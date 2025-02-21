@@ -3,18 +3,20 @@ using Nixie;
 
 namespace Kahuna;
 
-public sealed class LockActor : IActor<LockRequest, LockResponse>
+public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 {
     private string? owner;
     
-    public LockActor(IActorContext<LockActor, LockRequest, LockResponse> _)
+    private DateTime expires;
+
+    public LockActor(IActorContextStruct<LockActor, LockRequest, LockResponse> _)
     {
         
     }
 
-    public async Task<LockResponse?> Receive(LockRequest message)
+    public async Task<LockResponse> Receive(LockRequest message)
     {
-        //Console.WriteLine("Message: {0}", message.Type);
+        Console.WriteLine("Message: {0} {1} {2}", message.Type, message.Owner, message.ExpiresMs);
         
         await Task.CompletedTask;
         
@@ -33,9 +35,13 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
     private LockResponse TryLock(LockRequest message)
     {
         if (!string.IsNullOrEmpty(owner))
-            return new(LockResponseType.Busy);
+        {
+            if (expires - DateTime.UtcNow > TimeSpan.Zero)
+                return new(LockResponseType.Busy);
+        }
 
         owner = message.Owner;
+        expires = DateTime.UtcNow.AddMilliseconds(message.ExpiresMs);
 
         return new(LockResponseType.Locked);
     }

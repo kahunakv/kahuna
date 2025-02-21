@@ -1,7 +1,7 @@
 
 namespace Kahuna;
 
-public sealed class LockResponse
+public readonly struct LockResponse
 {
     public LockResponseType Type { get; }
     

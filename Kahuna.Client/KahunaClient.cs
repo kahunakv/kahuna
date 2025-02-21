@@ -6,16 +6,19 @@ using Flurl.Http;
 
 namespace Kahuna.Client;
 
-public class KahunaLockRequest
+public sealed class KahunaLockRequest
 {
     [JsonPropertyName("lockName")]
     public string? LockName { get; set; }
     
     [JsonPropertyName("lockId")]
     public string? LockId { get; set; }
+    
+    [JsonPropertyName("expiresMs")]
+    public double ExpiresMs { get; set; }
 }
 
-public class KahunaLockResponse
+public sealed class KahunaLockResponse
 {
     [JsonPropertyName("type")]
     public int Type { get; set; }
@@ -32,20 +35,20 @@ public class KahunaClient
     
     private async Task<KahunaLockAdquireResult> TryAdquireLock(string key, string lockId, TimeSpan expiryTime)
     {
-        KahunaLockRequest request = new() { LockName = key, LockId = lockId };
+        KahunaLockRequest request = new() { LockName = key, LockId = lockId, ExpiresMs = expiryTime.TotalMilliseconds };
         string payload = JsonSerializer.Serialize(request);
         
-        KahunaLockResponse x = await url
-                    .WithOAuthBearerToken("xxx")
-                    .AppendPathSegments("v1/kahuna/lock")
-                    .WithHeader("Accept", "application/json")
-                    .WithHeader("Content-Type", "application/json")
-                    .WithTimeout(5)
-                    .WithSettings(o => o.HttpVersion = "2.0")
-                    .PostStringAsync(payload)
-                    .ReceiveJson<KahunaLockResponse>();
+        KahunaLockResponse response = await url
+            .WithOAuthBearerToken("xxx")
+            .AppendPathSegments("v1/kahuna/lock")
+            .WithHeader("Accept", "application/json")
+            .WithHeader("Content-Type", "application/json")
+            .WithTimeout(5)
+            .WithSettings(o => o.HttpVersion = "2.0")
+            .PostStringAsync(payload)
+            .ReceiveJson<KahunaLockResponse>();
         
-        return x.Type == 0 ? KahunaLockAdquireResult.Success : KahunaLockAdquireResult.Conflicted;
+        return response.Type == 0 ? KahunaLockAdquireResult.Success : KahunaLockAdquireResult.Conflicted;
     }
     
     private async Task<(KahunaLockAdquireResult, string?)> Lock(string key, TimeSpan expiryTime, TimeSpan wait, TimeSpan retry)
@@ -137,7 +140,7 @@ public class KahunaClient
             KahunaLockRequest request = new() { LockName = key, LockId = lockId };
             string payload = JsonSerializer.Serialize(request);
         
-            KahunaLockResponse x = await url
+            KahunaLockResponse response = await url
                 .WithOAuthBearerToken("xxx")
                 .AppendPathSegments("v1/kahuna/unlock")
                 .WithHeader("Accept", "application/json")
@@ -147,7 +150,7 @@ public class KahunaClient
                 .PostStringAsync(payload)
                 .ReceiveJson<KahunaLockResponse>();
         
-            return x.Type == 2;
+            return response.Type == 2;
         }
         catch (Exception ex)
         {
@@ -164,7 +167,7 @@ public enum KahunaLockAdquireResult
     Error = 2,
 }
 
-public class KahunaLock : IAsyncDisposable
+public sealed class KahunaLock : IAsyncDisposable
 {
     private readonly KahunaClient locks;
 

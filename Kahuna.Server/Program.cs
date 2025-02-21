@@ -19,9 +19,14 @@ WebApplication app = builder.Build();
 app.MapPost("/v1/kahuna/lock", async (ExternLockRequest request, LockManager locks) =>
 {
     if (string.IsNullOrEmpty(request.LockName))
-        return new();
+        return new() { Type = LockResponseType.Errored };
 
-    LockResponseType response = await locks.TryLock(request.LockName ?? "", request.LockId ?? "");
+    if (string.IsNullOrEmpty(request.LockId))
+        return new() { Type = LockResponseType.Errored };
+    
+    Console.WriteLine("LOCK {0} {1} {2}", request.LockName, request.LockId, request.ExpiresMs);
+
+    LockResponseType response = await locks.TryLock(request.LockName, request.LockId, request.ExpiresMs);
 
     return new ExternLockResponse { Type = response };
 });
@@ -29,9 +34,14 @@ app.MapPost("/v1/kahuna/lock", async (ExternLockRequest request, LockManager loc
 app.MapPost("/v1/kahuna/unlock", async (ExternLockRequest request, LockManager locks) =>
 {
     if (string.IsNullOrEmpty(request.LockName))
-        return new();
+        return new() { Type = LockResponseType.Errored };
 
-    LockResponseType response = await locks.TryUnlock(request.LockName ?? "", request.LockId ?? "");
+    if (string.IsNullOrEmpty(request.LockId))
+        return new() { Type = LockResponseType.Errored };
+    
+    Console.WriteLine("UNLOCK {0} {1} {2}", request.LockName, request.LockId, request.ExpiresMs);
+
+    LockResponseType response = await locks.TryUnlock(request.LockName, request.LockId);
 
     return new ExternLockResponse { Type = response };
 });
