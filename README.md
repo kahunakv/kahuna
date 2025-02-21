@@ -1,8 +1,8 @@
 # Kahuna
 
-Kahuna is an open-source server for managing distributed locks in a scalable, fault-tolerant manner. It harnesses the power of distributed systems by enabling the addition of multiple nodes and distributing locks across partitions managed by a Raft Group. The API is simple yet effective, ensuring that only one process can access a resource at any given time.
+Kahuna is an open-source server for managing distributed locks in a scalable and fault-tolerant manner. It harnesses the power of distributed systems by enabling the addition of multiple nodes and distributing lock management across partitions managed by a Raft Group. The API is simple yet effective, ensuring that only one process can access a resource at any given time.
 
-Kahuna is not a library but a server software. It supports many servers (nodes) using Raft groups to elect leaders for different partitions, with different keys belonging to different partitions. For development purposes, Kahuna can also be used as a standalone server without horizontal scalability.
+It supports many servers (nodes) using Raft groups to elect leaders for different partitions, with different keys belonging to these partitions. For development purposes, Kahuna can also be used as a standalone server without horizontal scalability.
 
 In addition, Kahuna provides a client library for .NET to connect to the server, with plans to offer clients for other languages as well.
 
@@ -92,13 +92,13 @@ Kahuna exposes a simple API for acquiring and releasing locks. The main function
 Kahuna is available as a NuGet package. You can install it via the .NET CLI:
 
 ```bash
-dotnet add package Kahuna
+dotnet add package Kahuna.Client
 ```
 
 Or via the NuGet Package Manager:
 
 ```powershell
-Install-Package Kahuna
+Install-Package Kahuna.Client
 ```
 
 ---
@@ -115,15 +115,20 @@ var client = new KahunaClient("http://localhost:2070");
 
 public async Task UpdateTokens(string userId)
 {
-    // create a lock using a prefix and the user's id
-    // preventing the same player from changing the same data concurrently
+    // lock on a resource using a keyName composed of a prefix and the user's id,
+    // this will give up immediately if the lock is not available,
+    // if the lock is adquired it will prevent the same user from changing the same data concurrently
     await using KahunaLock myLock = await client.GetOrCreateLock("tokens-" + userId, TimeSpan.FromSeconds(5));
 
     if (myLock.IsAcquired)
     {
-        Console.WriteLine("Lock adquired !");
+        Console.WriteLine("Lock acquired!");
 
         // implement exclusive logic here
+    }
+    else
+    {
+        Console.WriteLine("Someone else has the lock!");
     }
 
     // myLock is automatically released after leaving the method
@@ -140,14 +145,7 @@ Kahuna also provides a client SDK tailored for .NET developers. This SDK simplif
 
 ## Contributing
 
-We welcome contributions from the community! To get started:
-1. Fork the repository.
-2. Create your feature branch (`git checkout -b feature/YourFeature`).
-3. Commit your changes (`git commit -am 'Add some feature'`).
-4. Push to the branch (`git push origin feature/YourFeature`).
-5. Create a new Pull Request.
-
-For detailed guidelines, refer to our [CONTRIBUTING.md](CONTRIBUTING.md) file.
+We welcome contributions from the community! For detailed guidelines, refer to our [CONTRIBUTING.md](CONTRIBUTING.md) file.
 
 ---
 
