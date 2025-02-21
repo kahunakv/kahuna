@@ -1,6 +1,10 @@
 # Kahuna
 
-Kahuna is an open-source C# library for managing distributed locks in a scalable, fault-tolerant manner. Built for the .NET platform, Kahuna leverages the power of distributed systems by allowing you to add multiple nodes and distribute locks across partitions managed by a Raft Group. The library draws inspiration from Redis’ Redlock algorithm, offering a simple yet effective API to help ensure that only one process can access a resource at any given time.
+Kahuna is an open-source server for managing distributed locks in a scalable, fault-tolerant manner. It harnesses the power of distributed systems by enabling the addition of multiple nodes and distributing locks across partitions managed by a Raft Group. The API is simple yet effective, ensuring that only one process can access a resource at any given time.
+
+Kahuna is not a library but a server software. It supports many servers (nodes) using Raft groups to elect leaders for different partitions, with different keys belonging to different partitions. For development purposes, Kahuna can also be used as a standalone server without horizontal scalability.
+
+In addition, Kahuna provides a client library for .NET to connect to the server, with plans to offer clients for other languages as well.
 
 ---
 
@@ -64,7 +68,7 @@ Kahuna exposes a simple API for acquiring and releasing locks. The main function
 - **lockId:** A unique identifier for the lock, usually associated with the client or process requesting the lock.
 - **expiresMs:** The expiration time for the lock in milliseconds.
 
-**Returns:**  
+**Returns:**
 - **Locked:** `true` if the lock was successfully acquired.
 - **Errored:** `true` if an error occurred during the locking process.
 
@@ -77,7 +81,7 @@ Kahuna exposes a simple API for acquiring and releasing locks. The main function
 - **resource:** The identifier for the resource to unlock.
 - **lockId:** The unique identifier for the lock previously used to acquire the lock.
 
-**Returns:**  
+**Returns:**
 - **Locked:** `false` if the resource was successfully unlocked.
 - **Errored:** `true` if an error occurred during the unlock process.
 
@@ -104,51 +108,25 @@ Install-Package Kahuna
 Below is a basic example to demonstrate how to use Kahuna in your C# project:
 
 ```csharp
-using Kahuna;
+using Kahuna.Client;
 
-public class DistributedLockExample
+// Create a Kahuna client (it can be a global instance)
+var client = new KahunaClient("http://localhost:2070");
+
+public async Task UpdateTokens(string userId)
 {
-    public void Execute()
+    // create a lock using a prefix and the user's id
+    // preventing the same player from changing the same data concurrently
+    await using KahunaLock myLock = await client.GetOrCreateLock("tokens-" + userId, TimeSpan.FromSeconds(5));
+
+    if (myLock.IsAcquired)
     {
-        var resource = "shared-resource";
-        var lockId = Guid.NewGuid().ToString();
-        int expiresMs = 30000; // Lock expiration time set to 30 seconds
+        Console.WriteLine("Lock adquired !");
 
-        // Attempt to acquire the lock
-        var (locked, error) = Kahuna.LockService.TryLock(resource, lockId, expiresMs);
-
-        if (error)
-        {
-            Console.WriteLine("An error occurred while trying to acquire the lock.");
-            return;
-        }
-
-        if (locked)
-        {
-            try
-            {
-                // Perform your critical section work here
-                Console.WriteLine("Lock acquired successfully.");
-            }
-            finally
-            {
-                // Release the lock
-                var (unlocked, unlockError) = Kahuna.LockService.Unlock(resource, lockId);
-                if (unlockError || unlocked)
-                {
-                    Console.WriteLine("An error occurred while releasing the lock.");
-                }
-                else
-                {
-                    Console.WriteLine("Lock released successfully.");
-                }
-            }
-        }
-        else
-        {
-            Console.WriteLine("Failed to acquire the lock. Resource is locked by another process.");
-        }
+        // implement exclusive logic here
     }
+
+    // myLock is automatically released after leaving the method
 }
 ```
 
@@ -156,7 +134,7 @@ public class DistributedLockExample
 
 ## Client SDK for .NET
 
-Kahuna also provides a client SDK tailored for .NET developers. This SDK simplifies the integration of distributed locking into your .NET applications by abstracting much of the underlying complexity. Documentation and samples for the client SDK can be found in the `docs/` folder or on our [GitHub repository](https://github.com/your-repo/kahuna).
+Kahuna also provides a client SDK tailored for .NET developers. This SDK simplifies the integration of distributed locking into your .NET applications by abstracting much of the underlying complexity. Documentation and samples for the client SDK can be found in the `docs/` folder or on our [GitHub repository](https://github.com/andresgutierrez/kahuna).
 
 ---
 
