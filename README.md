@@ -27,6 +27,7 @@ In addition, Kahuna provides a client library for .NET to connect to the server,
 In modern distributed systems, it is often necessary to synchronize access to shared resources across multiple nodes or processes. Kahuna provides a robust solution for this problem by implementing distributed locks that ensure resource consistency and prevent race conditions.
 
 By partitioning locks among nodes controlled by a Raft Group, Kahuna offers:
+
 - **Scalability:** Easily add more nodes to handle increased load.
 - **Reliability:** Raft consensus ensures that partition data remains consistent even in the face of network failures.
 - **Simplicity:** A straightforward API makes it easy to integrate distributed locking into your applications.
@@ -36,6 +37,7 @@ By partitioning locks among nodes controlled by a Raft Group, Kahuna offers:
 ## What Is a Distributed Lock?
 
 A distributed lock is a mechanism that ensures that a specific resource is accessed by only one node or process at a time in a distributed environment. This is crucial when:
+
 - **Preventing race conditions:** Ensuring that multiple processes do not modify shared resources simultaneously.
 - **Coordinating tasks:** Managing access to shared databases, files, or services across different nodes.
 - **Maintaining data consistency:** Guaranteeing that concurrent operations do not result in inconsistent states.

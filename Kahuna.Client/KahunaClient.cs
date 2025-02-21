@@ -6,24 +6,6 @@ using Flurl.Http;
 
 namespace Kahuna.Client;
 
-public sealed class KahunaLockRequest
-{
-    [JsonPropertyName("lockName")]
-    public string? LockName { get; set; }
-    
-    [JsonPropertyName("lockId")]
-    public string? LockId { get; set; }
-    
-    [JsonPropertyName("expiresMs")]
-    public double ExpiresMs { get; set; }
-}
-
-public sealed class KahunaLockResponse
-{
-    [JsonPropertyName("type")]
-    public int Type { get; set; }
-}
-
 public class KahunaClient
 {
     private readonly string url;
@@ -157,54 +139,5 @@ public class KahunaClient
             Console.WriteLine("Error locking lock instance: {0}", ex.Message);
             return false;
         }
-    }
-}
-
-public enum KahunaLockAdquireResult
-{
-    Success = 0,
-    Conflicted = 1,
-    Error = 2,
-}
-
-public sealed class KahunaLock : IAsyncDisposable
-{
-    private readonly KahunaClient locks;
-
-    private readonly KahunaLockAdquireResult result;
-
-    private readonly string resource;
-    
-    private readonly string? lockId;
-
-    private bool disposed;
-
-    public bool IsAcquired => result == KahunaLockAdquireResult.Success;
-
-    public KahunaLock(KahunaClient locks, string resource, (KahunaLockAdquireResult result, string? lockId) lockInfo)
-    {
-        this.locks = locks;
-        this.resource = resource;
-        this.result = lockInfo.result;
-        this.lockId = lockInfo.lockId;
-    }
-
-    public async ValueTask DisposeAsync()
-    {
-        disposed = true;
-
-        GC.SuppressFinalize(this);
-
-        if (!string.IsNullOrEmpty(lockId))
-            await locks.Unlock(resource, lockId);
-    }
-
-    ~KahunaLock()
-    {
-        //if (!disposed)
-        //    locks.logger.LogError("Lock was not disposed: {Resource}", resource);
-
-        if (!disposed)
-            Console.WriteLine("Lock was not disposed: {0}", resource);
     }
 }
