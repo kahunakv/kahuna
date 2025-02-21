@@ -1,4 +1,10 @@
-Kahuna/obj
-Kahuna/bin
-Kahuna/.idea
+Kahuna.Server/obj
+Kahuna.Server/bin
+Kahuna.Server/.idea
+Kahuna.Client/obj
+Kahuna.Client/bin
+Kahuna.Client/.idea
+Kahuna.Tests/obj
+Kahuna.Tests/bin
+Kahuna.Tests/.idea
 .idea

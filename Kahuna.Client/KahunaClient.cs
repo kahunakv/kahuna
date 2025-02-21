@@ -1,0 +1,207 @@
+
+using System.Diagnostics;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using Flurl.Http;
+
+namespace Kahuna.Client;
+
+public class KahunaLockRequest
+{
+    [JsonPropertyName("lockName")]
+    public string? LockName { get; set; }
+    
+    [JsonPropertyName("lockId")]
+    public string? LockId { get; set; }
+}
+
+public class KahunaLockResponse
+{
+    [JsonPropertyName("type")]
+    public int Type { get; set; }
+}
+
+public class KahunaClient
+{
+    private readonly string url;
+    
+    public KahunaClient(string url)
+    {
+        this.url = url;
+    }
+    
+    private async Task<KahunaLockAdquireResult> TryAdquireLock(string key, string lockId, TimeSpan expiryTime)
+    {
+        KahunaLockRequest request = new() { LockName = key, LockId = lockId };
+        string payload = JsonSerializer.Serialize(request);
+        
+        KahunaLockResponse x = await url
+                    .WithOAuthBearerToken("xxx")
+                    .AppendPathSegments("v1/kahuna/lock")
+                    .WithHeader("Accept", "application/json")
+                    .WithHeader("Content-Type", "application/json")
+                    .WithTimeout(5)
+                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .PostStringAsync(payload)
+                    .ReceiveJson<KahunaLockResponse>();
+        
+        return x.Type == 0 ? KahunaLockAdquireResult.Success : KahunaLockAdquireResult.Conflicted;
+    }
+    
+    private async Task<(KahunaLockAdquireResult, string?)> Lock(string key, TimeSpan expiryTime, TimeSpan wait, TimeSpan retry)
+    {
+        try
+        {
+            string lockId = Guid.NewGuid().ToString("N");
+            
+            Stopwatch stopWatch = Stopwatch.StartNew();
+            KahunaLockAdquireResult result = KahunaLockAdquireResult.Error;
+
+            while (stopWatch.Elapsed < wait)
+            {
+                result = await TryAdquireLock(key, lockId, expiryTime).ConfigureAwait(false);
+
+                if (result != KahunaLockAdquireResult.Success)
+                {
+                    await Task.Delay(retry).ConfigureAwait(false);
+                    continue;
+                }
+
+                return (result, lockId);
+            }
+
+            return (result, null);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("Error locking lock instance: {0}", ex.Message);
+
+            return (KahunaLockAdquireResult.Error, null);
+        }
+    }
+    
+    private async Task<(KahunaLockAdquireResult, string?)> Lock(string key, TimeSpan expiryTime)
+    {
+        try
+        {
+            string lockId = Guid.NewGuid().ToString();
+
+            KahunaLockAdquireResult result = await TryAdquireLock(key, lockId, expiryTime);
+
+            return (result, lockId);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("Error locking lock instance: {0}", ex.Message);
+
+            return (KahunaLockAdquireResult.Error, null);
+        }
+    }
+    
+    public async Task<KahunaLock> GetOrCreateLock(string resource, int expiryTime = 30000, int waitTime = 10000, int retryTime = 100)
+    {
+        TimeSpan expiry = TimeSpan.FromMilliseconds(expiryTime);
+        TimeSpan wait = TimeSpan.FromMilliseconds(waitTime);
+        TimeSpan retry = TimeSpan.FromMilliseconds(retryTime);
+
+        return await GetOrCreateLock(resource, expiry, wait, retry);
+    }
+
+    public async Task<KahunaLock> GetOrCreateLock(string resource, int expiryTime = 30000)
+    {
+        TimeSpan expiry = TimeSpan.FromMilliseconds(expiryTime);
+        
+        return await GetOrCreateLock(resource, expiry);
+    }
+
+    public async Task<KahunaLock> GetOrCreateLock(string resource, TimeSpan expiry, TimeSpan wait, TimeSpan retry)
+    {
+        if (retry == TimeSpan.Zero)
+            throw new Exception("Retry cannot be zero");
+        
+        if (wait == TimeSpan.Zero)
+            return new(this, resource, await Lock(resource, expiry));
+        
+        return new(this, resource, await Lock(resource, expiry, wait, retry));
+    }
+
+    public async Task<KahunaLock> GetOrCreateLock(string resource, TimeSpan expiry)
+    {
+        return new(this, resource, await Lock(resource, expiry));
+    }
+    
+    public async Task<bool> Unlock(string key, string lockId)
+    {
+        try
+        {
+            KahunaLockRequest request = new() { LockName = key, LockId = lockId };
+            string payload = JsonSerializer.Serialize(request);
+        
+            KahunaLockResponse x = await url
+                .WithOAuthBearerToken("xxx")
+                .AppendPathSegments("v1/kahuna/unlock")
+                .WithHeader("Accept", "application/json")
+                .WithHeader("Content-Type", "application/json")
+                .WithTimeout(5)
+                .WithSettings(o => o.HttpVersion = "2.0")
+                .PostStringAsync(payload)
+                .ReceiveJson<KahunaLockResponse>();
+        
+            return x.Type == 2;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("Error locking lock instance: {0}", ex.Message);
+            return false;
+        }
+    }
+}
+
+public enum KahunaLockAdquireResult
+{
+    Success = 0,
+    Conflicted = 1,
+    Error = 2,
+}
+
+public class KahunaLock : IAsyncDisposable
+{
+    private readonly KahunaClient locks;
+
+    private readonly KahunaLockAdquireResult result;
+
+    private readonly string resource;
+    
+    private readonly string? lockId;
+
+    private bool disposed;
+
+    public bool IsAcquired => result == KahunaLockAdquireResult.Success;
+
+    public KahunaLock(KahunaClient locks, string resource, (KahunaLockAdquireResult result, string? lockId) lockInfo)
+    {
+        this.locks = locks;
+        this.resource = resource;
+        this.result = lockInfo.result;
+        this.lockId = lockInfo.lockId;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        disposed = true;
+
+        GC.SuppressFinalize(this);
+
+        if (!string.IsNullOrEmpty(lockId))
+            await locks.Unlock(resource, lockId);
+    }
+
+    ~KahunaLock()
+    {
+        //if (!disposed)
+        //    locks.logger.LogError("Lock was not disposed: {Resource}", resource);
+
+        if (!disposed)
+            Console.WriteLine("Lock was not disposed: {0}", resource);
+    }
+}

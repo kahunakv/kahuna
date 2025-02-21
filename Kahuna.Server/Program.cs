@@ -1,9 +1,13 @@
-﻿// See https://aka.ms/new-console-template for more information
-
+﻿
 using Kahuna;
 using Nixie;
 
-Console.WriteLine("Kahuna!");
+Console.WriteLine("  _           _                     ");
+Console.WriteLine(" | | ____ _| |__  _   _ _ __   __ _ ");
+Console.WriteLine(" | |/ / _` | '_ \\| | | | '_ \\ / _` |");
+Console.WriteLine(" |   < (_| | | | | |_| | | | | (_| |");
+Console.WriteLine(" |_|\\_\\__,_|_| |_|\\__,_|_| |_|\\__,_|");
+Console.WriteLine("");
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
@@ -12,7 +16,7 @@ builder.Services.AddSingleton<LockManager>();
 
 WebApplication app = builder.Build();
 
-app.MapPost("/v1/hakuna/lock", async (ExternLockRequest request, LockManager locks) =>
+app.MapPost("/v1/kahuna/lock", async (ExternLockRequest request, LockManager locks) =>
 {
     if (string.IsNullOrEmpty(request.LockName))
         return new();
@@ -22,7 +26,7 @@ app.MapPost("/v1/hakuna/lock", async (ExternLockRequest request, LockManager loc
     return new ExternLockResponse { Type = response };
 });
 
-app.MapPost("/v1/hakuna/unlock", async (ExternLockRequest request, LockManager locks) =>
+app.MapPost("/v1/kahuna/unlock", async (ExternLockRequest request, LockManager locks) =>
 {
     if (string.IsNullOrEmpty(request.LockName))
         return new();
@@ -32,7 +36,7 @@ app.MapPost("/v1/hakuna/unlock", async (ExternLockRequest request, LockManager l
     return new ExternLockResponse { Type = response };
 });
 
-app.MapGet("/", () => "Kahuna");
+app.MapGet("/", () => "Kahuna.Server");
 
 app.Run("http://*:2070");
 
