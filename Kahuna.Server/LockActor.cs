@@ -51,6 +51,9 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         if (string.IsNullOrEmpty(owner))
             return new(LockResponseType.Errored);
 
+        if (message.Owner != owner)
+            return new(LockResponseType.Errored);
+        
         owner = null;
 
         return new(LockResponseType.Unlocked);
