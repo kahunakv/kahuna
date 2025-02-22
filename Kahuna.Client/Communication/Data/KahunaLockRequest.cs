@@ -1,9 +1,9 @@
 
 using System.Text.Json.Serialization;
 
-namespace Kahuna.Client;
+namespace Kahuna.Client.Communication.Data;
 
-public sealed class KahunaLockRequest
+internal sealed class KahunaLockRequest
 {
     [JsonPropertyName("lockName")]
     public string? LockName { get; set; }

@@ -119,7 +119,7 @@ public async Task UpdateTokens(string userId)
 {
     // lock on a resource using a keyName composed of a prefix and the user's id,
     // this will give up immediately if the lock is not available,
-    // if the lock is adquired it will prevent the same user from changing the same data concurrently
+    // if the lock is acquired it will prevent the same user from changing the same data concurrently
     await using KahunaLock myLock = await client.GetOrCreateLock("tokens-" + userId, TimeSpan.FromSeconds(5));
 
     if (myLock.IsAcquired)

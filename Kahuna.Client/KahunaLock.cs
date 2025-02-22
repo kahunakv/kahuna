@@ -1,10 +1,14 @@
+
 namespace Kahuna.Client;
 
+/// <summary>
+/// Represents a lock acquired from the Kahuna service.
+/// </summary>
 public sealed class KahunaLock : IAsyncDisposable
 {
     private readonly KahunaClient locks;
 
-    private readonly KahunaLockAdquireResult result;
+    private readonly KahunaLockAcquireResult result;
 
     private readonly string resource;
     
@@ -12,9 +16,15 @@ public sealed class KahunaLock : IAsyncDisposable
 
     private bool disposed;
 
-    public bool IsAcquired => result == KahunaLockAdquireResult.Success;
+    public bool IsAcquired => result == KahunaLockAcquireResult.Success;
 
-    public KahunaLock(KahunaClient locks, string resource, (KahunaLockAdquireResult result, string? lockId) lockInfo)
+    /// <summary>
+    /// Constructor
+    /// </summary>
+    /// <param name="locks"></param>
+    /// <param name="resource"></param>
+    /// <param name="lockInfo"></param>
+    public KahunaLock(KahunaClient locks, string resource, (KahunaLockAcquireResult result, string? lockId) lockInfo)
     {
         this.locks = locks;
         this.resource = resource;
@@ -22,6 +32,9 @@ public sealed class KahunaLock : IAsyncDisposable
         this.lockId = lockInfo.lockId;
     }
 
+    /// <summary>
+    /// Frees the lock after it's no longer needed
+    /// </summary>
     public async ValueTask DisposeAsync()
     {
         disposed = true;

@@ -1,3 +1,4 @@
+
 using Kahuna.Client;
 
 namespace Kahuna.Tests;
@@ -14,7 +15,7 @@ public class TestLocks
     }
     
     [Fact]
-    public async Task TestValidateAdquireLock()
+    public async Task TestValidateAcquireLock()
     {
         string lockName = GetRandomLockName();
 
@@ -24,7 +25,7 @@ public class TestLocks
     }
     
     [Fact]
-    public async Task TestValidateAdquireLock2()
+    public async Task TestValidateAcquireLock2()
     {
         string lockName = GetRandomLockName();
 
@@ -36,7 +37,7 @@ public class TestLocks
     }
     
     [Fact]
-    public async Task TestValidateAdquireLockExpires2()
+    public async Task TestValidateAcquireLockExpires2()
     {
         string lockName = GetRandomLockName();
 
@@ -50,7 +51,7 @@ public class TestLocks
     }
     
     [Fact]
-    public async Task TestValidateAdquireLockExpires3()
+    public async Task TestValidateAcquireLockExpires3()
     {
         string lockName = GetRandomLockName();
 
@@ -64,7 +65,7 @@ public class TestLocks
     }
     
     [Fact]
-    public async Task TestValidateAdquireLockExpires4()
+    public async Task TestValidateAcquireLockExpires4()
     {
         string lockName = GetRandomLockName();
 
@@ -84,17 +85,17 @@ public class TestLocks
     }
     
     [Fact]
-    public async Task TestValidateAdquireLockExpiresRace()
+    public async Task TestValidateAcquireLockExpiresRace()
     {
         List<Task> tasks = new(50);
 
         for (int i = 0; i < 50; i++)
-            tasks.Add(AdquireLockConcurrently());
+            tasks.Add(AcquireLockConcurrently());
 
         await Task.WhenAll(tasks);
     }
     
-    private async Task AdquireLockConcurrently()
+    private async Task AcquireLockConcurrently()
     {
         string lockName = GetRandomLockName();
 
@@ -114,20 +115,20 @@ public class TestLocks
     }
     
     [Fact]
-    public async Task TestValidateAdquireSameLockExpiresRace()
+    public async Task TestValidateAcquireSameLockExpiresRace()
     {
         List<Task> tasks = new(10);
         string lockName = GetRandomLockName();
 
         for (int i = 0; i < 10; i++)
-            tasks.Add(AdquireSameLockConcurrently(lockName));
+            tasks.Add(AcquireSameLockConcurrently(lockName));
 
         await Task.WhenAll(tasks);
         
         Assert.Equal(10, total);
     }
     
-    private async Task AdquireSameLockConcurrently(string lockName)
+    private async Task AcquireSameLockConcurrently(string lockName)
     {
         await using KahunaLock redLock = await locks.GetOrCreateLock(
             lockName, 

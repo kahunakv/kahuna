@@ -3,50 +3,48 @@ using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Flurl.Http;
+using Kahuna.Client.Communication;
 
 namespace Kahuna.Client;
 
+/// <summary>
+/// Client for the Kahuna service
+/// </summary>
 public class KahunaClient
 {
     private readonly string url;
+
+    private readonly HttpCommunication communication;
     
+    /// <summary>
+    /// Constructor
+    /// </summary>
+    /// <param name="url"></param>
     public KahunaClient(string url)
     {
         this.url = url;
+        this.communication = new();
     }
     
-    private async Task<KahunaLockAdquireResult> TryAdquireLock(string key, string lockId, TimeSpan expiryTime)
+    private async Task<KahunaLockAcquireResult> TryAcquireLock(string key, string lockId, TimeSpan expiryTime)
     {
-        KahunaLockRequest request = new() { LockName = key, LockId = lockId, ExpiresMs = expiryTime.TotalMilliseconds };
-        string payload = JsonSerializer.Serialize(request);
-        
-        KahunaLockResponse response = await url
-            .WithOAuthBearerToken("xxx")
-            .AppendPathSegments("v1/kahuna/lock")
-            .WithHeader("Accept", "application/json")
-            .WithHeader("Content-Type", "application/json")
-            .WithTimeout(5)
-            .WithSettings(o => o.HttpVersion = "2.0")
-            .PostStringAsync(payload)
-            .ReceiveJson<KahunaLockResponse>();
-        
-        return response.Type == 0 ? KahunaLockAdquireResult.Success : KahunaLockAdquireResult.Conflicted;
+        return await communication.TryAcquireLock(url, key, lockId, (int)expiryTime.TotalMilliseconds).ConfigureAwait(false);
     }
     
-    private async Task<(KahunaLockAdquireResult, string?)> Lock(string key, TimeSpan expiryTime, TimeSpan wait, TimeSpan retry)
+    private async Task<(KahunaLockAcquireResult, string?)> PeriodicallyTryAcquireLock(string key, TimeSpan expiryTime, TimeSpan wait, TimeSpan retry)
     {
         try
         {
             string lockId = Guid.NewGuid().ToString("N");
             
             Stopwatch stopWatch = Stopwatch.StartNew();
-            KahunaLockAdquireResult result = KahunaLockAdquireResult.Error;
+            KahunaLockAcquireResult result = KahunaLockAcquireResult.Error;
 
             while (stopWatch.Elapsed < wait)
             {
-                result = await TryAdquireLock(key, lockId, expiryTime).ConfigureAwait(false);
+                result = await TryAcquireLock(key, lockId, expiryTime).ConfigureAwait(false);
 
-                if (result != KahunaLockAdquireResult.Success)
+                if (result != KahunaLockAcquireResult.Success)
                 {
                     await Task.Delay(retry).ConfigureAwait(false);
                     continue;
@@ -61,17 +59,23 @@ public class KahunaClient
         {
             Console.WriteLine("Error locking lock instance: {0}", ex.Message);
 
-            return (KahunaLockAdquireResult.Error, null);
+            return (KahunaLockAcquireResult.Error, null);
         }
     }
     
-    private async Task<(KahunaLockAdquireResult, string?)> Lock(string key, TimeSpan expiryTime)
+    /// <summary>
+    /// Tries to acquire a lock on a resource with a given expiry time
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="expiryTime"></param>
+    /// <returns></returns>
+    private async Task<(KahunaLockAcquireResult, string?)> SingleTimeTryAcquireLock(string key, TimeSpan expiryTime)
     {
         try
         {
             string lockId = Guid.NewGuid().ToString();
 
-            KahunaLockAdquireResult result = await TryAdquireLock(key, lockId, expiryTime);
+            KahunaLockAcquireResult result = await TryAcquireLock(key, lockId, expiryTime).ConfigureAwait(false);
 
             return (result, lockId);
         }
@@ -79,60 +83,86 @@ public class KahunaClient
         {
             Console.WriteLine("Error locking lock instance: {0}", ex.Message);
 
-            return (KahunaLockAdquireResult.Error, null);
+            return (KahunaLockAcquireResult.Error, null);
         }
     }
     
+    /// <summary>
+    /// Gets or creates a lock on a resource with a given expiry time.
+    /// If the lock can't be acquired immediately, it will try to acquire it periodically 
+    /// </summary>
+    /// <param name="resource"></param>
+    /// <param name="expiryTime"></param>
+    /// <param name="waitTime"></param>
+    /// <param name="retryTime"></param>
+    /// <returns></returns>
     public async Task<KahunaLock> GetOrCreateLock(string resource, int expiryTime = 30000, int waitTime = 10000, int retryTime = 100)
     {
         TimeSpan expiry = TimeSpan.FromMilliseconds(expiryTime);
         TimeSpan wait = TimeSpan.FromMilliseconds(waitTime);
         TimeSpan retry = TimeSpan.FromMilliseconds(retryTime);
 
-        return await GetOrCreateLock(resource, expiry, wait, retry);
+        return await GetOrCreateLock(resource, expiry, wait, retry).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Gets or creates a lock on a resource with a given expiry time.
+    /// Gives up immediately if the lock is not available
+    /// </summary>
+    /// <param name="resource"></param>
+    /// <param name="expiryTime"></param>
+    /// <returns></returns>
     public async Task<KahunaLock> GetOrCreateLock(string resource, int expiryTime = 30000)
     {
         TimeSpan expiry = TimeSpan.FromMilliseconds(expiryTime);
         
-        return await GetOrCreateLock(resource, expiry);
+        return await GetOrCreateLock(resource, expiry).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Gets or creates a lock on a resource with a given expiry time.
+    /// If the lock can't be acquired immediately, it will try to acquire it periodically  
+    /// </summary>
+    /// <param name="resource"></param>
+    /// <param name="expiry"></param>
+    /// <param name="wait"></param>
+    /// <param name="retry"></param>
+    /// <returns></returns>
+    /// <exception cref="KahunaException"></exception>
     public async Task<KahunaLock> GetOrCreateLock(string resource, TimeSpan expiry, TimeSpan wait, TimeSpan retry)
     {
         if (retry == TimeSpan.Zero)
-            throw new Exception("Retry cannot be zero");
+            throw new KahunaException("Retry cannot be zero");
         
         if (wait == TimeSpan.Zero)
-            return new(this, resource, await Lock(resource, expiry));
+            return new(this, resource, await SingleTimeTryAcquireLock(resource, expiry).ConfigureAwait(false));
         
-        return new(this, resource, await Lock(resource, expiry, wait, retry));
+        return new(this, resource, await PeriodicallyTryAcquireLock(resource, expiry, wait, retry).ConfigureAwait(false));
     }
 
+    /// <summary>
+    /// Gets or creates a lock on a resource with a given expiry time.
+    /// Gives up immediately if the lock is not available
+    /// </summary>
+    /// <param name="resource"></param>
+    /// <param name="expiry"></param>
+    /// <returns></returns>
     public async Task<KahunaLock> GetOrCreateLock(string resource, TimeSpan expiry)
     {
-        return new(this, resource, await Lock(resource, expiry));
+        return new(this, resource, await SingleTimeTryAcquireLock(resource, expiry).ConfigureAwait(false));
     }
     
+    /// <summary>
+    /// Unlocks a lock on a resource if the owner is the current lock owner
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="lockId"></param>
+    /// <returns></returns>
     public async Task<bool> Unlock(string key, string lockId)
     {
         try
         {
-            KahunaLockRequest request = new() { LockName = key, LockId = lockId };
-            string payload = JsonSerializer.Serialize(request);
-        
-            KahunaLockResponse response = await url
-                .WithOAuthBearerToken("xxx")
-                .AppendPathSegments("v1/kahuna/unlock")
-                .WithHeader("Accept", "application/json")
-                .WithHeader("Content-Type", "application/json")
-                .WithTimeout(5)
-                .WithSettings(o => o.HttpVersion = "2.0")
-                .PostStringAsync(payload)
-                .ReceiveJson<KahunaLockResponse>();
-        
-            return response.Type == 2;
+            return await communication.TryUnlock(url, key, lockId).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
