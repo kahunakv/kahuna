@@ -1,14 +1,18 @@
 
+using System.Net;
 using System.Text.Json;
 using Flurl.Http;
 using Kahuna.Client.Communication.Data;
 using Microsoft.Extensions.Logging;
+using Polly;
+using Polly.Contrib.WaitAndRetry;
+using Polly.Retry;
 
 namespace Kahuna.Client.Communication;
 
 internal sealed class HttpCommunication
 {
-    protected AsyncRetryPolicy BuildRetryPolicy(ILogger? logger, int medianFirstRetryDelay = 1)
+    private AsyncRetryPolicy BuildRetryPolicy(ILogger? logger, int medianFirstRetryDelay = 1)
     {
         IEnumerable<TimeSpan> delay = Backoff.DecorrelatedJitterBackoffV2(
             medianFirstRetryDelay: TimeSpan.FromSeconds(medianFirstRetryDelay),
@@ -29,12 +33,44 @@ internal sealed class HttpCommunication
             Console.WriteLine("Retry: {0} {1}", ex.Message, timeSpan);
     }
     
+    private static bool IsTransientError(FlurlHttpException exception)
+    {
+        if (exception is FlurlHttpTimeoutException)
+            return true;
+
+        bool canBeRetried = exception.StatusCode.HasValue && CanHttpCodeBeRetried(exception.StatusCode.Value);
+        if (canBeRetried)
+            return canBeRetried;
+
+        if (!exception.StatusCode.HasValue && !string.IsNullOrEmpty(exception.Message) && exception.Message.Contains("An error occurred while sending the request"))
+            return true;
+
+        return false;
+    }
+
+    private static bool CanHttpCodeBeRetried(int httpStatus)
+    {
+        return httpStatus switch
+        {
+            (int)HttpStatusCode.RequestTimeout or // 408
+            (int)HttpStatusCode.BadGateway or // 502
+            (int)HttpStatusCode.ServiceUnavailable or // 503
+            (int)HttpStatusCode.GatewayTimeout or // 504
+            (int)HttpStatusCode.TooManyRequests => // 429
+              true,
+            _ => false
+        };
+    }
+    
     internal async Task<KahunaLockAcquireResult> TryAcquireLock(string url, string key, string lockId, int expiryTime)
     {
         KahunaLockRequest request = new() { LockName = key, LockId = lockId, ExpiresMs = expiryTime };
         string payload = JsonSerializer.Serialize(request);
+
+        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
         
-        KahunaLockResponse response = await url
+        KahunaLockResponse? response = await retryPolicy.ExecuteAsync(() =>
+            url
             .WithOAuthBearerToken("xxx")
             .AppendPathSegments("v1/kahuna/lock")
             .WithHeader("Accept", "application/json")
@@ -42,8 +78,7 @@ internal sealed class HttpCommunication
             .WithTimeout(5)
             .WithSettings(o => o.HttpVersion = "2.0")
             .PostStringAsync(payload)
-            .ReceiveJson<KahunaLockResponse>()
-            .ConfigureAwait(false);
+            .ReceiveJson<KahunaLockResponse>()).ConfigureAwait(false);
         
         return response.Type == 0 ? KahunaLockAcquireResult.Success : KahunaLockAcquireResult.Conflicted;
     }
@@ -53,7 +88,10 @@ internal sealed class HttpCommunication
         KahunaLockRequest request = new() { LockName = key, LockId = lockId };
         string payload = JsonSerializer.Serialize(request);
         
-        KahunaLockResponse response = await url
+        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
+        
+        KahunaLockResponse? response = await retryPolicy.ExecuteAsync(() => 
+            url
             .WithOAuthBearerToken("xxx")
             .AppendPathSegments("v1/kahuna/unlock")
             .WithHeader("Accept", "application/json")
@@ -61,7 +99,7 @@ internal sealed class HttpCommunication
             .WithTimeout(5)
             .WithSettings(o => o.HttpVersion = "2.0")
             .PostStringAsync(payload)
-            .ReceiveJson<KahunaLockResponse>()
+            .ReceiveJson<KahunaLockResponse>())
             .ConfigureAwait(false);
         
         return response.Type == 2;

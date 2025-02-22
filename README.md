@@ -87,6 +87,22 @@ Kahuna exposes a simple API for acquiring and releasing locks. The main function
 - **Locked:** `false` if the resource was successfully unlocked.
 - **Errored:** `true` if an error occurred during the unlock process.
 
+### Extend
+
+```csharp
+(bool Extended, bool Errored) Extend(string resource, string lockId, int expiresMs);
+```
+
+- **resource:** The identifier for the resource you want to extend.
+- **lockId:** A unique identifier for the lock, usually associated with the client or process requesting the lock. It must be the current owner of the lock.
+- **expiresMs:** The expiration time for the lock in milliseconds.
+
+**Returns:**
+- **Extended:** `true` if the lock was successfully extended.
+- **Errored:** `true` if an error occurred during the locking process.
+
+---
+
 ---
 
 ## Installation
@@ -94,13 +110,13 @@ Kahuna exposes a simple API for acquiring and releasing locks. The main function
 Kahuna is available as a NuGet package. You can install it via the .NET CLI:
 
 ```bash
-dotnet add package Kahuna.Client
+dotnet add package Kahuna.Client --version 0.0.2
 ```
 
 Or via the NuGet Package Manager:
 
 ```powershell
-Install-Package Kahuna.Client
+Install-Package Kahuna.Client -Version 0.0.2
 ```
 
 ---

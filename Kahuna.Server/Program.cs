@@ -31,6 +31,21 @@ app.MapPost("/v1/kahuna/lock", async (ExternLockRequest request, LockManager loc
     return new ExternLockResponse { Type = response };
 });
 
+app.MapPost("/v1/kahuna/extend-lock", async (ExternLockRequest request, LockManager locks) =>
+{
+    if (string.IsNullOrEmpty(request.LockName))
+        return new() { Type = LockResponseType.Errored };
+
+    if (string.IsNullOrEmpty(request.LockId))
+        return new() { Type = LockResponseType.Errored };
+    
+    Console.WriteLine("EXTEND-LOCK {0} {1} {2}", request.LockName, request.LockId, request.ExpiresMs);
+
+    LockResponseType response = await locks.TryExtendLock(request.LockName, request.LockId, request.ExpiresMs);
+
+    return new ExternLockResponse { Type = response };
+});
+
 app.MapPost("/v1/kahuna/unlock", async (ExternLockRequest request, LockManager locks) =>
 {
     if (string.IsNullOrEmpty(request.LockName))

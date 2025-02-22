@@ -20,23 +20,37 @@ public sealed class LockManager
         if (expiresMs <= 0)
             return LockResponseType.Errored;
         
-        Lazy<IActorRefStruct<LockActor, LockRequest, LockResponse>> lazyGreeter = locks.GetOrAdd(lockName, GetOrCreateLocker);
-        IActorRefStruct<LockActor, LockRequest, LockResponse> greeter = lazyGreeter.Value;
+        Lazy<IActorRefStruct<LockActor, LockRequest, LockResponse>> lazyLocker = locks.GetOrAdd(lockName, GetOrCreateLocker);
+        IActorRefStruct<LockActor, LockRequest, LockResponse> greeter = lazyLocker.Value;
         
         LockRequest request = new(LockRequestType.TryLock, lockId, expiresMs);
 
         LockResponse response = await greeter.Ask(request);
         return response.Type;
     }
+    
+    public async Task<LockResponseType> TryExtendLock(string lockName, string lockId, int expiresMs)
+    {
+        if (expiresMs <= 0)
+            return LockResponseType.Errored;
+        
+        Lazy<IActorRefStruct<LockActor, LockRequest, LockResponse>> lazyLocker = locks.GetOrAdd(lockName, GetOrCreateLocker);
+        IActorRefStruct<LockActor, LockRequest, LockResponse> locker = lazyLocker.Value;
+        
+        LockRequest request = new(LockRequestType.TryExtendLock, lockId, expiresMs);
+
+        LockResponse response = await locker.Ask(request);
+        return response.Type;
+    }
 
     public async Task<LockResponseType> TryUnlock(string lockName, string lockId)
     {
-        Lazy<IActorRefStruct<LockActor, LockRequest, LockResponse>> lazyGreeter = locks.GetOrAdd(lockName, GetOrCreateLocker);
-        IActorRefStruct<LockActor, LockRequest, LockResponse> greeter = lazyGreeter.Value;
+        Lazy<IActorRefStruct<LockActor, LockRequest, LockResponse>> lazyLocker = locks.GetOrAdd(lockName, GetOrCreateLocker);
+        IActorRefStruct<LockActor, LockRequest, LockResponse> locker = lazyLocker.Value;
         
         LockRequest request = new(LockRequestType.TryUnlock, lockId, 0);
 
-        LockResponse response = await greeter.Ask(request);
+        LockResponse response = await locker.Ask(request);
         return response.Type;
     }
     

@@ -14,22 +14,25 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         
     }
 
+    /// <summary>
+    /// Main entry point for the actor.
+    /// Receives messages one at a time to prevent concurrency issues
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
     public async Task<LockResponse> Receive(LockRequest message)
     {
         Console.WriteLine("Message: {0} {1} {2}", message.Type, message.Owner, message.ExpiresMs);
         
         await Task.CompletedTask;
-        
-        switch (message.Type)
-        {
-            case LockRequestType.TryLock:
-                return TryLock(message);
-            
-            case LockRequestType.TryUnlock:
-                return TryUnlock(message);
-        }
 
-        return new(LockResponseType.Errored);
+        return message.Type switch
+        {
+            LockRequestType.TryLock => TryLock(message),
+            LockRequestType.TryUnlock => TryUnlock(message),
+            LockRequestType.TryExtendLock => TryExtendLock(message),
+            _ => new(LockResponseType.Errored)
+        };
     }
     
     private LockResponse TryLock(LockRequest message)
@@ -44,6 +47,19 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         expires = DateTime.UtcNow.AddMilliseconds(message.ExpiresMs);
 
         return new(LockResponseType.Locked);
+    }
+    
+    private LockResponse TryExtendLock(LockRequest message)
+    {
+        if (string.IsNullOrEmpty(owner))
+            return new(LockResponseType.Errored);
+        
+        if (owner != message.Owner)
+            return new(LockResponseType.Errored);
+        
+        expires = DateTime.UtcNow.AddMilliseconds(message.ExpiresMs);
+
+        return new(LockResponseType.Extended);
     }
     
     private LockResponse TryUnlock(LockRequest message)
