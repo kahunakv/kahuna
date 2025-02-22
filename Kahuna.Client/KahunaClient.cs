@@ -73,7 +73,7 @@ public class KahunaClient
     {
         try
         {
-            string lockId = Guid.NewGuid().ToString();
+            string lockId = Guid.NewGuid().ToString("N");
 
             KahunaLockAcquireResult result = await TryAcquireLock(key, lockId, expiryTime).ConfigureAwait(false);
 
@@ -150,6 +150,26 @@ public class KahunaClient
     public async Task<KahunaLock> GetOrCreateLock(string resource, TimeSpan expiry)
     {
         return new(this, resource, await SingleTimeTryAcquireLock(resource, expiry).ConfigureAwait(false));
+    }
+    
+    /// <summary>
+    /// Tried to extend the lock by the specified duration
+    /// Returns true if the lock was successfully extended, false otherwise
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="lockId"></param>
+    /// <returns></returns>
+    public async Task<bool> TryExtend(string key, string lockId, TimeSpan duration)
+    {
+        try
+        {
+            return await communication.TryExtend(url, key, lockId, duration.TotalMilliseconds).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("Error locking lock instance: {0}", ex.Message);
+            return false;
+        }
     }
     
     /// <summary>

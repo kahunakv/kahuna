@@ -104,4 +104,26 @@ internal sealed class HttpCommunication
         
         return response.Type == LockResponseType.Unlocked;
     }
+    
+    internal async Task<bool> TryExtend(string url, string key, string lockId, double expiryTime)
+    {
+        KahunaLockRequest request = new() { LockName = key, LockId = lockId, ExpiresMs = expiryTime };
+        string payload = JsonSerializer.Serialize(request);
+        
+        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
+        
+        KahunaLockResponse? response = await retryPolicy.ExecuteAsync(() => 
+                url
+                    .WithOAuthBearerToken("xxx")
+                    .AppendPathSegments("v1/kahuna/extend-lock")
+                    .WithHeader("Accept", "application/json")
+                    .WithHeader("Content-Type", "application/json")
+                    .WithTimeout(5)
+                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .PostStringAsync(payload)
+                    .ReceiveJson<KahunaLockResponse>())
+            .ConfigureAwait(false);
+        
+        return response.Type == LockResponseType.Extended;
+    }
 }

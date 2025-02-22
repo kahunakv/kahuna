@@ -4,7 +4,10 @@ using System.Collections.Concurrent;
 
 namespace Kahuna;
 
-public sealed class LockManager
+/// <summary>
+/// LockManager is a singleton class that manages lock actors.
+/// </summary>
+public sealed class LockManager : IKahuna
 {
     private readonly ActorSystem actorSystem;
     
@@ -15,6 +18,13 @@ public sealed class LockManager
         this.actorSystem = actorSystem;
     }
     
+    /// <summary>
+    /// Passes a TryLock request to the locker actor for the given lock name.
+    /// </summary>
+    /// <param name="lockName"></param>
+    /// <param name="lockId"></param>
+    /// <param name="expiresMs"></param>
+    /// <returns></returns>
     public async Task<LockResponseType> TryLock(string lockName, string lockId, int expiresMs)
     {
         if (expiresMs <= 0)
@@ -29,6 +39,13 @@ public sealed class LockManager
         return response.Type;
     }
     
+    /// <summary>
+    /// Passes a TryExtendLock request to the locker actor for the given lock name.
+    /// </summary>
+    /// <param name="lockName"></param>
+    /// <param name="lockId"></param>
+    /// <param name="expiresMs"></param>
+    /// <returns></returns>
     public async Task<LockResponseType> TryExtendLock(string lockName, string lockId, int expiresMs)
     {
         if (expiresMs <= 0)
@@ -43,6 +60,12 @@ public sealed class LockManager
         return response.Type;
     }
 
+    /// <summary>
+    /// Passes a TryUnlock request to the locker actor for the given lock name.
+    /// </summary>
+    /// <param name="lockName"></param>
+    /// <param name="lockId"></param>
+    /// <returns></returns>
     public async Task<LockResponseType> TryUnlock(string lockName, string lockId)
     {
         Lazy<IActorRefStruct<LockActor, LockRequest, LockResponse>> lazyLocker = locks.GetOrAdd(lockName, GetOrCreateLocker);
@@ -54,6 +77,11 @@ public sealed class LockManager
         return response.Type;
     }
     
+    /// <summary>
+    /// Gets or creates a locker actor for the given lock name.
+    /// </summary>
+    /// <param name="lockName"></param>
+    /// <returns></returns>
     private Lazy<IActorRefStruct<LockActor, LockRequest, LockResponse>> GetOrCreateLocker(string lockName)
     {
         return new(() => actorSystem.SpawnStruct<LockActor, LockRequest, LockResponse>(lockName));

@@ -19,9 +19,9 @@ public class TestLocks
     {
         string lockName = GetRandomLockName();
 
-        await using KahunaLock redLock = await locks.GetOrCreateLock(lockName, 1000);
+        await using KahunaLock kLock = await locks.GetOrCreateLock(lockName, 1000);
 
-        Assert.True(redLock.IsAcquired);
+        Assert.True(kLock.IsAcquired);
     }
     
     [Fact]
@@ -29,11 +29,11 @@ public class TestLocks
     {
         string lockName = GetRandomLockName();
 
-        await using KahunaLock redLock1 = await locks.GetOrCreateLock(lockName, 10000);
-        await using KahunaLock redLock2 = await locks.GetOrCreateLock(lockName, 10000);
+        await using KahunaLock kLock1 = await locks.GetOrCreateLock(lockName, 10000);
+        await using KahunaLock kLock2 = await locks.GetOrCreateLock(lockName, 10000);
 
-        Assert.True(redLock1.IsAcquired);
-        Assert.False(redLock2.IsAcquired);
+        Assert.True(kLock1.IsAcquired);
+        Assert.False(kLock2.IsAcquired);
     }
     
     [Fact]
@@ -41,13 +41,13 @@ public class TestLocks
     {
         string lockName = GetRandomLockName();
 
-        KahunaLock redLock = await locks.GetOrCreateLock(lockName, 1000);
-        Assert.True(redLock.IsAcquired);
+        KahunaLock kLock = await locks.GetOrCreateLock(lockName, 1000);
+        Assert.True(kLock.IsAcquired);
 
-        await redLock.DisposeAsync();
+        await kLock.DisposeAsync();
 
-        await using KahunaLock redLock2 = await locks.GetOrCreateLock(lockName, 1000);
-        Assert.True(redLock2.IsAcquired);
+        await using KahunaLock kLock2 = await locks.GetOrCreateLock(lockName, 1000);
+        Assert.True(kLock2.IsAcquired);
     }
     
     [Fact]
@@ -55,13 +55,13 @@ public class TestLocks
     {
         string lockName = GetRandomLockName();
 
-        KahunaLock redLock = await locks.GetOrCreateLock(lockName, TimeSpan.FromSeconds(1));
-        Assert.True(redLock.IsAcquired);
+        KahunaLock kLock = await locks.GetOrCreateLock(lockName, TimeSpan.FromSeconds(1));
+        Assert.True(kLock.IsAcquired);
 
-        await redLock.DisposeAsync();
+        await kLock.DisposeAsync();
 
-        await using KahunaLock redLock2 = await locks.GetOrCreateLock(lockName, TimeSpan.FromSeconds(1));
-        Assert.True(redLock2.IsAcquired);
+        await using KahunaLock kLock2 = await locks.GetOrCreateLock(lockName, TimeSpan.FromSeconds(1));
+        Assert.True(kLock2.IsAcquired);
     }
     
     [Fact]
@@ -69,19 +69,19 @@ public class TestLocks
     {
         string lockName = GetRandomLockName();
 
-        KahunaLock redLock = await locks.GetOrCreateLock(
+        KahunaLock kLock = await locks.GetOrCreateLock(
             lockName, 
             expiryTime: 1000, 
             waitTime: 1000, 
             retryTime: 100
         );
         
-        Assert.True(redLock.IsAcquired);
+        Assert.True(kLock.IsAcquired);
 
-        await redLock.DisposeAsync();
+        await kLock.DisposeAsync();
 
-        await using KahunaLock redLock2 = await locks.GetOrCreateLock(lockName, TimeSpan.FromSeconds(1));
-        Assert.True(redLock2.IsAcquired);
+        await using KahunaLock kLock2 = await locks.GetOrCreateLock(lockName, TimeSpan.FromSeconds(1));
+        Assert.True(kLock2.IsAcquired);
     }
     
     [Fact]
@@ -99,19 +99,19 @@ public class TestLocks
     {
         string lockName = GetRandomLockName();
 
-        KahunaLock redLock = await locks.GetOrCreateLock(
+        KahunaLock kLock = await locks.GetOrCreateLock(
             lockName, 
             expiry: TimeSpan.FromSeconds(1), 
             wait: TimeSpan.FromSeconds(1), 
             retry: TimeSpan.FromMilliseconds(100)
         );
         
-        Assert.True(redLock.IsAcquired);
+        Assert.True(kLock.IsAcquired);
 
-        await redLock.DisposeAsync();
+        await kLock.DisposeAsync();
 
-        await using KahunaLock redLock2 = await locks.GetOrCreateLock(lockName, TimeSpan.FromSeconds(1));
-        Assert.True(redLock2.IsAcquired);
+        await using KahunaLock kLock2 = await locks.GetOrCreateLock(lockName, TimeSpan.FromSeconds(1));
+        Assert.True(kLock2.IsAcquired);
     }
     
     [Fact]
@@ -130,14 +130,14 @@ public class TestLocks
     
     private async Task AcquireSameLockConcurrently(string lockName)
     {
-        await using KahunaLock redLock = await locks.GetOrCreateLock(
+        await using KahunaLock kLock = await locks.GetOrCreateLock(
             lockName, 
             expiry: TimeSpan.FromSeconds(10), 
             wait: TimeSpan.FromSeconds(11),
             retry: TimeSpan.FromMilliseconds(100)
         );
         
-        if (!redLock.IsAcquired)
+        if (!kLock.IsAcquired)
             return;
 
         total++;
