@@ -2,7 +2,6 @@
 using CommandLine;
 using Kahuna;
 using Kommander;
-using Microsoft.Extensions.Options;
 using Nixie;
 
 Console.WriteLine("  _           _                     ");
@@ -73,5 +72,5 @@ app.MapPost("/v1/kahuna/unlock", async (ExternLockRequest request, IKahuna locks
 
 app.MapGet("/", () => "Kahuna.Server");
 
-app.Run("http://*:2070");
+app.Run($"http://{opts.Host}:{opts.Port}");
 
