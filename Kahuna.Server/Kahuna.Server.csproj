@@ -9,7 +9,7 @@
 
 <ItemGroup>
   <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.1"/>
-  <PackageReference Include="Kommander" Version="0.0.1" />
+  <PackageReference Include="Kommander" Version="0.0.3" />
 </ItemGroup>
   
 </Project>

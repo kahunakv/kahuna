@@ -6,5 +6,5 @@ namespace Kahuna.Client.Communication.Data;
 internal sealed class KahunaLockResponse
 {
     [JsonPropertyName("type")]
-    public int Type { get; set; }
+    public LockResponseType Type { get; set; }
 }

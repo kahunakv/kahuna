@@ -80,7 +80,7 @@ internal sealed class HttpCommunication
             .PostStringAsync(payload)
             .ReceiveJson<KahunaLockResponse>()).ConfigureAwait(false);
         
-        return response.Type == 0 ? KahunaLockAcquireResult.Success : KahunaLockAcquireResult.Conflicted;
+        return response.Type == LockResponseType.Locked ? KahunaLockAcquireResult.Success : KahunaLockAcquireResult.Conflicted;
     }
     
     internal async Task<bool> TryUnlock(string url, string key, string lockId)
@@ -102,6 +102,6 @@ internal sealed class HttpCommunication
             .ReceiveJson<KahunaLockResponse>())
             .ConfigureAwait(false);
         
-        return response.Type == 2;
+        return response.Type == LockResponseType.Unlocked;
     }
 }
