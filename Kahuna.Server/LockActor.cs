@@ -3,15 +3,22 @@ using Nixie;
 
 namespace Kahuna;
 
+public sealed class LockContext
+{
+    public string? Owner { get; set; }
+    
+    public DateTime Expires { get; set; }
+}
+
 public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 {
-    private string? owner;
-    
-    private DateTime expires;
+    private readonly Dictionary<string, LockContext> locks = new();
 
-    public LockActor(IActorContextStruct<LockActor, LockRequest, LockResponse> _)
+    private readonly ILogger<IKahuna> logger;
+
+    public LockActor(IActorContextStruct<LockActor, LockRequest, LockResponse> _, ILogger<IKahuna> logger)
     {
-        
+        this.logger = logger;
     }
 
     /// <summary>
@@ -22,7 +29,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     /// <returns></returns>
     public async Task<LockResponse> Receive(LockRequest message)
     {
-        Console.WriteLine("Message: {0} {1} {2}", message.Type, message.Owner, message.ExpiresMs);
+        logger.LogInformation("Message: {Type} {Resource} {Owner} {ExpiresMs}", message.Type, message.Resource, message.Owner, message.ExpiresMs);
         
         await Task.CompletedTask;
 
@@ -35,42 +42,72 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         };
     }
     
+    /// <summary>
+    /// Looks for a lock on the resource and tries to lock it
+    /// Check for the owner and expiration time
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
     private LockResponse TryLock(LockRequest message)
     {
-        if (!string.IsNullOrEmpty(owner))
+        if (locks.TryGetValue(message.Resource, out LockContext? context))
         {
-            if (expires - DateTime.UtcNow > TimeSpan.Zero)
-                return new(LockResponseType.Busy);
+            if (!string.IsNullOrEmpty(context.Owner))
+            {
+                if (context.Expires - DateTime.UtcNow > TimeSpan.Zero)
+                    return new(LockResponseType.Busy);
+            }
+            
+            context.Owner = message.Owner;
+            context.Expires = DateTime.UtcNow.AddMilliseconds(message.ExpiresMs);
+
+            return new(LockResponseType.Locked);
         }
-
-        owner = message.Owner;
-        expires = DateTime.UtcNow.AddMilliseconds(message.ExpiresMs);
-
+        
+        LockContext newContext = new()
+        {
+            Owner = message.Owner,
+            Expires = DateTime.UtcNow.AddMilliseconds(message.ExpiresMs)
+        };
+        
+        locks.Add(message.Resource, newContext);
+        
         return new(LockResponseType.Locked);
     }
     
+    /// <summary>
+    /// Looks for a lock on the resource and tries to extend it
+    /// If the lock doesn't exist or the owner is different, return an error
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
     private LockResponse TryExtendLock(LockRequest message)
     {
-        if (string.IsNullOrEmpty(owner))
+        if (!locks.TryGetValue(message.Resource, out LockContext? context))
             return new(LockResponseType.Errored);
         
-        if (owner != message.Owner)
+        if (context.Owner != message.Owner)
             return new(LockResponseType.Errored);
         
-        expires = DateTime.UtcNow.AddMilliseconds(message.ExpiresMs);
+        context.Expires = DateTime.UtcNow.AddMilliseconds(message.ExpiresMs);
 
         return new(LockResponseType.Extended);
     }
     
+    /// <summary>
+    /// Looks for a lock on the resource and tries to unlock it
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
     private LockResponse TryUnlock(LockRequest message)
     {
-        if (string.IsNullOrEmpty(owner))
+        if (!locks.TryGetValue(message.Resource, out LockContext? context))
             return new(LockResponseType.Errored);
 
-        if (message.Owner != owner)
+        if (message.Owner != context.Owner)
             return new(LockResponseType.Errored);
         
-        owner = null;
+        context.Owner = null;
 
         return new(LockResponseType.Unlocked);
     }

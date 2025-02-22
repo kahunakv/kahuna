@@ -1,6 +1,6 @@
 
 using Nixie;
-using System.Collections.Concurrent;
+using Nixie.Routers;
 
 namespace Kahuna;
 
@@ -11,11 +11,25 @@ public sealed class LockManager : IKahuna
 {
     private readonly ActorSystem actorSystem;
     
-    private readonly ConcurrentDictionary<string, Lazy<IActorRefStruct<LockActor, LockRequest, LockResponse>>> locks = new();
+    private readonly IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> locksRouter;
     
-    public LockManager(ActorSystem actorSystem)
+    /// <summary>
+    /// Constructor
+    /// </summary>
+    /// <param name="actorSystem"></param>
+    /// <param name="logger"></param>
+    public LockManager(ActorSystem actorSystem, ILogger<IKahuna> logger)
     {
         this.actorSystem = actorSystem;
+
+        int workers = Environment.ProcessorCount * 2;
+        
+        List<IActorRefStruct<LockActor, LockRequest, LockResponse>> responderInstances = new(workers);
+
+        for (int i = 0; i < workers; i++)
+            responderInstances.Add(actorSystem.SpawnStruct<LockActor, LockRequest, LockResponse>(null, logger));
+
+        locksRouter = actorSystem.CreateConsistentHashRouterStruct(responderInstances);
     }
     
     /// <summary>
@@ -30,12 +44,9 @@ public sealed class LockManager : IKahuna
         if (expiresMs <= 0)
             return LockResponseType.Errored;
         
-        Lazy<IActorRefStruct<LockActor, LockRequest, LockResponse>> lazyLocker = locks.GetOrAdd(lockName, GetOrCreateLocker);
-        IActorRefStruct<LockActor, LockRequest, LockResponse> greeter = lazyLocker.Value;
-        
-        LockRequest request = new(LockRequestType.TryLock, lockId, expiresMs);
+        LockRequest request = new(LockRequestType.TryLock, lockName, lockId, expiresMs);
 
-        LockResponse response = await greeter.Ask(request);
+        LockResponse response = await locksRouter.Ask(request);
         return response.Type;
     }
     
@@ -51,12 +62,9 @@ public sealed class LockManager : IKahuna
         if (expiresMs <= 0)
             return LockResponseType.Errored;
         
-        Lazy<IActorRefStruct<LockActor, LockRequest, LockResponse>> lazyLocker = locks.GetOrAdd(lockName, GetOrCreateLocker);
-        IActorRefStruct<LockActor, LockRequest, LockResponse> locker = lazyLocker.Value;
-        
-        LockRequest request = new(LockRequestType.TryExtendLock, lockId, expiresMs);
+        LockRequest request = new(LockRequestType.TryExtendLock, lockName, lockId, expiresMs);
 
-        LockResponse response = await locker.Ask(request);
+        LockResponse response = await locksRouter.Ask(request);
         return response.Type;
     }
 
@@ -68,22 +76,9 @@ public sealed class LockManager : IKahuna
     /// <returns></returns>
     public async Task<LockResponseType> TryUnlock(string lockName, string lockId)
     {
-        Lazy<IActorRefStruct<LockActor, LockRequest, LockResponse>> lazyLocker = locks.GetOrAdd(lockName, GetOrCreateLocker);
-        IActorRefStruct<LockActor, LockRequest, LockResponse> locker = lazyLocker.Value;
-        
-        LockRequest request = new(LockRequestType.TryUnlock, lockId, 0);
+        LockRequest request = new(LockRequestType.TryUnlock, lockName, lockId, 0);
 
-        LockResponse response = await locker.Ask(request);
+        LockResponse response = await locksRouter.Ask(request);
         return response.Type;
-    }
-    
-    /// <summary>
-    /// Gets or creates a locker actor for the given lock name.
-    /// </summary>
-    /// <param name="lockName"></param>
-    /// <returns></returns>
-    private Lazy<IActorRefStruct<LockActor, LockRequest, LockResponse>> GetOrCreateLocker(string lockName)
-    {
-        return new(() => actorSystem.SpawnStruct<LockActor, LockRequest, LockResponse>(lockName));
     }
 }
