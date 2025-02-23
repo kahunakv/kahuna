@@ -2,6 +2,9 @@
 using CommandLine;
 using Kahuna;
 using Kommander;
+using Kommander.Communication;
+using Kommander.Discovery;
+using Kommander.WAL;
 using Nixie;
 
 Console.WriteLine("  _           _                     ");
@@ -19,71 +22,45 @@ if (opts is null)
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddSingleton(new ActorSystem());
+bool assembleCluster = false;
+ActorSystem actorSystem = new();
+
+if (string.IsNullOrEmpty(opts.InitialCluster))
+    builder.Services.AddSingleton<RaftManager>();
+else
+{
+    // Try to assemble a Kahuna cluster from static discovery
+    string[] cluster = opts.InitialCluster.Split(',');
+    if (cluster.Length > 0)
+    {
+        assembleCluster = true;
+        
+        RaftConfiguration configuration = new()
+        {
+            Host = opts.Host,
+            Port = opts.Port,
+            MaxPartitions = opts.InitialClusterPartitions
+        };
+        
+        builder.Services.AddSingleton(new RaftManager(
+            actorSystem, 
+            configuration, 
+            new StaticDiscovery(cluster.Select(x => new RaftNode(x.Trim())).ToList()), 
+            new SqliteWAL(), 
+            new HttpCommunication()
+        ));
+    }
+}
+
+builder.Services.AddSingleton(actorSystem);
 builder.Services.AddSingleton<IKahuna, LockManager>();
-builder.Services.AddSingleton<RaftManager>();
 
 WebApplication app = builder.Build();
 
-app.MapPost("/v1/kahuna/lock", async (ExternLockRequest request, IKahuna locks) =>
-{
-    if (string.IsNullOrEmpty(request.LockName))
-        return new() { Type = LockResponseType.Errored };
+if (assembleCluster)
+    app.MapRaftRoutes();
 
-    if (string.IsNullOrEmpty(request.LockId))
-        return new() { Type = LockResponseType.Errored };
-    
-    // Console.WriteLine("LOCK {0} {1} {2}", request.LockName, request.LockId, request.ExpiresMs);
-
-    (LockResponseType response, long fencingToken) = await locks.TryLock(request.LockName, request.LockId, request.ExpiresMs);
-
-    return new ExternLockResponse { Type = response, FencingToken = fencingToken };
-});
-
-app.MapPost("/v1/kahuna/extend-lock", async (ExternLockRequest request, IKahuna locks) =>
-{
-    if (string.IsNullOrEmpty(request.LockName))
-        return new() { Type = LockResponseType.Errored };
-
-    if (string.IsNullOrEmpty(request.LockId))
-        return new() { Type = LockResponseType.Errored };
-    
-    // Console.WriteLine("EXTEND-LOCK {0} {1} {2}", request.LockName, request.LockId, request.ExpiresMs);
-
-    LockResponseType response = await locks.TryExtendLock(request.LockName, request.LockId, request.ExpiresMs);
-
-    return new ExternLockResponse { Type = response };
-});
-
-app.MapPost("/v1/kahuna/unlock", async (ExternLockRequest request, IKahuna locks) =>
-{
-    if (string.IsNullOrEmpty(request.LockName))
-        return new() { Type = LockResponseType.Errored };
-
-    if (string.IsNullOrEmpty(request.LockId))
-        return new() { Type = LockResponseType.Errored };
-    
-    // Console.WriteLine("UNLOCK {0} {1} {2}", request.LockName, request.LockId, request.ExpiresMs);
-
-    LockResponseType response = await locks.TryUnlock(request.LockName, request.LockId);
-
-    return new ExternLockResponse { Type = response };
-});
-
-app.MapPost("/v1/kahuna/get-lock", async (ExternGetLockRequest request, IKahuna locks) =>
-{
-    if (string.IsNullOrEmpty(request.LockName))
-        return new() { Type = LockResponseType.Errored };
-    
-    // Console.WriteLine("UNLOCK {0} {1} {2}", request.LockName, request.LockId, request.ExpiresMs);
-
-    (LockResponseType response, ReadOnlyLockContext? context) = await locks.GetLock(request.LockName);
-
-    if (context is not null)
-        return new() { Type = response, Owner = context.Owner, Expires = context.Expires, FencingToken = context.FencingToken };
-    
-    return new ExternGetLockResponse { Type = response };
-});
+app.MapKahunaRoutes();
 
 app.MapGet("/", () => "Kahuna.Server");
 

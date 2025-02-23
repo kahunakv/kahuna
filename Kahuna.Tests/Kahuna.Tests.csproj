@@ -30,4 +30,8 @@
       <ProjectReference Include="..\Kahuna.Client\Kahuna.Client.csproj" />
     </ItemGroup>
 
+    <ItemGroup>
+      <Folder Include="Server\" />
+    </ItemGroup>
+
 </Project>

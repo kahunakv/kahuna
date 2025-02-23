@@ -79,6 +79,9 @@ internal sealed class HttpCommunication
             .WithSettings(o => o.HttpVersion = "2.0")
             .PostStringAsync(payload)
             .ReceiveJson<KahunaLockResponse>()).ConfigureAwait(false);
+
+        if (response is null)
+            throw new KahunaException("Response is null");    
         
         return response.Type == LockResponseType.Locked ? KahunaLockAcquireResult.Success : KahunaLockAcquireResult.Conflicted;
     }
@@ -101,6 +104,9 @@ internal sealed class HttpCommunication
             .PostStringAsync(payload)
             .ReceiveJson<KahunaLockResponse>())
             .ConfigureAwait(false);
+
+        if (response is null)
+            throw new KahunaException("Response is null");
         
         return response.Type == LockResponseType.Unlocked;
     }
@@ -127,7 +133,7 @@ internal sealed class HttpCommunication
         return response.Type == LockResponseType.Extended;
     }
     
-    internal async Task<bool> Get(string url, string key)
+    internal async Task<KahunaLockInfo> Get(string url, string key)
     {
         KahunaGetRequest request = new() { LockName = key };
         string payload = JsonSerializer.Serialize(request);
@@ -145,7 +151,10 @@ internal sealed class HttpCommunication
                     .PostStringAsync(payload)
                     .ReceiveJson<KahunaGetResponse>())
             .ConfigureAwait(false);
+
+        if (response is null)
+            throw new KahunaException("Response is null");
         
-        return response.Type == LockResponseType.Got;
+        return new KahunaLockInfo(response.Type, response.Owner, response.Expires, response.FencingToken);
     }
 }

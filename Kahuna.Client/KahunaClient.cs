@@ -174,8 +174,7 @@ public class KahunaClient
         catch (Exception ex)
         {
             logger?.LogInformation("Error extending lock instance: {Message}", ex.Message);
-            
-            return false;
+            throw;
         }
     }
     
@@ -196,7 +195,7 @@ public class KahunaClient
         catch (Exception ex)
         {
             logger?.LogInformation("Error extending lock instance: {Message}", ex.Message);
-            return false;
+            throw;
         }
     }
     
@@ -215,7 +214,7 @@ public class KahunaClient
         catch (Exception ex)
         {
             logger?.LogInformation("Error unlocking lock instance: {Message}", ex.Message);
-            return false;
+            throw;
         }
     }
     
@@ -224,7 +223,7 @@ public class KahunaClient
     /// </summary>
     /// <param name="key"></param>
     /// <returns></returns>
-    public async Task<bool> GetLockInfo(string key)
+    public async Task<KahunaLockInfo> GetLockInfo(string key)
     {
         try
         {
@@ -232,8 +231,8 @@ public class KahunaClient
         }
         catch (Exception ex)
         {
-            logger?.LogInformation("Error getting lock instance: {Message}", ex.Message);
-            return false;
+            logger?.LogError("Error getting lock instance: {Message}", ex.Message);
+            throw;
         }
     }
 }
