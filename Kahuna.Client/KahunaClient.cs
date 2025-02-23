@@ -223,7 +223,7 @@ public class KahunaClient
     /// </summary>
     /// <param name="key"></param>
     /// <returns></returns>
-    public async Task<KahunaLockInfo> GetLockInfo(string key)
+    public async Task<KahunaLockInfo?> GetLockInfo(string key)
     {
         try
         {

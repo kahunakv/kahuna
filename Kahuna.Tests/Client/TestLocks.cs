@@ -148,12 +148,16 @@ public class TestLocks
     {
         string lockName = GetRandomLockName();
 
-        await using KahunaLock kLock = await locks.GetOrCreateLock(lockName, 1000);
+        await using KahunaLock kLock = await locks.GetOrCreateLock(lockName, 5000);
 
         Assert.True(kLock.IsAcquired);
         
-        await kLock.TryExtend(TimeSpan.FromSeconds(1));
+        bool extended = await kLock.TryExtend(TimeSpan.FromSeconds(5));
+        Assert.True(extended);
 
-        var lockInfo = await locks.GetLockInfo(lockName);
+        KahunaLockInfo? lockInfo = await locks.GetLockInfo(lockName);
+        Assert.NotNull(lockInfo);
+        
+        Assert.Equal(lockInfo.Owner, kLock.LockId);
     }
 }

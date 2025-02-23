@@ -17,6 +17,8 @@ public sealed class KahunaLock : IAsyncDisposable
     private bool disposed;
 
     public bool IsAcquired => result == KahunaLockAcquireResult.Success;
+    
+    public string LockId => lockId ?? throw new KahunaException("Lock was not acquired");
 
     /// <summary>
     /// Constructor

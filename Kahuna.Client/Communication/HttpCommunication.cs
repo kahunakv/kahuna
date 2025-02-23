@@ -133,7 +133,7 @@ internal sealed class HttpCommunication
         return response.Type == LockResponseType.Extended;
     }
     
-    internal async Task<KahunaLockInfo> Get(string url, string key)
+    internal async Task<KahunaLockInfo?> Get(string url, string key)
     {
         KahunaGetRequest request = new() { LockName = key };
         string payload = JsonSerializer.Serialize(request);
@@ -155,6 +155,11 @@ internal sealed class HttpCommunication
         if (response is null)
             throw new KahunaException("Response is null");
         
-        return new KahunaLockInfo(response.Type, response.Owner, response.Expires, response.FencingToken);
+        Console.WriteLine("{0}", response.Type);
+
+        if (response.Type != LockResponseType.Got)
+            return null;
+        
+        return new(response.Owner ?? "", response.Expires, response.FencingToken);
     }
 }

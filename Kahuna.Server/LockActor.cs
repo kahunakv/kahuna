@@ -124,7 +124,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         if (!locks.TryGetValue(message.Resource, out LockContext? context))
             return new(LockResponseType.Errored);
         
-        if (context.Expires - DateTime.UtcNow > TimeSpan.Zero)
+        if (context.Expires - DateTime.UtcNow < TimeSpan.Zero)
             return new(LockResponseType.Busy);
 
         ReadOnlyLockContext readOnlyLockContext = new(context.Owner, context.Expires, context.FencingToken);
