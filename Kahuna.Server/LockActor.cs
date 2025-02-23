@@ -51,7 +51,12 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         {
             if (!string.IsNullOrEmpty(context.Owner))
             {
-                if (context.Expires - DateTime.UtcNow > TimeSpan.Zero)
+                bool isExpired = context.Expires - DateTime.UtcNow > TimeSpan.Zero;
+                
+                if (context.Owner == message.Owner && !isExpired)
+                    return new(LockResponseType.Locked, context.FencingToken);
+                
+                if (isExpired)
                     return new(LockResponseType.Busy);
             }
             
