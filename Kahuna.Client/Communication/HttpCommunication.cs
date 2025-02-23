@@ -127,7 +127,7 @@ internal sealed class HttpCommunication
         return response.Type == LockResponseType.Extended;
     }
     
-    internal async Task<bool> Get(string url, string key)
+    internal async Task<KahunaLockInfo> Get(string url, string key)
     {
         KahunaLockRequest request = new() { LockName = key };
         string payload = JsonSerializer.Serialize(request);
@@ -146,6 +146,6 @@ internal sealed class HttpCommunication
                     .ReceiveJson<KahunaLockResponse>())
             .ConfigureAwait(false);
         
-        return response.Type == LockResponseType.Extended;
+        return new KahunaLockInfo(response.Type, response.Owner, response.Expires, response.FencingToken);
     }
 }

@@ -1,7 +1,7 @@
 
 using Kahuna.Client;
 
-namespace Kahuna.Tests;
+namespace Kahuna.Tests.Client;
 
 public class TestLocks
 {
@@ -153,5 +153,7 @@ public class TestLocks
         Assert.True(kLock.IsAcquired);
         
         await kLock.TryExtend(TimeSpan.FromSeconds(1));
+
+        var lockInfo = await locks.GetLockInfo(lockName);
     }
 }
