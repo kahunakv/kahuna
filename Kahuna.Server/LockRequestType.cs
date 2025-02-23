@@ -5,5 +5,6 @@ public enum LockRequestType
 {
     TryLock,
     TryExtendLock,
-    TryUnlock
+    TryUnlock,
+    Get
 }

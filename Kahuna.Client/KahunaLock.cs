@@ -46,6 +46,21 @@ public sealed class KahunaLock : IAsyncDisposable
 
         return await locks.TryExtend(resource, lockId, duration);
     }
+    
+    /// <summary>
+    /// Try to extend the lock by the specified duration.
+    /// Returns true if the lock was successfully extended, false otherwise.
+    /// </summary>
+    /// <param name="durationMs"></param>
+    /// <returns></returns>
+    /// <exception cref="KahunaException"></exception>
+    public async Task<bool> TryExtend(int durationMs)
+    {
+        if (!IsAcquired || string.IsNullOrEmpty(lockId))
+            throw new KahunaException("Lock was not acquired");
+
+        return await locks.TryExtend(resource, lockId, durationMs);
+    }
 
     /// <summary>
     /// Frees the lock after it's no longer needed

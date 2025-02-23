@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Flurl.Http;
 using Kahuna.Client.Communication;
+using Microsoft.Extensions.Logging;
 
 namespace Kahuna.Client;
 
@@ -14,15 +15,19 @@ public class KahunaClient
 {
     private readonly string url;
 
+    private readonly ILogger<KahunaClient>? logger;
+
     private readonly HttpCommunication communication;
     
     /// <summary>
     /// Constructor
     /// </summary>
     /// <param name="url"></param>
-    public KahunaClient(string url)
+    /// <param name="logger"></param>
+    public KahunaClient(string url, ILogger<KahunaClient>? logger)
     {
         this.url = url;
+        this.logger = logger;
         this.communication = new();
     }
     
@@ -81,7 +86,7 @@ public class KahunaClient
         }
         catch (Exception ex)
         {
-            Console.WriteLine("Error locking lock instance: {0}", ex.Message);
+            logger?.LogInformation("Error locking lock instance: {Message}", ex.Message);
 
             return (KahunaLockAcquireResult.Error, null);
         }
@@ -158,6 +163,7 @@ public class KahunaClient
     /// </summary>
     /// <param name="key"></param>
     /// <param name="lockId"></param>
+    /// <param name="duration"></param>
     /// <returns></returns>
     public async Task<bool> TryExtend(string key, string lockId, TimeSpan duration)
     {
@@ -167,7 +173,29 @@ public class KahunaClient
         }
         catch (Exception ex)
         {
-            Console.WriteLine("Error locking lock instance: {0}", ex.Message);
+            logger?.LogInformation("Error extending lock instance: {Message}", ex.Message);
+            
+            return false;
+        }
+    }
+    
+    /// <summary>
+    /// Tried to extend the lock by the specified duration
+    /// Returns true if the lock was successfully extended, false otherwise
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="lockId"></param>
+    /// <param name="durationMs"></param> 
+    /// <returns></returns>
+    public async Task<bool> TryExtend(string key, string lockId, int durationMs)
+    {
+        try
+        {
+            return await communication.TryExtend(url, key, lockId, durationMs).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogInformation("Error extending lock instance: {Message}", ex.Message);
             return false;
         }
     }
@@ -186,7 +214,25 @@ public class KahunaClient
         }
         catch (Exception ex)
         {
-            Console.WriteLine("Error locking lock instance: {0}", ex.Message);
+            logger?.LogInformation("Error unlocking lock instance: {Message}", ex.Message);
+            return false;
+        }
+    }
+    
+    /// <summary>
+    /// Obtains information about an existing lock
+    /// </summary>
+    /// <param name="key"></param>
+    /// <returns></returns>
+    public async Task<bool> GetLockInfo(string key)
+    {
+        try
+        {
+            return await communication.Get(url, key).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogInformation("Error getting lock instance: {Message}", ex.Message);
             return false;
         }
     }

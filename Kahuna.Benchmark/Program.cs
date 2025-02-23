@@ -5,7 +5,7 @@ using Kahuna.Client;
 
 Console.WriteLine("Hello, World!");
 
-KahunaClient locks = new("http://localhost:2070");
+KahunaClient locks = new("http://localhost:2070", null);
 
 List<Task> tasks = new(1000);
 

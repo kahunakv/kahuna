@@ -5,7 +5,7 @@ namespace Kahuna.Tests;
 
 public class TestLocks
 {
-    private readonly KahunaClient locks = new("http://localhost:2070");
+    private readonly KahunaClient locks = new("http://localhost:2070", null);
     
     private int total;
 
@@ -141,5 +141,17 @@ public class TestLocks
             return;
 
         total++;
+    }
+    
+    [Fact]
+    public async Task TestValidateAcquireAndExtendLock()
+    {
+        string lockName = GetRandomLockName();
+
+        await using KahunaLock kLock = await locks.GetOrCreateLock(lockName, 1000);
+
+        Assert.True(kLock.IsAcquired);
+        
+        await kLock.TryExtend(TimeSpan.FromSeconds(1));
     }
 }

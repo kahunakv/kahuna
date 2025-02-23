@@ -39,15 +39,15 @@ public sealed class LockManager : IKahuna
     /// <param name="lockId"></param>
     /// <param name="expiresMs"></param>
     /// <returns></returns>
-    public async Task<LockResponseType> TryLock(string lockName, string lockId, int expiresMs)
+    public async Task<(LockResponseType, long)> TryLock(string lockName, string lockId, int expiresMs)
     {
         if (expiresMs <= 0)
-            return LockResponseType.Errored;
+            return (LockResponseType.Errored, -1);
         
         LockRequest request = new(LockRequestType.TryLock, lockName, lockId, expiresMs);
 
         LockResponse response = await locksRouter.Ask(request);
-        return response.Type;
+        return (response.Type, response.FencingToken);
     }
     
     /// <summary>
@@ -80,5 +80,19 @@ public sealed class LockManager : IKahuna
 
         LockResponse response = await locksRouter.Ask(request);
         return response.Type;
+    }
+    
+    /// <summary>
+    /// Passes a Get request to the locker actor for the given lock name.
+    /// </summary>
+    /// <param name="lockName"></param>
+    /// <param name="lockId"></param>
+    /// <returns></returns>
+    public async Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(string lockName)
+    {
+        LockRequest request = new(LockRequestType.Get, lockName, "", 0);
+
+        LockResponse response = await locksRouter.Ask(request);
+        return (response.Type, response.Context);
     }
 }

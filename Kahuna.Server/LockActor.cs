@@ -3,13 +3,9 @@ using Nixie;
 
 namespace Kahuna;
 
-public sealed class LockContext
-{
-    public string? Owner { get; set; }
-    
-    public DateTime Expires { get; set; }
-}
-
+/// <summary>
+/// 
+/// </summary>
 public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 {
     private readonly Dictionary<string, LockContext> locks = new();
@@ -38,6 +34,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             LockRequestType.TryLock => TryLock(message),
             LockRequestType.TryUnlock => TryUnlock(message),
             LockRequestType.TryExtendLock => TryExtendLock(message),
+            LockRequestType.Get => GetLock(message),
             _ => new(LockResponseType.Errored)
         };
     }
@@ -61,7 +58,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             context.Owner = message.Owner;
             context.Expires = DateTime.UtcNow.AddMilliseconds(message.ExpiresMs);
 
-            return new(LockResponseType.Locked);
+            return new(LockResponseType.Locked, context.FencingToken++);
         }
         
         LockContext newContext = new()
@@ -110,5 +107,23 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         context.Owner = null;
 
         return new(LockResponseType.Unlocked);
+    }
+    
+    /// <summary>
+    /// Gets Information about an existing lock
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
+    private LockResponse GetLock(LockRequest message)
+    {
+        if (!locks.TryGetValue(message.Resource, out LockContext? context))
+            return new(LockResponseType.Errored);
+        
+        if (context.Expires - DateTime.UtcNow > TimeSpan.Zero)
+            return new(LockResponseType.Busy);
+
+        ReadOnlyLockContext readOnlyLockContext = new(context.Owner, context.Expires, context.FencingToken);
+
+        return new(LockResponseType.Got, readOnlyLockContext);
     }
 }
