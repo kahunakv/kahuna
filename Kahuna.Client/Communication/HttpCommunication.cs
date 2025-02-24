@@ -155,7 +155,7 @@ internal sealed class HttpCommunication
         if (response is null)
             throw new KahunaException("Response is null");
         
-        Console.WriteLine("{0}", response.Type);
+        //Console.WriteLine("{0}", response.Type);
 
         if (response.Type != LockResponseType.Got)
             return null;

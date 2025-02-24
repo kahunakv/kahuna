@@ -1,4 +1,6 @@
 
+using Kommander;
+using Kommander.Time;
 using Nixie;
 
 namespace Kahuna;
@@ -8,12 +10,15 @@ namespace Kahuna;
 /// </summary>
 public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 {
+    private readonly IRaft raft;
+    
     private readonly Dictionary<string, LockContext> locks = new();
 
     private readonly ILogger<IKahuna> logger;
 
-    public LockActor(IActorContextStruct<LockActor, LockRequest, LockResponse> _, ILogger<IKahuna> logger)
+    public LockActor(IActorContextStruct<LockActor, LockRequest, LockResponse> _, IRaft raft, ILogger<IKahuna> logger)
     {
+        this.raft = raft;
         this.logger = logger;
     }
 
@@ -26,15 +31,13 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     public async Task<LockResponse> Receive(LockRequest message)
     {
         logger.LogInformation("Message: {Type} {Resource} {Owner} {ExpiresMs}", message.Type, message.Resource, message.Owner, message.ExpiresMs);
-        
-        await Task.CompletedTask;
 
         return message.Type switch
         {
-            LockRequestType.TryLock => TryLock(message),
+            LockRequestType.TryLock => await TryLock(message),
             LockRequestType.TryUnlock => TryUnlock(message),
-            LockRequestType.TryExtendLock => TryExtendLock(message),
-            LockRequestType.Get => GetLock(message),
+            LockRequestType.TryExtendLock => await TryExtendLock(message),
+            LockRequestType.Get => await GetLock(message),
             _ => new(LockResponseType.Errored)
         };
     }
@@ -45,13 +48,15 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private LockResponse TryLock(LockRequest message)
+    private async Task<LockResponse> TryLock(LockRequest message)
     {
+        HLCTimestamp currentTime = await ((RaftManager)raft).HybridLogicalClock.SendOrLocalEvent();
+        
         if (locks.TryGetValue(message.Resource, out LockContext? context))
         {
             if (!string.IsNullOrEmpty(context.Owner))
             {
-                bool isExpired = context.Expires - DateTime.UtcNow > TimeSpan.Zero;
+                bool isExpired = context.Expires - currentTime > TimeSpan.Zero;
                 
                 if (context.Owner == message.Owner && !isExpired)
                     return new(LockResponseType.Locked, context.FencingToken);
@@ -61,7 +66,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             }
             
             context.Owner = message.Owner;
-            context.Expires = DateTime.UtcNow.AddMilliseconds(message.ExpiresMs);
+            context.Expires = currentTime + message.ExpiresMs;
 
             return new(LockResponseType.Locked, context.FencingToken++);
         }
@@ -69,7 +74,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         LockContext newContext = new()
         {
             Owner = message.Owner,
-            Expires = DateTime.UtcNow.AddMilliseconds(message.ExpiresMs)
+            Expires = currentTime + message.ExpiresMs
         };
         
         locks.Add(message.Resource, newContext);
@@ -83,7 +88,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private LockResponse TryExtendLock(LockRequest message)
+    private async Task<LockResponse> TryExtendLock(LockRequest message)
     {
         if (!locks.TryGetValue(message.Resource, out LockContext? context))
             return new(LockResponseType.Errored);
@@ -91,7 +96,9 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         if (context.Owner != message.Owner)
             return new(LockResponseType.Errored);
         
-        context.Expires = DateTime.UtcNow.AddMilliseconds(message.ExpiresMs);
+        HLCTimestamp currentTime = await ((RaftManager)raft).HybridLogicalClock.SendOrLocalEvent();
+        
+        context.Expires = currentTime + message.ExpiresMs;
 
         return new(LockResponseType.Extended);
     }
@@ -119,12 +126,14 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private LockResponse GetLock(LockRequest message)
+    private async Task<LockResponse> GetLock(LockRequest message)
     {
         if (!locks.TryGetValue(message.Resource, out LockContext? context))
             return new(LockResponseType.Errored);
         
-        if (context.Expires - DateTime.UtcNow < TimeSpan.Zero)
+        HLCTimestamp currentTime = await ((RaftManager)raft).HybridLogicalClock.SendOrLocalEvent();
+        
+        if (context.Expires - currentTime < TimeSpan.Zero)
             return new(LockResponseType.Busy);
 
         ReadOnlyLockContext readOnlyLockContext = new(context.Owner, context.Expires, context.FencingToken);

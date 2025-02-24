@@ -1,4 +1,5 @@
 
+using Kommander;
 using Nixie;
 using Nixie.Routers;
 
@@ -18,7 +19,7 @@ public sealed class LockManager : IKahuna
     /// </summary>
     /// <param name="actorSystem"></param>
     /// <param name="logger"></param>
-    public LockManager(ActorSystem actorSystem, ILogger<IKahuna> logger)
+    public LockManager(ActorSystem actorSystem, IRaft raft, ILogger<IKahuna> logger)
     {
         this.actorSystem = actorSystem;
 

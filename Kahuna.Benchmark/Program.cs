@@ -3,20 +3,40 @@
 using System.Diagnostics;
 using Kahuna.Client;
 
-Console.WriteLine("Hello, World!");
+Console.WriteLine("Kahuna Benchmark");
+
+const int numberOfLocks = 2500;
 
 KahunaClient locks = new("http://localhost:2070", null);
 
-List<Task> tasks = new(1000);
+List<Task> tasks = new(numberOfLocks);
 
 Stopwatch stopwatch = Stopwatch.StartNew();
 
-for (int i = 0; i < 1000; i++)
+for (int i = 0; i < numberOfLocks; i++)
     tasks.Add(AdquireLockConcurrently(locks));
 
 await Task.WhenAll(tasks);
 
-Console.WriteLine("Total time: " + stopwatch.Elapsed);
+Console.WriteLine("[1] Total time: " + stopwatch.Elapsed);
+
+stopwatch.Restart();
+
+for (int i = 0; i < numberOfLocks; i++)
+    tasks.Add(AdquireLockConcurrently(locks));
+
+await Task.WhenAll(tasks);
+
+Console.WriteLine("[2] Total time: " + stopwatch.Elapsed);
+
+stopwatch.Restart();
+
+for (int i = 0; i < numberOfLocks; i++)
+    tasks.Add(AdquireLockConcurrently(locks));
+
+await Task.WhenAll(tasks);
+
+Console.WriteLine("[3] Total time: " + stopwatch.Elapsed);
 
 async Task AdquireLockConcurrently(KahunaClient locksx)
 {

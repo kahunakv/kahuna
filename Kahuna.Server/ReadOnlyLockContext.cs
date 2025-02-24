@@ -1,15 +1,17 @@
 
+using Kommander.Time;
+
 namespace Kahuna;
 
 public sealed class ReadOnlyLockContext
 {
     public string? Owner { get; }
     
-    public DateTime Expires { get; }
+    public HLCTimestamp Expires { get; }
     
     public long FencingToken { get; }
     
-    public ReadOnlyLockContext(string? owner, DateTime expires, long fencingToken)
+    public ReadOnlyLockContext(string? owner, HLCTimestamp expires, long fencingToken)
     {
         Owner = owner;
         Expires = expires;

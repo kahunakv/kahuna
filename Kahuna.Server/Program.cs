@@ -4,6 +4,7 @@ using Kahuna;
 using Kommander;
 using Kommander.Communication;
 using Kommander.Discovery;
+using Kommander.Time;
 using Kommander.WAL;
 using Nixie;
 
@@ -22,46 +23,36 @@ if (opts is null)
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
-bool assembleCluster = false;
-ActorSystem actorSystem = new();
-
-if (string.IsNullOrEmpty(opts.InitialCluster))
-    builder.Services.AddSingleton<RaftManager>();
-else
+// Try to assemble a Kahuna cluster from static discovery
+builder.Services.AddSingleton<IRaft>(services =>
 {
-    // Try to assemble a Kahuna cluster from static discovery
     string[] cluster = opts.InitialCluster.Split(',');
-    if (cluster.Length > 0)
+    
+    RaftConfiguration configuration = new()
     {
-        assembleCluster = true;
-        
-        RaftConfiguration configuration = new()
-        {
-            Host = opts.Host,
-            Port = opts.Port,
-            MaxPartitions = opts.InitialClusterPartitions
-        };
-        
-        builder.Services.AddSingleton(new RaftManager(
-            actorSystem, 
-            configuration, 
-            new StaticDiscovery(cluster.Select(x => new RaftNode(x.Trim())).ToList()), 
-            new SqliteWAL(), 
-            new HttpCommunication()
-        ));
-    }
-}
+        Host = opts.Host,
+        Port = opts.Port,
+        MaxPartitions = opts.InitialClusterPartitions
+    };
+    
+    return new RaftManager(
+        services.GetRequiredService<ActorSystem>(),
+        configuration,
+        new StaticDiscovery(cluster.Select(x => new RaftNode(x.Trim())).ToList()),
+        new SqliteWAL(),
+        new HttpCommunication(),
+        new HybridLogicalClock(),
+        services.GetRequiredService<ILogger<IRaft>>()
+    );
+});
 
-builder.Services.AddSingleton(actorSystem);
+builder.Services.AddSingleton<ActorSystem>(services => new(services, services.GetRequiredService<ILogger<IRaft>>()));
 builder.Services.AddSingleton<IKahuna, LockManager>();
 
 WebApplication app = builder.Build();
 
-if (assembleCluster)
-    app.MapRaftRoutes();
-
+app.MapRaftRoutes();
 app.MapKahunaRoutes();
-
 app.MapGet("/", () => "Kahuna.Server");
 
 app.Run($"http://{opts.Host}:{opts.Port}");

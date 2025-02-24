@@ -1,4 +1,6 @@
 
+using Kommander.Time;
+
 namespace Kahuna;
 
 public sealed class ExternGetLockResponse
@@ -7,7 +9,7 @@ public sealed class ExternGetLockResponse
     
     public string? Owner { get; set; }
     
-    public DateTime Expires { get; set; }
+    public HLCTimestamp Expires { get; set; }
     
     public long FencingToken { get; set; }
 }
