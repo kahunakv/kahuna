@@ -1,6 +1,7 @@
 ﻿
 using CommandLine;
 using Kahuna;
+using Kahuna.Services;
 using Kommander;
 using Kommander.Communication;
 using Kommander.Discovery;
@@ -35,7 +36,7 @@ builder.Services.AddSingleton<IRaft>(services =>
         MaxPartitions = opts.InitialClusterPartitions
     };
     
-    return new RaftManager(
+    IRaft node = new RaftManager(
         services.GetRequiredService<ActorSystem>(),
         configuration,
         new StaticDiscovery(cluster.Select(x => new RaftNode(x.Trim())).ToList()),
@@ -44,10 +45,16 @@ builder.Services.AddSingleton<IRaft>(services =>
         new HybridLogicalClock(),
         services.GetRequiredService<ILogger<IRaft>>()
     );
+
+    if (cluster.Length > 0)
+        node.JoinCluster();
+
+    return node;
 });
 
 builder.Services.AddSingleton<ActorSystem>(services => new(services, services.GetRequiredService<ILogger<IRaft>>()));
 builder.Services.AddSingleton<IKahuna, LockManager>();
+builder.Services.AddHostedService<InstrumentationService>();
 
 WebApplication app = builder.Build();
 

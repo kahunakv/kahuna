@@ -1,6 +1,7 @@
 Kahuna.Server/obj
 Kahuna.Server/bin
 Kahuna.Server/.idea
+Kahuna.Server/database*
 Kahuna.Client/obj
 Kahuna.Client/bin
 Kahuna.Client/.idea
