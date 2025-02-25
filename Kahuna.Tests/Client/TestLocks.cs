@@ -134,7 +134,7 @@ public class TestLocks
             lockName, 
             expiry: TimeSpan.FromSeconds(10), 
             wait: TimeSpan.FromSeconds(11),
-            retry: TimeSpan.FromMilliseconds(100)
+            retry: TimeSpan.FromMilliseconds(500)
         );
         
         if (!kLock.IsAcquired)

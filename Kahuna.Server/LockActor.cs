@@ -83,8 +83,8 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             
             if (message.Consistency == LockConsistency.Consistent)
             {
-                int partition = Math.Abs(message.Resource.GetHashCode()) % 3;
-                await raft.ReplicateLogs(partition, Array.Empty<byte>());
+                int partitionId = (int)raft.GetPartitionKey(message.Resource);
+                await raft.ReplicateLogs(partitionId, Array.Empty<byte>());
             }
             
             context.Owner = message.Owner;
@@ -95,8 +95,8 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         
         if (message.Consistency == LockConsistency.Consistent)
         {
-            int partition = Math.Abs(message.Resource.GetHashCode()) % 3;
-            await raft.ReplicateLogs(partition, Array.Empty<byte>());
+            int partitionId = (int)raft.GetPartitionKey(message.Resource);
+            await raft.ReplicateLogs(partitionId, Array.Empty<byte>());
         }
         
         LockContext newContext = new()

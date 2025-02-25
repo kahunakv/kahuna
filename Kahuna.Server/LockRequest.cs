@@ -1,5 +1,7 @@
 
+using System.IO.Hashing;
 using Nixie.Routers;
+using Standart.Hash.xxHash;
 
 namespace Kahuna;
 
@@ -37,6 +39,6 @@ public readonly struct LockRequest : IConsistentHashable
 
     public int GetHash()
     {
-        return Math.Abs(Resource?.GetHashCode() ?? 0);
+        return (int)xxHash32.ComputeHash(Resource ?? "");
     }
 }
