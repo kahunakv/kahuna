@@ -1,0 +1,48 @@
+version: "3.8"
+
+services:
+  kahuna1:
+    image: kahuna:latest   
+    container_name: kahuna1
+    environment:
+      - KAHUNA_HOST=kahuna1
+      - KAHUNA_PORT=8081
+      - ASPNETCORE_URLS=http://*:8081;http://*:2070
+    ports:
+      - "8081:2070"
+    networks:
+      custom_net:
+        ipv4_address: 172.30.0.2
+
+  kahuna2:
+    image: kahuna:latest
+    container_name: kahuna2
+    environment:
+      - KAHUNA_HOST=kahuna2
+      - KAHUNA_PORT=8082
+      - ASPNETCORE_URLS=http://*:8082;http://*:2070
+    ports:
+      - "8082:2070"
+    networks:
+      custom_net:
+        ipv4_address: 172.30.0.3
+
+  kahuna3:
+    image: kahuna:latest
+    container_name: kahuna3
+    environment:
+      - KAHUNA_HOST=kahuna3
+      - KAHUNA_PORT=8083
+      - ASPNETCORE_URLS=http://*:8083;http://*:2070
+    ports:
+      - "8083:2070"
+    networks:
+      custom_net:
+        ipv4_address: 172.30.0.4
+
+networks:
+  custom_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/16
