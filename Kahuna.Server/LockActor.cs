@@ -6,7 +6,8 @@ using Nixie;
 namespace Kahuna;
 
 /// <summary>
-/// 
+/// Actor to manage lock operations on resources
+/// It ensures linearizable and serializable access to the resources on the same bucket
 /// </summary>
 public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 {
@@ -16,6 +17,12 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 
     private readonly ILogger<IKahuna> logger;
 
+    /// <summary>
+    /// Constructor
+    /// </summary>
+    /// <param name="_"></param>
+    /// <param name="raft"></param>
+    /// <param name="logger"></param>
     public LockActor(IActorContextStruct<LockActor, LockRequest, LockResponse> _, IRaft raft, ILogger<IKahuna> logger)
     {
         this.raft = raft;
@@ -30,16 +37,25 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     /// <returns></returns>
     public async Task<LockResponse> Receive(LockRequest message)
     {
-        logger.LogInformation("Message: {Type} {Resource} {Owner} {ExpiresMs}", message.Type, message.Resource, message.Owner, message.ExpiresMs);
-
-        return message.Type switch
+        try
         {
-            LockRequestType.TryLock => await TryLock(message),
-            LockRequestType.TryUnlock => TryUnlock(message),
-            LockRequestType.TryExtendLock => await TryExtendLock(message),
-            LockRequestType.Get => await GetLock(message),
-            _ => new(LockResponseType.Errored)
-        };
+            logger.LogInformation("Message: {Type} {Resource} {Owner} {ExpiresMs}", message.Type, message.Resource, message.Owner, message.ExpiresMs);
+
+            return message.Type switch
+            {
+                LockRequestType.TryLock => await TryLock(message),
+                LockRequestType.TryUnlock => TryUnlock(message),
+                LockRequestType.TryExtendLock => await TryExtendLock(message),
+                LockRequestType.Get => await GetLock(message),
+                _ => new(LockResponseType.Errored)
+            };
+        }
+        catch (Exception ex)
+        {
+            logger.LogError("Error processing message: {Message}", ex.Message);
+        }
+        
+        return new(LockResponseType.Errored);
     }
     
     /// <summary>
@@ -65,10 +81,22 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
                     return new(LockResponseType.Busy);
             }
             
+            if (message.Consistency == LockConsistency.Consistent)
+            {
+                int partition = Math.Abs(message.Resource.GetHashCode()) % 3;
+                await raft.ReplicateLogs(partition, Array.Empty<byte>());
+            }
+            
             context.Owner = message.Owner;
             context.Expires = currentTime + message.ExpiresMs;
 
             return new(LockResponseType.Locked, context.FencingToken++);
+        }
+        
+        if (message.Consistency == LockConsistency.Consistent)
+        {
+            int partition = Math.Abs(message.Resource.GetHashCode()) % 3;
+            await raft.ReplicateLogs(partition, Array.Empty<byte>());
         }
         
         LockContext newContext = new()

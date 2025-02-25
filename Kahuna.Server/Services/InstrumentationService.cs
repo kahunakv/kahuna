@@ -14,6 +14,9 @@ public class InstrumentationService : BackgroundService //, IDisposable
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if (raftManager.Configuration.Host == "*")
+            return;
+        
         await raftManager.JoinCluster();
         
         while (true)

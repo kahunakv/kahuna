@@ -1,10 +1,13 @@
 # Kahuna
 
-Kahuna is an open-source server for managing distributed locks in a scalable and fault-tolerant manner. It harnesses the power of distributed systems by enabling the addition of multiple nodes and distributing lock management across partitions managed by a Raft Group. The API is simple yet effective, ensuring that only one process can access a resource at any given time.
-
-It supports many servers (nodes) using Raft groups to elect leaders for different partitions, with different keys belonging to these partitions. For development purposes, Kahuna can also be used as a standalone server without horizontal scalability.
-
-In addition, Kahuna provides a client library for .NET to connect to the server, with plans to offer clients for other languages as well.
+**Kahuna** is an open-source solution designed to provide robust distributed 
+locking for modern distributed systems. It addresses the critical challenge 
+of synchronizing access to shared resources across multiple nodes 
+or processes, ensuring consistency and preventing race conditions. 
+By leveraging a partitioned locking mechanism coordinated via a Raft Group, 
+Kahuna combines scalability, reliability and simplicity, making it an ideal choice 
+for applications that require coordinated access to databases, files
+or other shared services.
 
 ---
 
@@ -14,8 +17,9 @@ In addition, Kahuna provides a client library for .NET to connect to the server,
 - [What Is a Distributed Lock?](#what-is-a-distributed-lock)
 - [Key Features](#key-features)
 - [API](#api)
-- [Installation](#installation)
-- [Usage](#usage)
+- [Leases](#leases)
+- [Client-Installation](#client-installation)
+- [Usage](#usage--examples)
 - [Client SDK for .NET](#client-sdk-for-net)
 - [Contributing](#contributing)
 - [License](#license)
@@ -91,7 +95,7 @@ Kahuna exposes a simple API for acquiring and releasing locks. The main function
 
 ---
 
-### Leases
+## Leases
 
 Distributed locks in Kahuna are based on the paper [*"Leases: An Efficient 
 Fault-Tolerant Mechanism for Distributed File Cache Consistency"*](https://web.stanford.edu/class/cs240/readings/leases.pdf) by Michael N. Nelson, Brent B. Welch, and John K. Ousterhout. 
@@ -114,7 +118,7 @@ While Kahuna leases help in expiring keys and releasing locks if a client fails,
 - A client pauses (e.g., due to a long GC pause or network partition) and later resumes, believing it still holds the lock, even though the lease has expired.
 - This could lead to split-brain where two clients believe they own the same lock. 
 
-### Fencing Token
+### Fencing Tokens
 
 A fencing token is a monotonically increasing number (e.g., version number) issued every time a lock is acquired. 
 It acts as a logical timestamp to resolve stale client operations.
@@ -352,4 +356,4 @@ Kahuna is licensed under the MIT License. See the [LICENSE](LICENSE) file for de
 
 ---
 
-Kahuna provides a robust and scalable solution for managing distributed locks in your .NET applications. By leveraging the principles of Raft consensus and the proven strategies from Redis’ Redlock, Kahuna ensures that your critical sections remain safe and synchronized in distributed environments. Happy coding!
+Kahuna offers a robust, scalable, and reliable solution for distributed locking in modern systems, making it an invaluable tool for developers facing the challenges of distributed resource management.

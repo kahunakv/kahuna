@@ -1,4 +1,5 @@
 ﻿
+using System.Net;
 using CommandLine;
 using Kahuna;
 using Kahuna.Services;
@@ -24,11 +25,35 @@ if (opts is null)
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
+List<RaftNode> nodes = [];
+    
+string[] cluster = !string.IsNullOrEmpty(opts.InitialCluster) ? opts.InitialCluster.Split(',') : [];
+
+if (cluster.Length == 0)
+{
+    string? kahunaHost = Environment.GetEnvironmentVariable("KAHUNA_HOST");
+    if (opts.Host == "*" && !string.IsNullOrEmpty(kahunaHost))
+    {                        
+        opts.Host = Dns.GetHostAddresses(kahunaHost)[0].ToString();            
+            
+        nodes =
+        [
+            new(Dns.GetHostAddresses("kahuna1")[0] + ":8081"),
+            new(Dns.GetHostAddresses("kahuna2")[0] + ":8082"),
+            new(Dns.GetHostAddresses("kahuna3")[0] + ":8083")
+        ];                    
+    }
+
+    string? kahunaPort = Environment.GetEnvironmentVariable("KAHUNA_PORT");
+    if (opts.Port == 2070 && !string.IsNullOrEmpty(kahunaPort))
+        opts.Port = int.Parse(kahunaPort);
+
+    nodes.RemoveAll(x => x.Endpoint == opts.Host + ":" + opts.Port);
+}
+
 // Try to assemble a Kahuna cluster from static discovery
 builder.Services.AddSingleton<IRaft>(services =>
 {
-    string[] cluster = opts.InitialCluster.Split(',');
-    
     RaftConfiguration configuration = new()
     {
         Host = opts.Host,
@@ -36,20 +61,15 @@ builder.Services.AddSingleton<IRaft>(services =>
         MaxPartitions = opts.InitialClusterPartitions
     };
     
-    IRaft node = new RaftManager(
+    return new RaftManager(
         services.GetRequiredService<ActorSystem>(),
         configuration,
-        new StaticDiscovery(cluster.Select(x => new RaftNode(x.Trim())).ToList()),
+        new StaticDiscovery(nodes),
         new SqliteWAL(),
         new HttpCommunication(),
         new HybridLogicalClock(),
         services.GetRequiredService<ILogger<IRaft>>()
     );
-
-    if (cluster.Length > 0)
-        node.JoinCluster();
-
-    return node;
 });
 
 builder.Services.AddSingleton<ActorSystem>(services => new(services, services.GetRequiredService<ILogger<IRaft>>()));
@@ -62,5 +82,7 @@ app.MapRaftRoutes();
 app.MapKahunaRoutes();
 app.MapGet("/", () => "Kahuna.Server");
 
-app.Run($"http://{opts.Host}:{opts.Port}");
+Console.WriteLine("Kahuna host detected: {0} {1}", opts.Host, opts.Port);
+
+app.Run();
 

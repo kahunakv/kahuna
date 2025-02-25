@@ -13,4 +13,7 @@ internal sealed class KahunaLockRequest
     
     [JsonPropertyName("expiresMs")]
     public double ExpiresMs { get; set; }
+    
+    [JsonPropertyName("consistency")]
+    public KahunaLockConsistency Consistency { get; set; }
 }

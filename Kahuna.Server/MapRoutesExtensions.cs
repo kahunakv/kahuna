@@ -26,12 +26,15 @@ public static class MapRoutesExtensions
 
             if (await raft.AmILeader(partitionId))
             {
-                (LockResponseType response, long fencingToken) = await locks.TryLock(request.LockName, request.LockId, request.ExpiresMs, LockConsistency.Consistent);
+                (LockResponseType response, long fencingToken) = await locks.TryLock(request.LockName, request.LockId, request.ExpiresMs, request.Consistency);
 
                 return new() { Type = response, FencingToken = fencingToken };    
             }
 
             string leader = await raft.WaitForLeader(partitionId);
+            if (leader == raft.GetLocalEndpoint())
+                throw new RaftException("lol");
+            
             string payload = JsonSerializer.Serialize(request);
             
             Console.WriteLine("{0} {1}", leader, payload);
@@ -41,7 +44,7 @@ public static class MapRoutesExtensions
                 .WithHeader("Accept", "application/json")
                 .WithHeader("Content-Type", "application/json")
                 .WithTimeout(5)
-                .WithSettings(o => o.HttpVersion = "2.0")
+                //.WithSettings(o => o.HttpVersion = "2.0")
                 .PostStringAsync(payload)
                 .ReceiveJson<ExternLockResponse>();
         });
@@ -63,7 +66,7 @@ public static class MapRoutesExtensions
             
             if (await raft.AmILeader(partitionId))
             {
-                LockResponseType response = await locks.TryExtendLock(request.LockName, request.LockId, request.ExpiresMs, LockConsistency.Consistent);
+                LockResponseType response = await locks.TryExtendLock(request.LockName, request.LockId, request.ExpiresMs, request.Consistency);
 
                 return new() { Type = response };    
             }
@@ -76,7 +79,7 @@ public static class MapRoutesExtensions
                 .WithHeader("Accept", "application/json")
                 .WithHeader("Content-Type", "application/json")
                 .WithTimeout(5)
-                .WithSettings(o => o.HttpVersion = "2.0")
+                //.WithSettings(o => o.HttpVersion = "2.0")
                 .PostStringAsync(payload)
                 .ReceiveJson<ExternLockResponse>();
         });
@@ -95,12 +98,15 @@ public static class MapRoutesExtensions
 
             if (await raft.AmILeader(partitionId))
             {
-                LockResponseType response = await locks.TryUnlock(request.LockName, request.LockId, LockConsistency.Consistent);
+                LockResponseType response = await locks.TryUnlock(request.LockName, request.LockId, request.Consistency);
 
                 return new() { Type = response };
             }
             
             string leader = await raft.WaitForLeader(partitionId);
+            if (leader == raft.GetLocalEndpoint())
+                throw new RaftException("lol");
+            
             string payload = JsonSerializer.Serialize(request);
             
             return await $"http://{leader}"
@@ -108,7 +114,7 @@ public static class MapRoutesExtensions
                 .WithHeader("Accept", "application/json")
                 .WithHeader("Content-Type", "application/json")
                 .WithTimeout(5)
-                .WithSettings(o => o.HttpVersion = "2.0")
+                //.WithSettings(o => o.HttpVersion = "2.0")
                 .PostStringAsync(payload)
                 .ReceiveJson<ExternLockResponse>();
         });
@@ -124,7 +130,7 @@ public static class MapRoutesExtensions
 
             if (await raft.AmILeader(partitionId))
             {
-                (LockResponseType response, ReadOnlyLockContext? context) = await locks.GetLock(request.LockName, LockConsistency.Consistent);
+                (LockResponseType response, ReadOnlyLockContext? context) = await locks.GetLock(request.LockName, request.Consistency);
 
                 if (context is not null)
                     return new()
@@ -139,6 +145,9 @@ public static class MapRoutesExtensions
             }
             
             string leader = await raft.WaitForLeader(partitionId);
+            if (leader == raft.GetLocalEndpoint())
+                throw new RaftException("lol");
+            
             string payload = JsonSerializer.Serialize(request);
             
             return await $"http://{leader}"

@@ -3,6 +3,9 @@ using Kommander.Time;
 
 namespace Kahuna;
 
+/// <summary>
+/// A snapshot of a lock context that is read-only.
+/// </summary>
 public sealed class ReadOnlyLockContext
 {
     public string? Owner { get; }

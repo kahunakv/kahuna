@@ -5,7 +5,7 @@ namespace Kahuna.Tests.Client;
 
 public class TestLocks
 {
-    private readonly KahunaClient locks = new("http://localhost:2070", null);
+    private readonly KahunaClient locks = new("http://localhost:8081", null);
     
     private int total;
 
@@ -159,5 +159,6 @@ public class TestLocks
         Assert.NotNull(lockInfo);
         
         Assert.Equal(lockInfo.Owner, kLock.LockId);
+        //Assert.Equal(lockInfo.Expires > DateTime.UtcNow, true);
     }
 }

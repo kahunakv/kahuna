@@ -12,7 +12,14 @@ namespace Kahuna.Client.Communication;
 
 internal sealed class HttpCommunication
 {
-    private AsyncRetryPolicy BuildRetryPolicy(ILogger? logger, int medianFirstRetryDelay = 1)
+    private readonly ILogger? logger;
+    
+    public HttpCommunication(ILogger? logger)
+    {
+        this.logger = logger;
+    }
+    
+    private static AsyncRetryPolicy BuildRetryPolicy(ILogger? logger, int medianFirstRetryDelay = 1)
     {
         IEnumerable<TimeSpan> delay = Backoff.DecorrelatedJitterBackoffV2(
             medianFirstRetryDelay: TimeSpan.FromSeconds(medianFirstRetryDelay),
@@ -62,9 +69,9 @@ internal sealed class HttpCommunication
         };
     }
     
-    internal async Task<KahunaLockAcquireResult> TryAcquireLock(string url, string key, string lockId, int expiryTime)
+    internal async Task<KahunaLockAcquireResult> TryAcquireLock(string url, string key, string lockId, int expiryTime, KahunaLockConsistency consistency)
     {
-        KahunaLockRequest request = new() { LockName = key, LockId = lockId, ExpiresMs = expiryTime };
+        KahunaLockRequest request = new() { LockName = key, LockId = lockId, ExpiresMs = expiryTime, Consistency = consistency };
         string payload = JsonSerializer.Serialize(request);
 
         AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
@@ -111,9 +118,9 @@ internal sealed class HttpCommunication
         return response.Type == LockResponseType.Unlocked;
     }
     
-    internal async Task<bool> TryExtend(string url, string key, string lockId, double expiryTime)
+    internal async Task<bool> TryExtend(string url, string resource, string lockId, double expiryTime, KahunaLockConsistency consistency)
     {
-        KahunaLockRequest request = new() { LockName = key, LockId = lockId, ExpiresMs = expiryTime };
+        KahunaLockRequest request = new() { LockName = resource, LockId = lockId, ExpiresMs = expiryTime, Consistency = consistency };
         string payload = JsonSerializer.Serialize(request);
         
         AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
@@ -133,9 +140,9 @@ internal sealed class HttpCommunication
         return response.Type == LockResponseType.Extended;
     }
     
-    internal async Task<KahunaLockInfo?> Get(string url, string key)
+    internal async Task<KahunaLockInfo?> Get(string url, string resource)
     {
-        KahunaGetRequest request = new() { LockName = key };
+        KahunaGetRequest request = new() { LockName = resource };
         string payload = JsonSerializer.Serialize(request);
         
         AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
