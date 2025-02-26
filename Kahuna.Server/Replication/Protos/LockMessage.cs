@@ -9,7 +9,7 @@ using pb = global::Google.Protobuf;
 using pbc = global::Google.Protobuf.Collections;
 using pbr = global::Google.Protobuf.Reflection;
 using scg = global::System.Collections.Generic;
-namespace Kahuna.Server.Protos {
+namespace Kahuna.Replication.Protos {
 
   /// <summary>Holder for reflection information generated from lock_message.proto</summary>
   public static partial class LockMessageReflection {
@@ -24,15 +24,16 @@ namespace Kahuna.Server.Protos {
     static LockMessageReflection() {
       byte[] descriptorData = global::System.Convert.FromBase64String(
           string.Concat(
-            "ChJsb2NrX21lc3NhZ2UucHJvdG8SFEthaHVuYS5TZXJ2ZXIuUHJvdG9zIowB",
-            "CgtMb2NrTWVzc2FnZRIMCgR0eXBlGAEgASgFEhAKCHJlc291cmNlGAIgASgJ",
-            "Eg0KBW93bmVyGAMgASgJEhMKC3RpbWVMb2dpY2FsGAQgASgDEhMKC3RpbWVD",
-            "b3VudGVyGAUgASgNEg8KB2V4cGlyZXMYBiABKAUSEwoLY29uc2lzdGVuY3kY",
-            "ByABKAViBnByb3RvMw=="));
+            "ChJsb2NrX21lc3NhZ2UucHJvdG8SGUthaHVuYS5SZXBsaWNhdGlvbi5Qcm90",
+            "b3MivwEKC0xvY2tNZXNzYWdlEgwKBHR5cGUYASABKAUSEAoIcmVzb3VyY2UY",
+            "AiABKAkSDQoFb3duZXIYAyABKAkSFAoMZmVuY2luZ1Rva2VuGAQgASgDEhUK",
+            "DWV4cGlyZUxvZ2ljYWwYBSABKAMSFQoNZXhwaXJlQ291bnRlchgGIAEoDRIT",
+            "Cgt0aW1lTG9naWNhbBgHIAEoAxITCgt0aW1lQ291bnRlchgIIAEoDRITCgtj",
+            "b25zaXN0ZW5jeRgJIAEoBWIGcHJvdG8z"));
       descriptor = pbr::FileDescriptor.FromGeneratedCode(descriptorData,
           new pbr::FileDescriptor[] { },
           new pbr::GeneratedClrTypeInfo(null, null, new pbr::GeneratedClrTypeInfo[] {
-            new pbr::GeneratedClrTypeInfo(typeof(global::Kahuna.Server.Protos.LockMessage), global::Kahuna.Server.Protos.LockMessage.Parser, new[]{ "Type", "Resource", "Owner", "TimeLogical", "TimeCounter", "Expires", "Consistency" }, null, null, null, null)
+            new pbr::GeneratedClrTypeInfo(typeof(global::Kahuna.Replication.Protos.LockMessage), global::Kahuna.Replication.Protos.LockMessage.Parser, new[]{ "Type", "Resource", "Owner", "FencingToken", "ExpireLogical", "ExpireCounter", "TimeLogical", "TimeCounter", "Consistency" }, null, null, null, null)
           }));
     }
     #endregion
@@ -54,7 +55,7 @@ namespace Kahuna.Server.Protos {
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public static pbr::MessageDescriptor Descriptor {
-      get { return global::Kahuna.Server.Protos.LockMessageReflection.Descriptor.MessageTypes[0]; }
+      get { return global::Kahuna.Replication.Protos.LockMessageReflection.Descriptor.MessageTypes[0]; }
     }
 
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
@@ -77,9 +78,11 @@ namespace Kahuna.Server.Protos {
       type_ = other.type_;
       resource_ = other.resource_;
       owner_ = other.owner_;
+      fencingToken_ = other.fencingToken_;
+      expireLogical_ = other.expireLogical_;
+      expireCounter_ = other.expireCounter_;
       timeLogical_ = other.timeLogical_;
       timeCounter_ = other.timeCounter_;
-      expires_ = other.expires_;
       consistency_ = other.consistency_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
@@ -126,8 +129,44 @@ namespace Kahuna.Server.Protos {
       }
     }
 
+    /// <summary>Field number for the "fencingToken" field.</summary>
+    public const int FencingTokenFieldNumber = 4;
+    private long fencingToken_;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public long FencingToken {
+      get { return fencingToken_; }
+      set {
+        fencingToken_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "expireLogical" field.</summary>
+    public const int ExpireLogicalFieldNumber = 5;
+    private long expireLogical_;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public long ExpireLogical {
+      get { return expireLogical_; }
+      set {
+        expireLogical_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "expireCounter" field.</summary>
+    public const int ExpireCounterFieldNumber = 6;
+    private uint expireCounter_;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint ExpireCounter {
+      get { return expireCounter_; }
+      set {
+        expireCounter_ = value;
+      }
+    }
+
     /// <summary>Field number for the "timeLogical" field.</summary>
-    public const int TimeLogicalFieldNumber = 4;
+    public const int TimeLogicalFieldNumber = 7;
     private long timeLogical_;
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
@@ -139,7 +178,7 @@ namespace Kahuna.Server.Protos {
     }
 
     /// <summary>Field number for the "timeCounter" field.</summary>
-    public const int TimeCounterFieldNumber = 5;
+    public const int TimeCounterFieldNumber = 8;
     private uint timeCounter_;
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
@@ -150,20 +189,8 @@ namespace Kahuna.Server.Protos {
       }
     }
 
-    /// <summary>Field number for the "expires" field.</summary>
-    public const int ExpiresFieldNumber = 6;
-    private int expires_;
-    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
-    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
-    public int Expires {
-      get { return expires_; }
-      set {
-        expires_ = value;
-      }
-    }
-
     /// <summary>Field number for the "consistency" field.</summary>
-    public const int ConsistencyFieldNumber = 7;
+    public const int ConsistencyFieldNumber = 9;
     private int consistency_;
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
@@ -192,9 +219,11 @@ namespace Kahuna.Server.Protos {
       if (Type != other.Type) return false;
       if (Resource != other.Resource) return false;
       if (Owner != other.Owner) return false;
+      if (FencingToken != other.FencingToken) return false;
+      if (ExpireLogical != other.ExpireLogical) return false;
+      if (ExpireCounter != other.ExpireCounter) return false;
       if (TimeLogical != other.TimeLogical) return false;
       if (TimeCounter != other.TimeCounter) return false;
-      if (Expires != other.Expires) return false;
       if (Consistency != other.Consistency) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
@@ -206,9 +235,11 @@ namespace Kahuna.Server.Protos {
       if (Type != 0) hash ^= Type.GetHashCode();
       if (Resource.Length != 0) hash ^= Resource.GetHashCode();
       if (Owner.Length != 0) hash ^= Owner.GetHashCode();
+      if (FencingToken != 0L) hash ^= FencingToken.GetHashCode();
+      if (ExpireLogical != 0L) hash ^= ExpireLogical.GetHashCode();
+      if (ExpireCounter != 0) hash ^= ExpireCounter.GetHashCode();
       if (TimeLogical != 0L) hash ^= TimeLogical.GetHashCode();
       if (TimeCounter != 0) hash ^= TimeCounter.GetHashCode();
-      if (Expires != 0) hash ^= Expires.GetHashCode();
       if (Consistency != 0) hash ^= Consistency.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
@@ -240,20 +271,28 @@ namespace Kahuna.Server.Protos {
         output.WriteRawTag(26);
         output.WriteString(Owner);
       }
-      if (TimeLogical != 0L) {
+      if (FencingToken != 0L) {
         output.WriteRawTag(32);
+        output.WriteInt64(FencingToken);
+      }
+      if (ExpireLogical != 0L) {
+        output.WriteRawTag(40);
+        output.WriteInt64(ExpireLogical);
+      }
+      if (ExpireCounter != 0) {
+        output.WriteRawTag(48);
+        output.WriteUInt32(ExpireCounter);
+      }
+      if (TimeLogical != 0L) {
+        output.WriteRawTag(56);
         output.WriteInt64(TimeLogical);
       }
       if (TimeCounter != 0) {
-        output.WriteRawTag(40);
+        output.WriteRawTag(64);
         output.WriteUInt32(TimeCounter);
       }
-      if (Expires != 0) {
-        output.WriteRawTag(48);
-        output.WriteInt32(Expires);
-      }
       if (Consistency != 0) {
-        output.WriteRawTag(56);
+        output.WriteRawTag(72);
         output.WriteInt32(Consistency);
       }
       if (_unknownFields != null) {
@@ -278,20 +317,28 @@ namespace Kahuna.Server.Protos {
         output.WriteRawTag(26);
         output.WriteString(Owner);
       }
-      if (TimeLogical != 0L) {
+      if (FencingToken != 0L) {
         output.WriteRawTag(32);
+        output.WriteInt64(FencingToken);
+      }
+      if (ExpireLogical != 0L) {
+        output.WriteRawTag(40);
+        output.WriteInt64(ExpireLogical);
+      }
+      if (ExpireCounter != 0) {
+        output.WriteRawTag(48);
+        output.WriteUInt32(ExpireCounter);
+      }
+      if (TimeLogical != 0L) {
+        output.WriteRawTag(56);
         output.WriteInt64(TimeLogical);
       }
       if (TimeCounter != 0) {
-        output.WriteRawTag(40);
+        output.WriteRawTag(64);
         output.WriteUInt32(TimeCounter);
       }
-      if (Expires != 0) {
-        output.WriteRawTag(48);
-        output.WriteInt32(Expires);
-      }
       if (Consistency != 0) {
-        output.WriteRawTag(56);
+        output.WriteRawTag(72);
         output.WriteInt32(Consistency);
       }
       if (_unknownFields != null) {
@@ -313,14 +360,20 @@ namespace Kahuna.Server.Protos {
       if (Owner.Length != 0) {
         size += 1 + pb::CodedOutputStream.ComputeStringSize(Owner);
       }
+      if (FencingToken != 0L) {
+        size += 1 + pb::CodedOutputStream.ComputeInt64Size(FencingToken);
+      }
+      if (ExpireLogical != 0L) {
+        size += 1 + pb::CodedOutputStream.ComputeInt64Size(ExpireLogical);
+      }
+      if (ExpireCounter != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(ExpireCounter);
+      }
       if (TimeLogical != 0L) {
         size += 1 + pb::CodedOutputStream.ComputeInt64Size(TimeLogical);
       }
       if (TimeCounter != 0) {
         size += 1 + pb::CodedOutputStream.ComputeUInt32Size(TimeCounter);
-      }
-      if (Expires != 0) {
-        size += 1 + pb::CodedOutputStream.ComputeInt32Size(Expires);
       }
       if (Consistency != 0) {
         size += 1 + pb::CodedOutputStream.ComputeInt32Size(Consistency);
@@ -346,14 +399,20 @@ namespace Kahuna.Server.Protos {
       if (other.Owner.Length != 0) {
         Owner = other.Owner;
       }
+      if (other.FencingToken != 0L) {
+        FencingToken = other.FencingToken;
+      }
+      if (other.ExpireLogical != 0L) {
+        ExpireLogical = other.ExpireLogical;
+      }
+      if (other.ExpireCounter != 0) {
+        ExpireCounter = other.ExpireCounter;
+      }
       if (other.TimeLogical != 0L) {
         TimeLogical = other.TimeLogical;
       }
       if (other.TimeCounter != 0) {
         TimeCounter = other.TimeCounter;
-      }
-      if (other.Expires != 0) {
-        Expires = other.Expires;
       }
       if (other.Consistency != 0) {
         Consistency = other.Consistency;
@@ -390,18 +449,26 @@ namespace Kahuna.Server.Protos {
             break;
           }
           case 32: {
-            TimeLogical = input.ReadInt64();
+            FencingToken = input.ReadInt64();
             break;
           }
           case 40: {
-            TimeCounter = input.ReadUInt32();
+            ExpireLogical = input.ReadInt64();
             break;
           }
           case 48: {
-            Expires = input.ReadInt32();
+            ExpireCounter = input.ReadUInt32();
             break;
           }
           case 56: {
+            TimeLogical = input.ReadInt64();
+            break;
+          }
+          case 64: {
+            TimeCounter = input.ReadUInt32();
+            break;
+          }
+          case 72: {
             Consistency = input.ReadInt32();
             break;
           }
@@ -437,18 +504,26 @@ namespace Kahuna.Server.Protos {
             break;
           }
           case 32: {
-            TimeLogical = input.ReadInt64();
+            FencingToken = input.ReadInt64();
             break;
           }
           case 40: {
-            TimeCounter = input.ReadUInt32();
+            ExpireLogical = input.ReadInt64();
             break;
           }
           case 48: {
-            Expires = input.ReadInt32();
+            ExpireCounter = input.ReadUInt32();
             break;
           }
           case 56: {
+            TimeLogical = input.ReadInt64();
+            break;
+          }
+          case 64: {
+            TimeCounter = input.ReadUInt32();
+            break;
+          }
+          case 72: {
             Consistency = input.ReadInt32();
             break;
           }

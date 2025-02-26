@@ -1,6 +1,6 @@
 
 using Kahuna.Replication;
-using Kahuna.Server.Protos;
+using Kahuna.Replication.Protos;
 using Kommander;
 using Kommander.Time;
 using Nixie;
@@ -14,9 +14,9 @@ namespace Kahuna.Locks;
 public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 {
     private readonly IActorContextStruct<LockActor, LockRequest, LockResponse> actorContext;
-    
+
     private readonly IRaft raft;
-    
+
     private readonly Dictionary<string, LockContext> locks = new();
 
     private readonly ILogger<IKahuna> logger;
@@ -27,7 +27,8 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     /// <param name="actorContext"></param>
     /// <param name="raft"></param>
     /// <param name="logger"></param>
-    public LockActor(IActorContextStruct<LockActor, LockRequest, LockResponse> actorContext, IRaft raft, ILogger<IKahuna> logger)
+    public LockActor(IActorContextStruct<LockActor, LockRequest, LockResponse> actorContext, IRaft raft,
+        ILogger<IKahuna> logger)
     {
         this.actorContext = actorContext;
         this.raft = raft;
@@ -44,12 +45,13 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     {
         try
         {
-            logger.LogInformation("Message: {Actor} {Type} {Resource} {Owner} {ExpiresMs}", actorContext.Self.Runner.Name, message.Type, message.Resource, message.Owner, message.ExpiresMs);
+            logger.LogInformation("Message: {Actor} {Type} {Resource} {Owner} {ExpiresMs}",
+                actorContext.Self.Runner.Name, message.Type, message.Resource, message.Owner, message.ExpiresMs);
 
             return message.Type switch
             {
                 LockRequestType.TryLock => await TryLock(message),
-                LockRequestType.TryUnlock => TryUnlock(message),
+                LockRequestType.TryUnlock => await TryUnlock(message),
                 LockRequestType.TryExtendLock => await TryExtendLock(message),
                 LockRequestType.Get => await GetLock(message),
                 _ => new(LockResponseType.Errored)
@@ -59,10 +61,10 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         {
             logger.LogError("Error processing message: {Message}", ex.Message);
         }
-        
+
         return new(LockResponseType.Errored);
     }
-    
+
     /// <summary>
     /// Looks for a lock on the resource and tries to lock it
     /// Check for the owner and expiration time
@@ -72,52 +74,52 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     private async Task<LockResponse> TryLock(LockRequest message)
     {
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
-        
+
         if (locks.TryGetValue(message.Resource, out LockContext? context))
         {
             if (!string.IsNullOrEmpty(context.Owner))
             {
-                bool isExpired = context.Expires - currentTime > TimeSpan.Zero;
-                
+                bool isExpired = context.Expires - currentTime < TimeSpan.Zero;
+
                 if (context.Owner == message.Owner && !isExpired)
                     return new(LockResponseType.Locked, context.FencingToken);
-                
-                if (isExpired)
+
+                if (!isExpired)
                     return new(LockResponseType.Busy);
             }
 
-            long fencingToken = context.FencingToken++;
+            context.FencingToken++;
             context.Owner = message.Owner;
             context.Expires = currentTime + message.ExpiresMs;
-            
+
             if (message.Consistency == LockConsistency.Consistent)
             {
-                bool success = await ReplicateMessage(message, currentTime);
+                bool success = await ReplicateLockMessage(message.Type, message.Resource, context, currentTime);
                 if (!success)
                     return new(LockResponseType.Errored);
             }
 
-            return new(LockResponseType.Locked, fencingToken);
+            return new(LockResponseType.Locked, context.FencingToken);
         }
-        
-        if (message.Consistency == LockConsistency.Consistent)
-        {
-            bool success = await ReplicateMessage(message, currentTime);
-            if (!success)
-                return new(LockResponseType.Errored);
-        }
-        
+
         LockContext newContext = new()
         {
             Owner = message.Owner,
             Expires = currentTime + message.ExpiresMs
         };
-        
+
+        if (message.Consistency == LockConsistency.Consistent)
+        {
+            bool success = await ReplicateLockMessage(message.Type, message.Resource, newContext, currentTime);
+            if (!success)
+                return new(LockResponseType.Errored);
+        }
+
         locks.Add(message.Resource, newContext);
-        
-        return new(LockResponseType.Locked);
+
+        return new(LockResponseType.Locked, newContext.FencingToken);
     }
-    
+
     /// <summary>
     /// Looks for a lock on the resource and tries to extend it
     /// If the lock doesn't exist or the owner is different, return an error
@@ -128,35 +130,50 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     {
         if (!locks.TryGetValue(message.Resource, out LockContext? context))
             return new(LockResponseType.Errored);
-        
+
         if (context.Owner != message.Owner)
             return new(LockResponseType.Errored);
-        
+
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
-        
+
         context.Expires = currentTime + message.ExpiresMs;
+
+        if (message.Consistency == LockConsistency.Consistent)
+        {
+            bool success = await ReplicateLockMessage(message.Type, message.Resource, context, currentTime);
+            if (!success)
+                return new(LockResponseType.Errored);
+        }
 
         return new(LockResponseType.Extended);
     }
-    
+
     /// <summary>
     /// Looks for a lock on the resource and tries to unlock it
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private LockResponse TryUnlock(LockRequest message)
+    private async Task<LockResponse> TryUnlock(LockRequest message)
     {
         if (!locks.TryGetValue(message.Resource, out LockContext? context))
             return new(LockResponseType.Errored);
 
         if (message.Owner != context.Owner)
             return new(LockResponseType.Errored);
-        
+
         context.Owner = null;
+
+        if (message.Consistency == LockConsistency.Consistent)
+        {
+            bool success = await ReplicateLockMessage(message.Type, message.Resource, context,
+                await raft.HybridLogicalClock.SendOrLocalEvent());
+            if (!success)
+                return new(LockResponseType.Errored);
+        }
 
         return new(LockResponseType.Unlocked);
     }
-    
+
     /// <summary>
     /// Gets Information about an existing lock
     /// </summary>
@@ -166,9 +183,9 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     {
         if (!locks.TryGetValue(message.Resource, out LockContext? context))
             return new(LockResponseType.Errored);
-        
+
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
-        
+
         if (context.Expires - currentTime < TimeSpan.Zero)
             return new(LockResponseType.Busy);
 
@@ -176,22 +193,25 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 
         return new(LockResponseType.Got, readOnlyLockContext);
     }
-    
-    private async Task<bool> ReplicateMessage(LockRequest message, HLCTimestamp currentTime)
+
+    private async Task<bool> ReplicateLockMessage(LockRequestType type, string resource, LockContext context,
+        HLCTimestamp currentTime)
     {
         if (!raft.Joined)
             return true;
-        
-        int partitionId = (int)raft.GetPartitionKey(message.Resource);
-                
+
+        int partitionId = raft.GetPartitionKey(resource);
+
         (bool success, long _) = await raft.ReplicateLogs(
-            partitionId, 
+            partitionId,
             ReplicationSerializer.Serialize(new LockMessage()
             {
-                Type = (int)message.Type,
-                Resource = message.Resource, 
-                Owner = message.Owner,
-                Expires = message.ExpiresMs,
+                Type = (int)type,
+                Resource = resource,
+                Owner = context.Owner,
+                FencingToken = context.FencingToken,
+                ExpireLogical = context.Expires.L,
+                ExpireCounter = context.Expires.C,
                 TimeLogical = currentTime.L,
                 TimeCounter = currentTime.C,
                 Consistency = (int)LockConsistency.ReplicationConsistent

@@ -1,7 +1,6 @@
 
 using Google.Protobuf;
-
-using Kahuna.Server.Protos;
+using Kahuna.Replication.Protos;
 
 namespace Kahuna.Replication;
 
