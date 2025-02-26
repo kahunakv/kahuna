@@ -13,11 +13,13 @@ namespace Kahuna.Client;
 /// </summary>
 public class KahunaClient
 {
-    private readonly string url;
+    private readonly string[] urls;
 
     private readonly ILogger<KahunaClient>? logger;
 
     private readonly HttpCommunication communication;
+
+    private int currentServer;
     
     /// <summary>
     /// Constructor
@@ -26,14 +28,26 @@ public class KahunaClient
     /// <param name="logger"></param>
     public KahunaClient(string url, ILogger<KahunaClient>? logger)
     {
-        this.url = url;
+        this.urls = [url];
+        this.logger = logger;
+        this.communication = new(logger);
+    }
+    
+    /// <summary>
+    /// Constructor
+    /// </summary>
+    /// <param name="urls"></param>
+    /// <param name="logger"></param>
+    public KahunaClient(string[] urls, ILogger<KahunaClient>? logger)
+    {
+        this.urls = urls;
         this.logger = logger;
         this.communication = new(logger);
     }
     
     private async Task<KahunaLockAcquireResult> TryAcquireLock(string resource, string lockId, TimeSpan expiryTime, KahunaLockConsistency consistency)
     {
-        return await communication.TryAcquireLock(url, resource, lockId, (int)expiryTime.TotalMilliseconds, consistency).ConfigureAwait(false);
+        return await communication.TryAcquireLock(GetRoundRobinUrl(), resource, lockId, (int)expiryTime.TotalMilliseconds, consistency).ConfigureAwait(false);
     }
     
     private async Task<(KahunaLockAcquireResult, string?, KahunaLockConsistency)> PeriodicallyTryAcquireLock(
@@ -166,7 +180,7 @@ public class KahunaClient
     {
         try
         {
-            return await communication.TryExtend(url, resource, owner, duration.TotalMilliseconds, consistency).ConfigureAwait(false);
+            return await communication.TryExtend(GetRoundRobinUrl(), resource, owner, duration.TotalMilliseconds, consistency).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -188,7 +202,7 @@ public class KahunaClient
     {
         try
         {
-            return await communication.TryExtend(url, resource, owner, durationMs, consistency).ConfigureAwait(false);
+            return await communication.TryExtend(GetRoundRobinUrl(), resource, owner, durationMs, consistency).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -208,7 +222,7 @@ public class KahunaClient
     {
         try
         {
-            return await communication.TryUnlock(url, resource, lockId, consistency).ConfigureAwait(false);
+            return await communication.TryUnlock(GetRoundRobinUrl(), resource, lockId, consistency).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -227,12 +241,22 @@ public class KahunaClient
     {
         try
         {
-            return await communication.Get(url, resource, consistency).ConfigureAwait(false);
+            return await communication.Get(GetRoundRobinUrl(), resource, consistency).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             logger?.LogError("Error getting lock instance: {Message}", ex.Message);
             throw;
         }
+    }
+    
+    /// <summary>
+    /// Chooses the next server in the list of servers in a round-robin fashion
+    /// </summary>
+    /// <returns></returns>
+    private string GetRoundRobinUrl()
+    {
+        int serverPointer = Interlocked.Increment(ref currentServer);
+        return urls[serverPointer % urls.Length];
     }
 }

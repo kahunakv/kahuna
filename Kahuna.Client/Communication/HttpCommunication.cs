@@ -74,7 +74,7 @@ internal sealed class HttpCommunication
     internal async Task<KahunaLockAcquireResult> TryAcquireLock(string url, string key, string lockId, int expiryTime, KahunaLockConsistency consistency)
     {
         KahunaLockRequest request = new() { LockName = key, LockId = lockId, ExpiresMs = expiryTime, Consistency = consistency };
-        string payload = JsonSerializer.Serialize(request);
+        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
 
         AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
         
@@ -98,7 +98,7 @@ internal sealed class HttpCommunication
     internal async Task<bool> TryUnlock(string url, string resource, string lockId, KahunaLockConsistency consistency)
     {
         KahunaLockRequest request = new() { LockName = resource, LockId = lockId, Consistency = consistency };
-        string payload = JsonSerializer.Serialize(request);
+        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
         
         AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
         
@@ -123,7 +123,7 @@ internal sealed class HttpCommunication
     internal async Task<bool> TryExtend(string url, string resource, string lockId, double expiryTime, KahunaLockConsistency consistency)
     {
         KahunaLockRequest request = new() { LockName = resource, LockId = lockId, ExpiresMs = expiryTime, Consistency = consistency };
-        string payload = JsonSerializer.Serialize(request);
+        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
         
         AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
         
@@ -145,7 +145,7 @@ internal sealed class HttpCommunication
     internal async Task<KahunaLockInfo?> Get(string url, string resource, KahunaLockConsistency consistency)
     {
         KahunaGetRequest request = new() { LockName = resource, Consistency = consistency };
-        string payload = JsonSerializer.Serialize(request);
+        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaGetRequest);
         
         AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
         

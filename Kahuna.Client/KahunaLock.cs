@@ -66,6 +66,16 @@ public sealed class KahunaLock : IAsyncDisposable
 
         return await locks.TryExtend(resource, lockId, durationMs, consistency);
     }
+    
+    /// <summary>
+    /// Obtains information about the lock (even if the lock wasn't adquired)
+    /// </summary>
+    /// <returns></returns>
+    /// <exception cref="KahunaException"></exception>
+    public async Task<KahunaLockInfo?> GetInfo()
+    {
+        return await locks.GetLockInfo(resource, consistency);
+    }
 
     /// <summary>
     /// Frees the lock after it's no longer needed
