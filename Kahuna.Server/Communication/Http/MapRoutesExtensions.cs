@@ -2,9 +2,10 @@
 using System.Text.Json;
 using Flurl;
 using Flurl.Http;
+using Kahuna.Locks;
 using Kommander;
 
-namespace Kahuna;
+namespace Kahuna.Communication.Http;
 
 public static class MapRoutesExtensions
 {
@@ -40,7 +41,7 @@ public static class MapRoutesExtensions
 
             try
             {
-                string payload = JsonSerializer.Serialize(request);
+                string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.ExternLockRequest);
 
                 return await $"http://{leader}"
                     .AppendPathSegments("v1/kahuna/lock")
@@ -87,7 +88,7 @@ public static class MapRoutesExtensions
             
             try
             {
-                string payload = JsonSerializer.Serialize(request);
+                string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.ExternLockRequest);
                 
                 return await $"http://{leader}"
                     .AppendPathSegments("v1/kahuna/extend-lock")
@@ -131,7 +132,7 @@ public static class MapRoutesExtensions
             
             try
             {
-                string payload = JsonSerializer.Serialize(request);
+                string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.ExternLockRequest);
                 
                 return await $"http://{leader}"
                     .AppendPathSegments("v1/kahuna/unlock")
@@ -181,7 +182,7 @@ public static class MapRoutesExtensions
             
             try
             {
-                string payload = JsonSerializer.Serialize(request);
+                string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.ExternGetLockRequest);
                 
                 return await $"http://{leader}"
                     .AppendPathSegments("v1/kahuna/get-lock")

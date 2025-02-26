@@ -1,10 +1,11 @@
 
+using Kahuna.Replication;
 using Kahuna.Server.Protos;
 using Kommander;
 using Kommander.Time;
 using Nixie;
 
-namespace Kahuna;
+namespace Kahuna.Locks;
 
 /// <summary>
 /// Actor to manage lock operations on resources

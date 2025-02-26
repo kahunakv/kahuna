@@ -2,6 +2,8 @@
 using System.Net;
 using CommandLine;
 using Kahuna;
+using Kahuna.Communication.Http;
+using Kahuna.Locks;
 using Kahuna.Services;
 using Kommander;
 using Kommander.Communication;

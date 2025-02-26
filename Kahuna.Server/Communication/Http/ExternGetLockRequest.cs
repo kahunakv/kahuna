@@ -1,7 +1,8 @@
 
 using System.Text.Json.Serialization;
+using Kahuna.Locks;
 
-namespace Kahuna;
+namespace Kahuna.Communication.Http;
 
 public sealed class ExternGetLockRequest
 {

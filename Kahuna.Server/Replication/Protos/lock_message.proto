@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package Kahuna.Server.Protos;
+package Kahuna.Replication.Protos;
 
 message LockMessage {
   int32 type = 1;

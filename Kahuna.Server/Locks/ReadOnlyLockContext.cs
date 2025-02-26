@@ -1,7 +1,7 @@
 
 using Kommander.Time;
 
-namespace Kahuna;
+namespace Kahuna.Locks;
 
 /// <summary>
 /// A snapshot of a lock context that is read-only.

@@ -1,7 +1,7 @@
 
 using Kommander.Time;
 
-namespace Kahuna;
+namespace Kahuna.Locks;
 
 /// <summary>
 /// 

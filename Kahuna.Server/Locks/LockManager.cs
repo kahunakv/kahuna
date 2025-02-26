@@ -1,11 +1,12 @@
 
+using Kahuna.Replication;
 using Kahuna.Server.Protos;
 using Kommander;
 using Kommander.Time;
 using Nixie;
 using Nixie.Routers;
 
-namespace Kahuna;
+namespace Kahuna.Locks;
 
 /// <summary>
 /// LockManager is a singleton class that manages lock actors.

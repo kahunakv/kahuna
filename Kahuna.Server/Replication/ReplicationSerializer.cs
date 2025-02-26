@@ -3,7 +3,7 @@ using Google.Protobuf;
 
 using Kahuna.Server.Protos;
 
-namespace Kahuna;
+namespace Kahuna.Replication;
 
 public static class ReplicationSerializer
 {
