@@ -45,7 +45,7 @@ async Task AdquireLockConcurrently(KahunaClient locksx)
     await using KahunaLock redLock = await locksx.GetOrCreateLock(
         lockName, 
         expiry: TimeSpan.FromSeconds(5),
-        consistency: KahunaLockConsistency.Consistent
+        consistency: KahunaLockConsistency.Ephemeral
     );
 
     if (!redLock.IsAcquired)
