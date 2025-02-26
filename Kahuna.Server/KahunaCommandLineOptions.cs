@@ -14,6 +14,6 @@ public sealed class KahunaCommandLineOptions
     [Option("initial-cluster", Required = false, HelpText = "Initial cluster configuration for static discovery", Default = "")]
     public string InitialCluster { get; set; } = "";
     
-    [Option("initial-cluster-partitions", Required = false, HelpText = "Initial cluster number of partitions", Default = 3)]
+    [Option("initial-cluster-partitions", Required = false, HelpText = "Initial cluster number of partitions", Default = 8)]
     public int InitialClusterPartitions { get; set; }
 }

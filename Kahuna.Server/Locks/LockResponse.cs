@@ -1,5 +1,5 @@
 
-namespace Kahuna;
+namespace Kahuna.Locks;
 
 /// <summary>
 /// Represents the response of the operation on the locker actor

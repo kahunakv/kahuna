@@ -1,4 +1,6 @@
 
+using Kahuna.Locks;
+
 namespace Kahuna;
 
 public interface IKahuna

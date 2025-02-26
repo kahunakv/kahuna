@@ -22,8 +22,10 @@ as well as priests, ministers, and sorcerers.
 - [Key Features](#key-features)
 - [API](#api)
 - [Leases](#leases)
+- [Consistency Levels](#consistency-levels) 
+- [Server-Installation](#server-installation) 
 - [Client-Installation](#client-installation)
-- [Usage](#usage--examples)
+- [Usage & Examples](#usage--examples)
 - [Client SDK for .NET](#client-sdk-for-net)
 - [Contributing](#contributing)
 - [License](#license)
@@ -157,18 +159,64 @@ Example Flow:
 
 ---
 
+## Consistency Levels
+
+Kahuna provides different consistency levels to meet the requirements of various applications:
+
+| Consistency Level      | Replication Mechanism                                  | Leader Role                                         | Lock State Storage      | Use Case                                                                 | Failure Impact                                                   |
+|------------------------|--------------------------------------------------------|-----------------------------------------------------|-------------------------|-------------------------------------------------------------------------|------------------------------------------------------------------|
+| Strong Consistency    | Raft consensus replicates across all nodes             | Raft consensus ensures consistency                 | Persisted across nodes  | Locks with long-duration TTLs, where failures cause serious issues      | Critical – ensures state consistency across all nodes            |
+| Ephemeral Consistency | Lock state kept in memory, not replicated              | Leaders manage lock state, Raft handles re-election | Only in leader memory  | Locks with short-duration TTLs (<10 sec), where failure recovery is quick | Minimal – recovery from persistence adds little value            |
+
+## Server Installation
+
+### Standalone server
+
+You can build and run the Kahuna server using the following steps (it requires .NET 9.0 installed):
+
+```bash
+git clone https://github.com/andresgutierrez/kahuna
+cd kahuna
+export ASPNETCORE_URLS='http://*:2070'
+dotnet run --project Kahuna.Server
+```
+
+### Local Docker container
+
+Alternatively, you can run the Kahuna server in a local Docker container:
+
+```bash
+git clone https://github.com/andresgutierrez/kahuna
+cd kahuna
+docker build -f Dockerfile -t kahuna .
+docker run -e ASPNETCORE_URLS='http://*:2070' -p 2070:2070 kahuna
+```
+
+### Local Docker Compose Cluster
+
+To run a local cluster of Kahuna servers using Docker Compose:
+
+```bash
+git clone https://github.com/andresgutierrez/kahuna
+cd kahuna
+docker build -f Dockerfile -t kahuna .
+docker compose up
+```
+
+---
+
 ## Client Installation
 
 Kahuna Client for .NET is available as a NuGet package. You can install it via the .NET CLI:
 
 ```bash
-dotnet add package Kahuna.Client --version 0.0.2
+dotnet add package Kahuna.Client --version 0.0.3
 ```
 
 Or via the NuGet Package Manager:
 
 ```powershell
-Install-Package Kahuna.Client -Version 0.0.2
+Install-Package Kahuna.Client -Version 0.0.3
 ```
 
 ---
@@ -336,15 +384,90 @@ public async Task TryChooseLeader(KahunaClient client, string groupId)
 }
 ```
 
-### Retrieve information about a lock.
+### Retrieve information about a lock
 
+You can also retrieve information about a lock, such as the current lock's owner 
+and remaining time for the lock to expire:
 
+```csharp
+using Kahuna.Client;
+
+public async Task TryChooseLeader(KahunaClient client, string groupId)
+{
+    await using KahunaLock myLock = await client.GetOrCreateLock(
+        "group-leader-" + groupId, 
+        expiry: TimeSpan.FromSeconds(5)
+    );
+
+    if (!myLock.IsAcquired)
+    {
+        Console.WriteLine("Lock not acquired!");
+        
+        var lockInfo = await myLock.GetInfo();
+        
+        Console.WriteLine($"Lock owner: {lockInfo.Owner}");
+        Console.WriteLine($"Expires: {lockInfo.Expires}");       
+    }                                                             
+}
+```
+
+### Configure a pool of endpoints
+
+If you want to configure a pool of Kahuna endpoints belonging to the 
+same cluster so that traffic is distributed in a round-robin manner:
+
+```csharp
+using Kahuna.Client;
+
+// Create a Kahuna client with a pool of endpoints
+var client = new KahunaClient([
+    "http://localhost:8081",
+    "http://localhost:8082",
+    "http://localhost:8083"
+]);
+
+// ...
+```
+
+### Specify consistency level
+
+You can also specify the desired consistency level when acquiring a lock:
+
+```csharp
+using Kahuna.Client;
+
+public async Task UpdateBalance(KahunaClient client, string userId)
+{
+    // acquire a lock with strong consistency, ensuring that the lock state is 
+    // replicated across all nodes in the Kahuna cluster
+    // in case of failure or network partition, the lock state is guaranteed to be consistent
+    
+    await using KahunaLock myLock = await client.GetOrCreateLock(
+        "balance-" + userId, 
+        TimeSpan.FromSeconds(300), // lock for 5 mins
+        consistency: KahunaLockConsistency.Consistent
+    );
+
+    if (myLock.IsAcquired)
+    {
+        Console.WriteLine("Lock acquired with strong consistency!");
+
+        // implement exclusive logic here
+    }
+    else
+    {
+        Console.WriteLine("Someone else has the lock!");
+    }
+
+    // myLock is automatically released after leaving the method
+}
+```
 
 ---
 
 ## Client SDK for .NET
 
-Kahuna also provides a client SDK tailored for .NET developers. This SDK simplifies the integration of distributed locking into your .NET applications by abstracting much of the underlying complexity. Documentation and samples for the client SDK can be found in the `docs/` folder or on our [GitHub repository](https://github.com/andresgutierrez/kahuna).
+Kahuna also provides a client tailored for .NET developers. This SDK simplifies the integration of distributed locking into your .NET applications by abstracting much of the underlying complexity. Documentation and samples for the client SDK can be found in the `docs/` folder or on our [GitHub repository](https://github.com/andresgutierrez/kahuna).
 
 ---
 

@@ -2,9 +2,10 @@
 using System.Text.Json;
 using Flurl;
 using Flurl.Http;
+using Kahuna.Locks;
 using Kommander;
 
-namespace Kahuna;
+namespace Kahuna.Communication.Http;
 
 public static class MapRoutesExtensions
 {
@@ -23,16 +24,16 @@ public static class MapRoutesExtensions
             
             // Console.WriteLine("LOCK {0} {1} {2}", request.LockName, request.LockId, request.ExpiresMs);
             
-            int partitionId = (int)raft.GetPartitionKey(request.LockName);
+            int partitionId = raft.GetPartitionKey(request.LockName);
 
-            if (!raft.Joined || await raft.AmILeader(partitionId))
+            if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
             {
                 (LockResponseType response, long fencingToken) = await locks.TryLock(request.LockName, request.LockId, request.ExpiresMs, request.Consistency);
 
                 return new() { Type = response, FencingToken = fencingToken };    
             }
             
-            string leader = await raft.WaitForLeader(partitionId);
+            string leader = await raft.WaitForLeader(partitionId, CancellationToken.None);
             if (leader == raft.GetLocalEndpoint())
                 throw new RaftException("lol");
             
@@ -40,7 +41,7 @@ public static class MapRoutesExtensions
 
             try
             {
-                string payload = JsonSerializer.Serialize(request);
+                string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.ExternLockRequest);
 
                 return await $"http://{leader}"
                     .AppendPathSegments("v1/kahuna/lock")
@@ -70,16 +71,16 @@ public static class MapRoutesExtensions
             if (request.ExpiresMs <= 0)
                 return new() { Type = LockResponseType.Errored };
             
-            int partitionId = (int)raft.GetPartitionKey(request.LockName);
+            int partitionId = raft.GetPartitionKey(request.LockName);
             
-            if (!raft.Joined || await raft.AmILeader(partitionId))
+            if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
             {
                 LockResponseType response = await locks.TryExtendLock(request.LockName, request.LockId, request.ExpiresMs, request.Consistency);
 
                 return new() { Type = response };    
             }
             
-            string leader = await raft.WaitForLeader(partitionId);
+            string leader = await raft.WaitForLeader(partitionId, CancellationToken.None);
             if (leader == raft.GetLocalEndpoint())
                 throw new RaftException("lol");
             
@@ -87,7 +88,7 @@ public static class MapRoutesExtensions
             
             try
             {
-                string payload = JsonSerializer.Serialize(request);
+                string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.ExternLockRequest);
                 
                 return await $"http://{leader}"
                     .AppendPathSegments("v1/kahuna/extend-lock")
@@ -114,16 +115,16 @@ public static class MapRoutesExtensions
             if (string.IsNullOrEmpty(request.LockId))
                 return new() { Type = LockResponseType.Errored };
             
-            int partitionId = (int)raft.GetPartitionKey(request.LockName);
+            int partitionId = raft.GetPartitionKey(request.LockName);
 
-            if (!raft.Joined || await raft.AmILeader(partitionId))
+            if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
             {
                 LockResponseType response = await locks.TryUnlock(request.LockName, request.LockId, request.Consistency);
 
                 return new() { Type = response };
             }
             
-            string leader = await raft.WaitForLeader(partitionId);
+            string leader = await raft.WaitForLeader(partitionId, CancellationToken.None);
             if (leader == raft.GetLocalEndpoint())
                 throw new RaftException("lol");
             
@@ -131,7 +132,7 @@ public static class MapRoutesExtensions
             
             try
             {
-                string payload = JsonSerializer.Serialize(request);
+                string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.ExternLockRequest);
                 
                 return await $"http://{leader}"
                     .AppendPathSegments("v1/kahuna/unlock")
@@ -155,9 +156,9 @@ public static class MapRoutesExtensions
             if (string.IsNullOrEmpty(request.LockName))
                 return new() { Type = LockResponseType.Errored };
             
-            int partitionId = (int)raft.GetPartitionKey(request.LockName);
+            int partitionId = raft.GetPartitionKey(request.LockName);
 
-            if (!raft.Joined || await raft.AmILeader(partitionId))
+            if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
             {
                 (LockResponseType response, ReadOnlyLockContext? context) = await locks.GetLock(request.LockName, request.Consistency);
 
@@ -173,7 +174,7 @@ public static class MapRoutesExtensions
                 return new() { Type = response };
             }
             
-            string leader = await raft.WaitForLeader(partitionId);
+            string leader = await raft.WaitForLeader(partitionId, CancellationToken.None);
             if (leader == raft.GetLocalEndpoint())
                 throw new RaftException("lol");
             
@@ -181,7 +182,7 @@ public static class MapRoutesExtensions
             
             try
             {
-                string payload = JsonSerializer.Serialize(request);
+                string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.ExternGetLockRequest);
                 
                 return await $"http://{leader}"
                     .AppendPathSegments("v1/kahuna/get-lock")

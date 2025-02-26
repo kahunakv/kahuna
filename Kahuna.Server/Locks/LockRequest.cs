@@ -1,9 +1,8 @@
 
-using System.IO.Hashing;
 using Nixie.Routers;
 using Standart.Hash.xxHash;
 
-namespace Kahuna;
+namespace Kahuna.Locks;
 
 /// <summary>
 /// Represents a request to perform an action on a locker actor

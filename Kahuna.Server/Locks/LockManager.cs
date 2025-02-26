@@ -1,11 +1,12 @@
 
-using Kahuna.Server.Protos;
+using Kahuna.Replication;
+using Kahuna.Replication.Protos;
 using Kommander;
 using Kommander.Time;
 using Nixie;
 using Nixie.Routers;
 
-namespace Kahuna;
+namespace Kahuna.Locks;
 
 /// <summary>
 /// LockManager is a singleton class that manages lock actors.
@@ -57,14 +58,17 @@ public sealed class LockManager : IKahuna
         HLCTimestamp eventTime = new(lockMessage.TimeLogical, lockMessage.TimeCounter);
         
         HLCTimestamp currentTime = await raft.HybridLogicalClock.ReceiveEvent(eventTime);
+        
+        HLCTimestamp expires = new(lockMessage.ExpireLogical, lockMessage.ExpireCounter);
+        TimeSpan timeSpan = expires - currentTime;
 
         switch ((LockRequestType)lockMessage.Type)
         {
             case LockRequestType.TryLock:
-                if (currentTime - (eventTime + lockMessage.Expires) > TimeSpan.Zero) // event already expired
+                if (timeSpan < TimeSpan.Zero) // event already expired
                     break;
 
-                await TryLock(lockMessage.Resource, lockMessage.Owner, lockMessage.Expires, (LockConsistency)lockMessage.Consistency);
+                await TryLock(lockMessage.Resource, lockMessage.Owner, (int)timeSpan.TotalMilliseconds, (LockConsistency)lockMessage.Consistency);
                 break;
                 
             case LockRequestType.TryUnlock:
@@ -72,7 +76,7 @@ public sealed class LockManager : IKahuna
                 break;
             
             case LockRequestType.TryExtendLock:
-                await TryExtendLock(lockMessage.Resource, lockMessage.Owner,  lockMessage.Expires, (LockConsistency)lockMessage.Consistency);
+                await TryExtendLock(lockMessage.Resource, lockMessage.Owner, (int)timeSpan.TotalMilliseconds, (LockConsistency)lockMessage.Consistency);
                 break;
             
             case LockRequestType.Get:
