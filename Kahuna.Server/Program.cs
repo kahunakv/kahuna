@@ -65,7 +65,7 @@ builder.Services.AddSingleton<IRaft>(services =>
         services.GetRequiredService<ActorSystem>(),
         configuration,
         new StaticDiscovery(nodes),
-        new SqliteWAL(),
+        new SqliteWAL(path: "/app/data"),
         new HttpCommunication(),
         new HybridLogicalClock(),
         services.GetRequiredService<ILogger<IRaft>>()
@@ -74,7 +74,7 @@ builder.Services.AddSingleton<IRaft>(services =>
 
 builder.Services.AddSingleton<ActorSystem>(services => new(services, services.GetRequiredService<ILogger<IRaft>>()));
 builder.Services.AddSingleton<IKahuna, LockManager>();
-builder.Services.AddHostedService<InstrumentationService>();
+builder.Services.AddHostedService<ReplicationService>();
 
 WebApplication app = builder.Build();
 

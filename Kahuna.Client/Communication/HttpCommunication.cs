@@ -49,7 +49,9 @@ internal sealed class HttpCommunication
         if (canBeRetried)
             return canBeRetried;
 
-        if (!exception.StatusCode.HasValue && !string.IsNullOrEmpty(exception.Message) && exception.Message.Contains("An error occurred while sending the request"))
+        if (!exception.StatusCode.HasValue && 
+            !string.IsNullOrEmpty(exception.Message) && 
+            (exception.Message.Contains("An error occurred while sending the request") || exception.Message.Contains("Call timed out")))
             return true;
 
         return false;
@@ -93,9 +95,9 @@ internal sealed class HttpCommunication
         return response.Type == LockResponseType.Locked ? KahunaLockAcquireResult.Success : KahunaLockAcquireResult.Conflicted;
     }
     
-    internal async Task<bool> TryUnlock(string url, string key, string lockId)
+    internal async Task<bool> TryUnlock(string url, string resource, string lockId, KahunaLockConsistency consistency)
     {
-        KahunaLockRequest request = new() { LockName = key, LockId = lockId };
+        KahunaLockRequest request = new() { LockName = resource, LockId = lockId, Consistency = consistency };
         string payload = JsonSerializer.Serialize(request);
         
         AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
@@ -140,9 +142,9 @@ internal sealed class HttpCommunication
         return response.Type == LockResponseType.Extended;
     }
     
-    internal async Task<KahunaLockInfo?> Get(string url, string resource)
+    internal async Task<KahunaLockInfo?> Get(string url, string resource, KahunaLockConsistency consistency)
     {
-        KahunaGetRequest request = new() { LockName = resource };
+        KahunaGetRequest request = new() { LockName = resource, Consistency = consistency };
         string payload = JsonSerializer.Serialize(request);
         
         AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
@@ -161,8 +163,6 @@ internal sealed class HttpCommunication
 
         if (response is null)
             throw new KahunaException("Response is null");
-        
-        //Console.WriteLine("{0}", response.Type);
 
         if (response.Type != LockResponseType.Got)
             return null;

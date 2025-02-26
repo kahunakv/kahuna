@@ -3,12 +3,15 @@ using Kommander;
 
 namespace Kahuna.Services;
 
-public class InstrumentationService : BackgroundService //, IDisposable
+public class ReplicationService : BackgroundService //, IDisposable
 {
+    private readonly IKahuna kahuna;
+    
     private readonly IRaft raftManager;
 
-    public InstrumentationService(IRaft raftManager)
+    public ReplicationService(IKahuna kahuna, IRaft raftManager)
     {
+        this.kahuna = kahuna;
         this.raftManager = raftManager;
     }
 
@@ -16,6 +19,8 @@ public class InstrumentationService : BackgroundService //, IDisposable
     {
         if (raftManager.Configuration.Host == "*")
             return;
+
+        raftManager.OnReplicationReceived += kahuna.OnReplicationReceived;
         
         await raftManager.JoinCluster();
         

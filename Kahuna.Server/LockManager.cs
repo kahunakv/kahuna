@@ -1,5 +1,7 @@
 
+using Kahuna.Server.Protos;
 using Kommander;
+using Kommander.Time;
 using Nixie;
 using Nixie.Routers;
 
@@ -11,6 +13,10 @@ namespace Kahuna;
 public sealed class LockManager : IKahuna
 {
     private readonly ActorSystem actorSystem;
+
+    private readonly IRaft raft;
+
+    private readonly ILogger<IKahuna> logger;
     
     private readonly IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> ephemeralLocksRouter;
     
@@ -25,6 +31,8 @@ public sealed class LockManager : IKahuna
     public LockManager(ActorSystem actorSystem, IRaft raft, ILogger<IKahuna> logger)
     {
         this.actorSystem = actorSystem;
+        this.raft = raft;
+        this.logger = logger;
 
         int workers = Environment.ProcessorCount * 2;
         
@@ -41,7 +49,43 @@ public sealed class LockManager : IKahuna
         ephemeralLocksRouter = actorSystem.CreateConsistentHashRouterStruct(ephemeralInstances);
         persistentLocksRouter = actorSystem.CreateConsistentHashRouterStruct(persistentInstances);
     }
-    
+
+    public async Task<bool> OnReplicationReceived(byte[] message)
+    {
+        LockMessage lockMessage = ReplicationSerializer.Unserializer(message);
+
+        HLCTimestamp eventTime = new(lockMessage.TimeLogical, lockMessage.TimeCounter);
+        
+        HLCTimestamp currentTime = await raft.HybridLogicalClock.ReceiveEvent(eventTime);
+
+        switch ((LockRequestType)lockMessage.Type)
+        {
+            case LockRequestType.TryLock:
+                if (currentTime - (eventTime + lockMessage.Expires) > TimeSpan.Zero) // event already expired
+                    break;
+
+                await TryLock(lockMessage.Resource, lockMessage.Owner, lockMessage.Expires, (LockConsistency)lockMessage.Consistency);
+                break;
+                
+            case LockRequestType.TryUnlock:
+                await TryUnlock(lockMessage.Resource, lockMessage.Owner, (LockConsistency)lockMessage.Consistency);
+                break;
+            
+            case LockRequestType.TryExtendLock:
+                await TryExtendLock(lockMessage.Resource, lockMessage.Owner,  lockMessage.Expires, (LockConsistency)lockMessage.Consistency);
+                break;
+            
+            case LockRequestType.Get:
+                break;
+            
+            default:
+                logger.LogError("Unknown replication message type: {Type}", lockMessage.Type);
+                break;
+        }
+
+        return true;
+    }
+
     /// <summary>
     /// Passes a TryLock request to the locker actor for the given lock name.
     /// </summary>

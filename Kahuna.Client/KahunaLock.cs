@@ -14,6 +14,8 @@ public sealed class KahunaLock : IAsyncDisposable
     
     private readonly string? lockId;
 
+    private readonly KahunaLockConsistency consistency;
+
     private bool disposed;
 
     public bool IsAcquired => result == KahunaLockAcquireResult.Success;
@@ -26,12 +28,13 @@ public sealed class KahunaLock : IAsyncDisposable
     /// <param name="locks"></param>
     /// <param name="resource"></param>
     /// <param name="lockInfo"></param>
-    public KahunaLock(KahunaClient locks, string resource, (KahunaLockAcquireResult result, string? lockId) lockInfo)
+    public KahunaLock(KahunaClient locks, string resource, (KahunaLockAcquireResult result, string? lockId, KahunaLockConsistency consistency) lockInfo)
     {
         this.locks = locks;
         this.resource = resource;
         this.result = lockInfo.result;
         this.lockId = lockInfo.lockId;
+        this.consistency = lockInfo.consistency;
     }
     
     /// <summary>
@@ -46,7 +49,7 @@ public sealed class KahunaLock : IAsyncDisposable
         if (!IsAcquired || string.IsNullOrEmpty(lockId))
             throw new KahunaException("Lock was not acquired");
 
-        return await locks.TryExtend(resource, lockId, duration);
+        return await locks.TryExtend(resource, lockId, duration, consistency);
     }
     
     /// <summary>
@@ -61,7 +64,7 @@ public sealed class KahunaLock : IAsyncDisposable
         if (!IsAcquired || string.IsNullOrEmpty(lockId))
             throw new KahunaException("Lock was not acquired");
 
-        return await locks.TryExtend(resource, lockId, durationMs);
+        return await locks.TryExtend(resource, lockId, durationMs, consistency);
     }
 
     /// <summary>
@@ -74,7 +77,7 @@ public sealed class KahunaLock : IAsyncDisposable
         GC.SuppressFinalize(this);
 
         if (!string.IsNullOrEmpty(lockId))
-            await locks.Unlock(resource, lockId);
+            await locks.Unlock(resource, lockId, consistency);
     }
 
     ~KahunaLock()

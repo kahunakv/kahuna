@@ -1,4 +1,5 @@
 
+using Kahuna.Server.Protos;
 using Kommander;
 using Kommander.Time;
 using Nixie;
@@ -11,6 +12,8 @@ namespace Kahuna;
 /// </summary>
 public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 {
+    private readonly IActorContextStruct<LockActor, LockRequest, LockResponse> actorContext;
+    
     private readonly IRaft raft;
     
     private readonly Dictionary<string, LockContext> locks = new();
@@ -20,11 +23,12 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     /// <summary>
     /// Constructor
     /// </summary>
-    /// <param name="_"></param>
+    /// <param name="actorContext"></param>
     /// <param name="raft"></param>
     /// <param name="logger"></param>
-    public LockActor(IActorContextStruct<LockActor, LockRequest, LockResponse> _, IRaft raft, ILogger<IKahuna> logger)
+    public LockActor(IActorContextStruct<LockActor, LockRequest, LockResponse> actorContext, IRaft raft, ILogger<IKahuna> logger)
     {
+        this.actorContext = actorContext;
         this.raft = raft;
         this.logger = logger;
     }
@@ -39,7 +43,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     {
         try
         {
-            logger.LogInformation("Message: {Type} {Resource} {Owner} {ExpiresMs}", message.Type, message.Resource, message.Owner, message.ExpiresMs);
+            logger.LogInformation("Message: {Actor} {Type} {Resource} {Owner} {ExpiresMs}", actorContext.Self.Runner.Name, message.Type, message.Resource, message.Owner, message.ExpiresMs);
 
             return message.Type switch
             {
@@ -66,7 +70,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     /// <returns></returns>
     private async Task<LockResponse> TryLock(LockRequest message)
     {
-        HLCTimestamp currentTime = await ((RaftManager)raft).HybridLogicalClock.SendOrLocalEvent();
+        HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
         
         if (locks.TryGetValue(message.Resource, out LockContext? context))
         {
@@ -80,23 +84,26 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
                 if (isExpired)
                     return new(LockResponseType.Busy);
             }
+
+            long fencingToken = context.FencingToken++;
+            context.Owner = message.Owner;
+            context.Expires = currentTime + message.ExpiresMs;
             
             if (message.Consistency == LockConsistency.Consistent)
             {
-                int partitionId = (int)raft.GetPartitionKey(message.Resource);
-                await raft.ReplicateLogs(partitionId, Array.Empty<byte>());
+                bool success = await ReplicateMessage(message, currentTime);
+                if (!success)
+                    return new(LockResponseType.Errored);
             }
-            
-            context.Owner = message.Owner;
-            context.Expires = currentTime + message.ExpiresMs;
 
-            return new(LockResponseType.Locked, context.FencingToken++);
+            return new(LockResponseType.Locked, fencingToken);
         }
         
         if (message.Consistency == LockConsistency.Consistent)
         {
-            int partitionId = (int)raft.GetPartitionKey(message.Resource);
-            await raft.ReplicateLogs(partitionId, Array.Empty<byte>());
+            bool success = await ReplicateMessage(message, currentTime);
+            if (!success)
+                return new(LockResponseType.Errored);
         }
         
         LockContext newContext = new()
@@ -124,7 +131,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         if (context.Owner != message.Owner)
             return new(LockResponseType.Errored);
         
-        HLCTimestamp currentTime = await ((RaftManager)raft).HybridLogicalClock.SendOrLocalEvent();
+        HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
         
         context.Expires = currentTime + message.ExpiresMs;
 
@@ -159,7 +166,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         if (!locks.TryGetValue(message.Resource, out LockContext? context))
             return new(LockResponseType.Errored);
         
-        HLCTimestamp currentTime = await ((RaftManager)raft).HybridLogicalClock.SendOrLocalEvent();
+        HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
         
         if (context.Expires - currentTime < TimeSpan.Zero)
             return new(LockResponseType.Busy);
@@ -167,5 +174,29 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         ReadOnlyLockContext readOnlyLockContext = new(context.Owner, context.Expires, context.FencingToken);
 
         return new(LockResponseType.Got, readOnlyLockContext);
+    }
+    
+    private async Task<bool> ReplicateMessage(LockRequest message, HLCTimestamp currentTime)
+    {
+        if (!raft.Joined)
+            return true;
+        
+        int partitionId = (int)raft.GetPartitionKey(message.Resource);
+                
+        (bool success, long _) = await raft.ReplicateLogs(
+            partitionId, 
+            ReplicationSerializer.Serialize(new LockMessage()
+            {
+                Type = (int)message.Type,
+                Resource = message.Resource, 
+                Owner = message.Owner,
+                Expires = message.ExpiresMs,
+                TimeLogical = currentTime.L,
+                TimeCounter = currentTime.C,
+                Consistency = (int)LockConsistency.ReplicationConsistent
+            })
+        );
+
+        return success;
     }
 }

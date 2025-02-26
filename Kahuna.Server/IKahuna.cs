@@ -10,4 +10,6 @@ public interface IKahuna
     public Task<LockResponseType> TryUnlock(string lockName, string lockId, LockConsistency consistency);
     
     public Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(string lockName, LockConsistency consistency);
+
+    public Task<bool> OnReplicationReceived(byte[] message);
 }

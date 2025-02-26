@@ -7,7 +7,7 @@ Console.WriteLine("Kahuna Benchmark");
 
 const int numberOfLocks = 2500;
 
-KahunaClient locks = new("http://localhost:2070", null);
+KahunaClient locks = new("http://localhost:8081", null);
 
 List<Task> tasks = new(numberOfLocks);
 
@@ -44,14 +44,15 @@ async Task AdquireLockConcurrently(KahunaClient locksx)
 
     await using KahunaLock redLock = await locksx.GetOrCreateLock(
         lockName, 
-        expiry: TimeSpan.FromSeconds(5)
+        expiry: TimeSpan.FromSeconds(5),
+        consistency: KahunaLockConsistency.Consistent
     );
 
     if (!redLock.IsAcquired)
-        throw new Exception("Not adquired " + lockName);
+        throw new KahunaException("Not adquired " + lockName);
 }
 
 static string GetRandomLockName()
 {
-    return Guid.NewGuid().ToString("N")[..10];
+    return Guid.NewGuid().ToString("N")[..16];
 }
