@@ -1,5 +1,6 @@
 
 using Kahuna.Client;
+using Kommander.Time;
 
 namespace Kahuna.Tests.Client;
 
@@ -66,8 +67,10 @@ public class TestLocks
         Assert.True(kLock2.IsAcquired);
     }
     
-    [Fact]
-    public async Task TestValidateAcquireLockExpires4()
+    [Theory]
+    [InlineData(KahunaLockConsistency.Consistent)]
+    [InlineData(KahunaLockConsistency.Ephemeral)]
+    public async Task TestValidateAcquireLockExpires4(KahunaLockConsistency consistency)
     {
         string lockName = GetRandomLockName();
 
@@ -82,22 +85,24 @@ public class TestLocks
 
         await kLock.DisposeAsync();
 
-        await using KahunaLock kLock2 = await locks.GetOrCreateLock(lockName, TimeSpan.FromSeconds(1));
+        await using KahunaLock kLock2 = await locks.GetOrCreateLock(lockName, TimeSpan.FromSeconds(1), consistency: consistency);
         Assert.True(kLock2.IsAcquired);
     }
     
-    [Fact]
-    public async Task TestValidateAcquireLockExpiresRace()
+    [Theory]
+    //[InlineData(KahunaLockConsistency.Consistent)]
+    [InlineData(KahunaLockConsistency.Ephemeral)]
+    public async Task TestValidateAcquireLockExpiresRace(KahunaLockConsistency consistency)
     {
         List<Task> tasks = new(50);
 
         for (int i = 0; i < 50; i++)
-            tasks.Add(AcquireLockConcurrently());
+            tasks.Add(AcquireLockConcurrently(consistency));
 
         await Task.WhenAll(tasks);
     }
     
-    private async Task AcquireLockConcurrently()
+    private async Task AcquireLockConcurrently(KahunaLockConsistency consistency)
     {
         string lockName = GetRandomLockName();
 
@@ -105,38 +110,42 @@ public class TestLocks
             lockName, 
             expiry: TimeSpan.FromSeconds(1), 
             wait: TimeSpan.FromSeconds(1), 
-            retry: TimeSpan.FromMilliseconds(100)
+            retry: TimeSpan.FromMilliseconds(100),
+            consistency: consistency
         );
         
         Assert.True(kLock.IsAcquired);
 
         await kLock.DisposeAsync();
 
-        await using KahunaLock kLock2 = await locks.GetOrCreateLock(lockName, TimeSpan.FromSeconds(1));
+        await using KahunaLock kLock2 = await locks.GetOrCreateLock(lockName, TimeSpan.FromSeconds(1), consistency: consistency);
         Assert.True(kLock2.IsAcquired);
     }
     
-    [Fact]
-    public async Task TestValidateAcquireSameLockExpiresRace()
+    [Theory]
+    //[InlineData(KahunaLockConsistency.Consistent)]
+    [InlineData(KahunaLockConsistency.Ephemeral)]
+    public async Task TestValidateAcquireSameLockExpiresRace(KahunaLockConsistency consistency)
     {
         List<Task> tasks = new(10);
         string lockName = GetRandomLockName();
 
         for (int i = 0; i < 10; i++)
-            tasks.Add(AcquireSameLockConcurrently(lockName));
+            tasks.Add(AcquireSameLockConcurrently(lockName, consistency));
 
         await Task.WhenAll(tasks);
         
         Assert.Equal(10, total);
     }
     
-    private async Task AcquireSameLockConcurrently(string lockName)
+    private async Task AcquireSameLockConcurrently(string lockName, KahunaLockConsistency consistency)
     {
         await using KahunaLock kLock = await locks.GetOrCreateLock(
             lockName, 
             expiry: TimeSpan.FromSeconds(10), 
             wait: TimeSpan.FromSeconds(11),
-            retry: TimeSpan.FromMilliseconds(500)
+            retry: TimeSpan.FromMilliseconds(500),
+            consistency: consistency
         );
         
         if (!kLock.IsAcquired)
@@ -145,22 +154,35 @@ public class TestLocks
         total++;
     }
     
-    [Fact]
-    public async Task TestValidateAcquireAndExtendLock()
+    [Theory]
+    [InlineData(KahunaLockConsistency.Consistent)]
+    [InlineData(KahunaLockConsistency.Ephemeral)]
+    public async Task TestValidateAcquireAndExtendLock(KahunaLockConsistency consistency)
     {
         string lockName = GetRandomLockName();
 
-        await using KahunaLock kLock = await locks.GetOrCreateLock(lockName, 5000);
+        await using KahunaLock kLock = await locks.GetOrCreateLock(lockName, 5000, consistency: consistency);
 
         Assert.True(kLock.IsAcquired);
         
-        bool extended = await kLock.TryExtend(TimeSpan.FromSeconds(5));
+        bool extended = await kLock.TryExtend(TimeSpan.FromSeconds(10));
         Assert.True(extended);
 
         KahunaLockInfo? lockInfo = await locks.GetLockInfo(lockName);
         Assert.NotNull(lockInfo);
         
         Assert.Equal(lockInfo.Owner, kLock.LockId);
+        HLCTimestamp expires = lockInfo.Expires;
+        
+        await kLock.TryExtend(TimeSpan.FromSeconds(10));
+        Assert.True(extended);
+        
+        lockInfo = await locks.GetLockInfo(lockName);
+        Assert.NotNull(lockInfo);
+        
+        Assert.Equal(lockInfo.Owner, kLock.LockId);
+        Assert.True(lockInfo.Expires - expires > TimeSpan.Zero);
+        
         //Assert.Equal(lockInfo.Expires > DateTime.UtcNow, true);
     }
 }

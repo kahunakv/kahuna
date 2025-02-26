@@ -1,7 +1,6 @@
 FROM mcr.microsoft.com/dotnet/sdk:9.0-alpine AS build-env
 
 RUN mkdir -p /src
-COPY Kahuna /src/Kahuna/
 COPY Kahuna.Server /src/Kahuna.Server/
 
 # build the dotnet program

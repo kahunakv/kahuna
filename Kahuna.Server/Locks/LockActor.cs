@@ -27,8 +27,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     /// <param name="actorContext"></param>
     /// <param name="raft"></param>
     /// <param name="logger"></param>
-    public LockActor(IActorContextStruct<LockActor, LockRequest, LockResponse> actorContext, IRaft raft,
-        ILogger<IKahuna> logger)
+    public LockActor(IActorContextStruct<LockActor, LockRequest, LockResponse> actorContext, IRaft raft, ILogger<IKahuna> logger)
     {
         this.actorContext = actorContext;
         this.raft = raft;
