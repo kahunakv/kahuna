@@ -1,13 +1,17 @@
 # Kahuna
 
-**Kahuna** is an open-source solution designed to provide robust distributed 
-locking for modern distributed systems. It addresses the critical challenge 
-of synchronizing access to shared resources across multiple nodes 
-or processes, ensuring consistency and preventing race conditions. 
-By leveraging a partitioned locking mechanism coordinated via a Raft Group, 
-Kahuna combines scalability, reliability and simplicity, making it an ideal choice 
+**Kahuna** is an open-source solution designed to provide robust distributed
+locking for modern distributed systems. It addresses the critical challenge
+of synchronizing access to shared resources across multiple nodes
+or processes, ensuring consistency and preventing race conditions.
+By leveraging a partitioned locking mechanism coordinated via a Raft Group,
+Kahuna combines scalability, reliability and simplicity, making it an ideal choice
 for applications that require coordinated access to databases, files
 or other shared services.
+
+_Kahuna_ is a Hawaiian word that refers to an expert in any field. Historically,
+it has been used to refer to doctors, surgeons and dentists,
+as well as priests, ministers, and sorcerers.
 
 ---
 
@@ -97,30 +101,30 @@ Kahuna exposes a simple API for acquiring and releasing locks. The main function
 
 ## Leases
 
-Distributed locks in Kahuna are based on the paper [*"Leases: An Efficient 
-Fault-Tolerant Mechanism for Distributed File Cache Consistency"*](https://web.stanford.edu/class/cs240/readings/leases.pdf) by Michael N. Nelson, Brent B. Welch, and John K. Ousterhout. 
-It introduced the concept of **leases** as a way to manage distributed locks efficiently. 
-Leases act as time-bound locks that expire after a specified duration, 
+Distributed locks in Kahuna are based on the paper [*"Leases: An Efficient
+Fault-Tolerant Mechanism for Distributed File Cache Consistency"*](https://web.stanford.edu/class/cs240/readings/leases.pdf) by Michael N. Nelson, Brent B. Welch, and John K. Ousterhout.
+It introduced the concept of **leases** as a way to manage distributed locks efficiently.
+Leases act as time-bound locks that expire after a specified duration,
 providing a balance between strong consistency and fault tolerance.
 
-- **Automatic Lock Expiration**: Leases expire after a predefined time, 
+- **Automatic Lock Expiration**: Leases expire after a predefined time,
 eliminating the need for manual lock release. This is particularly useful if a client holding a lock crashes or becomes unreachable, as the system can reclaim the resource once the lease expires.
-- **No Need for Explicit Unlock**: Despite Kahuna clients sent explicit unlocks, clients 
-don't need to explicitly release them, which reduces the complexity of 
+- **No Need for Explicit Unlock**: Despite Kahuna clients sent explicit unlocks, clients
+don't need to explicitly release them, which reduces the complexity of
 handling failures and network partitions.
 - **Reduced Lock Contention**: Since leases are time-bound, even if a client misbehaves or gets disconnected, other clients will eventually be able to acquire the lock after the lease expires.
 - **Graceful Degradation**: In the event of partial failures (e.g., network partitions), the system can still make progress once the lease times out.
 
-Do leases provide mutual exclusion? No, leases by themselves do not provide mutual exclusion. 
+Do leases provide mutual exclusion? No, leases by themselves do not provide mutual exclusion.
 
 While Kahuna leases help in expiring keys and releasing locks if a client fails, they don’t inherently protect against scenarios where:
 
 - A client pauses (e.g., due to a long GC pause or network partition) and later resumes, believing it still holds the lock, even though the lease has expired.
-- This could lead to split-brain where two clients believe they own the same lock. 
+- This could lead to split-brain where two clients believe they own the same lock.
 
 ### Fencing Tokens
 
-A fencing token is a monotonically increasing number (e.g., version number) issued every time a lock is acquired. 
+A fencing token is a monotonically increasing number (e.g., version number) issued every time a lock is acquired.
 It acts as a logical timestamp to resolve stale client operations.
 
 How Leases + Fencing Tokens can provide Strong Mutual Exclusion:
@@ -189,7 +193,7 @@ public async Task UpdateBalance(KahunaClient client, string userId)
     // if acquired then automatically release the lock after 5 seconds (if not extended),
     // it will give up immediately if the lock is not available,
     // if the lock is acquired it will prevent the same user from changing the same data concurrently
-    
+
     await using KahunaLock myLock = await client.GetOrCreateLock("balance-" + userId, TimeSpan.FromSeconds(5));
 
     if (myLock.IsAcquired)
@@ -209,7 +213,7 @@ public async Task UpdateBalance(KahunaClient client, string userId)
 
 #### Multiple attempts to acquire a lock
 
-The following example shows how to make multiple attempts to 
+The following example shows how to make multiple attempts to
 acquire a lock (lease) for 10 seconds, retrying every 100 ms:
 
 ```csharp
@@ -222,9 +226,9 @@ public async Task UpdateBalance(KahunaClient client, string userId)
     // if not acquired retry to acquire the lock every 100 milliseconds for 10 seconds,
     // it will give up after 10 seconds if the lock is not available,
     // if the lock is acquired it will prevent the same user from changing the same data concurrently
-    
+
     await using KahunaLock myLock = await client.GetOrCreateLock(
-        "balance-" + userId, 
+        "balance-" + userId,
         expiry: TimeSpan.FromSeconds(5),
         wait: TimeSpan.FromSeconds(10),
         retry: TimeSpan.FromMilliseconds(100)
@@ -258,31 +262,31 @@ public async Task IncreaseBalance(KahunaClient client, string userId, long amoun
 {
     // try to lock on a resource holding the lease for 5 seconds
     // and prevent stale clients from modifying data after losing their lock.
-    
+
     await using KahunaLock myLock = await client.GetOrCreateLock(
-        "balance-" + userId, 
+        "balance-" + userId,
         expiry: TimeSpan.FromSeconds(5)
     );
 
     if (myLock.IsAcquired)
     {
-        Console.WriteLine("Lock acquired!");        
-        
+        Console.WriteLine("Lock acquired!");
+
         BalanceAccount account = await db.GetBalance(userId);
-        
+
         if (account.FencingToken > myLock.FencingToken)
         {
             // Write rejected: Stale fencing token
-            
+
             Console.WriteLine("Someone else had the lock!");
             return;
         }
-        
+
         // Write successful: New balance saved with new fencing token
-        
+
         account.Balance += amount;
         account.FencingToken = myLock.FencingToken;
-        
+
         await db.Save(account);
     }
     else
@@ -296,9 +300,9 @@ public async Task IncreaseBalance(KahunaClient client, string userId, long amoun
 
 ### Periodically extend a lock
 
-At times, it is useful to periodically extend the lock's expiration 
-time while a client holds it, for example, in a leader election scenario. 
-As long as the leader node is alive and healthy, it can extend the 
+At times, it is useful to periodically extend the lock's expiration
+time while a client holds it, for example, in a leader election scenario.
+As long as the leader node is alive and healthy, it can extend the
 lock duration to signal that it can continue acting as the leader:
 
 ```csharp
@@ -307,7 +311,7 @@ using Kahuna.Client;
 public async Task TryChooseLeader(KahunaClient client, string groupId)
 {
     await using KahunaLock myLock = await client.GetOrCreateLock(
-        "group-leader-" + groupId, 
+        "group-leader-" + groupId,
         expiry: TimeSpan.FromSeconds(5)
     );
 
@@ -316,19 +320,19 @@ public async Task TryChooseLeader(KahunaClient client, string groupId)
         Console.WriteLine("Lock not acquired!");
         return;
     }
-                
+
     while (true)
-    {                                                                
+    {
         bool isExtended = await client.TryExtend(TimeSpan.FromSeconds(5));
         if (!isExtended)
         {
             Console.WriteLine("Lock extension failed!");
             break;
         }
-        
+
         // extend the lock every 5 seconds
         await Task.Delay(5000);
-    }                                          
+    }
 }
 ```
 
