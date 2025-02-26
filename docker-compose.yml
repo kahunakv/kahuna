@@ -10,6 +10,8 @@ services:
       - ASPNETCORE_URLS=http://*:8081;http://*:2070
     ports:
       - "8081:2070"
+    volumes:
+      - kahuna1-data:/app/data  
     networks:
       custom_net:
         ipv4_address: 172.30.0.2
@@ -23,6 +25,8 @@ services:
       - ASPNETCORE_URLS=http://*:8082;http://*:2070
     ports:
       - "8082:2070"
+    volumes:
+      - kahuna2-data:/app/data    
     networks:
       custom_net:
         ipv4_address: 172.30.0.3
@@ -36,9 +40,16 @@ services:
       - ASPNETCORE_URLS=http://*:8083;http://*:2070
     ports:
       - "8083:2070"
+    volumes:
+      - kahuna3-data:/app/data    
     networks:
       custom_net:
         ipv4_address: 172.30.0.4
+
+volumes:
+  kahuna1-data:
+  kahuna2-data:
+  kahuna3-data:        
 
 networks:
   custom_net:
