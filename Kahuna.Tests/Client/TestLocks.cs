@@ -6,7 +6,7 @@ namespace Kahuna.Tests.Client;
 
 public class TestLocks
 {
-    private readonly KahunaClient locks = new("http://localhost:8081", null);
+    private readonly KahunaClient locks = new("http://localhost:8082", null);
     
     private int total;
 
@@ -78,7 +78,7 @@ public class TestLocks
             lockName, 
             expiryTime: 1000, 
             waitTime: 1000, 
-            retryTime: 100
+            retryTime: 500
         );
         
         Assert.True(kLock.IsAcquired);
@@ -110,7 +110,7 @@ public class TestLocks
             lockName, 
             expiry: TimeSpan.FromSeconds(1), 
             wait: TimeSpan.FromSeconds(1), 
-            retry: TimeSpan.FromMilliseconds(100),
+            retry: TimeSpan.FromMilliseconds(500),
             consistency: consistency
         );
         
@@ -123,12 +123,13 @@ public class TestLocks
     }
     
     [Theory]
-    //[InlineData(KahunaLockConsistency.Consistent)]
+    [InlineData(KahunaLockConsistency.Consistent)]
     [InlineData(KahunaLockConsistency.Ephemeral)]
     public async Task TestValidateAcquireSameLockExpiresRace(KahunaLockConsistency consistency)
     {
-        List<Task> tasks = new(10);
         string lockName = GetRandomLockName();
+        
+        List<Task> tasks = new(10);
 
         for (int i = 0; i < 10; i++)
             tasks.Add(AcquireSameLockConcurrently(lockName, consistency));
@@ -161,14 +162,14 @@ public class TestLocks
     {
         string lockName = GetRandomLockName();
 
-        await using KahunaLock kLock = await locks.GetOrCreateLock(lockName, 5000, consistency: consistency);
+        await using KahunaLock kLock = await locks.GetOrCreateLock(lockName, 10000, consistency: consistency);
 
         Assert.True(kLock.IsAcquired);
         
         bool extended = await kLock.TryExtend(TimeSpan.FromSeconds(10));
         Assert.True(extended);
 
-        KahunaLockInfo? lockInfo = await locks.GetLockInfo(lockName);
+        KahunaLockInfo? lockInfo = await locks.GetLockInfo(lockName, consistency);
         Assert.NotNull(lockInfo);
         
         Assert.Equal(lockInfo.Owner, kLock.LockId);
@@ -177,7 +178,7 @@ public class TestLocks
         await kLock.TryExtend(TimeSpan.FromSeconds(10));
         Assert.True(extended);
         
-        lockInfo = await locks.GetLockInfo(lockName);
+        lockInfo = await locks.GetLockInfo(lockName, consistency);
         Assert.NotNull(lockInfo);
         
         Assert.Equal(lockInfo.Owner, kLock.LockId);

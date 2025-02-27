@@ -44,8 +44,15 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     {
         try
         {
-            logger.LogInformation("Message: {Actor} {Type} {Resource} {Owner} {ExpiresMs}",
-                actorContext.Self.Runner.Name, message.Type, message.Resource, message.Owner, message.ExpiresMs);
+            logger.LogInformation(
+                "Message: {Actor} {Type} {Resource} {Owner} {ExpiresMs} {Consistency}", 
+                actorContext.Self.Runner.Name, 
+                message.Type, 
+                message.Resource, 
+                message.Owner, 
+                message.ExpiresMs,
+                message.Consistency
+            );
 
             return message.Type switch
             {
@@ -58,7 +65,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         }
         catch (Exception ex)
         {
-            logger.LogError("Error processing message: {Message}", ex.Message);
+            logger.LogError("Error processing message: {Type} {Message}\n{Stacktrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
         }
 
         return new(LockResponseType.Errored);
@@ -207,7 +214,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             {
                 Type = (int)type,
                 Resource = resource,
-                Owner = context.Owner,
+                Owner = context.Owner ?? "",
                 FencingToken = context.FencingToken,
                 ExpireLogical = context.Expires.L,
                 ExpireCounter = context.Expires.C,

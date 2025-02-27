@@ -5,7 +5,7 @@ package Kahuna.Replication.Protos;
 message LockMessage {
   int32 type = 1;
   string resource = 2;
-  string owner = 3;
+  optional string owner = 3;
   int64 fencingToken = 4;
   int64 expireLogical = 5;
   uint32 expireCounter = 6;

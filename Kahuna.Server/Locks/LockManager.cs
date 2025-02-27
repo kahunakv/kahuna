@@ -35,7 +35,7 @@ public sealed class LockManager : IKahuna
         this.raft = raft;
         this.logger = logger;
 
-        int workers = Environment.ProcessorCount * 2;
+        int workers = Math.Max(32, Environment.ProcessorCount * 4);
         
         List<IActorRefStruct<LockActor, LockRequest, LockResponse>> ephemeralInstances = new(workers);
 

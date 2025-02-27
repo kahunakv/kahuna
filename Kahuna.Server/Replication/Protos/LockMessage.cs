@@ -25,15 +25,15 @@ namespace Kahuna.Replication.Protos {
       byte[] descriptorData = global::System.Convert.FromBase64String(
           string.Concat(
             "ChJsb2NrX21lc3NhZ2UucHJvdG8SGUthaHVuYS5SZXBsaWNhdGlvbi5Qcm90",
-            "b3MivwEKC0xvY2tNZXNzYWdlEgwKBHR5cGUYASABKAUSEAoIcmVzb3VyY2UY",
-            "AiABKAkSDQoFb3duZXIYAyABKAkSFAoMZmVuY2luZ1Rva2VuGAQgASgDEhUK",
-            "DWV4cGlyZUxvZ2ljYWwYBSABKAMSFQoNZXhwaXJlQ291bnRlchgGIAEoDRIT",
-            "Cgt0aW1lTG9naWNhbBgHIAEoAxITCgt0aW1lQ291bnRlchgIIAEoDRITCgtj",
-            "b25zaXN0ZW5jeRgJIAEoBWIGcHJvdG8z"));
+            "b3MizgEKC0xvY2tNZXNzYWdlEgwKBHR5cGUYASABKAUSEAoIcmVzb3VyY2UY",
+            "AiABKAkSEgoFb3duZXIYAyABKAlIAIgBARIUCgxmZW5jaW5nVG9rZW4YBCAB",
+            "KAMSFQoNZXhwaXJlTG9naWNhbBgFIAEoAxIVCg1leHBpcmVDb3VudGVyGAYg",
+            "ASgNEhMKC3RpbWVMb2dpY2FsGAcgASgDEhMKC3RpbWVDb3VudGVyGAggASgN",
+            "EhMKC2NvbnNpc3RlbmN5GAkgASgFQggKBl9vd25lcmIGcHJvdG8z"));
       descriptor = pbr::FileDescriptor.FromGeneratedCode(descriptorData,
           new pbr::FileDescriptor[] { },
           new pbr::GeneratedClrTypeInfo(null, null, new pbr::GeneratedClrTypeInfo[] {
-            new pbr::GeneratedClrTypeInfo(typeof(global::Kahuna.Replication.Protos.LockMessage), global::Kahuna.Replication.Protos.LockMessage.Parser, new[]{ "Type", "Resource", "Owner", "FencingToken", "ExpireLogical", "ExpireCounter", "TimeLogical", "TimeCounter", "Consistency" }, null, null, null, null)
+            new pbr::GeneratedClrTypeInfo(typeof(global::Kahuna.Replication.Protos.LockMessage), global::Kahuna.Replication.Protos.LockMessage.Parser, new[]{ "Type", "Resource", "Owner", "FencingToken", "ExpireLogical", "ExpireCounter", "TimeLogical", "TimeCounter", "Consistency" }, new[]{ "Owner" }, null, null, null)
           }));
     }
     #endregion
@@ -119,14 +119,28 @@ namespace Kahuna.Replication.Protos {
 
     /// <summary>Field number for the "owner" field.</summary>
     public const int OwnerFieldNumber = 3;
-    private string owner_ = "";
+    private readonly static string OwnerDefaultValue = "";
+
+    private string owner_;
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public string Owner {
-      get { return owner_; }
+      get { return owner_ ?? OwnerDefaultValue; }
       set {
         owner_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
       }
+    }
+    /// <summary>Gets whether the "owner" field is set</summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public bool HasOwner {
+      get { return owner_ != null; }
+    }
+    /// <summary>Clears the value of the "owner" field</summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void ClearOwner() {
+      owner_ = null;
     }
 
     /// <summary>Field number for the "fencingToken" field.</summary>
@@ -234,7 +248,7 @@ namespace Kahuna.Replication.Protos {
       int hash = 1;
       if (Type != 0) hash ^= Type.GetHashCode();
       if (Resource.Length != 0) hash ^= Resource.GetHashCode();
-      if (Owner.Length != 0) hash ^= Owner.GetHashCode();
+      if (HasOwner) hash ^= Owner.GetHashCode();
       if (FencingToken != 0L) hash ^= FencingToken.GetHashCode();
       if (ExpireLogical != 0L) hash ^= ExpireLogical.GetHashCode();
       if (ExpireCounter != 0) hash ^= ExpireCounter.GetHashCode();
@@ -267,7 +281,7 @@ namespace Kahuna.Replication.Protos {
         output.WriteRawTag(18);
         output.WriteString(Resource);
       }
-      if (Owner.Length != 0) {
+      if (HasOwner) {
         output.WriteRawTag(26);
         output.WriteString(Owner);
       }
@@ -313,7 +327,7 @@ namespace Kahuna.Replication.Protos {
         output.WriteRawTag(18);
         output.WriteString(Resource);
       }
-      if (Owner.Length != 0) {
+      if (HasOwner) {
         output.WriteRawTag(26);
         output.WriteString(Owner);
       }
@@ -357,7 +371,7 @@ namespace Kahuna.Replication.Protos {
       if (Resource.Length != 0) {
         size += 1 + pb::CodedOutputStream.ComputeStringSize(Resource);
       }
-      if (Owner.Length != 0) {
+      if (HasOwner) {
         size += 1 + pb::CodedOutputStream.ComputeStringSize(Owner);
       }
       if (FencingToken != 0L) {
@@ -396,7 +410,7 @@ namespace Kahuna.Replication.Protos {
       if (other.Resource.Length != 0) {
         Resource = other.Resource;
       }
-      if (other.Owner.Length != 0) {
+      if (other.HasOwner) {
         Owner = other.Owner;
       }
       if (other.FencingToken != 0L) {
