@@ -67,7 +67,7 @@ builder.Services.AddSingleton<IRaft>(services =>
         services.GetRequiredService<ActorSystem>(),
         configuration,
         new StaticDiscovery(nodes),
-        new SqliteWAL(path: "/app/data"),
+        new SqliteWAL(path: "/app/data", version: "v2"),
         new HttpCommunication(),
         new HybridLogicalClock(),
         services.GetRequiredService<ILogger<IRaft>>()

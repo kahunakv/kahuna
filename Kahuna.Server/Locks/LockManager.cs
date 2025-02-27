@@ -1,7 +1,9 @@
 
+using Kahuna.Persistence;
 using Kahuna.Replication;
 using Kahuna.Replication.Protos;
 using Kommander;
+using Kommander.Data;
 using Kommander.Time;
 using Nixie;
 using Nixie.Routers;
@@ -19,6 +21,8 @@ public sealed class LockManager : IKahuna
 
     private readonly ILogger<IKahuna> logger;
     
+    private readonly SqlitePersistence sqlitePersistence;
+    
     private readonly IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> ephemeralLocksRouter;
     
     private readonly IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> persistentLocksRouter;
@@ -34,6 +38,8 @@ public sealed class LockManager : IKahuna
         this.actorSystem = actorSystem;
         this.raft = raft;
         this.logger = logger;
+
+        this.sqlitePersistence = new SqlitePersistence("/app/data", "v1");
 
         int workers = Math.Max(32, Environment.ProcessorCount * 4);
         
@@ -51,43 +57,79 @@ public sealed class LockManager : IKahuna
         persistentLocksRouter = actorSystem.CreateConsistentHashRouterStruct(persistentInstances);
     }
 
-    public async Task<bool> OnReplicationReceived(byte[] message)
+    public async Task<bool> OnReplicationReceived(string type, byte[] data)
     {
-        LockMessage lockMessage = ReplicationSerializer.Unserializer(message);
-
-        HLCTimestamp eventTime = new(lockMessage.TimeLogical, lockMessage.TimeCounter);
-        
-        HLCTimestamp currentTime = await raft.HybridLogicalClock.ReceiveEvent(eventTime);
-        
-        HLCTimestamp expires = new(lockMessage.ExpireLogical, lockMessage.ExpireCounter);
-        TimeSpan timeSpan = expires - currentTime;
-
-        switch ((LockRequestType)lockMessage.Type)
+        try
         {
-            case LockRequestType.TryLock:
-                if (timeSpan < TimeSpan.Zero) // event already expired
+            LockMessage lockMessage = ReplicationSerializer.Unserializer(data);
+
+            HLCTimestamp eventTime = new(lockMessage.TimeLogical, lockMessage.TimeCounter);
+
+            HLCTimestamp currentTime = await raft.HybridLogicalClock.ReceiveEvent(eventTime);
+            
+            Console.WriteLine("Expires {0} {1} {2}:{3}", (LockRequestType)lockMessage.Type, lockMessage.Resource, lockMessage.ExpireLogical, lockMessage.ExpireCounter);
+
+            //HLCTimestamp expires = new(lockMessage.ExpireLogical, lockMessage.ExpireCounter);
+            //TimeSpan timeSpan = expires - currentTime;
+
+            switch ((LockRequestType)lockMessage.Type)
+            {
+                case LockRequestType.TryLock:
+                    await sqlitePersistence.UpdateLock(
+                        lockMessage.Resource,
+                        lockMessage.Owner,
+                        lockMessage.ExpireLogical,
+                        lockMessage.ExpireCounter,
+                        lockMessage.FencingToken,
+                        lockMessage.Consistency,
+                        LockState.Locked
+                    );
                     break;
 
-                await TryLock(lockMessage.Resource, lockMessage.Owner, (int)timeSpan.TotalMilliseconds, (LockConsistency)lockMessage.Consistency);
-                break;
-                
-            case LockRequestType.TryUnlock:
-                await TryUnlock(lockMessage.Resource, lockMessage.Owner, (LockConsistency)lockMessage.Consistency);
-                break;
-            
-            case LockRequestType.TryExtendLock:
-                await TryExtendLock(lockMessage.Resource, lockMessage.Owner, (int)timeSpan.TotalMilliseconds, (LockConsistency)lockMessage.Consistency);
-                break;
-            
-            case LockRequestType.Get:
-                break;
-            
-            default:
-                logger.LogError("Unknown replication message type: {Type}", lockMessage.Type);
-                break;
+                case LockRequestType.TryUnlock:
+                    await sqlitePersistence.UpdateLock(
+                        lockMessage.Resource,
+                        lockMessage.Owner,
+                        lockMessage.ExpireLogical,
+                        lockMessage.ExpireCounter,
+                        lockMessage.FencingToken,
+                        lockMessage.Consistency,
+                        LockState.Unlocked
+                    );
+                    break;
+
+                case LockRequestType.TryExtendLock:
+                    await sqlitePersistence.UpdateLock(
+                        lockMessage.Resource,
+                        lockMessage.Owner,
+                        lockMessage.ExpireLogical,
+                        lockMessage.ExpireCounter,
+                        lockMessage.FencingToken,
+                        lockMessage.Consistency,
+                        LockState.Locked
+                    );
+                    break;
+
+                case LockRequestType.Get:
+                    break;
+
+                default:
+                    logger.LogError("Unknown replication message type: {Type}", lockMessage.Type);
+                    break;
+            }
+        } 
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error processing replication message");
+            return false;
         }
 
         return true;
+    }
+
+    public void OnReplicationError(RaftLog log)
+    {
+        logger.LogError("Replication error: #{Id} {Type}", log.Id, log.LogType);
     }
 
     /// <summary>

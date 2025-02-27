@@ -200,8 +200,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         return new(LockResponseType.Got, readOnlyLockContext);
     }
 
-    private async Task<bool> ReplicateLockMessage(LockRequestType type, string resource, LockContext context,
-        HLCTimestamp currentTime)
+    private async Task<bool> ReplicateLockMessage(LockRequestType type, string resource, LockContext context, HLCTimestamp currentTime)
     {
         if (!raft.Joined)
             return true;
@@ -210,6 +209,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 
         (bool success, long _) = await raft.ReplicateLogs(
             partitionId,
+            "LockMessage",
             ReplicationSerializer.Serialize(new LockMessage()
             {
                 Type = (int)type,

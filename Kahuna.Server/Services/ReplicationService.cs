@@ -7,26 +7,27 @@ public class ReplicationService : BackgroundService //, IDisposable
 {
     private readonly IKahuna kahuna;
     
-    private readonly IRaft raftManager;
+    private readonly IRaft raft;
 
-    public ReplicationService(IKahuna kahuna, IRaft raftManager)
+    public ReplicationService(IKahuna kahuna, IRaft raft)
     {
         this.kahuna = kahuna;
-        this.raftManager = raftManager;
+        this.raft = raft;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (raftManager.Configuration.Host == "*")
+        if (raft.Configuration.Host == "*")
             return;
-
-        raftManager.OnReplicationReceived += kahuna.OnReplicationReceived;
         
-        await raftManager.JoinCluster();
+        raft.OnReplicationReceived += kahuna.OnReplicationReceived;
+        ((RaftManager)raft).OnReplicationError += kahuna.OnReplicationError;
+        
+        await raft.JoinCluster();
         
         while (true)
         {
-            await raftManager.UpdateNodes();
+            await raft.UpdateNodes();
 
             await Task.Delay(3000, stoppingToken);
         }
