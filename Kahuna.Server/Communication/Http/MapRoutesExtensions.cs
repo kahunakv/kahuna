@@ -22,8 +22,6 @@ public static class MapRoutesExtensions
             if (request.ExpiresMs <= 0)
                 return new() { Type = LockResponseType.Errored };
             
-            // Console.WriteLine("LOCK {0} {1} {2}", request.LockName, request.LockId, request.ExpiresMs);
-            
             int partitionId = raft.GetPartitionKey(request.LockName);
 
             if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
@@ -35,7 +33,7 @@ public static class MapRoutesExtensions
             
             string leader = await raft.WaitForLeader(partitionId, CancellationToken.None);
             if (leader == raft.GetLocalEndpoint())
-                throw new RaftException("lol");
+                return new() { Type = LockResponseType.MustRetry };
             
             logger.LogInformation("LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
 
@@ -43,7 +41,7 @@ public static class MapRoutesExtensions
             {
                 string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.ExternLockRequest);
 
-                return await $"http://{leader}"
+                ExternLockResponse? response = await $"http://{leader}"
                     .AppendPathSegments("v1/kahuna/lock")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
@@ -51,6 +49,11 @@ public static class MapRoutesExtensions
                     .WithSettings(o => o.HttpVersion = "2.0")
                     .PostStringAsync(payload)
                     .ReceiveJson<ExternLockResponse>();
+                
+                if (response is not null)
+                    response.ServedFrom = $"http://{leader}";
+
+                return response;
             }
             catch (Exception ex)
             {
@@ -63,13 +66,13 @@ public static class MapRoutesExtensions
         app.MapPost("/v1/kahuna/extend-lock", async (ExternLockRequest request, IKahuna locks, IRaft raft, ILogger<IKahuna> logger) =>
         {
             if (string.IsNullOrEmpty(request.LockName))
-                return new() { Type = LockResponseType.Errored };
+                return new() { Type = LockResponseType.InvalidInput };
 
             if (string.IsNullOrEmpty(request.LockId))
-                return new() { Type = LockResponseType.Errored };
+                return new() { Type = LockResponseType.InvalidInput };
             
             if (request.ExpiresMs <= 0)
-                return new() { Type = LockResponseType.Errored };
+                return new() { Type = LockResponseType.InvalidInput };
             
             int partitionId = raft.GetPartitionKey(request.LockName);
             
@@ -82,7 +85,7 @@ public static class MapRoutesExtensions
             
             string leader = await raft.WaitForLeader(partitionId, CancellationToken.None);
             if (leader == raft.GetLocalEndpoint())
-                throw new RaftException("lol");
+                return new() { Type = LockResponseType.MustRetry };
             
             logger.LogInformation("EXTEND-LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
             
@@ -90,7 +93,7 @@ public static class MapRoutesExtensions
             {
                 string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.ExternLockRequest);
                 
-                return await $"http://{leader}"
+                ExternLockResponse? response = await $"http://{leader}"
                     .AppendPathSegments("v1/kahuna/extend-lock")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
@@ -98,6 +101,11 @@ public static class MapRoutesExtensions
                     .WithSettings(o => o.HttpVersion = "2.0")
                     .PostStringAsync(payload)
                     .ReceiveJson<ExternLockResponse>();
+                
+                if (response is not null)
+                    response.ServedFrom = $"http://{leader}";
+
+                return response;
             }
             catch (Exception ex)
             {
@@ -110,10 +118,10 @@ public static class MapRoutesExtensions
         app.MapPost("/v1/kahuna/unlock", async (ExternLockRequest request, IKahuna locks, IRaft raft, ILogger<IKahuna> logger) =>
         {
             if (string.IsNullOrEmpty(request.LockName))
-                return new() { Type = LockResponseType.Errored };
+                return new() { Type = LockResponseType.InvalidInput };
 
             if (string.IsNullOrEmpty(request.LockId))
-                return new() { Type = LockResponseType.Errored };
+                return new() { Type = LockResponseType.InvalidInput };
             
             int partitionId = raft.GetPartitionKey(request.LockName);
 
@@ -126,7 +134,7 @@ public static class MapRoutesExtensions
             
             string leader = await raft.WaitForLeader(partitionId, CancellationToken.None);
             if (leader == raft.GetLocalEndpoint())
-                throw new RaftException("lol");
+                return new() { Type = LockResponseType.MustRetry };
             
             logger.LogInformation("UNLOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
             
@@ -134,7 +142,7 @@ public static class MapRoutesExtensions
             {
                 string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.ExternLockRequest);
                 
-                return await $"http://{leader}"
+                ExternLockResponse? response = await $"http://{leader}"
                     .AppendPathSegments("v1/kahuna/unlock")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
@@ -142,6 +150,11 @@ public static class MapRoutesExtensions
                     .WithSettings(o => o.HttpVersion = "2.0")
                     .PostStringAsync(payload)
                     .ReceiveJson<ExternLockResponse>();
+                
+                if (response is not null)
+                    response.ServedFrom = $"http://{leader}";
+
+                return response;
             }
             catch (Exception ex)
             {
@@ -154,7 +167,7 @@ public static class MapRoutesExtensions
         app.MapPost("/v1/kahuna/get-lock", async (ExternGetLockRequest request, IKahuna locks, IRaft raft, ILogger<IKahuna> logger) =>
         {
             if (string.IsNullOrEmpty(request.LockName))
-                return new() { Type = LockResponseType.Errored };
+                return new() { Type = LockResponseType.InvalidInput };
             
             int partitionId = raft.GetPartitionKey(request.LockName);
 
@@ -176,7 +189,7 @@ public static class MapRoutesExtensions
             
             string leader = await raft.WaitForLeader(partitionId, CancellationToken.None);
             if (leader == raft.GetLocalEndpoint())
-                throw new RaftException("lol");
+                return new() { Type = LockResponseType.MustRetry };
             
             logger.LogInformation("GET-LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
             
@@ -184,7 +197,7 @@ public static class MapRoutesExtensions
             {
                 string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.ExternGetLockRequest);
                 
-                return await $"http://{leader}"
+                ExternGetLockResponse? response = await $"http://{leader}"
                     .AppendPathSegments("v1/kahuna/get-lock")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
@@ -192,6 +205,11 @@ public static class MapRoutesExtensions
                     .WithSettings(o => o.HttpVersion = "2.0")
                     .PostStringAsync(payload)
                     .ReceiveJson<ExternGetLockResponse>();
+
+                if (response is not null)
+                    response.ServedFrom = $"http://{leader}";
+
+                return response;
             }
             catch (Exception ex)
             {

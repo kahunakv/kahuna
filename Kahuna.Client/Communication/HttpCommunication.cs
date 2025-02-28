@@ -75,24 +75,36 @@ internal sealed class HttpCommunication
     {
         KahunaLockRequest request = new() { LockName = key, LockId = lockId, ExpiresMs = expiryTime, Consistency = consistency };
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
-
-        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
         
-        KahunaLockResponse? response = await retryPolicy.ExecuteAsync(() =>
-            url
-            .WithOAuthBearerToken("xxx")
-            .AppendPathSegments("v1/kahuna/lock")
-            .WithHeader("Accept", "application/json")
-            .WithHeader("Content-Type", "application/json")
-            .WithTimeout(5)
-            .WithSettings(o => o.HttpVersion = "2.0")
-            .PostStringAsync(payload)
-            .ReceiveJson<KahunaLockResponse>()).ConfigureAwait(false);
-
-        if (response is null)
-            throw new KahunaException("Response is null");    
+        KahunaLockResponse? response;
         
-        return response.Type == LockResponseType.Locked ? KahunaLockAcquireResult.Success : KahunaLockAcquireResult.Conflicted;
+        do
+        {
+            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
+        
+            response = await retryPolicy.ExecuteAsync(() =>
+                url
+                .WithOAuthBearerToken("xxx")
+                .AppendPathSegments("v1/kahuna/lock")
+                .WithHeader("Accept", "application/json")
+                .WithHeader("Content-Type", "application/json")
+                .WithTimeout(5)
+                .WithSettings(o => o.HttpVersion = "2.0")
+                .PostStringAsync(payload)
+                .ReceiveJson<KahunaLockResponse>()).ConfigureAwait(false);
+
+            if (response is null)
+                throw new KahunaException("Response is null", LockResponseType.Errored);
+
+            if (response.Type == LockResponseType.Locked)
+                return KahunaLockAcquireResult.Success;
+            
+            if (response.Type == LockResponseType.Busy)
+                return KahunaLockAcquireResult.Conflicted;
+
+        } while (response.Type == LockResponseType.MustRetry);
+            
+        throw new KahunaException("Failed to lock", response.Type);
     }
     
     internal async Task<bool> TryUnlock(string url, string resource, string lockId, KahunaLockConsistency consistency)
@@ -100,34 +112,49 @@ internal sealed class HttpCommunication
         KahunaLockRequest request = new() { LockName = resource, LockId = lockId, Consistency = consistency };
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
         
-        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
+        KahunaLockResponse? response;
         
-        KahunaLockResponse? response = await retryPolicy.ExecuteAsync(() => 
-            url
-            .WithOAuthBearerToken("xxx")
-            .AppendPathSegments("v1/kahuna/unlock")
-            .WithHeader("Accept", "application/json")
-            .WithHeader("Content-Type", "application/json")
-            .WithTimeout(5)
-            .WithSettings(o => o.HttpVersion = "2.0")
-            .PostStringAsync(payload)
-            .ReceiveJson<KahunaLockResponse>())
-            .ConfigureAwait(false);
+        do
+        {
+            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
+        
+            response = await retryPolicy.ExecuteAsync(() => 
+                url
+                .WithOAuthBearerToken("xxx")
+                .AppendPathSegments("v1/kahuna/unlock")
+                .WithHeader("Accept", "application/json")
+                .WithHeader("Content-Type", "application/json")
+                .WithTimeout(5)
+                .WithSettings(o => o.HttpVersion = "2.0")
+                .PostStringAsync(payload)
+                .ReceiveJson<KahunaLockResponse>())
+                .ConfigureAwait(false);
 
-        if (response is null)
-            throw new KahunaException("Response is null");
+            if (response is null)
+                throw new KahunaException("Response is null", LockResponseType.Errored);
+                
+            if (response.Type == LockResponseType.Unlocked)
+                return true;
+
+        } while (response.Type == LockResponseType.MustRetry);
         
-        return response.Type == LockResponseType.Unlocked;
+        Console.WriteLine(response.Type);
+        
+        throw new KahunaException("Failed to unlock", response.Type);
     }
     
     internal async Task<bool> TryExtend(string url, string resource, string lockId, double expiryTime, KahunaLockConsistency consistency)
     {
         KahunaLockRequest request = new() { LockName = resource, LockId = lockId, ExpiresMs = expiryTime, Consistency = consistency };
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
+
+        KahunaLockResponse? response;
         
-        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
-        
-        KahunaLockResponse? response = await retryPolicy.ExecuteAsync(() => 
+        do
+        {
+            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
+            
+            response = await retryPolicy.ExecuteAsync(() => 
                 url
                     .WithOAuthBearerToken("xxx")
                     .AppendPathSegments("v1/kahuna/extend-lock")
@@ -138,35 +165,49 @@ internal sealed class HttpCommunication
                     .PostStringAsync(payload)
                     .ReceiveJson<KahunaLockResponse>())
             .ConfigureAwait(false);
+            
+            if (response is null)
+                throw new KahunaException("Response is null", LockResponseType.Errored);
+            
+            if (response.Type == LockResponseType.Extended)
+                return true;
+
+        } while (response.Type == LockResponseType.MustRetry);
         
-        return response.Type == LockResponseType.Extended;
+        throw new KahunaException("Failed to extend lock", response.Type);
     }
     
     internal async Task<KahunaLockInfo?> Get(string url, string resource, KahunaLockConsistency consistency)
     {
         KahunaGetRequest request = new() { LockName = resource, Consistency = consistency };
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaGetRequest);
-        
-        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
-        
-        KahunaGetResponse? response = await retryPolicy.ExecuteAsync(() => 
-                url
-                    .WithOAuthBearerToken("xxx")
-                    .AppendPathSegments("v1/kahuna/get-lock")
-                    .WithHeader("Accept", "application/json")
-                    .WithHeader("Content-Type", "application/json")
-                    .WithTimeout(5)
-                    .WithSettings(o => o.HttpVersion = "2.0")
-                    .PostStringAsync(payload)
-                    .ReceiveJson<KahunaGetResponse>())
-            .ConfigureAwait(false);
 
-        if (response is null)
-            throw new KahunaException("Response is null");
+        KahunaGetResponse? response;
 
-        if (response.Type != LockResponseType.Got)
-            return null;
+        do
+        {
+            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
+
+            response = await retryPolicy.ExecuteAsync(() =>
+                    url
+                        .WithOAuthBearerToken("xxx")
+                        .AppendPathSegments("v1/kahuna/get-lock")
+                        .WithHeader("Accept", "application/json")
+                        .WithHeader("Content-Type", "application/json")
+                        .WithTimeout(5)
+                        .WithSettings(o => o.HttpVersion = "2.0")
+                        .PostStringAsync(payload)
+                        .ReceiveJson<KahunaGetResponse>())
+                .ConfigureAwait(false);
+
+            if (response is null)
+                throw new KahunaException("Response is null", LockResponseType.Errored);
+
+            if (response.Type == LockResponseType.Got)
+                return new(response.Owner ?? "", response.Expires, response.FencingToken);
+            
+        } while (response.Type == LockResponseType.MustRetry);
         
-        return new(response.Owner ?? "", response.Expires, response.FencingToken);
+        throw new KahunaException("Failed to get lock information", response.Type);
     }
 }

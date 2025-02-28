@@ -2,6 +2,7 @@
 
 using System.Diagnostics;
 using Kahuna.Client;
+using Kahuna.Client.Communication;
 
 Console.WriteLine("Kahuna Benchmark");
 
@@ -49,7 +50,7 @@ async Task AdquireLockConcurrently(KahunaClient locksx)
     );
 
     if (!redLock.IsAcquired)
-        throw new KahunaException("Not adquired " + lockName);
+        throw new KahunaException("Not acquired " + lockName, LockResponseType.Errored);
 }
 
 static string GetRandomLockName()

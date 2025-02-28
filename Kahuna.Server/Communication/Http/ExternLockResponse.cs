@@ -6,6 +6,9 @@ namespace Kahuna.Communication.Http;
 
 public sealed class ExternLockResponse
 {
+    [JsonPropertyName("servedFrom")]
+    public string? ServedFrom { get; set; }
+    
     [JsonPropertyName("type")]
     public LockResponseType Type { get; set; }
     

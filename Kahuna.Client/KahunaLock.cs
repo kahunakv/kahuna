@@ -1,4 +1,6 @@
 
+using Kahuna.Client.Communication;
+
 namespace Kahuna.Client;
 
 /// <summary>
@@ -20,7 +22,7 @@ public sealed class KahunaLock : IAsyncDisposable
 
     public bool IsAcquired => result == KahunaLockAcquireResult.Success;
     
-    public string LockId => lockId ?? throw new KahunaException("Lock was not acquired");
+    public string LockId => lockId ?? throw new KahunaException("Lock was not acquired", LockResponseType.Errored);
 
     /// <summary>
     /// Constructor
@@ -47,7 +49,7 @@ public sealed class KahunaLock : IAsyncDisposable
     public async Task<bool> TryExtend(TimeSpan duration)
     {
         if (!IsAcquired || string.IsNullOrEmpty(lockId))
-            throw new KahunaException("Lock was not acquired");
+            throw new KahunaException("Lock was not acquired", LockResponseType.Errored);
 
         return await locks.TryExtend(resource, lockId, duration, consistency);
     }
@@ -62,7 +64,7 @@ public sealed class KahunaLock : IAsyncDisposable
     public async Task<bool> TryExtend(int durationMs)
     {
         if (!IsAcquired || string.IsNullOrEmpty(lockId))
-            throw new KahunaException("Lock was not acquired");
+            throw new KahunaException("Lock was not acquired", LockResponseType.Errored);
 
         return await locks.TryExtend(resource, lockId, durationMs, consistency);
     }
@@ -86,7 +88,7 @@ public sealed class KahunaLock : IAsyncDisposable
 
         GC.SuppressFinalize(this);
 
-        if (!string.IsNullOrEmpty(lockId))
+        if (IsAcquired && !string.IsNullOrEmpty(lockId))
             await locks.Unlock(resource, lockId, consistency);
     }
 

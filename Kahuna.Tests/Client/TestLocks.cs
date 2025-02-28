@@ -43,12 +43,11 @@ public class TestLocks
 
         // Dispose the first lock so that the lock becomes available:
         await kLock1.DisposeAsync();
+        await kLock2.DisposeAsync();
 
         // Now try acquiring the lock again:
         await using KahunaLock kLock3 = await locks.GetOrCreateLock(lockName, 1000, consistency: consistency);
         Assert.True(kLock3.IsAcquired);
-        
-        await kLock2.DisposeAsync();
     }
     
     [Theory]
@@ -90,7 +89,7 @@ public class TestLocks
     }
     
     [Theory]
-    //[InlineData(KahunaLockConsistency.Consistent)]
+    [InlineData(KahunaLockConsistency.Consistent)]
     [InlineData(KahunaLockConsistency.Ephemeral)]
     public async Task TestValidateAcquireLockExpiresRace(KahunaLockConsistency consistency)
     {
@@ -108,8 +107,8 @@ public class TestLocks
 
         KahunaLock kLock = await locks.GetOrCreateLock(
             lockName, 
-            expiry: TimeSpan.FromSeconds(1), 
-            wait: TimeSpan.FromSeconds(1), 
+            expiry: TimeSpan.FromSeconds(5), 
+            wait: TimeSpan.FromSeconds(5), 
             retry: TimeSpan.FromMilliseconds(500),
             consistency: consistency
         );
@@ -118,7 +117,7 @@ public class TestLocks
 
         await kLock.DisposeAsync();
 
-        await using KahunaLock kLock2 = await locks.GetOrCreateLock(lockName, TimeSpan.FromSeconds(1), consistency: consistency);
+        await using KahunaLock kLock2 = await locks.GetOrCreateLock(lockName, TimeSpan.FromSeconds(5), consistency: consistency);
         Assert.True(kLock2.IsAcquired);
     }
     

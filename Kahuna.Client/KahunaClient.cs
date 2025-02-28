@@ -149,7 +149,7 @@ public class KahunaClient
             return new(this, resource, await SingleTimeTryAcquireLock(resource, expiry, consistency).ConfigureAwait(false));
         
         if (retry == TimeSpan.Zero)
-            throw new KahunaException("Retry cannot be zero");
+            throw new KahunaException("Retry cannot be zero", LockResponseType.InvalidInput);
         
         return new(this, resource, await PeriodicallyTryAcquireLock(resource, expiry, wait, retry, consistency).ConfigureAwait(false));
     }

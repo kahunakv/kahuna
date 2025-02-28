@@ -17,6 +17,8 @@ EXPOSE 2070
 # copy the built program
 COPY --from=build-env /app .
 
+RUN apk add sqlite
+
 # when starting the container, run dotnet with the built dll
 ENTRYPOINT ["dotnet", "/app/Kahuna.Server.dll"]
 

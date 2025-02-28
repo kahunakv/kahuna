@@ -9,7 +9,7 @@ Kahuna combines scalability, reliability and simplicity, making it an ideal choi
 for applications that require coordinated access to databases, files
 or other shared services.
 
-_Kahuna_ is a Hawaiian word that refers to an expert in any field. Historically,
+> _Kahuna_ is a Hawaiian word that refers to an expert in any field. Historically,
 it has been used to refer to doctors, surgeons and dentists,
 as well as priests, ministers, and sorcerers.
 
@@ -259,7 +259,7 @@ public async Task UpdateBalance(KahunaClient client, string userId)
 }
 ```
 
-#### Multiple attempts to acquire a lock
+### Multiple attempts to acquire a lock
 
 The following example shows how to make multiple attempts to
 acquire a lock (lease) for 10 seconds, retrying every 100 ms:
@@ -297,7 +297,7 @@ public async Task UpdateBalance(KahunaClient client, string userId)
 }
 ```
 
-#### Fencing Tokens
+### Fencing Tokens
 
 Whenever possible, it is also important to use the fencing tokens.
 Even if a client thinks it holds the lock post-lease expiration, fencing tokens prevent stale writes.
@@ -371,7 +371,7 @@ public async Task TryChooseLeader(KahunaClient client, string groupId)
 
     while (true)
     {
-        bool isExtended = await client.TryExtend(TimeSpan.FromSeconds(5));
+        bool isExtended = await myLock.TryExtend(TimeSpan.FromSeconds(5));
         if (!isExtended)
         {
             Console.WriteLine("Lock extension failed!");
