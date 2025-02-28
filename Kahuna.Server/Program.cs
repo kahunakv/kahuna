@@ -1,16 +1,19 @@
 ﻿
+using Nixie;
 using System.Net;
 using CommandLine;
+
 using Kahuna;
-using Kahuna.Communication.Http;
+using Kahuna.Communication.Grpc;
+using Kahuna.Communication.Rest;
 using Kahuna.Locks;
 using Kahuna.Services;
+
 using Kommander;
 using Kommander.Communication;
 using Kommander.Discovery;
 using Kommander.Time;
 using Kommander.WAL;
-using Nixie;
 
 Console.WriteLine("  _           _                     ");
 Console.WriteLine(" | | ____ _| |__  _   _ _ __   __ _ ");
@@ -78,10 +81,15 @@ builder.Services.AddSingleton<ActorSystem>(services => new(services, services.Ge
 builder.Services.AddSingleton<IKahuna, LockManager>();
 builder.Services.AddHostedService<ReplicationService>();
 
+builder.Services.AddGrpc();
+builder.Services.AddGrpcReflection();
+
 WebApplication app = builder.Build();
 
 app.MapRaftRoutes();
-app.MapKahunaRoutes();
+app.MapRestKahunaRoutes();
+app.MapGrpcKahunaRoutes();
+app.MapGrpcReflectionService();
 app.MapGet("/", () => "Kahuna.Server");
 
 Console.WriteLine("Kahuna host detected: {0} {1}", opts.Host, opts.Port);

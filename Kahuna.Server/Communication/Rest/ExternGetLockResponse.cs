@@ -2,7 +2,7 @@
 using Kahuna.Locks;
 using Kommander.Time;
 
-namespace Kahuna.Communication.Http;
+namespace Kahuna.Communication.Rest;
 
 public sealed class ExternGetLockResponse
 {

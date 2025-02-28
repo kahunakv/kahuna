@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+service Locker {
+  rpc TryLock (TryLockRequest) returns (TryLockResponse);
+}
+
+message TryLockRequest {
+  string LockName = 1;
+  optional string LockId = 2;
+  int32 ExpiresMs = 3;
+  GrpcLockConsistency Consistency = 4;
+}
+
+message TryLockResponse {
+  optional string servedFrom = 1;
+  GrpcLockResponseType Type = 2;
+  int64 fencingToken = 3;
+}
+
+enum GrpcLockResponseType {
+  LOCK_RESPONSE_TYPE_LOCKED = 0;
+  LOCK_RESPONSE_TYPE_BUSY = 1;
+  LOCK_RESPONSE_TYPE_EXTENDED = 2;
+  LOCK_RESPONSE_TYPE_UNLOCKED = 3;
+  LOCK_RESPONSE_TYPE_GOT = 4;
+  LOCK_RESPONSE_TYPE_ERRORED = 99;
+  LOCK_RESPONSE_TYPE_INVALID_INPUT = 100;
+  LOCK_RESPONSE_TYPE_MUST_RETRY = 101;
+  LOCK_RESPONSE_TYPE_LOCK_DOES_NOT_EXIST = 102;
+  LOCK_RESPONSE_TYPE_INVALID_OWNER = 103;
+}
+
+enum GrpcLockConsistency {
+  LOCK_CONSISTENCY_EPHEMERAL = 0;
+  LOCK_CONSISTENCY_CONSISTENT = 1;
+  LOCK_CONSISTENCY_REPLICATION_CONSISTENT = 2;
+}

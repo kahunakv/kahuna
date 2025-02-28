@@ -2,7 +2,7 @@
 using System.Text.Json.Serialization;
 using Kahuna.Locks;
 
-namespace Kahuna.Communication.Http;
+namespace Kahuna.Communication.Rest;
 
 public sealed class ExternLockResponse
 {

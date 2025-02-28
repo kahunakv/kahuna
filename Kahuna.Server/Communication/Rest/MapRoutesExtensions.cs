@@ -5,11 +5,11 @@ using Flurl.Http;
 using Kahuna.Locks;
 using Kommander;
 
-namespace Kahuna.Communication.Http;
+namespace Kahuna.Communication.Rest;
 
 public static class MapRoutesExtensions
 {
-    public static void MapKahunaRoutes(this WebApplication app)
+    public static void MapRestKahunaRoutes(this WebApplication app)
     {
         app.MapPost("/v1/kahuna/lock", async (ExternLockRequest request, IKahuna locks, IRaft raft, ILogger<IKahuna> logger) =>
         {

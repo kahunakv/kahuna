@@ -1,7 +1,7 @@
 
 using System.Text.Json.Serialization;
 
-namespace Kahuna.Communication.Http;
+namespace Kahuna.Communication.Rest;
 
 [JsonSerializable(typeof(ExternGetLockRequest))]
 [JsonSerializable(typeof(ExternGetLockResponse))]
