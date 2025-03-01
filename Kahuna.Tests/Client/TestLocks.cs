@@ -1,5 +1,6 @@
 
 using Kahuna.Client;
+using Kahuna.Shared.Locks;
 using Kommander.Time;
 
 namespace Kahuna.Tests.Client;
@@ -16,9 +17,9 @@ public class TestLocks
     }
     
     [Theory]
-    [InlineData(KahunaLockConsistency.Consistent)]
-    [InlineData(KahunaLockConsistency.Ephemeral)]
-    public async Task TestValidateAcquireSingleLock(KahunaLockConsistency consistency)
+    [InlineData(LockConsistency.Consistent)]
+    [InlineData(LockConsistency.Ephemeral)]
+    public async Task TestValidateAcquireSingleLock(LockConsistency consistency)
     {
         string lockName = GetRandomLockName();
 
@@ -28,9 +29,9 @@ public class TestLocks
     }
     
     [Theory]
-    [InlineData(KahunaLockConsistency.Consistent)]
-    [InlineData(KahunaLockConsistency.Ephemeral)]
-    public async Task TestLockAcquisitionAndExpiresWithMilliseconds(KahunaLockConsistency consistency)
+    [InlineData(LockConsistency.Consistent)]
+    [InlineData(LockConsistency.Ephemeral)]
+    public async Task TestLockAcquisitionAndExpiresWithMilliseconds(LockConsistency consistency)
     {
         string lockName = GetRandomLockName();
 
@@ -51,9 +52,9 @@ public class TestLocks
     }
     
     [Theory]
-    [InlineData(KahunaLockConsistency.Consistent)]
-    [InlineData(KahunaLockConsistency.Ephemeral)]
-    public async Task TestValidateAcquireLockExpiresWithTimeSpan(KahunaLockConsistency consistency)
+    [InlineData(LockConsistency.Consistent)]
+    [InlineData(LockConsistency.Ephemeral)]
+    public async Task TestValidateAcquireLockExpiresWithTimeSpan(LockConsistency consistency)
     {
         string lockName = GetRandomLockName();
 
@@ -67,9 +68,9 @@ public class TestLocks
     }
     
     [Theory]
-    [InlineData(KahunaLockConsistency.Consistent)]
-    [InlineData(KahunaLockConsistency.Ephemeral)]
-    public async Task TestValidateAcquireLockExpires4(KahunaLockConsistency consistency)
+    [InlineData(LockConsistency.Consistent)]
+    [InlineData(LockConsistency.Ephemeral)]
+    public async Task TestValidateAcquireLockExpires4(LockConsistency consistency)
     {
         string lockName = GetRandomLockName();
 
@@ -89,9 +90,9 @@ public class TestLocks
     }
     
     [Theory]
-    [InlineData(KahunaLockConsistency.Consistent)]
-    [InlineData(KahunaLockConsistency.Ephemeral)]
-    public async Task TestValidateAcquireLockExpiresRace(KahunaLockConsistency consistency)
+    [InlineData(LockConsistency.Consistent)]
+    [InlineData(LockConsistency.Ephemeral)]
+    public async Task TestValidateAcquireLockExpiresRace(LockConsistency consistency)
     {
         List<Task> tasks = new(50);
 
@@ -101,7 +102,7 @@ public class TestLocks
         await Task.WhenAll(tasks);
     }
     
-    private async Task AcquireLockConcurrently(KahunaLockConsistency consistency)
+    private async Task AcquireLockConcurrently(LockConsistency consistency)
     {
         string lockName = GetRandomLockName();
 
@@ -122,9 +123,9 @@ public class TestLocks
     }
     
     [Theory]
-    [InlineData(KahunaLockConsistency.Consistent)]
-    [InlineData(KahunaLockConsistency.Ephemeral)]
-    public async Task TestValidateAcquireSameLockExpiresRace(KahunaLockConsistency consistency)
+    [InlineData(LockConsistency.Consistent)]
+    [InlineData(LockConsistency.Ephemeral)]
+    public async Task TestValidateAcquireSameLockExpiresRace(LockConsistency consistency)
     {
         string lockName = GetRandomLockName();
         
@@ -138,7 +139,7 @@ public class TestLocks
         Assert.Equal(10, total);
     }
     
-    private async Task AcquireSameLockConcurrently(string lockName, KahunaLockConsistency consistency)
+    private async Task AcquireSameLockConcurrently(string lockName, LockConsistency consistency)
     {
         await using KahunaLock kLock = await locks.GetOrCreateLock(
             lockName, 
@@ -155,9 +156,9 @@ public class TestLocks
     }
     
     [Theory]
-    [InlineData(KahunaLockConsistency.Consistent)]
-    [InlineData(KahunaLockConsistency.Ephemeral)]
-    public async Task TestValidateAcquireAndExtendLock(KahunaLockConsistency consistency)
+    [InlineData(LockConsistency.Consistent)]
+    [InlineData(LockConsistency.Ephemeral)]
+    public async Task TestValidateAcquireAndExtendLock(LockConsistency consistency)
     {
         string lockName = GetRandomLockName();
 

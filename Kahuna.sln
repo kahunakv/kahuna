@@ -8,6 +8,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kahuna.Tests", "Kahuna.Test
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kahuna.Benchmark", "Kahuna.Benchmark\Kahuna.Benchmark.csproj", "{19F520DC-6916-457A-938C-327BF7F6F08F}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kahuna.Shared", "Kahuna.Shared\Kahuna.Shared.csproj", "{315888B3-57BE-4038-8AB6-36EF9DD54F56}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -30,5 +32,9 @@ Global
 		{19F520DC-6916-457A-938C-327BF7F6F08F}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{19F520DC-6916-457A-938C-327BF7F6F08F}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{19F520DC-6916-457A-938C-327BF7F6F08F}.Release|Any CPU.Build.0 = Release|Any CPU
+		{315888B3-57BE-4038-8AB6-36EF9DD54F56}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{315888B3-57BE-4038-8AB6-36EF9DD54F56}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{315888B3-57BE-4038-8AB6-36EF9DD54F56}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{315888B3-57BE-4038-8AB6-36EF9DD54F56}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

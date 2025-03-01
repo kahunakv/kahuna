@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Flurl.Http;
 using Kahuna.Client.Communication;
+using Kahuna.Shared.Locks;
 using Microsoft.Extensions.Logging;
 
 namespace Kahuna.Client;
@@ -45,17 +46,17 @@ public class KahunaClient
         this.communication = new(logger);
     }
     
-    private async Task<KahunaLockAcquireResult> TryAcquireLock(string resource, string lockId, TimeSpan expiryTime, KahunaLockConsistency consistency)
+    private async Task<KahunaLockAcquireResult> TryAcquireLock(string resource, string lockId, TimeSpan expiryTime, LockConsistency consistency)
     {
         return await communication.TryAcquireLock(GetRoundRobinUrl(), resource, lockId, (int)expiryTime.TotalMilliseconds, consistency).ConfigureAwait(false);
     }
     
-    private async Task<(KahunaLockAcquireResult, string?, KahunaLockConsistency)> PeriodicallyTryAcquireLock(
+    private async Task<(KahunaLockAcquireResult, string?, LockConsistency)> PeriodicallyTryAcquireLock(
         string resource, 
         TimeSpan expiryTime, 
         TimeSpan wait, 
         TimeSpan retry,
-        KahunaLockConsistency consistency
+        LockConsistency consistency
     )
     {
         try
@@ -95,7 +96,7 @@ public class KahunaClient
     /// <param name="expiryTime"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    private async Task<(KahunaLockAcquireResult, string?, KahunaLockConsistency)> SingleTimeTryAcquireLock(string resource, TimeSpan expiryTime, KahunaLockConsistency consistency)
+    private async Task<(KahunaLockAcquireResult, string?, LockConsistency)> SingleTimeTryAcquireLock(string resource, TimeSpan expiryTime, LockConsistency consistency)
     {
         try
         {
@@ -123,7 +124,7 @@ public class KahunaClient
     /// <param name="retryTime"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<KahunaLock> GetOrCreateLock(string resource, int expiryTime = 30000, int waitTime = 0, int retryTime = 0, KahunaLockConsistency consistency = KahunaLockConsistency.Ephemeral)
+    public async Task<KahunaLock> GetOrCreateLock(string resource, int expiryTime = 30000, int waitTime = 0, int retryTime = 0, LockConsistency consistency = LockConsistency.Ephemeral)
     {
         TimeSpan expiry = TimeSpan.FromMilliseconds(expiryTime);
         TimeSpan wait = TimeSpan.FromMilliseconds(waitTime);
@@ -143,7 +144,7 @@ public class KahunaClient
     /// <param name="consistency"></param>
     /// <returns></returns>
     /// <exception cref="KahunaException"></exception>
-    public async Task<KahunaLock> GetOrCreateLock(string resource, TimeSpan expiry, TimeSpan wait, TimeSpan retry, KahunaLockConsistency consistency = KahunaLockConsistency.Ephemeral)
+    public async Task<KahunaLock> GetOrCreateLock(string resource, TimeSpan expiry, TimeSpan wait, TimeSpan retry, LockConsistency consistency = LockConsistency.Ephemeral)
     {        
         if (wait == TimeSpan.Zero)
             return new(this, resource, await SingleTimeTryAcquireLock(resource, expiry, consistency).ConfigureAwait(false));
@@ -162,7 +163,7 @@ public class KahunaClient
     /// <param name="expiry"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<KahunaLock> GetOrCreateLock(string resource, TimeSpan expiry, KahunaLockConsistency consistency = KahunaLockConsistency.Ephemeral)
+    public async Task<KahunaLock> GetOrCreateLock(string resource, TimeSpan expiry, LockConsistency consistency = LockConsistency.Ephemeral)
     {
         return new(this, resource, await SingleTimeTryAcquireLock(resource, expiry, consistency).ConfigureAwait(false));
     }
@@ -176,11 +177,11 @@ public class KahunaClient
     /// <param name="duration"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<bool> TryExtend(string resource, string owner, TimeSpan duration, KahunaLockConsistency consistency = KahunaLockConsistency.Ephemeral)
+    public async Task<bool> TryExtend(string resource, string owner, TimeSpan duration, LockConsistency consistency = LockConsistency.Ephemeral)
     {
         try
         {
-            return await communication.TryExtend(GetRoundRobinUrl(), resource, owner, duration.TotalMilliseconds, consistency).ConfigureAwait(false);
+            return await communication.TryExtend(GetRoundRobinUrl(), resource, owner, (int)duration.TotalMilliseconds, consistency).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -198,7 +199,7 @@ public class KahunaClient
     /// <param name="durationMs"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<bool> TryExtend(string resource, string owner, int durationMs, KahunaLockConsistency consistency = KahunaLockConsistency.Ephemeral)
+    public async Task<bool> TryExtend(string resource, string owner, int durationMs, LockConsistency consistency = LockConsistency.Ephemeral)
     {
         try
         {
@@ -218,7 +219,7 @@ public class KahunaClient
     /// <param name="lockId"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<bool> Unlock(string resource, string lockId, KahunaLockConsistency consistency = KahunaLockConsistency.Ephemeral)
+    public async Task<bool> Unlock(string resource, string lockId, LockConsistency consistency = LockConsistency.Ephemeral)
     {
         try
         {
@@ -237,7 +238,7 @@ public class KahunaClient
     /// <param name="resource"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<KahunaLockInfo?> GetLockInfo(string resource, KahunaLockConsistency consistency = KahunaLockConsistency.Ephemeral)
+    public async Task<KahunaLockInfo?> GetLockInfo(string resource, LockConsistency consistency = LockConsistency.Ephemeral)
     {
         try
         {

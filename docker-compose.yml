@@ -1,47 +1,58 @@
-version: "3.8"
 
 services:
-  kahuna1:
-    image: kahuna:latest   
+  kahuna1:    
+    build:
+      context: . #current dir as build context
+      args:
+        KAHUNA_RAFT_HOST: 172.30.0.2
+        KAHUNA_RAFT_PORT: 8083
+        KAHUNA_HTTP_PORTS: 2070 8081
+        KAHUNA_HTTPS_PORTS: 2071 8082
+        KAHUNA_INITIAL_CLUSTER: 172.30.0.3:8083 172.30.0.4:8085        
     container_name: kahuna1
-    environment:
-      - KAHUNA_HOST=kahuna1
-      - KAHUNA_PORT=8081
-      - ASPNETCORE_URLS=http://*:8081;http://*:2070
     ports:
       - "8081:2070"
+      - "8082:2071"
     volumes:
-      - kahuna1-data:/app/data  
+      - kahuna1-data:/app/data      
     networks:
       custom_net:
         ipv4_address: 172.30.0.2
 
   kahuna2:
-    image: kahuna:latest
-    container_name: kahuna2
-    environment:
-      - KAHUNA_HOST=kahuna2
-      - KAHUNA_PORT=8082
-      - ASPNETCORE_URLS=http://*:8082;http://*:2070
+    build:
+      context: . #current dir as build context
+      args:
+        KAHUNA_RAFT_HOST: 172.30.0.3
+        KAHUNA_RAFT_PORT: 8083
+        KAHUNA_HTTP_PORTS: 2070 8083
+        KAHUNA_HTTPS_PORTS: 2071 8084
+        KAHUNA_INITIAL_CLUSTER: 172.30.0.2:8081 172.30.0.4:8085        
+    container_name: kahuna2    
     ports:
-      - "8082:2070"
+      - "8083:2070"
+      - "8084:2071"
     volumes:
-      - kahuna2-data:/app/data    
+      - kahuna2-data:/app/data      
     networks:
       custom_net:
         ipv4_address: 172.30.0.3
 
   kahuna3:
-    image: kahuna:latest
-    container_name: kahuna3
-    environment:
-      - KAHUNA_HOST=kahuna3
-      - KAHUNA_PORT=8083
-      - ASPNETCORE_URLS=http://*:8083;http://*:2070
+    build:
+      context: . #current dir as build context
+      args:
+        KAHUNA_RAFT_HOST: 172.30.0.4
+        KAHUNA_RAFT_PORT: 8085
+        KAHUNA_HTTP_PORTS: 2070 8085
+        KAHUNA_HTTPS_PORTS: 2071 8086
+        KAHUNA_INITIAL_CLUSTER: 172.30.0.2:8081 172.30.0.3:8083        
+    container_name: kahuna3    
     ports:
-      - "8083:2070"
+      - "8085:2070"
+      - "8086:2071"
     volumes:
-      - kahuna3-data:/app/data    
+      - kahuna3-data:/app/data      
     networks:
       custom_net:
         ipv4_address: 172.30.0.4
@@ -49,7 +60,7 @@ services:
 volumes:
   kahuna1-data:
   kahuna2-data:
-  kahuna3-data:        
+  kahuna3-data:
 
 networks:
   custom_net:

@@ -1,4 +1,6 @@
 
+using Kahuna.Shared.Locks;
+
 namespace Kahuna.Locks;
 
 /// <summary>

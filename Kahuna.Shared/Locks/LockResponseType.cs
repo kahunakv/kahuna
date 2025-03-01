@@ -1,5 +1,5 @@
 
-namespace Kahuna.Client.Communication;
+namespace Kahuna.Shared.Locks;
 
 public enum LockResponseType
 {

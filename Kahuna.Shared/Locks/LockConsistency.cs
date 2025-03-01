@@ -1,5 +1,5 @@
 
-namespace Kahuna.Locks;
+namespace Kahuna.Shared.Locks;
 
 public enum LockConsistency
 {

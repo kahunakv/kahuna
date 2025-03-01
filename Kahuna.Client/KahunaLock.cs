@@ -1,5 +1,5 @@
 
-using Kahuna.Client.Communication;
+using Kahuna.Shared.Locks;
 
 namespace Kahuna.Client;
 
@@ -16,7 +16,7 @@ public sealed class KahunaLock : IAsyncDisposable
     
     private readonly string? lockId;
 
-    private readonly KahunaLockConsistency consistency;
+    private readonly LockConsistency consistency;
 
     private bool disposed;
 
@@ -30,7 +30,7 @@ public sealed class KahunaLock : IAsyncDisposable
     /// <param name="locks"></param>
     /// <param name="resource"></param>
     /// <param name="lockInfo"></param>
-    public KahunaLock(KahunaClient locks, string resource, (KahunaLockAcquireResult result, string? lockId, KahunaLockConsistency consistency) lockInfo)
+    public KahunaLock(KahunaClient locks, string resource, (KahunaLockAcquireResult result, string? lockId, LockConsistency consistency) lockInfo)
     {
         this.locks = locks;
         this.resource = resource;

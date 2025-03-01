@@ -1,6 +1,7 @@
 
 using Grpc.Core;
-using Kahuna.Locks;
+using Grpc.Net.Client;
+using Kahuna.Shared.Locks;
 using Kommander;
 
 namespace Kahuna.Communication.Grpc;
@@ -18,6 +19,28 @@ public class LocksService : Locker.LockerBase
         this.locks = locks;
         this.raft = raft;
         this.logger = logger;
+    }
+
+    public HttpClientHandler GetHandler()
+    {
+        HttpClientHandler handler = new();
+        
+        handler.ServerCertificateCustomValidationCallback = (httpRequestMessage, cert, cetChain, policyErrors) =>
+        {
+            // Optionally, check for other policyErrors
+            if (policyErrors == System.Net.Security.SslPolicyErrors.None)
+                return true;
+
+            // Compare the certificate's thumbprint to our trusted thumbprint.
+            //if (cert is X509Certificate2 certificate && certificate.Thumbprint.Equals(trustedThumbprint, StringComparison.OrdinalIgnoreCase))
+            //{
+                return true;
+            //}
+
+            //return false;
+        };
+        
+        return handler;
     }
     
     public override async Task<TryLockResponse> TryLock(TryLockRequest request, ServerCallContext context)
@@ -43,10 +66,11 @@ public class LocksService : Locker.LockerBase
             };
         
         logger.LogInformation("LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
-
-        return new()
-        {
-            Type = GrpcLockResponseType.LockResponseTypeMustRetry
-        };
+        
+        GrpcChannel channel = GrpcChannel.ForAddress($"https://{leader}", new() { HttpHandler = GetHandler() });
+        
+        Locker.LockerClient client = new(channel);
+        
+        return await client.TryLockAsync(request);
     }
 }

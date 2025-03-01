@@ -2,7 +2,8 @@
 using System.Net;
 using System.Text.Json;
 using Flurl.Http;
-using Kahuna.Client.Communication.Data;
+using Kahuna.Shared.Communication.Rest;
+using Kahuna.Shared.Locks;
 using Microsoft.Extensions.Logging;
 using Polly;
 using Polly.Contrib.WaitAndRetry;
@@ -71,7 +72,7 @@ internal sealed class HttpCommunication
         };
     }
     
-    internal async Task<KahunaLockAcquireResult> TryAcquireLock(string url, string key, string lockId, int expiryTime, KahunaLockConsistency consistency)
+    internal async Task<KahunaLockAcquireResult> TryAcquireLock(string url, string key, string lockId, int expiryTime, LockConsistency consistency)
     {
         KahunaLockRequest request = new() { LockName = key, LockId = lockId, ExpiresMs = expiryTime, Consistency = consistency };
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
@@ -107,7 +108,7 @@ internal sealed class HttpCommunication
         throw new KahunaException("Failed to lock", response.Type);
     }
     
-    internal async Task<bool> TryUnlock(string url, string resource, string lockId, KahunaLockConsistency consistency)
+    internal async Task<bool> TryUnlock(string url, string resource, string lockId, LockConsistency consistency)
     {
         KahunaLockRequest request = new() { LockName = resource, LockId = lockId, Consistency = consistency };
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
@@ -143,7 +144,7 @@ internal sealed class HttpCommunication
         throw new KahunaException("Failed to unlock", response.Type);
     }
     
-    internal async Task<bool> TryExtend(string url, string resource, string lockId, double expiryTime, KahunaLockConsistency consistency)
+    internal async Task<bool> TryExtend(string url, string resource, string lockId, int expiryTime, LockConsistency consistency)
     {
         KahunaLockRequest request = new() { LockName = resource, LockId = lockId, ExpiresMs = expiryTime, Consistency = consistency };
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
@@ -177,12 +178,12 @@ internal sealed class HttpCommunication
         throw new KahunaException("Failed to extend lock", response.Type);
     }
     
-    internal async Task<KahunaLockInfo?> Get(string url, string resource, KahunaLockConsistency consistency)
+    internal async Task<KahunaLockInfo?> Get(string url, string resource, LockConsistency consistency)
     {
-        KahunaGetRequest request = new() { LockName = resource, Consistency = consistency };
-        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaGetRequest);
+        KahunaGetLockRequest request = new() { LockName = resource, Consistency = consistency };
+        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaGetLockRequest);
 
-        KahunaGetResponse? response;
+        KahunaGetLockResponse? response;
 
         do
         {
@@ -197,7 +198,7 @@ internal sealed class HttpCommunication
                         .WithTimeout(5)
                         .WithSettings(o => o.HttpVersion = "2.0")
                         .PostStringAsync(payload)
-                        .ReceiveJson<KahunaGetResponse>())
+                        .ReceiveJson<KahunaGetLockResponse>())
                 .ConfigureAwait(false);
 
             if (response is null)

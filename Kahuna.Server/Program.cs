@@ -30,47 +30,21 @@ if (opts is null)
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
-List<RaftNode> nodes = [];
-    
-string[] cluster = !string.IsNullOrEmpty(opts.InitialCluster) ? opts.InitialCluster.Split(',') : [];
-
-if (cluster.Length == 0)
-{
-    string? kahunaHost = Environment.GetEnvironmentVariable("KAHUNA_HOST");
-    if (opts.Host == "*" && !string.IsNullOrEmpty(kahunaHost))
-    {                        
-        opts.Host = Dns.GetHostAddresses(kahunaHost)[0].ToString();            
-            
-        nodes =
-        [
-            new(Dns.GetHostAddresses("kahuna1")[0] + ":8081"),
-            new(Dns.GetHostAddresses("kahuna2")[0] + ":8082"),
-            new(Dns.GetHostAddresses("kahuna3")[0] + ":8083")
-        ];                    
-    }
-
-    string? kahunaPort = Environment.GetEnvironmentVariable("KAHUNA_PORT");
-    if (opts.Port == 2070 && !string.IsNullOrEmpty(kahunaPort))
-        opts.Port = int.Parse(kahunaPort);
-
-    nodes.RemoveAll(x => x.Endpoint == opts.Host + ":" + opts.Port);
-}
-
 // Try to assemble a Kahuna cluster from static discovery
 builder.Services.AddSingleton<IRaft>(services =>
 {
     RaftConfiguration configuration = new()
     {
-        Host = opts.Host,
-        Port = opts.Port,
+        Host = opts.RaftHost,
+        Port = opts.RaftPort,
         MaxPartitions = opts.InitialClusterPartitions
     };
     
     return new RaftManager(
         services.GetRequiredService<ActorSystem>(),
         configuration,
-        new StaticDiscovery(nodes),
-        new SqliteWAL(path: "/app/data", version: "v2"),
+        new StaticDiscovery(opts.InitialCluster is not null ? [.. opts.InitialCluster.Select(k => new RaftNode(k))] : []),
+        new SqliteWAL(path: opts.SqliteWalPath, version: opts.SqliteWalRevision),
         new HttpCommunication(),
         new HybridLogicalClock(),
         services.GetRequiredService<ILogger<IRaft>>()
@@ -84,6 +58,34 @@ builder.Services.AddHostedService<ReplicationService>();
 builder.Services.AddGrpc();
 builder.Services.AddGrpcReflection();
 
+foreach (var x in Environment.GetCommandLineArgs())
+    Console.WriteLine(x);
+
+builder.WebHost.ConfigureKestrel(options =>
+{
+    if (opts.HttpPorts is null || !opts.HttpPorts.Any())
+        options.Listen(IPAddress.Any, 2070, _ => { });
+    else
+        foreach (string port in opts.HttpPorts)
+        {
+            Console.WriteLine($"Listening on port {port}");
+            options.Listen(IPAddress.Any, int.Parse(port), _ => { });
+        }
+
+    if (opts.HttpsPorts is null || !opts.HttpsPorts.Any())
+        options.Listen(IPAddress.Any, 2071, _ => { });
+    else
+    {
+        foreach (string port in opts.HttpsPorts)
+        {
+            options.Listen(IPAddress.Any, int.Parse(port), listenOptions =>
+            {
+                listenOptions.UseHttps(opts.HttpsCertificate, opts.HttpsCertificatePassword);
+            });
+        }
+    }
+});
+
 WebApplication app = builder.Build();
 
 app.MapRaftRoutes();
@@ -91,8 +93,6 @@ app.MapRestKahunaRoutes();
 app.MapGrpcKahunaRoutes();
 app.MapGrpcReflectionService();
 app.MapGet("/", () => "Kahuna.Server");
-
-Console.WriteLine("Kahuna host detected: {0} {1}", opts.Host, opts.Port);
 
 app.Run();
 

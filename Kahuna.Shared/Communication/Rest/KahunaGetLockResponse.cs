@@ -1,10 +1,10 @@
 
-using Kahuna.Locks;
 using Kommander.Time;
+using Kahuna.Shared.Locks;
 
-namespace Kahuna.Communication.Rest;
+namespace Kahuna.Shared.Communication.Rest;
 
-public sealed class ExternGetLockResponse
+public sealed class KahunaGetLockResponse
 {
     public string? ServedFrom { get; set; }
     

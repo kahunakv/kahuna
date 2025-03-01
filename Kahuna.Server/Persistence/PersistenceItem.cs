@@ -1,5 +1,6 @@
 
 using Kahuna.Locks;
+using Kahuna.Shared.Locks;
 using Kommander.Time;
 
 namespace Kahuna.Persistence;

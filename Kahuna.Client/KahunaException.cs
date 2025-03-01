@@ -1,5 +1,5 @@
 
-using Kahuna.Client.Communication;
+using Kahuna.Shared.Locks;
 
 namespace Kahuna.Client;
 

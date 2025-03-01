@@ -3,6 +3,8 @@ using System.Text.Json;
 using Flurl;
 using Flurl.Http;
 using Kahuna.Locks;
+using Kahuna.Shared.Communication.Rest;
+using Kahuna.Shared.Locks;
 using Kommander;
 
 namespace Kahuna.Communication.Rest;
@@ -11,7 +13,7 @@ public static class MapRoutesExtensions
 {
     public static void MapRestKahunaRoutes(this WebApplication app)
     {
-        app.MapPost("/v1/kahuna/lock", async (ExternLockRequest request, IKahuna locks, IRaft raft, ILogger<IKahuna> logger) =>
+        app.MapPost("/v1/kahuna/lock", async (KahunaLockRequest request, IKahuna locks, IRaft raft, ILogger<IKahuna> logger) =>
         {
             if (string.IsNullOrEmpty(request.LockName))
                 return new() { Type = LockResponseType.Errored };
@@ -39,16 +41,16 @@ public static class MapRoutesExtensions
 
             try
             {
-                string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.ExternLockRequest);
+                string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
 
-                ExternLockResponse? response = await $"http://{leader}"
+                KahunaLockResponse? response = await $"http://{leader}"
                     .AppendPathSegments("v1/kahuna/lock")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
                     .WithTimeout(5)
                     .WithSettings(o => o.HttpVersion = "2.0")
                     .PostStringAsync(payload)
-                    .ReceiveJson<ExternLockResponse>();
+                    .ReceiveJson<KahunaLockResponse>();
                 
                 if (response is not null)
                     response.ServedFrom = $"http://{leader}";
@@ -63,7 +65,7 @@ public static class MapRoutesExtensions
             }
         });
 
-        app.MapPost("/v1/kahuna/extend-lock", async (ExternLockRequest request, IKahuna locks, IRaft raft, ILogger<IKahuna> logger) =>
+        app.MapPost("/v1/kahuna/extend-lock", async (KahunaLockRequest request, IKahuna locks, IRaft raft, ILogger<IKahuna> logger) =>
         {
             if (string.IsNullOrEmpty(request.LockName))
                 return new() { Type = LockResponseType.InvalidInput };
@@ -91,16 +93,16 @@ public static class MapRoutesExtensions
             
             try
             {
-                string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.ExternLockRequest);
+                string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
                 
-                ExternLockResponse? response = await $"http://{leader}"
+                KahunaLockResponse? response = await $"http://{leader}"
                     .AppendPathSegments("v1/kahuna/extend-lock")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
                     .WithTimeout(5)
                     .WithSettings(o => o.HttpVersion = "2.0")
                     .PostStringAsync(payload)
-                    .ReceiveJson<ExternLockResponse>();
+                    .ReceiveJson<KahunaLockResponse>();
                 
                 if (response is not null)
                     response.ServedFrom = $"http://{leader}";
@@ -115,7 +117,7 @@ public static class MapRoutesExtensions
             }
         });
 
-        app.MapPost("/v1/kahuna/unlock", async (ExternLockRequest request, IKahuna locks, IRaft raft, ILogger<IKahuna> logger) =>
+        app.MapPost("/v1/kahuna/unlock", async (KahunaLockRequest request, IKahuna locks, IRaft raft, ILogger<IKahuna> logger) =>
         {
             if (string.IsNullOrEmpty(request.LockName))
                 return new() { Type = LockResponseType.InvalidInput };
@@ -140,16 +142,16 @@ public static class MapRoutesExtensions
             
             try
             {
-                string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.ExternLockRequest);
+                string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
                 
-                ExternLockResponse? response = await $"http://{leader}"
+                KahunaLockResponse? response = await $"http://{leader}"
                     .AppendPathSegments("v1/kahuna/unlock")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
                     .WithTimeout(5)
                     .WithSettings(o => o.HttpVersion = "2.0")
                     .PostStringAsync(payload)
-                    .ReceiveJson<ExternLockResponse>();
+                    .ReceiveJson<KahunaLockResponse>();
                 
                 if (response is not null)
                     response.ServedFrom = $"http://{leader}";
@@ -164,7 +166,7 @@ public static class MapRoutesExtensions
             }
         });
 
-        app.MapPost("/v1/kahuna/get-lock", async (ExternGetLockRequest request, IKahuna locks, IRaft raft, ILogger<IKahuna> logger) =>
+        app.MapPost("/v1/kahuna/get-lock", async (KahunaGetLockRequest request, IKahuna locks, IRaft raft, ILogger<IKahuna> logger) =>
         {
             if (string.IsNullOrEmpty(request.LockName))
                 return new() { Type = LockResponseType.InvalidInput };
@@ -195,16 +197,16 @@ public static class MapRoutesExtensions
             
             try
             {
-                string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.ExternGetLockRequest);
+                string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaGetLockRequest);
                 
-                ExternGetLockResponse? response = await $"http://{leader}"
+                KahunaGetLockResponse? response = await $"http://{leader}"
                     .AppendPathSegments("v1/kahuna/get-lock")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
                     .WithTimeout(5)
                     .WithSettings(o => o.HttpVersion = "2.0")
                     .PostStringAsync(payload)
-                    .ReceiveJson<ExternGetLockResponse>();
+                    .ReceiveJson<KahunaGetLockResponse>();
 
                 if (response is not null)
                     response.ServedFrom = $"http://{leader}";

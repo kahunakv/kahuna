@@ -1,10 +1,10 @@
 
+using Kahuna.Shared.Locks;
 using System.Text.Json.Serialization;
-using Kahuna.Locks;
 
-namespace Kahuna.Communication.Rest;
+namespace Kahuna.Shared.Communication.Rest;
 
-public sealed class ExternGetLockRequest
+public sealed class KahunaGetLockRequest
 {
     [JsonPropertyName("lockName")]
     public string? LockName { get; set; }

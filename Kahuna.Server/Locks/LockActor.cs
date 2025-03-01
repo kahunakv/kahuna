@@ -2,6 +2,7 @@
 using Kahuna.Persistence;
 using Kahuna.Replication;
 using Kahuna.Replication.Protos;
+using Kahuna.Shared.Locks;
 using Kommander;
 using Kommander.Time;
 using Nixie;

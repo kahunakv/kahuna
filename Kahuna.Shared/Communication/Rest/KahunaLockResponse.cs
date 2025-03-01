@@ -1,10 +1,10 @@
 
+using Kahuna.Shared.Locks;
 using System.Text.Json.Serialization;
-using Kahuna.Locks;
 
-namespace Kahuna.Communication.Rest;
+namespace Kahuna.Shared.Communication.Rest;
 
-public sealed class ExternLockResponse
+public sealed class KahunaLockResponse
 {
     [JsonPropertyName("servedFrom")]
     public string? ServedFrom { get; set; }

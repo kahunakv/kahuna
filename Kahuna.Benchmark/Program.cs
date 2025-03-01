@@ -2,7 +2,7 @@
 
 using System.Diagnostics;
 using Kahuna.Client;
-using Kahuna.Client.Communication;
+using Kahuna.Shared.Locks;
 
 Console.WriteLine("Kahuna Benchmark");
 
@@ -46,7 +46,7 @@ async Task AdquireLockConcurrently(KahunaClient locksx)
     await using KahunaLock redLock = await locksx.GetOrCreateLock(
         lockName, 
         expiry: TimeSpan.FromSeconds(5),
-        consistency: KahunaLockConsistency.Ephemeral
+        consistency: LockConsistency.Ephemeral
     );
 
     if (!redLock.IsAcquired)
