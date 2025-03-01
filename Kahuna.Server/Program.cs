@@ -6,6 +6,7 @@ using CommandLine;
 using Kahuna;
 using Kahuna.Communication.Grpc;
 using Kahuna.Communication.Rest;
+using Kahuna.Configuration;
 using Kahuna.Locks;
 using Kahuna.Services;
 
@@ -59,6 +60,7 @@ builder.Services.AddHostedService<ReplicationService>();
 builder.Services.AddGrpc();
 builder.Services.AddGrpcReflection();
 
+// Listen on all http/https ports in the configuration    
 builder.WebHost.ConfigureKestrel(options =>
 {
     if (opts.HttpPorts is null || !opts.HttpPorts.Any())
@@ -84,10 +86,20 @@ builder.WebHost.ConfigureKestrel(options =>
     }
 });
 
+// Build Kahuna configuration
+KahunaConfiguration configuration = new()
+{
+    HttpsCertificate = opts.HttpsCertificate,
+    HttpsCertificatePassword = opts.HttpsCertificatePassword
+};
+
+builder.Services.AddSingleton(configuration);
+
+// Start server
 WebApplication app = builder.Build();
 
-app.MapGrpcKahunaRoutes();
 app.MapRestKahunaRoutes();
+app.MapGrpcRaftRoutes();
 app.MapGrpcKahunaRoutes();
 app.MapGrpcReflectionService();
 

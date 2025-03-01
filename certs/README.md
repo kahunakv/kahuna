@@ -1,4 +1,6 @@
 
+Generate a self-signed certificate (no password):
+
 ```sh
 openssl genrsa -out development-private.key 2048
 openssl req -new -nodes -config san.cnf -keyout development-private.key -out development-certificate.csr
@@ -10,5 +12,5 @@ openssl pkcs12 -export -out development-certificate.pfx -inkey development-priva
 Trust certificate on mac:
 
 ```sh
-
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain development-certificate.crt
 ```

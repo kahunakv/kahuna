@@ -21,11 +21,10 @@ as well as priests, ministers, and sorcerers.
 
 - [Overview](#overview)
 - [What Is a Distributed Lock?](#what-is-a-distributed-lock)
-- [Key Features](#key-features)
 - [API](#api)
 - [Leases](#leases)
-- [Consistency Levels](#consistency-levels) 
-- [Server-Installation](#server-installation) 
+- [Consistency Levels](#consistency-levels)
+- [Server-Installation](#server-installation)
 - [Client-Installation](#client-installation)
 - [Usage & Examples](#usage--examples)
 - [Client SDK for .NET](#client-sdk-for-net)
@@ -388,7 +387,7 @@ public async Task TryChooseLeader(KahunaClient client, string groupId)
 
 ### Retrieve information about a lock
 
-You can also retrieve information about a lock, such as the current lock's owner 
+You can also retrieve information about a lock, such as the current lock's owner
 and remaining time for the lock to expire:
 
 ```csharp
@@ -397,25 +396,25 @@ using Kahuna.Client;
 public async Task TryChooseLeader(KahunaClient client, string groupId)
 {
     await using KahunaLock myLock = await client.GetOrCreateLock(
-        "group-leader-" + groupId, 
+        "group-leader-" + groupId,
         expiry: TimeSpan.FromSeconds(5)
     );
 
     if (!myLock.IsAcquired)
     {
         Console.WriteLine("Lock not acquired!");
-        
+
         var lockInfo = await myLock.GetInfo();
-        
+
         Console.WriteLine($"Lock owner: {lockInfo.Owner}");
-        Console.WriteLine($"Expires: {lockInfo.Expires}");       
-    }                                                             
+        Console.WriteLine($"Expires: {lockInfo.Expires}");
+    }
 }
 ```
 
 ### Configure a pool of endpoints
 
-If you want to configure a pool of Kahuna endpoints belonging to the 
+If you want to configure a pool of Kahuna endpoints belonging to the
 same cluster so that traffic is distributed in a round-robin manner:
 
 ```csharp
@@ -440,12 +439,12 @@ using Kahuna.Client;
 
 public async Task UpdateBalance(KahunaClient client, string userId)
 {
-    // acquire a lock with strong consistency, ensuring that the lock state is 
+    // acquire a lock with strong consistency, ensuring that the lock state is
     // replicated across all nodes in the Kahuna cluster
     // in case of failure or network partition, the lock state is guaranteed to be consistent
-    
+
     await using KahunaLock myLock = await client.GetOrCreateLock(
-        "balance-" + userId, 
+        "balance-" + userId,
         TimeSpan.FromSeconds(300), // lock for 5 mins
         consistency: KahunaLockConsistency.Consistent
     );

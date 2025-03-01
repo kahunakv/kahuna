@@ -1,6 +1,9 @@
 
+using System.Net.Security;
+using System.Security.Cryptography.X509Certificates;
 using Grpc.Core;
 using Grpc.Net.Client;
+using Kahuna.Configuration;
 using Kahuna.Shared.Locks;
 using Kommander;
 
@@ -10,13 +13,16 @@ public class LocksService : Locker.LockerBase
 {
     private readonly IKahuna locks;
 
+    private readonly KahunaConfiguration configuration;
+
     private readonly IRaft raft; 
     
     private readonly ILogger<IKahuna> logger;
     
-    public LocksService(IKahuna locks, IRaft raft, ILogger<IKahuna> logger)
+    public LocksService(IKahuna locks, KahunaConfiguration configuration, IRaft raft, ILogger<IKahuna> logger)
     {
         this.locks = locks;
+        this.configuration = configuration;
         this.raft = raft;
         this.logger = logger;
     }
@@ -24,11 +30,23 @@ public class LocksService : Locker.LockerBase
     public HttpClientHandler GetHandler()
     {
         HttpClientHandler handler = new();
+
+        if (string.IsNullOrEmpty(configuration.HttpsCertificate))
+            return handler;
+        
+        X509Certificate2 certificate = X509CertificateLoader.LoadCertificateFromFile(
+            configuration.HttpsCertificate
+        );
+        
+        Console.WriteLine(certificate.Thumbprint);
+        
+        //X509Certificate2 certificate = new(configuration.HttpsCertificate, configuration.HttpsCertificatePassword);
+        //Console.WriteLine(certificate.Thumbprint);
         
         handler.ServerCertificateCustomValidationCallback = (httpRequestMessage, cert, cetChain, policyErrors) =>
         {
             // Optionally, check for other policyErrors
-            if (policyErrors == System.Net.Security.SslPolicyErrors.None)
+            if (policyErrors == SslPolicyErrors.None)
                 return true;
 
             // Compare the certificate's thumbprint to our trusted thumbprint.
