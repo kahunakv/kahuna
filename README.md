@@ -1,5 +1,7 @@
 # Kahuna
 
+<img src="https://github.com/user-attachments/assets/a49cf165-4b65-4d87-821f-67dfc3b153d3" width="200" />
+
 **Kahuna** is an open-source solution designed to provide robust distributed
 locking for modern distributed systems. It addresses the critical challenge
 of synchronizing access to shared resources across multiple nodes
