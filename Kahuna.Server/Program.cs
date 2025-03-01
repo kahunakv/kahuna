@@ -11,6 +11,7 @@ using Kahuna.Services;
 
 using Kommander;
 using Kommander.Communication;
+using Kommander.Communication.Grpc;
 using Kommander.Discovery;
 using Kommander.Time;
 using Kommander.WAL;
@@ -45,7 +46,7 @@ builder.Services.AddSingleton<IRaft>(services =>
         configuration,
         new StaticDiscovery(opts.InitialCluster is not null ? [.. opts.InitialCluster.Select(k => new RaftNode(k))] : []),
         new SqliteWAL(path: opts.SqliteWalPath, version: opts.SqliteWalRevision),
-        new HttpCommunication(),
+        new GrpcCommunication(),
         new HybridLogicalClock(),
         services.GetRequiredService<ILogger<IRaft>>()
     );
@@ -58,22 +59,19 @@ builder.Services.AddHostedService<ReplicationService>();
 builder.Services.AddGrpc();
 builder.Services.AddGrpcReflection();
 
-foreach (var x in Environment.GetCommandLineArgs())
-    Console.WriteLine(x);
-
 builder.WebHost.ConfigureKestrel(options =>
 {
     if (opts.HttpPorts is null || !opts.HttpPorts.Any())
         options.Listen(IPAddress.Any, 2070, _ => { });
     else
         foreach (string port in opts.HttpPorts)
-        {
-            Console.WriteLine($"Listening on port {port}");
             options.Listen(IPAddress.Any, int.Parse(port), _ => { });
-        }
 
     if (opts.HttpsPorts is null || !opts.HttpsPorts.Any())
-        options.Listen(IPAddress.Any, 2071, _ => { });
+        options.Listen(IPAddress.Any, 2071, listenOptions =>
+        {
+            listenOptions.UseHttps(opts.HttpsCertificate, opts.HttpsCertificatePassword);
+        });
     else
     {
         foreach (string port in opts.HttpsPorts)
@@ -88,11 +86,10 @@ builder.WebHost.ConfigureKestrel(options =>
 
 WebApplication app = builder.Build();
 
-app.MapRaftRoutes();
+app.MapGrpcKahunaRoutes();
 app.MapRestKahunaRoutes();
 app.MapGrpcKahunaRoutes();
 app.MapGrpcReflectionService();
-app.MapGet("/", () => "Kahuna.Server");
 
 app.Run();
 

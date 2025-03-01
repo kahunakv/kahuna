@@ -13,6 +13,8 @@ public static class MapRoutesExtensions
 {
     public static void MapRestKahunaRoutes(this WebApplication app)
     {
+        app.MapGet("/", () => "Kahuna.Server");
+        
         app.MapPost("/v1/kahuna/lock", async (KahunaLockRequest request, IKahuna locks, IRaft raft, ILogger<IKahuna> logger) =>
         {
             if (string.IsNullOrEmpty(request.LockName))
