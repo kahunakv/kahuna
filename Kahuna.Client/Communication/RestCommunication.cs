@@ -11,11 +11,11 @@ using Polly.Retry;
 
 namespace Kahuna.Client.Communication;
 
-internal sealed class HttpCommunication
+internal sealed class RestCommunication
 {
     private readonly ILogger? logger;
     
-    public HttpCommunication(ILogger? logger)
+    public RestCommunication(ILogger? logger)
     {
         this.logger = logger;
     }

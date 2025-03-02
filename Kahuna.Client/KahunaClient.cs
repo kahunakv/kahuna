@@ -18,7 +18,7 @@ public class KahunaClient
 
     private readonly ILogger<KahunaClient>? logger;
 
-    private readonly HttpCommunication communication;
+    private readonly GrpcCommunication communication;
 
     private int currentServer;
     
