@@ -22,7 +22,7 @@ public sealed class LockManager : IKahuna
 
     private readonly ILogger<IKahuna> logger;
     
-    private readonly IPersistence persistence;
+    private readonly IActorRef<PersistenceActor, PersistenceRequest, PersistenceResponse> persistenceActor;
 
     private readonly IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> ephemeralLocksRouter;
     
@@ -40,21 +40,22 @@ public sealed class LockManager : IKahuna
         this.raft = raft;
         this.logger = logger;
 
-        persistence = new SqlitePersistence("/app/data", "v1");
+        SqlitePersistence persistence = new("/app/data", "v1");
+        persistenceActor = actorSystem.Spawn<PersistenceActor, PersistenceRequest, PersistenceResponse>("locks-persistence", persistence, logger);
         
-        IActorRef<LockBackgroundWriterActor, LockBackgroundWriteRequest> backgroundWriter1 = actorSystem.Spawn<LockBackgroundWriterActor, LockBackgroundWriteRequest>("locks-background-writer", raft, persistence, logger);
+        IActorRef<LockBackgroundWriterActor, LockBackgroundWriteRequest> backgroundWriter = actorSystem.Spawn<LockBackgroundWriterActor, LockBackgroundWriteRequest>("locks-background-writer", raft, persistenceActor, logger);
 
         int workers = Math.Max(32, Environment.ProcessorCount * 4);
         
         List<IActorRefStruct<LockActor, LockRequest, LockResponse>> ephemeralInstances = new(workers);
 
         for (int i = 0; i < workers; i++)
-            ephemeralInstances.Add(actorSystem.SpawnStruct<LockActor, LockRequest, LockResponse>("ephemeral-lock-" + i, backgroundWriter1, persistence, logger));
+            ephemeralInstances.Add(actorSystem.SpawnStruct<LockActor, LockRequest, LockResponse>("ephemeral-lock-" + i, backgroundWriter, persistence, logger));
         
         List<IActorRefStruct<LockActor, LockRequest, LockResponse>> consistentInstances = new(workers);
 
         for (int i = 0; i < workers; i++)
-            consistentInstances.Add(actorSystem.SpawnStruct<LockActor, LockRequest, LockResponse>("consistent-lock-" + i, backgroundWriter1, persistence, logger));
+            consistentInstances.Add(actorSystem.SpawnStruct<LockActor, LockRequest, LockResponse>("consistent-lock-" + i, backgroundWriter, persistence, logger));
 
         ephemeralLocksRouter = actorSystem.CreateConsistentHashRouterStruct(ephemeralInstances);
         consistentLocksRouter = actorSystem.CreateConsistentHashRouterStruct(consistentInstances);
@@ -78,40 +79,61 @@ public sealed class LockManager : IKahuna
             switch ((LockRequestType)lockMessage.Type)
             {
                 case LockRequestType.TryLock:
-                    await persistence.UpdateLock(
+                {
+                    PersistenceResponse? response = await persistenceActor.Ask(new(
+                        PersistenceRequestType.Store,
                         lockMessage.Resource,
                         lockMessage.Owner,
+                        lockMessage.FencingToken,
                         lockMessage.ExpireLogical,
                         lockMessage.ExpireCounter,
-                        lockMessage.FencingToken,
-                        lockMessage.Consistency,
+                        (LockConsistency)lockMessage.Consistency,
                         LockState.Locked
-                    );
-                    break;
+                    ));
+                    
+                    if (response is null)
+                        return false;
+
+                    return response.Type == PersistenceResponseType.Success;
+                }
 
                 case LockRequestType.TryUnlock:
-                    await persistence.UpdateLock(
+                {
+                    PersistenceResponse? response = await persistenceActor.Ask(new(
+                        PersistenceRequestType.Store,
                         lockMessage.Resource,
                         lockMessage.Owner,
+                        lockMessage.FencingToken,
                         lockMessage.ExpireLogical,
                         lockMessage.ExpireCounter,
-                        lockMessage.FencingToken,
-                        lockMessage.Consistency,
+                        (LockConsistency)lockMessage.Consistency,
                         LockState.Unlocked
-                    );
-                    break;
+                    ));
+                    
+                    if (response is null)
+                        return false;
+
+                    return response.Type == PersistenceResponseType.Success;
+                }
 
                 case LockRequestType.TryExtendLock:
-                    await persistence.UpdateLock(
+                {
+                    PersistenceResponse? response = await persistenceActor.Ask(new(
+                        PersistenceRequestType.Store,
                         lockMessage.Resource,
                         lockMessage.Owner,
+                        lockMessage.FencingToken,
                         lockMessage.ExpireLogical,
                         lockMessage.ExpireCounter,
-                        lockMessage.FencingToken,
-                        lockMessage.Consistency,
+                        (LockConsistency)lockMessage.Consistency,
                         LockState.Locked
-                    );
-                    break;
+                    ));
+
+                    if (response is null)
+                        return false;
+
+                    return response.Type == PersistenceResponseType.Success;
+                }
 
                 case LockRequestType.Get:
                     break;

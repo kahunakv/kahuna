@@ -7,7 +7,7 @@ namespace Kahuna.Tests.Client;
 
 public class TestLocks
 {
-    private readonly KahunaClient locks = new("http://localhost:8082", null);
+    private readonly KahunaClient locks = new("https://localhost:8082", null);
     
     private int total;
 

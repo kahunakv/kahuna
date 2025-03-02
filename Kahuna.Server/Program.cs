@@ -12,11 +12,11 @@ using Kahuna.Locks;
 using Kahuna.Services;
 
 using Kommander;
-using Kommander.Communication;
 using Kommander.Communication.Grpc;
 using Kommander.Discovery;
 using Kommander.Time;
 using Kommander.WAL;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
 
 Console.WriteLine("  _           _                     ");
 Console.WriteLine(" | | ____ _| |__  _   _ _ __   __ _ ");
@@ -65,14 +65,21 @@ builder.Services.AddGrpcReflection();
 builder.WebHost.ConfigureKestrel(options =>
 {
     if (opts.HttpPorts is null || !opts.HttpPorts.Any())
-        options.Listen(IPAddress.Any, 2070, _ => { });
+        options.Listen(IPAddress.Any, 2070, listenOptions =>
+        {
+            listenOptions.Protocols = HttpProtocols.Http1AndHttp2AndHttp3;
+        });
     else
         foreach (string port in opts.HttpPorts)
-            options.Listen(IPAddress.Any, int.Parse(port), _ => { });
+            options.Listen(IPAddress.Any, int.Parse(port), listenOptions =>
+            {
+                listenOptions.Protocols = HttpProtocols.Http1AndHttp2AndHttp3;
+            });
 
     if (opts.HttpsPorts is null || !opts.HttpsPorts.Any())
         options.Listen(IPAddress.Any, 2071, listenOptions =>
         {
+            listenOptions.Protocols = HttpProtocols.Http1AndHttp2AndHttp3;
             listenOptions.UseHttps(opts.HttpsCertificate, opts.HttpsCertificatePassword);
         });
     else
@@ -81,6 +88,7 @@ builder.WebHost.ConfigureKestrel(options =>
         {
             options.Listen(IPAddress.Any, int.Parse(port), listenOptions =>
             {
+                listenOptions.Protocols = HttpProtocols.Http1AndHttp2AndHttp3;
                 listenOptions.UseHttps(opts.HttpsCertificate, opts.HttpsCertificatePassword);
             });
         }

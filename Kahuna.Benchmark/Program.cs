@@ -6,9 +6,9 @@ using Kahuna.Shared.Locks;
 
 Console.WriteLine("Kahuna Benchmark");
 
-const int numberOfLocks = 2500;
+const int numberOfLocks = 500;
 
-KahunaClient locks = new("http://localhost:8081", null);
+KahunaClient locks = new("https://localhost:8082", null);
 
 List<Task> tasks = new(numberOfLocks);
 
@@ -46,7 +46,7 @@ async Task AdquireLockConcurrently(KahunaClient locksx)
     await using KahunaLock redLock = await locksx.GetOrCreateLock(
         lockName, 
         expiry: TimeSpan.FromSeconds(5),
-        consistency: LockConsistency.Ephemeral
+        consistency: LockConsistency.Consistent
     );
 
     if (!redLock.IsAcquired)

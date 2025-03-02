@@ -1,15 +1,18 @@
 
-using System.Data.Common;
+using System.Data;
 using Kahuna.Locks;
+using Kommander;
 using Microsoft.Data.Sqlite;
 
 namespace Kahuna.Persistence;
 
 public class SqlitePersistence : IPersistence
 {
-    private SqliteConnection? sqlConnection; 
+    private const int MaxShards = 8;
     
     private readonly SemaphoreSlim semaphore = new(1, 1);
+    
+    private readonly Dictionary<int, SqliteConnection> connections = new();
     
     private readonly string path;
     
@@ -21,19 +24,21 @@ public class SqlitePersistence : IPersistence
         this.version = version;
     }
     
-    private async ValueTask<SqliteConnection> TryOpenDatabase()
+    private async ValueTask<SqliteConnection> TryOpenDatabase(string resource)
     {
-        if (sqlConnection is not null)
+        int shard = (int)HashUtils.ConsistentHash(resource, MaxShards);
+        
+        if (connections.TryGetValue(shard, out SqliteConnection? sqlConnection))
             return sqlConnection;
         
         try
         {
             await semaphore.WaitAsync();
 
-            if (sqlConnection is not null)
+            if (connections.TryGetValue(shard, out sqlConnection))
                 return sqlConnection;
 
-            string connectionString = $"Data Source={path}/locks_{version}.db";
+            string connectionString = $"Data Source={path}/locks{shard}_{version}.db";
             SqliteConnection connection = new(connectionString);
 
             connection.Open();
@@ -53,11 +58,11 @@ public class SqlitePersistence : IPersistence
             await using SqliteCommand command1 = new(createTableQuery, connection);
             await command1.ExecuteNonQueryAsync();
             
-            const string pragmasQuery = "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA temp_store=MEMORY; PRAGMA wal_checkpoint(FULL);";
+            const string pragmasQuery = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY;";
             await using SqliteCommand command3 = new(pragmasQuery, connection);
             await command3.ExecuteNonQueryAsync();
-
-            sqlConnection = connection;
+            
+            connections.Add(shard, connection);
 
             return connection;
         }
@@ -67,11 +72,11 @@ public class SqlitePersistence : IPersistence
         }
     }
     
-    public async Task UpdateLock(string resource, string owner, long expiresLogical, long expiresCounter, long fencingToken, long consistency, LockState state)
+    public async Task StoreLock(string resource, string owner, long expiresLogical, uint expiresCounter, long fencingToken, long consistency, LockState state)
     {
         try
         {
-            SqliteConnection connection = await TryOpenDatabase();
+            SqliteConnection connection = await TryOpenDatabase(resource);
 
             const string query = """
              INSERT INTO locks (resource, owner, expiresLogical, expiresCounter, fencingToken, consistency, state) 
@@ -79,7 +84,7 @@ public class SqlitePersistence : IPersistence
              ON CONFLICT(resource) DO UPDATE SET owner=@owner, expiresLogical=@expiresLogical, expiresCounter=@expiresCounter, 
              fencingToken=@fencingToken, consistency=@consistency, state=@state;
              """;
-
+            
             await using SqliteCommand command = new(query, connection);
 
             command.Parameters.AddWithValue("@resource", resource);
@@ -98,62 +103,11 @@ public class SqlitePersistence : IPersistence
         }
     }
 
-    public async Task UpdateLocks(List<PersistenceItem> items)
-    {
-        if (items.Count == 0)
-            return;
-        
-        try
-        {
-            SqliteConnection connection = await TryOpenDatabase();
-            
-            const string query = """
-             INSERT INTO locks (resource, owner, expiresLogical, expiresCounter, fencingToken, consistency, state) 
-             VALUES (@resource, @owner, @expiresLogical, @expiresCounter, @fencingToken, @consistency, @state) 
-             ON CONFLICT(resource) DO UPDATE SET owner=@owner, expiresLogical=@expiresLogical, expiresCounter=@expiresCounter, 
-             fencingToken=@fencingToken, consistency=@consistency, state=@state;
-             """;
-
-            await using SqliteTransaction transaction = connection.BeginTransaction();
-            
-            try
-            {
-                foreach (PersistenceItem item in items)
-                {
-                    await using SqliteCommand command = new(query, connection);
-                    
-                    command.Transaction = transaction;
-
-                    command.Parameters.AddWithValue("@resource", item.Resource);
-                    command.Parameters.AddWithValue("@owner", item.Owner ?? "");
-                    command.Parameters.AddWithValue("@expiresLogical", item.Expires.L);
-                    command.Parameters.AddWithValue("@expiresCounter", item.Expires.C);
-                    command.Parameters.AddWithValue("@fencingToken", item.FencingToken);
-                    command.Parameters.AddWithValue("@consistency", (int)item.Consistency);
-                    command.Parameters.AddWithValue("@state", (int)item.State);
-
-                    await command.ExecuteNonQueryAsync();
-                }
-
-                await transaction.CommitAsync();
-            }
-            catch (Exception)
-            {
-                await transaction.RollbackAsync();
-                throw;
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine("UpdateLocks: {0} {1} {2}", ex.GetType().Name, ex.Message, ex.StackTrace);
-        }
-    }
-
     public async Task<LockContext?> GetLock(string resource)
     {
         try
         {
-            SqliteConnection connection = await TryOpenDatabase();
+            SqliteConnection connection = await TryOpenDatabase(resource);
 
             const string query = "SELECT owner, expiresLogical, expiresCounter, fencingToken, consistency, state FROM locks WHERE resource = @resource";
             await using SqliteCommand command = new(query, connection);

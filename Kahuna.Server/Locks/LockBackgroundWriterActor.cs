@@ -12,7 +12,7 @@ public sealed class LockBackgroundWriterActor : IActor<LockBackgroundWriteReques
 {
     private readonly IRaft raft;
     
-    private readonly SqlitePersistence persistence;
+    private readonly IActorRef<PersistenceActor, PersistenceRequest, PersistenceResponse> persistenceActor;
 
     private readonly ILogger<IKahuna> logger;
     
@@ -21,12 +21,12 @@ public sealed class LockBackgroundWriterActor : IActor<LockBackgroundWriteReques
     public LockBackgroundWriterActor(
         IActorContext<LockBackgroundWriterActor, LockBackgroundWriteRequest> context,
         IRaft raft,
-        SqlitePersistence persistence,
+        IActorRef<PersistenceActor, PersistenceRequest, PersistenceResponse> persistenceActor,
         ILogger<IKahuna> logger
     )
     {
         this.raft = raft;
-        this.persistence = persistence;
+        this.persistenceActor = persistenceActor;
         this.logger = logger;
         
         context.ActorSystem.StartPeriodicTimer(
@@ -52,29 +52,26 @@ public sealed class LockBackgroundWriterActor : IActor<LockBackgroundWriteReques
                     return;
                 
                 HashSet<int> partitionIds = [];
-                List<PersistenceItem> items = [];
                 
                 while (dirtyLocks.TryDequeue(out LockBackgroundWriteRequest? lockRequest))
                 {
                     partitionIds.Add(lockRequest.PartitionId);
                     
-                    items.Add(new(
+                    await persistenceActor.Ask(new(
+                        PersistenceRequestType.Store,
                         lockRequest.Resource,
                         lockRequest.Owner,
                         lockRequest.FencingToken,
-                        lockRequest.Expires,
+                        lockRequest.Expires.L,
+                        lockRequest.Expires.C,
                         lockRequest.Consistency,
                         lockRequest.State
                     ));
                 }
-
-                if (items.Count > 0)
-                {
-                    await persistence.UpdateLocks(items);
-                    
-                    foreach (int partitionId in partitionIds)
-                        await raft.ReplicateCheckpoint(partitionId);
-                }
+                
+                foreach (int partitionId in partitionIds)
+                    await raft.ReplicateCheckpoint(partitionId);
+                
                 break;
         }
     }

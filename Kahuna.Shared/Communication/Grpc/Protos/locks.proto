@@ -1,20 +1,45 @@
 syntax = "proto3";
 
 service Locker {
-  rpc TryLock (TryLockRequest) returns (TryLockResponse);
+  rpc TryLock (GrpcTryLockRequest) returns (GrpcTryLockResponse);
+  rpc TryExtendLock (GrpcExtendLockRequest) returns (GrpcExtendLockResponse);
+  rpc Unlock (GrpcUnlockRequest) returns (GrpcUnlockResponse);
 }
 
-message TryLockRequest {
+message GrpcTryLockRequest {
   string LockName = 1;
   optional string LockId = 2;
   int32 ExpiresMs = 3;
   GrpcLockConsistency Consistency = 4;
 }
 
-message TryLockResponse {
+message GrpcTryLockResponse {
   optional string servedFrom = 1;
   GrpcLockResponseType Type = 2;
   int64 fencingToken = 3;
+}
+
+message GrpcExtendLockRequest {
+  string LockName = 1;
+  optional string LockId = 2;
+  int32 ExpiresMs = 3;
+  GrpcLockConsistency Consistency = 4;
+}
+
+message GrpcExtendLockResponse {
+  optional string servedFrom = 1;
+  GrpcLockResponseType Type = 2;
+}
+
+message GrpcUnlockRequest {
+  string LockName = 1;
+  optional string LockId = 2;
+  GrpcLockConsistency Consistency = 3;
+}
+
+message GrpcUnlockResponse {
+  optional string servedFrom = 1;
+  GrpcLockResponseType Type = 2;
 }
 
 enum GrpcLockResponseType {
