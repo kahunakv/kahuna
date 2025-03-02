@@ -39,7 +39,7 @@ public static class MapRoutesExtensions
             if (leader == raft.GetLocalEndpoint())
                 return new() { Type = LockResponseType.MustRetry };
             
-            logger.LogInformation("LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
+            logger.LogDebug("LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
 
             try
             {
@@ -91,7 +91,7 @@ public static class MapRoutesExtensions
             if (leader == raft.GetLocalEndpoint())
                 return new() { Type = LockResponseType.MustRetry };
             
-            logger.LogInformation("EXTEND-LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
+            logger.LogDebug("EXTEND-LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
             
             try
             {
@@ -140,7 +140,7 @@ public static class MapRoutesExtensions
             if (leader == raft.GetLocalEndpoint())
                 return new() { Type = LockResponseType.MustRetry };
             
-            logger.LogInformation("UNLOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
+            logger.LogDebug("UNLOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
             
             try
             {
@@ -195,7 +195,7 @@ public static class MapRoutesExtensions
             if (leader == raft.GetLocalEndpoint())
                 return new() { Type = LockResponseType.MustRetry };
             
-            logger.LogInformation("GET-LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
+            logger.LogDebug("GET-LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
             
             try
             {

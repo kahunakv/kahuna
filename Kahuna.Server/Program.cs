@@ -1,6 +1,7 @@
 ﻿
 using Nixie;
 using System.Net;
+using System.Security.Cryptography.X509Certificates;
 using CommandLine;
 
 using Kahuna;
@@ -92,6 +93,15 @@ KahunaConfiguration configuration = new()
     HttpsCertificate = opts.HttpsCertificate,
     HttpsCertificatePassword = opts.HttpsCertificatePassword
 };
+
+// @todo move somewhere else
+if (!string.IsNullOrEmpty(configuration.HttpsCertificate))
+{
+#pragma warning disable SYSLIB0057
+    X509Certificate2 xcertificate = new(configuration.HttpsCertificate, configuration.HttpsCertificatePassword);
+#pragma warning restore SYSLIB0057
+    configuration.HttpsTrustedThumbprint = xcertificate.Thumbprint;
+}
 
 builder.Services.AddSingleton(configuration);
 

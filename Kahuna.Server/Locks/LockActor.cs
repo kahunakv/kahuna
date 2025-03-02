@@ -58,8 +58,8 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     {
         try
         {
-            logger.LogInformation(
-                "Message: {Actor} {Type} {Resource} {Owner} {ExpiresMs} {Consistency}", 
+            logger.LogDebug(
+                "LockActor Message: {Actor} {Type} {Resource} {Owner} {ExpiresMs} {Consistency}", 
                 actorContext.Self.Runner.Name, 
                 message.Type, 
                 message.Resource, 

@@ -1,6 +1,5 @@
 
 using System.Net.Security;
-using System.Security.Cryptography.X509Certificates;
 using Grpc.Core;
 using Grpc.Net.Client;
 using Kahuna.Configuration;
@@ -11,6 +10,8 @@ namespace Kahuna.Communication.Grpc;
 
 public class LocksService : Locker.LockerBase
 {
+    private static HttpClientHandler? httpHandler;
+    
     private readonly IKahuna locks;
 
     private readonly KahunaConfiguration configuration;
@@ -29,19 +30,13 @@ public class LocksService : Locker.LockerBase
 
     public HttpClientHandler GetHandler()
     {
+        if (httpHandler is not null)
+            return httpHandler;
+        
         HttpClientHandler handler = new();
 
         if (string.IsNullOrEmpty(configuration.HttpsCertificate))
             return handler;
-        
-        X509Certificate2 certificate = X509CertificateLoader.LoadCertificateFromFile(
-            configuration.HttpsCertificate
-        );
-        
-        Console.WriteLine(certificate.Thumbprint);
-        
-        //X509Certificate2 certificate = new(configuration.HttpsCertificate, configuration.HttpsCertificatePassword);
-        //Console.WriteLine(certificate.Thumbprint);
         
         handler.ServerCertificateCustomValidationCallback = (httpRequestMessage, cert, cetChain, policyErrors) =>
         {
@@ -50,13 +45,10 @@ public class LocksService : Locker.LockerBase
                 return true;
 
             // Compare the certificate's thumbprint to our trusted thumbprint.
-            //if (cert is X509Certificate2 certificate && certificate.Thumbprint.Equals(trustedThumbprint, StringComparison.OrdinalIgnoreCase))
-            //{
-                return true;
-            //}
-
-            //return false;
+            return cert is not null && cert.Thumbprint.Equals(configuration.HttpsTrustedThumbprint, StringComparison.OrdinalIgnoreCase);
         };
+
+        httpHandler = handler;
         
         return handler;
     }
@@ -83,7 +75,7 @@ public class LocksService : Locker.LockerBase
                 Type = GrpcLockResponseType.LockResponseTypeMustRetry
             };
         
-        logger.LogInformation("LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
+        logger.LogDebug("LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
         
         GrpcChannel channel = GrpcChannel.ForAddress($"https://{leader}", new() { HttpHandler = GetHandler() });
         
