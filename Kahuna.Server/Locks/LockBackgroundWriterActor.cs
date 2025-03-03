@@ -2,6 +2,7 @@
 using Nixie;
 using Kahuna.Persistence;
 using Kommander;
+using Nixie.Routers;
 
 namespace Kahuna.Locks;
 
@@ -12,7 +13,7 @@ public sealed class LockBackgroundWriterActor : IActor<LockBackgroundWriteReques
 {
     private readonly IRaft raft;
     
-    private readonly IActorRef<PersistenceActor, PersistenceRequest, PersistenceResponse> persistenceActor;
+    private readonly IActorRef<ConsistentHashActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter;
 
     private readonly ILogger<IKahuna> logger;
     
@@ -21,12 +22,12 @@ public sealed class LockBackgroundWriterActor : IActor<LockBackgroundWriteReques
     public LockBackgroundWriterActor(
         IActorContext<LockBackgroundWriterActor, LockBackgroundWriteRequest> context,
         IRaft raft,
-        IActorRef<PersistenceActor, PersistenceRequest, PersistenceResponse> persistenceActor,
+        IActorRef<ConsistentHashActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter,
         ILogger<IKahuna> logger
     )
     {
         this.raft = raft;
-        this.persistenceActor = persistenceActor;
+        this.persistenceActorRouter = persistenceActorRouter;
         this.logger = logger;
         
         context.ActorSystem.StartPeriodicTimer(
@@ -57,7 +58,7 @@ public sealed class LockBackgroundWriterActor : IActor<LockBackgroundWriteReques
                 {
                     partitionIds.Add(lockRequest.PartitionId);
                     
-                    await persistenceActor.Ask(new(
+                    await persistenceActorRouter.Ask(new(
                         PersistenceRequestType.Store,
                         lockRequest.Resource,
                         lockRequest.Owner,

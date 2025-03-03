@@ -88,7 +88,7 @@ public class SqlitePersistence : IPersistence
             await using SqliteCommand command = new(query, connection);
 
             command.Parameters.AddWithValue("@resource", resource);
-            command.Parameters.AddWithValue("@owner", owner);
+            command.Parameters.AddWithValue("@owner", owner ?? "");
             command.Parameters.AddWithValue("@expiresLogical", expiresLogical);
             command.Parameters.AddWithValue("@expiresCounter", expiresCounter);
             command.Parameters.AddWithValue("@fencingToken", fencingToken);
@@ -99,7 +99,7 @@ public class SqlitePersistence : IPersistence
         }
         catch (Exception ex)
         {
-            Console.WriteLine("UpdateLock: {0} {1} {2}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            Console.WriteLine("UpdateLock: {0} {1} {2} [{3}][{4}][{5}][{6}][{7}][{8}][{9}]", ex.GetType().Name, ex.Message, ex.StackTrace, resource, owner, expiresLogical, expiresCounter, fencingToken, consistency, state);
         }
     }
 

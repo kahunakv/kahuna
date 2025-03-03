@@ -4,6 +4,7 @@ services:
     build:
       context: . #current dir as build context
       args:
+        KAHUNA_RAFT_NODEID: kahuna1
         KAHUNA_RAFT_HOST: 172.30.0.2
         KAHUNA_RAFT_PORT: 8082
         KAHUNA_HTTP_PORTS: 2070 8081
@@ -23,6 +24,7 @@ services:
     build:
       context: . #current dir as build context
       args:
+        KAHUNA_RAFT_NODEID: kahuna2
         KAHUNA_RAFT_HOST: 172.30.0.3
         KAHUNA_RAFT_PORT: 8084
         KAHUNA_HTTP_PORTS: 2070 8083
@@ -42,6 +44,7 @@ services:
     build:
       context: . #current dir as build context
       args:
+        KAHUNA_RAFT_NODEID: kahuna3
         KAHUNA_RAFT_HOST: 172.30.0.4
         KAHUNA_RAFT_PORT: 8086
         KAHUNA_HTTP_PORTS: 2070 8085

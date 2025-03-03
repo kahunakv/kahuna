@@ -36,18 +36,29 @@ WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 // Try to assemble a Kahuna cluster from static discovery
 builder.Services.AddSingleton<IRaft>(services =>
 {
+    if (string.IsNullOrEmpty(opts.RaftNodeId))
+        opts.RaftNodeId = Environment.MachineName;
+    
     RaftConfiguration configuration = new()
     {
+        NodeId = opts.RaftNodeId,
         Host = opts.RaftHost,
         Port = opts.RaftPort,
         MaxPartitions = opts.InitialClusterPartitions
     };
-    
+
+    IWAL walAdapter = opts.WalStorage switch
+    {
+        "rocksdb" => new RocksDbWAL(path: opts.WalPath, revision: opts.WalRevision),
+        "sqlite" => new SqliteWAL(path: opts.WalPath, revision: opts.WalRevision),
+        _ => throw new KahunaServerException("Invalid WAL storage")
+    };
+
     return new RaftManager(
         services.GetRequiredService<ActorSystem>(),
         configuration,
         new StaticDiscovery(opts.InitialCluster is not null ? [.. opts.InitialCluster.Select(k => new RaftNode(k))] : []),
-        new SqliteWAL(path: opts.SqliteWalPath, version: opts.SqliteWalRevision),
+        walAdapter,
         new GrpcCommunication(),
         new HybridLogicalClock(),
         services.GetRequiredService<ILogger<IRaft>>()
@@ -99,12 +110,17 @@ builder.WebHost.ConfigureKestrel(options =>
 KahunaConfiguration configuration = new()
 {
     HttpsCertificate = opts.HttpsCertificate,
-    HttpsCertificatePassword = opts.HttpsCertificatePassword
+    HttpsCertificatePassword = opts.HttpsCertificatePassword,
+    LocksWorkers = opts.LocksWorkers,
+    BackgroundWriterWorkers = opts.BackgroundWritersWorkers
 };
 
 // @todo move somewhere else
 if (!string.IsNullOrEmpty(configuration.HttpsCertificate))
 {
+    if (!File.Exists(configuration.HttpsCertificate))
+        throw new KahunaServerException("Invalid HTTPS certificate");
+    
 #pragma warning disable SYSLIB0057
     X509Certificate2 xcertificate = new(configuration.HttpsCertificate, configuration.HttpsCertificatePassword);
 #pragma warning restore SYSLIB0057

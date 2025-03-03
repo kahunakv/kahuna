@@ -1,10 +1,12 @@
 
 using Kahuna.Locks;
 using Kahuna.Shared.Locks;
+using Kommander;
+using Nixie.Routers;
 
 namespace Kahuna.Persistence;
 
-public sealed class PersistenceRequest
+public sealed class PersistenceRequest : IConsistentHashable
 {
     public PersistenceRequestType Type { get; }
     
@@ -41,5 +43,10 @@ public sealed class PersistenceRequest
         ExpiresCounter = expiresCounter;
         Consistency = consistency;
         State = state;
+    }
+
+    public int GetHash()
+    {
+        return (int)HashUtils.ConsistentHash(Resource, 4);
     }
 }

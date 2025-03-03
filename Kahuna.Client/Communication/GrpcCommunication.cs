@@ -17,7 +17,7 @@ internal sealed class GrpcCommunication
         this.logger = logger;
     }
     
-    internal async Task<KahunaLockAcquireResult> TryAcquireLock(string url, string key, string lockId, int expiryTime, LockConsistency consistency)
+    internal async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string url, string key, string lockId, int expiryTime, LockConsistency consistency)
     {
         GrpcTryLockRequest request = new() { LockName = key, LockId = lockId, ExpiresMs = expiryTime, Consistency = (GrpcLockConsistency)consistency };
         
@@ -39,10 +39,10 @@ internal sealed class GrpcCommunication
                 throw new KahunaException("Response is null", LockResponseType.Errored);
 
             if (response.Type == GrpcLockResponseType.LockResponseTypeLocked)
-                return KahunaLockAcquireResult.Success;
+                return (KahunaLockAcquireResult.Success, response.FencingToken);
             
             if (response.Type == GrpcLockResponseType.LockResponseTypeBusy)
-                return KahunaLockAcquireResult.Conflicted;
+                return (KahunaLockAcquireResult.Conflicted, -1);
 
         } while (response.Type == GrpcLockResponseType.LockResponseTypeMustRetry);
             
@@ -72,10 +72,11 @@ internal sealed class GrpcCommunication
                 
             if (response.Type == GrpcLockResponseType.LockResponseTypeUnlocked)
                 return true;
+            
+            if (response.Type == GrpcLockResponseType.LockResponseTypeInvalidOwner)
+                return false;
 
-        } while (response.Type == GrpcLockResponseType.LockResponseTypeLocked);
-        
-        Console.WriteLine(response.Type);
+        } while (response.Type == GrpcLockResponseType.LockResponseTypeMustRetry);
         
         throw new KahunaException("Failed to unlock", (LockResponseType)response.Type);
     }

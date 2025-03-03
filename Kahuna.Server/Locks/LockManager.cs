@@ -1,4 +1,5 @@
 
+using Kahuna.Configuration;
 using Kahuna.Persistence;
 using Kahuna.Replication;
 using Kahuna.Replication.Protos;
@@ -22,7 +23,7 @@ public sealed class LockManager : IKahuna
 
     private readonly ILogger<IKahuna> logger;
     
-    private readonly IActorRef<PersistenceActor, PersistenceRequest, PersistenceResponse> persistenceActor;
+    private readonly IActorRef<ConsistentHashActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter;
 
     private readonly IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> ephemeralLocksRouter;
     
@@ -33,32 +34,59 @@ public sealed class LockManager : IKahuna
     /// </summary>
     /// <param name="actorSystem"></param>
     /// <param name="raft"></param>
+    /// <param name="configuration"></param>
     /// <param name="logger"></param>
-    public LockManager(ActorSystem actorSystem, IRaft raft, ILogger<IKahuna> logger)
+    public LockManager(ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, ILogger<IKahuna> logger)
     {
         this.actorSystem = actorSystem;
         this.raft = raft;
         this.logger = logger;
 
         SqlitePersistence persistence = new("/app/data", "v1");
-        persistenceActor = actorSystem.Spawn<PersistenceActor, PersistenceRequest, PersistenceResponse>("locks-persistence", persistence, logger);
         
-        IActorRef<LockBackgroundWriterActor, LockBackgroundWriteRequest> backgroundWriter = actorSystem.Spawn<LockBackgroundWriterActor, LockBackgroundWriteRequest>("locks-background-writer", raft, persistenceActor, logger);
+        persistenceActorRouter = GetPersistenceRouter(persistence);
+        
+        IActorRef<LockBackgroundWriterActor, LockBackgroundWriteRequest> backgroundWriter = actorSystem.Spawn<LockBackgroundWriterActor, LockBackgroundWriteRequest>("locks-background-writer", raft, persistenceActorRouter, logger);
 
         int workers = Math.Max(32, Environment.ProcessorCount * 4);
         
+        ephemeralLocksRouter = GetEphemeralRouter(backgroundWriter, persistence, workers);
+        consistentLocksRouter = GetConsistentRouter(backgroundWriter, persistence, workers);
+    }
+
+    /// <summary>
+    /// Creates the persistence router
+    /// </summary>
+    /// <param name="persistence"></param>
+    /// <returns></returns>
+    private IActorRef<ConsistentHashActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> GetPersistenceRouter(IPersistence persistence)
+    {
+        List<IActorRef<PersistenceActor, PersistenceRequest, PersistenceResponse>> persistenceInstances = new(4);
+
+        for (int i = 0; i < 4; i++)
+            persistenceInstances.Add(actorSystem.Spawn<PersistenceActor, PersistenceRequest, PersistenceResponse>("locks-persistence-" + i, persistence, logger));
+
+        return actorSystem.CreateConsistentHashRouter(persistenceInstances);
+    }
+
+    private IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> GetEphemeralRouter(IActorRef<LockBackgroundWriterActor, LockBackgroundWriteRequest> backgroundWriter, IPersistence persistence, int workers)
+    {
         List<IActorRefStruct<LockActor, LockRequest, LockResponse>> ephemeralInstances = new(workers);
 
         for (int i = 0; i < workers; i++)
             ephemeralInstances.Add(actorSystem.SpawnStruct<LockActor, LockRequest, LockResponse>("ephemeral-lock-" + i, backgroundWriter, persistence, logger));
-        
+
+        return actorSystem.CreateConsistentHashRouterStruct(ephemeralInstances);
+    }
+
+    private IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> GetConsistentRouter(IActorRef<LockBackgroundWriterActor, LockBackgroundWriteRequest> backgroundWriter, IPersistence persistence, int workers)
+    {
         List<IActorRefStruct<LockActor, LockRequest, LockResponse>> consistentInstances = new(workers);
 
         for (int i = 0; i < workers; i++)
             consistentInstances.Add(actorSystem.SpawnStruct<LockActor, LockRequest, LockResponse>("consistent-lock-" + i, backgroundWriter, persistence, logger));
-
-        ephemeralLocksRouter = actorSystem.CreateConsistentHashRouterStruct(ephemeralInstances);
-        consistentLocksRouter = actorSystem.CreateConsistentHashRouterStruct(consistentInstances);
+        
+        return actorSystem.CreateConsistentHashRouterStruct(consistentInstances);
     }
 
     public async Task<bool> OnReplicationReceived(string type, byte[] data)
@@ -80,7 +108,7 @@ public sealed class LockManager : IKahuna
             {
                 case LockRequestType.TryLock:
                 {
-                    PersistenceResponse? response = await persistenceActor.Ask(new(
+                    PersistenceResponse? response = await persistenceActorRouter.Ask(new(
                         PersistenceRequestType.Store,
                         lockMessage.Resource,
                         lockMessage.Owner,
@@ -99,7 +127,7 @@ public sealed class LockManager : IKahuna
 
                 case LockRequestType.TryUnlock:
                 {
-                    PersistenceResponse? response = await persistenceActor.Ask(new(
+                    PersistenceResponse? response = await persistenceActorRouter.Ask(new(
                         PersistenceRequestType.Store,
                         lockMessage.Resource,
                         lockMessage.Owner,
@@ -118,7 +146,7 @@ public sealed class LockManager : IKahuna
 
                 case LockRequestType.TryExtendLock:
                 {
-                    PersistenceResponse? response = await persistenceActor.Ask(new(
+                    PersistenceResponse? response = await persistenceActorRouter.Ask(new(
                         PersistenceRequestType.Store,
                         lockMessage.Resource,
                         lockMessage.Owner,

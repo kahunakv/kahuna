@@ -46,12 +46,12 @@ public class KahunaClient
         this.communication = new(logger);
     }
     
-    private async Task<KahunaLockAcquireResult> TryAcquireLock(string resource, string lockId, TimeSpan expiryTime, LockConsistency consistency)
+    private async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string resource, string lockId, TimeSpan expiryTime, LockConsistency consistency)
     {
         return await communication.TryAcquireLock(GetRoundRobinUrl(), resource, lockId, (int)expiryTime.TotalMilliseconds, consistency).ConfigureAwait(false);
     }
     
-    private async Task<(KahunaLockAcquireResult, string?, LockConsistency)> PeriodicallyTryAcquireLock(
+    private async Task<(KahunaLockAcquireResult, string?, LockConsistency, long)> PeriodicallyTryAcquireLock(
         string resource, 
         TimeSpan expiryTime, 
         TimeSpan wait, 
@@ -64,28 +64,30 @@ public class KahunaClient
             string owner = Guid.NewGuid().ToString("N");
             
             Stopwatch stopWatch = Stopwatch.StartNew();
+            
+            long fencingToken = -1;
             KahunaLockAcquireResult result = KahunaLockAcquireResult.Error;
 
             while (stopWatch.Elapsed < wait)
             {
-                result = await TryAcquireLock(resource, owner, expiryTime, consistency).ConfigureAwait(false);
+                (result, fencingToken) = await TryAcquireLock(resource, owner, expiryTime, consistency).ConfigureAwait(false);
 
                 if (result != KahunaLockAcquireResult.Success)
                 {
-                    await Task.Delay(retry).ConfigureAwait(false);
+                    await Task.Delay((int)Math.Max(100, retry.TotalMilliseconds + Random.Shared.Next(-50, 50))).ConfigureAwait(false);
                     continue;
                 }
 
-                return (result, owner, consistency);
+                return (result, owner, consistency, fencingToken);
             }
 
-            return (result, null, consistency);
+            return (result, null, consistency, fencingToken);
         }
         catch (Exception ex)
         {
             logger?.LogError("Error locking lock instance: {Message}", ex.Message);
 
-            return (KahunaLockAcquireResult.Error, null, consistency);
+            return (KahunaLockAcquireResult.Error, null, consistency, -1);
         }
     }
     
@@ -96,21 +98,21 @@ public class KahunaClient
     /// <param name="expiryTime"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    private async Task<(KahunaLockAcquireResult, string?, LockConsistency)> SingleTimeTryAcquireLock(string resource, TimeSpan expiryTime, LockConsistency consistency)
+    private async Task<(KahunaLockAcquireResult, string?, LockConsistency, long)> SingleTimeTryAcquireLock(string resource, TimeSpan expiryTime, LockConsistency consistency)
     {
         try
         {
             string owner = Guid.NewGuid().ToString("N");
 
-            KahunaLockAcquireResult result = await TryAcquireLock(resource, owner, expiryTime, consistency).ConfigureAwait(false);
+            (KahunaLockAcquireResult result, long fencingToken) = await TryAcquireLock(resource, owner, expiryTime, consistency).ConfigureAwait(false);
 
-            return (result, owner, consistency);
+            return (result, owner, consistency, fencingToken);
         }
         catch (Exception ex)
         {
             logger?.LogError("Error locking lock instance: {Message}", ex.Message);
 
-            return (KahunaLockAcquireResult.Error, null, consistency);
+            return (KahunaLockAcquireResult.Error, null, consistency, -1);
         }
     }
     

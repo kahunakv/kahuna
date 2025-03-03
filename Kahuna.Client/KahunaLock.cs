@@ -1,5 +1,6 @@
 
 using Kahuna.Shared.Locks;
+// ReSharper disable ConvertToAutoProperty
 
 namespace Kahuna.Client;
 
@@ -12,6 +13,8 @@ public sealed class KahunaLock : IAsyncDisposable
 
     private readonly KahunaLockAcquireResult result;
 
+    private readonly long fencingToken;
+
     private readonly string resource;
     
     private readonly string? lockId;
@@ -22,6 +25,8 @@ public sealed class KahunaLock : IAsyncDisposable
 
     public bool IsAcquired => result == KahunaLockAcquireResult.Success;
     
+    public long FencingToken => fencingToken;
+    
     public string LockId => lockId ?? throw new KahunaException("Lock was not acquired", LockResponseType.Errored);
 
     /// <summary>
@@ -30,13 +35,14 @@ public sealed class KahunaLock : IAsyncDisposable
     /// <param name="locks"></param>
     /// <param name="resource"></param>
     /// <param name="lockInfo"></param>
-    public KahunaLock(KahunaClient locks, string resource, (KahunaLockAcquireResult result, string? lockId, LockConsistency consistency) lockInfo)
+    public KahunaLock(KahunaClient locks, string resource, (KahunaLockAcquireResult result, string? lockId, LockConsistency consistency, long fencingToken) lockInfo)
     {
         this.locks = locks;
         this.resource = resource;
         this.result = lockInfo.result;
         this.lockId = lockInfo.lockId;
         this.consistency = lockInfo.consistency;
+        this.fencingToken = lockInfo.fencingToken;
     }
     
     /// <summary>
