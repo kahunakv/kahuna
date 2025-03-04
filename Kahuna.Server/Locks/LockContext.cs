@@ -22,4 +22,9 @@ public sealed class LockContext
     /// Current fencing token
     /// </summary>
     public long FencingToken { get; set; }
+    
+    /// <summary>
+    /// HLC timestamp of the last time the lock was used
+    /// </summary>
+    public HLCTimestamp LastUsed { get; set; }
 }

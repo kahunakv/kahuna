@@ -27,6 +27,8 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 
     private readonly ILogger<IKahuna> logger;
 
+    private long operations;
+
     /// <summary>
     /// Constructor
     /// </summary>
@@ -67,6 +69,9 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
                 message.ExpiresMs,
                 message.Consistency
             );
+
+            if ((operations++) % 1000 == 0)
+                await Collect();
 
             return message.Type switch
             {
@@ -110,7 +115,8 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             newContext ??= new()
             {
                 Owner = message.Owner,
-                Expires = currentTime + message.ExpiresMs
+                Expires = currentTime + message.ExpiresMs,
+                LastUsed = currentTime
             };
 
             // If the lock is consistent, we need to persist and replicate the lock state
@@ -140,6 +146,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         context.FencingToken++;
         context.Owner = message.Owner;
         context.Expires = currentTime + message.ExpiresMs;
+        context.LastUsed = currentTime;
 
         if (message.Consistency == LockConsistency.Consistent)
         {
@@ -169,6 +176,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
 
         context.Expires = currentTime + message.ExpiresMs;
+        context.LastUsed = currentTime;
 
         if (message.Consistency == LockConsistency.Consistent)
         {
@@ -193,13 +201,14 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 
         if (message.Owner != context.Owner)
             return new(LockResponseType.InvalidOwner);
+        
+        HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
 
         context.Owner = null;
+        context.LastUsed = currentTime;
 
         if (message.Consistency == LockConsistency.Consistent)
         {
-            HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
-            
             bool success = await PersistAndReplicateLockMessage(message.Type, message.Resource, context, currentTime, LockState.Unlocked);
             if (!success)
                 return new(LockResponseType.Errored);
@@ -299,5 +308,36 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         ));
 
         return success;
+    }
+
+    private async ValueTask Collect()
+    {
+        if (locks.Count < 2000)
+            return;
+        
+        int number = 0;
+        TimeSpan range = TimeSpan.FromMinutes(30);
+        HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
+
+        HashSet<string> keys = [];
+
+        foreach (KeyValuePair<string, LockContext> key in locks)
+        {
+            if ((currentTime - key.Value.LastUsed) < range)
+                continue;
+            
+            keys.Add(key.Key);
+            number++;
+            
+            if (number > 100)
+                break;
+        }
+
+        foreach (string key in keys)
+        {
+            locks.Remove(key);
+            
+            Console.WriteLine("Removed {0}", key);
+        }
     }
 }
