@@ -1,8 +1,9 @@
 
-using System.Text.Json;
+using System.Text;
 using Kahuna.Locks;
-using Kahuna.Shared.Locks;
+using Kahuna.Persistence.Protos;
 using RocksDbSharp;
+using Google.Protobuf;
 
 namespace Kahuna.Persistence;
 
@@ -14,45 +15,73 @@ public class RocksDbPersistence : IPersistence
     
     private readonly string revision;
     
-    public RocksDbPersistence(string path, string revision)
+    public RocksDbPersistence(string path = ".", string revision = "v1")
     {
         this.path = path;
         this.revision = revision;
+
+        string fullPath = $"{path}/{revision}";
         
-        this.db = RocksDb.Open(new DbOptions().SetCreateIfMissing(true), path);
+        DbOptions dbOptions = new DbOptions()
+            .SetCreateIfMissing(true)
+            .SetCreateMissingColumnFamilies(true)
+            .SetWalRecoveryMode(Recovery.AbsoluteConsistency);
+
+        this.db = RocksDb.Open(dbOptions, fullPath);
     }
 
-    public async Task StoreLock(
+    public Task StoreLock(
         string resource, 
         string owner, 
-        long expiresLogical, 
+        long expiresPhysical, 
         uint expiresCounter, 
         long fencingToken,
         long consistency, 
         LockState state
     )
     {
-        await Task.CompletedTask;
-        
-        db.Put(resource, JsonSerializer.Serialize(new PersistenceRequest(
-            PersistenceRequestType.Store,
-            resource,
-            owner,
-            fencingToken,
-            expiresLogical,
-            expiresCounter,
-            (LockConsistency) consistency,
-            state
-        )));
-    }
+        db.Put(Encoding.UTF8.GetBytes(resource), Serialize(new()
+        {
+            Owner = owner,
+            ExpiresPhysical = expiresPhysical,
+            ExpiresCounter = expiresCounter,
+            FencingToken = fencingToken,
+            Consistency = (int)consistency,
+            State = (int)state
+        }));
 
-    public Task UpdateLocks(List<PersistenceRequest> items)
-    {
-        throw new NotImplementedException();
+        return Task.CompletedTask;
     }
 
     public Task<LockContext?> GetLock(string resource)
     {
-        return Task.FromResult<LockContext?>(null);
+        byte[]? value = db.Get(Encoding.UTF8.GetBytes(resource));
+        if (value is null)
+            return Task.FromResult<LockContext?>(null);
+
+        RocksDbLockMessage message = Unserializer(value);
+
+        LockContext context = new()
+        {
+            Owner = message.Owner,
+            FencingToken = message.FencingToken,
+            Expires = new(message.ExpiresPhysical, message.ExpiresCounter),
+        };
+
+        return Task.FromResult<LockContext?>(context);
     }
+    
+    private static byte[] Serialize(RocksDbLockMessage message)
+    {
+        using MemoryStream memoryStream = new();
+        message.WriteTo(memoryStream);
+        return memoryStream.ToArray();
+    }
+
+    private static RocksDbLockMessage Unserializer(byte[] serializedData)
+    {
+        using MemoryStream memoryStream = new(serializedData);
+        return RocksDbLockMessage.Parser.ParseFrom(memoryStream);
+    }
+    
 }

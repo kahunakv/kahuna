@@ -37,7 +37,7 @@ public class SqlitePersistence : IPersistence
 
             if (connections.TryGetValue(shard, out sqlConnection))
                 return sqlConnection;
-
+            
             string connectionString = $"Data Source={path}/locks{shard}_{version}.db";
             SqliteConnection connection = new(connectionString);
 
@@ -72,7 +72,7 @@ public class SqlitePersistence : IPersistence
         }
     }
     
-    public async Task StoreLock(string resource, string owner, long expiresLogical, uint expiresCounter, long fencingToken, long consistency, LockState state)
+    public async Task StoreLock(string resource, string owner, long expiresPhysical, uint expiresCounter, long fencingToken, long consistency, LockState state)
     {
         try
         {
@@ -89,7 +89,7 @@ public class SqlitePersistence : IPersistence
 
             command.Parameters.AddWithValue("@resource", resource);
             command.Parameters.AddWithValue("@owner", owner ?? "");
-            command.Parameters.AddWithValue("@expiresLogical", expiresLogical);
+            command.Parameters.AddWithValue("@expiresLogical", expiresPhysical);
             command.Parameters.AddWithValue("@expiresCounter", expiresCounter);
             command.Parameters.AddWithValue("@fencingToken", fencingToken);
             command.Parameters.AddWithValue("@consistency", consistency);
@@ -99,7 +99,7 @@ public class SqlitePersistence : IPersistence
         }
         catch (Exception ex)
         {
-            Console.WriteLine("UpdateLock: {0} {1} {2} [{3}][{4}][{5}][{6}][{7}][{8}][{9}]", ex.GetType().Name, ex.Message, ex.StackTrace, resource, owner, expiresLogical, expiresCounter, fencingToken, consistency, state);
+            Console.WriteLine("UpdateLock: {0} {1} {2} [{3}][{4}][{5}][{6}][{7}][{8}][{9}]", ex.GetType().Name, ex.Message, ex.StackTrace, resource, owner, expiresPhysical, expiresCounter, fencingToken, consistency, state);
         }
     }
 

@@ -10,7 +10,7 @@ using Kahuna.Communication.Rest;
 using Kahuna.Configuration;
 using Kahuna.Locks;
 using Kahuna.Services;
-
+using Kahuna.Utils;
 using Kommander;
 using Kommander.Communication.Grpc;
 using Kommander.Discovery;
@@ -47,13 +47,15 @@ builder.Services.AddSingleton<IRaft>(services =>
         MaxPartitions = opts.InitialClusterPartitions
     };
 
+    opts.WalPath = opts.WalPath.Trim();
+
     IWAL walAdapter = opts.WalStorage switch
     {
         "rocksdb" => new RocksDbWAL(path: opts.WalPath, revision: opts.WalRevision),
         "sqlite" => new SqliteWAL(path: opts.WalPath, revision: opts.WalRevision),
         _ => throw new KahunaServerException("Invalid WAL storage")
     };
-
+    
     return new RaftManager(
         services.GetRequiredService<ActorSystem>(),
         configuration,

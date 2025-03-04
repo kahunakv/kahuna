@@ -45,7 +45,7 @@ public static class MapRoutesExtensions
             {
                 string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
 
-                KahunaLockResponse? response = await $"http://{leader}"
+                KahunaLockResponse? response = await $"https://{leader}"
                     .AppendPathSegments("v1/kahuna/lock")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
@@ -55,7 +55,7 @@ public static class MapRoutesExtensions
                     .ReceiveJson<KahunaLockResponse>();
                 
                 if (response is not null)
-                    response.ServedFrom = $"http://{leader}";
+                    response.ServedFrom = $"https://{leader}";
 
                 return response;
             }
@@ -97,7 +97,7 @@ public static class MapRoutesExtensions
             {
                 string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
                 
-                KahunaLockResponse? response = await $"http://{leader}"
+                KahunaLockResponse? response = await $"https://{leader}"
                     .AppendPathSegments("v1/kahuna/extend-lock")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
@@ -107,7 +107,7 @@ public static class MapRoutesExtensions
                     .ReceiveJson<KahunaLockResponse>();
                 
                 if (response is not null)
-                    response.ServedFrom = $"http://{leader}";
+                    response.ServedFrom = $"https://{leader}";
 
                 return response;
             }
@@ -146,7 +146,7 @@ public static class MapRoutesExtensions
             {
                 string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
                 
-                KahunaLockResponse? response = await $"http://{leader}"
+                KahunaLockResponse? response = await $"https://{leader}"
                     .AppendPathSegments("v1/kahuna/unlock")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
@@ -156,7 +156,7 @@ public static class MapRoutesExtensions
                     .ReceiveJson<KahunaLockResponse>();
                 
                 if (response is not null)
-                    response.ServedFrom = $"http://{leader}";
+                    response.ServedFrom = $"https://{leader}";
 
                 return response;
             }
@@ -201,7 +201,7 @@ public static class MapRoutesExtensions
             {
                 string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaGetLockRequest);
                 
-                KahunaGetLockResponse? response = await $"http://{leader}"
+                KahunaGetLockResponse? response = await $"https://{leader}"
                     .AppendPathSegments("v1/kahuna/get-lock")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
@@ -211,7 +211,7 @@ public static class MapRoutesExtensions
                     .ReceiveJson<KahunaGetLockResponse>();
 
                 if (response is not null)
-                    response.ServedFrom = $"http://{leader}";
+                    response.ServedFrom = $"https://{leader}";
 
                 return response;
             }

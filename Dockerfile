@@ -1,7 +1,8 @@
-FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build-env
+#FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build-env
+FROM kahuna-base AS build-env
 
-RUN mkdir -p /src
-COPY Kommander /src/Kommander/
+RUN rm -fr /src && mkdir -p /src
+#COPY Kommander /src/Kommander/
 COPY Kahuna.Shared /src/Kahuna.Shared/
 COPY Kahuna.Server /src/Kahuna.Server/
 
@@ -40,8 +41,8 @@ ENV KAHUNA_INITIAL_CLUSTER="$KAHUNA_INITIAL_CLUSTER"
 
 COPY --chmod=755 <<EOT /app/entrypoint.sh
 #!/usr/bin/env bash
-echo "kahuna --raft-nodeid $KAHUNA_RAFT_NODEID --raft-host $KAHUNA_RAFT_HOST --raft-port $KAHUNA_RAFT_PORT --http-ports $KAHUNA_HTTP_PORTS --https-ports $KAHUNA_HTTPS_PORTS --https-certificate /app/certificate.pfx --initial-cluster $KAHUNA_INITIAL_CLUSTER --wal-path /app/data --wal-revision v1"
-dotnet /app/Kahuna.Server.dll --raft-nodeid $KAHUNA_RAFT_NODEID --raft-host $KAHUNA_RAFT_HOST --raft-port $KAHUNA_RAFT_PORT --http-ports $KAHUNA_HTTP_PORTS --https-ports $KAHUNA_HTTPS_PORTS --https-certificate /app/certificate.pfx --initial-cluster $KAHUNA_INITIAL_CLUSTER --wal-path /app/data --wal-revision v1
+echo "kahuna --raft-nodeid $KAHUNA_RAFT_NODEID --raft-host $KAHUNA_RAFT_HOST --raft-port $KAHUNA_RAFT_PORT --http-ports $KAHUNA_HTTP_PORTS --https-ports $KAHUNA_HTTPS_PORTS --https-certificate /app/certificate.pfx --initial-cluster $KAHUNA_INITIAL_CLUSTER --wal-path /tmp --wal-revision v1"
+dotnet /app/Kahuna.Server.dll --raft-nodeid $KAHUNA_RAFT_NODEID --raft-host $KAHUNA_RAFT_HOST --raft-port $KAHUNA_RAFT_PORT --http-ports $KAHUNA_HTTP_PORTS --https-ports $KAHUNA_HTTPS_PORTS --https-certificate /app/certificate.pfx --initial-cluster $KAHUNA_INITIAL_CLUSTER --wal-path /tmp --wal-revision v1
 EOT
 
 # when starting the container, run dotnet with the built dll

@@ -4,6 +4,7 @@ service Locker {
   rpc TryLock (GrpcTryLockRequest) returns (GrpcTryLockResponse);
   rpc TryExtendLock (GrpcExtendLockRequest) returns (GrpcExtendLockResponse);
   rpc Unlock (GrpcUnlockRequest) returns (GrpcUnlockResponse);
+  rpc GetLock (GrpcGetLockRequest) returns (GrpcGetLockResponse);
 }
 
 message GrpcTryLockRequest {
@@ -40,6 +41,20 @@ message GrpcUnlockRequest {
 message GrpcUnlockResponse {
   optional string servedFrom = 1;
   GrpcLockResponseType Type = 2;
+}
+
+message GrpcGetLockRequest {
+  string LockName = 1;
+  GrpcLockConsistency Consistency = 2;
+}
+
+message GrpcGetLockResponse {
+  optional string servedFrom = 1;
+  GrpcLockResponseType Type = 2;
+  string Owner = 3;
+  int64 ExpiresPhysical = 4;
+  uint32 ExpiresCounter = 5;
+  int64 fencingToken = 6;
 }
 
 enum GrpcLockResponseType {

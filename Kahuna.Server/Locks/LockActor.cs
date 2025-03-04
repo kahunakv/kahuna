@@ -116,7 +116,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             // If the lock is consistent, we need to persist and replicate the lock state
             if (message.Consistency == LockConsistency.Consistent)
             {
-                bool success = await PersistAndReplicateLockMessage(message.Type, message.Resource, newContext, currentTime);
+                bool success = await PersistAndReplicateLockMessage(message.Type, message.Resource, newContext, currentTime, LockState.Locked);
                 if (!success)
                     return new(LockResponseType.Errored);
             }
@@ -143,7 +143,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 
         if (message.Consistency == LockConsistency.Consistent)
         {
-            bool success = await PersistAndReplicateLockMessage(message.Type, message.Resource, context, currentTime);
+            bool success = await PersistAndReplicateLockMessage(message.Type, message.Resource, context, currentTime, LockState.Locked);
             if (!success)
                 return new(LockResponseType.Errored);
         }
@@ -159,7 +159,8 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     /// <returns></returns>
     private async Task<LockResponse> TryExtendLock(LockRequest message)
     {
-        if (!locks.TryGetValue(message.Resource, out LockContext? context))
+        LockContext? context = await GetLockContext(message.Resource, message.Consistency);
+        if (context is null)
             return new(LockResponseType.LockDoesNotExist);
 
         if (context.Owner != message.Owner)
@@ -171,7 +172,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 
         if (message.Consistency == LockConsistency.Consistent)
         {
-            bool success = await PersistAndReplicateLockMessage(message.Type, message.Resource, context, currentTime);
+            bool success = await PersistAndReplicateLockMessage(message.Type, message.Resource, context, currentTime, LockState.Locked);
             if (!success)
                 return new(LockResponseType.Errored);
         }
@@ -186,7 +187,8 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     /// <returns></returns>
     private async Task<LockResponse> TryUnlock(LockRequest message)
     {
-        if (!locks.TryGetValue(message.Resource, out LockContext? context))
+        LockContext? context = await GetLockContext(message.Resource, message.Consistency);
+        if (context is null)
             return new(LockResponseType.LockDoesNotExist);
 
         if (message.Owner != context.Owner)
@@ -196,8 +198,9 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 
         if (message.Consistency == LockConsistency.Consistent)
         {
-            bool success = await PersistAndReplicateLockMessage(message.Type, message.Resource, context,
-                await raft.HybridLogicalClock.SendOrLocalEvent());
+            HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
+            
+            bool success = await PersistAndReplicateLockMessage(message.Type, message.Resource, context, currentTime, LockState.Unlocked);
             if (!success)
                 return new(LockResponseType.Errored);
         }
@@ -212,7 +215,8 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     /// <returns></returns>
     private async Task<LockResponse> GetLock(LockRequest message)
     {
-        if (!locks.TryGetValue(message.Resource, out LockContext? context))
+        LockContext? context = await GetLockContext(message.Resource, message.Consistency);
+        if (context is null)
             return new(LockResponseType.LockDoesNotExist);
 
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
@@ -225,15 +229,38 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         return new(LockResponseType.Got, readOnlyLockContext);
     }
 
+    private async ValueTask<LockContext?> GetLockContext(string resource, LockConsistency? consistency)
+    {
+        if (!locks.TryGetValue(resource, out LockContext? context))
+        {
+            if (consistency == LockConsistency.Consistent)
+            {
+                context = await persistence.GetLock(resource);
+                if (context is not null)
+                {
+                    locks.Add(resource, context);
+                    return context;
+                }
+                
+                return null;
+            }
+            
+            return null;    
+        }
+        
+        return context;
+    }
+
     /// <summary>
-    /// Persists and replicates lock message to the raft cluster
+    /// Persists and replicates lock message to the Raft cluster
     /// </summary>
     /// <param name="type"></param>
     /// <param name="resource"></param>
     /// <param name="context"></param>
     /// <param name="currentTime"></param>
+    /// <param name="lockState"></param>
     /// <returns></returns>
-    private async Task<bool> PersistAndReplicateLockMessage(LockRequestType type, string resource, LockContext context, HLCTimestamp currentTime)
+    private async Task<bool> PersistAndReplicateLockMessage(LockRequestType type, string resource, LockContext context, HLCTimestamp currentTime, LockState lockState)
     {
         if (!raft.Joined)
             return true;
@@ -268,7 +295,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             context.FencingToken,
             context.Expires,
             LockConsistency.Consistent,
-            LockState.Locked
+            lockState
         ));
 
         return success;

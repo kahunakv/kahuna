@@ -42,7 +42,7 @@ public sealed class LockManager : IKahuna
         this.raft = raft;
         this.logger = logger;
 
-        SqlitePersistence persistence = new("/app/data", "v1");
+        RocksDbPersistence persistence = new("/app/data", "v1");
         
         persistenceActorRouter = GetPersistenceRouter(persistence);
         
