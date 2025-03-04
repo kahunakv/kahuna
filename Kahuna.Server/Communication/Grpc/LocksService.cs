@@ -230,16 +230,16 @@ public class LocksService : Locker.LockerBase
 
         if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
         {
-            (LockResponseType type, ReadOnlyLockContext? lockContext) = await locks.GetLock(request.LockName,(LockConsistency)request.Consistency);
+            (LockResponseType type, ReadOnlyLockContext? lockContext) = await locks.GetLock(request.LockName, (LockConsistency)request.Consistency);
             if (type != LockResponseType.Got)
                 return new()
                 {
-                    Type = GrpcLockResponseType.LockResponseTypeInvalidInput
+                    Type = (GrpcLockResponseType)type
                 };
 
             return new()
             {
-                ServedFrom = null,
+                ServedFrom = "",
                 Type = (GrpcLockResponseType)type,
                 Owner = lockContext?.Owner ?? "",
                 FencingToken = lockContext?.FencingToken ?? 0,

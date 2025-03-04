@@ -222,7 +222,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
 
         if (context.Expires - currentTime < TimeSpan.Zero)
-            return new(LockResponseType.Busy);
+            return new(LockResponseType.LockDoesNotExist);
 
         ReadOnlyLockContext readOnlyLockContext = new(context.Owner, context.Expires, context.FencingToken);
 

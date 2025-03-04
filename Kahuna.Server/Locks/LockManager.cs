@@ -42,7 +42,7 @@ public sealed class LockManager : IKahuna
         this.raft = raft;
         this.logger = logger;
 
-        RocksDbPersistence persistence = new("/app/data", "v1");
+        IPersistence persistence = GetPersistence(configuration);
         
         persistenceActorRouter = GetPersistenceRouter(persistence);
         
@@ -52,6 +52,16 @@ public sealed class LockManager : IKahuna
         
         ephemeralLocksRouter = GetEphemeralRouter(backgroundWriter, persistence, workers);
         consistentLocksRouter = GetConsistentRouter(backgroundWriter, persistence, workers);
+    }
+
+    private IPersistence GetPersistence(KahunaConfiguration configuration)
+    {
+        return configuration.Storage switch
+        {
+            "rocksdb" => new RocksDbPersistence(configuration.StoragePath, configuration.StorageRevision),
+            "sqlite" => new SqlitePersistence(configuration.StoragePath, configuration.StorageRevision),
+            _ => throw new KahunaServerException("Invalid storage type")
+        };
     }
 
     /// <summary>
@@ -69,6 +79,13 @@ public sealed class LockManager : IKahuna
         return actorSystem.CreateConsistentHashRouter(persistenceInstances);
     }
 
+    /// <summary>
+    /// Creates the ephemeral locks router
+    /// </summary>
+    /// <param name="backgroundWriter"></param>
+    /// <param name="persistence"></param>
+    /// <param name="workers"></param>
+    /// <returns></returns>
     private IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> GetEphemeralRouter(IActorRef<LockBackgroundWriterActor, LockBackgroundWriteRequest> backgroundWriter, IPersistence persistence, int workers)
     {
         List<IActorRefStruct<LockActor, LockRequest, LockResponse>> ephemeralInstances = new(workers);
@@ -79,6 +96,13 @@ public sealed class LockManager : IKahuna
         return actorSystem.CreateConsistentHashRouterStruct(ephemeralInstances);
     }
 
+    /// <summary>
+    /// Creates the consistent locks router
+    /// </summary>
+    /// <param name="backgroundWriter"></param>
+    /// <param name="persistence"></param>
+    /// <param name="workers"></param>
+    /// <returns></returns>
     private IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> GetConsistentRouter(IActorRef<LockBackgroundWriterActor, LockBackgroundWriteRequest> backgroundWriter, IPersistence persistence, int workers)
     {
         List<IActorRefStruct<LockActor, LockRequest, LockResponse>> consistentInstances = new(workers);

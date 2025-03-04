@@ -15,7 +15,7 @@ services:
       - "8081:2070"
       - "8082:2071"
     volumes:
-      - kahuna1-data:/app/data
+      - kahuna1-data:/storage
     networks:
       custom_net:
         ipv4_address: 172.30.0.2
@@ -35,7 +35,7 @@ services:
       - "8083:2070"
       - "8084:2071"
     volumes:
-      - kahuna2-data:/app/data
+      - kahuna2-data:/storage
     networks:
       custom_net:
         ipv4_address: 172.30.0.3
@@ -55,7 +55,7 @@ services:
       - "8085:2070"
       - "8086:2071"
     volumes:
-      - kahuna3-data:/app/data
+      - kahuna3-data:/storage
     networks:
       custom_net:
         ipv4_address: 172.30.0.4

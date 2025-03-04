@@ -47,8 +47,6 @@ builder.Services.AddSingleton<IRaft>(services =>
         MaxPartitions = opts.InitialClusterPartitions
     };
 
-    opts.WalPath = opts.WalPath.Trim();
-
     IWAL walAdapter = opts.WalStorage switch
     {
         "rocksdb" => new RocksDbWAL(path: opts.WalPath, revision: opts.WalRevision),
@@ -114,7 +112,10 @@ KahunaConfiguration configuration = new()
     HttpsCertificate = opts.HttpsCertificate,
     HttpsCertificatePassword = opts.HttpsCertificatePassword,
     LocksWorkers = opts.LocksWorkers,
-    BackgroundWriterWorkers = opts.BackgroundWritersWorkers
+    BackgroundWriterWorkers = opts.BackgroundWritersWorkers,
+    Storage = opts.Storage,
+    StoragePath = opts.StoragePath,
+    StorageRevision = opts.StorageRevision
 };
 
 // @todo move somewhere else
@@ -127,6 +128,18 @@ if (!string.IsNullOrEmpty(configuration.HttpsCertificate))
     X509Certificate2 xcertificate = new(configuration.HttpsCertificate, configuration.HttpsCertificatePassword);
 #pragma warning restore SYSLIB0057
     configuration.HttpsTrustedThumbprint = xcertificate.Thumbprint;
+}
+
+if (!string.IsNullOrEmpty(opts.StoragePath))
+{
+    if (Directory.Exists(opts.StoragePath))
+        Directory.CreateDirectory(opts.StoragePath);
+}
+
+if (!string.IsNullOrEmpty(opts.WalPath))
+{
+    if (Directory.Exists(opts.WalPath))
+        Directory.CreateDirectory(opts.WalPath);
 }
 
 builder.Services.AddSingleton(configuration);

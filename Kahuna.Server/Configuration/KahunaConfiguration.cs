@@ -12,4 +12,10 @@ public sealed class KahunaConfiguration
     public int LocksWorkers { get; set; }
     
     public int BackgroundWriterWorkers { get; set; }
+
+    public string Storage { get; set; } = "";
+    
+    public string StoragePath { get; set; } = "";
+    
+    public string StorageRevision { get; set; } = "";
 }
