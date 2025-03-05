@@ -56,6 +56,9 @@ public sealed class KahunaCommandLineOptions
     [Option("locks-workers", Required = false, HelpText = "Number of ephemeral/consistent workers")]
     public int LocksWorkers { get; set; } = 0;
     
+    [Option("persistence-workers", Required = false, HelpText = "Number of persistence workers")]
+    public int PersistenceWorkers { get; set; } = 0;
+    
     [Option("background-writer-workers", Required = false, HelpText = "Number of background writers workers")]
     public int BackgroundWritersWorkers { get; set; } = 0;
 }

@@ -276,7 +276,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 
         int partitionId = raft.GetPartitionKey(resource);
 
-        (bool success, long _) = await raft.ReplicateLogs(
+        (bool success, _, long _) = await raft.ReplicateLogs(
             partitionId,
             "LockMessage",
             ReplicationSerializer.Serialize(new LockMessage()

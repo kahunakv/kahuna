@@ -11,6 +11,8 @@ public sealed class KahunaConfiguration
     
     public int LocksWorkers { get; set; }
     
+    public int PersistenceWorkers { get; set; }
+    
     public int BackgroundWriterWorkers { get; set; }
 
     public string Storage { get; set; } = "";

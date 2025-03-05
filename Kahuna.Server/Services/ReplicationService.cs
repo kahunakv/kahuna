@@ -21,7 +21,7 @@ public class ReplicationService : BackgroundService //, IDisposable
             return;
         
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
-        ((RaftManager)raft).OnReplicationError += kahuna.OnReplicationError;
+        raft.OnReplicationError += kahuna.OnReplicationError;
         
         await raft.JoinCluster();
         

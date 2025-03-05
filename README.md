@@ -446,7 +446,7 @@ public async Task UpdateBalance(KahunaClient client, string userId)
     await using KahunaLock myLock = await client.GetOrCreateLock(
         "balance-" + userId,
         TimeSpan.FromSeconds(300), // lock for 5 mins
-        consistency: KahunaLockConsistency.Consistent
+        consistency: LockConsistency.Consistent
     );
 
     if (myLock.IsAcquired)
@@ -468,13 +468,17 @@ public async Task UpdateBalance(KahunaClient client, string userId)
 
 ## Client SDK for .NET
 
-Kahuna also provides a client tailored for .NET developers. This SDK simplifies the integration of distributed locking into your .NET applications by abstracting much of the underlying complexity. Documentation and samples for the client SDK can be found in the `docs/` folder or on our [GitHub repository](https://github.com/andresgutierrez/kahuna).
+Kahuna also provides a client tailored for .NET developers. 
+This SDK simplifies the integration of distributed locking into your .NET applications 
+by abstracting much of the underlying complexity. Documentation and samples 
+for the client SDK can be found in the [Documentation](https://github.com/andresgutierrez/kahuna/kahuna/wiki#client-sdk-for-net).
 
 ---
 
 ## Contributing
 
-We welcome contributions from the community! For detailed guidelines, refer to our [CONTRIBUTING.md](CONTRIBUTING.md) file.
+We welcome contributions from the community! For detailed guidelines, 
+refer to our [CONTRIBUTING.md](CONTRIBUTING.md) file.
 
 ---
 
@@ -484,4 +488,7 @@ Kahuna is licensed under the MIT License. See the [LICENSE](LICENSE) file for de
 
 ---
 
-Kahuna offers a robust, scalable, and reliable solution for distributed locking in modern systems, making it an invaluable tool for developers facing the challenges of distributed resource management.
+Kahuna offers a robust, scalable, and reliable solution for 
+distributed locking in modern systems, making it an invaluable 
+tool for developers facing the challenges of distributed 
+resource management.

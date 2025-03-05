@@ -15,7 +15,7 @@ public interface IKahuna
     
     public Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(string lockName, LockConsistency consistency);
 
-    public Task<bool> OnReplicationReceived(string type, byte[] message);
+    public Task<bool> OnReplicationReceived(RaftLog log);
 
     public void OnReplicationError(RaftLog log);
 }

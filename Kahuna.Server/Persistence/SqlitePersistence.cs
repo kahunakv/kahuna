@@ -16,12 +16,12 @@ public class SqlitePersistence : IPersistence
     
     private readonly string path;
     
-    private readonly string version;
+    private readonly string revision;
     
-    public SqlitePersistence(string path = ".", string version = "v1")
+    public SqlitePersistence(string path = ".", string revision = "v1")
     {
         this.path = path;
-        this.version = version;
+        this.revision = revision;
     }
     
     private async ValueTask<SqliteConnection> TryOpenDatabase(string resource)
@@ -38,7 +38,7 @@ public class SqlitePersistence : IPersistence
             if (connections.TryGetValue(shard, out sqlConnection))
                 return sqlConnection;
             
-            string connectionString = $"Data Source={path}/locks{shard}_{version}.db";
+            string connectionString = $"Data Source={path}/locks{shard}_{revision}.db";
             SqliteConnection connection = new(connectionString);
 
             connection.Open();

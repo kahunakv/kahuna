@@ -4,6 +4,9 @@ using Kommander.Time;
 
 namespace Kahuna.Locks;
 
+/// <summary>
+/// Represents a lock background write request.
+/// </summary>
 public sealed class LockBackgroundWriteRequest
 {
     public LockBackgroundWriteType Type { get; }

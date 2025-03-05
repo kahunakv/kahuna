@@ -44,17 +44,26 @@ public sealed class LockManager : IKahuna
 
         IPersistence persistence = GetPersistence(configuration);
         
-        persistenceActorRouter = GetPersistenceRouter(persistence);
+        persistenceActorRouter = GetPersistenceRouter(persistence, configuration);
         
-        IActorRef<LockBackgroundWriterActor, LockBackgroundWriteRequest> backgroundWriter = actorSystem.Spawn<LockBackgroundWriterActor, LockBackgroundWriteRequest>("locks-background-writer", raft, persistenceActorRouter, logger);
-
-        int workers = Math.Max(32, Environment.ProcessorCount * 4);
+        IActorRef<LockBackgroundWriterActor, LockBackgroundWriteRequest> backgroundWriter = actorSystem.Spawn<LockBackgroundWriterActor, LockBackgroundWriteRequest>(
+            "locks-background-writer", 
+            raft, 
+            persistenceActorRouter, 
+            logger
+        );
         
-        ephemeralLocksRouter = GetEphemeralRouter(backgroundWriter, persistence, workers);
-        consistentLocksRouter = GetConsistentRouter(backgroundWriter, persistence, workers);
+        ephemeralLocksRouter = GetEphemeralRouter(backgroundWriter, persistence, configuration);
+        consistentLocksRouter = GetConsistentRouter(backgroundWriter, persistence, configuration);
     }
 
-    private IPersistence GetPersistence(KahunaConfiguration configuration)
+    /// <summary>
+    /// Creates the persistence instance
+    /// </summary>
+    /// <param name="configuration"></param>
+    /// <returns></returns>
+    /// <exception cref="KahunaServerException"></exception>
+    private static IPersistence GetPersistence(KahunaConfiguration configuration)
     {
         return configuration.Storage switch
         {
@@ -68,12 +77,16 @@ public sealed class LockManager : IKahuna
     /// Creates the persistence router
     /// </summary>
     /// <param name="persistence"></param>
+    /// <param name="configuration"></param>
     /// <returns></returns>
-    private IActorRef<ConsistentHashActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> GetPersistenceRouter(IPersistence persistence)
+    private IActorRef<ConsistentHashActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> GetPersistenceRouter(
+        IPersistence persistence, 
+        KahunaConfiguration configuration
+    )
     {
-        List<IActorRef<PersistenceActor, PersistenceRequest, PersistenceResponse>> persistenceInstances = new(4);
+        List<IActorRef<PersistenceActor, PersistenceRequest, PersistenceResponse>> persistenceInstances = new(configuration.PersistenceWorkers);
 
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < configuration.PersistenceWorkers; i++)
             persistenceInstances.Add(actorSystem.Spawn<PersistenceActor, PersistenceRequest, PersistenceResponse>("locks-persistence-" + i, persistence, logger));
 
         return actorSystem.CreateConsistentHashRouter(persistenceInstances);
@@ -86,11 +99,15 @@ public sealed class LockManager : IKahuna
     /// <param name="persistence"></param>
     /// <param name="workers"></param>
     /// <returns></returns>
-    private IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> GetEphemeralRouter(IActorRef<LockBackgroundWriterActor, LockBackgroundWriteRequest> backgroundWriter, IPersistence persistence, int workers)
+    private IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> GetEphemeralRouter(
+        IActorRef<LockBackgroundWriterActor, LockBackgroundWriteRequest> backgroundWriter, 
+        IPersistence persistence, 
+        KahunaConfiguration configuration
+    )
     {
-        List<IActorRefStruct<LockActor, LockRequest, LockResponse>> ephemeralInstances = new(workers);
+        List<IActorRefStruct<LockActor, LockRequest, LockResponse>> ephemeralInstances = new(configuration.LocksWorkers);
 
-        for (int i = 0; i < workers; i++)
+        for (int i = 0; i < configuration.LocksWorkers; i++)
             ephemeralInstances.Add(actorSystem.SpawnStruct<LockActor, LockRequest, LockResponse>("ephemeral-lock-" + i, backgroundWriter, persistence, logger));
 
         return actorSystem.CreateConsistentHashRouterStruct(ephemeralInstances);
@@ -103,30 +120,37 @@ public sealed class LockManager : IKahuna
     /// <param name="persistence"></param>
     /// <param name="workers"></param>
     /// <returns></returns>
-    private IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> GetConsistentRouter(IActorRef<LockBackgroundWriterActor, LockBackgroundWriteRequest> backgroundWriter, IPersistence persistence, int workers)
+    private IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> GetConsistentRouter(
+        IActorRef<LockBackgroundWriterActor, LockBackgroundWriteRequest> backgroundWriter, 
+        IPersistence persistence, 
+        KahunaConfiguration configuration
+    )
     {
-        List<IActorRefStruct<LockActor, LockRequest, LockResponse>> consistentInstances = new(workers);
+        List<IActorRefStruct<LockActor, LockRequest, LockResponse>> consistentInstances = new(configuration.LocksWorkers);
 
-        for (int i = 0; i < workers; i++)
+        for (int i = 0; i < configuration.LocksWorkers; i++)
             consistentInstances.Add(actorSystem.SpawnStruct<LockActor, LockRequest, LockResponse>("consistent-lock-" + i, backgroundWriter, persistence, logger));
         
         return actorSystem.CreateConsistentHashRouterStruct(consistentInstances);
     }
 
-    public async Task<bool> OnReplicationReceived(string type, byte[] data)
+    /// <summary>
+    /// Receives replication messages once they're committed to the Raft log.
+    /// </summary>
+    /// <param name="log"></param>
+    /// <returns></returns>
+    public async Task<bool> OnReplicationReceived(RaftLog log)
     {
+        if (log.LogData is null || log.LogData.Length == 0)
+            return true;
+        
         try
         {
-            LockMessage lockMessage = ReplicationSerializer.Unserializer(data);
+            LockMessage lockMessage = ReplicationSerializer.Unserializer(log.LogData);
 
             HLCTimestamp eventTime = new(lockMessage.TimeLogical, lockMessage.TimeCounter);
 
-            HLCTimestamp currentTime = await raft.HybridLogicalClock.ReceiveEvent(eventTime);
-            
-            //Console.WriteLine("Expires {0} {1} {2}:{3}", (LockRequestType)lockMessage.Type, lockMessage.Resource, lockMessage.ExpireLogical, lockMessage.ExpireCounter);
-
-            //HLCTimestamp expires = new(lockMessage.ExpireLogical, lockMessage.ExpireCounter);
-            //TimeSpan timeSpan = expires - currentTime;
+            await raft.HybridLogicalClock.ReceiveEvent(eventTime);
 
             switch ((LockRequestType)lockMessage.Type)
             {
@@ -204,6 +228,10 @@ public sealed class LockManager : IKahuna
         return true;
     }
 
+    /// <summary>
+    /// Invoken when a replication error occurs.
+    /// </summary>
+    /// <param name="log"></param>
     public void OnReplicationError(RaftLog log)
     {
         logger.LogError("Replication error: #{Id} {Type}", log.Id, log.LogType);

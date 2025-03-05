@@ -106,43 +106,8 @@ builder.WebHost.ConfigureKestrel(options =>
     }
 });
 
-// Build Kahuna configuration
-KahunaConfiguration configuration = new()
-{
-    HttpsCertificate = opts.HttpsCertificate,
-    HttpsCertificatePassword = opts.HttpsCertificatePassword,
-    LocksWorkers = opts.LocksWorkers,
-    BackgroundWriterWorkers = opts.BackgroundWritersWorkers,
-    Storage = opts.Storage,
-    StoragePath = opts.StoragePath,
-    StorageRevision = opts.StorageRevision
-};
 
-// @todo move somewhere else
-if (!string.IsNullOrEmpty(configuration.HttpsCertificate))
-{
-    if (!File.Exists(configuration.HttpsCertificate))
-        throw new KahunaServerException("Invalid HTTPS certificate");
-    
-#pragma warning disable SYSLIB0057
-    X509Certificate2 xcertificate = new(configuration.HttpsCertificate, configuration.HttpsCertificatePassword);
-#pragma warning restore SYSLIB0057
-    configuration.HttpsTrustedThumbprint = xcertificate.Thumbprint;
-}
-
-if (!string.IsNullOrEmpty(opts.StoragePath))
-{
-    if (Directory.Exists(opts.StoragePath))
-        Directory.CreateDirectory(opts.StoragePath);
-}
-
-if (!string.IsNullOrEmpty(opts.WalPath))
-{
-    if (Directory.Exists(opts.WalPath))
-        Directory.CreateDirectory(opts.WalPath);
-}
-
-builder.Services.AddSingleton(configuration);
+builder.Services.AddSingleton(ConfigurationValidator.Validate(opts));
 
 // Start server
 WebApplication app = builder.Build();
