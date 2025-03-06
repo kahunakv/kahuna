@@ -12,7 +12,6 @@
   <PackageReference Include="Grpc.AspNetCore.Server.Reflection" Version="2.67.0" />
   <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.2" />
   <PackageReference Include="CommandLineParser" Version="2.9.1" />
-  <PackageReference Include="RocksDB" Version="9.10.0.55496" />
 </ItemGroup>
 
 <ItemGroup>

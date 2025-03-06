@@ -41,6 +41,8 @@ ENV KAHUNA_INITIAL_CLUSTER="$KAHUNA_INITIAL_CLUSTER"
 
 COPY --chmod=755 <<EOT /app/entrypoint.sh
 #!/usr/bin/env bash
+mkdir -p /storage/data/v1
+mkdir -p /storage/wal/v1
 echo "kahuna --raft-nodeid $KAHUNA_RAFT_NODEID --raft-host $KAHUNA_RAFT_HOST --raft-port $KAHUNA_RAFT_PORT --http-ports $KAHUNA_HTTP_PORTS --https-ports $KAHUNA_HTTPS_PORTS --https-certificate /app/certificate.pfx --initial-cluster $KAHUNA_INITIAL_CLUSTER --storage-path /storage/data --storage-revision v1 --wal-path /storage/wal --wal-revision v1"
 dotnet /app/Kahuna.Server.dll --raft-nodeid $KAHUNA_RAFT_NODEID --raft-host $KAHUNA_RAFT_HOST --raft-port $KAHUNA_RAFT_PORT --http-ports $KAHUNA_HTTP_PORTS --https-ports $KAHUNA_HTTPS_PORTS --https-certificate /app/certificate.pfx --initial-cluster $KAHUNA_INITIAL_CLUSTER --storage-path /storage/data --storage-revision v1 --wal-path /storage/wal --wal-revision v1
 EOT

@@ -13,6 +13,7 @@ using Kahuna.Services;
 using Kahuna.Utils;
 using Kommander;
 using Kommander.Communication.Grpc;
+using Kommander.Communication.Rest;
 using Kommander.Discovery;
 using Kommander.Time;
 using Kommander.WAL;
@@ -44,7 +45,10 @@ builder.Services.AddSingleton<IRaft>(services =>
         NodeId = opts.RaftNodeId,
         Host = opts.RaftHost,
         Port = opts.RaftPort,
-        MaxPartitions = opts.InitialClusterPartitions
+        MaxPartitions = opts.InitialClusterPartitions,
+        StartElectionTimeout = 2000,
+        EndElectionTimeout = 5000,
+        VotingTimeout = TimeSpan.FromSeconds(5)
     };
 
     IWAL walAdapter = opts.WalStorage switch
@@ -112,7 +116,9 @@ builder.Services.AddSingleton(ConfigurationValidator.Validate(opts));
 // Start server
 WebApplication app = builder.Build();
 
+app.MapRestRaftRoutes();
 app.MapRestKahunaRoutes();
+
 app.MapGrpcRaftRoutes();
 app.MapGrpcKahunaRoutes();
 app.MapGrpcReflectionService();
