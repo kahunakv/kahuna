@@ -27,7 +27,13 @@ internal sealed class GrpcCommunication
         {
             if (!channels.TryGetValue(url, out GrpcChannel? channel))
             {
-                channel = GrpcChannel.ForAddress(url); // , new() { HttpHandler = GetHandler() }
+                channel = GrpcChannel.ForAddress(url, new() { 
+                    HttpHandler = new SocketsHttpHandler
+                    {
+                        EnableMultipleHttp2Connections = true
+                    } 
+                });
+                
                 channels.TryAdd(url, channel);
             }
         
@@ -59,7 +65,12 @@ internal sealed class GrpcCommunication
         {
             if (!channels.TryGetValue(url, out GrpcChannel? channel))
             {
-                channel = GrpcChannel.ForAddress(url); // , new() { HttpHandler = GetHandler() }
+                channel = GrpcChannel.ForAddress(url, new() { 
+                    HttpHandler = new SocketsHttpHandler
+                    {
+                        EnableMultipleHttp2Connections = true
+                    } 
+                });
                 channels.TryAdd(url, channel);
             }
         

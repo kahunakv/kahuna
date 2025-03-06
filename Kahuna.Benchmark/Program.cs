@@ -7,7 +7,7 @@ using Kahuna.Shared.Locks;
 
 Console.WriteLine("Kahuna Benchmark");
 
-const int numberOfLocks = 750;
+const int numberOfLocks = 2500;
 const int MaxTokens = 1_000_000;
 
 List<string> tokens = new(MaxTokens);
