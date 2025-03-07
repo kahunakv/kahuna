@@ -45,6 +45,9 @@ public static class ConfigurationValidator
 
         if (configuration.LocksWorkers <= 0)
             configuration.LocksWorkers = Math.Max(32, Environment.ProcessorCount * 4);
+        
+        if (configuration.KeyValuesWorkers <= 0)
+            configuration.KeyValuesWorkers = Math.Max(32, Environment.ProcessorCount * 4);
 
         if (configuration.BackgroundWriterWorkers <= 0)
             configuration.BackgroundWriterWorkers = 1;

@@ -1,5 +1,6 @@
 
 using System.Data;
+using Kahuna.KeyValues;
 using Kahuna.Locks;
 using Kommander;
 using Microsoft.Data.Sqlite;
@@ -57,6 +58,20 @@ public class SqlitePersistence : IPersistence
             
             await using SqliteCommand command1 = new(createTableQuery, connection);
             await command1.ExecuteNonQueryAsync();
+            
+            const string createTableQuery2 = """
+            CREATE TABLE IF NOT EXISTS keys (
+                key STRING PRIMARY KEY, 
+                value STRING, 
+                expiresLogical INT, 
+                expiresCounter INT, 
+                consistency INT,
+                state INT
+            );
+            """;
+            
+            await using SqliteCommand command2 = new(createTableQuery2, connection);
+            await command2.ExecuteNonQueryAsync();
             
             const string pragmasQuery = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY;";
             await using SqliteCommand command3 = new(pragmasQuery, connection);
@@ -127,6 +142,34 @@ public class SqlitePersistence : IPersistence
         catch (Exception ex)
         {
             Console.WriteLine("GetLock: {0} {1} {2}", ex.GetType().Name, ex.Message, ex.StackTrace);
+        }
+        
+        return null;
+    }
+
+    public async Task<KeyValueContext?> GetKeyValue(string keyName)
+    {
+        try
+        {
+            SqliteConnection connection = await TryOpenDatabase(keyName);
+
+            const string query = "SELECT key, expiresLogical, expiresCounter, consistency, state FROM keys WHERE key = @key";
+            await using SqliteCommand command = new(query, connection);
+
+            command.Parameters.AddWithValue("@key", keyName);
+
+            await using SqliteDataReader reader = await command.ExecuteReaderAsync();
+
+            while (reader.Read())
+                return new()
+                {
+                    Value = reader.IsDBNull(0) ? "" :  reader.GetString(0),
+                    Expires = new(reader.IsDBNull(1) ? 0 : reader.GetInt64(1), reader.IsDBNull(2) ? 0 : (uint)reader.GetInt64(2))
+                };
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("GetKeyValue: {0} {1} {2}", ex.GetType().Name, ex.Message, ex.StackTrace);
         }
         
         return null;

@@ -9,7 +9,7 @@ service Locker {
 
 message GrpcTryLockRequest {
   string LockName = 1;
-  optional string LockId = 2;
+  string LockId = 2;
   int32 ExpiresMs = 3;
   GrpcLockConsistency Consistency = 4;
 }
@@ -72,6 +72,6 @@ enum GrpcLockResponseType {
 
 enum GrpcLockConsistency {
   LOCK_CONSISTENCY_EPHEMERAL = 0;
-  LOCK_CONSISTENCY_CONSISTENT = 1;
+  LOCK_CONSISTENCY_LINEARIZABLE = 1;
   LOCK_CONSISTENCY_REPLICATION_CONSISTENT = 2;
 }

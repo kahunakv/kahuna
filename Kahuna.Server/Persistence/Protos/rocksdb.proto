@@ -11,3 +11,12 @@ message RocksDbLockMessage {
   int32 consistency = 6;
   int32 state = 7;
 }
+
+message RocksDbKeyValueMessage {
+  string key = 1;
+  string value = 2;
+  int64 expiresPhysical = 3;
+  uint32 expiresCounter = 4;
+  int32 consistency = 5;
+  int32 state = 6;
+}

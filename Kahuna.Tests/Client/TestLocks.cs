@@ -17,7 +17,7 @@ public class TestLocks
     }
     
     [Theory]
-    [InlineData(LockConsistency.Consistent)]
+    [InlineData(LockConsistency.Linearizable)]
     [InlineData(LockConsistency.Ephemeral)]
     public async Task TestValidateAcquireSingleLock(LockConsistency consistency)
     {
@@ -29,7 +29,7 @@ public class TestLocks
     }
     
     [Theory]
-    [InlineData(LockConsistency.Consistent)]
+    [InlineData(LockConsistency.Linearizable)]
     [InlineData(LockConsistency.Ephemeral)]
     public async Task TestLockAcquisitionAndExpiresWithMilliseconds(LockConsistency consistency)
     {
@@ -52,7 +52,7 @@ public class TestLocks
     }
     
     [Theory]
-    [InlineData(LockConsistency.Consistent)]
+    [InlineData(LockConsistency.Linearizable)]
     [InlineData(LockConsistency.Ephemeral)]
     public async Task TestValidateAcquireLockExpiresWithTimeSpan(LockConsistency consistency)
     {
@@ -68,7 +68,7 @@ public class TestLocks
     }
     
     [Theory]
-    [InlineData(LockConsistency.Consistent)]
+    [InlineData(LockConsistency.Linearizable)]
     [InlineData(LockConsistency.Ephemeral)]
     public async Task TestValidateAcquireLockExpires4(LockConsistency consistency)
     {
@@ -90,7 +90,7 @@ public class TestLocks
     }
     
     [Theory]
-    [InlineData(LockConsistency.Consistent)]
+    [InlineData(LockConsistency.Linearizable)]
     [InlineData(LockConsistency.Ephemeral)]
     public async Task TestValidateAcquireLockExpiresRace(LockConsistency consistency)
     {
@@ -123,7 +123,7 @@ public class TestLocks
     }
     
     [Theory]
-    [InlineData(LockConsistency.Consistent)]
+    [InlineData(LockConsistency.Linearizable)]
     [InlineData(LockConsistency.Ephemeral)]
     public async Task TestValidateAcquireSameLockExpiresRace(LockConsistency consistency)
     {
@@ -156,7 +156,7 @@ public class TestLocks
     }
     
     [Theory]
-    [InlineData(LockConsistency.Consistent)]
+    [InlineData(LockConsistency.Linearizable)]
     [InlineData(LockConsistency.Ephemeral)]
     public async Task TestValidateAcquireAndExtendLock(LockConsistency consistency)
     {

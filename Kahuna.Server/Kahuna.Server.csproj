@@ -22,6 +22,9 @@
     <Protobuf Include="Replication\Protos\lock_message.proto">
       <Generator>MSBuild:Compile</Generator>
     </Protobuf>
+    <Protobuf Include="Replication\Protos\keyvalue_message.proto">
+      <Generator>MSBuild:Compile</Generator>
+    </Protobuf>
     <Protobuf Include="Persistence\Protos\rocksdb.proto">
       <Generator>MSBuild:Compile</Generator>
     </Protobuf>

@@ -13,9 +13,22 @@ public static class ReplicationSerializer
         return memoryStream.ToArray();
     }
 
-    public static LockMessage Unserializer(byte[] serializedData)
+    public static LockMessage UnserializeLockMessage(byte[] serializedData)
     {
         using MemoryStream memoryStream = new(serializedData);
         return LockMessage.Parser.ParseFrom(memoryStream);
+    }
+    
+    public static byte[] Serialize(KeyValueMessage message)
+    {
+        using MemoryStream memoryStream = new();
+        message.WriteTo(memoryStream);
+        return memoryStream.ToArray();
+    }
+    
+    public static KeyValueMessage UnserializeKeyValueMessage(byte[] serializedData)
+    {
+        using MemoryStream memoryStream = new(serializedData);
+        return KeyValueMessage.Parser.ParseFrom(memoryStream);
     }
 }

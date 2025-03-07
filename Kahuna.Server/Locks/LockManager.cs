@@ -15,7 +15,7 @@ namespace Kahuna.Locks;
 /// <summary>
 /// LockManager is a singleton class that manages lock actors.
 /// </summary>
-public sealed class LockManager : IKahuna
+public sealed class LockManager
 {
     private readonly ActorSystem actorSystem;
 
@@ -146,7 +146,7 @@ public sealed class LockManager : IKahuna
         
         try
         {
-            LockMessage lockMessage = ReplicationSerializer.Unserializer(log.LogData);
+            LockMessage lockMessage = ReplicationSerializer.UnserializeLockMessage(log.LogData);
 
             HLCTimestamp eventTime = new(lockMessage.TimeLogical, lockMessage.TimeCounter);
 

@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package Kahuna.Replication.Protos;
+
+message KeyValueMessage {
+  int32 type = 1;
+  string key = 2;
+  string value = 3;
+  int64 expireLogical = 4;
+  uint32 expireCounter = 5;
+  int64 timeLogical = 6;
+  uint32 timeCounter = 7;
+  int32 consistency = 8;
+}

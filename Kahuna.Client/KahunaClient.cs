@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Flurl.Http;
 using Kahuna.Client.Communication;
+using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 using Microsoft.Extensions.Logging;
 
@@ -251,6 +252,41 @@ public class KahunaClient
             logger?.LogError("Error getting lock instance: {Message}", ex.Message);
             throw;
         }
+    }
+    
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="value"></param>
+    /// <param name="expiryTime"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
+    public async Task<bool> SetKeyValue(string key, string? value, int expiryTime = 30000, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
+    {
+        try
+        {
+            return await communication.TrySetKeyValue(GetRoundRobinUrl(), key, value, expiryTime, consistency).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError("Error setting key/value: {Message}", ex.Message);
+
+            throw;
+        }
+    }
+    
+    /// <summary>
+    /// Set key to hold the string value. If key already holds a value, it is overwritten.
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="value"></param>
+    /// <param name="expiry"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
+    public async Task<bool> SetKeyValue(string key, string? value, TimeSpan expiry, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
+    {
+        return await SetKeyValue(key, value, (int)expiry.TotalMilliseconds, consistency).ConfigureAwait(false);
     }
     
     /// <summary>

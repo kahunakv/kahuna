@@ -1,6 +1,7 @@
 
 using System.Collections.Concurrent;
 using Grpc.Net.Client;
+using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 using Microsoft.Extensions.Logging;
 
@@ -94,77 +95,107 @@ internal sealed class GrpcCommunication
     
     internal async Task<bool> TryExtend(string url, string resource, string lockId, int expiryTime, LockConsistency consistency)
     {
-        /*KahunaLockRequest request = new() { LockName = resource, LockId = lockId, ExpiresMs = expiryTime, Consistency = consistency };
-        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
-
-        KahunaLockResponse? response;
+        GrpcExtendLockRequest request = new() { LockName = resource, LockId = lockId, ExpiresMs = expiryTime, Consistency = (GrpcLockConsistency)consistency };
+        
+        GrpcExtendLockResponse? response;
         
         do
         {
-            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
-            
-            response = await retryPolicy.ExecuteAsync(() => 
-                url
-                    .WithOAuthBearerToken("xxx")
-                    .AppendPathSegments("v1/kahuna/extend-lock")
-                    .WithHeader("Accept", "application/json")
-                    .WithHeader("Content-Type", "application/json")
-                    .WithTimeout(5)
-                    .WithSettings(o => o.HttpVersion = "2.0")
-                    .PostStringAsync(payload)
-                    .ReceiveJson<KahunaLockResponse>())
-            .ConfigureAwait(false);
-            
+            if (!channels.TryGetValue(url, out GrpcChannel? channel))
+            {
+                channel = GrpcChannel.ForAddress(url, new() { 
+                    HttpHandler = new SocketsHttpHandler
+                    {
+                        EnableMultipleHttp2Connections = true
+                    } 
+                });
+                channels.TryAdd(url, channel);
+            }
+        
+            Locker.LockerClient client = new(channel);
+        
+            response = await client.TryExtendLockAsync(request).ConfigureAwait(false);
+
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
-            
-            if (response.Type == LockResponseType.Extended)
+                
+            if (response.Type == GrpcLockResponseType.LockResponseTypeExtended)
                 return true;
 
-        } while (response.Type == LockResponseType.MustRetry);
+        } while (response.Type == GrpcLockResponseType.LockResponseTypeMustRetry);
         
-        throw new KahunaException("Failed to extend lock", response.Type);*/
-        
-        await Task.Yield();
-        
-        throw new KahunaException("Failed to get lock information", LockResponseType.Errored);
+        throw new KahunaException("Failed to extend", (LockResponseType)response.Type);
     }
     
     internal async Task<KahunaLockInfo?> Get(string url, string resource, LockConsistency consistency)
     {
-        /*KahunaGetLockRequest request = new() { LockName = resource, Consistency = consistency };
-        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaGetLockRequest);
-
-        KahunaGetLockResponse? response;
-
+        GrpcGetLockRequest request = new() { LockName = resource, Consistency = (GrpcLockConsistency)consistency };
+        
+        GrpcGetLockResponse? response;
+        
         do
         {
-            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
+            if (!channels.TryGetValue(url, out GrpcChannel? channel))
+            {
+                channel = GrpcChannel.ForAddress(url, new() { 
+                    HttpHandler = new SocketsHttpHandler
+                    {
+                        EnableMultipleHttp2Connections = true
+                    } 
+                });
+                channels.TryAdd(url, channel);
+            }
+        
+            Locker.LockerClient client = new(channel);
+        
+            response = await client.GetLockAsync(request).ConfigureAwait(false);
 
-            response = await retryPolicy.ExecuteAsync(() =>
-                    url
-                        .WithOAuthBearerToken("xxx")
-                        .AppendPathSegments("v1/kahuna/get-lock")
-                        .WithHeader("Accept", "application/json")
-                        .WithHeader("Content-Type", "application/json")
-                        .WithTimeout(5)
-                        .WithSettings(o => o.HttpVersion = "2.0")
-                        .PostStringAsync(payload)
-                        .ReceiveJson<KahunaGetLockResponse>())
-                .ConfigureAwait(false);
+            if (response is null)
+                throw new KahunaException("Response is null", LockResponseType.Errored);
+                
+            if (response.Type == GrpcLockResponseType.LockResponseTypeGot)
+                return new(response.Owner, new(response.ExpiresPhysical, response.ExpiresCounter), response.FencingToken);
+
+        } while (response.Type == GrpcLockResponseType.LockResponseTypeMustRetry);
+        
+        throw new KahunaException("Failed to get lock information", (LockResponseType)response.Type);
+    }
+    
+    internal async Task<bool> TrySetKeyValue(string url, string key, string? value, int expiryTime, KeyValueConsistency consistency)
+    {
+        GrpcTrySetKeyValueRequest request = new() { Key = key, Value = value, ExpiresMs = expiryTime, Consistency = (GrpcKeyValueConsistency)consistency };
+        
+        GrpcTrySetKeyValueResponse? response;
+        
+        do
+        {
+            if (!channels.TryGetValue(url, out GrpcChannel? channel))
+            {
+                channel = GrpcChannel.ForAddress(url, new() { 
+                    HttpHandler = new SocketsHttpHandler
+                    {
+                        EnableMultipleHttp2Connections = true
+                    } 
+                });
+                
+                channels.TryAdd(url, channel);
+            }
+        
+            KeyValuer.KeyValuerClient client = new(channel);
+        
+            response = await client.TrySetKeyValueAsync(request).ConfigureAwait(false);
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
 
-            if (response.Type == LockResponseType.Got)
-                return new(response.Owner ?? "", response.Expires, response.FencingToken);
+            if (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeSet)
+                return true;
             
-        } while (response.Type == LockResponseType.MustRetry);
-        
-        throw new KahunaException("Failed to get lock information", response.Type);*/
-        
-        await Task.Yield();
+            //if (response.Type == GrpcLockResponseType.LockResponseTypeBusy)
+            //    return (KahunaLockAcquireResult.Conflicted, -1);
 
-        throw new KahunaException("Failed to get lock information", LockResponseType.Errored);
+        } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
+            
+        throw new KahunaException("Failed to set key/value", (LockResponseType)response.Type);
     }
 }

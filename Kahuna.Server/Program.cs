@@ -8,6 +8,7 @@ using Kahuna;
 using Kahuna.Communication.Grpc;
 using Kahuna.Communication.Rest;
 using Kahuna.Configuration;
+using Kahuna.KeyValues;
 using Kahuna.Locks;
 using Kahuna.Services;
 using Kahuna.Utils;
@@ -70,7 +71,9 @@ builder.Services.AddSingleton<IRaft>(services =>
 });
 
 builder.Services.AddSingleton<ActorSystem>(services => new(services, services.GetRequiredService<ILogger<IRaft>>()));
-builder.Services.AddSingleton<IKahuna, LockManager>();
+builder.Services.AddSingleton<LockManager>();
+builder.Services.AddSingleton<KeyValuesManager>();
+builder.Services.AddSingleton<IKahuna, KahunaManager>();
 builder.Services.AddHostedService<ReplicationService>();
 
 builder.Services.AddGrpc();

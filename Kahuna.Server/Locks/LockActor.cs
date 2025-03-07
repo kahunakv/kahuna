@@ -84,7 +84,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         }
         catch (Exception ex)
         {
-            logger.LogError("Error processing message: {Type} {Message}\n{Stacktrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            logger.LogError("LockActor: Error processing message: {Type} {Message}\n{Stacktrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
         }
 
         return new(LockResponseType.Errored);
@@ -105,7 +105,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             LockContext? newContext = null;
 
             /// Try to retrieve lock context from persistence
-            if (message.Consistency == LockConsistency.Consistent)
+            if (message.Consistency == LockConsistency.Linearizable)
             {
                 newContext = await persistence.GetLock(message.Resource);
                 if (newContext is not null)
@@ -120,7 +120,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             };
 
             // If the lock is consistent, we need to persist and replicate the lock state
-            if (message.Consistency == LockConsistency.Consistent)
+            if (message.Consistency == LockConsistency.Linearizable)
             {
                 bool success = await PersistAndReplicateLockMessage(message.Type, message.Resource, newContext, currentTime, LockState.Locked);
                 if (!success)
@@ -148,7 +148,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         context.Expires = currentTime + message.ExpiresMs;
         context.LastUsed = currentTime;
 
-        if (message.Consistency == LockConsistency.Consistent)
+        if (message.Consistency == LockConsistency.Linearizable)
         {
             bool success = await PersistAndReplicateLockMessage(message.Type, message.Resource, context, currentTime, LockState.Locked);
             if (!success)
@@ -178,7 +178,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         context.Expires = currentTime + message.ExpiresMs;
         context.LastUsed = currentTime;
 
-        if (message.Consistency == LockConsistency.Consistent)
+        if (message.Consistency == LockConsistency.Linearizable)
         {
             bool success = await PersistAndReplicateLockMessage(message.Type, message.Resource, context, currentTime, LockState.Locked);
             if (!success)
@@ -207,7 +207,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         context.Owner = null;
         context.LastUsed = currentTime;
 
-        if (message.Consistency == LockConsistency.Consistent)
+        if (message.Consistency == LockConsistency.Linearizable)
         {
             bool success = await PersistAndReplicateLockMessage(message.Type, message.Resource, context, currentTime, LockState.Unlocked);
             if (!success)
@@ -242,7 +242,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     {
         if (!locks.TryGetValue(resource, out LockContext? context))
         {
-            if (consistency == LockConsistency.Consistent)
+            if (consistency == LockConsistency.Linearizable)
             {
                 context = await persistence.GetLock(resource);
                 if (context is not null)
@@ -303,7 +303,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             context.Owner, 
             context.FencingToken,
             context.Expires,
-            LockConsistency.Consistent,
+            LockConsistency.Linearizable,
             lockState
         ));
 

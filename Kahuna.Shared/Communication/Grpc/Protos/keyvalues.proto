@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+service KeyValuer {
+  rpc TrySetKeyValue (GrpcTrySetKeyValueRequest) returns (GrpcTrySetKeyValueResponse);
+  rpc TryExtendKeyValue (GrpcTryExtendKeyValueRequest) returns (GrpcTryExtendKeyValueResponse);
+  rpc TryDeleteKeyValue (GrpcTryDeleteKeyValueRequest) returns (GrpcTryDeleteKeyValueResponse);
+  rpc TryGetKeyValue (GrpcTryGetKeyValueRequest) returns (GrpcTryGetKeyValueResponse);
+}
+
+message GrpcTrySetKeyValueRequest {
+  string Key = 1;
+  optional string Value = 2;
+  int32 ExpiresMs = 3;
+  GrpcKeyValueConsistency Consistency = 4;
+}
+
+message GrpcTrySetKeyValueResponse {
+  optional string servedFrom = 1;
+  GrpcKeyValueResponseType Type = 2;
+}
+
+message GrpcTryExtendKeyValueRequest {
+  string Key = 1;
+  int32 ExpiresMs = 2;
+  GrpcKeyValueConsistency Consistency = 3;
+}
+
+message GrpcTryExtendKeyValueResponse {
+  optional string servedFrom = 1;
+  GrpcKeyValueResponseType Type = 2;
+}
+
+message GrpcTryDeleteKeyValueRequest {
+  string Key = 1;
+  GrpcKeyValueConsistency Consistency = 2;
+}
+
+message GrpcTryDeleteKeyValueResponse {
+  optional string servedFrom = 1;
+  GrpcKeyValueResponseType Type = 2;
+}
+
+message GrpcTryGetKeyValueRequest {
+  string Key = 1;
+  GrpcKeyValueConsistency Consistency = 2;
+}
+
+message GrpcTryGetKeyValueResponse {
+  optional string servedFrom = 1;
+  GrpcKeyValueResponseType Type = 2;
+  optional string Value = 3;
+  int64 ExpiresPhysical = 4;
+  uint32 ExpiresCounter = 5;
+}
+
+enum GrpcKeyValueResponseType {
+  KEYVALUE_RESPONSE_TYPE_SET = 0;
+  KEYVALUE_RESPONSE_TYPE_NOTSET = 1;
+  KEYVALUE_RESPONSE_TYPE_EXTENDED = 2;
+  KEYVALUE_RESPONSE_TYPE_GOT = 3;
+  KEYVALUE_RESPONSE_TYPE_DELETED = 4;
+  KEYVALUE_RESPONSE_TYPE_ERRORED = 99;
+  KEYVALUE_RESPONSE_TYPE_INVALID_INPUT = 100;
+  KEYVALUE_RESPONSE_TYPE_MUST_RETRY = 101;
+  KEYVALUE_RESPONSE_TYPE_DOES_NOT_EXIST = 102;
+}
+
+enum GrpcKeyValueConsistency {
+  KEYVALUE_CONSISTENCY_EPHEMERAL = 0;
+  KEYVALUE_CONSISTENCY_LINEARIZABLE = 1;
+  KEYVALUE_CONSISTENCY_REPLICATION_CONSISTENT = 2;
+}

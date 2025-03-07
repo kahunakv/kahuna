@@ -26,4 +26,10 @@
       </Protobuf>
     </ItemGroup>
 
+    <ItemGroup>
+        <Protobuf Include="Communication\Grpc\Protos\keyvalues.proto">
+            <Generator>MSBuild:Compile</Generator>
+        </Protobuf>
+    </ItemGroup>
+
 </Project>
