@@ -88,7 +88,7 @@ public sealed class KahunaManager : IKahuna
     }
 
     /// <summary>
-    /// Passes a TryUnlock request to the locker actor for the given lock name. 
+    /// Tries Unlocking the lock with the given name and id.
     /// </summary>
     /// <param name="lockName"></param>
     /// <param name="consistency"></param>

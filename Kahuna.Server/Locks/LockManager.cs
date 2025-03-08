@@ -143,7 +143,7 @@ public sealed class LockManager
         if (log.LogData is null || log.LogData.Length == 0)
             return true;
         
-        if (log.LogType != ReplicationTypes.KeyValues)
+        if (log.LogType != ReplicationTypes.Locks)
             return true;
         
         try

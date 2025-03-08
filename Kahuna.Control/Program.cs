@@ -36,28 +36,24 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
 {
     string[] keywords =
     [
+        // ephemeral key/values
         "eset",
         "eget",
         "edelete",
+        "eextend",
+        // linearizable key/values
         "set",
         "get",
         "delete",
+        "extend",
+        // locks
         "lock",
         "extend-lock",
-        "extend-key",
         "unlock",
         "get-lock",
     ];
 
-    string[] functions =
-    [
-        "count",
-        "distinct",
-        "max",
-        "min",
-        "avg",
-        "sum"
-    ];
+    string[] functions = [];
 
     string[] commands =
     [
@@ -85,7 +81,7 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
     {
         MultiLine = false,
         Text = "",
-        Prompt = new MyLineNumberPrompt(new Style(foreground: Color.PaleTurquoise1)),
+        Prompt = new MyLineNumberPrompt(new(foreground: Color.PaleTurquoise1)),
         //Completion = new TestCompletion(),        
         Highlighter = worldHighlighter
     };
@@ -165,6 +161,8 @@ while (true)
                 AnsiConsole.MarkupLine("[cyan]{0}[/]", Markup.Escape(value));
             else
                 AnsiConsole.MarkupLine("[yellow]null[/]");
+            
+            continue;
         }
         
         if (commandTrim.StartsWith("delete ", StringComparison.InvariantCultureIgnoreCase))
@@ -174,9 +172,25 @@ while (true)
             bool success = await connection.DeleteKeyValue(parts[1], KeyValueConsistency.Linearizable);
             
             if (success)
-                AnsiConsole.MarkupLine("[cyan]ok[/]");
+                AnsiConsole.MarkupLine("[cyan]deleted[/]");
             else
                 AnsiConsole.MarkupLine("[yellow]error[/]");
+
+            continue;
+        }
+        
+        if (commandTrim.StartsWith("extend ", StringComparison.InvariantCultureIgnoreCase))
+        {
+            string[] parts = commandTrim.Split(" ");
+
+            bool success = await connection.ExtendKeyValue(parts[1], int.Parse(parts[2]), KeyValueConsistency.Linearizable);
+            
+            if (success)
+                AnsiConsole.MarkupLine("[cyan]extended[/]");
+            else
+                AnsiConsole.MarkupLine("[yellow]error[/]");
+
+            continue;
         }
         
         if (commandTrim.StartsWith("eset ", StringComparison.InvariantCultureIgnoreCase))
@@ -201,6 +215,8 @@ while (true)
                 AnsiConsole.MarkupLine("[cyan]{0}[/]", Markup.Escape(value));
             else
                 AnsiConsole.MarkupLine("[yellow]null[/]");
+
+            continue;
         }
         
         if (commandTrim.StartsWith("edelete ", StringComparison.InvariantCultureIgnoreCase))
@@ -213,6 +229,8 @@ while (true)
                 AnsiConsole.MarkupLine("[cyan]ok[/]");
             else
                 AnsiConsole.MarkupLine("[yellow]error[/]");
+
+            continue;
         }
         
         if (commandTrim.StartsWith("lock ", StringComparison.InvariantCultureIgnoreCase))
@@ -275,9 +293,11 @@ while (true)
             {
                 AnsiConsole.MarkupLine("[yellow]not acquired[/]");
             }
-
+            
             continue;
         }
+        
+        AnsiConsole.MarkupLine("[yellow]unknown command[/]");
     }
     catch (Exception ex)
     {
@@ -337,7 +357,7 @@ public sealed class MyLineNumberPrompt : ILineEditorPrompt
 
     public (Markup Markup, int Margin) GetPrompt(ILineEditorState state, int line)
     {
-        return (new Markup("kahuna> ", _style), 1);
+        return (new Markup("kahuna-cli> ", _style), 1);
     }
 }
 

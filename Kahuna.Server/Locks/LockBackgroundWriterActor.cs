@@ -70,8 +70,8 @@ public sealed class LockBackgroundWriterActor : IActor<LockBackgroundWriteReques
                     ));
                 }
                 
-                foreach (int partitionId in partitionIds)
-                    await raft.ReplicateCheckpoint(partitionId);
+                //foreach (int partitionId in partitionIds)
+                //    await raft.ReplicateCheckpoint(partitionId);
                 
                 break;
         }

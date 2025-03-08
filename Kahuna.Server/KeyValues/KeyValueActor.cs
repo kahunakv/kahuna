@@ -124,17 +124,6 @@ public class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueResponse>
             return new(KeyValueResponseType.Set);
         }
         
-        if (!string.IsNullOrEmpty(context.Value))
-        {
-            bool isExpired = context.Expires - currentTime < TimeSpan.Zero;
-
-            if (context.Value == message.Value && !isExpired)
-                return new(KeyValueResponseType.Set);
-
-            if (!isExpired)
-                return new(KeyValueResponseType.Set);
-        }
-        
         context.Value = message.Value;
         context.Expires = currentTime + message.ExpiresMs;
         context.LastUsed = currentTime;

@@ -255,7 +255,7 @@ public class KahunaClient
     }
     
     /// <summary>
-    /// 
+    /// Set key to hold the string value. If key already holds a value, it is overwritten
     /// </summary>
     /// <param name="key"></param>
     /// <param name="value"></param>
@@ -310,7 +310,7 @@ public class KahunaClient
     }
     
     /// <summary>
-    /// 
+    /// Removes the specified key. A key is ignored if it does not exist.
     /// </summary>
     /// <param name="key"></param>
     /// <param name="consistency"></param>
@@ -324,6 +324,48 @@ public class KahunaClient
         catch (Exception ex)
         {
             logger?.LogError("Error deleting key/value: {Message}", ex.Message);
+
+            throw;
+        }
+    }
+    
+    /// <summary>
+    /// Set a timeout on key. After the timeout has expired, the key will automatically be deleted
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
+    public async Task<bool> ExtendKeyValue(string key, int expiresMs, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
+    {
+        try
+        {
+            return await communication.TryExtendKeyValue(GetRoundRobinUrl(), key, expiresMs, consistency).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError("Error extending key/value: {Message}", ex.Message);
+
+            throw;
+        }
+    }
+    
+    /// <summary>
+    /// Set a timeout on key. After the timeout has expired, the key will automatically be deleted
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
+    public async Task<bool> ExtendKeyValue(string key, TimeSpan expiresMs, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
+    {
+        try
+        {
+            return await communication.TryExtendKeyValue(GetRoundRobinUrl(), key, (int)expiresMs.TotalMilliseconds, consistency).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError("Error extending key/value: {Message}", ex.Message);
 
             throw;
         }

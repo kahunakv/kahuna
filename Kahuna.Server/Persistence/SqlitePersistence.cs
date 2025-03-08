@@ -113,7 +113,7 @@ public class SqlitePersistence : IPersistence
         }
         catch (Exception ex)
         {
-            Console.WriteLine("UpdateLock: {0} {1} {2} [{3}][{4}][{5}][{6}][{7}][{8}][{9}]", ex.GetType().Name, ex.Message, ex.StackTrace, resource, owner, expiresPhysical, expiresCounter, fencingToken, consistency, state);
+            Console.WriteLine("StoreLock: {0} {1} {2} [{3}][{4}][{5}][{6}][{7}][{8}][{9}]", ex.GetType().Name, ex.Message, ex.StackTrace, resource, owner, expiresPhysical, expiresCounter, fencingToken, consistency, state);
         }
     }
     
@@ -125,15 +125,15 @@ public class SqlitePersistence : IPersistence
 
             const string query = """
                                  INSERT INTO keys (key, value, expiresLogical, expiresCounter, consistency, state) 
-                                 VALUES (@resource, @owner, @expiresLogical, @expiresCounter, @consistency, @state) 
-                                 ON CONFLICT(resource) DO UPDATE SET owner=@owner, expiresLogical=@expiresLogical, expiresCounter=@expiresCounter, 
+                                 VALUES (@key, @value, @expiresLogical, @expiresCounter, @consistency, @state) 
+                                 ON CONFLICT(key) DO UPDATE SET value=@value, expiresLogical=@expiresLogical, expiresCounter=@expiresCounter, 
                                  consistency=@consistency, state=@state;
                                  """;
             
             await using SqliteCommand command = new(query, connection);
 
-            command.Parameters.AddWithValue("@resource", key);
-            command.Parameters.AddWithValue("@owner", value ?? "");
+            command.Parameters.AddWithValue("@key", key);
+            command.Parameters.AddWithValue("@value", value ?? "");
             command.Parameters.AddWithValue("@expiresLogical", expiresPhysical);
             command.Parameters.AddWithValue("@expiresCounter", expiresCounter);
             command.Parameters.AddWithValue("@consistency", consistency);
@@ -143,7 +143,7 @@ public class SqlitePersistence : IPersistence
         }
         catch (Exception ex)
         {
-            Console.WriteLine("UpdateLock: {0} {1} {2} [{3}][{4}][{5}][{6}][{7}][{8}]", ex.GetType().Name, ex.Message, ex.StackTrace, key, value, expiresPhysical, expiresCounter, consistency, state);
+            Console.WriteLine("StoreKeyValue: {0} {1} {2} [{3}][{4}][{5}][{6}][{7}][{8}]", ex.GetType().Name, ex.Message, ex.StackTrace, key, value, expiresPhysical, expiresCounter, consistency, state);
         }
     }
 
@@ -182,7 +182,7 @@ public class SqlitePersistence : IPersistence
         {
             SqliteConnection connection = await TryOpenDatabase(keyName);
 
-            const string query = "SELECT key, expiresLogical, expiresCounter, consistency, state FROM keys WHERE key = @key";
+            const string query = "SELECT value, expiresLogical, expiresCounter, consistency, state FROM keys WHERE key = @key";
             await using SqliteCommand command = new(query, connection);
 
             command.Parameters.AddWithValue("@key", keyName);

@@ -280,4 +280,45 @@ internal sealed class GrpcCommunication
             
         throw new KahunaException("Failed to delete key/value", (LockResponseType)response.Type);
     }
+    
+    internal async Task<bool> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueConsistency consistency)
+    {
+        GrpcTryExtendKeyValueRequest request = new() { Key = key, ExpiresMs = expiresMs, Consistency = (GrpcKeyValueConsistency)consistency };
+        
+        GrpcTryExtendKeyValueResponse? response;
+        
+        do
+        {
+            if (!channels.TryGetValue(url, out GrpcChannel? channel))
+            {
+                channel = GrpcChannel.ForAddress(url, new() { 
+                    HttpHandler = new SocketsHttpHandler
+                    {
+                        EnableMultipleHttp2Connections = true
+                    } 
+                });
+                
+                channels.TryAdd(url, channel);
+            }
+        
+            KeyValuer.KeyValuerClient client = new(channel);
+        
+            response = await client.TryExtendKeyValueAsync(request).ConfigureAwait(false);
+
+            if (response is null)
+                throw new KahunaException("Response is null", LockResponseType.Errored);
+
+            switch (response.Type)
+            {
+                case GrpcKeyValueResponseType.KeyvalueResponseTypeExtended:
+                    return true;
+                
+                case GrpcKeyValueResponseType.KeyvalueResponseTypeDoesNotExist:
+                    return false;
+            }
+            
+        } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
+            
+        throw new KahunaException("Failed to extend key/value", (LockResponseType)response.Type);
+    }
 }

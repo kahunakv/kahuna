@@ -71,8 +71,8 @@ public sealed class KeyValueBackgroundWriterActor : IActor<KeyValueBackgroundWri
                     ));
                 }
                 
-                foreach (int partitionId in partitionIds)
-                    await raft.ReplicateCheckpoint(partitionId);
+                //foreach (int partitionId in partitionIds)
+                //    await raft.ReplicateCheckpoint(partitionId);
                 
                 break;
         }
