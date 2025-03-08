@@ -1,0 +1,48 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net8.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <PackAsTool>true</PackAsTool>
+        <ToolCommandName>kahunactl</ToolCommandName>
+        <PackageOutputPath>./nupkg</PackageOutputPath>
+        <PackageId>Kahuna.Control</PackageId>
+        <Version>0.0.1</Version>
+        <Description>kahunactl is a command-line interface for interacting with Kahuna</Description>
+        <Authors>Andres Gutierrez</Authors>
+        <Company>Kahuna</Company>
+        <InvariantGlobalization>true</InvariantGlobalization>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <PackageDescription>kahunactl is a command-line interface for interacting with Kahuna</PackageDescription>
+        <PackageProjectUrl>https://github.com/andresgutierrez/kahuna</PackageProjectUrl>
+        <RepositoryUrl>https://github.com/andresgutierrez/kahuna</RepositoryUrl>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <PackageTags>dotnet;kahuna;cli;</PackageTags>
+    </PropertyGroup>
+
+    <PropertyGroup>
+        <NuGetAudit>false</NuGetAudit>
+        <NoWarn>NU1904;NU1903;MSB3245;CS1591;SA1633;SA1101</NoWarn>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Spectre.Console" Version="0.49.1" />
+        <PackageReference Include="CsvHelper" Version="33.0.1" />
+        <PackageReference Include="CommandLineParser" Version="2.9.1" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Include="../README.md">
+            <Pack>True</Pack>
+            <PackagePath>\</PackagePath>
+        </None>
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\RadLine\RadLine\RadLine.csproj" />
+        <ProjectReference Include="..\Kahuna.Client\Kahuna.Client.csproj" />
+    </ItemGroup>
+
+</Project>

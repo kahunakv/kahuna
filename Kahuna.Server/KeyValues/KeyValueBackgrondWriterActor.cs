@@ -57,15 +57,16 @@ public sealed class KeyValueBackgroundWriterActor : IActor<KeyValueBackgroundWri
                 {
                     partitionIds.Add(keyValueRequest.PartitionId);
                     
-                    /*await persistenceActorRouter.Ask(new(
-                        PersistenceRequestType.Store,
+                    await persistenceActorRouter.Ask(new(
+                        PersistenceRequestType.StoreLock,
                         keyValueRequest.Key,
                         keyValueRequest.Value,
+                        0,
                         keyValueRequest.Expires.L,
                         keyValueRequest.Expires.C,
-                        keyValueRequest.Consistency,
-                        keyValueRequest.State
-                    ));*/
+                        (int)keyValueRequest.Consistency,
+                        (int)keyValueRequest.State
+                    ));
                 }
                 
                 foreach (int partitionId in partitionIds)

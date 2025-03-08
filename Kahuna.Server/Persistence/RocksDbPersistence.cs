@@ -10,6 +10,10 @@ namespace Kahuna.Persistence;
 
 public class RocksDbPersistence : IPersistence
 {
+    private const string LockPrefix = "lk-";
+    
+    private const string KeyValuePrefix = "kv-";
+    
     private readonly RocksDb db;
     
     private readonly string path;
@@ -37,11 +41,11 @@ public class RocksDbPersistence : IPersistence
         long expiresPhysical, 
         uint expiresCounter, 
         long fencingToken,
-        long consistency, 
-        LockState state
+        int consistency, 
+        int state
     )
     {
-        db.Put(Encoding.UTF8.GetBytes(resource), Serialize(new()
+        db.Put(Encoding.UTF8.GetBytes(LockPrefix + resource), Serialize(new RocksDbLockMessage
         {
             Owner = owner,
             ExpiresPhysical = expiresPhysical,
@@ -53,10 +57,31 @@ public class RocksDbPersistence : IPersistence
 
         return Task.CompletedTask;
     }
+    
+    public Task StoreKeyValue(
+        string key, 
+        string value, 
+        long expiresPhysical, 
+        uint expiresCounter, 
+        int consistency, 
+        int state
+    )
+    {
+        db.Put(Encoding.UTF8.GetBytes(LockPrefix + key), Serialize(new RocksDbKeyValueMessage
+        {
+            Value = value,
+            ExpiresPhysical = expiresPhysical,
+            ExpiresCounter = expiresCounter,
+            Consistency = consistency,
+            State = state
+        }));
+
+        return Task.CompletedTask;
+    }
 
     public Task<LockContext?> GetLock(string resource)
     {
-        byte[]? value = db.Get(Encoding.UTF8.GetBytes(resource));
+        byte[]? value = db.Get(Encoding.UTF8.GetBytes(LockPrefix + resource));
         if (value is null)
             return Task.FromResult<LockContext?>(null);
 
@@ -74,7 +99,7 @@ public class RocksDbPersistence : IPersistence
 
     public Task<KeyValueContext?> GetKeyValue(string keyName)
     {
-        byte[]? value = db.Get(Encoding.UTF8.GetBytes(keyName));
+        byte[]? value = db.Get(Encoding.UTF8.GetBytes(KeyValuePrefix + keyName));
         if (value is null)
             return Task.FromResult<KeyValueContext?>(null);
 
@@ -90,6 +115,13 @@ public class RocksDbPersistence : IPersistence
     }
 
     private static byte[] Serialize(RocksDbLockMessage message)
+    {
+        using MemoryStream memoryStream = new();
+        message.WriteTo(memoryStream);
+        return memoryStream.ToArray();
+    }
+    
+    private static byte[] Serialize(RocksDbKeyValueMessage message)
     {
         using MemoryStream memoryStream = new();
         message.WriteTo(memoryStream);

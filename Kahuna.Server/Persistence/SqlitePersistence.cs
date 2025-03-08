@@ -1,5 +1,4 @@
 
-using System.Data;
 using Kahuna.KeyValues;
 using Kahuna.Locks;
 using Kommander;
@@ -87,7 +86,7 @@ public class SqlitePersistence : IPersistence
         }
     }
     
-    public async Task StoreLock(string resource, string owner, long expiresPhysical, uint expiresCounter, long fencingToken, long consistency, LockState state)
+    public async Task StoreLock(string resource, string owner, long expiresPhysical, uint expiresCounter, long fencingToken, int consistency, int state)
     {
         try
         {
@@ -115,6 +114,36 @@ public class SqlitePersistence : IPersistence
         catch (Exception ex)
         {
             Console.WriteLine("UpdateLock: {0} {1} {2} [{3}][{4}][{5}][{6}][{7}][{8}][{9}]", ex.GetType().Name, ex.Message, ex.StackTrace, resource, owner, expiresPhysical, expiresCounter, fencingToken, consistency, state);
+        }
+    }
+    
+    public async Task StoreKeyValue(string key, string? value, long expiresPhysical, uint expiresCounter, int consistency, int state)
+    {
+        try
+        {
+            SqliteConnection connection = await TryOpenDatabase(key);
+
+            const string query = """
+                                 INSERT INTO keys (key, value, expiresLogical, expiresCounter, consistency, state) 
+                                 VALUES (@resource, @owner, @expiresLogical, @expiresCounter, @consistency, @state) 
+                                 ON CONFLICT(resource) DO UPDATE SET owner=@owner, expiresLogical=@expiresLogical, expiresCounter=@expiresCounter, 
+                                 consistency=@consistency, state=@state;
+                                 """;
+            
+            await using SqliteCommand command = new(query, connection);
+
+            command.Parameters.AddWithValue("@resource", key);
+            command.Parameters.AddWithValue("@owner", value ?? "");
+            command.Parameters.AddWithValue("@expiresLogical", expiresPhysical);
+            command.Parameters.AddWithValue("@expiresCounter", expiresCounter);
+            command.Parameters.AddWithValue("@consistency", consistency);
+            command.Parameters.AddWithValue("@state", state);
+
+            await command.ExecuteNonQueryAsync();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("UpdateLock: {0} {1} {2} [{3}][{4}][{5}][{6}][{7}][{8}]", ex.GetType().Name, ex.Message, ex.StackTrace, key, value, expiresPhysical, expiresCounter, consistency, state);
         }
     }
 

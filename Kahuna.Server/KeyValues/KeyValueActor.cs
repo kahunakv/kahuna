@@ -199,6 +199,9 @@ public class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueResponse>
                 return new(KeyValueResponseType.Errored);
         }
 
+        if (message.Consistency == KeyValueConsistency.Ephemeral)
+            keyValues.Remove(message.Key);
+
         return new(KeyValueResponseType.Deleted);
     }
 

@@ -59,14 +59,14 @@ public sealed class LockBackgroundWriterActor : IActor<LockBackgroundWriteReques
                     partitionIds.Add(lockRequest.PartitionId);
                     
                     await persistenceActorRouter.Ask(new(
-                        PersistenceRequestType.Store,
+                        PersistenceRequestType.StoreLock,
                         lockRequest.Resource,
                         lockRequest.Owner,
                         lockRequest.FencingToken,
                         lockRequest.Expires.L,
                         lockRequest.Expires.C,
-                        lockRequest.Consistency,
-                        lockRequest.State
+                        (int)lockRequest.Consistency,
+                        (int)lockRequest.State
                     ));
                 }
                 

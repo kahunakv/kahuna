@@ -34,15 +34,14 @@ public sealed class LockManager
     /// </summary>
     /// <param name="actorSystem"></param>
     /// <param name="raft"></param>
+    /// <param name="persistence"></param>
     /// <param name="configuration"></param>
     /// <param name="logger"></param>
-    public LockManager(ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, ILogger<IKahuna> logger)
+    public LockManager(ActorSystem actorSystem, IRaft raft, IPersistence persistence, KahunaConfiguration configuration, ILogger<IKahuna> logger)
     {
         this.actorSystem = actorSystem;
         this.raft = raft;
         this.logger = logger;
-
-        IPersistence persistence = GetPersistence(configuration);
         
         persistenceActorRouter = GetPersistenceRouter(persistence, configuration);
         
@@ -157,14 +156,14 @@ public sealed class LockManager
                 case LockRequestType.TryLock:
                 {
                     PersistenceResponse? response = await persistenceActorRouter.Ask(new(
-                        PersistenceRequestType.Store,
+                        PersistenceRequestType.StoreLock,
                         lockMessage.Resource,
                         lockMessage.Owner,
                         lockMessage.FencingToken,
                         lockMessage.ExpireLogical,
                         lockMessage.ExpireCounter,
-                        (LockConsistency)lockMessage.Consistency,
-                        LockState.Locked
+                        lockMessage.Consistency,
+                        (int)LockState.Locked
                     ));
                     
                     if (response is null)
@@ -176,14 +175,14 @@ public sealed class LockManager
                 case LockRequestType.TryUnlock:
                 {
                     PersistenceResponse? response = await persistenceActorRouter.Ask(new(
-                        PersistenceRequestType.Store,
+                        PersistenceRequestType.StoreLock,
                         lockMessage.Resource,
                         lockMessage.Owner,
                         lockMessage.FencingToken,
                         lockMessage.ExpireLogical,
                         lockMessage.ExpireCounter,
-                        (LockConsistency)lockMessage.Consistency,
-                        LockState.Unlocked
+                        lockMessage.Consistency,
+                        (int)LockState.Unlocked
                     ));
                     
                     if (response is null)
@@ -195,14 +194,14 @@ public sealed class LockManager
                 case LockRequestType.TryExtendLock:
                 {
                     PersistenceResponse? response = await persistenceActorRouter.Ask(new(
-                        PersistenceRequestType.Store,
+                        PersistenceRequestType.StoreLock,
                         lockMessage.Resource,
                         lockMessage.Owner,
                         lockMessage.FencingToken,
                         lockMessage.ExpireLogical,
                         lockMessage.ExpireCounter,
-                        (LockConsistency)lockMessage.Consistency,
-                        LockState.Locked
+                        lockMessage.Consistency,
+                        (int)LockState.Locked
                     ));
 
                     if (response is null)

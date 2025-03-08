@@ -290,6 +290,46 @@ public class KahunaClient
     }
     
     /// <summary>
+    /// Get the value of key. If the key does not exist null is returned
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
+    public async Task<string?> GetKeyValue(string key, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
+    {
+        try
+        {
+            return await communication.TryGetKeyValue(GetRoundRobinUrl(), key, consistency).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError("Error setting key/value: {Message}", ex.Message);
+
+            throw;
+        }
+    }
+    
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
+    public async Task<bool> DeleteKeyValue(string key, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
+    {
+        try
+        {
+            return await communication.TryDeleteKeyValue(GetRoundRobinUrl(), key, consistency).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError("Error deleting key/value: {Message}", ex.Message);
+
+            throw;
+        }
+    }
+    
+    /// <summary>
     /// Chooses the next server in the list of servers in a round-robin fashion
     /// </summary>
     /// <returns></returns>

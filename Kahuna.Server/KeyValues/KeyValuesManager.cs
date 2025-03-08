@@ -31,15 +31,14 @@ public class KeyValuesManager
     /// </summary>
     /// <param name="actorSystem"></param>
     /// <param name="raft"></param>
+    /// <param name="persistence"></param>
     /// <param name="configuration"></param>
     /// <param name="logger"></param>
-    public KeyValuesManager(ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, ILogger<IKahuna> logger)
+    public KeyValuesManager(ActorSystem actorSystem, IRaft raft, IPersistence persistence, KahunaConfiguration configuration, ILogger<IKahuna> logger)
     {
         this.actorSystem = actorSystem;
         this.raft = raft;
         this.logger = logger;
-
-        IPersistence persistence = GetPersistence(configuration);
         
         persistenceActorRouter = GetPersistenceRouter(persistence, configuration);
         
@@ -52,24 +51,6 @@ public class KeyValuesManager
         
         ephemeralKeyValuesRouter = GetEphemeralRouter(backgroundWriter, persistence, configuration);
         consistentKeyValuesRouter = GetConsistentRouter(backgroundWriter, persistence, configuration);
-    }
-
-    /// <summary>
-    /// Creates the persistence instance
-    /// </summary>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    /// <exception cref="KahunaServerException"></exception>
-    private static IPersistence GetPersistence(KahunaConfiguration configuration)
-    {
-        return new SqlitePersistence(configuration.StoragePath, configuration.StorageRevision);
-
-        /*return configuration.Storage switch
-        {
-            "rocksdb" => new RocksDbPersistence(configuration.StoragePath, configuration.StorageRevision),
-            "sqlite" => new SqlitePersistence(configuration.StoragePath, configuration.StorageRevision),
-            _ => throw new KahunaServerException("Invalid storage type")
-        };*/
     }
 
     /// <summary>

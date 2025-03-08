@@ -198,4 +198,86 @@ internal sealed class GrpcCommunication
             
         throw new KahunaException("Failed to set key/value", (LockResponseType)response.Type);
     }
+    
+    internal async Task<string?> TryGetKeyValue(string url, string key, KeyValueConsistency consistency)
+    {
+        GrpcTryGetKeyValueRequest request = new() { Key = key, Consistency = (GrpcKeyValueConsistency)consistency };
+        
+        GrpcTryGetKeyValueResponse? response;
+        
+        do
+        {
+            if (!channels.TryGetValue(url, out GrpcChannel? channel))
+            {
+                channel = GrpcChannel.ForAddress(url, new() { 
+                    HttpHandler = new SocketsHttpHandler
+                    {
+                        EnableMultipleHttp2Connections = true
+                    } 
+                });
+                
+                channels.TryAdd(url, channel);
+            }
+        
+            KeyValuer.KeyValuerClient client = new(channel);
+        
+            response = await client.TryGetKeyValueAsync(request).ConfigureAwait(false);
+
+            if (response is null)
+                throw new KahunaException("Response is null", LockResponseType.Errored);
+
+            switch (response.Type)
+            {
+                case GrpcKeyValueResponseType.KeyvalueResponseTypeGot:
+                    return response.Value;
+                
+                case GrpcKeyValueResponseType.KeyvalueResponseTypeDoesNotExist:
+                    return null;
+            }
+            
+        } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
+            
+        throw new KahunaException("Failed to set key/value", (LockResponseType)response.Type);
+    }
+    
+    internal async Task<bool> TryDeleteKeyValue(string url, string key, KeyValueConsistency consistency)
+    {
+        GrpcTryDeleteKeyValueRequest request = new() { Key = key, Consistency = (GrpcKeyValueConsistency)consistency };
+        
+        GrpcTryDeleteKeyValueResponse? response;
+        
+        do
+        {
+            if (!channels.TryGetValue(url, out GrpcChannel? channel))
+            {
+                channel = GrpcChannel.ForAddress(url, new() { 
+                    HttpHandler = new SocketsHttpHandler
+                    {
+                        EnableMultipleHttp2Connections = true
+                    } 
+                });
+                
+                channels.TryAdd(url, channel);
+            }
+        
+            KeyValuer.KeyValuerClient client = new(channel);
+        
+            response = await client.TryDeleteKeyValueAsync(request).ConfigureAwait(false);
+
+            if (response is null)
+                throw new KahunaException("Response is null", LockResponseType.Errored);
+
+            switch (response.Type)
+            {
+                case GrpcKeyValueResponseType.KeyvalueResponseTypeDeleted:
+                    return true;
+                
+                case GrpcKeyValueResponseType.KeyvalueResponseTypeDoesNotExist:
+                    return false;
+            }
+            
+        } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
+            
+        throw new KahunaException("Failed to delete key/value", (LockResponseType)response.Type);
+    }
 }

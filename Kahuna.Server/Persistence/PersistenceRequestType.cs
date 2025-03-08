@@ -2,6 +2,8 @@ namespace Kahuna.Persistence;
 
 public enum PersistenceRequestType
 {
-    Store,
-    Get
+    StoreLock,
+    StoreKeyValue,
+    GetLock,
+    GetKeyValue
 }

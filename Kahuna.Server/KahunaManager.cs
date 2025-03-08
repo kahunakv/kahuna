@@ -1,8 +1,12 @@
+using Kahuna.Configuration;
 using Kahuna.KeyValues;
 using Kahuna.Locks;
+using Kahuna.Persistence;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
+using Kommander;
 using Kommander.Data;
+using Nixie;
 
 namespace Kahuna;
 
@@ -20,10 +24,29 @@ public sealed class KahunaManager : IKahuna
     /// </summary>
     /// <param name="locks"></param>
     /// <param name="keyValues"></param>
-    public KahunaManager(LockManager locks, KeyValuesManager keyValues)
+    public KahunaManager(ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, ILogger<IKahuna> logger)
     {
-        this.locks = locks;
-        this.keyValues = keyValues;
+        IPersistence persistence = GetPersistence(configuration);
+        
+        this.locks = new LockManager(actorSystem, raft, persistence, configuration, logger);
+        this.keyValues = new KeyValuesManager(actorSystem, raft, persistence, configuration, logger);
+        
+    }
+    
+    /// <summary>
+    /// Creates the persistence instance
+    /// </summary>
+    /// <param name="configuration"></param>
+    /// <returns></returns>
+    /// <exception cref="KahunaServerException"></exception>
+    private static IPersistence GetPersistence(KahunaConfiguration configuration)
+    {
+        return configuration.Storage switch
+        {
+            "rocksdb" => new RocksDbPersistence(configuration.StoragePath, configuration.StorageRevision),
+            "sqlite" => new SqlitePersistence(configuration.StoragePath, configuration.StorageRevision),
+            _ => throw new KahunaServerException("Invalid storage type")
+        };
     }
     
     /// <summary>

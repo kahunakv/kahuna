@@ -10,9 +10,9 @@ public sealed class PersistenceRequest : IConsistentHashable
 {
     public PersistenceRequestType Type { get; }
     
-    public string Resource { get; }
+    public string Key { get; }
     
-    public string? Owner { get; }
+    public string? Value { get; }
     
     public long FencingToken { get; }
     
@@ -20,24 +20,24 @@ public sealed class PersistenceRequest : IConsistentHashable
     
     public uint ExpiresCounter { get; }
     
-    public LockConsistency Consistency { get; }
+    public int Consistency { get; }
     
-    public LockState State { get; }
+    public int State { get; }
     
     public PersistenceRequest(
         PersistenceRequestType type,
-        string resource, 
-        string? owner, 
+        string key, 
+        string? value, 
         long fencingToken, 
         long expiresLogical,
         uint expiresCounter, 
-        LockConsistency consistency,
-        LockState state
+        int consistency,
+        int state
     )
     {
         Type = type;
-        Resource = resource;
-        Owner = owner;
+        Key = key;
+        Value = value;
         FencingToken = fencingToken;
         ExpiresLogical = expiresLogical;
         ExpiresCounter = expiresCounter;
@@ -47,6 +47,6 @@ public sealed class PersistenceRequest : IConsistentHashable
 
     public int GetHash()
     {
-        return (int)HashUtils.ConsistentHash(Resource, 4);
+        return (int)HashUtils.ConsistentHash(Key, 4);
     }
 }

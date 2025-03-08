@@ -1,4 +1,5 @@
 
+using Kahuna.KeyValues;
 using Nixie;
 using Kahuna.Locks;
 
@@ -21,21 +22,39 @@ public sealed class PersistenceActor : IActor<PersistenceRequest, PersistenceRes
     {
         switch (message.Type)
         {
-            case PersistenceRequestType.Store:
+            case PersistenceRequestType.StoreLock:
                 await persistence.StoreLock(
-                    message.Resource, 
-                    message.Owner ?? "", 
+                    message.Key, 
+                    message.Value ?? "", 
                     message.ExpiresLogical, 
                     message.ExpiresCounter, 
                     message.FencingToken, 
-                    (long)message.Consistency, 
+                    message.Consistency, 
                     message.State
                 );
                 break;
             
-            case PersistenceRequestType.Get:
-                LockContext? lockContext = await persistence.GetLock(message.Resource);
+            case PersistenceRequestType.StoreKeyValue:
+                await persistence.StoreKeyValue(
+                    message.Key, 
+                    message.Value ?? "", 
+                    message.ExpiresLogical, 
+                    message.ExpiresCounter, 
+                    message.Consistency, 
+                    message.State
+                );
+                break;
+            
+            case PersistenceRequestType.GetLock:
+                LockContext? lockContext = await persistence.GetLock(message.Key);
                 if (lockContext == null)
+                    return new(PersistenceResponseType.NotFound);
+                
+                return new(PersistenceResponseType.Found);
+            
+            case PersistenceRequestType.GetKeyValue:
+                KeyValueContext? keyValueContext = await persistence.GetKeyValue(message.Key);
+                if (keyValueContext == null)
                     return new(PersistenceResponseType.NotFound);
                 
                 return new(PersistenceResponseType.Found);
