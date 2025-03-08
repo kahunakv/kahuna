@@ -266,7 +266,7 @@ public class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueResponse>
 
         (bool success, _, long _) = await raft.ReplicateLogs(
             partitionId,
-            "KeyValueMessage",
+            ReplicationTypes.KeyValues,
             ReplicationSerializer.Serialize(new KeyValueMessage
             {
                 Type = (int)type,

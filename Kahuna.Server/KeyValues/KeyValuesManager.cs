@@ -123,6 +123,9 @@ public class KeyValuesManager
     {
         if (log.LogData is null || log.LogData.Length == 0)
             return true;
+
+        if (log.LogType != ReplicationTypes.KeyValues)
+            return true;
         
         try
         {
@@ -136,61 +139,59 @@ public class KeyValuesManager
             {
                 case KeyValueRequestType.TrySet:
                 {
-                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
-                        PersistenceRequestType.Store,
+                    PersistenceResponse? response = await persistenceActorRouter.Ask(new(
+                        PersistenceRequestType.StoreKeyValue,
                         keyValueMessage.Key,
                         keyValueMessage.Value,
+                        0,
                         keyValueMessage.ExpireLogical,
                         keyValueMessage.ExpireCounter,
-                        (KeyValueConsistency)keyValueMessage.Consistency,
-                        KeyValueState.Set
+                        keyValueMessage.Consistency,
+                        (int)KeyValueState.Set
                     ));
                     
                     if (response is null)
                         return false;
 
-                    return response.Type == PersistenceResponseType.Success;*/
-                    return false;
+                    return response.Type == PersistenceResponseType.Success;
                 }
 
                 case KeyValueRequestType.TryDelete:
                 {
-                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
-                        PersistenceRequestType.Store,
-                        keyValueMessage.Resource,
-                        keyValueMessage.Owner,
-                        keyValueMessage.FencingToken,
+                    PersistenceResponse? response = await persistenceActorRouter.Ask(new(
+                        PersistenceRequestType.StoreKeyValue,
+                        keyValueMessage.Key,
+                        keyValueMessage.Value,
+                        0,
                         keyValueMessage.ExpireLogical,
                         keyValueMessage.ExpireCounter,
-                        (KeyValueConsistency)keyValueMessage.Consistency,
-                        KeyValueState.UnkeyValueed
+                        keyValueMessage.Consistency,
+                        (int)KeyValueState.Deleted
                     ));
                     
                     if (response is null)
                         return false;
 
-                    return response.Type == PersistenceResponseType.Success;*/
-                    return false;
+                    return response.Type == PersistenceResponseType.Success;
                 }
 
                 case KeyValueRequestType.TryExtend:
                 {
-                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
-                        PersistenceRequestType.Store,
-                        keyValueMessage.Resource,
-                        keyValueMessage.Owner,
-                        keyValueMessage.FencingToken,
+                    PersistenceResponse? response = await persistenceActorRouter.Ask(new(
+                        PersistenceRequestType.StoreKeyValue,
+                        keyValueMessage.Key,
+                        keyValueMessage.Value,
+                        0,
                         keyValueMessage.ExpireLogical,
                         keyValueMessage.ExpireCounter,
-                        (KeyValueConsistency)keyValueMessage.Consistency,
-                        KeyValueState.KeyValueed
+                        keyValueMessage.Consistency,
+                        (int)KeyValueState.Set
                     ));
 
                     if (response is null)
                         return false;
 
-                    return response.Type == PersistenceResponseType.Success;*/
-                    return false;
+                    return response.Type == PersistenceResponseType.Success;
                 }
 
                 case KeyValueRequestType.TryGet:
@@ -248,7 +249,7 @@ public class KeyValuesManager
     }
     
     /// <summary>
-    /// Passes a TryExtendKeyValue request to the keyValueer actor for the given keyValue name.
+    /// Set a timeout on key. After the timeout has expired, the key will automatically be deleted
     /// </summary>
     /// <param name="key"></param>
     /// <param name="expiresMs"></param>
@@ -275,7 +276,7 @@ public class KeyValuesManager
     }
 
     /// <summary>
-    /// Passes a TryDeleteKeyValue request to the keyValueer actor for the given keyValue name.
+    /// Removes the specified keys. A key is ignored if it does not exist.
     /// </summary>
     /// <param name="key"></param>
     /// <param name="consistency"></param>

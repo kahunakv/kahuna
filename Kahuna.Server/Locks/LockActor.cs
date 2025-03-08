@@ -238,6 +238,12 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         return new(LockResponseType.Got, readOnlyLockContext);
     }
 
+    /// <summary>
+    /// Returns an existing lock context from memory or tries to retrieve it from disk
+    /// </summary>
+    /// <param name="resource"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
     private async ValueTask<LockContext?> GetLockContext(string resource, LockConsistency? consistency)
     {
         if (!locks.TryGetValue(resource, out LockContext? context))
@@ -278,8 +284,8 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 
         (bool success, _, long _) = await raft.ReplicateLogs(
             partitionId,
-            "LockMessage",
-            ReplicationSerializer.Serialize(new LockMessage()
+            ReplicationTypes.Locks,
+            ReplicationSerializer.Serialize(new LockMessage
             {
                 Type = (int)type,
                 Resource = resource,

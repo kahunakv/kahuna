@@ -98,16 +98,37 @@ public sealed class KahunaManager : IKahuna
         return locks.GetLock(lockName, consistency);
     }
 
+    /// <summary>
+    /// Set key to hold the string value. If key already holds a value, it is overwritten
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="value"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
     public Task<KeyValueResponseType> TrySetKeyValue(string key, string? value, int expiresMs, KeyValueConsistency consistency)
     {
         return keyValues.TrySetKeyValue(key, value, expiresMs, consistency);
     }
 
+    /// <summary>
+    /// Set a timeout on key. After the timeout has expired, the key will automatically be deleted
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
     public Task<KeyValueResponseType> TryExtendKeyValue(string key, int expiresMs, KeyValueConsistency consistency)
     {
         return keyValues.TryExtendKeyValue(key, expiresMs, consistency);
     }
 
+    /// <summary>
+    /// Removes the specified key. A key is ignored if it does not exist.
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
     public Task<KeyValueResponseType> TryDeleteKeyValue(string key, KeyValueConsistency consistency)
     {
         return keyValues.TryDeleteKeyValue(key, consistency);
@@ -118,13 +139,15 @@ public sealed class KahunaManager : IKahuna
         return keyValues.TryGetValue(keyValueName, consistency);
     }
 
-    public Task<bool> OnReplicationReceived(RaftLog log)
+    public async Task<bool> OnReplicationReceived(RaftLog log)
     {
-        return locks.OnReplicationReceived(log);
+        await Task.WhenAll(locks.OnReplicationReceived(log), keyValues.OnReplicationReceived(log));
+        return true;
     }
 
     public void OnReplicationError(RaftLog log)
     {
         locks.OnReplicationError(log);
+        keyValues.OnReplicationError(log);
     }
 }

@@ -57,6 +57,8 @@ public sealed class KeyValueBackgroundWriterActor : IActor<KeyValueBackgroundWri
                 {
                     partitionIds.Add(keyValueRequest.PartitionId);
                     
+                    // @todo make sure the key is stored
+                    
                     await persistenceActorRouter.Ask(new(
                         PersistenceRequestType.StoreLock,
                         keyValueRequest.Key,

@@ -12,6 +12,7 @@ using DotNext.Threading.Tasks;
 using RadLine;
 using Spectre.Console;
 using Kahuna.Client;
+using Kahuna.Shared.KeyValue;
 
 ParserResult<Options> optsResult = Parser.Default.ParseArguments<Options>(args);
 
@@ -35,14 +36,17 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
 {
     string[] keywords =
     [
+        "eset",
+        "eget",
+        "edelete",
         "set",
         "get",
+        "delete",
         "lock",
         "extend-lock",
         "extend-key",
         "unlock",
         "get-lock",
-        "delete"
     ];
 
     string[] functions =
@@ -113,7 +117,7 @@ while (true)
         if (editor is not null)
             command = await editor.ReadLine(CancellationToken.None);
         else
-            command = AnsiConsole.Prompt(new TextPrompt<string>("kahuna> ").AllowEmpty());
+            command = AnsiConsole.Prompt(new TextPrompt<string>("kahuna-cli> ").AllowEmpty());
 
         if (string.IsNullOrWhiteSpace(command))
             continue;
@@ -143,7 +147,7 @@ while (true)
         {
             string[] parts = commandTrim.Split(" ");
             
-            if (await connection.SetKeyValue(parts[1], parts[2], int.Parse(parts[3])))
+            if (await connection.SetKeyValue(parts[1], parts[2], int.Parse(parts[3]), KeyValueConsistency.Linearizable))
                 AnsiConsole.MarkupLine("[cyan]ok[/]");
             else
                 AnsiConsole.MarkupLine("[yellow]error[/]");
@@ -155,7 +159,7 @@ while (true)
         {
             string[] parts = commandTrim.Split(" ");
 
-            string? value = await connection.GetKeyValue(parts[1]);
+            string? value = await connection.GetKeyValue(parts[1], KeyValueConsistency.Linearizable);
             
             if (value is not null)
                 AnsiConsole.MarkupLine("[cyan]{0}[/]", Markup.Escape(value));
@@ -164,6 +168,42 @@ while (true)
         }
         
         if (commandTrim.StartsWith("delete ", StringComparison.InvariantCultureIgnoreCase))
+        {
+            string[] parts = commandTrim.Split(" ");
+
+            bool success = await connection.DeleteKeyValue(parts[1], KeyValueConsistency.Linearizable);
+            
+            if (success)
+                AnsiConsole.MarkupLine("[cyan]ok[/]");
+            else
+                AnsiConsole.MarkupLine("[yellow]error[/]");
+        }
+        
+        if (commandTrim.StartsWith("eset ", StringComparison.InvariantCultureIgnoreCase))
+        {
+            string[] parts = commandTrim.Split(" ");
+            
+            if (await connection.SetKeyValue(parts[1], parts[2], int.Parse(parts[3])))
+                AnsiConsole.MarkupLine("[cyan]ok[/]");
+            else
+                AnsiConsole.MarkupLine("[yellow]error[/]");
+
+            continue;
+        }
+        
+        if (commandTrim.StartsWith("eget ", StringComparison.InvariantCultureIgnoreCase))
+        {
+            string[] parts = commandTrim.Split(" ");
+
+            string? value = await connection.GetKeyValue(parts[1]);
+            
+            if (value is not null)
+                AnsiConsole.MarkupLine("[cyan]{0}[/]", Markup.Escape(value));
+            else
+                AnsiConsole.MarkupLine("[yellow]null[/]");
+        }
+        
+        if (commandTrim.StartsWith("edelete ", StringComparison.InvariantCultureIgnoreCase))
         {
             string[] parts = commandTrim.Split(" ");
 
