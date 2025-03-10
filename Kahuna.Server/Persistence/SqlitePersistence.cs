@@ -16,12 +16,12 @@ public class SqlitePersistence : IPersistence
     
     private readonly string path;
     
-    private readonly string revision;
+    private readonly string dbRevision;
     
-    public SqlitePersistence(string path = ".", string revision = "v1")
+    public SqlitePersistence(string path = ".", string dbRevision = "v1")
     {
         this.path = path;
-        this.revision = revision;
+        this.dbRevision = dbRevision;
     }
     
     private async ValueTask<SqliteConnection> TryOpenDatabase(string resource)
@@ -38,7 +38,7 @@ public class SqlitePersistence : IPersistence
             if (connections.TryGetValue(shard, out sqlConnection))
                 return sqlConnection;
             
-            string connectionString = $"Data Source={path}/locks{shard}_{revision}.db";
+            string connectionString = $"Data Source={path}/locks{shard}_{dbRevision}.db";
             SqliteConnection connection = new(connectionString);
 
             connection.Open();
@@ -64,6 +64,7 @@ public class SqlitePersistence : IPersistence
                 value STRING, 
                 expiresLogical INT, 
                 expiresCounter INT, 
+                revision INT,
                 consistency INT,
                 state INT
             );
@@ -113,22 +114,34 @@ public class SqlitePersistence : IPersistence
         }
         catch (Exception ex)
         {
-            Console.WriteLine("StoreLock: {0} {1} {2} [{3}][{4}][{5}][{6}][{7}][{8}][{9}]", ex.GetType().Name, ex.Message, ex.StackTrace, resource, owner, expiresPhysical, expiresCounter, fencingToken, consistency, state);
+            Console.WriteLine(
+                "StoreLock: {0} {1} {2} [{3}][{4}][{5}][{6}][{7}][{8}][{9}]", 
+                ex.GetType().Name, 
+                ex.Message, 
+                ex.StackTrace, 
+                resource, 
+                owner, 
+                expiresPhysical, 
+                expiresCounter, 
+                fencingToken, 
+                consistency, 
+                state
+            );
         }
     }
     
-    public async Task StoreKeyValue(string key, string? value, long expiresPhysical, uint expiresCounter, int consistency, int state)
+    public async Task StoreKeyValue(string key, string? value, long expiresPhysical, uint expiresCounter, long revision, int consistency, int state)
     {
         try
         {
             SqliteConnection connection = await TryOpenDatabase(key);
 
             const string query = """
-                                 INSERT INTO keys (key, value, expiresLogical, expiresCounter, consistency, state) 
-                                 VALUES (@key, @value, @expiresLogical, @expiresCounter, @consistency, @state) 
-                                 ON CONFLICT(key) DO UPDATE SET value=@value, expiresLogical=@expiresLogical, expiresCounter=@expiresCounter, 
-                                 consistency=@consistency, state=@state;
-                                 """;
+             INSERT INTO keys (key, value, expiresLogical, expiresCounter, revision, consistency, state) 
+             VALUES (@key, @value, @expiresLogical, @expiresCounter, @revision, @consistency, @state) 
+             ON CONFLICT(key) DO UPDATE SET value=@value, expiresLogical=@expiresLogical, expiresCounter=@expiresCounter, 
+             revision=@revision, consistency=@consistency, state=@state;
+             """;
             
             await using SqliteCommand command = new(query, connection);
 
@@ -136,6 +149,7 @@ public class SqlitePersistence : IPersistence
             command.Parameters.AddWithValue("@value", value ?? "");
             command.Parameters.AddWithValue("@expiresLogical", expiresPhysical);
             command.Parameters.AddWithValue("@expiresCounter", expiresCounter);
+            command.Parameters.AddWithValue("@revision", revision);
             command.Parameters.AddWithValue("@consistency", consistency);
             command.Parameters.AddWithValue("@state", state);
 
@@ -143,7 +157,19 @@ public class SqlitePersistence : IPersistence
         }
         catch (Exception ex)
         {
-            Console.WriteLine("StoreKeyValue: {0} {1} {2} [{3}][{4}][{5}][{6}][{7}][{8}]", ex.GetType().Name, ex.Message, ex.StackTrace, key, value, expiresPhysical, expiresCounter, consistency, state);
+            Console.WriteLine(
+                "StoreKeyValue: {0} {1} {2} [{3}][{4}][{5}][{6}][{7}][{8}][{9}]", 
+                ex.GetType().Name, 
+                ex.Message, 
+                ex.StackTrace, 
+                key, 
+                value, 
+                expiresPhysical, 
+                expiresCounter, 
+                revision, 
+                consistency, 
+                state
+            );
         }
     }
 
@@ -182,7 +208,7 @@ public class SqlitePersistence : IPersistence
         {
             SqliteConnection connection = await TryOpenDatabase(keyName);
 
-            const string query = "SELECT value, expiresLogical, expiresCounter, consistency, state FROM keys WHERE key = @key";
+            const string query = "SELECT value, revision, expiresLogical, expiresCounter, consistency, state FROM keys WHERE key = @key";
             await using SqliteCommand command = new(query, connection);
 
             command.Parameters.AddWithValue("@key", keyName);
@@ -193,7 +219,8 @@ public class SqlitePersistence : IPersistence
                 return new()
                 {
                     Value = reader.IsDBNull(0) ? "" :  reader.GetString(0),
-                    Expires = new(reader.IsDBNull(1) ? 0 : reader.GetInt64(1), reader.IsDBNull(2) ? 0 : (uint)reader.GetInt64(2))
+                    Revision = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
+                    Expires = new(reader.IsDBNull(2) ? 0 : reader.GetInt64(2), reader.IsDBNull(3) ? 0 : (uint)reader.GetInt64(3))
                 };
         }
         catch (Exception ex)

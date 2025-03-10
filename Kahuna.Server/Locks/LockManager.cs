@@ -275,7 +275,7 @@ public sealed class LockManager
     /// <param name="expiresMs"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<LockResponseType> TryExtendLock(string lockName, string lockId, int expiresMs, LockConsistency consistency)
+    public async Task<(LockResponseType, long)> TryExtendLock(string lockName, string lockId, int expiresMs, LockConsistency consistency)
     {
         LockRequest request = new(
             LockRequestType.TryExtendLock, 
@@ -292,7 +292,7 @@ public sealed class LockManager
         else
             response = await consistentLocksRouter.Ask(request);
         
-        return response.Type;
+        return (response.Type, response.FencingToken);
     }
 
     /// <summary>

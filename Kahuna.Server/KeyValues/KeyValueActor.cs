@@ -107,6 +107,7 @@ public class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueResponse>
             newContext ??= new()
             {
                 Value = message.Value,
+                Revision = 0,
                 Expires = currentTime + message.ExpiresMs,
                 LastUsed = currentTime
             };
@@ -121,10 +122,11 @@ public class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueResponse>
 
             keyValues.Add(message.Key, newContext);
 
-            return new(KeyValueResponseType.Set);
+            return new(KeyValueResponseType.Set, newContext.Revision);
         }
         
         context.Value = message.Value;
+        context.Revision++;
         context.Expires = currentTime + message.ExpiresMs;
         context.LastUsed = currentTime;
 
@@ -135,7 +137,7 @@ public class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueResponse>
                 return new(KeyValueResponseType.Errored);
         }
 
-        return new(KeyValueResponseType.Set);
+        return new(KeyValueResponseType.Set, context.Revision);
     }
     
     /// <summary>
@@ -162,7 +164,7 @@ public class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueResponse>
                 return new(KeyValueResponseType.Errored);
         }
 
-        return new(KeyValueResponseType.Extended);
+        return new(KeyValueResponseType.Extended, context.Revision);
     }
     
     /// <summary>
@@ -210,7 +212,7 @@ public class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueResponse>
         if (context.Expires - currentTime < TimeSpan.Zero)
             return new(KeyValueResponseType.DoesNotExist);
 
-        ReadOnlyKeyValueContext readOnlyKeyValueContext = new(context.Value, context.Expires);
+        ReadOnlyKeyValueContext readOnlyKeyValueContext = new(context.Value, context.Revision, context.Expires);
 
         return new(KeyValueResponseType.Get, readOnlyKeyValueContext);
     }
@@ -261,6 +263,7 @@ public class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueResponse>
                 Type = (int)type,
                 Key = key,
                 Value = context.Value ?? "",
+                Revision = context.Revision,
                 ExpireLogical = context.Expires.L,
                 ExpireCounter = context.Expires.C,
                 TimeLogical = currentTime.L,
@@ -277,6 +280,7 @@ public class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueResponse>
             partitionId,
             key, 
             context.Value, 
+            context.Revision,
             context.Expires,
             KeyValueConsistency.Linearizable,
             KeyValueState

@@ -140,11 +140,12 @@ public class LocksService : Locker.LockerBase
 
         if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
         {
-            LockResponseType response = await locks.TryExtendLock(request.LockName, request.LockId, request.ExpiresMs, (LockConsistency)request.Consistency);
+            (LockResponseType response, long fencingToken) = await locks.TryExtendLock(request.LockName, request.LockId, request.ExpiresMs, (LockConsistency)request.Consistency);
 
             return new()
             {
-                Type = (GrpcLockResponseType)response
+                Type = (GrpcLockResponseType)response,
+                FencingToken = fencingToken
             };
         }
             

@@ -143,7 +143,7 @@ public class KeyValuesManager
                         PersistenceRequestType.StoreKeyValue,
                         keyValueMessage.Key,
                         keyValueMessage.Value,
-                        0,
+                        keyValueMessage.Revision,
                         keyValueMessage.ExpireLogical,
                         keyValueMessage.ExpireCounter,
                         keyValueMessage.Consistency,
@@ -162,7 +162,7 @@ public class KeyValuesManager
                         PersistenceRequestType.StoreKeyValue,
                         keyValueMessage.Key,
                         keyValueMessage.Value,
-                        0,
+                        keyValueMessage.Revision,
                         keyValueMessage.ExpireLogical,
                         keyValueMessage.ExpireCounter,
                         keyValueMessage.Consistency,
@@ -181,7 +181,7 @@ public class KeyValuesManager
                         PersistenceRequestType.StoreKeyValue,
                         keyValueMessage.Key,
                         keyValueMessage.Value,
-                        0,
+                        keyValueMessage.Revision,
                         keyValueMessage.ExpireLogical,
                         keyValueMessage.ExpireCounter,
                         keyValueMessage.Consistency,
@@ -228,7 +228,7 @@ public class KeyValuesManager
     /// <param name="expiresMs"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<KeyValueResponseType> TrySetKeyValue(string key, string? value, int expiresMs, KeyValueConsistency consistency)
+    public async Task<(KeyValueResponseType, long)> TrySetKeyValue(string key, string? value, int expiresMs, KeyValueConsistency consistency)
     {
         KeyValueRequest request = new(
             KeyValueRequestType.TrySet, 
@@ -245,7 +245,7 @@ public class KeyValuesManager
         else
             response = await consistentKeyValuesRouter.Ask(request);
         
-        return response.Type;
+        return (response.Type, response.Revision);
     }
     
     /// <summary>
@@ -255,7 +255,7 @@ public class KeyValuesManager
     /// <param name="expiresMs"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<KeyValueResponseType> TryExtendKeyValue(string key, int expiresMs, KeyValueConsistency consistency)
+    public async Task<(KeyValueResponseType, long)> TryExtendKeyValue(string key, int expiresMs, KeyValueConsistency consistency)
     {
         KeyValueRequest request = new(
             KeyValueRequestType.TryExtend, 
@@ -272,7 +272,7 @@ public class KeyValuesManager
         else
             response = await consistentKeyValuesRouter.Ask(request);
         
-        return response.Type;
+        return (response.Type, response.Revision);
     }
 
     /// <summary>

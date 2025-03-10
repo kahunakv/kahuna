@@ -3,11 +3,12 @@
 using System.Diagnostics;
 using DotNext;
 using Kahuna.Client;
+using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 
 Console.WriteLine("Kahuna Benchmark");
 
-const int numberOfLocks = 2500;
+const int numberOfLocks = 1000;
 const int MaxTokens = 1_000_000;
 
 List<string> tokens = new(MaxTokens);
@@ -17,16 +18,19 @@ for (int k = 0; k < MaxTokens; k++)
 
 KahunaClient locks = new("https://localhost:8082", null);
 
-List<Task> tasks = new(numberOfLocks);
+List<Task> tasks = new(numberOfLocks * 2);
 
 Stopwatch stopwatch = Stopwatch.StartNew();
 
 for (int j = 0; j < 25; j++)
 {
     tasks.Clear();
-    
+
     for (int i = 0; i < numberOfLocks; i++)
-        tasks.Add(AdquireLockConcurrently(locks));
+    {
+        tasks.Add(SetKeyConcurrently(locks));
+        tasks.Add(GetKeyConcurrently(locks));
+    }
 
     await Task.WhenAll(tasks);
 
@@ -54,6 +58,52 @@ async Task AdquireLockConcurrently(KahunaClient locksx)
         
         if (kahunaLock.FencingToken > 1)
             Console.WriteLine("Got repeated token " + kahunaLock.FencingToken);
+    }
+    catch (KahunaException ex)
+    {
+        Console.WriteLine("KahunaException {0} {1}", ex.Message, ex.ErrorCode);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine("Exception {0}", ex.Message);
+    }
+}
+
+async Task SetKeyConcurrently(KahunaClient keyValues)
+{
+    try
+    {
+        string key = GetRandomLockNameFromList(tokens);
+        string value = GetRandomLockNameFromList(tokens);
+
+        (bool success, long revision) = await keyValues.SetKeyValue(key, value, TimeSpan.FromHours(5), KeyValueConsistency.Linearizable);
+
+        if (!success)
+            throw new KahunaException("Not set " + key, LockResponseType.Busy);
+        
+        if (revision > 1)
+            Console.WriteLine("Got repeated revision " + revision);
+    }
+    catch (KahunaException ex)
+    {
+        Console.WriteLine("KahunaException {0} {1}", ex.Message, ex.ErrorCode);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine("Exception {0}", ex.Message);
+    }
+}
+
+async Task GetKeyConcurrently(KahunaClient keyValues)
+{
+    try
+    {
+        string key = GetRandomLockNameFromList(tokens);
+
+        (string? _, long revision) = await keyValues.GetKeyValue(key, KeyValueConsistency.Linearizable);
+        
+        if (revision > 1)
+            Console.WriteLine("Got repeated revision " + revision);
     }
     catch (KahunaException ex)
     {

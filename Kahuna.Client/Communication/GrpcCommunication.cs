@@ -93,7 +93,7 @@ internal sealed class GrpcCommunication
         throw new KahunaException("Failed to unlock", (LockResponseType)response.Type);
     }
     
-    internal async Task<bool> TryExtend(string url, string resource, string lockId, int expiryTime, LockConsistency consistency)
+    internal async Task<(bool, long)> TryExtend(string url, string resource, string lockId, int expiryTime, LockConsistency consistency)
     {
         GrpcExtendLockRequest request = new() { LockName = resource, LockId = lockId, ExpiresMs = expiryTime, Consistency = (GrpcLockConsistency)consistency };
         
@@ -120,7 +120,7 @@ internal sealed class GrpcCommunication
                 throw new KahunaException("Response is null", LockResponseType.Errored);
                 
             if (response.Type == GrpcLockResponseType.LockResponseTypeExtended)
-                return true;
+                return (true, response.FencingToken);
 
         } while (response.Type == GrpcLockResponseType.LockResponseTypeMustRetry);
         
@@ -161,7 +161,7 @@ internal sealed class GrpcCommunication
         throw new KahunaException("Failed to get lock information", (LockResponseType)response.Type);
     }
     
-    internal async Task<bool> TrySetKeyValue(string url, string key, string? value, int expiryTime, KeyValueConsistency consistency)
+    internal async Task<(bool, long)> TrySetKeyValue(string url, string key, string? value, int expiryTime, KeyValueConsistency consistency)
     {
         GrpcTrySetKeyValueRequest request = new() { Key = key, Value = value, ExpiresMs = expiryTime, Consistency = (GrpcKeyValueConsistency)consistency };
         
@@ -189,7 +189,7 @@ internal sealed class GrpcCommunication
                 throw new KahunaException("Response is null", LockResponseType.Errored);
 
             if (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeSet)
-                return true;
+                return (true, response.Revision);
             
             //if (response.Type == GrpcLockResponseType.LockResponseTypeBusy)
             //    return (KahunaLockAcquireResult.Conflicted, -1);
@@ -199,7 +199,7 @@ internal sealed class GrpcCommunication
         throw new KahunaException("Failed to set key/value", (LockResponseType)response.Type);
     }
     
-    internal async Task<string?> TryGetKeyValue(string url, string key, KeyValueConsistency consistency)
+    internal async Task<(string?, long)> TryGetKeyValue(string url, string key, KeyValueConsistency consistency)
     {
         GrpcTryGetKeyValueRequest request = new() { Key = key, Consistency = (GrpcKeyValueConsistency)consistency };
         
@@ -229,10 +229,10 @@ internal sealed class GrpcCommunication
             switch (response.Type)
             {
                 case GrpcKeyValueResponseType.KeyvalueResponseTypeGot:
-                    return response.Value;
+                    return (response.Value, response.Revision);
                 
                 case GrpcKeyValueResponseType.KeyvalueResponseTypeDoesNotExist:
-                    return null;
+                    return (null, 0);
             }
             
         } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
@@ -281,7 +281,7 @@ internal sealed class GrpcCommunication
         throw new KahunaException("Failed to delete key/value", (LockResponseType)response.Type);
     }
     
-    internal async Task<bool> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueConsistency consistency)
+    internal async Task<(bool, long)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueConsistency consistency)
     {
         GrpcTryExtendKeyValueRequest request = new() { Key = key, ExpiresMs = expiresMs, Consistency = (GrpcKeyValueConsistency)consistency };
         
@@ -311,10 +311,10 @@ internal sealed class GrpcCommunication
             switch (response.Type)
             {
                 case GrpcKeyValueResponseType.KeyvalueResponseTypeExtended:
-                    return true;
+                    return (true, response.Revision);
                 
                 case GrpcKeyValueResponseType.KeyvalueResponseTypeDoesNotExist:
-                    return false;
+                    return (false, 0);
             }
             
         } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);

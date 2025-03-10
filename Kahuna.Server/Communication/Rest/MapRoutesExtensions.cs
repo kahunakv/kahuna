@@ -82,9 +82,9 @@ public static class MapRoutesExtensions
             
             if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
             {
-                LockResponseType response = await locks.TryExtendLock(request.LockName, request.LockId, request.ExpiresMs, request.Consistency);
+                (LockResponseType response, long fencingToken) = await locks.TryExtendLock(request.LockName, request.LockId, request.ExpiresMs, request.Consistency);
 
-                return new() { Type = response };    
+                return new() { Type = response, FencingToken = fencingToken };    
             }
             
             string leader = await raft.WaitForLeader(partitionId, CancellationToken.None);

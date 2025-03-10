@@ -15,8 +15,9 @@ message GrpcTrySetKeyValueRequest {
 }
 
 message GrpcTrySetKeyValueResponse {
-  optional string servedFrom = 1;
+  optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
+  int64 Revision = 3;
 }
 
 message GrpcTryExtendKeyValueRequest {
@@ -26,8 +27,9 @@ message GrpcTryExtendKeyValueRequest {
 }
 
 message GrpcTryExtendKeyValueResponse {
-  optional string servedFrom = 1;
+  optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
+  int64 Revision = 3;
 }
 
 message GrpcTryDeleteKeyValueRequest {
@@ -36,7 +38,7 @@ message GrpcTryDeleteKeyValueRequest {
 }
 
 message GrpcTryDeleteKeyValueResponse {
-  optional string servedFrom = 1;
+  optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
 }
 
@@ -46,11 +48,12 @@ message GrpcTryGetKeyValueRequest {
 }
 
 message GrpcTryGetKeyValueResponse {
-  optional string servedFrom = 1;
+  optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
   optional string Value = 3;
-  int64 ExpiresPhysical = 4;
-  uint32 ExpiresCounter = 5;
+  int64 Revision = 4;
+  int64 ExpiresPhysical = 5;
+  uint32 ExpiresCounter = 6;
 }
 
 enum GrpcKeyValueResponseType {

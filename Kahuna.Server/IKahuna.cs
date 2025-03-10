@@ -11,15 +11,15 @@ public interface IKahuna
 {
     public Task<(LockResponseType, long)> TryLock(string lockName, string lockId, int expiresMs, LockConsistency consistency);
 
-    public Task<LockResponseType> TryExtendLock(string lockName, string lockId, int expiresMs, LockConsistency consistency);
+    public Task<(LockResponseType, long)> TryExtendLock(string lockName, string lockId, int expiresMs, LockConsistency consistency);
 
     public Task<LockResponseType> TryUnlock(string lockName, string lockId, LockConsistency consistency);
     
     public Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(string lockName, LockConsistency consistency);
 
-    public Task<KeyValueResponseType> TrySetKeyValue(string key, string? value, int expiresMs, KeyValueConsistency consistency);
+    public Task<(KeyValueResponseType, long)> TrySetKeyValue(string key, string? value, int expiresMs, KeyValueConsistency consistency);
 
-    public Task<KeyValueResponseType> TryExtendKeyValue(string key, int expiresMs, KeyValueConsistency consistency);
+    public Task<(KeyValueResponseType, long)> TryExtendKeyValue(string key, int expiresMs, KeyValueConsistency consistency);
 
     public Task<KeyValueResponseType> TryDeleteKeyValue(string key, KeyValueConsistency consistency);
 

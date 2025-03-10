@@ -15,9 +15,9 @@ message GrpcTryLockRequest {
 }
 
 message GrpcTryLockResponse {
-  optional string servedFrom = 1;
+  optional string ServedFrom = 1;
   GrpcLockResponseType Type = 2;
-  int64 fencingToken = 3;
+  int64 FencingToken = 3;
 }
 
 message GrpcExtendLockRequest {
@@ -28,8 +28,9 @@ message GrpcExtendLockRequest {
 }
 
 message GrpcExtendLockResponse {
-  optional string servedFrom = 1;
+  optional string ServedFrom = 1;
   GrpcLockResponseType Type = 2;
+  int64 FencingToken = 3;
 }
 
 message GrpcUnlockRequest {
@@ -39,7 +40,7 @@ message GrpcUnlockRequest {
 }
 
 message GrpcUnlockResponse {
-  optional string servedFrom = 1;
+  optional string ServedFrom = 1;
   GrpcLockResponseType Type = 2;
 }
 
@@ -49,12 +50,12 @@ message GrpcGetLockRequest {
 }
 
 message GrpcGetLockResponse {
-  optional string servedFrom = 1;
+  optional string ServedFrom = 1;
   GrpcLockResponseType Type = 2;
   string Owner = 3;
   int64 ExpiresPhysical = 4;
   uint32 ExpiresCounter = 5;
-  int64 fencingToken = 6;
+  int64 FencingToken = 6;
 }
 
 enum GrpcLockResponseType {

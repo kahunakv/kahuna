@@ -143,8 +143,12 @@ while (true)
         {
             string[] parts = commandTrim.Split(" ");
             
-            if (await connection.SetKeyValue(parts[1], parts[2], int.Parse(parts[3]), KeyValueConsistency.Linearizable))
-                AnsiConsole.MarkupLine("[cyan]ok[/]");
+            Console.WriteLine(parts[3]);
+
+            (bool success, long revision) = await connection.SetKeyValue(parts[1], parts[2], int.Parse(parts[3]), KeyValueConsistency.Linearizable);
+            
+            if (success)
+                AnsiConsole.MarkupLine("[cyan]ok rev:{0}[/]", revision);
             else
                 AnsiConsole.MarkupLine("[yellow]error[/]");
 
@@ -155,10 +159,10 @@ while (true)
         {
             string[] parts = commandTrim.Split(" ");
 
-            string? value = await connection.GetKeyValue(parts[1], KeyValueConsistency.Linearizable);
+            (string? value, long revision) = await connection.GetKeyValue(parts[1], KeyValueConsistency.Linearizable);
             
             if (value is not null)
-                AnsiConsole.MarkupLine("[cyan]{0}[/]", Markup.Escape(value));
+                AnsiConsole.MarkupLine("[cyan]{0} rev:{1}[/]", Markup.Escape(value), revision);
             else
                 AnsiConsole.MarkupLine("[yellow]null[/]");
             
@@ -183,10 +187,10 @@ while (true)
         {
             string[] parts = commandTrim.Split(" ");
 
-            bool success = await connection.ExtendKeyValue(parts[1], int.Parse(parts[2]), KeyValueConsistency.Linearizable);
+            (bool success, long revision) = await connection.ExtendKeyValue(parts[1], int.Parse(parts[2]), KeyValueConsistency.Linearizable);
             
             if (success)
-                AnsiConsole.MarkupLine("[cyan]extended[/]");
+                AnsiConsole.MarkupLine("[cyan]extended rev:{0}[/]", revision);
             else
                 AnsiConsole.MarkupLine("[yellow]error[/]");
 
@@ -196,9 +200,11 @@ while (true)
         if (commandTrim.StartsWith("eset ", StringComparison.InvariantCultureIgnoreCase))
         {
             string[] parts = commandTrim.Split(" ");
+
+            (bool success, long revision) = await connection.SetKeyValue(parts[1], parts[2], int.Parse(parts[3]));
             
-            if (await connection.SetKeyValue(parts[1], parts[2], int.Parse(parts[3])))
-                AnsiConsole.MarkupLine("[cyan]ok[/]");
+            if (success)
+                AnsiConsole.MarkupLine("[cyan]ok rev:{0}[/]", revision);
             else
                 AnsiConsole.MarkupLine("[yellow]error[/]");
 
@@ -209,10 +215,10 @@ while (true)
         {
             string[] parts = commandTrim.Split(" ");
 
-            string? value = await connection.GetKeyValue(parts[1]);
+            (string? value, long revision) = await connection.GetKeyValue(parts[1]);
             
             if (value is not null)
-                AnsiConsole.MarkupLine("[cyan]{0}[/]", Markup.Escape(value));
+                AnsiConsole.MarkupLine("[cyan]{0} rev:{1}[/]", Markup.Escape(value), revision);
             else
                 AnsiConsole.MarkupLine("[yellow]null[/]");
 
@@ -241,7 +247,7 @@ while (true)
 
             if (kahunaLock.IsAcquired)
             {
-                AnsiConsole.MarkupLine("[cyan]acquired {0} {1}[/]", Markup.Escape(kahunaLock.LockId), Markup.Escape(kahunaLock.FencingToken.ToString()));
+                AnsiConsole.MarkupLine("[cyan]acquired {0} rev:{1}[/]", Markup.Escape(kahunaLock.LockId), Markup.Escape(kahunaLock.FencingToken.ToString()));
                 
                 locks.TryAdd(parts[1], kahunaLock);
             }
@@ -283,7 +289,30 @@ while (true)
                 bool success = await connection.Unlock(parts[1], kahunaLock.LockId);
 
                 if (success)
-                    AnsiConsole.MarkupLine("[cyan]got {0} {1}[/]", Markup.Escape(kahunaLock.LockId), Markup.Escape(kahunaLock.FencingToken.ToString()));
+                    AnsiConsole.MarkupLine("[cyan]got {0} rev:{1}[/]", Markup.Escape(kahunaLock.LockId), kahunaLock.FencingToken);
+                else
+                    AnsiConsole.MarkupLine("[yellow]not acquired[/]");
+                
+                locks.Remove(parts[1]);
+            }
+            else
+            {
+                AnsiConsole.MarkupLine("[yellow]not acquired[/]");
+            }
+            
+            continue;
+        }
+        
+        if (commandTrim.StartsWith("extend-lock ", StringComparison.InvariantCultureIgnoreCase))
+        {
+            string[] parts = commandTrim.Split(" ");
+
+            if (locks.TryGetValue(parts[1], out KahunaLock? kahunaLock))
+            {
+                (bool success, long fencingToken) = await kahunaLock.TryExtend(int.Parse(parts[2]));
+
+                if (success)
+                    AnsiConsole.MarkupLine("[cyan]got {0} rev:{1}[/]", Markup.Escape(kahunaLock.LockId), fencingToken);
                 else
                     AnsiConsole.MarkupLine("[yellow]not acquired[/]");
                 

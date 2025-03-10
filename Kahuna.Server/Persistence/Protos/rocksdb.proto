@@ -17,6 +17,7 @@ message RocksDbKeyValueMessage {
   string value = 2;
   int64 expiresPhysical = 3;
   uint32 expiresCounter = 4;
-  int32 consistency = 5;
-  int32 state = 6;
+  int64 revision = 5;
+  int32 consistency = 6;
+  int32 state = 7;
 }

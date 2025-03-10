@@ -18,14 +18,14 @@ public class RocksDbPersistence : IPersistence
     
     private readonly string path;
     
-    private readonly string revision;
+    private readonly string dbRevision;
     
-    public RocksDbPersistence(string path = ".", string revision = "v1")
+    public RocksDbPersistence(string path = ".", string dbRevision = "v1")
     {
         this.path = path;
-        this.revision = revision;
+        this.dbRevision = dbRevision;
 
-        string fullPath = $"{path}/{revision}";
+        string fullPath = $"{path}/{dbRevision}";
         
         DbOptions dbOptions = new DbOptions()
             .SetCreateIfMissing(true)
@@ -51,8 +51,8 @@ public class RocksDbPersistence : IPersistence
             ExpiresPhysical = expiresPhysical,
             ExpiresCounter = expiresCounter,
             FencingToken = fencingToken,
-            Consistency = (int)consistency,
-            State = (int)state
+            Consistency = consistency,
+            State = state
         }));
 
         return Task.CompletedTask;
@@ -63,6 +63,7 @@ public class RocksDbPersistence : IPersistence
         string value, 
         long expiresPhysical, 
         uint expiresCounter, 
+        long revision,
         int consistency, 
         int state
     )
@@ -72,6 +73,7 @@ public class RocksDbPersistence : IPersistence
             Value = value,
             ExpiresPhysical = expiresPhysical,
             ExpiresCounter = expiresCounter,
+            Revision = revision,
             Consistency = consistency,
             State = state
         }));
@@ -108,6 +110,7 @@ public class RocksDbPersistence : IPersistence
         KeyValueContext context = new()
         {
             Value = message.Value,
+            Revision = message.Revision,
             Expires = new(message.ExpiresPhysical, message.ExpiresCounter),
         };
 

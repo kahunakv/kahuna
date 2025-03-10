@@ -16,6 +16,11 @@ public sealed class KeyValueContext
     public HLCTimestamp Expires { get; set; }
     
     /// <summary>
+    /// Current modification revision
+    /// </summary>
+    public long Revision { get; set; }
+    
+    /// <summary>
     /// HLC timestamp of the last time the lock was used
     /// </summary>
     public HLCTimestamp LastUsed { get; set; }

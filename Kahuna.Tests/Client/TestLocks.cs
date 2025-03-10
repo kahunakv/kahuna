@@ -166,7 +166,7 @@ public class TestLocks
 
         Assert.True(kLock.IsAcquired);
         
-        bool extended = await kLock.TryExtend(TimeSpan.FromSeconds(10));
+        (bool extended, long fencingToken) = await kLock.TryExtend(TimeSpan.FromSeconds(10));
         Assert.True(extended);
 
         KahunaLockInfo? lockInfo = await locks.GetLockInfo(lockName, consistency);

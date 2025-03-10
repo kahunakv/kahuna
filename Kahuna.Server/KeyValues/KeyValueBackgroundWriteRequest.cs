@@ -17,6 +17,8 @@ public sealed class KeyValueBackgroundWriteRequest
     
     public string? Value { get; }
     
+    public long Revision { get; }
+    
     public HLCTimestamp Expires { get; }
     
     public KeyValueConsistency Consistency { get; }
@@ -28,6 +30,7 @@ public sealed class KeyValueBackgroundWriteRequest
         int partitionId,
         string key, 
         string? value, 
+        long revision,
         HLCTimestamp expires, 
         KeyValueConsistency consistency,
         KeyValueState state
@@ -37,6 +40,7 @@ public sealed class KeyValueBackgroundWriteRequest
         PartitionId = partitionId;
         Key = key;
         Value = value;
+        Revision = revision;
         Expires = expires;
         Consistency = consistency;
         State = state;

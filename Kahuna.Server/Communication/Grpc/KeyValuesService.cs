@@ -79,11 +79,12 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
 
         if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
         {
-            KeyValueResponseType response = await keyValues.TrySetKeyValue(request.Key, request.Value, request.ExpiresMs, (KeyValueConsistency)request.Consistency);
+            (KeyValueResponseType response, long revision) = await keyValues.TrySetKeyValue(request.Key, request.Value, request.ExpiresMs, (KeyValueConsistency)request.Consistency);
 
             return new()
             {
-                Type = (GrpcKeyValueResponseType)response
+                Type = (GrpcKeyValueResponseType)response,
+                Revision = revision
             };
         }
             
@@ -127,11 +128,12 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
 
         if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
         {
-            KeyValueResponseType response = await keyValues.TryExtendKeyValue(request.Key, request.ExpiresMs, (KeyValueConsistency)request.Consistency);
+            (KeyValueResponseType response, long revision) = await keyValues.TryExtendKeyValue(request.Key, request.ExpiresMs, (KeyValueConsistency)request.Consistency);
 
             return new()
             {
-                Type = (GrpcKeyValueResponseType)response
+                Type = (GrpcKeyValueResponseType)response,
+                Revision = revision
             };
         }
             
@@ -223,6 +225,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
                 ServedFrom = "",
                 Type = (GrpcKeyValueResponseType)type,
                 Value = keyValueContext?.Value ?? "",
+                Revision = keyValueContext?.Revision ?? 0,
                 ExpiresPhysical = keyValueContext?.Expires.L ?? 0,
                 ExpiresCounter = keyValueContext?.Expires.C ?? 0,
             };

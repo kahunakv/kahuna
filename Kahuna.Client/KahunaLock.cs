@@ -52,7 +52,7 @@ public sealed class KahunaLock : IAsyncDisposable
     /// <param name="duration"></param>
     /// <returns></returns>
     /// <exception cref="KahunaException"></exception>
-    public async Task<bool> TryExtend(TimeSpan duration)
+    public async Task<(bool, long)> TryExtend(TimeSpan duration)
     {
         if (!IsAcquired || string.IsNullOrEmpty(lockId))
             throw new KahunaException("Lock was not acquired", LockResponseType.Errored);
@@ -67,7 +67,7 @@ public sealed class KahunaLock : IAsyncDisposable
     /// <param name="durationMs"></param>
     /// <returns></returns>
     /// <exception cref="KahunaException"></exception>
-    public async Task<bool> TryExtend(int durationMs)
+    public async Task<(bool, long)> TryExtend(int durationMs)
     {
         if (!IsAcquired || string.IsNullOrEmpty(lockId))
             throw new KahunaException("Lock was not acquired", LockResponseType.Errored);

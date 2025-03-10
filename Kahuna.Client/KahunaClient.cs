@@ -180,7 +180,7 @@ public class KahunaClient
     /// <param name="duration"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<bool> TryExtend(string resource, string owner, TimeSpan duration, LockConsistency consistency = LockConsistency.Ephemeral)
+    public async Task<(bool, long)> TryExtend(string resource, string owner, TimeSpan duration, LockConsistency consistency = LockConsistency.Ephemeral)
     {
         try
         {
@@ -202,7 +202,7 @@ public class KahunaClient
     /// <param name="durationMs"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<bool> TryExtend(string resource, string owner, int durationMs, LockConsistency consistency = LockConsistency.Ephemeral)
+    public async Task<(bool, long)> TryExtend(string resource, string owner, int durationMs, LockConsistency consistency = LockConsistency.Ephemeral)
     {
         try
         {
@@ -262,7 +262,7 @@ public class KahunaClient
     /// <param name="expiryTime"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<bool> SetKeyValue(string key, string? value, int expiryTime = 30000, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
+    public async Task<(bool, long)> SetKeyValue(string key, string? value, int expiryTime = 30000, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
     {
         try
         {
@@ -284,7 +284,7 @@ public class KahunaClient
     /// <param name="expiry"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<bool> SetKeyValue(string key, string? value, TimeSpan expiry, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
+    public async Task<(bool, long)> SetKeyValue(string key, string? value, TimeSpan expiry, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
     {
         return await SetKeyValue(key, value, (int)expiry.TotalMilliseconds, consistency).ConfigureAwait(false);
     }
@@ -295,7 +295,7 @@ public class KahunaClient
     /// <param name="key"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<string?> GetKeyValue(string key, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
+    public async Task<(string?, long)> GetKeyValue(string key, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
     {
         try
         {
@@ -336,7 +336,7 @@ public class KahunaClient
     /// <param name="expiresMs"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<bool> ExtendKeyValue(string key, int expiresMs, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
+    public async Task<(bool, long)> ExtendKeyValue(string key, int expiresMs, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
     {
         try
         {
@@ -357,7 +357,7 @@ public class KahunaClient
     /// <param name="expiresMs"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<bool> ExtendKeyValue(string key, TimeSpan expiresMs, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
+    public async Task<(bool, long)> ExtendKeyValue(string key, TimeSpan expiresMs, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
     {
         try
         {
