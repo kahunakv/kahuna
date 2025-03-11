@@ -16,6 +16,12 @@ public readonly struct KeyValueRequest : IConsistentHashable
     
     public string? Value { get; }
     
+    public string? CompareValue { get; }
+    
+    public long CompareRevision { get; }
+    
+    public KeyValueFlags Flags { get; }
+    
     public int ExpiresMs { get; }
     
     public KeyValueConsistency Consistency { get; }
@@ -28,11 +34,23 @@ public readonly struct KeyValueRequest : IConsistentHashable
     /// <param name="value"></param>
     /// <param name="expiresMs"></param>
     /// <param name="consistency"></param>
-    public KeyValueRequest(KeyValueRequestType type, string key, string? value, int expiresMs, KeyValueConsistency consistency)
+    public KeyValueRequest(
+        KeyValueRequestType type, 
+        string key, 
+        string? value, 
+        string? compareValue,
+        long compareRevision,
+        KeyValueFlags flags,
+        int expiresMs, 
+        KeyValueConsistency consistency
+    )
     {
         Type = type;
         Key = key;
         Value = value;
+        CompareValue = compareValue;
+        CompareRevision = compareRevision;
+        Flags = flags;
         ExpiresMs = expiresMs;
         Consistency = consistency;
     }

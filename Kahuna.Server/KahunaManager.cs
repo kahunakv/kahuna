@@ -139,12 +139,23 @@ public sealed class KahunaManager : IKahuna
     /// </summary>
     /// <param name="key"></param>
     /// <param name="value"></param>
+    /// <param name="compareValue"></param>
+    /// <param name="compareRevision"></param>
+    /// <param name="flags"></param>
     /// <param name="expiresMs"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, long)> TrySetKeyValue(string key, string? value, int expiresMs, KeyValueConsistency consistency)
+    public Task<(KeyValueResponseType, long)> TrySetKeyValue(
+        string key, 
+        string? value,
+        string? compareValue,
+        long compareRevision,
+        KeyValueFlags flags,
+        int expiresMs, 
+        KeyValueConsistency consistency
+    )
     {
-        return keyValues.TrySetKeyValue(key, value, expiresMs, consistency);
+        return keyValues.TrySetKeyValue(key, value, compareValue, compareRevision, flags, expiresMs, consistency);
     }
 
     /// <summary>

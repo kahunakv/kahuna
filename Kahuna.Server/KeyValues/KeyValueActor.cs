@@ -97,15 +97,27 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
     /// <returns></returns>
     private async Task<KeyValueResponse> TrySet(KeyValueRequest message)
     {
+        bool exists = true;
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
 
         if (!keyValues.TryGetValue(message.Key, out KeyValueContext? context))
         {
+            exists = false;
             KeyValueContext? newContext = null;
 
             /// Try to retrieve KeyValue context from persistence
             if (message.Consistency == KeyValueConsistency.Linearizable)
+            {
                 newContext = await persistence.GetKeyValue(message.Key);
+                if (newContext is not null)
+                {
+                    if (newContext.State != KeyValueState.Deleted)
+                        exists = true;
+                    
+                    if (newContext.Expires - currentTime < TimeSpan.Zero)
+                        exists = false;
+                }
+            }
 
             newContext ??= new() { Revision = -1 };
             
@@ -113,7 +125,29 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
 
             keyValues.Add(message.Key, newContext);
         }
-        
+
+        switch (message.Flags)
+        {
+            case KeyValueFlags.SetIfExists when !exists:
+                return new(KeyValueResponseType.NotSet, context.Revision);
+            
+            case KeyValueFlags.SetIfNotExists when exists:
+                return new(KeyValueResponseType.NotSet, context.Revision);
+            
+            case KeyValueFlags.SetIfEqualToValue when exists && context.Value != message.CompareValue:
+                return new(KeyValueResponseType.NotSet, context.Revision);
+            
+            case KeyValueFlags.SetIfEqualToRevision when exists && context.Revision != message.CompareRevision:
+                return new(KeyValueResponseType.NotSet, context.Revision);
+            
+            case KeyValueFlags.None:
+            case KeyValueFlags.Set:
+                break;
+            
+            default:
+                throw new ArgumentOutOfRangeException();
+        }
+
         context.Value = message.Value;
         context.Revision++;
         context.Expires = currentTime + message.ExpiresMs;
@@ -131,8 +165,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
     }
     
     /// <summary>
-    /// Looks for a KeyValue on the resource and tries to extend it
-    /// If the KeyValue doesn't exist or the owner is different, return an error
+    /// Set a timeout on key. After the timeout has expired, the key will automatically be deleted
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
@@ -141,8 +174,11 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         KeyValueContext? context = await GetKeyValueContext(message.Key, message.Consistency);
         if (context is null || context.State == KeyValueState.Deleted)
             return new(KeyValueResponseType.DoesNotExist);
-
+        
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
+        
+        if (context.Expires - currentTime < TimeSpan.Zero)
+            return new(KeyValueResponseType.DoesNotExist);
 
         context.Expires = currentTime + message.ExpiresMs;
         context.LastUsed = currentTime;
@@ -158,7 +194,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
     }
     
     /// <summary>
-    /// Looks for a KeyValue on the resource and tries to unKeyValue it
+    /// Looks for a KeyValue on the resource and tries to delete it
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
@@ -185,7 +221,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
     }
 
     /// <summary>
-    /// Gets Information about an existing KeyValue
+    /// Gets a value by the specified key
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
@@ -277,8 +313,8 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         backgroundWriter.Send(new(
             BackgroundWriteType.QueueStoreLock,
             partitionId,
-            key, 
-            context.Value, 
+            key,
+            context.Value,
             context.Revision,
             context.Expires,
             (int)KeyValueConsistency.Linearizable,

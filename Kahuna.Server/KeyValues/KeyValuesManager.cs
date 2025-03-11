@@ -208,15 +208,29 @@ public sealed class KeyValuesManager
     /// </summary>
     /// <param name="key"></param>
     /// <param name="value"></param>
+    /// <param name="compareValue"></param>
+    /// <param name="compareRevision"></param>
+    /// <param name="flags"></param>
     /// <param name="expiresMs"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, long)> TrySetKeyValue(string key, string? value, int expiresMs, KeyValueConsistency consistency)
+    public async Task<(KeyValueResponseType, long)> TrySetKeyValue(
+        string key, 
+        string? value, 
+        string? compareValue,
+        long compareRevision,
+        KeyValueFlags flags,
+        int expiresMs, 
+        KeyValueConsistency consistency
+    )
     {
         KeyValueRequest request = new(
             KeyValueRequestType.TrySet, 
             key, 
             value, 
+            compareValue,
+            compareRevision,
+            flags,
             expiresMs, 
             consistency
         );
@@ -238,12 +252,19 @@ public sealed class KeyValuesManager
     /// <param name="expiresMs"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, long)> TryExtendKeyValue(string key, int expiresMs, KeyValueConsistency consistency)
+    public async Task<(KeyValueResponseType, long)> TryExtendKeyValue(
+        string key, 
+        int expiresMs, 
+        KeyValueConsistency consistency
+    )
     {
         KeyValueRequest request = new(
             KeyValueRequestType.TryExtend, 
             key, 
             null, 
+            null,
+            -1,
+            KeyValueFlags.None,
             expiresMs, 
             consistency
         );
@@ -270,6 +291,9 @@ public sealed class KeyValuesManager
             KeyValueRequestType.TryDelete, 
             key, 
             null, 
+            null,
+            -1,
+            KeyValueFlags.None,
             0, 
             consistency
         );
@@ -296,6 +320,9 @@ public sealed class KeyValuesManager
             KeyValueRequestType.TryGet, 
             key, 
             null, 
+            null,
+            -1,
+            KeyValueFlags.None,
             0, 
             consistency
         );

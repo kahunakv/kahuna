@@ -17,7 +17,7 @@ public interface IKahuna
     
     public Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(string lockName, LockConsistency consistency);
 
-    public Task<(KeyValueResponseType, long)> TrySetKeyValue(string key, string? value, int expiresMs, KeyValueConsistency consistency);
+    public Task<(KeyValueResponseType, long)> TrySetKeyValue(string key, string? value, string? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs, KeyValueConsistency consistency);
 
     public Task<(KeyValueResponseType, long)> TryExtendKeyValue(string key, int expiresMs, KeyValueConsistency consistency);
 
