@@ -262,11 +262,11 @@ public class KahunaClient
     /// <param name="expiryTime"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<(bool, long)> SetKeyValue(string key, string? value, int expiryTime = 30000, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
+    public async Task<(bool, long)> SetKeyValue(string key, string? value, int expiryTime = 30000, KeyValueFlags flags = KeyValueFlags.Set, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
     {
         try
         {
-            return await communication.TrySetKeyValue(GetRoundRobinUrl(), key, value, expiryTime, consistency).ConfigureAwait(false);
+            return await communication.TrySetKeyValue(GetRoundRobinUrl(), key, value, expiryTime, flags, consistency).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -284,9 +284,9 @@ public class KahunaClient
     /// <param name="expiry"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<(bool, long)> SetKeyValue(string key, string? value, TimeSpan expiry, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
+    public async Task<(bool, long)> SetKeyValue(string key, string? value, TimeSpan expiry, KeyValueFlags flags = KeyValueFlags.Set, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
     {
-        return await SetKeyValue(key, value, (int)expiry.TotalMilliseconds, consistency).ConfigureAwait(false);
+        return await SetKeyValue(key, value, (int)expiry.TotalMilliseconds, flags, consistency).ConfigureAwait(false);
     }
     
     /// <summary>

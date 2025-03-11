@@ -24,7 +24,9 @@ Console.WriteLine("Kahuna Shell 0.0.1 (alpha)\n");
 
 // Path.GetTempPath() + Path.PathSeparator + 
 
-string historyPath = "/tmp/kahuna.history.json";
+const int DefaultExpires = 5 * 86400 * 365;
+
+const string historyPath = "/tmp/kahuna.history.json";
 List<string> history = await GetHistory(historyPath);
 
 KahunaClient connection = await GetConnection(opts);
@@ -46,6 +48,8 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "get",
         "delete",
         "extend",
+        "nx",
+        "xx",
         // locks
         "lock",
         "extend-lock",
@@ -148,21 +152,38 @@ while (true)
 
         if (commandTrim.StartsWith("set ", StringComparison.InvariantCultureIgnoreCase))
         {
-            string[] parts = commandTrim.Split(" ");
+            history.Add(commandTrim);
+            
+            string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
 
-            (bool success, long revision) = await connection.SetKeyValue(parts[1], parts[2], int.Parse(parts[3]), KeyValueConsistency.Linearizable);
+            int expires = DefaultExpires;
+            KeyValueFlags flags = KeyValueFlags.Set;
+
+            if (parts.Length >= 4)
+            {
+                if (parts[3].Equals("NX", StringComparison.InvariantCultureIgnoreCase))
+                    flags = KeyValueFlags.SetIfNotExists;
+                else if (parts[3].Equals("XX", StringComparison.InvariantCultureIgnoreCase))
+                    flags = KeyValueFlags.SetIfExists;
+                else
+                    expires = int.Parse(parts[3]);
+            }
+
+            (bool success, long revision) = await connection.SetKeyValue(parts[1], parts[2], expires, flags, KeyValueConsistency.Linearizable);
             
             if (success)
                 AnsiConsole.MarkupLine("[cyan]ok rev:{0}[/]", revision);
             else
-                AnsiConsole.MarkupLine("[yellow]error[/]");
+                AnsiConsole.MarkupLine("[yellow]not set rev:{0}[/]", revision);
 
             continue;
         }
         
         if (commandTrim.StartsWith("get ", StringComparison.InvariantCultureIgnoreCase))
         {
-            string[] parts = commandTrim.Split(" ");
+            history.Add(commandTrim);
+            
+            string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
 
             (string? value, long revision) = await connection.GetKeyValue(parts[1], KeyValueConsistency.Linearizable);
             
@@ -176,7 +197,9 @@ while (true)
         
         if (commandTrim.StartsWith("delete ", StringComparison.InvariantCultureIgnoreCase))
         {
-            string[] parts = commandTrim.Split(" ");
+            history.Add(commandTrim);
+            
+            string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
 
             bool success = await connection.DeleteKeyValue(parts[1], KeyValueConsistency.Linearizable);
             
@@ -190,7 +213,9 @@ while (true)
         
         if (commandTrim.StartsWith("extend ", StringComparison.InvariantCultureIgnoreCase))
         {
-            string[] parts = commandTrim.Split(" ");
+            history.Add(commandTrim);
+            
+            string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
 
             (bool success, long revision) = await connection.ExtendKeyValue(parts[1], int.Parse(parts[2]), KeyValueConsistency.Linearizable);
             
@@ -204,7 +229,9 @@ while (true)
         
         if (commandTrim.StartsWith("eset ", StringComparison.InvariantCultureIgnoreCase))
         {
-            string[] parts = commandTrim.Split(" ");
+            history.Add(commandTrim);
+            
+            string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
 
             (bool success, long revision) = await connection.SetKeyValue(parts[1], parts[2], int.Parse(parts[3]));
             
@@ -218,7 +245,9 @@ while (true)
         
         if (commandTrim.StartsWith("eget ", StringComparison.InvariantCultureIgnoreCase))
         {
-            string[] parts = commandTrim.Split(" ");
+            history.Add(commandTrim);
+            
+            string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
 
             (string? value, long revision) = await connection.GetKeyValue(parts[1]);
             
@@ -232,7 +261,9 @@ while (true)
         
         if (commandTrim.StartsWith("edelete ", StringComparison.InvariantCultureIgnoreCase))
         {
-            string[] parts = commandTrim.Split(" ");
+            history.Add(commandTrim);
+            
+            string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
 
             bool success = await connection.DeleteKeyValue(parts[1]);
             
@@ -246,7 +277,9 @@ while (true)
         
         if (commandTrim.StartsWith("lock ", StringComparison.InvariantCultureIgnoreCase))
         {
-            string[] parts = commandTrim.Split(" ");
+            history.Add(commandTrim);
+            
+            string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
 
             KahunaLock kahunaLock = await connection.GetOrCreateLock(parts[1], int.Parse(parts[2]));
 
@@ -264,7 +297,9 @@ while (true)
         
         if (commandTrim.StartsWith("unlock ", StringComparison.InvariantCultureIgnoreCase))
         {
-            string[] parts = commandTrim.Split(" ");
+            history.Add(commandTrim);
+            
+            string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
 
             if (locks.TryGetValue(parts[1], out KahunaLock? kahunaLock))
             {
@@ -287,7 +322,9 @@ while (true)
         
         if (commandTrim.StartsWith("get-lock ", StringComparison.InvariantCultureIgnoreCase))
         {
-            string[] parts = commandTrim.Split(" ");
+            history.Add(commandTrim);
+            
+            string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
 
             if (locks.TryGetValue(parts[1], out KahunaLock? kahunaLock))
             {
@@ -308,7 +345,9 @@ while (true)
         
         if (commandTrim.StartsWith("extend-lock ", StringComparison.InvariantCultureIgnoreCase))
         {
-            string[] parts = commandTrim.Split(" ");
+            history.Add(commandTrim);
+            
+            string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
 
             if (locks.TryGetValue(parts[1], out KahunaLock? kahunaLock))
             {
@@ -350,7 +389,7 @@ static async Task<KahunaClient> GetConnection(Options opts)
 
 static async Task<List<string>> GetHistory(string historyPath)
 {
-    List<string>? history = new();
+    List<string>? history = [];
 
     if (File.Exists(historyPath))
     {

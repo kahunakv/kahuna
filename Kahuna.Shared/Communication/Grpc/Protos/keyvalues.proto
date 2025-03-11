@@ -10,8 +10,11 @@ service KeyValuer {
 message GrpcTrySetKeyValueRequest {
   string Key = 1;
   optional string Value = 2;
-  int32 ExpiresMs = 3;
-  GrpcKeyValueConsistency Consistency = 4;
+  optional string CompareValue = 3;
+  int64 CompareRevision = 4;
+  GrpcKeyValueFlags Flags = 5;
+  int32 ExpiresMs = 6;
+  GrpcKeyValueConsistency Consistency = 7;
 }
 
 message GrpcTrySetKeyValueResponse {
@@ -54,6 +57,15 @@ message GrpcTryGetKeyValueResponse {
   int64 Revision = 4;
   int64 ExpiresPhysical = 5;
   uint32 ExpiresCounter = 6;
+}
+
+enum GrpcKeyValueFlags {
+  KEYVALUE_FLAGS_NONE = 0;
+  KEYVALUE_FLAGS_SET = 1;
+  KEYVALUE_FLAGS_SET_IF_EXISTS = 2;
+  KEYVALUE_FLAGS_SET_IF_NOT_EXISTS = 3;
+  KEYVALUE_FLAGS_SET_IF_EQUAL_TO_VALUE = 4;
+  KEYVALUE_FLAGS_SET_IF_EQUAL_TO_REVISION = 5;
 }
 
 enum GrpcKeyValueResponseType {

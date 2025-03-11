@@ -18,25 +18,15 @@ internal sealed class GrpcCommunication
         this.logger = logger;
     }
     
-    internal async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string url, string key, string lockId, int expiryTime, LockConsistency consistency)
+    internal async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string url, string key, string owner, int expiryTime, LockConsistency consistency)
     {
-        GrpcTryLockRequest request = new() { LockName = key, LockId = lockId, ExpiresMs = expiryTime, Consistency = (GrpcLockConsistency)consistency };
+        GrpcTryLockRequest request = new() { LockName = key, LockId = owner, ExpiresMs = expiryTime, Consistency = (GrpcLockConsistency)consistency };
         
         GrpcTryLockResponse? response;
         
         do
         {
-            if (!channels.TryGetValue(url, out GrpcChannel? channel))
-            {
-                channel = GrpcChannel.ForAddress(url, new() { 
-                    HttpHandler = new SocketsHttpHandler
-                    {
-                        EnableMultipleHttp2Connections = true
-                    } 
-                });
-                
-                channels.TryAdd(url, channel);
-            }
+            GrpcChannel channel = GetSharedChannel(url);
         
             Locker.LockerClient client = new(channel);
         
@@ -56,24 +46,15 @@ internal sealed class GrpcCommunication
         throw new KahunaException("Failed to lock", (LockResponseType)response.Type);
     }
     
-    internal async Task<bool> TryUnlock(string url, string resource, string lockId, LockConsistency consistency)
+    internal async Task<bool> TryUnlock(string url, string resource, string owner, LockConsistency consistency)
     {
-        GrpcUnlockRequest request = new() { LockName = resource, LockId = lockId, Consistency = (GrpcLockConsistency)consistency };
+        GrpcUnlockRequest request = new() { LockName = resource, LockId = owner, Consistency = (GrpcLockConsistency)consistency };
         
         GrpcUnlockResponse? response;
         
         do
         {
-            if (!channels.TryGetValue(url, out GrpcChannel? channel))
-            {
-                channel = GrpcChannel.ForAddress(url, new() { 
-                    HttpHandler = new SocketsHttpHandler
-                    {
-                        EnableMultipleHttp2Connections = true
-                    } 
-                });
-                channels.TryAdd(url, channel);
-            }
+            GrpcChannel channel = GetSharedChannel(url);
         
             Locker.LockerClient client = new(channel);
         
@@ -93,24 +74,15 @@ internal sealed class GrpcCommunication
         throw new KahunaException("Failed to unlock", (LockResponseType)response.Type);
     }
     
-    internal async Task<(bool, long)> TryExtend(string url, string resource, string lockId, int expiryTime, LockConsistency consistency)
+    internal async Task<(bool, long)> TryExtend(string url, string resource, string owner, int expiryTime, LockConsistency consistency)
     {
-        GrpcExtendLockRequest request = new() { LockName = resource, LockId = lockId, ExpiresMs = expiryTime, Consistency = (GrpcLockConsistency)consistency };
+        GrpcExtendLockRequest request = new() { LockName = resource, LockId = owner, ExpiresMs = expiryTime, Consistency = (GrpcLockConsistency)consistency };
         
         GrpcExtendLockResponse? response;
         
         do
         {
-            if (!channels.TryGetValue(url, out GrpcChannel? channel))
-            {
-                channel = GrpcChannel.ForAddress(url, new() { 
-                    HttpHandler = new SocketsHttpHandler
-                    {
-                        EnableMultipleHttp2Connections = true
-                    } 
-                });
-                channels.TryAdd(url, channel);
-            }
+            GrpcChannel channel = GetSharedChannel(url);
         
             Locker.LockerClient client = new(channel);
         
@@ -135,16 +107,7 @@ internal sealed class GrpcCommunication
         
         do
         {
-            if (!channels.TryGetValue(url, out GrpcChannel? channel))
-            {
-                channel = GrpcChannel.ForAddress(url, new() { 
-                    HttpHandler = new SocketsHttpHandler
-                    {
-                        EnableMultipleHttp2Connections = true
-                    } 
-                });
-                channels.TryAdd(url, channel);
-            }
+            GrpcChannel channel = GetSharedChannel(url);
         
             Locker.LockerClient client = new(channel);
         
@@ -161,25 +124,22 @@ internal sealed class GrpcCommunication
         throw new KahunaException("Failed to get lock information", (LockResponseType)response.Type);
     }
     
-    internal async Task<(bool, long)> TrySetKeyValue(string url, string key, string? value, int expiryTime, KeyValueConsistency consistency)
+    internal async Task<(bool, long)> TrySetKeyValue(string url, string key, string? value, int expiryTime, KeyValueFlags flags, KeyValueConsistency consistency)
     {
-        GrpcTrySetKeyValueRequest request = new() { Key = key, Value = value, ExpiresMs = expiryTime, Consistency = (GrpcKeyValueConsistency)consistency };
+        GrpcTrySetKeyValueRequest request = new()
+        {
+            Key = key, 
+            Value = value,
+            Flags = (GrpcKeyValueFlags)flags,
+            ExpiresMs = expiryTime, 
+            Consistency = (GrpcKeyValueConsistency)consistency
+        };
         
         GrpcTrySetKeyValueResponse? response;
         
         do
         {
-            if (!channels.TryGetValue(url, out GrpcChannel? channel))
-            {
-                channel = GrpcChannel.ForAddress(url, new() { 
-                    HttpHandler = new SocketsHttpHandler
-                    {
-                        EnableMultipleHttp2Connections = true
-                    } 
-                });
-                
-                channels.TryAdd(url, channel);
-            }
+            GrpcChannel channel = GetSharedChannel(url);
         
             KeyValuer.KeyValuerClient client = new(channel);
         
@@ -191,12 +151,84 @@ internal sealed class GrpcCommunication
             if (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeSet)
                 return (true, response.Revision);
             
-            //if (response.Type == GrpcLockResponseType.LockResponseTypeBusy)
-            //    return (KahunaLockAcquireResult.Conflicted, -1);
+            if (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeNotset)
+                return (false, response.Revision);
 
         } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
             
-        throw new KahunaException("Failed to set key/value", (LockResponseType)response.Type);
+        throw new KahunaException("Failed to set key/value: " + response.Type, (LockResponseType)response.Type);
+    }
+    
+    internal async Task<(bool, long)> TryCompareValueAndSetKeyValue(string url, string key, string? value, string? compareValue, int expiryTime, KeyValueConsistency consistency)
+    {
+        GrpcTrySetKeyValueRequest request = new()
+        {
+            Key = key, 
+            Value = value,
+            CompareValue = compareValue,
+            Flags = GrpcKeyValueFlags.KeyvalueFlagsSetIfEqualToValue,
+            ExpiresMs = expiryTime, 
+            Consistency = (GrpcKeyValueConsistency)consistency
+        };
+        
+        GrpcTrySetKeyValueResponse? response;
+        
+        do
+        {
+            GrpcChannel channel = GetSharedChannel(url);
+        
+            KeyValuer.KeyValuerClient client = new(channel);
+        
+            response = await client.TrySetKeyValueAsync(request).ConfigureAwait(false);
+
+            if (response is null)
+                throw new KahunaException("Response is null", LockResponseType.Errored);
+
+            if (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeSet)
+                return (true, response.Revision);
+            
+            if (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeNotset)
+                return (false, response.Revision);
+
+        } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
+            
+        throw new KahunaException("Failed to set key/value: " + response.Type, (LockResponseType)response.Type);
+    }
+    
+    internal async Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string url, string key, string? value, long compareRevision, int expiryTime, KeyValueConsistency consistency)
+    {
+        GrpcTrySetKeyValueRequest request = new()
+        {
+            Key = key, 
+            Value = value,
+            CompareRevision = compareRevision,
+            Flags = GrpcKeyValueFlags.KeyvalueFlagsSetIfEqualToValue,
+            ExpiresMs = expiryTime, 
+            Consistency = (GrpcKeyValueConsistency)consistency
+        };
+        
+        GrpcTrySetKeyValueResponse? response;
+        
+        do
+        {
+            GrpcChannel channel = GetSharedChannel(url);
+        
+            KeyValuer.KeyValuerClient client = new(channel);
+        
+            response = await client.TrySetKeyValueAsync(request).ConfigureAwait(false);
+
+            if (response is null)
+                throw new KahunaException("Response is null", LockResponseType.Errored);
+
+            if (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeSet)
+                return (true, response.Revision);
+            
+            if (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeNotset)
+                return (false, response.Revision);
+
+        } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
+            
+        throw new KahunaException("Failed to set key/value:" + response.Type, (LockResponseType)response.Type);
     }
     
     internal async Task<(string?, long)> TryGetKeyValue(string url, string key, KeyValueConsistency consistency)
@@ -207,17 +239,7 @@ internal sealed class GrpcCommunication
         
         do
         {
-            if (!channels.TryGetValue(url, out GrpcChannel? channel))
-            {
-                channel = GrpcChannel.ForAddress(url, new() { 
-                    HttpHandler = new SocketsHttpHandler
-                    {
-                        EnableMultipleHttp2Connections = true
-                    } 
-                });
-                
-                channels.TryAdd(url, channel);
-            }
+            GrpcChannel channel = GetSharedChannel(url);
         
             KeyValuer.KeyValuerClient client = new(channel);
         
@@ -237,7 +259,7 @@ internal sealed class GrpcCommunication
             
         } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
             
-        throw new KahunaException("Failed to get key/value", (LockResponseType)response.Type);
+        throw new KahunaException("Failed to get key/value:" + response.Type, (LockResponseType)response.Type);
     }
     
     internal async Task<bool> TryDeleteKeyValue(string url, string key, KeyValueConsistency consistency)
@@ -248,17 +270,7 @@ internal sealed class GrpcCommunication
         
         do
         {
-            if (!channels.TryGetValue(url, out GrpcChannel? channel))
-            {
-                channel = GrpcChannel.ForAddress(url, new() { 
-                    HttpHandler = new SocketsHttpHandler
-                    {
-                        EnableMultipleHttp2Connections = true
-                    } 
-                });
-                
-                channels.TryAdd(url, channel);
-            }
+            GrpcChannel channel = GetSharedChannel(url);
         
             KeyValuer.KeyValuerClient client = new(channel);
         
@@ -278,7 +290,7 @@ internal sealed class GrpcCommunication
             
         } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
             
-        throw new KahunaException("Failed to delete key/value", (LockResponseType)response.Type);
+        throw new KahunaException("Failed to delete key/value: " + response.Type, (LockResponseType)response.Type);
     }
     
     internal async Task<(bool, long)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueConsistency consistency)
@@ -289,17 +301,7 @@ internal sealed class GrpcCommunication
         
         do
         {
-            if (!channels.TryGetValue(url, out GrpcChannel? channel))
-            {
-                channel = GrpcChannel.ForAddress(url, new() { 
-                    HttpHandler = new SocketsHttpHandler
-                    {
-                        EnableMultipleHttp2Connections = true
-                    } 
-                });
-                
-                channels.TryAdd(url, channel);
-            }
+            GrpcChannel channel = GetSharedChannel(url);
         
             KeyValuer.KeyValuerClient client = new(channel);
         
@@ -320,5 +322,22 @@ internal sealed class GrpcCommunication
         } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
             
         throw new KahunaException("Failed to extend key/value", (LockResponseType)response.Type);
+    }
+
+    private GrpcChannel GetSharedChannel(string url)
+    {
+        if (!channels.TryGetValue(url, out GrpcChannel? channel))
+        {
+            channel = GrpcChannel.ForAddress(url, new() { 
+                HttpHandler = new SocketsHttpHandler
+                {
+                    EnableMultipleHttp2Connections = true
+                } 
+            });
+                
+            channels.TryAdd(url, channel);
+        }
+
+        return channel;
     }
 }

@@ -61,12 +61,13 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         try
         {
             logger.LogDebug(
-                "KeyValueActor Message: {Actor} {Type} {Key} {Value} {ExpiresMs} {Consistency}",
+                "KeyValueActor Message: {Actor} {Type} {Key} {Value} {ExpiresMs} {Flags} {Consistency}",
                 actorContext.Self.Runner.Name,
                 message.Type,
                 message.Key,
                 message.Value,
                 message.ExpiresMs,
+                message.Flags,
                 message.Consistency
             );
 
@@ -125,27 +126,24 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
 
             keyValues.Add(message.Key, newContext);
         }
+        else
+        {
+            if (context.State == KeyValueState.Deleted)
+                exists = false;
+        }
 
         switch (message.Flags)
         {
             case KeyValueFlags.SetIfExists when !exists:
-                return new(KeyValueResponseType.NotSet, context.Revision);
-            
             case KeyValueFlags.SetIfNotExists when exists:
-                return new(KeyValueResponseType.NotSet, context.Revision);
-            
             case KeyValueFlags.SetIfEqualToValue when exists && context.Value != message.CompareValue:
-                return new(KeyValueResponseType.NotSet, context.Revision);
-            
             case KeyValueFlags.SetIfEqualToRevision when exists && context.Revision != message.CompareRevision:
                 return new(KeyValueResponseType.NotSet, context.Revision);
-            
+
             case KeyValueFlags.None:
             case KeyValueFlags.Set:
-                break;
-            
             default:
-                throw new ArgumentOutOfRangeException();
+                break;
         }
 
         context.Value = message.Value;

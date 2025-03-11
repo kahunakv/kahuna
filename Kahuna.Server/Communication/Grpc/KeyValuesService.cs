@@ -44,9 +44,17 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         
         int partitionId = raft.GetPartitionKey(request.Key);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
+        if (!raft.Joined || await raft.AmILeader(partitionId, context.CancellationToken))
         {
-            (KeyValueResponseType response, long revision) = await keyValues.TrySetKeyValue(request.Key, request.Value, request.ExpiresMs, (KeyValueConsistency)request.Consistency);
+            (KeyValueResponseType response, long revision) = await keyValues.TrySetKeyValue(
+                request.Key, 
+                request.Value, 
+                request.CompareValue,
+                request.CompareRevision,
+                (KeyValueFlags)request.Flags,
+                request.ExpiresMs, 
+                (KeyValueConsistency)request.Consistency
+            );
 
             return new()
             {
@@ -55,7 +63,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
             };
         }
             
-        string leader = await raft.WaitForLeader(partitionId, CancellationToken.None);
+        string leader = await raft.WaitForLeader(partitionId, context.CancellationToken);
         if (leader == raft.GetLocalEndpoint())
             return new()
             {
