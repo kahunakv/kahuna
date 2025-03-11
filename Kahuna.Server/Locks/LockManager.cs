@@ -35,60 +35,28 @@ public sealed class LockManager
     /// <param name="actorSystem"></param>
     /// <param name="raft"></param>
     /// <param name="persistence"></param>
+    /// <param name="persistenceActorRouter"></param>
+    /// <param name="backgroundWriter"></param>
     /// <param name="configuration"></param>
     /// <param name="logger"></param>
-    public LockManager(ActorSystem actorSystem, IRaft raft, IPersistence persistence, KahunaConfiguration configuration, ILogger<IKahuna> logger)
+    public LockManager(
+        ActorSystem actorSystem, 
+        IRaft raft, 
+        IPersistence persistence, 
+        IActorRef<ConsistentHashActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter,
+        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
+        KahunaConfiguration configuration, 
+        ILogger<IKahuna> logger
+    )
     {
         this.actorSystem = actorSystem;
         this.raft = raft;
         this.logger = logger;
         
-        persistenceActorRouter = GetPersistenceRouter(persistence, configuration);
-        
-        IActorRef<LockBackgroundWriterActor, LockBackgroundWriteRequest> backgroundWriter = actorSystem.Spawn<LockBackgroundWriterActor, LockBackgroundWriteRequest>(
-            "locks-background-writer", 
-            raft, 
-            persistenceActorRouter, 
-            logger
-        );
+        this.persistenceActorRouter = persistenceActorRouter;
         
         ephemeralLocksRouter = GetEphemeralRouter(backgroundWriter, persistence, configuration);
         consistentLocksRouter = GetConsistentRouter(backgroundWriter, persistence, configuration);
-    }
-
-    /// <summary>
-    /// Creates the persistence instance
-    /// </summary>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    /// <exception cref="KahunaServerException"></exception>
-    private static IPersistence GetPersistence(KahunaConfiguration configuration)
-    {
-        return configuration.Storage switch
-        {
-            "rocksdb" => new RocksDbPersistence(configuration.StoragePath, configuration.StorageRevision),
-            "sqlite" => new SqlitePersistence(configuration.StoragePath, configuration.StorageRevision),
-            _ => throw new KahunaServerException("Invalid storage type")
-        };
-    }
-
-    /// <summary>
-    /// Creates the persistence router
-    /// </summary>
-    /// <param name="persistence"></param>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    private IActorRef<ConsistentHashActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> GetPersistenceRouter(
-        IPersistence persistence, 
-        KahunaConfiguration configuration
-    )
-    {
-        List<IActorRef<PersistenceActor, PersistenceRequest, PersistenceResponse>> persistenceInstances = new(configuration.PersistenceWorkers);
-
-        for (int i = 0; i < configuration.PersistenceWorkers; i++)
-            persistenceInstances.Add(actorSystem.Spawn<PersistenceActor, PersistenceRequest, PersistenceResponse>("locks-persistence-" + i, persistence, logger));
-
-        return actorSystem.CreateConsistentHashRouter(persistenceInstances);
     }
 
     /// <summary>
@@ -99,7 +67,7 @@ public sealed class LockManager
     /// <param name="workers"></param>
     /// <returns></returns>
     private IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> GetEphemeralRouter(
-        IActorRef<LockBackgroundWriterActor, LockBackgroundWriteRequest> backgroundWriter, 
+        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, 
         IPersistence persistence, 
         KahunaConfiguration configuration
     )
@@ -120,7 +88,7 @@ public sealed class LockManager
     /// <param name="workers"></param>
     /// <returns></returns>
     private IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> GetConsistentRouter(
-        IActorRef<LockBackgroundWriterActor, LockBackgroundWriteRequest> backgroundWriter, 
+        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, 
         IPersistence persistence, 
         KahunaConfiguration configuration
     )

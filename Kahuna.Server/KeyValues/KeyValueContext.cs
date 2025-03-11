@@ -24,4 +24,9 @@ public sealed class KeyValueContext
     /// HLC timestamp of the last time the lock was used
     /// </summary>
     public HLCTimestamp LastUsed { get; set; }
+
+    /// <summary>
+    /// Current state of the key
+    /// </summary>
+    public KeyValueState State { get; set; } = KeyValueState.Set;
 }

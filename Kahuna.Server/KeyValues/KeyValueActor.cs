@@ -1,4 +1,5 @@
 
+using Kahuna.Locks;
 using Nixie;
 using Kommander;
 using Kommander.Time;
@@ -10,21 +11,23 @@ using Kahuna.Replication.Protos;
 
 namespace Kahuna.KeyValues;
 
-public class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueResponse>
+public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueResponse>
 {
     private readonly IActorContextStruct<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext;
 
-    private readonly IActorRef<KeyValueBackgroundWriterActor, KeyValueBackgroundWriteRequest> backgroundWriter;
+    private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
 
     private readonly IPersistence persistence;
 
     private readonly IRaft raft;
 
     private readonly Dictionary<string, KeyValueContext> keyValues = new();
+    
+    private readonly HashSet<string> keysToEvict = [];
 
     private readonly ILogger<IKahuna> logger;
 
-    private long operations;
+    private uint operations;
 
     /// <summary>
     /// Constructor
@@ -34,7 +37,7 @@ public class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueResponse>
     /// <param name="logger"></param>
     public KeyValueActor(
         IActorContextStruct<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext,
-        IActorRef<KeyValueBackgroundWriterActor, KeyValueBackgroundWriteRequest> backgroundWriter,
+        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistence persistence,
         IRaft raft,
         ILogger<IKahuna> logger
@@ -104,31 +107,18 @@ public class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueResponse>
             if (message.Consistency == KeyValueConsistency.Linearizable)
                 newContext = await persistence.GetKeyValue(message.Key);
 
-            newContext ??= new()
-            {
-                Value = message.Value,
-                Revision = 0,
-                Expires = currentTime + message.ExpiresMs,
-                LastUsed = currentTime
-            };
-
-            // If the key is consistent, we need to persist and replicate the KeyValue state
-            if (message.Consistency == KeyValueConsistency.Linearizable)
-            {
-                bool success = await PersistAndReplicateKeyValueMessage(message.Type, message.Key, newContext, currentTime, KeyValueState.Set);
-                if (!success)
-                    return new(KeyValueResponseType.Errored);
-            }
+            newContext ??= new() { Revision = -1 };
+            
+            context = newContext;
 
             keyValues.Add(message.Key, newContext);
-
-            return new(KeyValueResponseType.Set, newContext.Revision);
         }
         
         context.Value = message.Value;
         context.Revision++;
         context.Expires = currentTime + message.ExpiresMs;
         context.LastUsed = currentTime;
+        context.State = KeyValueState.Set;
 
         if (message.Consistency == KeyValueConsistency.Linearizable)
         {
@@ -149,7 +139,7 @@ public class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueResponse>
     private async Task<KeyValueResponse> TryExtend(KeyValueRequest message)
     {
         KeyValueContext? context = await GetKeyValueContext(message.Key, message.Consistency);
-        if (context is null)
+        if (context is null || context.State == KeyValueState.Deleted)
             return new(KeyValueResponseType.DoesNotExist);
 
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
@@ -175,13 +165,14 @@ public class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueResponse>
     private async Task<KeyValueResponse> TryDelete(KeyValueRequest message)
     {
         KeyValueContext? context = await GetKeyValueContext(message.Key, message.Consistency);
-        if (context is null)
+        if (context is null || context.State == KeyValueState.Deleted)
             return new(KeyValueResponseType.DoesNotExist);
         
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
 
         context.Value = null;
         context.LastUsed = currentTime;
+        context.State = KeyValueState.Deleted;
 
         if (message.Consistency == KeyValueConsistency.Linearizable)
         {
@@ -189,10 +180,7 @@ public class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueResponse>
             if (!success)
                 return new(KeyValueResponseType.Errored);
         }
-
-        if (message.Consistency == KeyValueConsistency.Ephemeral)
-            keyValues.Remove(message.Key);
-
+        
         return new(KeyValueResponseType.Deleted);
     }
 
@@ -204,7 +192,7 @@ public class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueResponse>
     private async Task<KeyValueResponse> TryGet(KeyValueRequest message)
     {
         KeyValueContext? context = await GetKeyValueContext(message.Key, message.Consistency);
-        if (context is null)
+        if (context is null || context.State == KeyValueState.Deleted)
             return new(KeyValueResponseType.DoesNotExist);
 
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
@@ -226,6 +214,7 @@ public class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueResponse>
                 context = await persistence.GetKeyValue(resource);
                 if (context is not null)
                 {
+                    context.LastUsed = await raft.HybridLogicalClock.SendOrLocalEvent();
                     keyValues.Add(resource, context);
                     return context;
                 }
@@ -246,44 +235,54 @@ public class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueResponse>
     /// <param name="key"></param>
     /// <param name="context"></param>
     /// <param name="currentTime"></param>
-    /// <param name="KeyValueState"></param>
+    /// <param name="keyValueState"></param>
     /// <returns></returns>
-    private async Task<bool> PersistAndReplicateKeyValueMessage(KeyValueRequestType type, string key, KeyValueContext context, HLCTimestamp currentTime, KeyValueState KeyValueState)
+    private async Task<bool> PersistAndReplicateKeyValueMessage(
+        KeyValueRequestType type, 
+        string key, 
+        KeyValueContext context, 
+        HLCTimestamp currentTime, 
+        KeyValueState keyValueState
+    )
     {
         if (!raft.Joined)
             return true;
 
         int partitionId = raft.GetPartitionKey(key);
 
+        KeyValueMessage kvm = new()
+        {
+            Type = (int)type,
+            Key = key,
+            Revision = context.Revision,
+            ExpireLogical = context.Expires.L,
+            ExpireCounter = context.Expires.C,
+            TimeLogical = currentTime.L,
+            TimeCounter = currentTime.C,
+            Consistency = (int)KeyValueConsistency.LinearizableReplication
+        };
+        
+        if (context.Value is not null)
+            kvm.Value = context.Value;
+
         (bool success, _, long _) = await raft.ReplicateLogs(
             partitionId,
             ReplicationTypes.KeyValues,
-            ReplicationSerializer.Serialize(new KeyValueMessage
-            {
-                Type = (int)type,
-                Key = key,
-                Value = context.Value ?? "",
-                Revision = context.Revision,
-                ExpireLogical = context.Expires.L,
-                ExpireCounter = context.Expires.C,
-                TimeLogical = currentTime.L,
-                TimeCounter = currentTime.C,
-                Consistency = (int)KeyValueConsistency.LinearizableReplication
-            })
+            ReplicationSerializer.Serialize(kvm)
         );
 
         if (!success)
             return false;
         
         backgroundWriter.Send(new(
-            KeyValueBackgroundWriteType.Queue,
+            BackgroundWriteType.QueueStoreLock,
             partitionId,
             key, 
             context.Value, 
             context.Revision,
             context.Expires,
-            KeyValueConsistency.Linearizable,
-            KeyValueState
+            (int)KeyValueConsistency.Linearizable,
+            (int)keyValueState
         ));
 
         return success;
@@ -298,25 +297,25 @@ public class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueResponse>
         TimeSpan range = TimeSpan.FromMinutes(30);
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
 
-        HashSet<string> keys = [];
-
         foreach (KeyValuePair<string, KeyValueContext> key in keyValues)
         {
             if ((currentTime - key.Value.LastUsed) < range)
                 continue;
             
-            keys.Add(key.Key);
+            keysToEvict.Add(key.Key);
             number++;
             
             if (number > 100)
                 break;
         }
 
-        foreach (string key in keys)
+        foreach (string key in keysToEvict)
         {
             keyValues.Remove(key);
             
             Console.WriteLine("Removed {0}", key);
         }
+        
+        keysToEvict.Clear();
     }
 }

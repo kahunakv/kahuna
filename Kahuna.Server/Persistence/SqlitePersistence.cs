@@ -87,7 +87,7 @@ public class SqlitePersistence : IPersistence
         }
     }
     
-    public async Task StoreLock(string resource, string owner, long expiresPhysical, uint expiresCounter, long fencingToken, int consistency, int state)
+    public async Task<bool> StoreLock(string resource, string? owner, long expiresPhysical, uint expiresCounter, long fencingToken, int consistency, int state)
     {
         try
         {
@@ -103,7 +103,12 @@ public class SqlitePersistence : IPersistence
             await using SqliteCommand command = new(query, connection);
 
             command.Parameters.AddWithValue("@resource", resource);
-            command.Parameters.AddWithValue("@owner", owner ?? "");
+            
+            if (owner is null)
+                command.Parameters.AddWithValue("@owner", DBNull.Value);
+            else
+                command.Parameters.AddWithValue("@owner", owner);
+            
             command.Parameters.AddWithValue("@expiresLogical", expiresPhysical);
             command.Parameters.AddWithValue("@expiresCounter", expiresCounter);
             command.Parameters.AddWithValue("@fencingToken", fencingToken);
@@ -111,6 +116,8 @@ public class SqlitePersistence : IPersistence
             command.Parameters.AddWithValue("@state", state);
 
             await command.ExecuteNonQueryAsync();
+
+            return true;
         }
         catch (Exception ex)
         {
@@ -128,9 +135,11 @@ public class SqlitePersistence : IPersistence
                 state
             );
         }
+
+        return false;
     }
     
-    public async Task StoreKeyValue(string key, string? value, long expiresPhysical, uint expiresCounter, long revision, int consistency, int state)
+    public async Task<bool> StoreKeyValue(string key, string? value, long expiresPhysical, uint expiresCounter, long revision, int consistency, int state)
     {
         try
         {
@@ -146,7 +155,12 @@ public class SqlitePersistence : IPersistence
             await using SqliteCommand command = new(query, connection);
 
             command.Parameters.AddWithValue("@key", key);
-            command.Parameters.AddWithValue("@value", value ?? "");
+            
+            if (value is null)
+                command.Parameters.AddWithValue("@value", DBNull.Value);
+            else
+                command.Parameters.AddWithValue("@value", value);
+            
             command.Parameters.AddWithValue("@expiresLogical", expiresPhysical);
             command.Parameters.AddWithValue("@expiresCounter", expiresCounter);
             command.Parameters.AddWithValue("@revision", revision);
@@ -154,6 +168,8 @@ public class SqlitePersistence : IPersistence
             command.Parameters.AddWithValue("@state", state);
 
             await command.ExecuteNonQueryAsync();
+
+            return true;
         }
         catch (Exception ex)
         {
@@ -171,6 +187,8 @@ public class SqlitePersistence : IPersistence
                 state
             );
         }
+
+        return false;
     }
 
     public async Task<LockContext?> GetLock(string resource)
@@ -189,7 +207,7 @@ public class SqlitePersistence : IPersistence
             while (reader.Read())
                 return new()
                 {
-                    Owner = reader.IsDBNull(0) ? "" :  reader.GetString(0),
+                    Owner = reader.IsDBNull(0) ? null : reader.GetString(0),
                     Expires = new(reader.IsDBNull(1) ? 0 : reader.GetInt64(1), reader.IsDBNull(2) ? 0 : (uint)reader.GetInt64(2)),
                     FencingToken = reader.IsDBNull(3) ? 0 : reader.GetInt64(3)
                 };
@@ -218,7 +236,7 @@ public class SqlitePersistence : IPersistence
             while (reader.Read())
                 return new()
                 {
-                    Value = reader.IsDBNull(0) ? "" :  reader.GetString(0),
+                    Value = reader.IsDBNull(0) ? null : reader.GetString(0),
                     Revision = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
                     Expires = new(reader.IsDBNull(2) ? 0 : reader.GetInt64(2), reader.IsDBNull(3) ? 0 : (uint)reader.GetInt64(3))
                 };

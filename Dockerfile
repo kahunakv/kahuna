@@ -41,10 +41,13 @@ ENV KAHUNA_INITIAL_CLUSTER="$KAHUNA_INITIAL_CLUSTER"
 
 COPY --chmod=755 <<EOT /app/entrypoint.sh
 #!/usr/bin/env bash
+
 mkdir -p /storage/data/v2
 mkdir -p /storage/wal/v2
-echo "kahuna --raft-nodeid $KAHUNA_RAFT_NODEID --raft-host $KAHUNA_RAFT_HOST --raft-port $KAHUNA_RAFT_PORT --http-ports $KAHUNA_HTTP_PORTS --https-ports $KAHUNA_HTTPS_PORTS --https-certificate /app/certificate.pfx --initial-cluster $KAHUNA_INITIAL_CLUSTER --storage sqlite --storage-path /storage/data --storage-revision v1 --wal-path /storage/wal --wal-revision v2"
-dotnet /app/Kahuna.Server.dll --raft-nodeid $KAHUNA_RAFT_NODEID --raft-host $KAHUNA_RAFT_HOST --raft-port $KAHUNA_RAFT_PORT --http-ports $KAHUNA_HTTP_PORTS --https-ports $KAHUNA_HTTPS_PORTS --https-certificate /app/certificate.pfx --initial-cluster $KAHUNA_INITIAL_CLUSTER --storage sqlite --storage-path /storage/data --storage-revision v1 --wal-path /storage/wal --wal-revision v2
+
+echo "kahuna --raft-nodeid $KAHUNA_RAFT_NODEID --raft-host $KAHUNA_RAFT_HOST --raft-port $KAHUNA_RAFT_PORT --http-ports $KAHUNA_HTTP_PORTS --https-ports $KAHUNA_HTTPS_PORTS --https-certificate /app/certificate.pfx --initial-cluster $KAHUNA_INITIAL_CLUSTER --storage rocksdb --storage-path /storage/data --storage-revision v1 --wal-path /storage/wal --wal-revision v2"
+
+dotnet /app/Kahuna.Server.dll --raft-nodeid $KAHUNA_RAFT_NODEID --raft-host $KAHUNA_RAFT_HOST --raft-port $KAHUNA_RAFT_PORT --http-ports $KAHUNA_HTTP_PORTS --https-ports $KAHUNA_HTTPS_PORTS --https-certificate /app/certificate.pfx --initial-cluster $KAHUNA_INITIAL_CLUSTER --storage rocksdb --storage-path /storage/data --storage-revision v1 --wal-path /storage/wal --wal-revision v2
 EOT
 
 # when starting the container, run dotnet with the built dll

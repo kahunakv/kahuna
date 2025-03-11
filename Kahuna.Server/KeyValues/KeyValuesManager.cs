@@ -1,5 +1,6 @@
 
 using Kahuna.Configuration;
+using Kahuna.Locks;
 using Kahuna.Persistence;
 using Kahuna.Replication;
 using Kahuna.Replication.Protos;
@@ -12,14 +13,14 @@ using Nixie.Routers;
 
 namespace Kahuna.KeyValues;
 
-public class KeyValuesManager
+public sealed class KeyValuesManager
 {
     private readonly ActorSystem actorSystem;
 
     private readonly IRaft raft;
 
     private readonly ILogger<IKahuna> logger;
-    
+
     private readonly IActorRef<ConsistentHashActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter;
 
     private readonly IActorRefStruct<ConsistentHashActorStruct<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> ephemeralKeyValuesRouter;
@@ -34,42 +35,24 @@ public class KeyValuesManager
     /// <param name="persistence"></param>
     /// <param name="configuration"></param>
     /// <param name="logger"></param>
-    public KeyValuesManager(ActorSystem actorSystem, IRaft raft, IPersistence persistence, KahunaConfiguration configuration, ILogger<IKahuna> logger)
+    public KeyValuesManager(
+        ActorSystem actorSystem, 
+        IRaft raft, 
+        IPersistence persistence, 
+        IActorRef<ConsistentHashActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter,
+        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
+        KahunaConfiguration configuration, 
+        ILogger<IKahuna> logger
+    )
     {
         this.actorSystem = actorSystem;
         this.raft = raft;
         this.logger = logger;
         
-        persistenceActorRouter = GetPersistenceRouter(persistence, configuration);
-        
-        IActorRef<KeyValueBackgroundWriterActor, KeyValueBackgroundWriteRequest> backgroundWriter = actorSystem.Spawn<KeyValueBackgroundWriterActor, KeyValueBackgroundWriteRequest>(
-            "keyvalues-background-writer", 
-            raft, 
-            persistenceActorRouter, 
-            logger
-        );
+        this.persistenceActorRouter = persistenceActorRouter;
         
         ephemeralKeyValuesRouter = GetEphemeralRouter(backgroundWriter, persistence, configuration);
         consistentKeyValuesRouter = GetConsistentRouter(backgroundWriter, persistence, configuration);
-    }
-
-    /// <summary>
-    /// Creates the persistence router
-    /// </summary>
-    /// <param name="persistence"></param>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    private IActorRef<ConsistentHashActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> GetPersistenceRouter(
-        IPersistence persistence, 
-        KahunaConfiguration configuration
-    )
-    {
-        List<IActorRef<PersistenceActor, PersistenceRequest, PersistenceResponse>> persistenceInstances = new(configuration.PersistenceWorkers);
-
-        for (int i = 0; i < configuration.PersistenceWorkers; i++)
-            persistenceInstances.Add(actorSystem.Spawn<PersistenceActor, PersistenceRequest, PersistenceResponse>("keyValues-persistence-" + i, persistence, logger));
-
-        return actorSystem.CreateConsistentHashRouter(persistenceInstances);
     }
 
     /// <summary>
@@ -80,7 +63,7 @@ public class KeyValuesManager
     /// <param name="workers"></param>
     /// <returns></returns>
     private IActorRefStruct<ConsistentHashActorStruct<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> GetEphemeralRouter(
-        IActorRef<KeyValueBackgroundWriterActor, KeyValueBackgroundWriteRequest> backgroundWriter, 
+        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, 
         IPersistence persistence, 
         KahunaConfiguration configuration
     )
@@ -101,7 +84,7 @@ public class KeyValuesManager
     /// <param name="workers"></param>
     /// <returns></returns>
     private IActorRefStruct<ConsistentHashActorStruct<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> GetConsistentRouter(
-        IActorRef<KeyValueBackgroundWriterActor, KeyValueBackgroundWriteRequest> backgroundWriter, 
+        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, 
         IPersistence persistence, 
         KahunaConfiguration configuration
     )

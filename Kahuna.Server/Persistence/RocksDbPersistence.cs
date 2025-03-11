@@ -10,11 +10,15 @@ namespace Kahuna.Persistence;
 
 public class RocksDbPersistence : IPersistence
 {
-    private const string LockPrefix = "lk-";
+    private static readonly Task<LockContext?> NullLockContext = Task.FromResult<LockContext?>(null);
     
-    private const string KeyValuePrefix = "kv-";
+    private static readonly Task<KeyValueContext?> NullKeyValueContext = Task.FromResult<KeyValueContext?>(null);
     
     private readonly RocksDb db;
+
+    private readonly ColumnFamilyHandle? columnFamilyKeys;
+    
+    private readonly ColumnFamilyHandle? columnFamilyLocks;
     
     private readonly string path;
     
@@ -31,13 +35,22 @@ public class RocksDbPersistence : IPersistence
             .SetCreateIfMissing(true)
             .SetCreateMissingColumnFamilies(true)
             .SetWalRecoveryMode(Recovery.AbsoluteConsistency);
+        
+        ColumnFamilies columnFamilies = new()
+        {
+            { "kv", new() },
+            { "locks", new() }
+        };
 
-        this.db = RocksDb.Open(dbOptions, fullPath);
+        this.db = RocksDb.Open(dbOptions, fullPath, columnFamilies);
+        
+        columnFamilyKeys = db.GetColumnFamily("kv");
+        columnFamilyLocks = db.GetColumnFamily("locks");
     }
 
-    public Task StoreLock(
+    public Task<bool> StoreLock(
         string resource, 
-        string owner, 
+        string? owner, 
         long expiresPhysical, 
         uint expiresCounter, 
         long fencingToken,
@@ -45,22 +58,26 @@ public class RocksDbPersistence : IPersistence
         int state
     )
     {
-        db.Put(Encoding.UTF8.GetBytes(LockPrefix + resource), Serialize(new RocksDbLockMessage
+        RocksDbLockMessage kvm = new()
         {
-            Owner = owner,
             ExpiresPhysical = expiresPhysical,
             ExpiresCounter = expiresCounter,
             FencingToken = fencingToken,
             Consistency = consistency,
             State = state
-        }));
+        };
+        
+        if (owner != null)
+            kvm.Owner = owner;
+        
+        db.Put(Encoding.UTF8.GetBytes(resource), Serialize(kvm), cf: columnFamilyLocks);
 
-        return Task.CompletedTask;
+        return Task.FromResult(true);
     }
     
-    public Task StoreKeyValue(
+    public Task<bool> StoreKeyValue(
         string key, 
-        string value, 
+        string? value, 
         long expiresPhysical, 
         uint expiresCounter, 
         long revision,
@@ -68,24 +85,28 @@ public class RocksDbPersistence : IPersistence
         int state
     )
     {
-        db.Put(Encoding.UTF8.GetBytes(LockPrefix + key), Serialize(new RocksDbKeyValueMessage
+        RocksDbKeyValueMessage kvm = new()
         {
-            Value = value,
             ExpiresPhysical = expiresPhysical,
             ExpiresCounter = expiresCounter,
             Revision = revision,
             Consistency = consistency,
             State = state
-        }));
+        };
 
-        return Task.CompletedTask;
+        if (value is not null)
+            kvm.Value = value;
+        
+        db.Put(Encoding.UTF8.GetBytes(key), Serialize(kvm), cf: columnFamilyKeys);
+
+        return Task.FromResult(true);
     }
 
     public Task<LockContext?> GetLock(string resource)
     {
-        byte[]? value = db.Get(Encoding.UTF8.GetBytes(LockPrefix + resource));
+        byte[]? value = db.Get(Encoding.UTF8.GetBytes(resource), cf: columnFamilyLocks);
         if (value is null)
-            return Task.FromResult<LockContext?>(null);
+            return NullLockContext;
 
         RocksDbLockMessage message = UnserializeLockMessage(value);
 
@@ -101,9 +122,9 @@ public class RocksDbPersistence : IPersistence
 
     public Task<KeyValueContext?> GetKeyValue(string keyName)
     {
-        byte[]? value = db.Get(Encoding.UTF8.GetBytes(KeyValuePrefix + keyName));
+        byte[]? value = db.Get(Encoding.UTF8.GetBytes(keyName), cf: columnFamilyKeys);
         if (value is null)
-            return Task.FromResult<KeyValueContext?>(null);
+            return NullKeyValueContext;
 
         RocksDbKeyValueMessage message = UnserializeKeyValueMessage(value);
 

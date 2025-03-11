@@ -7,7 +7,7 @@ namespace Kahuna.Tests.Client;
 
 public class TestLocks
 {
-    private readonly KahunaClient locks = new("https://localhost:8082", null);
+    private readonly KahunaClient locks = new(["https://localhost:8082", "https://localhost:8084", "https://localhost:8086"], null);
     
     private int total;
 
@@ -26,6 +26,7 @@ public class TestLocks
         await using KahunaLock kLock = await locks.GetOrCreateLock(lockName, 1000, consistency: consistency);
 
         Assert.True(kLock.IsAcquired);
+        Assert.Equal(0, kLock.FencingToken);
     }
     
     [Theory]
@@ -40,6 +41,8 @@ public class TestLocks
         KahunaLock kLock2 = await locks.GetOrCreateLock(lockName, 10000, consistency: consistency);
 
         Assert.True(kLock1.IsAcquired);
+        Assert.Equal(0, kLock1.FencingToken);
+        
         Assert.False(kLock2.IsAcquired);
 
         // Dispose the first lock so that the lock becomes available:
@@ -49,6 +52,7 @@ public class TestLocks
         // Now try acquiring the lock again:
         await using KahunaLock kLock3 = await locks.GetOrCreateLock(lockName, 1000, consistency: consistency);
         Assert.True(kLock3.IsAcquired);
+        Assert.Equal(1, kLock3.FencingToken);
     }
     
     [Theory]
@@ -60,11 +64,13 @@ public class TestLocks
 
         KahunaLock kLock = await locks.GetOrCreateLock(lockName, TimeSpan.FromSeconds(1), consistency: consistency);
         Assert.True(kLock.IsAcquired);
+        Assert.Equal(0, kLock.FencingToken);
 
         await kLock.DisposeAsync();
 
         await using KahunaLock kLock2 = await locks.GetOrCreateLock(lockName, TimeSpan.FromSeconds(1), consistency: consistency);
         Assert.True(kLock2.IsAcquired);
+        Assert.Equal(1, kLock2.FencingToken);
     }
     
     [Theory]
@@ -78,15 +84,18 @@ public class TestLocks
             lockName, 
             expiryTime: 1000, 
             waitTime: 1000, 
-            retryTime: 500
+            retryTime: 500,
+            consistency: consistency
         );
         
         Assert.True(kLock.IsAcquired);
+        Assert.Equal(0, kLock.FencingToken);
 
         await kLock.DisposeAsync();
 
         await using KahunaLock kLock2 = await locks.GetOrCreateLock(lockName, TimeSpan.FromSeconds(1), consistency: consistency);
         Assert.True(kLock2.IsAcquired);
+        Assert.Equal(1, kLock2.FencingToken);
     }
     
     [Theory]
@@ -115,11 +124,13 @@ public class TestLocks
         );
         
         Assert.True(kLock.IsAcquired);
+        Assert.Equal(0, kLock.FencingToken);
 
         await kLock.DisposeAsync();
 
         await using KahunaLock kLock2 = await locks.GetOrCreateLock(lockName, TimeSpan.FromSeconds(5), consistency: consistency);
         Assert.True(kLock2.IsAcquired);
+        Assert.Equal(1, kLock2.FencingToken);
     }
     
     [Theory]
@@ -165,9 +176,11 @@ public class TestLocks
         await using KahunaLock kLock = await locks.GetOrCreateLock(lockName, 10000, consistency: consistency);
 
         Assert.True(kLock.IsAcquired);
+        Assert.Equal(0, kLock.FencingToken);
         
         (bool extended, long fencingToken) = await kLock.TryExtend(TimeSpan.FromSeconds(10));
         Assert.True(extended);
+        Assert.Equal(kLock.FencingToken, fencingToken);
 
         KahunaLockInfo? lockInfo = await locks.GetLockInfo(lockName, consistency);
         Assert.NotNull(lockInfo);
@@ -175,8 +188,9 @@ public class TestLocks
         Assert.Equal(lockInfo.Owner, kLock.LockId);
         HLCTimestamp expires = lockInfo.Expires;
         
-        await kLock.TryExtend(TimeSpan.FromSeconds(10));
+        (extended, fencingToken) = await kLock.TryExtend(TimeSpan.FromSeconds(10));
         Assert.True(extended);
+        Assert.Equal(kLock.FencingToken, fencingToken);
         
         lockInfo = await locks.GetLockInfo(lockName, consistency);
         Assert.NotNull(lockInfo);

@@ -237,7 +237,7 @@ internal sealed class GrpcCommunication
             
         } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
             
-        throw new KahunaException("Failed to set key/value", (LockResponseType)response.Type);
+        throw new KahunaException("Failed to get key/value", (LockResponseType)response.Type);
     }
     
     internal async Task<bool> TryDeleteKeyValue(string url, string key, KeyValueConsistency consistency)

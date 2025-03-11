@@ -17,17 +17,19 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 {
     private readonly IActorContextStruct<LockActor, LockRequest, LockResponse> actorContext;
 
-    private readonly IActorRef<LockBackgroundWriterActor, LockBackgroundWriteRequest> backgroundWriter;
+    private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
 
     private readonly IPersistence persistence;
 
     private readonly IRaft raft;
 
     private readonly Dictionary<string, LockContext> locks = new();
+    
+    private readonly HashSet<string> keysToEvict = [];
 
     private readonly ILogger<IKahuna> logger;
 
-    private long operations;
+    private uint operations;
 
     /// <summary>
     /// Constructor
@@ -37,7 +39,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     /// <param name="logger"></param>
     public LockActor(
         IActorContextStruct<LockActor, LockRequest, LockResponse> actorContext,
-        IActorRef<LockBackgroundWriterActor, LockBackgroundWriteRequest> backgroundWriter,
+        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistence persistence,
         IRaft raft, 
         ILogger<IKahuna> logger
@@ -106,30 +108,13 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 
             /// Try to retrieve lock context from persistence
             if (message.Consistency == LockConsistency.Linearizable)
-            {
                 newContext = await persistence.GetLock(message.Resource);
-                if (newContext is not null)
-                    newContext.FencingToken++;
-            }
 
-            newContext ??= new()
-            {
-                Owner = message.Owner,
-                Expires = currentTime + message.ExpiresMs,
-                LastUsed = currentTime
-            };
-
-            // If the lock is consistent, we need to persist and replicate the lock state
-            if (message.Consistency == LockConsistency.Linearizable)
-            {
-                bool success = await PersistAndReplicateLockMessage(message.Type, message.Resource, newContext, currentTime, LockState.Locked);
-                if (!success)
-                    return new(LockResponseType.Errored);
-            }
-
+            newContext ??= new() { FencingToken = -1 };
+            
+            context = newContext;
+            
             locks.Add(message.Resource, newContext);
-
-            return new(LockResponseType.Locked, newContext.FencingToken);
         }
         
         if (!string.IsNullOrEmpty(context.Owner))
@@ -147,6 +132,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         context.Owner = message.Owner;
         context.Expires = currentTime + message.ExpiresMs;
         context.LastUsed = currentTime;
+        context.State = LockState.Locked;
 
         if (message.Consistency == LockConsistency.Linearizable)
         {
@@ -167,7 +153,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     private async Task<LockResponse> TryExtendLock(LockRequest message)
     {
         LockContext? context = await GetLockContext(message.Resource, message.Consistency);
-        if (context is null)
+        if (context is null || context.State == LockState.Unlocked)
             return new(LockResponseType.LockDoesNotExist);
 
         if (context.Owner != message.Owner)
@@ -196,7 +182,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     private async Task<LockResponse> TryUnlock(LockRequest message)
     {
         LockContext? context = await GetLockContext(message.Resource, message.Consistency);
-        if (context is null)
+        if (context is null || context.State == LockState.Unlocked)
             return new(LockResponseType.LockDoesNotExist);
 
         if (message.Owner != context.Owner)
@@ -206,6 +192,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 
         context.Owner = null;
         context.LastUsed = currentTime;
+        context.State = LockState.Unlocked;
 
         if (message.Consistency == LockConsistency.Linearizable)
         {
@@ -225,7 +212,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     private async Task<LockResponse> GetLock(LockRequest message)
     {
         LockContext? context = await GetLockContext(message.Resource, message.Consistency);
-        if (context is null)
+        if (context is null || context.State == LockState.Unlocked)
             return new(LockResponseType.LockDoesNotExist);
 
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
@@ -253,6 +240,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
                 context = await persistence.GetLock(resource);
                 if (context is not null)
                 {
+                    context.LastUsed = await raft.HybridLogicalClock.SendOrLocalEvent();
                     locks.Add(resource, context);
                     return context;
                 }
@@ -275,42 +263,52 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     /// <param name="currentTime"></param>
     /// <param name="lockState"></param>
     /// <returns></returns>
-    private async Task<bool> PersistAndReplicateLockMessage(LockRequestType type, string resource, LockContext context, HLCTimestamp currentTime, LockState lockState)
+    private async Task<bool> PersistAndReplicateLockMessage(
+        LockRequestType type, 
+        string resource, 
+        LockContext context, 
+        HLCTimestamp currentTime, 
+        LockState lockState
+    )
     {
         if (!raft.Joined)
             return true;
 
         int partitionId = raft.GetPartitionKey(resource);
 
+        LockMessage lockMessage = new()
+        {
+            Type = (int)type,
+            Resource = resource,
+            FencingToken = context.FencingToken,
+            ExpireLogical = context.Expires.L,
+            ExpireCounter = context.Expires.C,
+            TimeLogical = currentTime.L,
+            TimeCounter = currentTime.C,
+            Consistency = (int)LockConsistency.ReplicationConsistent
+        };
+
+        if (context.Owner is not null)
+            lockMessage.Owner = context.Owner;
+
         (bool success, _, long _) = await raft.ReplicateLogs(
             partitionId,
             ReplicationTypes.Locks,
-            ReplicationSerializer.Serialize(new LockMessage
-            {
-                Type = (int)type,
-                Resource = resource,
-                Owner = context.Owner ?? "",
-                FencingToken = context.FencingToken,
-                ExpireLogical = context.Expires.L,
-                ExpireCounter = context.Expires.C,
-                TimeLogical = currentTime.L,
-                TimeCounter = currentTime.C,
-                Consistency = (int)LockConsistency.ReplicationConsistent
-            })
+            ReplicationSerializer.Serialize(lockMessage)
         );
 
         if (!success)
             return false;
         
         backgroundWriter.Send(new(
-            LockBackgroundWriteType.Queue,
+            BackgroundWriteType.QueueStoreLock,
             partitionId,
             resource, 
             context.Owner, 
             context.FencingToken,
             context.Expires,
-            LockConsistency.Linearizable,
-            lockState
+            (int)LockConsistency.Linearizable,
+            (int)lockState
         ));
 
         return success;
@@ -325,25 +323,25 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         TimeSpan range = TimeSpan.FromMinutes(30);
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
 
-        HashSet<string> keys = [];
-
         foreach (KeyValuePair<string, LockContext> key in locks)
         {
             if ((currentTime - key.Value.LastUsed) < range)
                 continue;
             
-            keys.Add(key.Key);
+            keysToEvict.Add(key.Key);
             number++;
             
             if (number > 100)
                 break;
         }
 
-        foreach (string key in keys)
+        foreach (string key in keysToEvict)
         {
             locks.Remove(key);
             
             Console.WriteLine("Removed {0}", key);
         }
+        
+        keysToEvict.Clear();
     }
 }

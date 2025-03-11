@@ -7,6 +7,7 @@ using Kahuna.Shared.Locks;
 using Kommander;
 using Kommander.Data;
 using Nixie;
+using Nixie.Routers;
 
 namespace Kahuna;
 
@@ -15,6 +16,8 @@ namespace Kahuna;
 /// </summary>
 public sealed class KahunaManager : IKahuna
 {
+    private readonly ActorSystem actorSystem;
+    
     private readonly LockManager locks;
 
     private readonly KeyValuesManager keyValues;
@@ -22,15 +25,48 @@ public sealed class KahunaManager : IKahuna
     /// <summary>
     /// Constructor
     /// </summary>
-    /// <param name="locks"></param>
-    /// <param name="keyValues"></param>
+    /// <param name="actorSystem"></param>
+    /// <param name="raft"></param>
+    /// <param name="configuration"></param>
+    /// <param name="logger"></param>
     public KahunaManager(ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, ILogger<IKahuna> logger)
     {
+        this.actorSystem = actorSystem;
+        
         IPersistence persistence = GetPersistence(configuration);
         
-        this.locks = new LockManager(actorSystem, raft, persistence, configuration, logger);
-        this.keyValues = new KeyValuesManager(actorSystem, raft, persistence, configuration, logger);
+        IActorRef<ConsistentHashActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter = GetPersistenceRouter(persistence, configuration, logger);
         
+        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter = actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
+            "background-writer", 
+            raft, 
+            persistenceActorRouter, 
+            logger
+        );
+        
+        this.locks = new(actorSystem, raft, persistence, persistenceActorRouter, backgroundWriter, configuration, logger);
+        this.keyValues = new(actorSystem, raft, persistence, persistenceActorRouter, backgroundWriter, configuration, logger);
+    }
+    
+    /// <summary>
+    /// Creates the persistence router
+    /// </summary>
+    /// <param name="persistence"></param>
+    /// <param name="configuration"></param>
+    /// <param name="logger"></param>
+    /// <returns></returns>
+    private IActorRef<ConsistentHashActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> GetPersistenceRouter(
+        IPersistence persistence, 
+        KahunaConfiguration configuration,
+        ILogger logger
+    )
+    {
+        List<IActorRef<PersistenceActor, PersistenceRequest, PersistenceResponse>> persistenceInstances = new(configuration.PersistenceWorkers);
+
+        for (int i = 0; i < configuration.PersistenceWorkers; i++)
+            persistenceInstances.Add(actorSystem.Spawn<PersistenceActor, PersistenceRequest, PersistenceResponse>("persistence-" + i, persistence, logger));
+
+        return actorSystem.CreateConsistentHashRouter(persistenceInstances);
     }
     
     /// <summary>
@@ -45,7 +81,7 @@ public sealed class KahunaManager : IKahuna
         {
             "rocksdb" => new RocksDbPersistence(configuration.StoragePath, configuration.StorageRevision),
             "sqlite" => new SqlitePersistence(configuration.StoragePath, configuration.StorageRevision),
-            _ => throw new KahunaServerException("Invalid storage type")
+            _ => throw new KahunaServerException("Invalid storage type: " + configuration.Storage)
         };
     }
     

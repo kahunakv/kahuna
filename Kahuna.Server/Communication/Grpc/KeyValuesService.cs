@@ -12,10 +12,6 @@ namespace Kahuna.Communication.Grpc;
 
 public class KeyValuesService : KeyValuer.KeyValuerBase
 {
-    private static readonly ConcurrentDictionary<string, GrpcChannel> channels = new();
-    
-    private static HttpClientHandler? httpHandler;
-    
     private readonly IKahuna keyValues;
 
     private readonly KahunaConfiguration configuration;
@@ -30,35 +26,6 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         this.configuration = configuration;
         this.raft = raft;
         this.logger = logger;
-    }
-
-    private HttpClientHandler GetHandler()
-    {
-        if (httpHandler is not null)
-            return httpHandler;
-        
-        HttpClientHandler handler = new();
-
-        if (string.IsNullOrEmpty(configuration.HttpsCertificate))
-            return handler;
-        
-        handler.ServerCertificateCustomValidationCallback = (httpRequestMessage, cert, cetChain, policyErrors) =>
-        {
-            // Optionally, check for other policyErrors
-            if (policyErrors == SslPolicyErrors.None)
-                return true;
-
-            // Compare the certificate's thumbprint to our trusted thumbprint.
-            return cert is not null && cert.Thumbprint.Equals(configuration.HttpsTrustedThumbprint, StringComparison.OrdinalIgnoreCase);
-          
-            //if (cert is not null)
-            //    Console.WriteLine("{0} {1}", cert.Thumbprint, configuration.HttpsTrustedThumbprint);
-            //return true;
-        };
-
-        httpHandler = handler;
-        
-        return handler;
     }
     
     public override async Task<GrpcTrySetKeyValueResponse> TrySetKeyValue(GrpcTrySetKeyValueRequest request, ServerCallContext context)
@@ -97,11 +64,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         
         logger.LogDebug("SET-KEYVALUE Redirect {Key} to leader partition {Partition} at {Leader}", request.Key, partitionId, leader);
         
-        if (!channels.TryGetValue(leader, out GrpcChannel? channel))
-        {
-            channel = GrpcChannel.ForAddress($"https://{leader}", new() { HttpHandler = GetHandler() });
-            channels.TryAdd(leader, channel);
-        }
+        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
         
         KeyValuer.KeyValuerClient client = new(channel);
         
@@ -146,11 +109,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         
         logger.LogDebug("EXTEND-KEYVALUE Redirect {Key} to leader partition {Partition} at {Leader}", request.Key, partitionId, leader);
         
-        if (!channels.TryGetValue(leader, out GrpcChannel? channel))
-        {
-            channel = GrpcChannel.ForAddress($"https://{leader}", new() { HttpHandler = GetHandler() });
-            channels.TryAdd(leader, channel);
-        }
+        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
         
         KeyValuer.KeyValuerClient client = new(channel);
         
@@ -188,11 +147,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         
         logger.LogDebug("UNKEYVALUE Redirect {Key} to leader partition {Partition} at {Leader}", request.Key, partitionId, leader);
         
-        if (!channels.TryGetValue(leader, out GrpcChannel? channel))
-        {
-            channel = GrpcChannel.ForAddress($"https://{leader}", new() { HttpHandler = GetHandler() });
-            channels.TryAdd(leader, channel);
-        }
+        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
         
         KeyValuer.KeyValuerClient client = new(channel);
         
@@ -240,11 +195,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         
         logger.LogDebug("GET-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", request.Key, partitionId, leader);
         
-        if (!channels.TryGetValue(leader, out GrpcChannel? channel))
-        {
-            channel = GrpcChannel.ForAddress($"https://{leader}", new() { HttpHandler = GetHandler() });
-            channels.TryAdd(leader, channel);
-        }
+        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
         
         KeyValuer.KeyValuerClient client = new(channel);
         

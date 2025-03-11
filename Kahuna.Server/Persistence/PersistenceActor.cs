@@ -23,29 +23,39 @@ public sealed class PersistenceActor : IActor<PersistenceRequest, PersistenceRes
         switch (message.Type)
         {
             case PersistenceRequestType.StoreLock:
-                await persistence.StoreLock(
-                    message.Key, 
-                    message.Value ?? "", 
-                    message.ExpiresLogical, 
-                    message.ExpiresCounter, 
-                    message.FencingToken, 
-                    message.Consistency, 
-                    message.State
-                );
-                break;
-            
-            case PersistenceRequestType.StoreKeyValue:
-                await persistence.StoreKeyValue(
-                    message.Key, 
-                    message.Value ?? "", 
-                    message.ExpiresLogical, 
-                    message.ExpiresCounter, 
+            {
+                bool success = await persistence.StoreLock(
+                    message.Key,
+                    message.Value,
+                    message.ExpiresLogical,
+                    message.ExpiresCounter,
                     message.FencingToken,
-                    message.Consistency, 
+                    message.Consistency,
                     message.State
                 );
-                break;
-            
+
+                if (!success)
+                    return new(PersistenceResponseType.Failed);
+            }
+            break;
+
+            case PersistenceRequestType.StoreKeyValue:
+            {
+                bool success = await persistence.StoreKeyValue(
+                    message.Key,
+                    message.Value,
+                    message.ExpiresLogical,
+                    message.ExpiresCounter,
+                    message.FencingToken,
+                    message.Consistency,
+                    message.State
+                );
+
+                if (!success)
+                    return new(PersistenceResponseType.Failed);
+            } 
+            break;
+
             case PersistenceRequestType.GetLock:
                 LockContext? lockContext = await persistence.GetLock(message.Key);
                 if (lockContext == null)

@@ -7,9 +7,9 @@ namespace Kahuna.Locks;
 /// <summary>
 /// Represents a lock background write request.
 /// </summary>
-public sealed class LockBackgroundWriteRequest
+public sealed class BackgroundWriteRequest
 {
-    public LockBackgroundWriteType Type { get; }
+    public BackgroundWriteType Type { get; }
     
     public int PartitionId { get; }
     
@@ -21,19 +21,19 @@ public sealed class LockBackgroundWriteRequest
     
     public HLCTimestamp Expires { get; }
     
-    public LockConsistency Consistency { get; }
+    public int Consistency { get; }
     
-    public LockState State { get; }
+    public int State { get; }
     
-    public LockBackgroundWriteRequest(
-        LockBackgroundWriteType type,
+    public BackgroundWriteRequest(
+        BackgroundWriteType type,
         int partitionId,
         string resource, 
         string? owner, 
         long fencingToken, 
         HLCTimestamp expires, 
-        LockConsistency consistency,
-        LockState state
+        int consistency,
+        int state
     )
     {
         Type = type;
@@ -46,7 +46,7 @@ public sealed class LockBackgroundWriteRequest
         State = state;
     }
     
-    public LockBackgroundWriteRequest(LockBackgroundWriteType type)
+    public BackgroundWriteRequest(BackgroundWriteType type)
     {
         Type = type;
         Resource = "";

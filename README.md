@@ -1,13 +1,32 @@
 # 🦎 Kahuna
 
-**Kahuna** is an open-source solution designed to provide robust distributed
-locking for modern distributed systems. It addresses the critical challenge
-of synchronizing access to shared resources across multiple nodes
-or processes, ensuring consistency and preventing race conditions.
-By leveraging a partitioned locking mechanism coordinated via a Raft Group,
-Kahuna combines scalability, reliability and simplicity, making it an ideal choice
-for applications that require coordinated access to databases, files
-or other shared services.
+Kahuna is an open-source solution designed to provide robust coordination for modern 
+distributed systems by integrating three critical functionalities: 
+**distributed locking, a distributed key/value store, and a distributed sequencer**. 
+By ensuring synchronized access to shared resources, efficient data storage and retrieval, 
+and globally ordered event sequencing, Kahuna offers a unified approach 
+to managing distributed workloads. Built on a partitioned architecture coordinated via a **Raft Group**, 
+it delivers **scalability, reliability, and simplicity**, making it an ideal choice for 
+applications requiring strong consistency and high availability.
+
+### **Distributed Locking**
+Kahuna addresses the challenge of synchronizing access to shared resources across multiple 
+nodes or processes, ensuring consistency and preventing race conditions. Its partitioned locking 
+mechanism ensures efficient coordination for databases, files, and other shared services.
+
+### **Distributed Key/Value Store**
+Beyond locking, Kahuna operates as a distributed key/value store, enabling fault-tolerant, 
+high-performance storage and retrieval of structured data. This makes it a powerful tool 
+for managing metadata, caching, and application state in distributed environments.
+
+### **Distributed Sequencer**
+Kahuna also functions as a distributed sequencer, ensuring a globally ordered execution 
+of events or transactions. This capability is essential for use cases such as distributed 
+databases, message queues, and event-driven systems that require precise ordering of 
+operations.
+
+By seamlessly integrating these three functionalities, Kahuna provides a comprehensive 
+foundation for building reliable and scalable distributed applications.
 
 > _Kahuna_ is a Hawaiian word that refers to an expert in any field. Historically,
 it has been used to refer to doctors, surgeons and dentists,
@@ -19,7 +38,6 @@ as well as priests, ministers, and sorcerers.
 
 - [Overview](#overview)
 - [What Is a Distributed Lock?](#what-is-a-distributed-lock)
-- [API](#api)
 - [Leases](#leases)
 - [Consistency Levels](#consistency-levels)
 - [Server-Installation](#server-installation)
@@ -37,7 +55,6 @@ In modern distributed systems, it is often necessary to synchronize access to sh
 
 By partitioning locks among nodes controlled by a Raft Group, Kahuna offers:
 
-- **Scalability:** Multiple nodes in the cluster can handle lock requests, enabling horizontal scaling as your application grows.
 - **Reliability:** Raft consensus ensures that partition data remains consistent even in the face of network failures.
 - **Simplicity:** A straightforward API based on leases makes it easy to integrate distributed locking into your applications.
 
@@ -50,53 +67,6 @@ A distributed lock is a mechanism that ensures that a specific resource is acces
 - **Preventing race conditions:** Ensuring that multiple processes do not modify shared resources simultaneously.
 - **Coordinating tasks:** Managing access to shared databases, files, or services across different nodes.
 - **Maintaining data consistency:** Guaranteeing that concurrent operations do not result in inconsistent states.
-
----
-
-## API
-
-Kahuna exposes a simple API for acquiring and releasing locks. The main functions are:
-
-### Lock
-
-```csharp
-(bool Locked, bool Errored) TryLock(string resource, string lockId, int expiresMs);
-```
-
-- **resource:** The identifier for the resource you want to lock.
-- **lockId:** A unique identifier for the lock, usually associated with the client or process requesting the lock.
-- **expiresMs:** The expiration time for the lock in milliseconds.
-
-**Returns:**
-- **Locked:** `true` if the lock was successfully acquired.
-- **Errored:** `true` if an error occurred during the locking process.
-
-### Unlock
-
-```csharp
-(bool Locked, bool Errored) Unlock(string resource, string lockId);
-```
-
-- **resource:** The identifier for the resource to unlock.
-- **lockId:** The unique identifier for the lock previously used to acquire the lock.
-
-**Returns:**
-- **Locked:** `false` if the resource was successfully unlocked.
-- **Errored:** `true` if an error occurred during the unlock process.
-
-### Extend
-
-```csharp
-(bool Extended, bool Errored) Extend(string resource, string lockId, int expiresMs);
-```
-
-- **resource:** The identifier for the resource you want to extend.
-- **lockId:** A unique identifier for the lock, usually associated with the client or process requesting the lock. It must be the current owner of the lock.
-- **expiresMs:** The expiration time for the lock in milliseconds.
-
-**Returns:**
-- **Extended:** `true` if the lock was successfully extended.
-- **Errored:** `true` if an error occurred during the locking process.
 
 ---
 
@@ -209,13 +179,13 @@ docker compose up
 Kahuna Client for .NET is available as a NuGet package. You can install it via the .NET CLI:
 
 ```bash
-dotnet add package Kahuna.Client --version 0.0.3
+dotnet add package Kahuna.Client --version 0.0.4
 ```
 
 Or via the NuGet Package Manager:
 
 ```powershell
-Install-Package Kahuna.Client -Version 0.0.3
+Install-Package Kahuna.Client -Version 0.0.4
 ```
 
 ---
@@ -359,7 +329,7 @@ public async Task TryChooseLeader(KahunaClient client, string groupId)
 {
     await using KahunaLock myLock = await client.GetOrCreateLock(
         "group-leader-" + groupId,
-        expiry: TimeSpan.FromSeconds(5)
+        expiry: TimeSpan.FromSeconds(10)
     );
 
     if (!myLock.IsAcquired)
@@ -367,13 +337,21 @@ public async Task TryChooseLeader(KahunaClient client, string groupId)
         Console.WriteLine("Lock not acquired!");
         return;
     }
+    
+    long acquireFencingToken = myLock.FencingToken;
 
     while (true)
     {
-        bool isExtended = await myLock.TryExtend(TimeSpan.FromSeconds(5));
+        (bool isExtended, long fencingToken) = await myLock.TryExtend(TimeSpan.FromSeconds(10));
         if (!isExtended)
         {
             Console.WriteLine("Lock extension failed!");
+            break;
+        }
+        
+        if (fencingToken != acquireFencingToken)
+        {
+            Console.WriteLine("Lock fencing token changed!");
             break;
         }
 
@@ -444,7 +422,7 @@ public async Task UpdateBalance(KahunaClient client, string userId)
     await using KahunaLock myLock = await client.GetOrCreateLock(
         "balance-" + userId,
         TimeSpan.FromSeconds(300), // lock for 5 mins
-        consistency: LockConsistency.Consistent
+        consistency: LockConsistency.Linearizable
     );
 
     if (myLock.IsAcquired)
@@ -469,7 +447,7 @@ public async Task UpdateBalance(KahunaClient client, string userId)
 Kahuna also provides a client tailored for .NET developers. 
 This SDK simplifies the integration of distributed locking into your .NET applications 
 by abstracting much of the underlying complexity. Documentation and samples 
-for the client SDK can be found in the [Documentation](https://github.com/andresgutierrez/kahuna/kahuna/wiki#client-sdk-for-net).
+for the client SDK can be found in the [Documentation](https://github.com/kahunakv/kahuna/wiki#client-sdk-for-net).
 
 ---
 

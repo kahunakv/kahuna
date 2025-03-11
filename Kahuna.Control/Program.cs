@@ -124,9 +124,16 @@ while (true)
         {
             foreach (KeyValuePair<string, KahunaLock> kvp in locks)
             {
-                AnsiConsole.MarkupLine("[yellow]Disposing lock {0}...[/]", kvp.Value.LockId);
-                
-                await kvp.Value.DisposeAsync();
+                try
+                {
+                    AnsiConsole.MarkupLine("[yellow]Disposing lock {0}...[/]", kvp.Value.LockId);
+
+                    await kvp.Value.DisposeAsync();
+                }
+                catch (Exception ex)
+                {
+                    AnsiConsole.MarkupLine("[red]{0}[/]: {1}\n", Markup.Escape(ex.GetType().Name), Markup.Escape(ex.Message));
+                }
             }
 
             await SaveHistory(historyPath, history);
@@ -142,8 +149,6 @@ while (true)
         if (commandTrim.StartsWith("set ", StringComparison.InvariantCultureIgnoreCase))
         {
             string[] parts = commandTrim.Split(" ");
-            
-            Console.WriteLine(parts[3]);
 
             (bool success, long revision) = await connection.SetKeyValue(parts[1], parts[2], int.Parse(parts[3]), KeyValueConsistency.Linearizable);
             
@@ -292,8 +297,6 @@ while (true)
                     AnsiConsole.MarkupLine("[cyan]got {0} rev:{1}[/]", Markup.Escape(kahunaLock.LockId), kahunaLock.FencingToken);
                 else
                     AnsiConsole.MarkupLine("[yellow]not acquired[/]");
-                
-                locks.Remove(parts[1]);
             }
             else
             {
@@ -315,8 +318,6 @@ while (true)
                     AnsiConsole.MarkupLine("[cyan]got {0} rev:{1}[/]", Markup.Escape(kahunaLock.LockId), fencingToken);
                 else
                     AnsiConsole.MarkupLine("[yellow]not acquired[/]");
-                
-                locks.Remove(parts[1]);
             }
             else
             {

@@ -1,6 +1,4 @@
 
-using System.Collections.Concurrent;
-using System.Net.Security;
 using Grpc.Core;
 using Grpc.Net.Client;
 using Kahuna.Configuration;
@@ -12,10 +10,6 @@ namespace Kahuna.Communication.Grpc;
 
 public class LocksService : Locker.LockerBase
 {
-    private static readonly ConcurrentDictionary<string, GrpcChannel> channels = new();
-    
-    private static HttpClientHandler? httpHandler;
-    
     private readonly IKahuna locks;
 
     private readonly KahunaConfiguration configuration;
@@ -30,35 +24,6 @@ public class LocksService : Locker.LockerBase
         this.configuration = configuration;
         this.raft = raft;
         this.logger = logger;
-    }
-
-    public HttpClientHandler GetHandler()
-    {
-        if (httpHandler is not null)
-            return httpHandler;
-        
-        HttpClientHandler handler = new();
-
-        if (string.IsNullOrEmpty(configuration.HttpsCertificate))
-            return handler;
-        
-        handler.ServerCertificateCustomValidationCallback = (httpRequestMessage, cert, cetChain, policyErrors) =>
-        {
-            // Optionally, check for other policyErrors
-            if (policyErrors == SslPolicyErrors.None)
-                return true;
-
-            // Compare the certificate's thumbprint to our trusted thumbprint.
-            return cert is not null && cert.Thumbprint.Equals(configuration.HttpsTrustedThumbprint, StringComparison.OrdinalIgnoreCase);
-          
-            //if (cert is not null)
-            //    Console.WriteLine("{0} {1}", cert.Thumbprint, configuration.HttpsTrustedThumbprint);
-            //return true;
-        };
-
-        httpHandler = handler;
-        
-        return handler;
     }
     
     public override async Task<GrpcTryLockResponse> TryLock(GrpcTryLockRequest request, ServerCallContext context)
@@ -83,7 +48,7 @@ public class LocksService : Locker.LockerBase
         
         int partitionId = raft.GetPartitionKey(request.LockName);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
+        if (!raft.Joined || await raft.AmILeader(partitionId, context.CancellationToken))
         {
             (LockResponseType response, long fencingToken) = await locks.TryLock(request.LockName, request.LockId, request.ExpiresMs, (LockConsistency)request.Consistency);
 
@@ -94,7 +59,7 @@ public class LocksService : Locker.LockerBase
             };
         }
             
-        string leader = await raft.WaitForLeader(partitionId, CancellationToken.None);
+        string leader = await raft.WaitForLeader(partitionId, context.CancellationToken);
         if (leader == raft.GetLocalEndpoint())
             return new()
             {
@@ -103,11 +68,7 @@ public class LocksService : Locker.LockerBase
         
         logger.LogDebug("LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
         
-        if (!channels.TryGetValue(leader, out GrpcChannel? channel))
-        {
-            channel = GrpcChannel.ForAddress($"https://{leader}", new() { HttpHandler = GetHandler() });
-            channels.TryAdd(leader, channel);
-        }
+        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
         
         Locker.LockerClient client = new(channel);
         
@@ -138,7 +99,7 @@ public class LocksService : Locker.LockerBase
         
         int partitionId = raft.GetPartitionKey(request.LockName);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
+        if (!raft.Joined || await raft.AmILeader(partitionId, context.CancellationToken))
         {
             (LockResponseType response, long fencingToken) = await locks.TryExtendLock(request.LockName, request.LockId, request.ExpiresMs, (LockConsistency)request.Consistency);
 
@@ -149,7 +110,7 @@ public class LocksService : Locker.LockerBase
             };
         }
             
-        string leader = await raft.WaitForLeader(partitionId, CancellationToken.None);
+        string leader = await raft.WaitForLeader(partitionId, context.CancellationToken);
         if (leader == raft.GetLocalEndpoint())
             return new()
             {
@@ -158,11 +119,7 @@ public class LocksService : Locker.LockerBase
         
         logger.LogDebug("EXTEND-LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
         
-        if (!channels.TryGetValue(leader, out GrpcChannel? channel))
-        {
-            channel = GrpcChannel.ForAddress($"https://{leader}", new() { HttpHandler = GetHandler() });
-            channels.TryAdd(leader, channel);
-        }
+        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
         
         Locker.LockerClient client = new(channel);
         
@@ -187,7 +144,7 @@ public class LocksService : Locker.LockerBase
         
         int partitionId = raft.GetPartitionKey(request.LockName);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
+        if (!raft.Joined || await raft.AmILeader(partitionId, context.CancellationToken))
         {
             LockResponseType response = await locks.TryUnlock(request.LockName, request.LockId, (LockConsistency)request.Consistency);
 
@@ -197,7 +154,7 @@ public class LocksService : Locker.LockerBase
             };
         }
             
-        string leader = await raft.WaitForLeader(partitionId, CancellationToken.None);
+        string leader = await raft.WaitForLeader(partitionId, context.CancellationToken);
         if (leader == raft.GetLocalEndpoint())
             return new()
             {
@@ -206,11 +163,7 @@ public class LocksService : Locker.LockerBase
         
         logger.LogDebug("UNLOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
         
-        if (!channels.TryGetValue(leader, out GrpcChannel? channel))
-        {
-            channel = GrpcChannel.ForAddress($"https://{leader}", new() { HttpHandler = GetHandler() });
-            channels.TryAdd(leader, channel);
-        }
+        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
         
         Locker.LockerClient client = new(channel);
         
@@ -229,7 +182,7 @@ public class LocksService : Locker.LockerBase
         
         int partitionId = raft.GetPartitionKey(request.LockName);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
+        if (!raft.Joined || await raft.AmILeader(partitionId, context.CancellationToken))
         {
             (LockResponseType type, ReadOnlyLockContext? lockContext) = await locks.GetLock(request.LockName, (LockConsistency)request.Consistency);
             if (type != LockResponseType.Got)
@@ -249,7 +202,7 @@ public class LocksService : Locker.LockerBase
             };
         }
             
-        string leader = await raft.WaitForLeader(partitionId, CancellationToken.None);
+        string leader = await raft.WaitForLeader(partitionId, context.CancellationToken);
         if (leader == raft.GetLocalEndpoint())
             return new()
             {
@@ -258,11 +211,7 @@ public class LocksService : Locker.LockerBase
         
         logger.LogDebug("GET-LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
         
-        if (!channels.TryGetValue(leader, out GrpcChannel? channel))
-        {
-            channel = GrpcChannel.ForAddress($"https://{leader}", new() { HttpHandler = GetHandler() });
-            channels.TryAdd(leader, channel);
-        }
+        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
         
         Locker.LockerClient client = new(channel);
         

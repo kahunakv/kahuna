@@ -8,15 +8,15 @@ using Kahuna.Shared.Locks;
 
 Console.WriteLine("Kahuna Benchmark");
 
-const int numberOfLocks = 1000;
-const int MaxTokens = 1_000_000;
+const int numberOfLocks = 5000;
+const int MaxTokens = 100_000;
 
 List<string> tokens = new(MaxTokens);
 
 for (int k = 0; k < MaxTokens; k++)
     tokens.Add(GetRandomLockName());
 
-KahunaClient locks = new("https://localhost:8082", null);
+KahunaClient locks = new(["https://localhost:8082", "https://localhost:8084", "https://localhost:8086"], null);
 
 List<Task> tasks = new(numberOfLocks * 2);
 
@@ -76,13 +76,13 @@ async Task SetKeyConcurrently(KahunaClient keyValues)
         string key = GetRandomLockNameFromList(tokens);
         string value = GetRandomLockNameFromList(tokens);
 
-        (bool success, long revision) = await keyValues.SetKeyValue(key, value, TimeSpan.FromHours(5), KeyValueConsistency.Linearizable);
+        (bool success, long revision) = await keyValues.SetKeyValue(key, value, TimeSpan.FromHours(5), KeyValueConsistency.Ephemeral);
 
         if (!success)
             throw new KahunaException("Not set " + key, LockResponseType.Busy);
         
-        if (revision > 1)
-            Console.WriteLine("Got repeated revision " + revision);
+        //if (revision > 1)
+        //    Console.WriteLine("Got repeated revision " + revision);
     }
     catch (KahunaException ex)
     {
@@ -100,10 +100,10 @@ async Task GetKeyConcurrently(KahunaClient keyValues)
     {
         string key = GetRandomLockNameFromList(tokens);
 
-        (string? _, long revision) = await keyValues.GetKeyValue(key, KeyValueConsistency.Linearizable);
+        (string? _, long revision) = await keyValues.GetKeyValue(key, KeyValueConsistency.Ephemeral);
         
-        if (revision > 1)
-            Console.WriteLine("Got repeated revision " + revision);
+        //if (revision > 1)
+        //   Console.WriteLine("Got repeated revision " + revision);
     }
     catch (KahunaException ex)
     {
