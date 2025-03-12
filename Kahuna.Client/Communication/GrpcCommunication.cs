@@ -20,7 +20,13 @@ internal sealed class GrpcCommunication
     
     internal async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string url, string key, string owner, int expiryTime, LockConsistency consistency)
     {
-        GrpcTryLockRequest request = new() { LockName = key, LockId = owner, ExpiresMs = expiryTime, Consistency = (GrpcLockConsistency)consistency };
+        GrpcTryLockRequest request = new()
+        {
+            LockName = key, 
+            LockId = owner, 
+            ExpiresMs = expiryTime, 
+            Consistency = (GrpcLockConsistency)consistency
+        };
         
         GrpcTryLockResponse? response;
         
@@ -48,7 +54,12 @@ internal sealed class GrpcCommunication
     
     internal async Task<bool> TryUnlock(string url, string resource, string owner, LockConsistency consistency)
     {
-        GrpcUnlockRequest request = new() { LockName = resource, LockId = owner, Consistency = (GrpcLockConsistency)consistency };
+        GrpcUnlockRequest request = new()
+        {
+            LockName = resource, 
+            LockId = owner, 
+            Consistency = (GrpcLockConsistency)consistency
+        };
         
         GrpcUnlockResponse? response;
         
@@ -101,7 +112,11 @@ internal sealed class GrpcCommunication
     
     internal async Task<KahunaLockInfo?> Get(string url, string resource, LockConsistency consistency)
     {
-        GrpcGetLockRequest request = new() { LockName = resource, Consistency = (GrpcLockConsistency)consistency };
+        GrpcGetLockRequest request = new()
+        {
+            LockName = resource, 
+            Consistency = (GrpcLockConsistency)consistency
+        };
         
         GrpcGetLockResponse? response;
         
@@ -202,7 +217,7 @@ internal sealed class GrpcCommunication
             Key = key, 
             Value = value,
             CompareRevision = compareRevision,
-            Flags = GrpcKeyValueFlags.KeyvalueFlagsSetIfEqualToValue,
+            Flags = GrpcKeyValueFlags.KeyvalueFlagsSetIfEqualToRevision,
             ExpiresMs = expiryTime, 
             Consistency = (GrpcKeyValueConsistency)consistency
         };
@@ -233,7 +248,11 @@ internal sealed class GrpcCommunication
     
     internal async Task<(string?, long)> TryGetKeyValue(string url, string key, KeyValueConsistency consistency)
     {
-        GrpcTryGetKeyValueRequest request = new() { Key = key, Consistency = (GrpcKeyValueConsistency)consistency };
+        GrpcTryGetKeyValueRequest request = new()
+        {
+            Key = key, 
+            Consistency = (GrpcKeyValueConsistency)consistency
+        };
         
         GrpcTryGetKeyValueResponse? response;
         
@@ -262,9 +281,13 @@ internal sealed class GrpcCommunication
         throw new KahunaException("Failed to get key/value:" + response.Type, (LockResponseType)response.Type);
     }
     
-    internal async Task<bool> TryDeleteKeyValue(string url, string key, KeyValueConsistency consistency)
+    internal async Task<(bool, long)> TryDeleteKeyValue(string url, string key, KeyValueConsistency consistency)
     {
-        GrpcTryDeleteKeyValueRequest request = new() { Key = key, Consistency = (GrpcKeyValueConsistency)consistency };
+        GrpcTryDeleteKeyValueRequest request = new()
+        {
+            Key = key, 
+            Consistency = (GrpcKeyValueConsistency)consistency
+        };
         
         GrpcTryDeleteKeyValueResponse? response;
         
@@ -282,10 +305,10 @@ internal sealed class GrpcCommunication
             switch (response.Type)
             {
                 case GrpcKeyValueResponseType.KeyvalueResponseTypeDeleted:
-                    return true;
+                    return (true, response.Revision);
                 
                 case GrpcKeyValueResponseType.KeyvalueResponseTypeDoesNotExist:
-                    return false;
+                    return (false, response.Revision);
             }
             
         } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
@@ -324,7 +347,7 @@ internal sealed class GrpcCommunication
         throw new KahunaException("Failed to extend key/value", (LockResponseType)response.Type);
     }
 
-    private GrpcChannel GetSharedChannel(string url)
+    private static GrpcChannel GetSharedChannel(string url)
     {
         if (!channels.TryGetValue(url, out GrpcChannel? channel))
         {

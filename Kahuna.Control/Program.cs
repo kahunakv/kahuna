@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Diagnostics;
 using System.Text.Json;
 using CommandLine;
 using DotNext.Threading.Tasks;
@@ -41,11 +42,13 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         // ephemeral key/values
         "eset",
         "eget",
+        "edel",
         "edelete",
         "eextend",
         // linearizable key/values
         "set",
         "get",
+        "del",
         "delete",
         "extend",
         "nx",
@@ -154,28 +157,7 @@ while (true)
         {
             history.Add(commandTrim);
             
-            string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
-
-            int expires = DefaultExpires;
-            KeyValueFlags flags = KeyValueFlags.Set;
-
-            if (parts.Length >= 4)
-            {
-                if (parts[3].Equals("NX", StringComparison.InvariantCultureIgnoreCase))
-                    flags = KeyValueFlags.SetIfNotExists;
-                else if (parts[3].Equals("XX", StringComparison.InvariantCultureIgnoreCase))
-                    flags = KeyValueFlags.SetIfExists;
-                else
-                    expires = int.Parse(parts[3]);
-            }
-
-            (bool success, long revision) = await connection.SetKeyValue(parts[1], parts[2], expires, flags, KeyValueConsistency.Linearizable);
-            
-            if (success)
-                AnsiConsole.MarkupLine("[cyan]ok rev:{0}[/]", revision);
-            else
-                AnsiConsole.MarkupLine("[yellow]not set rev:{0}[/]", revision);
-
+            await SetKey(commandTrim, KeyValueConsistency.Linearizable);
             continue;
         }
         
@@ -183,31 +165,15 @@ while (true)
         {
             history.Add(commandTrim);
             
-            string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
-
-            (string? value, long revision) = await connection.GetKeyValue(parts[1], KeyValueConsistency.Linearizable);
-            
-            if (value is not null)
-                AnsiConsole.MarkupLine("[cyan]{0} rev:{1}[/]", Markup.Escape(value), revision);
-            else
-                AnsiConsole.MarkupLine("[yellow]null[/]");
-            
+            await GetKey(commandTrim, KeyValueConsistency.Linearizable);
             continue;
         }
         
-        if (commandTrim.StartsWith("delete ", StringComparison.InvariantCultureIgnoreCase))
+        if (commandTrim.StartsWith("delete ", StringComparison.InvariantCultureIgnoreCase) || commandTrim.StartsWith("del ", StringComparison.InvariantCultureIgnoreCase))
         {
             history.Add(commandTrim);
             
-            string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
-
-            bool success = await connection.DeleteKeyValue(parts[1], KeyValueConsistency.Linearizable);
-            
-            if (success)
-                AnsiConsole.MarkupLine("[cyan]deleted[/]");
-            else
-                AnsiConsole.MarkupLine("[yellow]error[/]");
-
+            await DeleteKey(commandTrim, KeyValueConsistency.Linearizable);
             continue;
         }
         
@@ -215,15 +181,7 @@ while (true)
         {
             history.Add(commandTrim);
             
-            string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
-
-            (bool success, long revision) = await connection.ExtendKeyValue(parts[1], int.Parse(parts[2]), KeyValueConsistency.Linearizable);
-            
-            if (success)
-                AnsiConsole.MarkupLine("[cyan]extended rev:{0}[/]", revision);
-            else
-                AnsiConsole.MarkupLine("[yellow]error[/]");
-
+            await ExtendKey(commandTrim, KeyValueConsistency.Linearizable);
             continue;
         }
         
@@ -231,15 +189,7 @@ while (true)
         {
             history.Add(commandTrim);
             
-            string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
-
-            (bool success, long revision) = await connection.SetKeyValue(parts[1], parts[2], int.Parse(parts[3]));
-            
-            if (success)
-                AnsiConsole.MarkupLine("[cyan]ok rev:{0}[/]", revision);
-            else
-                AnsiConsole.MarkupLine("[yellow]error[/]");
-
+            await SetKey(commandTrim, KeyValueConsistency.Ephemeral);
             continue;
         }
         
@@ -247,31 +197,15 @@ while (true)
         {
             history.Add(commandTrim);
             
-            string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
-
-            (string? value, long revision) = await connection.GetKeyValue(parts[1]);
-            
-            if (value is not null)
-                AnsiConsole.MarkupLine("[cyan]{0} rev:{1}[/]", Markup.Escape(value), revision);
-            else
-                AnsiConsole.MarkupLine("[yellow]null[/]");
-
+            await GetKey(commandTrim, KeyValueConsistency.Ephemeral);
             continue;
         }
         
-        if (commandTrim.StartsWith("edelete ", StringComparison.InvariantCultureIgnoreCase))
+        if (commandTrim.StartsWith("edelete ", StringComparison.InvariantCultureIgnoreCase) || commandTrim.StartsWith("edel ", StringComparison.InvariantCultureIgnoreCase))
         {
             history.Add(commandTrim);
             
-            string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
-
-            bool success = await connection.DeleteKeyValue(parts[1]);
-            
-            if (success)
-                AnsiConsole.MarkupLine("[cyan]ok[/]");
-            else
-                AnsiConsole.MarkupLine("[yellow]error[/]");
-
+            await DeleteKey(commandTrim, KeyValueConsistency.Ephemeral);
             continue;
         }
         
@@ -285,12 +219,12 @@ while (true)
 
             if (kahunaLock.IsAcquired)
             {
-                AnsiConsole.MarkupLine("[cyan]acquired {0} rev:{1}[/]", Markup.Escape(kahunaLock.LockId), Markup.Escape(kahunaLock.FencingToken.ToString()));
+                AnsiConsole.MarkupLine("[cyan]acquired {0} rev:{1}[/]\n", Markup.Escape(kahunaLock.LockId), Markup.Escape(kahunaLock.FencingToken.ToString()));
                 
                 locks.TryAdd(parts[1], kahunaLock);
             }
             else
-                AnsiConsole.MarkupLine("[yellow]not acquired[/]");
+                AnsiConsole.MarkupLine("[yellow]not acquired[/]\n");
 
             continue;
         }
@@ -400,7 +334,7 @@ static async Task<List<string>> GetHistory(string historyPath)
         }
         catch
         {
-            Console.WriteLine("Found invalid history");
+            AnsiConsole.MarkupLine("[yellow]Found invalid history[/]");
         }
     }
 
@@ -413,6 +347,75 @@ static async Task SaveHistory(string historyPath, List<string>? history)
 {
     if (history is not null)
         await File.WriteAllTextAsync(historyPath, JsonSerializer.Serialize(history));
+}
+
+async Task SetKey(string commandTrim, KeyValueConsistency consistency)
+{
+    Stopwatch stopwatch = Stopwatch.StartNew();
+            
+    string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
+
+    int expires = DefaultExpires;
+    KeyValueFlags flags = KeyValueFlags.Set;
+
+    if (parts.Length >= 4)
+    {
+        if (parts[3].Equals("NX", StringComparison.InvariantCultureIgnoreCase))
+            flags = KeyValueFlags.SetIfNotExists;
+        else if (parts[3].Equals("XX", StringComparison.InvariantCultureIgnoreCase))
+            flags = KeyValueFlags.SetIfExists;
+        else
+            expires = int.Parse(parts[3]);
+    }
+
+    (bool success, long revision) = await connection.SetKeyValue(parts[1], parts[2], expires, flags, consistency);
+            
+    if (success)
+        AnsiConsole.MarkupLine("r{0} [cyan]ok[/] {1}ms\n", revision, stopwatch.ElapsedMilliseconds);
+    else
+        AnsiConsole.MarkupLine("r{0} [yellow](not set)[/] {1}ms\n", revision, stopwatch.ElapsedMilliseconds);
+}
+
+async Task GetKey(string commandTrim, KeyValueConsistency consistency)
+{
+    Stopwatch stopwatch = Stopwatch.StartNew();
+            
+    string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
+
+    (string? value, long revision) = await connection.GetKeyValue(parts[1], consistency);
+            
+    if (value is not null)
+        AnsiConsole.MarkupLine("r{0} [cyan]{1}[/] {2}ms\n", revision, Markup.Escape(value), stopwatch.ElapsedMilliseconds);
+    else
+        AnsiConsole.MarkupLine("r{0} [yellow]null[/] {1}ms\n", revision, stopwatch.ElapsedMilliseconds);
+}
+
+async Task DeleteKey(string commandTrim, KeyValueConsistency consistency)
+{
+    Stopwatch stopwatch = Stopwatch.StartNew();
+    
+    string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
+
+    (bool success, long revision) = await connection.DeleteKeyValue(parts[1], consistency);
+            
+    if (success)
+        AnsiConsole.MarkupLine("r{0} [cyan]deleted[/] {1}ms\n", revision, stopwatch.ElapsedMilliseconds);
+    else
+        AnsiConsole.MarkupLine("r{0} [yellow]not found[/] {1}ms\n", revision, stopwatch.ElapsedMilliseconds);
+}
+
+async Task ExtendKey(string commandTrim, KeyValueConsistency consistency)
+{
+    Stopwatch stopwatch = Stopwatch.StartNew();
+    
+    string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
+
+    (bool success, long revision) = await connection.ExtendKeyValue(parts[1], int.Parse(parts[2]), consistency);
+            
+    if (success)
+        AnsiConsole.MarkupLine("r{0} [cyan]extended[/] {1}ms\n", revision, stopwatch.ElapsedMilliseconds);
+    else
+        AnsiConsole.MarkupLine("r{0} [yellow]not found[/] {1}ms\n", revision, stopwatch.ElapsedMilliseconds);
 }
 
 public sealed class MyLineNumberPrompt : ILineEditorPrompt

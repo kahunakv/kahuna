@@ -76,7 +76,7 @@ async Task SetKeyConcurrently(KahunaClient keyValues)
         string key = GetRandomLockNameFromList(tokens);
         string value = GetRandomLockNameFromList(tokens);
 
-        (bool success, long revision) = await keyValues.SetKeyValue(key, value, TimeSpan.FromHours(5), KeyValueConsistency.Ephemeral);
+        (bool success, long revision) = await keyValues.SetKeyValue(key, value, TimeSpan.FromHours(5), KeyValueFlags.Set, KeyValueConsistency.Ephemeral);
 
         if (!success)
             throw new KahunaException("Not set " + key, LockResponseType.Busy);

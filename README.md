@@ -128,6 +128,20 @@ Example Flow:
 
 ---
 
+## **Distributed Key/Value Store**
+
+Beyond locking, Kahuna operates as a distributed key/value store, enabling fault-tolerant,
+high-performance storage and retrieval of structured data. This makes it a powerful tool
+for managing metadata, caching, and application state in distributed environments.
+
+### **Key Characteristics**
+1. **Scalability** – Kahuna distributes data across multiple machines, allowing it to scale horizontally as demand increases.
+2. **Fault Tolerance** – By replicating data across multiple nodes, it ensures resilience against failures.
+3. **High Availability** – Data is accessible even if some nodes go offline, minimizing downtime.
+4. **Strong Consistency** – Using the consensus protocol called **Raft**.
+5. **Low Latency** – Optimized for fast read/write operations, making it ideal for caching, real-time applications, and distributed computing.
+
+
 ## Consistency Levels
 
 Kahuna provides different consistency levels to meet the requirements of various applications:
@@ -192,9 +206,12 @@ Install-Package Kahuna.Client -Version 0.0.4
 
 ## Usage & Examples
 
+Below is a basic example to demonstrate how to use Kahuna in a C# project:
+
 ### Single attempt to acquire a lock
 
-Below is a basic example to demonstrate how to use Kahuna in a C# project:
+The following example shows how to acquire a lock (lease) for 5 seconds
+and give up immediately if the lock is not available:
 
 ```csharp
 using Kahuna.Client;
@@ -315,130 +332,7 @@ public async Task IncreaseBalance(KahunaClient client, string userId, long amoun
 }
 ```
 
-### Periodically extend a lock
-
-At times, it is useful to periodically extend the lock's expiration
-time while a client holds it, for example, in a leader election scenario.
-As long as the leader node is alive and healthy, it can extend the
-lock duration to signal that it can continue acting as the leader:
-
-```csharp
-using Kahuna.Client;
-
-public async Task TryChooseLeader(KahunaClient client, string groupId)
-{
-    await using KahunaLock myLock = await client.GetOrCreateLock(
-        "group-leader-" + groupId,
-        expiry: TimeSpan.FromSeconds(10)
-    );
-
-    if (!myLock.IsAcquired)
-    {
-        Console.WriteLine("Lock not acquired!");
-        return;
-    }
-    
-    long acquireFencingToken = myLock.FencingToken;
-
-    while (true)
-    {
-        (bool isExtended, long fencingToken) = await myLock.TryExtend(TimeSpan.FromSeconds(10));
-        if (!isExtended)
-        {
-            Console.WriteLine("Lock extension failed!");
-            break;
-        }
-        
-        if (fencingToken != acquireFencingToken)
-        {
-            Console.WriteLine("Lock fencing token changed!");
-            break;
-        }
-
-        // extend the lock every 5 seconds
-        await Task.Delay(5000);
-    }
-}
-```
-
-### Retrieve information about a lock
-
-You can also retrieve information about a lock, such as the current lock's owner
-and remaining time for the lock to expire:
-
-```csharp
-using Kahuna.Client;
-
-public async Task TryChooseLeader(KahunaClient client, string groupId)
-{
-    await using KahunaLock myLock = await client.GetOrCreateLock(
-        "group-leader-" + groupId,
-        expiry: TimeSpan.FromSeconds(5)
-    );
-
-    if (!myLock.IsAcquired)
-    {
-        Console.WriteLine("Lock not acquired!");
-
-        var lockInfo = await myLock.GetInfo();
-
-        Console.WriteLine($"Lock owner: {lockInfo.Owner}");
-        Console.WriteLine($"Expires: {lockInfo.Expires}");
-    }
-}
-```
-
-### Configure a pool of endpoints
-
-If you want to configure a pool of Kahuna endpoints belonging to the
-same cluster so that traffic is distributed in a round-robin manner:
-
-```csharp
-using Kahuna.Client;
-
-// Create a Kahuna client with a pool of endpoints
-var client = new KahunaClient([
-    "http://localhost:8081",
-    "http://localhost:8082",
-    "http://localhost:8083"
-]);
-
-// ...
-```
-
-### Specify consistency level
-
-You can also specify the desired consistency level when acquiring a lock:
-
-```csharp
-using Kahuna.Client;
-
-public async Task UpdateBalance(KahunaClient client, string userId)
-{
-    // acquire a lock with strong consistency, ensuring that the lock state is
-    // replicated across all nodes in the Kahuna cluster
-    // in case of failure or network partition, the lock state is guaranteed to be consistent
-
-    await using KahunaLock myLock = await client.GetOrCreateLock(
-        "balance-" + userId,
-        TimeSpan.FromSeconds(300), // lock for 5 mins
-        consistency: LockConsistency.Linearizable
-    );
-
-    if (myLock.IsAcquired)
-    {
-        Console.WriteLine("Lock acquired with strong consistency!");
-
-        // implement exclusive logic here
-    }
-    else
-    {
-        Console.WriteLine("Someone else has the lock!");
-    }
-
-    // myLock is automatically released after leaving the method
-}
-```
+Find more examples and detailed documentation in the [Wiki](https://github.com/kahunakv/kahuna/wiki#usage--examples)
 
 ---
 

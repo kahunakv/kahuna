@@ -354,8 +354,9 @@ public class TestKeyValues
         
         Assert.Equal("some-value", value1);
         
-        success = await kahuna.DeleteKeyValue(keyName, consistency);
+        (success, revision) = await kahuna.DeleteKeyValue(keyName, consistency);
         Assert.True(success);
+        Assert.Equal(0, revision);
         
         (value1, revision) = await kahuna.GetKeyValue(keyName, consistency);
         Assert.Null(value1);
@@ -389,8 +390,9 @@ public class TestKeyValues
         
         Assert.Equal("some-value", value1);
         
-        success = await kahuna.DeleteKeyValue(keyName, consistency);
+        (success, revision) = await kahuna.DeleteKeyValue(keyName, consistency);
         Assert.True(success);
+        Assert.Equal(0, revision);
         
         (value1, revision) = await kahuna.GetKeyValue(keyName, consistency);
         Assert.Null(value1);
@@ -403,5 +405,101 @@ public class TestKeyValues
         (value1, revision) = await kahuna.GetKeyValue(keyName, consistency);
         Assert.Null(value1);
         Assert.Equal(0, revision);
+    }
+
+    [Theory]
+    [InlineData(KeyValueConsistency.Linearizable)]
+    [InlineData(KeyValueConsistency.Ephemeral)]
+    public async Task TestCompareValueAndSetKeyValue(KeyValueConsistency consistency)
+    {
+        string keyName = GetRandomKeyName();
+
+        (bool success, long revision) = await kahuna.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        Assert.True(success);
+        Assert.Equal(0, revision);
+        
+        (success, revision) = await kahuna.TryCompareValueAndSetKeyValue(keyName, "some-new-value", "some-value", 10000, consistency: consistency);
+        Assert.True(success);
+        Assert.Equal(1, revision);
+        
+        (string? value, revision) = await kahuna.GetKeyValue(keyName, consistency);
+        Assert.NotNull(value);
+        Assert.Equal(1, revision);
+        
+        Assert.Equal("some-new-value", value);
+    }
+    
+    [Theory]
+    [InlineData(KeyValueConsistency.Linearizable)]
+    [InlineData(KeyValueConsistency.Ephemeral)]
+    public async Task TestCompareUnknownValueAndSetKeyValue(KeyValueConsistency consistency)
+    {
+        string keyName = GetRandomKeyName();
+
+        (bool success, long revision) = await kahuna.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        Assert.True(success);
+        Assert.Equal(0, revision);
+        
+        (success, revision) = await kahuna.TryCompareValueAndSetKeyValue(keyName, "some-new-value", "other-some-value", 10000, consistency: consistency);
+        Assert.False(success);
+        Assert.Equal(0, revision);
+        
+        (string? value, revision) = await kahuna.GetKeyValue(keyName, consistency);
+        Assert.NotNull(value);
+        Assert.Equal(0, revision);
+        
+        Assert.Equal("some-value", value);
+    }
+    
+    [Theory]
+    [InlineData(KeyValueConsistency.Linearizable)]
+    [InlineData(KeyValueConsistency.Ephemeral)]
+    public async Task TestCompareRevisionAndSetKeyValue(KeyValueConsistency consistency)
+    {
+        string keyName = GetRandomKeyName();
+
+        (bool success, long revision) = await kahuna.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        Assert.True(success);
+        Assert.Equal(0, revision);
+        
+        (success, revision) = await kahuna.SetKeyValue(keyName, "some-new-value", 10000, consistency: consistency);
+        Assert.True(success);
+        Assert.Equal(1, revision);
+        
+        (success, revision) = await kahuna.TryCompareRevisionAndSetKeyValue(keyName, "some-new-new-value", 1, 10000, consistency: consistency);
+        Assert.True(success);
+        Assert.Equal(2, revision);
+        
+        (string? value, revision) = await kahuna.GetKeyValue(keyName, consistency);
+        Assert.NotNull(value);
+        Assert.Equal(2, revision);
+        
+        Assert.Equal("some-new-new-value", value);
+    }
+    
+    [Theory]
+    [InlineData(KeyValueConsistency.Linearizable)]
+    [InlineData(KeyValueConsistency.Ephemeral)]
+    public async Task TestCompareUnknownRevisionAndSetKeyValue(KeyValueConsistency consistency)
+    {
+        string keyName = GetRandomKeyName();
+
+        (bool success, long revision) = await kahuna.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        Assert.True(success);
+        Assert.Equal(0, revision);
+        
+        (success, revision) = await kahuna.SetKeyValue(keyName, "some-new-value", 10000, consistency: consistency);
+        Assert.True(success);
+        Assert.Equal(1, revision);
+        
+        (success, revision) = await kahuna.TryCompareRevisionAndSetKeyValue(keyName, "some-new-new-value",10, 10000, consistency: consistency);
+        Assert.False(success);
+        Assert.Equal(1, revision);
+        
+        (string? value, revision) = await kahuna.GetKeyValue(keyName, consistency);
+        Assert.NotNull(value);
+        Assert.Equal(1, revision);
+        
+        Assert.Equal("some-new-value", value);
     }
 }

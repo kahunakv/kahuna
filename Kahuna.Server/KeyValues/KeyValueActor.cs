@@ -11,6 +11,11 @@ using Kahuna.Replication.Protos;
 
 namespace Kahuna.KeyValues;
 
+/// <summary>
+/// Each of these actors functions as a worker, accepting requests to perform operations on key/value pairs.
+/// The actor maintains an in-memory cache and if a key is not found, it attempts to retrieve it from disk.
+/// Operations with Linearizable consistency persist all modifications to disk.
+/// </summary>
 public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueResponse>
 {
     private readonly IActorContextStruct<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext;
@@ -170,13 +175,16 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
     private async Task<KeyValueResponse> TryExtend(KeyValueRequest message)
     {
         KeyValueContext? context = await GetKeyValueContext(message.Key, message.Consistency);
-        if (context is null || context.State == KeyValueState.Deleted)
+        if (context is null)
             return new(KeyValueResponseType.DoesNotExist);
+        
+        if (context.State == KeyValueState.Deleted)
+            return new(KeyValueResponseType.DoesNotExist, context.Revision);
         
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
         
         if (context.Expires - currentTime < TimeSpan.Zero)
-            return new(KeyValueResponseType.DoesNotExist);
+            return new(KeyValueResponseType.DoesNotExist, context.Revision);
 
         context.Expires = currentTime + message.ExpiresMs;
         context.LastUsed = currentTime;
@@ -199,8 +207,11 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
     private async Task<KeyValueResponse> TryDelete(KeyValueRequest message)
     {
         KeyValueContext? context = await GetKeyValueContext(message.Key, message.Consistency);
-        if (context is null || context.State == KeyValueState.Deleted)
+        if (context is null)
             return new(KeyValueResponseType.DoesNotExist);
+        
+        if (context.State == KeyValueState.Deleted)
+            return new(KeyValueResponseType.DoesNotExist, context.Revision);
         
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
 
@@ -215,7 +226,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
                 return new(KeyValueResponseType.Errored);
         }
         
-        return new(KeyValueResponseType.Deleted);
+        return new(KeyValueResponseType.Deleted, context.Revision);
     }
 
     /// <summary>

@@ -3,6 +3,9 @@ using Kommander.Time;
 
 namespace Kahuna.KeyValues;
 
+/// <summary>
+/// 
+/// </summary>
 public sealed class KeyValueContext
 {
     /// <summary>

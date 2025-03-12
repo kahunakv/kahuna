@@ -1,6 +1,11 @@
 
-using System.Collections.Concurrent;
-using System.Net.Security;
+/**
+ * This file is part of Kahuna
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 using Grpc.Core;
 using Grpc.Net.Client;
 using Kahuna.Configuration;
@@ -20,6 +25,13 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
     
     private readonly ILogger<IKahuna> logger;
     
+    /// <summary>
+    /// Constructor
+    /// </summary>
+    /// <param name="keyValues"></param>
+    /// <param name="configuration"></param>
+    /// <param name="raft"></param>
+    /// <param name="logger"></param>
     public KeyValuesService(IKahuna keyValues, KahunaConfiguration configuration, IRaft raft, ILogger<IKahuna> logger)
     {
         this.keyValues = keyValues;
@@ -28,6 +40,12 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         this.logger = logger;
     }
     
+    /// <summary>
+    /// Receives requests the key/value "set" service
+    /// </summary>
+    /// <param name="request"></param>
+    /// <param name="context"></param>
+    /// <returns></returns>
     public override async Task<GrpcTrySetKeyValueResponse> TrySetKeyValue(GrpcTrySetKeyValueRequest request, ServerCallContext context)
     {
         if (string.IsNullOrEmpty(request.Key))
@@ -81,6 +99,12 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         return remoteResponse;
     }
     
+    /// <summary>
+    /// Receives requests the key/value "extend" service
+    /// </summary>
+    /// <param name="request"></param>
+    /// <param name="context"></param>
+    /// <returns></returns>
     public override async Task<GrpcTryExtendKeyValueResponse> TryExtendKeyValue(GrpcTryExtendKeyValueRequest request, ServerCallContext context)
     {
         if (string.IsNullOrEmpty(request.Key))
@@ -126,6 +150,12 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         return remoteResponse;
     }
     
+    /// <summary>
+    /// Receives requests the key/value "delete" service
+    /// </summary>
+    /// <param name="request"></param>
+    /// <param name="context"></param>
+    /// <returns></returns>
     public override async Task<GrpcTryDeleteKeyValueResponse> TryDeleteKeyValue(GrpcTryDeleteKeyValueRequest request, ServerCallContext context)
     {
         if (string.IsNullOrEmpty(request.Key))
@@ -138,11 +168,12 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
 
         if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
         {
-            KeyValueResponseType response = await keyValues.TryDeleteKeyValue(request.Key, (KeyValueConsistency)request.Consistency);
+            (KeyValueResponseType response, long revision) = await keyValues.TryDeleteKeyValue(request.Key, (KeyValueConsistency)request.Consistency);
 
             return new()
             {
-                Type = (GrpcKeyValueResponseType)response
+                Type = (GrpcKeyValueResponseType)response,
+                Revision = revision
             };
         }
             
@@ -153,7 +184,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
             };
         
-        logger.LogDebug("UNKEYVALUE Redirect {Key} to leader partition {Partition} at {Leader}", request.Key, partitionId, leader);
+        logger.LogDebug("DELETE-KEYVALUE Redirect {Key} to leader partition {Partition} at {Leader}", request.Key, partitionId, leader);
         
         GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
         

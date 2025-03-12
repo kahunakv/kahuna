@@ -73,9 +73,9 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                     
             PersistenceResponse? response = await persistenceActorRouter.Ask(new(
                 PersistenceRequestType.StoreLock,
-                lockRequest.Resource,
-                lockRequest.Owner,
-                lockRequest.FencingToken,
+                lockRequest.Key,
+                lockRequest.Value,
+                lockRequest.Revision,
                 lockRequest.Expires.L,
                 lockRequest.Expires.C,
                 lockRequest.Consistency,
@@ -103,19 +103,19 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         if (dirtyLocks.Count == 0)
             return;
                 
-        while (dirtyLocks.TryDequeue(out BackgroundWriteRequest? lockRequest))
+        while (dirtyLocks.TryDequeue(out BackgroundWriteRequest? keyValueRequest))
         {
-            partitionIds.Add(lockRequest.PartitionId);
+            partitionIds.Add(keyValueRequest.PartitionId);
                     
             PersistenceResponse? response = await persistenceActorRouter.Ask(new(
                 PersistenceRequestType.StoreKeyValue,
-                lockRequest.Resource,
-                lockRequest.Owner,
-                lockRequest.FencingToken,
-                lockRequest.Expires.L,
-                lockRequest.Expires.C,
-                lockRequest.Consistency,
-                lockRequest.State
+                keyValueRequest.Key,
+                keyValueRequest.Value,
+                keyValueRequest.Revision,
+                keyValueRequest.Expires.L,
+                keyValueRequest.Expires.C,
+                keyValueRequest.Consistency,
+                keyValueRequest.State
             ));
 
             if (response == null)

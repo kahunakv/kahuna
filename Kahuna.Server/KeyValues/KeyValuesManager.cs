@@ -285,7 +285,7 @@ public sealed class KeyValuesManager
     /// <param name="key"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<KeyValueResponseType> TryDeleteKeyValue(string key, KeyValueConsistency consistency)
+    public async Task<(KeyValueResponseType, long)> TryDeleteKeyValue(string key, KeyValueConsistency consistency)
     {
         KeyValueRequest request = new(
             KeyValueRequestType.TryDelete, 
@@ -305,7 +305,7 @@ public sealed class KeyValuesManager
         else
             response = await consistentKeyValuesRouter.Ask(request);
         
-        return response.Type;
+        return (response.Type, response.Revision);
     }
     
     /// <summary>

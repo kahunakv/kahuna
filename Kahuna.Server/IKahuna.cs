@@ -21,7 +21,7 @@ public interface IKahuna
 
     public Task<(KeyValueResponseType, long)> TryExtendKeyValue(string key, int expiresMs, KeyValueConsistency consistency);
 
-    public Task<KeyValueResponseType> TryDeleteKeyValue(string key, KeyValueConsistency consistency);
+    public Task<(KeyValueResponseType, long)> TryDeleteKeyValue(string key, KeyValueConsistency consistency);
 
     public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryGetValue(string key, KeyValueConsistency consistency);
 

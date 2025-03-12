@@ -176,11 +176,17 @@ public sealed class KahunaManager : IKahuna
     /// <param name="key"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public Task<KeyValueResponseType> TryDeleteKeyValue(string key, KeyValueConsistency consistency)
+    public Task<(KeyValueResponseType, long)> TryDeleteKeyValue(string key, KeyValueConsistency consistency)
     {
         return keyValues.TryDeleteKeyValue(key, consistency);
     }
 
+    /// <summary>
+    /// Returns a value and its context by the specified key
+    /// </summary>
+    /// <param name="keyValueName"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
     public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryGetValue(string keyValueName, KeyValueConsistency consistency)
     {
         return keyValues.TryGetValue(keyValueName, consistency);

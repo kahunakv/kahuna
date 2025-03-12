@@ -1,4 +1,11 @@
 
+/**
+ * This file is part of Kahuna
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -277,6 +284,52 @@ public class KahunaClient
     }
     
     /// <summary>
+    /// Compare Value and Set (CVAS) operation. Sets the value of a key if the current value is equal to the expected value
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="value"></param>
+    /// <param name="compareValue"></param>
+    /// <param name="expiryTime"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
+    public async Task<(bool, long)> TryCompareValueAndSetKeyValue(string key, string? value, string? compareValue, int expiryTime = 30000, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
+    {
+        try
+        {
+            return await communication.TryCompareValueAndSetKeyValue(GetRoundRobinUrl(), key, value, compareValue, expiryTime, consistency).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError("Error setting key/value (cvas): {Message}", ex.Message);
+
+            throw;
+        }
+    }
+    
+    /// <summary>
+    /// Compare Revision and Set (CRAS) operation. Sets the value of a key if the current revision is equal to the expected value
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="value"></param>
+    /// <param name="compareRevision"></param>
+    /// <param name="expiryTime"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
+    public async Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string key, string? value, long compareRevision, int expiryTime = 30000, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
+    {
+        try
+        {
+            return await communication.TryCompareRevisionAndSetKeyValue(GetRoundRobinUrl(), key, value, compareRevision, expiryTime, consistency).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError("Error setting key/value (cras): {Message}", ex.Message);
+
+            throw;
+        }
+    }
+    
+    /// <summary>
     /// Set key to hold the string value. If key already holds a value, it is overwritten.
     /// </summary>
     /// <param name="key"></param>
@@ -315,7 +368,7 @@ public class KahunaClient
     /// <param name="key"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<bool> DeleteKeyValue(string key, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
+    public async Task<(bool, long)> DeleteKeyValue(string key, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
     {
         try
         {

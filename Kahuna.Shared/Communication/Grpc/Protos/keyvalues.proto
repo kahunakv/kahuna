@@ -43,6 +43,7 @@ message GrpcTryDeleteKeyValueRequest {
 message GrpcTryDeleteKeyValueResponse {
   optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
+  int64 Revision = 3;
 }
 
 message GrpcTryGetKeyValueRequest {
