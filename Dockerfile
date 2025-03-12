@@ -2,7 +2,7 @@
 FROM kahuna-base AS build-env
 
 RUN rm -fr /src && mkdir -p /src
-COPY Kommander /src/Kommander/
+#COPY Kommander /src/Kommander/
 COPY Kahuna.Shared /src/Kahuna.Shared/
 COPY Kahuna.Server /src/Kahuna.Server/
 
