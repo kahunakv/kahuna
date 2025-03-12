@@ -1,0 +1,35 @@
+name: Run Tests
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+jobs:
+  Nixie-Tests:
+    runs-on: ubuntu-latest
+    env:
+      GIT_BRANCH: ${{ github.head_ref || github.ref_name }}
+      GIT_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Install .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            9.0.x
+      - name: Run Kahuna Server
+        run: (cd scripts && ./run-server.sh)
+      - name: Install dotCover
+        run: dotnet tool install JetBrains.dotCover.GlobalTool -g
+      - name: Run Tests
+        run: (cd Kahuna.Tests && dotnet dotcover test --dcOutput=KahunaCoverageReport.html --dcReportType=HTML)
+      - name: Archive code coverage results
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-coverage-report
+          path: |
+            Kahuna.Tests/KahunaCoverageReport
+            Kahuna.Tests/KahunaCoverageReport.html

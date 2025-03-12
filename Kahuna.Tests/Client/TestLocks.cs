@@ -200,4 +200,39 @@ public class TestLocks
         
         //Assert.Equal(lockInfo.Expires > DateTime.UtcNow, true);
     }
+    
+    [Theory]
+    [InlineData(LockConsistency.Linearizable)]
+    [InlineData(LockConsistency.Ephemeral)]
+    public async Task TestAdquireLockAndGetInfo(LockConsistency consistency)
+    {
+        string lockName = GetRandomLockName();
+
+        await using KahunaLock kLock = await locks.GetOrCreateLock(lockName, 10000, consistency: consistency);
+
+        Assert.True(kLock.IsAcquired);
+        Assert.Equal(0, kLock.FencingToken);
+        
+        (bool extended, long fencingToken) = await kLock.TryExtend(TimeSpan.FromSeconds(10));
+        Assert.True(extended);
+        Assert.Equal(kLock.FencingToken, fencingToken);
+
+        KahunaLockInfo? lockInfo = await kLock.GetInfo();
+        Assert.NotNull(lockInfo);
+        
+        Assert.Equal(lockInfo.Owner, kLock.LockId);
+        HLCTimestamp expires = lockInfo.Expires;
+        
+        (extended, fencingToken) = await kLock.TryExtend(TimeSpan.FromSeconds(10));
+        Assert.True(extended);
+        Assert.Equal(kLock.FencingToken, fencingToken);
+        
+        lockInfo = await kLock.GetInfo();
+        Assert.NotNull(lockInfo);
+        
+        Assert.Equal(lockInfo.Owner, kLock.LockId);
+        Assert.True(lockInfo.Expires - expires > TimeSpan.Zero);
+        
+        //Assert.Equal(lockInfo.Expires > DateTime.UtcNow, true);
+    }
 }

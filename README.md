@@ -39,6 +39,7 @@ as well as priests, ministers, and sorcerers.
 - [Overview](#overview)
 - [What Is a Distributed Lock?](#what-is-a-distributed-lock)
 - [Leases](#leases)
+- [Distributed Key/Value Store](#distributed-keyvalue-store-1)
 - [Consistency Levels](#consistency-levels)
 - [Server-Installation](#server-installation)
 - [Client-Installation](#client-installation)
@@ -141,6 +142,7 @@ for managing metadata, caching, and application state in distributed environment
 4. **Strong Consistency** – Using the consensus protocol called **Raft**.
 5. **Low Latency** – Optimized for fast read/write operations, making it ideal for caching, real-time applications, and distributed computing.
 
+Find more examples and detailed documentation in the [Wiki](https://github.com/kahunakv/kahuna/wiki#usage--examples)
 
 ## Consistency Levels
 
@@ -158,7 +160,7 @@ Kahuna provides different consistency levels to meet the requirements of various
 You can build and run the Kahuna server using the following steps (it requires .NET 9.0 installed):
 
 ```bash
-git clone https://github.com/andresgutierrez/kahuna
+git clone https://github.com/kahunakv/kahuna
 cd kahuna
 export ASPNETCORE_URLS='http://*:2070'
 dotnet run --project Kahuna.Server
@@ -169,7 +171,7 @@ dotnet run --project Kahuna.Server
 Alternatively, you can run the Kahuna server in a local Docker container:
 
 ```bash
-git clone https://github.com/andresgutierrez/kahuna
+git clone https://github.com/kahunakv/kahuna
 cd kahuna
 docker build -f Dockerfile -t kahuna .
 docker run -e ASPNETCORE_URLS='http://*:2070' -p 2070:2070 kahuna
@@ -180,7 +182,7 @@ docker run -e ASPNETCORE_URLS='http://*:2070' -p 2070:2070 kahuna
 To run a local cluster of Kahuna servers using Docker Compose:
 
 ```bash
-git clone https://github.com/andresgutierrez/kahuna
+git clone https://github.com/kahunakv/kahuna
 cd kahuna
 docker build -f Dockerfile -t kahuna .
 docker compose up
