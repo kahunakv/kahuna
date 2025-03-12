@@ -310,6 +310,8 @@ public class TestKeyValues
         Assert.True(success);
         Assert.Equal(0, revision);
         
+        await Task.Delay(1);
+        
         (string? value, revision) = await kahuna.GetKeyValue(keyName, consistency);
         Assert.Null(value);
         Assert.Equal(0, revision);

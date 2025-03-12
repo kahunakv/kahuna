@@ -4,6 +4,7 @@ using Kahuna.Replication;
 using Kahuna.Replication.Protos;
 using Kahuna.Shared.Locks;
 using Kommander;
+using Kommander.Data;
 using Kommander.Time;
 using Nixie;
 
@@ -291,15 +292,19 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         if (context.Owner is not null)
             lockMessage.Owner = context.Owner;
 
-        (bool success, _, long _) = await raft.ReplicateLogs(
+        (bool success, RaftOperationStatus status, long _) = await raft.ReplicateLogs(
             partitionId,
             ReplicationTypes.Locks,
             ReplicationSerializer.Serialize(lockMessage)
         );
 
         if (!success)
+        {
+            logger.LogWarning("Failed to replicate lock {Resource} Partition={Partition} Status={Status}", resource, partitionId, status);
+            
             return false;
-        
+        }
+
         backgroundWriter.Send(new(
             BackgroundWriteType.QueueStoreLock,
             partitionId,

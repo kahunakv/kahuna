@@ -8,6 +8,7 @@ using Kahuna.Persistence;
 using Kahuna.Replication;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Replication.Protos;
+using Kommander.Data;
 
 namespace Kahuna.KeyValues;
 
@@ -310,15 +311,19 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         if (context.Value is not null)
             kvm.Value = context.Value;
 
-        (bool success, _, long _) = await raft.ReplicateLogs(
+        (bool success, RaftOperationStatus status, long _) = await raft.ReplicateLogs(
             partitionId,
             ReplicationTypes.KeyValues,
             ReplicationSerializer.Serialize(kvm)
         );
 
         if (!success)
+        {
+            logger.LogWarning("Failed to replicate key/value {Key} Partition={Partition} Status={Status}", key, partitionId, status);
+            
             return false;
-        
+        }
+
         backgroundWriter.Send(new(
             BackgroundWriteType.QueueStoreLock,
             partitionId,
