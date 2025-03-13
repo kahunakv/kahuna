@@ -26,7 +26,7 @@ public class KahunaClient
 
     private readonly ILogger<KahunaClient>? logger;
 
-    private readonly GrpcCommunication communication;
+    private readonly IKahunaCommunication communication;
 
     private int currentServer;
     
@@ -35,11 +35,12 @@ public class KahunaClient
     /// </summary>
     /// <param name="url"></param>
     /// <param name="logger"></param>
-    public KahunaClient(string url, ILogger<KahunaClient>? logger)
+    /// <param name="communication"></param>
+    public KahunaClient(string url, ILogger<KahunaClient>? logger = null, IKahunaCommunication? communication = null)
     {
         this.urls = [url];
         this.logger = logger;
-        this.communication = new(logger);
+        this.communication = (communication ?? new GrpcCommunication(logger));
     }
     
     /// <summary>
@@ -47,16 +48,17 @@ public class KahunaClient
     /// </summary>
     /// <param name="urls"></param>
     /// <param name="logger"></param>
-    public KahunaClient(string[] urls, ILogger<KahunaClient>? logger)
+    /// <param name="communication"></param>
+    public KahunaClient(string[] urls, ILogger<KahunaClient>? logger = null, IKahunaCommunication? communication = null)
     {
         this.urls = urls;
         this.logger = logger;
-        this.communication = new(logger);
+        this.communication = (communication ?? new GrpcCommunication(logger));
     }
     
-    private async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string resource, string lockId, TimeSpan expiryTime, LockConsistency consistency)
+    private async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string resource, string owner, TimeSpan expiryTime, LockConsistency consistency)
     {
-        return await communication.TryAcquireLock(GetRoundRobinUrl(), resource, lockId, (int)expiryTime.TotalMilliseconds, consistency).ConfigureAwait(false);
+        return await communication.TryAcquireLock(GetRoundRobinUrl(), resource, owner, (int)expiryTime.TotalMilliseconds, consistency).ConfigureAwait(false);
     }
     
     private async Task<(KahunaLockAcquireResult, string?, LockConsistency, long)> PeriodicallyTryAcquireLock(
@@ -95,7 +97,7 @@ public class KahunaClient
         {
             logger?.LogError("Error locking lock instance: {Message}", ex.Message);
 
-            return (KahunaLockAcquireResult.Error, null, consistency, -1);
+            throw;
         }
     }
     
@@ -226,14 +228,14 @@ public class KahunaClient
     /// Unlocks a lock on a resource if the owner is the current lock owner
     /// </summary>
     /// <param name="resource"></param>
-    /// <param name="lockId"></param>
+    /// <param name="owner"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<bool> Unlock(string resource, string lockId, LockConsistency consistency = LockConsistency.Ephemeral)
+    public async Task<bool> Unlock(string resource, string owner, LockConsistency consistency = LockConsistency.Ephemeral)
     {
         try
         {
-            return await communication.TryUnlock(GetRoundRobinUrl(), resource, lockId, consistency).ConfigureAwait(false);
+            return await communication.TryUnlock(GetRoundRobinUrl(), resource, owner, consistency).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

@@ -3,7 +3,7 @@ using Nixie;
 using System.Net;
 using System.Security.Cryptography.X509Certificates;
 using CommandLine;
-
+using Flurl.Http;
 using Kahuna;
 using Kahuna.Communication.Grpc;
 using Kahuna.Communication.Rest;
@@ -113,6 +113,9 @@ builder.WebHost.ConfigureKestrel(options =>
     }
 });
 
+ThreadPool.SetMinThreads(1024, 512);
+    
+FlurlHttp.Clients.WithDefaults(x => x.ConfigureInnerHandler(ih => ih.ServerCertificateCustomValidationCallback = (a, b, c, d) => true));
 
 builder.Services.AddSingleton(ConfigurationValidator.Validate(opts));
 

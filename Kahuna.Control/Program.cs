@@ -14,6 +14,8 @@ using RadLine;
 using Spectre.Console;
 using Kahuna.Client;
 using Kahuna.Shared.KeyValue;
+using Kommander.Communication.Rest;
+using Microsoft.Extensions.Logging;
 
 ParserResult<Options> optsResult = Parser.Default.ParseArguments<Options>(args);
 
@@ -23,11 +25,9 @@ if (opts is null)
 
 Console.WriteLine("Kahuna Shell 0.0.1 (alpha)\n");
 
-// Path.GetTempPath() + Path.PathSeparator + 
-
 const int DefaultExpires = 5 * 86400 * 365;
 
-const string historyPath = "/tmp/kahuna.history.json";
+string historyPath = Path.GetTempPath() + Path.PathSeparator + "kahuna.history.json";
 List<string> history = await GetHistory(historyPath);
 
 KahunaClient connection = await GetConnection(opts);
@@ -318,7 +318,7 @@ static async Task<KahunaClient> GetConnection(Options opts)
     
     await Task.CompletedTask;
 
-    return new(connectionString, null);
+    return new(connectionString, null, new Kahuna.Client.Communication.RestCommunication(null));
 }
 
 static async Task<List<string>> GetHistory(string historyPath)

@@ -6,16 +6,24 @@
  * file that was distributed with this source code.
  */
 
+using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 
 namespace Kahuna.Client;
 
 public sealed class KahunaException : Exception
 {
-    public LockResponseType ErrorCode { get; }
+    public LockResponseType LockErrorCode { get; }
+    
+    public KeyValueResponseType KeyValueErrorCode { get; }
     
     public KahunaException(string message, LockResponseType errorCode) : base(message)
     {
-        ErrorCode = errorCode;
+        LockErrorCode = errorCode;
+    }
+    
+    public KahunaException(string message, KeyValueResponseType errorCode) : base(message)
+    {
+        KeyValueErrorCode = errorCode;
     }
 }

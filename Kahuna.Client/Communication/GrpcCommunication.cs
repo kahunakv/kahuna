@@ -1,4 +1,11 @@
 
+/**
+ * This file is part of Kahuna
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 using System.Collections.Concurrent;
 using Grpc.Net.Client;
 using Kahuna.Shared.KeyValue;
@@ -7,7 +14,7 @@ using Microsoft.Extensions.Logging;
 
 namespace Kahuna.Client.Communication;
 
-internal sealed class GrpcCommunication
+public class GrpcCommunication : IKahunaCommunication
 {
     private static readonly ConcurrentDictionary<string, GrpcChannel> channels = new();
     
@@ -18,7 +25,7 @@ internal sealed class GrpcCommunication
         this.logger = logger;
     }
     
-    internal async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string url, string key, string owner, int expiryTime, LockConsistency consistency)
+    public async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string url, string key, string owner, int expiryTime, LockConsistency consistency)
     {
         GrpcTryLockRequest request = new()
         {
@@ -52,7 +59,7 @@ internal sealed class GrpcCommunication
         throw new KahunaException("Failed to lock", (LockResponseType)response.Type);
     }
     
-    internal async Task<bool> TryUnlock(string url, string resource, string owner, LockConsistency consistency)
+    public async Task<bool> TryUnlock(string url, string resource, string owner, LockConsistency consistency)
     {
         GrpcUnlockRequest request = new()
         {
@@ -85,9 +92,15 @@ internal sealed class GrpcCommunication
         throw new KahunaException("Failed to unlock", (LockResponseType)response.Type);
     }
     
-    internal async Task<(bool, long)> TryExtend(string url, string resource, string owner, int expiryTime, LockConsistency consistency)
+    public async Task<(bool, long)> TryExtend(string url, string resource, string owner, int expiryTime, LockConsistency consistency)
     {
-        GrpcExtendLockRequest request = new() { LockName = resource, LockId = owner, ExpiresMs = expiryTime, Consistency = (GrpcLockConsistency)consistency };
+        GrpcExtendLockRequest request = new()
+        {
+            LockName = resource, 
+            LockId = owner, 
+            ExpiresMs = expiryTime, 
+            Consistency = (GrpcLockConsistency)consistency
+        };
         
         GrpcExtendLockResponse? response;
         
@@ -110,7 +123,7 @@ internal sealed class GrpcCommunication
         throw new KahunaException("Failed to extend", (LockResponseType)response.Type);
     }
     
-    internal async Task<KahunaLockInfo?> Get(string url, string resource, LockConsistency consistency)
+    public async Task<KahunaLockInfo?> Get(string url, string resource, LockConsistency consistency)
     {
         GrpcGetLockRequest request = new()
         {
@@ -139,7 +152,7 @@ internal sealed class GrpcCommunication
         throw new KahunaException("Failed to get lock information", (LockResponseType)response.Type);
     }
     
-    internal async Task<(bool, long)> TrySetKeyValue(string url, string key, string? value, int expiryTime, KeyValueFlags flags, KeyValueConsistency consistency)
+    public async Task<(bool, long)> TrySetKeyValue(string url, string key, string? value, int expiryTime, KeyValueFlags flags, KeyValueConsistency consistency)
     {
         GrpcTrySetKeyValueRequest request = new()
         {
@@ -174,7 +187,7 @@ internal sealed class GrpcCommunication
         throw new KahunaException("Failed to set key/value: " + response.Type, (LockResponseType)response.Type);
     }
     
-    internal async Task<(bool, long)> TryCompareValueAndSetKeyValue(string url, string key, string? value, string? compareValue, int expiryTime, KeyValueConsistency consistency)
+    public async Task<(bool, long)> TryCompareValueAndSetKeyValue(string url, string key, string? value, string? compareValue, int expiryTime, KeyValueConsistency consistency)
     {
         GrpcTrySetKeyValueRequest request = new()
         {
@@ -210,7 +223,7 @@ internal sealed class GrpcCommunication
         throw new KahunaException("Failed to set key/value: " + response.Type, (LockResponseType)response.Type);
     }
     
-    internal async Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string url, string key, string? value, long compareRevision, int expiryTime, KeyValueConsistency consistency)
+    public async Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string url, string key, string? value, long compareRevision, int expiryTime, KeyValueConsistency consistency)
     {
         GrpcTrySetKeyValueRequest request = new()
         {
@@ -246,7 +259,7 @@ internal sealed class GrpcCommunication
         throw new KahunaException("Failed to set key/value:" + response.Type, (LockResponseType)response.Type);
     }
     
-    internal async Task<(string?, long)> TryGetKeyValue(string url, string key, KeyValueConsistency consistency)
+    public async Task<(string?, long)> TryGetKeyValue(string url, string key, KeyValueConsistency consistency)
     {
         GrpcTryGetKeyValueRequest request = new()
         {
@@ -281,7 +294,7 @@ internal sealed class GrpcCommunication
         throw new KahunaException("Failed to get key/value:" + response.Type, (LockResponseType)response.Type);
     }
     
-    internal async Task<(bool, long)> TryDeleteKeyValue(string url, string key, KeyValueConsistency consistency)
+    public async Task<(bool, long)> TryDeleteKeyValue(string url, string key, KeyValueConsistency consistency)
     {
         GrpcTryDeleteKeyValueRequest request = new()
         {
@@ -316,7 +329,7 @@ internal sealed class GrpcCommunication
         throw new KahunaException("Failed to delete key/value: " + response.Type, (LockResponseType)response.Type);
     }
     
-    internal async Task<(bool, long)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueConsistency consistency)
+    public async Task<(bool, long)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueConsistency consistency)
     {
         GrpcTryExtendKeyValueRequest request = new() { Key = key, ExpiresMs = expiresMs, Consistency = (GrpcKeyValueConsistency)consistency };
         

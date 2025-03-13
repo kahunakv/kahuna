@@ -3,6 +3,7 @@ using System.Net;
 using System.Text.Json;
 using Flurl.Http;
 using Kahuna.Shared.Communication.Rest;
+using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 using Microsoft.Extensions.Logging;
 using Polly;
@@ -11,7 +12,7 @@ using Polly.Retry;
 
 namespace Kahuna.Client.Communication;
 
-internal sealed class RestCommunication
+public class RestCommunication : IKahunaCommunication
 {
     private readonly ILogger? logger;
     
@@ -72,9 +73,16 @@ internal sealed class RestCommunication
         };
     }
     
-    internal async Task<KahunaLockAcquireResult> TryAcquireLock(string url, string key, string lockId, int expiryTime, LockConsistency consistency)
+    public async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string url, string resource, string owner, int expiryTime, LockConsistency consistency)
     {
-        KahunaLockRequest request = new() { LockName = key, LockId = lockId, ExpiresMs = expiryTime, Consistency = consistency };
+        KahunaLockRequest request = new()
+        {
+            LockName = resource, 
+            LockId = owner, 
+            ExpiresMs = expiryTime, 
+            Consistency = consistency
+        };
+        
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
         
         KahunaLockResponse? response;
@@ -86,7 +94,7 @@ internal sealed class RestCommunication
             response = await retryPolicy.ExecuteAsync(() =>
                 url
                 .WithOAuthBearerToken("xxx")
-                .AppendPathSegments("v1/kahuna/lock")
+                .AppendPathSegments("v1/locks/try-lock")
                 .WithHeader("Accept", "application/json")
                 .WithHeader("Content-Type", "application/json")
                 .WithTimeout(5)
@@ -98,19 +106,25 @@ internal sealed class RestCommunication
                 throw new KahunaException("Response is null", LockResponseType.Errored);
 
             if (response.Type == LockResponseType.Locked)
-                return KahunaLockAcquireResult.Success;
+                return (KahunaLockAcquireResult.Success, response.FencingToken);
             
             if (response.Type == LockResponseType.Busy)
-                return KahunaLockAcquireResult.Conflicted;
+                return (KahunaLockAcquireResult.Conflicted, response.FencingToken);
 
         } while (response.Type == LockResponseType.MustRetry);
             
         throw new KahunaException("Failed to lock", response.Type);
     }
     
-    internal async Task<bool> TryUnlock(string url, string resource, string lockId, LockConsistency consistency)
+    public async Task<bool> TryUnlock(string url, string resource, string lockId, LockConsistency consistency)
     {
-        KahunaLockRequest request = new() { LockName = resource, LockId = lockId, Consistency = consistency };
+        KahunaLockRequest request = new()
+        {
+            LockName = resource, 
+            LockId = lockId, 
+            Consistency = consistency
+        };
+        
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
         
         KahunaLockResponse? response;
@@ -122,7 +136,7 @@ internal sealed class RestCommunication
             response = await retryPolicy.ExecuteAsync(() => 
                 url
                 .WithOAuthBearerToken("xxx")
-                .AppendPathSegments("v1/kahuna/unlock")
+                .AppendPathSegments("v1/locks/try-unlock")
                 .WithHeader("Accept", "application/json")
                 .WithHeader("Content-Type", "application/json")
                 .WithTimeout(5)
@@ -144,9 +158,16 @@ internal sealed class RestCommunication
         throw new KahunaException("Failed to unlock", response.Type);
     }
     
-    internal async Task<bool> TryExtend(string url, string resource, string lockId, int expiryTime, LockConsistency consistency)
+    public async Task<(bool, long)> TryExtend(string url, string resource, string lockId, int expiryTime, LockConsistency consistency)
     {
-        KahunaLockRequest request = new() { LockName = resource, LockId = lockId, ExpiresMs = expiryTime, Consistency = consistency };
+        KahunaLockRequest request = new()
+        {
+            LockName = resource, 
+            LockId = lockId, 
+            ExpiresMs = expiryTime, 
+            Consistency = consistency
+        };
+        
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
 
         KahunaLockResponse? response;
@@ -158,7 +179,7 @@ internal sealed class RestCommunication
             response = await retryPolicy.ExecuteAsync(() => 
                 url
                     .WithOAuthBearerToken("xxx")
-                    .AppendPathSegments("v1/kahuna/extend-lock")
+                    .AppendPathSegments("v1/locks/try-extend")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
                     .WithTimeout(5)
@@ -171,16 +192,21 @@ internal sealed class RestCommunication
                 throw new KahunaException("Response is null", LockResponseType.Errored);
             
             if (response.Type == LockResponseType.Extended)
-                return true;
+                return (true, response.FencingToken);
 
         } while (response.Type == LockResponseType.MustRetry);
         
         throw new KahunaException("Failed to extend lock", response.Type);
     }
     
-    internal async Task<KahunaLockInfo?> Get(string url, string resource, LockConsistency consistency)
+    public async Task<KahunaLockInfo?> Get(string url, string resource, LockConsistency consistency)
     {
-        KahunaGetLockRequest request = new() { LockName = resource, Consistency = consistency };
+        KahunaGetLockRequest request = new()
+        {
+            LockName = resource, 
+            Consistency = consistency
+        };
+        
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaGetLockRequest);
 
         KahunaGetLockResponse? response;
@@ -192,7 +218,7 @@ internal sealed class RestCommunication
             response = await retryPolicy.ExecuteAsync(() =>
                     url
                         .WithOAuthBearerToken("xxx")
-                        .AppendPathSegments("v1/kahuna/get-lock")
+                        .AppendPathSegments("v1/locks/get-info")
                         .WithHeader("Accept", "application/json")
                         .WithHeader("Content-Type", "application/json")
                         .WithTimeout(5)
@@ -210,5 +236,188 @@ internal sealed class RestCommunication
         } while (response.Type == LockResponseType.MustRetry);
         
         throw new KahunaException("Failed to get lock information", response.Type);
+    }
+
+    public async Task<(bool, long)> TrySetKeyValue(string url, string key, string? value, int expiryTime, KeyValueFlags flags, KeyValueConsistency consistency)
+    {
+        KahunaSetKeyValueRequest request = new()
+        {
+            Key = key, 
+            Value = value, 
+            ExpiresMs = expiryTime,
+            Flags = flags,
+            Consistency = consistency
+        };
+        
+        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaSetKeyValueRequest);
+        
+        KahunaSetKeyValueResponse? response;
+        
+        do
+        {
+            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
+        
+            response = await retryPolicy.ExecuteAsync(() =>
+                url
+                    .WithOAuthBearerToken("xxx")
+                    .AppendPathSegments("v1/kv/try-set")
+                    .WithHeader("Accept", "application/json")
+                    .WithHeader("Content-Type", "application/json")
+                    .WithTimeout(5)
+                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .PostStringAsync(payload)
+                    .ReceiveJson<KahunaSetKeyValueResponse>()).ConfigureAwait(false);
+
+            if (response is null)
+                throw new KahunaException("Response is null", LockResponseType.Errored);
+
+            if (response.Type == KeyValueResponseType.Set)
+                return (true, response.Revision);
+            
+            if (response.Type == KeyValueResponseType.NotSet)
+                return (false, response.Revision);
+
+        } while (response.Type == KeyValueResponseType.MustRetry);
+            
+        throw new KahunaException("Failed to set key/value: " + response.Type, response.Type);
+    }
+
+    public async Task<(bool, long)> TryCompareValueAndSetKeyValue(string url, string key, string? value, string? compareValue, int expiryTime, KeyValueConsistency consistency)
+    {
+        KahunaSetKeyValueRequest request = new()
+        {
+            Key = key, 
+            Value = value, 
+            ExpiresMs = expiryTime,
+            Flags = KeyValueFlags.SetIfEqualToValue,
+            Consistency = consistency
+        };
+        
+        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaSetKeyValueRequest);
+        
+        KahunaSetKeyValueResponse? response;
+        
+        do
+        {
+            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
+        
+            response = await retryPolicy.ExecuteAsync(() =>
+                url
+                    .WithOAuthBearerToken("xxx")
+                    .AppendPathSegments("v1/kv/try-set")
+                    .WithHeader("Accept", "application/json")
+                    .WithHeader("Content-Type", "application/json")
+                    .WithTimeout(5)
+                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .PostStringAsync(payload)
+                    .ReceiveJson<KahunaSetKeyValueResponse>()).ConfigureAwait(false);
+
+            if (response is null)
+                throw new KahunaException("Response is null", LockResponseType.Errored);
+
+            if (response.Type == KeyValueResponseType.Set)
+                return (true, response.Revision);
+            
+            if (response.Type == KeyValueResponseType.NotSet)
+                return (false, response.Revision);
+
+        } while (response.Type == KeyValueResponseType.MustRetry);
+            
+        throw new KahunaException("Failed to set key/value: " + response.Type, response.Type);
+    }
+
+    public async Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string url, string key, string? value, long compareRevision, int expiryTime, KeyValueConsistency consistency)
+    {
+        KahunaSetKeyValueRequest request = new()
+        {
+            Key = key, 
+            Value = value, 
+            ExpiresMs = expiryTime,
+            Flags = KeyValueFlags.SetIfEqualToValue,
+            Consistency = consistency
+        };
+        
+        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaSetKeyValueRequest);
+        
+        KahunaSetKeyValueResponse? response;
+        
+        do
+        {
+            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
+        
+            response = await retryPolicy.ExecuteAsync(() =>
+                url
+                    .WithOAuthBearerToken("xxx")
+                    .AppendPathSegments("v1/kv/try-set")
+                    .WithHeader("Accept", "application/json")
+                    .WithHeader("Content-Type", "application/json")
+                    .WithTimeout(5)
+                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .PostStringAsync(payload)
+                    .ReceiveJson<KahunaSetKeyValueResponse>()).ConfigureAwait(false);
+
+            if (response is null)
+                throw new KahunaException("Response is null", LockResponseType.Errored);
+
+            if (response.Type == KeyValueResponseType.Set)
+                return (true, response.Revision);
+            
+            if (response.Type == KeyValueResponseType.NotSet)
+                return (false, response.Revision);
+
+        } while (response.Type == KeyValueResponseType.MustRetry);
+            
+        throw new KahunaException("Failed to set key/value: " + response.Type, response.Type);
+    }
+
+    public async Task<(string?, long)> TryGetKeyValue(string url, string key, KeyValueConsistency consistency)
+    {
+        KahunaGetKeyValueRequest request = new()
+        {
+            Key = key, 
+            Consistency = consistency
+        };
+        
+        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaGetKeyValueRequest);
+        
+        KahunaGetKeyValueResponse? response;
+        
+        do
+        {
+            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
+        
+            response = await retryPolicy.ExecuteAsync(() =>
+                url
+                    .WithOAuthBearerToken("xxx")
+                    .AppendPathSegments("v1/kv/try-get")
+                    .WithHeader("Accept", "application/json")
+                    .WithHeader("Content-Type", "application/json")
+                    .WithTimeout(5)
+                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .PostStringAsync(payload)
+                    .ReceiveJson<KahunaGetKeyValueResponse>()).ConfigureAwait(false);
+
+            if (response is null)
+                throw new KahunaException("Response is null", LockResponseType.Errored);
+
+            if (response.Type == KeyValueResponseType.Get)
+                return (response.Value, response.Revision);
+            
+            if (response.Type == KeyValueResponseType.DoesNotExist)
+                return (null, response.Revision);
+
+        } while (response.Type == KeyValueResponseType.MustRetry);
+            
+        throw new KahunaException("Failed to get key/value: " + response.Type, response.Type);
+    }
+
+    public Task<(bool, long)> TryDeleteKeyValue(string url, string key, KeyValueConsistency consistency)
+    {
+        throw new NotImplementedException();
+    }
+
+    public Task<(bool, long)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueConsistency consistency)
+    {
+        throw new NotImplementedException();
     }
 }

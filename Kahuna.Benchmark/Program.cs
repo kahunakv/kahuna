@@ -61,7 +61,7 @@ async Task AdquireLockConcurrently(KahunaClient locksx)
     }
     catch (KahunaException ex)
     {
-        Console.WriteLine("KahunaException {0} {1}", ex.Message, ex.ErrorCode);
+        Console.WriteLine("KahunaException {0} {1}", ex.Message, ex.LockErrorCode);
     }
     catch (Exception ex)
     {
@@ -86,7 +86,7 @@ async Task SetKeyConcurrently(KahunaClient keyValues)
     }
     catch (KahunaException ex)
     {
-        Console.WriteLine("KahunaException {0} {1}", ex.Message, ex.ErrorCode);
+        Console.WriteLine("KahunaException {0} {1}", ex.Message, ex.KeyValueErrorCode);
     }
     catch (Exception ex)
     {
@@ -107,7 +107,7 @@ async Task GetKeyConcurrently(KahunaClient keyValues)
     }
     catch (KahunaException ex)
     {
-        Console.WriteLine("KahunaException {0} {1}", ex.Message, ex.ErrorCode);
+        Console.WriteLine("KahunaException {0} {1}", ex.Message, ex.KeyValueErrorCode);
     }
     catch (Exception ex)
     {
