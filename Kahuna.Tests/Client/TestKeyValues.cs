@@ -661,10 +661,3 @@ public class TestKeyValues
         };
     }
 }
-
-public enum KahunaClientType
-{
-    Single,
-    Pool
-}
-

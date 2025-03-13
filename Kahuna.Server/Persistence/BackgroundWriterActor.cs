@@ -4,7 +4,7 @@ using Kahuna.Persistence;
 using Kommander;
 using Nixie.Routers;
 
-namespace Kahuna.Locks;
+namespace Kahuna.Persistence;
 
 /*
  * Writes dirty locks from memory to disk before they are forced out by backend processes.

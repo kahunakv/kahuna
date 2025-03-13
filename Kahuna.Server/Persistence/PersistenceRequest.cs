@@ -14,7 +14,7 @@ public sealed class PersistenceRequest : IConsistentHashable
     
     public string? Value { get; }
     
-    public long FencingToken { get; }
+    public long Revision { get; }
     
     public long ExpiresLogical { get; }
     
@@ -28,7 +28,7 @@ public sealed class PersistenceRequest : IConsistentHashable
         PersistenceRequestType type,
         string key, 
         string? value, 
-        long fencingToken, 
+        long revision, 
         long expiresLogical,
         uint expiresCounter, 
         int consistency,
@@ -38,7 +38,7 @@ public sealed class PersistenceRequest : IConsistentHashable
         Type = type;
         Key = key;
         Value = value;
-        FencingToken = fencingToken;
+        Revision = revision;
         ExpiresLogical = expiresLogical;
         ExpiresCounter = expiresCounter;
         Consistency = consistency;

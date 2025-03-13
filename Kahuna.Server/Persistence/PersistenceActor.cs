@@ -29,7 +29,7 @@ public sealed class PersistenceActor : IActor<PersistenceRequest, PersistenceRes
                     message.Value,
                     message.ExpiresLogical,
                     message.ExpiresCounter,
-                    message.FencingToken,
+                    message.Revision,
                     message.Consistency,
                     message.State
                 );
@@ -46,7 +46,7 @@ public sealed class PersistenceActor : IActor<PersistenceRequest, PersistenceRes
                     message.Value,
                     message.ExpiresLogical,
                     message.ExpiresCounter,
-                    message.FencingToken,
+                    message.Revision,
                     message.Consistency,
                     message.State
                 );

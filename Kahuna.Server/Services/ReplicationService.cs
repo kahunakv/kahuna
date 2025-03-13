@@ -3,7 +3,7 @@ using Kommander;
 
 namespace Kahuna.Services;
 
-public class ReplicationService : BackgroundService //, IDisposable
+public sealed class ReplicationService : BackgroundService //, IDisposable
 {
     private readonly IKahuna kahuna;
     

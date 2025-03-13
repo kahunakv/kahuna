@@ -1,6 +1,5 @@
 
 using Kahuna.Configuration;
-using Kahuna.Locks;
 using Kahuna.Persistence;
 using Kahuna.Replication;
 using Kahuna.Replication.Protos;

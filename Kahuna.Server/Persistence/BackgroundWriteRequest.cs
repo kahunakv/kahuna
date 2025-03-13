@@ -2,7 +2,7 @@
 using Kahuna.Shared.Locks;
 using Kommander.Time;
 
-namespace Kahuna.Locks;
+namespace Kahuna.Persistence;
 
 /// <summary>
 /// Represents a lock background write request.
