@@ -373,6 +373,28 @@ public class KahunaClient
     }
     
     /// <summary>
+    /// Set key to hold the string value. If key already holds a value, it is overwritten
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="value"></param>
+    /// <param name="expiryTime"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
+    public async Task<(bool, long)> SetKeyValue(string key, string value, TimeSpan expiryTime, KeyValueFlags flags = KeyValueFlags.Set, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
+    {
+        try
+        {
+            return await communication.TrySetKeyValue(GetRoundRobinUrl(), key, Encoding.UTF8.GetBytes(value), (int)expiryTime.TotalMilliseconds, flags, consistency).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError("Error setting key/value: {Message}", ex.Message);
+
+            throw;
+        }
+    }
+    
+    /// <summary>
     /// Compare Value and Set (CVAS) operation. Sets the value of a key if the current value is equal to the expected value
     /// </summary>
     /// <param name="key"></param>

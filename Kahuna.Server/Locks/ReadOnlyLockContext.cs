@@ -6,7 +6,7 @@ namespace Kahuna.Locks;
 /// <summary>
 /// A snapshot of a lock context that is read-only.
 /// </summary>
-public readonly struct ReadOnlyLockContext
+public sealed class ReadOnlyLockContext
 {
     public byte[]? Owner { get; }
     

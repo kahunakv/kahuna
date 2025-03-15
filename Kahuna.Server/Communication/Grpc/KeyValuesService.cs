@@ -215,18 +215,24 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
         {
             (KeyValueResponseType type, ReadOnlyKeyValueContext? keyValueContext) = await keyValues.TryGetValue(request.Key, (KeyValueConsistency)request.Consistency);
-            
+
             if (keyValueContext is not null)
-                return new()
+            {
+                GrpcTryGetKeyValueResponse response = new()
                 {
                     ServedFrom = "",
                     Type = (GrpcKeyValueResponseType)type,
-                    Value = keyValueContext?.Value is not null ? ByteString.CopyFrom(keyValueContext?.Value) : null,
-                    Revision = keyValueContext?.Revision ?? 0,
-                    ExpiresPhysical = keyValueContext?.Expires.L ?? 0,
-                    ExpiresCounter = keyValueContext?.Expires.C ?? 0,
+                    Revision = keyValueContext.Revision,
+                    ExpiresPhysical = keyValueContext.Expires.L,
+                    ExpiresCounter = keyValueContext.Expires.C,
                 };
-            
+
+                if (keyValueContext.Value is not null)
+                    response.Value = ByteString.CopyFrom(keyValueContext.Value);
+
+                return response;
+            }
+
             return new()
             {
                 Type = (GrpcKeyValueResponseType)type

@@ -72,7 +72,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
                 actorContext.Self.Runner.Name,
                 message.Type,
                 message.Key,
-                message.Value,
+                message.Value?.Length,
                 message.ExpiresMs,
                 message.Flags,
                 message.Consistency
@@ -143,7 +143,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         {
             case KeyValueFlags.SetIfExists when !exists:
             case KeyValueFlags.SetIfNotExists when exists:
-            case KeyValueFlags.SetIfEqualToValue when exists && context.Value != message.CompareValue:
+            case KeyValueFlags.SetIfEqualToValue when exists && !((ReadOnlySpan<byte>)context.Value).SequenceEqual(message.CompareValue):
             case KeyValueFlags.SetIfEqualToRevision when exists && context.Revision != message.CompareRevision:
                 return new(KeyValueResponseType.NotSet, context.Revision);
 

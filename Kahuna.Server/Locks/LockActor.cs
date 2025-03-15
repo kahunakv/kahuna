@@ -69,7 +69,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
                 actorContext.Self.Runner.Name, 
                 message.Type, 
                 message.Resource, 
-                message.Owner, 
+                message.Owner?.Length, 
                 message.ExpiresMs,
                 message.Consistency
             );
@@ -167,7 +167,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         if (context is null || context.State == LockState.Unlocked)
             return new(LockResponseType.LockDoesNotExist);
 
-        if (context.Owner != message.Owner)
+        if (!((ReadOnlySpan<byte>)context.Owner).SequenceEqual(message.Owner))
             return new(LockResponseType.InvalidOwner);
 
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
@@ -205,7 +205,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         if (context is null || context.State == LockState.Unlocked)
             return new(LockResponseType.LockDoesNotExist);
 
-        if (message.Owner != context.Owner)
+        if (!((ReadOnlySpan<byte>)context.Owner).SequenceEqual(message.Owner))
             return new(LockResponseType.InvalidOwner);
         
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();

@@ -3,7 +3,7 @@ using Kommander.Time;
 
 namespace Kahuna.KeyValues;
 
-public readonly struct ReadOnlyKeyValueContext
+public sealed class ReadOnlyKeyValueContext
 {
     public byte[]? Value { get; }
     

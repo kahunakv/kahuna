@@ -1,4 +1,5 @@
 
+using System.Text;
 using Kahuna.Client;
 using Kahuna.Client.Communication;
 using Kahuna.Shared.KeyValue;
@@ -200,11 +201,11 @@ public class TestKeyValues
         Assert.True(success);
         Assert.Equal(0, revision);
         
-        (string? value, revision) = await client.GetKeyValue(keyName, consistency);
+        (byte[]? value, revision) = await client.GetKeyValue(keyName, consistency);
         Assert.NotNull(value);
         Assert.Equal(0, revision);
         
-        Assert.Equal("some-value", value);
+        Assert.Equal("some-value", Encoding.UTF8.GetString(value));
     }
     
     [Theory, CombinatorialData]
@@ -222,11 +223,11 @@ public class TestKeyValues
         Assert.True(success);
         Assert.Equal(0, revision);
         
-        (string? value, revision) = await client.GetKeyValue(keyName, consistency);
+        (byte[]? value, revision) = await client.GetKeyValue(keyName, consistency);
         Assert.NotNull(value);
         Assert.Equal(0, revision);
         
-        Assert.Equal("some-value", value);
+        Assert.Equal("some-value", Encoding.UTF8.GetString(value));
         
         (success, revision) = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
         Assert.True(success);
@@ -252,11 +253,11 @@ public class TestKeyValues
         Assert.True(success);
         Assert.Equal(0, revision);
         
-        (string? value, revision) = await client.GetKeyValue(keyName, consistency);
+        (byte[]? value, revision) = await client.GetKeyValue(keyName, consistency);
         Assert.NotNull(value);
         Assert.Equal(0, revision);
         
-        Assert.Equal("some-value", value);
+        Assert.Equal("some-value", Encoding.UTF8.GetString(value));
     }
     
     [Theory, CombinatorialData]
@@ -274,11 +275,11 @@ public class TestKeyValues
         Assert.True(success);
         Assert.Equal(0, revision);
         
-        (string? value, revision) = await client.GetKeyValue(keyName, consistency);
+        (byte[]? value, revision) = await client.GetKeyValue(keyName, consistency);
         Assert.NotNull(value);
         Assert.Equal(0, revision);
         
-        Assert.Equal("some-value", value);
+        Assert.Equal("some-value", Encoding.UTF8.GetString(value));
         
         await Task.Delay(1500, TestContext.Current.CancellationToken);
         
@@ -307,17 +308,17 @@ public class TestKeyValues
         Assert.True(success);
         Assert.Equal(0, revision);
         
-        (string? value1, revision) = await client.GetKeyValue(keyName1, consistency);
+        (byte[]? value1, revision) = await client.GetKeyValue(keyName1, consistency);
         Assert.NotNull(value1);
         Assert.Equal(0, revision);
         
-        Assert.Equal("some-value", value1);
+        Assert.Equal("some-value", Encoding.UTF8.GetString(value1));
         
-        (string? value2, revision) = await client.GetKeyValue(keyName2, consistency);
+        (byte[]? value2, revision) = await client.GetKeyValue(keyName2, consistency);
         Assert.NotNull(value2);
         Assert.Equal(0, revision);
         
-        Assert.Equal("some-value", value2);
+        Assert.Equal("some-value", Encoding.UTF8.GetString(value2));
         
         await Task.Delay(1500, TestContext.Current.CancellationToken);
         
@@ -350,17 +351,17 @@ public class TestKeyValues
         Assert.True(success);
         Assert.Equal(0, revision);
         
-        (string? value1, revision) = await client.GetKeyValue(keyName1, consistency);
+        (byte[]? value1, revision) = await client.GetKeyValue(keyName1, consistency);
         Assert.NotNull(value1);
         Assert.Equal(0, revision);
         
-        Assert.Equal("some-value", value1);
+        Assert.Equal("some-value", Encoding.UTF8.GetString(value1));
         
-        (string? value2, revision) = await client.GetKeyValue(keyName2, consistency);
+        (byte[]? value2, revision) = await client.GetKeyValue(keyName2, consistency);
         Assert.NotNull(value2);
         Assert.Equal(0, revision);
         
-        Assert.Equal("some-value", value2);
+        Assert.Equal("some-value", Encoding.UTF8.GetString(value2));
         
         await Task.Delay(1500, TestContext.Current.CancellationToken);
         
@@ -406,7 +407,7 @@ public class TestKeyValues
         
         await Task.Delay(50, TestContext.Current.CancellationToken);
         
-        (string? value, revision) = await client.GetKeyValue(keyName, consistency);
+        (byte[]? value, revision) = await client.GetKeyValue(keyName, consistency);
         Assert.Null(value);
         Assert.Equal(0, revision);
     }
@@ -432,7 +433,7 @@ public class TestKeyValues
         
         await Task.Delay(2000, TestContext.Current.CancellationToken);
         
-        (string? value1, revision) = await client.GetKeyValue(keyName, consistency);
+        (byte[]? value1, revision) = await client.GetKeyValue(keyName, consistency);
         Assert.NotNull(value1);
         Assert.Equal(0, revision);
     }
@@ -458,7 +459,7 @@ public class TestKeyValues
         
         await Task.Delay(2000, TestContext.Current.CancellationToken);
         
-        (string? value1, revision) = await client.GetKeyValue(keyName, consistency);
+        (byte[]? value1, revision) = await client.GetKeyValue(keyName, consistency);
         Assert.NotNull(value1);
         Assert.Equal(0, revision);
     }
@@ -478,11 +479,11 @@ public class TestKeyValues
         Assert.True(success);
         Assert.Equal(0, revision);
         
-        (string? value1, revision) = await client.GetKeyValue(keyName, consistency);
+        (byte[]? value1, revision) = await client.GetKeyValue(keyName, consistency);
         Assert.NotNull(value1);
         Assert.Equal(0, revision);
         
-        Assert.Equal("some-value", value1);
+        Assert.Equal("some-value", Encoding.UTF8.GetString(value1));
         
         (success, revision) = await client.DeleteKeyValue(keyName, consistency);
         Assert.True(success);
@@ -500,7 +501,7 @@ public class TestKeyValues
         Assert.NotNull(value1);
         Assert.Equal(1, revision);
         
-        Assert.Equal("some-value-2", value1);
+        Assert.Equal("some-value-2", Encoding.UTF8.GetString(value1));
     }
     
     [Theory, CombinatorialData]
@@ -518,11 +519,11 @@ public class TestKeyValues
         Assert.True(success);
         Assert.Equal(0, revision);
         
-        (string? value1, revision) = await client.GetKeyValue(keyName, consistency);
+        (byte[]? value1, revision) = await client.GetKeyValue(keyName, consistency);
         Assert.NotNull(value1);
         Assert.Equal(0, revision);
         
-        Assert.Equal("some-value", value1);
+        Assert.Equal("some-value", Encoding.UTF8.GetString(value1));
         
         (success, revision) = await client.DeleteKeyValue(keyName, consistency);
         Assert.True(success);
@@ -560,11 +561,11 @@ public class TestKeyValues
         Assert.True(success);
         Assert.Equal(1, revision);
         
-        (string? value, revision) = await client.GetKeyValue(keyName, consistency);
+        (byte[]? value, revision) = await client.GetKeyValue(keyName, consistency);
         Assert.NotNull(value);
         Assert.Equal(1, revision);
         
-        Assert.Equal("some-new-value", value);
+        Assert.Equal("some-new-value", Encoding.UTF8.GetString(value));
     }
     
     [Theory, CombinatorialData]
@@ -586,11 +587,11 @@ public class TestKeyValues
         Assert.False(success);
         Assert.Equal(0, revision);
         
-        (string? value, revision) = await client.GetKeyValue(keyName, consistency);
+        (byte[]? value, revision) = await client.GetKeyValue(keyName, consistency);
         Assert.NotNull(value);
         Assert.Equal(0, revision);
         
-        Assert.Equal("some-value", value);
+        Assert.Equal("some-value", Encoding.UTF8.GetString(value));
     }
     
     [Theory, CombinatorialData]
@@ -616,11 +617,11 @@ public class TestKeyValues
         Assert.True(success);
         Assert.Equal(2, revision);
         
-        (string? value, revision) = await client.GetKeyValue(keyName, consistency);
+        (byte[]? value, revision) = await client.GetKeyValue(keyName, consistency);
         Assert.NotNull(value);
         Assert.Equal(2, revision);
         
-        Assert.Equal("some-new-new-value", value);
+        Assert.Equal("some-new-new-value", Encoding.UTF8.GetString(value));
     }
     
     [Theory, CombinatorialData]
@@ -646,11 +647,11 @@ public class TestKeyValues
         Assert.False(success);
         Assert.Equal(1, revision);
         
-        (string? value, revision) = await client.GetKeyValue(keyName, consistency);
+        (byte[]? value, revision) = await client.GetKeyValue(keyName, consistency);
         Assert.NotNull(value);
         Assert.Equal(1, revision);
         
-        Assert.Equal("some-new-value", value);
+        Assert.Equal("some-new-value", Encoding.UTF8.GetString(value));
     }
     
     private KahunaClient GetClientByType(KahunaCommunicationType communicationType, KahunaClientType clientType)
