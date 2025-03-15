@@ -1,4 +1,5 @@
 
+using Google.Protobuf;
 using Kahuna.Persistence;
 using Kahuna.Replication;
 using Kahuna.Replication.Protos;
@@ -118,11 +119,11 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             locks.Add(message.Resource, newContext);
         }
         
-        if (!string.IsNullOrEmpty(context.Owner))
+        if (context.Owner is not null)
         {
             bool isExpired = context.Expires - currentTime < TimeSpan.Zero;
 
-            if (context.Owner == message.Owner && !isExpired)
+            if (((ReadOnlySpan<byte>)context.Owner).SequenceEqual(message.Owner) && !isExpired)
                 return new(LockResponseType.Locked, context.FencingToken);
 
             if (!isExpired)
@@ -311,7 +312,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         };
 
         if (proposal.Owner is not null)
-            lockMessage.Owner = proposal.Owner;
+            lockMessage.Owner = ByteString.CopyFrom(proposal.Owner);
 
         (bool success, RaftOperationStatus status, long _) = await raft.ReplicateLogs(
             partitionId,

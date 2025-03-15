@@ -15,7 +15,7 @@ namespace Kahuna.Client;
 /// </summary>
 public sealed class KahunaLockInfo
 {
-    public string Owner { get; }
+    public byte[]? Owner { get; }
     
     public HLCTimestamp Expires { get; }
     
@@ -27,7 +27,7 @@ public sealed class KahunaLockInfo
     /// <param name="owner"></param>
     /// <param name="expires"></param>
     /// <param name="fencingToken"></param>
-    public KahunaLockInfo(string owner, HLCTimestamp expires, long fencingToken)
+    public KahunaLockInfo(byte[]? owner, HLCTimestamp expires, long fencingToken)
     {
         Owner = owner;
         Expires = expires;

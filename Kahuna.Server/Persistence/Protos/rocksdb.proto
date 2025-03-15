@@ -4,7 +4,7 @@ package Kahuna.Persistence.Protos;
 
 message RocksDbLockMessage {
   string resource = 1;
-  optional string owner = 2;
+  optional bytes owner = 2;
   int64 expiresPhysical = 3;
   uint32 expiresCounter = 4;
   int64 fencingToken = 5;
@@ -14,7 +14,7 @@ message RocksDbLockMessage {
 
 message RocksDbKeyValueMessage {
   string key = 1;
-  optional string value = 2;
+  optional bytes value = 2;
   int64 expiresPhysical = 3;
   uint32 expiresCounter = 4;
   int64 revision = 5;

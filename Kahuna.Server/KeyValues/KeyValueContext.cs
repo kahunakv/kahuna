@@ -11,7 +11,7 @@ public sealed class KeyValueContext
     /// <summary>
     /// The current value of the key.
     /// </summary>
-    public string? Value { get; set; }
+    public byte[]? Value { get; set; }
     
     /// <summary>
     /// HLC timestamp when the lock will expire

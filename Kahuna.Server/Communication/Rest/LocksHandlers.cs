@@ -16,20 +16,20 @@ public static class LocksHandlers
     {
         app.MapPost("/v1/locks/try-lock", async (KahunaLockRequest request, IKahuna locks, IRaft raft, ILogger<IKahuna> logger) =>
         {
-            if (string.IsNullOrEmpty(request.LockName))
+            if (string.IsNullOrEmpty(request.Resource))
                 return new() { Type = LockResponseType.Errored };
 
-            if (string.IsNullOrEmpty(request.LockId))
+            if (request.Owner is null)
                 return new() { Type = LockResponseType.Errored };
             
             if (request.ExpiresMs <= 0)
                 return new() { Type = LockResponseType.Errored };
             
-            int partitionId = raft.GetPartitionKey(request.LockName);
+            int partitionId = raft.GetPartitionKey(request.Resource);
 
             if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
             {
-                (LockResponseType response, long fencingToken) = await locks.TryLock(request.LockName, request.LockId, request.ExpiresMs, request.Consistency);
+                (LockResponseType response, long fencingToken) = await locks.TryLock(request.Resource, request.Owner, request.ExpiresMs, request.Consistency);
 
                 return new() { Type = response, FencingToken = fencingToken };    
             }
@@ -38,7 +38,7 @@ public static class LocksHandlers
             if (leader == raft.GetLocalEndpoint())
                 return new() { Type = LockResponseType.MustRetry };
             
-            logger.LogDebug("LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
+            logger.LogDebug("LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.Resource, partitionId, leader);
 
             try
             {
@@ -68,20 +68,20 @@ public static class LocksHandlers
 
         app.MapPost("/v1/locks/try-extend", async (KahunaLockRequest request, IKahuna locks, IRaft raft, ILogger<IKahuna> logger) =>
         {
-            if (string.IsNullOrEmpty(request.LockName))
+            if (string.IsNullOrEmpty(request.Resource))
                 return new() { Type = LockResponseType.InvalidInput };
 
-            if (string.IsNullOrEmpty(request.LockId))
+            if (request.Owner is null)
                 return new() { Type = LockResponseType.InvalidInput };
             
             if (request.ExpiresMs <= 0)
                 return new() { Type = LockResponseType.InvalidInput };
             
-            int partitionId = raft.GetPartitionKey(request.LockName);
+            int partitionId = raft.GetPartitionKey(request.Resource);
             
             if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
             {
-                (LockResponseType response, long fencingToken) = await locks.TryExtendLock(request.LockName, request.LockId, request.ExpiresMs, request.Consistency);
+                (LockResponseType response, long fencingToken) = await locks.TryExtendLock(request.Resource, request.Owner, request.ExpiresMs, request.Consistency);
 
                 return new() { Type = response, FencingToken = fencingToken };    
             }
@@ -90,7 +90,7 @@ public static class LocksHandlers
             if (leader == raft.GetLocalEndpoint())
                 return new() { Type = LockResponseType.MustRetry };
             
-            logger.LogDebug("EXTEND-LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
+            logger.LogDebug("EXTEND-LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.Resource, partitionId, leader);
             
             try
             {
@@ -120,17 +120,17 @@ public static class LocksHandlers
 
         app.MapPost("/v1/locks/try-unlock", async (KahunaLockRequest request, IKahuna locks, IRaft raft, ILogger<IKahuna> logger) =>
         {
-            if (string.IsNullOrEmpty(request.LockName))
+            if (string.IsNullOrEmpty(request.Resource))
                 return new() { Type = LockResponseType.InvalidInput };
 
-            if (string.IsNullOrEmpty(request.LockId))
+            if (request.Owner is null)
                 return new() { Type = LockResponseType.InvalidInput };
             
-            int partitionId = raft.GetPartitionKey(request.LockName);
+            int partitionId = raft.GetPartitionKey(request.Resource);
 
             if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
             {
-                LockResponseType response = await locks.TryUnlock(request.LockName, request.LockId, request.Consistency);
+                LockResponseType response = await locks.TryUnlock(request.Resource, request.Owner, request.Consistency);
 
                 return new() { Type = response };
             }
@@ -139,7 +139,7 @@ public static class LocksHandlers
             if (leader == raft.GetLocalEndpoint())
                 return new() { Type = LockResponseType.MustRetry };
             
-            logger.LogDebug("UNLOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
+            logger.LogDebug("UNLOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.Resource, partitionId, leader);
             
             try
             {

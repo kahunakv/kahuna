@@ -8,8 +8,8 @@ service Locker {
 }
 
 message GrpcTryLockRequest {
-  string LockName = 1;
-  string LockId = 2;
+  string Resource = 1;
+  bytes Owner = 2;
   int32 ExpiresMs = 3;
   GrpcLockConsistency Consistency = 4;
 }
@@ -21,8 +21,8 @@ message GrpcTryLockResponse {
 }
 
 message GrpcExtendLockRequest {
-  string LockName = 1;
-  optional string LockId = 2;
+  string Resource = 1;
+  optional bytes Owner = 2;
   int32 ExpiresMs = 3;
   GrpcLockConsistency Consistency = 4;
 }
@@ -34,8 +34,8 @@ message GrpcExtendLockResponse {
 }
 
 message GrpcUnlockRequest {
-  string LockName = 1;
-  optional string LockId = 2;
+  string Resource = 1;
+  optional bytes Owner = 2;
   GrpcLockConsistency Consistency = 3;
 }
 
@@ -45,14 +45,14 @@ message GrpcUnlockResponse {
 }
 
 message GrpcGetLockRequest {
-  string LockName = 1;
+  string Resource = 1;
   GrpcLockConsistency Consistency = 2;
 }
 
 message GrpcGetLockResponse {
   optional string ServedFrom = 1;
   GrpcLockResponseType Type = 2;
-  string Owner = 3;
+  optional bytes Owner = 3;
   int64 ExpiresPhysical = 4;
   uint32 ExpiresCounter = 5;
   int64 FencingToken = 6;

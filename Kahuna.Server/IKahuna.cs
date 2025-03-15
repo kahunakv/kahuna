@@ -9,15 +9,15 @@ namespace Kahuna;
 
 public interface IKahuna
 {
-    public Task<(LockResponseType, long)> TryLock(string lockName, string lockId, int expiresMs, LockConsistency consistency);
+    public Task<(LockResponseType, long)> TryLock(string resource, byte[] owner, int expiresMs, LockConsistency consistency);
 
-    public Task<(LockResponseType, long)> TryExtendLock(string lockName, string lockId, int expiresMs, LockConsistency consistency);
+    public Task<(LockResponseType, long)> TryExtendLock(string resource, byte[] owner, int expiresMs, LockConsistency consistency);
 
-    public Task<LockResponseType> TryUnlock(string lockName, string lockId, LockConsistency consistency);
+    public Task<LockResponseType> TryUnlock(string resource, byte[] owner, LockConsistency consistency);
     
-    public Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(string lockName, LockConsistency consistency);
+    public Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(string resource, LockConsistency consistency);
 
-    public Task<(KeyValueResponseType, long)> TrySetKeyValue(string key, string? value, string? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs, KeyValueConsistency consistency);
+    public Task<(KeyValueResponseType, long)> TrySetKeyValue(string key, byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs, KeyValueConsistency consistency);
 
     public Task<(KeyValueResponseType, long)> TryExtendKeyValue(string key, int expiresMs, KeyValueConsistency consistency);
 

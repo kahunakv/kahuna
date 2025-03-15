@@ -10,7 +10,7 @@ public sealed class KahunaGetLockResponse
     
     public LockResponseType Type { get; set; }
     
-    public string? Owner { get; set; }
+    public byte[]? Owner { get; set; }
     
     public HLCTimestamp Expires { get; set; }
     

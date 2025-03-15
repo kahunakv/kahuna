@@ -15,7 +15,7 @@ public sealed class BackgroundWriteRequest
     
     public string Key { get; }
     
-    public string? Value { get; }
+    public byte[]? Value { get; }
     
     public long Revision { get; }
     
@@ -29,7 +29,7 @@ public sealed class BackgroundWriteRequest
         BackgroundWriteType type,
         int partitionId,
         string key, 
-        string? value, 
+        byte[]? value, 
         long revision, 
         HLCTimestamp expires, 
         int consistency,

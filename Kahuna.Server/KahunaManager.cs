@@ -88,50 +88,50 @@ public sealed class KahunaManager : IKahuna
     /// <summary>
     /// Passes a TryLock request to the locker actor for the given lock name. 
     /// </summary>
-    /// <param name="lockName"></param>
-    /// <param name="lockId"></param>
+    /// <param name="resource"></param>
+    /// <param name="owner"></param>
     /// <param name="expiresMs"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public Task<(LockResponseType, long)> TryLock(string lockName, string lockId, int expiresMs, LockConsistency consistency)
+    public Task<(LockResponseType, long)> TryLock(string resource, byte[] owner, int expiresMs, LockConsistency consistency)
     {
-        return locks.TryLock(lockName, lockId, expiresMs, consistency);
+        return locks.TryLock(resource, owner, expiresMs, consistency);
     }
 
     /// <summary>
     /// Passes a TryExtendLock request to the locker actor for the given lock name. 
     /// </summary>
-    /// <param name="lockName"></param>
-    /// <param name="lockId"></param>
+    /// <param name="resource"></param>
+    /// <param name="owner"></param>
     /// <param name="expiresMs"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public Task<(LockResponseType, long)> TryExtendLock(string lockName, string lockId, int expiresMs, LockConsistency consistency)
+    public Task<(LockResponseType, long)> TryExtendLock(string resource, byte[] owner, int expiresMs, LockConsistency consistency)
     {
-        return locks.TryExtendLock(lockName, lockId, expiresMs, consistency);
+        return locks.TryExtendLock(resource, owner, expiresMs, consistency);
     }
 
     /// <summary>
     /// 
     /// </summary>
-    /// <param name="lockName"></param>
-    /// <param name="lockId"></param>
+    /// <param name="resource"></param>
+    /// <param name="owner"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public Task<LockResponseType> TryUnlock(string lockName, string lockId, LockConsistency consistency)
+    public Task<LockResponseType> TryUnlock(string resource, byte[] owner, LockConsistency consistency)
     {
-        return locks.TryUnlock(lockName, lockId, consistency);
+        return locks.TryUnlock(resource, owner, consistency);
     }
 
     /// <summary>
     /// Tries Unlocking the lock with the given name and id.
     /// </summary>
-    /// <param name="lockName"></param>
+    /// <param name="resource"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(string lockName, LockConsistency consistency)
+    public Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(string resource, LockConsistency consistency)
     {
-        return locks.GetLock(lockName, consistency);
+        return locks.GetLock(resource, consistency);
     }
 
     /// <summary>
@@ -147,8 +147,8 @@ public sealed class KahunaManager : IKahuna
     /// <returns></returns>
     public Task<(KeyValueResponseType, long)> TrySetKeyValue(
         string key, 
-        string? value,
-        string? compareValue,
+        byte[]? value,
+        byte[]? compareValue,
         long compareRevision,
         KeyValueFlags flags,
         int expiresMs, 

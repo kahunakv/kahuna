@@ -1,4 +1,5 @@
 
+using Google.Protobuf;
 using Kahuna.Locks;
 using Nixie;
 using Kommander;
@@ -330,7 +331,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         };
         
         if (proposal.Value is not null)
-            kvm.Value = proposal.Value;
+            kvm.Value = ByteString.CopyFrom(proposal.Value);
 
         (bool success, RaftOperationStatus status, long _) = await raft.ReplicateLogs(
             partitionId,

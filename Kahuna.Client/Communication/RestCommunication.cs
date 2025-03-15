@@ -73,12 +73,12 @@ public class RestCommunication : IKahunaCommunication
         };
     }
     
-    public async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string url, string resource, string owner, int expiryTime, LockConsistency consistency)
+    public async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string url, string resource, byte[] owner, int expiryTime, LockConsistency consistency)
     {
         KahunaLockRequest request = new()
         {
-            LockName = resource, 
-            LockId = owner, 
+            Resource = resource, 
+            Owner = owner, 
             ExpiresMs = expiryTime, 
             Consistency = consistency
         };
@@ -116,12 +116,12 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to lock", response.Type);
     }
     
-    public async Task<bool> TryUnlock(string url, string resource, string lockId, LockConsistency consistency)
+    public async Task<bool> TryUnlock(string url, string resource, byte[] owner, LockConsistency consistency)
     {
         KahunaLockRequest request = new()
         {
-            LockName = resource, 
-            LockId = lockId, 
+            Resource = resource, 
+            Owner = owner, 
             Consistency = consistency
         };
         
@@ -158,12 +158,12 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to unlock", response.Type);
     }
     
-    public async Task<(bool, long)> TryExtend(string url, string resource, string lockId, int expiryTime, LockConsistency consistency)
+    public async Task<(bool, long)> TryExtend(string url, string resource, byte[] owner, int expiryTime, LockConsistency consistency)
     {
         KahunaLockRequest request = new()
         {
-            LockName = resource, 
-            LockId = lockId, 
+            Resource = resource, 
+            Owner = owner, 
             ExpiresMs = expiryTime, 
             Consistency = consistency
         };
@@ -231,14 +231,14 @@ public class RestCommunication : IKahunaCommunication
                 throw new KahunaException("Response is null", LockResponseType.Errored);
 
             if (response.Type == LockResponseType.Got)
-                return new(response.Owner ?? "", response.Expires, response.FencingToken);
+                return new(response.Owner, response.Expires, response.FencingToken);
             
         } while (response.Type == LockResponseType.MustRetry);
         
         throw new KahunaException("Failed to get lock information", response.Type);
     }
 
-    public async Task<(bool, long)> TrySetKeyValue(string url, string key, string? value, int expiryTime, KeyValueFlags flags, KeyValueConsistency consistency)
+    public async Task<(bool, long)> TrySetKeyValue(string url, string key, byte[]? value, int expiryTime, KeyValueFlags flags, KeyValueConsistency consistency)
     {
         KahunaSetKeyValueRequest request = new()
         {
@@ -282,7 +282,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value: " + response.Type, response.Type);
     }
 
-    public async Task<(bool, long)> TryCompareValueAndSetKeyValue(string url, string key, string? value, string? compareValue, int expiryTime, KeyValueConsistency consistency)
+    public async Task<(bool, long)> TryCompareValueAndSetKeyValue(string url, string key, byte[]? value, byte[]? compareValue, int expiryTime, KeyValueConsistency consistency)
     {
         KahunaSetKeyValueRequest request = new()
         {
@@ -327,7 +327,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value: " + response.Type, response.Type);
     }
 
-    public async Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string url, string key, string? value, long compareRevision, int expiryTime, KeyValueConsistency consistency)
+    public async Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string url, string key, byte[]? value, long compareRevision, int expiryTime, KeyValueConsistency consistency)
     {
         KahunaSetKeyValueRequest request = new()
         {
@@ -372,7 +372,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value: " + response.Type, response.Type);
     }
 
-    public async Task<(string?, long)> TryGetKeyValue(string url, string key, KeyValueConsistency consistency)
+    public async Task<(byte[]?, long)> TryGetKeyValue(string url, string key, KeyValueConsistency consistency)
     {
         KahunaGetKeyValueRequest request = new()
         {

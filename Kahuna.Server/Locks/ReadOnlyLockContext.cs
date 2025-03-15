@@ -8,13 +8,13 @@ namespace Kahuna.Locks;
 /// </summary>
 public readonly struct ReadOnlyLockContext
 {
-    public string? Owner { get; }
+    public byte[]? Owner { get; }
     
     public long FencingToken { get; }
     
     public HLCTimestamp Expires { get; }
     
-    public ReadOnlyLockContext(string? owner, long fencingToken, HLCTimestamp expires)
+    public ReadOnlyLockContext(byte[]? owner, long fencingToken, HLCTimestamp expires)
     {
         Owner = owner;
         FencingToken = fencingToken;

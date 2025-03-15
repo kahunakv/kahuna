@@ -7,6 +7,7 @@
  */
 
 using System.Collections.Concurrent;
+using Google.Protobuf;
 using Grpc.Net.Client;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
@@ -25,13 +26,13 @@ public class GrpcCommunication : IKahunaCommunication
         this.logger = logger;
     }
     
-    public async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string url, string key, string owner, int expiryTime, LockConsistency consistency)
+    public async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string url, string resource, byte[] owner, int expiryTime, LockConsistency consistency)
     {
         GrpcTryLockRequest request = new()
         {
-            LockName = key, 
-            LockId = owner, 
-            ExpiresMs = expiryTime, 
+            Resource = resource,
+            Owner = ByteString.CopyFrom(owner), 
+            ExpiresMs = expiryTime,
             Consistency = (GrpcLockConsistency)consistency
         };
         
@@ -59,12 +60,12 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to lock", (LockResponseType)response.Type);
     }
     
-    public async Task<bool> TryUnlock(string url, string resource, string owner, LockConsistency consistency)
+    public async Task<bool> TryUnlock(string url, string resource, byte[] owner, LockConsistency consistency)
     {
         GrpcUnlockRequest request = new()
         {
-            LockName = resource, 
-            LockId = owner, 
+            Resource = resource, 
+            Owner = ByteString.CopyFrom(owner), 
             Consistency = (GrpcLockConsistency)consistency
         };
         
@@ -92,13 +93,13 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to unlock", (LockResponseType)response.Type);
     }
     
-    public async Task<(bool, long)> TryExtend(string url, string resource, string owner, int expiryTime, LockConsistency consistency)
+    public async Task<(bool, long)> TryExtend(string url, string resource, byte[] owner, int expiryTime, LockConsistency consistency)
     {
         GrpcExtendLockRequest request = new()
         {
-            LockName = resource, 
-            LockId = owner, 
-            ExpiresMs = expiryTime, 
+            Resource = resource,
+            Owner = ByteString.CopyFrom(owner),
+            ExpiresMs = expiryTime,
             Consistency = (GrpcLockConsistency)consistency
         };
         
@@ -127,7 +128,7 @@ public class GrpcCommunication : IKahunaCommunication
     {
         GrpcGetLockRequest request = new()
         {
-            LockName = resource, 
+            Resource = resource, 
             Consistency = (GrpcLockConsistency)consistency
         };
         
@@ -145,19 +146,19 @@ public class GrpcCommunication : IKahunaCommunication
                 throw new KahunaException("Response is null", LockResponseType.Errored);
                 
             if (response.Type == GrpcLockResponseType.LockResponseTypeGot)
-                return new(response.Owner, new(response.ExpiresPhysical, response.ExpiresCounter), response.FencingToken);
+                return new(response.Owner?.ToByteArray(), new(response.ExpiresPhysical, response.ExpiresCounter), response.FencingToken);
 
         } while (response.Type == GrpcLockResponseType.LockResponseTypeMustRetry);
         
         throw new KahunaException("Failed to get lock information", (LockResponseType)response.Type);
     }
     
-    public async Task<(bool, long)> TrySetKeyValue(string url, string key, string? value, int expiryTime, KeyValueFlags flags, KeyValueConsistency consistency)
+    public async Task<(bool, long)> TrySetKeyValue(string url, string key, byte[]? value, int expiryTime, KeyValueFlags flags, KeyValueConsistency consistency)
     {
         GrpcTrySetKeyValueRequest request = new()
         {
             Key = key, 
-            Value = value,
+            Value = value is not null ? ByteString.CopyFrom(value) : null,
             Flags = (GrpcKeyValueFlags)flags,
             ExpiresMs = expiryTime, 
             Consistency = (GrpcKeyValueConsistency)consistency
@@ -187,13 +188,13 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
-    public async Task<(bool, long)> TryCompareValueAndSetKeyValue(string url, string key, string? value, string? compareValue, int expiryTime, KeyValueConsistency consistency)
+    public async Task<(bool, long)> TryCompareValueAndSetKeyValue(string url, string key, byte[]? value, byte[]? compareValue, int expiryTime, KeyValueConsistency consistency)
     {
         GrpcTrySetKeyValueRequest request = new()
         {
             Key = key, 
-            Value = value,
-            CompareValue = compareValue,
+            Value = value is not null ? ByteString.CopyFrom(value) : null,
+            CompareValue = compareValue is not null ? ByteString.CopyFrom(compareValue) : null,
             Flags = GrpcKeyValueFlags.KeyvalueFlagsSetIfEqualToValue,
             ExpiresMs = expiryTime, 
             Consistency = (GrpcKeyValueConsistency)consistency
@@ -223,12 +224,12 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
-    public async Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string url, string key, string? value, long compareRevision, int expiryTime, KeyValueConsistency consistency)
+    public async Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string url, string key, byte[]? value, long compareRevision, int expiryTime, KeyValueConsistency consistency)
     {
         GrpcTrySetKeyValueRequest request = new()
         {
             Key = key, 
-            Value = value,
+            Value = value is not null ? ByteString.CopyFrom(value) : null,
             CompareRevision = compareRevision,
             Flags = GrpcKeyValueFlags.KeyvalueFlagsSetIfEqualToRevision,
             ExpiresMs = expiryTime, 
@@ -259,7 +260,7 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
-    public async Task<(string?, long)> TryGetKeyValue(string url, string key, KeyValueConsistency consistency)
+    public async Task<(byte[]?, long)> TryGetKeyValue(string url, string key, KeyValueConsistency consistency)
     {
         GrpcTryGetKeyValueRequest request = new()
         {
@@ -283,7 +284,7 @@ public class GrpcCommunication : IKahunaCommunication
             switch (response.Type)
             {
                 case GrpcKeyValueResponseType.KeyvalueResponseTypeGot:
-                    return (response.Value, response.Revision);
+                    return (response.Value.ToArray(), response.Revision);
                 
                 case GrpcKeyValueResponseType.KeyvalueResponseTypeDoesNotExist:
                     return (null, 0);
@@ -331,7 +332,12 @@ public class GrpcCommunication : IKahunaCommunication
     
     public async Task<(bool, long)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueConsistency consistency)
     {
-        GrpcTryExtendKeyValueRequest request = new() { Key = key, ExpiresMs = expiresMs, Consistency = (GrpcKeyValueConsistency)consistency };
+        GrpcTryExtendKeyValueRequest request = new()
+        {
+            Key = key, 
+            ExpiresMs = expiresMs, 
+            Consistency = (GrpcKeyValueConsistency)consistency
+        };
         
         GrpcTryExtendKeyValueResponse? response;
         
@@ -367,7 +373,10 @@ public class GrpcCommunication : IKahunaCommunication
             channel = GrpcChannel.ForAddress(url, new() { 
                 HttpHandler = new SocketsHttpHandler
                 {
-                    EnableMultipleHttp2Connections = true
+                    EnableMultipleHttp2Connections = true,
+                    PooledConnectionIdleTimeout = TimeSpan.FromMinutes(10),
+                    KeepAlivePingDelay = TimeSpan.FromSeconds(30),
+                    KeepAlivePingTimeout = TimeSpan.FromSeconds(5)
                 } 
             });
                 

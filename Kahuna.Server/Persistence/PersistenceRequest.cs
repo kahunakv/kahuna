@@ -12,7 +12,7 @@ public sealed class PersistenceRequest : IConsistentHashable
     
     public string Key { get; }
     
-    public string? Value { get; }
+    public byte[]? Value { get; }
     
     public long Revision { get; }
     
@@ -27,7 +27,7 @@ public sealed class PersistenceRequest : IConsistentHashable
     public PersistenceRequest(
         PersistenceRequestType type,
         string key, 
-        string? value, 
+        byte[]? value, 
         long revision, 
         long expiresLogical,
         uint expiresCounter, 

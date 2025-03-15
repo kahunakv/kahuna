@@ -216,7 +216,7 @@ public class TestLocks
         KahunaLockInfo? lockInfo = await client.GetLockInfo(lockName, consistency);
         Assert.NotNull(lockInfo);
         
-        Assert.Equal(lockInfo.Owner, kLock.LockId);
+        Assert.Equal(lockInfo.Owner, kLock.Owner);
         HLCTimestamp expires = lockInfo.Expires;
         
         (extended, fencingToken) = await kLock.TryExtend(TimeSpan.FromSeconds(10));
@@ -226,7 +226,7 @@ public class TestLocks
         lockInfo = await client.GetLockInfo(lockName, consistency);
         Assert.NotNull(lockInfo);
         
-        Assert.Equal(lockInfo.Owner, kLock.LockId);
+        Assert.Equal(lockInfo.Owner, kLock.Owner);
         Assert.True(lockInfo.Expires - expires > TimeSpan.Zero);
         
         //Assert.Equal(lockInfo.Expires > DateTime.UtcNow, true);
@@ -255,7 +255,7 @@ public class TestLocks
         KahunaLockInfo? lockInfo = await kLock.GetInfo();
         Assert.NotNull(lockInfo);
         
-        Assert.Equal(lockInfo.Owner, kLock.LockId);
+        Assert.Equal(lockInfo.Owner, kLock.Owner);
         HLCTimestamp expires = lockInfo.Expires;
         
         (extended, fencingToken) = await kLock.TryExtend(TimeSpan.FromSeconds(10));
@@ -265,7 +265,7 @@ public class TestLocks
         lockInfo = await kLock.GetInfo();
         Assert.NotNull(lockInfo);
         
-        Assert.Equal(lockInfo.Owner, kLock.LockId);
+        Assert.Equal(lockInfo.Owner, kLock.Owner);
         Assert.True(lockInfo.Expires - expires > TimeSpan.Zero);
         
         //Assert.Equal(lockInfo.Expires > DateTime.UtcNow, true);

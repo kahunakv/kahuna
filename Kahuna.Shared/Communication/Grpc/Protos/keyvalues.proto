@@ -9,8 +9,8 @@ service KeyValuer {
 
 message GrpcTrySetKeyValueRequest {
   string Key = 1;
-  optional string Value = 2;
-  optional string CompareValue = 3;
+  optional bytes Value = 2;
+  optional bytes CompareValue = 3;
   int64 CompareRevision = 4;
   GrpcKeyValueFlags Flags = 5;
   int32 ExpiresMs = 6;
@@ -54,7 +54,7 @@ message GrpcTryGetKeyValueRequest {
 message GrpcTryGetKeyValueResponse {
   optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
-  optional string Value = 3;
+  optional bytes Value = 3;
   int64 Revision = 4;
   int64 ExpiresPhysical = 5;
   uint32 ExpiresCounter = 6;

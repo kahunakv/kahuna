@@ -1,4 +1,5 @@
 
+using Google.Protobuf;
 using Grpc.Core;
 using Grpc.Net.Client;
 using Kahuna.Configuration;
@@ -28,13 +29,13 @@ public class LocksService : Locker.LockerBase
     
     public override async Task<GrpcTryLockResponse> TryLock(GrpcTryLockRequest request, ServerCallContext context)
     {
-        if (string.IsNullOrEmpty(request.LockName))
+        if (string.IsNullOrEmpty(request.Resource))
             return new()
             {
                 Type = GrpcLockResponseType.LockResponseTypeInvalidInput
             };
         
-        if (string.IsNullOrEmpty(request.LockId))
+        if (request.Owner is null)
             return new()
             {
                 Type = GrpcLockResponseType.LockResponseTypeInvalidInput
@@ -46,11 +47,11 @@ public class LocksService : Locker.LockerBase
                 Type = GrpcLockResponseType.LockResponseTypeInvalidInput
             };
         
-        int partitionId = raft.GetPartitionKey(request.LockName);
+        int partitionId = raft.GetPartitionKey(request.Resource);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, context.CancellationToken))
         {
-            (LockResponseType response, long fencingToken) = await locks.TryLock(request.LockName, request.LockId, request.ExpiresMs, (LockConsistency)request.Consistency);
+            (LockResponseType response, long fencingToken) = await locks.TryLock(request.Resource, request.Owner?.ToByteArray() ?? [], request.ExpiresMs, (LockConsistency)request.Consistency);
 
             return new()
             {
@@ -66,7 +67,7 @@ public class LocksService : Locker.LockerBase
                 Type = GrpcLockResponseType.LockResponseTypeMustRetry
             };
         
-        logger.LogDebug("LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
+        logger.LogDebug("LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.Resource, partitionId, leader);
         
         GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
         
@@ -79,13 +80,13 @@ public class LocksService : Locker.LockerBase
     
     public override async Task<GrpcExtendLockResponse> TryExtendLock(GrpcExtendLockRequest request, ServerCallContext context)
     {
-        if (string.IsNullOrEmpty(request.LockName))
+        if (string.IsNullOrEmpty(request.Resource))
             return new()
             {
                 Type = GrpcLockResponseType.LockResponseTypeInvalidInput
             };
         
-        if (string.IsNullOrEmpty(request.LockId))
+        if (request.Owner is null)
             return new()
             {
                 Type = GrpcLockResponseType.LockResponseTypeInvalidInput
@@ -97,11 +98,11 @@ public class LocksService : Locker.LockerBase
                 Type = GrpcLockResponseType.LockResponseTypeInvalidInput
             };
         
-        int partitionId = raft.GetPartitionKey(request.LockName);
+        int partitionId = raft.GetPartitionKey(request.Resource);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, context.CancellationToken))
         {
-            (LockResponseType response, long fencingToken) = await locks.TryExtendLock(request.LockName, request.LockId, request.ExpiresMs, (LockConsistency)request.Consistency);
+            (LockResponseType response, long fencingToken) = await locks.TryExtendLock(request.Resource, request.Owner?.ToByteArray() ?? [], request.ExpiresMs, (LockConsistency)request.Consistency);
 
             return new()
             {
@@ -117,7 +118,7 @@ public class LocksService : Locker.LockerBase
                 Type = GrpcLockResponseType.LockResponseTypeMustRetry
             };
         
-        logger.LogDebug("EXTEND-LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
+        logger.LogDebug("EXTEND-LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.Resource, partitionId, leader);
         
         GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
         
@@ -130,23 +131,23 @@ public class LocksService : Locker.LockerBase
     
     public override async Task<GrpcUnlockResponse> Unlock(GrpcUnlockRequest request, ServerCallContext context)
     {
-        if (string.IsNullOrEmpty(request.LockName))
+        if (string.IsNullOrEmpty(request.Resource))
             return new()
             {
                 Type = GrpcLockResponseType.LockResponseTypeInvalidInput
             };
         
-        if (string.IsNullOrEmpty(request.LockId))
+        if (request.Owner is null)
             return new()
             {
                 Type = GrpcLockResponseType.LockResponseTypeInvalidInput
             };
         
-        int partitionId = raft.GetPartitionKey(request.LockName);
+        int partitionId = raft.GetPartitionKey(request.Resource);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, context.CancellationToken))
         {
-            LockResponseType response = await locks.TryUnlock(request.LockName, request.LockId, (LockConsistency)request.Consistency);
+            LockResponseType response = await locks.TryUnlock(request.Resource, request.Owner?.ToByteArray() ?? [], (LockConsistency)request.Consistency);
 
             return new()
             {
@@ -161,7 +162,7 @@ public class LocksService : Locker.LockerBase
                 Type = GrpcLockResponseType.LockResponseTypeMustRetry
             };
         
-        logger.LogDebug("UNLOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
+        logger.LogDebug("UNLOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.Resource, partitionId, leader);
         
         GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
         
@@ -174,17 +175,17 @@ public class LocksService : Locker.LockerBase
     
     public override async Task<GrpcGetLockResponse> GetLock(GrpcGetLockRequest request, ServerCallContext context)
     {
-        if (string.IsNullOrEmpty(request.LockName))
+        if (string.IsNullOrEmpty(request.Resource))
             return new()
             {
                 Type = GrpcLockResponseType.LockResponseTypeInvalidInput
             };
         
-        int partitionId = raft.GetPartitionKey(request.LockName);
+        int partitionId = raft.GetPartitionKey(request.Resource);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, context.CancellationToken))
         {
-            (LockResponseType type, ReadOnlyLockContext? lockContext) = await locks.GetLock(request.LockName, (LockConsistency)request.Consistency);
+            (LockResponseType type, ReadOnlyLockContext? lockContext) = await locks.GetLock(request.Resource, (LockConsistency)request.Consistency);
             if (type != LockResponseType.Got)
                 return new()
                 {
@@ -195,7 +196,7 @@ public class LocksService : Locker.LockerBase
             {
                 ServedFrom = "",
                 Type = (GrpcLockResponseType)type,
-                Owner = lockContext?.Owner ?? "",
+                Owner = lockContext?.Owner is not null ? ByteString.CopyFrom(lockContext?.Owner) : null,
                 FencingToken = lockContext?.FencingToken ?? 0,
                 ExpiresPhysical = lockContext?.Expires.L ?? 0,
                 ExpiresCounter = lockContext?.Expires.C ?? 0,
@@ -209,7 +210,7 @@ public class LocksService : Locker.LockerBase
                 Type = GrpcLockResponseType.LockResponseTypeMustRetry
             };
         
-        logger.LogDebug("GET-LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.LockName, partitionId, leader);
+        logger.LogDebug("GET-LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.Resource, partitionId, leader);
         
         GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
         

@@ -7,7 +7,7 @@ public readonly struct LockProposal
 {
     public string Resource { get; } 
     
-    public string? Owner { get; } 
+    public byte[]? Owner { get; } 
     
     public long FencingToken { get; }
     
@@ -19,7 +19,7 @@ public readonly struct LockProposal
     
     public LockProposal(
         string resource, 
-        string? owner, 
+        byte[]? owner, 
         long fencingToken,
         HLCTimestamp expires, 
         HLCTimestamp lastUsed,

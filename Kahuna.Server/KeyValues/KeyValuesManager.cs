@@ -126,7 +126,7 @@ public sealed class KeyValuesManager
                     PersistenceResponse? response = await persistenceActorRouter.Ask(new(
                         PersistenceRequestType.StoreKeyValue,
                         keyValueMessage.Key,
-                        keyValueMessage.Value,
+                        keyValueMessage.Value?.ToByteArray(),
                         keyValueMessage.Revision,
                         keyValueMessage.ExpireLogical,
                         keyValueMessage.ExpireCounter,
@@ -145,7 +145,7 @@ public sealed class KeyValuesManager
                     PersistenceResponse? response = await persistenceActorRouter.Ask(new(
                         PersistenceRequestType.StoreKeyValue,
                         keyValueMessage.Key,
-                        keyValueMessage.Value,
+                        keyValueMessage.Value?.ToByteArray(),
                         keyValueMessage.Revision,
                         keyValueMessage.ExpireLogical,
                         keyValueMessage.ExpireCounter,
@@ -164,7 +164,7 @@ public sealed class KeyValuesManager
                     PersistenceResponse? response = await persistenceActorRouter.Ask(new(
                         PersistenceRequestType.StoreKeyValue,
                         keyValueMessage.Key,
-                        keyValueMessage.Value,
+                        keyValueMessage.Value?.ToByteArray(),
                         keyValueMessage.Revision,
                         keyValueMessage.ExpireLogical,
                         keyValueMessage.ExpireCounter,
@@ -217,8 +217,8 @@ public sealed class KeyValuesManager
     /// <returns></returns>
     public async Task<(KeyValueResponseType, long)> TrySetKeyValue(
         string key, 
-        string? value, 
-        string? compareValue,
+        byte[]? value, 
+        byte[]? compareValue,
         long compareRevision,
         KeyValueFlags flags,
         int expiresMs, 

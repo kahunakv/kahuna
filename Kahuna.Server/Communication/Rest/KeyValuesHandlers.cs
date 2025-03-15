@@ -17,13 +17,13 @@ public static class KeyValuesHandlers
         app.MapPost("/v1/kv/try-set", async (KahunaSetKeyValueRequest request, IKahuna keyValues, IRaft raft, ILogger<IKahuna> logger) =>
         {
             if (string.IsNullOrEmpty(request.Key))
-                return new() { Type = KeyValueResponseType.Errored };
+                return new() { Type = KeyValueResponseType.InvalidInput };
 
-            if (string.IsNullOrEmpty(request.Value))
-                return new() { Type = KeyValueResponseType.Errored };
+            if (request.Value is null)
+                return new() { Type = KeyValueResponseType.InvalidInput };
             
             if (request.ExpiresMs <= 0)
-                return new() { Type = KeyValueResponseType.Errored };
+                return new() { Type = KeyValueResponseType.InvalidInput };
             
             int partitionId = raft.GetPartitionKey(request.Key);
 
@@ -192,7 +192,7 @@ public static class KeyValuesHandlers
                 {
                     ServedFrom = "",
                     Type = type,
-                    Value = keyValueContext?.Value ?? "",
+                    Value = keyValueContext?.Value,
                     Revision = keyValueContext?.Revision ?? 0,
                     Expires = keyValueContext?.Expires ?? HLCTimestamp.Zero
                 };

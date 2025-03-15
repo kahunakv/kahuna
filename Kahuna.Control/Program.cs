@@ -7,6 +7,7 @@
  */
 
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using CommandLine;
 using DotNext.Threading.Tasks;
@@ -103,7 +104,7 @@ Console.CancelKeyPress += delegate
 
     foreach (KeyValuePair<string, KahunaLock> kvp in locks)
     {
-        AnsiConsole.MarkupLine("[yellow]Disposing lock {0}...[/]", kvp.Value.LockId);
+        AnsiConsole.MarkupLine("[yellow]Disposing lock {0}...[/]", kvp.Value.Owner);
 
         kvp.Value.DisposeAsync().Wait();
     }
@@ -133,7 +134,7 @@ while (true)
             {
                 try
                 {
-                    AnsiConsole.MarkupLine("[yellow]Disposing lock {0}...[/]", kvp.Value.LockId);
+                    AnsiConsole.MarkupLine("[yellow]Disposing lock {0}...[/]", kvp.Value.Owner);
 
                     await kvp.Value.DisposeAsync();
                 }
@@ -219,7 +220,7 @@ while (true)
 
             if (kahunaLock.IsAcquired)
             {
-                AnsiConsole.MarkupLine("[cyan]acquired {0} rev:{1}[/]\n", Markup.Escape(kahunaLock.LockId), Markup.Escape(kahunaLock.FencingToken.ToString()));
+                AnsiConsole.MarkupLine("[cyan]acquired {0} rev:{1}[/]\n", Markup.Escape(Encoding.UTF8.GetString(kahunaLock.Owner)), Markup.Escape(kahunaLock.FencingToken.ToString()));
                 
                 locks.TryAdd(parts[1], kahunaLock);
             }
@@ -262,10 +263,10 @@ while (true)
 
             if (locks.TryGetValue(parts[1], out KahunaLock? kahunaLock))
             {
-                bool success = await connection.Unlock(parts[1], kahunaLock.LockId);
+                bool success = await connection.Unlock(parts[1], kahunaLock.Owner);
 
                 if (success)
-                    AnsiConsole.MarkupLine("[cyan]got {0} rev:{1}[/]", Markup.Escape(kahunaLock.LockId), kahunaLock.FencingToken);
+                    AnsiConsole.MarkupLine("[cyan]got {0} rev:{1}[/]", Markup.Escape(Encoding.UTF8.GetString(kahunaLock.Owner)), kahunaLock.FencingToken);
                 else
                     AnsiConsole.MarkupLine("[yellow]not acquired[/]");
             }
@@ -288,7 +289,7 @@ while (true)
                 (bool success, long fencingToken) = await kahunaLock.TryExtend(int.Parse(parts[2]));
 
                 if (success)
-                    AnsiConsole.MarkupLine("[cyan]got {0} rev:{1}[/]", Markup.Escape(kahunaLock.LockId), fencingToken);
+                    AnsiConsole.MarkupLine("[cyan]got {0} rev:{1}[/]", Markup.Escape(Encoding.UTF8.GetString(kahunaLock.Owner)), fencingToken);
                 else
                     AnsiConsole.MarkupLine("[yellow]not acquired[/]");
             }
@@ -368,7 +369,7 @@ async Task SetKey(string commandTrim, KeyValueConsistency consistency)
             expires = int.Parse(parts[3]);
     }
 
-    (bool success, long revision) = await connection.SetKeyValue(parts[1], parts[2], expires, flags, consistency);
+    (bool success, long revision) = await connection.SetKeyValue(parts[1], Encoding.UTF8.GetBytes(parts[2]), expires, flags, consistency);
             
     if (success)
         AnsiConsole.MarkupLine("r{0} [cyan]ok[/] {1}ms\n", revision, stopwatch.ElapsedMilliseconds);
@@ -382,10 +383,10 @@ async Task GetKey(string commandTrim, KeyValueConsistency consistency)
             
     string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
 
-    (string? value, long revision) = await connection.GetKeyValue(parts[1], consistency);
+    (byte[]? value, long revision) = await connection.GetKeyValue(parts[1], consistency);
             
     if (value is not null)
-        AnsiConsole.MarkupLine("r{0} [cyan]{1}[/] {2}ms\n", revision, Markup.Escape(value), stopwatch.ElapsedMilliseconds);
+        AnsiConsole.MarkupLine("r{0} [cyan]{1}[/] {2}ms\n", revision, Markup.Escape(Encoding.UTF8.GetString(value)), stopwatch.ElapsedMilliseconds);
     else
         AnsiConsole.MarkupLine("r{0} [yellow]null[/] {1}ms\n", revision, stopwatch.ElapsedMilliseconds);
 }

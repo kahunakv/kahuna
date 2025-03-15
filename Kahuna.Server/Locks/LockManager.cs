@@ -129,7 +129,7 @@ public sealed class LockManager
                     PersistenceResponse? response = await persistenceActorRouter.Ask(new(
                         PersistenceRequestType.StoreLock,
                         lockMessage.Resource,
-                        lockMessage.Owner,
+                        lockMessage.Owner?.ToByteArray(),
                         lockMessage.FencingToken,
                         lockMessage.ExpireLogical,
                         lockMessage.ExpireCounter,
@@ -148,7 +148,7 @@ public sealed class LockManager
                     PersistenceResponse? response = await persistenceActorRouter.Ask(new(
                         PersistenceRequestType.StoreLock,
                         lockMessage.Resource,
-                        lockMessage.Owner,
+                        lockMessage.Owner?.ToByteArray(),
                         lockMessage.FencingToken,
                         lockMessage.ExpireLogical,
                         lockMessage.ExpireCounter,
@@ -167,7 +167,7 @@ public sealed class LockManager
                     PersistenceResponse? response = await persistenceActorRouter.Ask(new(
                         PersistenceRequestType.StoreLock,
                         lockMessage.Resource,
-                        lockMessage.Owner,
+                        lockMessage.Owner?.ToByteArray(),
                         lockMessage.FencingToken,
                         lockMessage.ExpireLogical,
                         lockMessage.ExpireCounter,
@@ -210,17 +210,17 @@ public sealed class LockManager
     /// <summary>
     /// Passes a TryLock request to the locker actor for the given lock name.
     /// </summary>
-    /// <param name="lockName"></param>
-    /// <param name="lockId"></param>
+    /// <param name="resource"></param>
+    /// <param name="owner"></param>
     /// <param name="expiresMs"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<(LockResponseType, long)> TryLock(string lockName, string lockId, int expiresMs, LockConsistency consistency)
+    public async Task<(LockResponseType, long)> TryLock(string resource, byte[] owner, int expiresMs, LockConsistency consistency)
     {
         LockRequest request = new(
             LockRequestType.TryLock, 
-            lockName, 
-            lockId, 
+            resource, 
+            owner, 
             expiresMs, 
             consistency
         );
@@ -238,17 +238,17 @@ public sealed class LockManager
     /// <summary>
     /// Passes a TryExtendLock request to the locker actor for the given lock name.
     /// </summary>
-    /// <param name="lockName"></param>
-    /// <param name="lockId"></param>
+    /// <param name="resource"></param>
+    /// <param name="owners"></param>
     /// <param name="expiresMs"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<(LockResponseType, long)> TryExtendLock(string lockName, string lockId, int expiresMs, LockConsistency consistency)
+    public async Task<(LockResponseType, long)> TryExtendLock(string resource, byte[] owner, int expiresMs, LockConsistency consistency)
     {
         LockRequest request = new(
             LockRequestType.TryExtendLock, 
-            lockName, 
-            lockId, 
+            resource, 
+            owner, 
             expiresMs, 
             consistency
         );
@@ -266,16 +266,16 @@ public sealed class LockManager
     /// <summary>
     /// Passes a TryUnlock request to the locker actor for the given lock name.
     /// </summary>
-    /// <param name="lockName"></param>
-    /// <param name="lockId"></param>
+    /// <param name="resource"></param>
+    /// <param name="owner"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<LockResponseType> TryUnlock(string lockName, string lockId, LockConsistency consistency)
+    public async Task<LockResponseType> TryUnlock(string resource, byte[] owner, LockConsistency consistency)
     {
         LockRequest request = new(
             LockRequestType.TryUnlock, 
-            lockName, 
-            lockId, 
+            resource, 
+            owner, 
             0, 
             consistency
         );
@@ -293,15 +293,15 @@ public sealed class LockManager
     /// <summary>
     /// Passes a Get request to the locker actor for the given lock name.
     /// </summary>
-    /// <param name="lockName"></param>
+    /// <param name="resource"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(string lockName, LockConsistency consistency)
+    public async Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(string resource, LockConsistency consistency)
     {
         LockRequest request = new(
             LockRequestType.Get, 
-            lockName, 
-            "", 
+            resource, 
+            null, 
             0, 
             consistency
         );

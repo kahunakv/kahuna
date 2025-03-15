@@ -5,13 +5,13 @@ namespace Kahuna.KeyValues;
 
 public readonly struct ReadOnlyKeyValueContext
 {
-    public string? Value { get; }
+    public byte[]? Value { get; }
     
     public long Revision { get; }
     
     public HLCTimestamp Expires { get; }
     
-    public ReadOnlyKeyValueContext(string? value, long revision, HLCTimestamp expires)
+    public ReadOnlyKeyValueContext(byte[]? value, long revision, HLCTimestamp expires)
     {
         Value = value;
         Revision = revision;

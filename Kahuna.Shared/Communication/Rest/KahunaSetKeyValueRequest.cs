@@ -10,10 +10,10 @@ public sealed class KahunaSetKeyValueRequest
     public string? Key { get; set; }
     
     [JsonPropertyName("value")]
-    public string? Value { get; set; }
+    public byte[]? Value { get; set; }
     
     [JsonPropertyName("compareValue")]
-    public string? CompareValue { get; set; }
+    public byte[]? CompareValue { get; set; }
     
     [JsonPropertyName("compareRevision")]
     public long CompareRevision { get; set; }

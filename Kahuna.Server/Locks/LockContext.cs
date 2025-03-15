@@ -11,7 +11,7 @@ public sealed class LockContext
     /// <summary>
     /// The current owner of the lock.
     /// </summary>
-    public string? Owner { get; set; }
+    public byte[]? Owner { get; set; }
     
     /// <summary>
     /// HLC timestamp when the lock will expire

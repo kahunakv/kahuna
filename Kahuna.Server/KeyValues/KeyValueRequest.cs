@@ -14,9 +14,9 @@ public readonly struct KeyValueRequest : IConsistentHashable
     
     public string Key { get; }
     
-    public string? Value { get; }
+    public byte[]? Value { get; }
     
-    public string? CompareValue { get; }
+    public byte[]? CompareValue { get; }
     
     public long CompareRevision { get; }
     
@@ -37,8 +37,8 @@ public readonly struct KeyValueRequest : IConsistentHashable
     public KeyValueRequest(
         KeyValueRequestType type, 
         string key, 
-        string? value, 
-        string? compareValue,
+        byte[]? value, 
+        byte[]? compareValue,
         long compareRevision,
         KeyValueFlags flags,
         int expiresMs, 

@@ -46,7 +46,7 @@ public class SqlitePersistence : IPersistence
             const string createTableQuery = """
             CREATE TABLE IF NOT EXISTS locks (
                 resource STRING PRIMARY KEY, 
-                owner STRING, 
+                owner BLOB, 
                 expiresLogical INT, 
                 expiresCounter INT, 
                 fencingToken INT, 
@@ -61,7 +61,7 @@ public class SqlitePersistence : IPersistence
             const string createTableQuery2 = """
             CREATE TABLE IF NOT EXISTS keys (
                 key STRING PRIMARY KEY, 
-                value STRING, 
+                value BLOB, 
                 expiresLogical INT, 
                 expiresCounter INT, 
                 revision INT,
@@ -87,7 +87,7 @@ public class SqlitePersistence : IPersistence
         }
     }
     
-    public async Task<bool> StoreLock(string resource, string? owner, long expiresPhysical, uint expiresCounter, long fencingToken, int consistency, int state)
+    public async Task<bool> StoreLock(string resource, byte[]? owner, long expiresPhysical, uint expiresCounter, long fencingToken, int consistency, int state)
     {
         try
         {
@@ -127,7 +127,7 @@ public class SqlitePersistence : IPersistence
                 ex.Message, 
                 ex.StackTrace, 
                 resource, 
-                owner, 
+                owner?.Length, 
                 expiresPhysical, 
                 expiresCounter, 
                 fencingToken, 
@@ -139,7 +139,7 @@ public class SqlitePersistence : IPersistence
         return false;
     }
     
-    public async Task<bool> StoreKeyValue(string key, string? value, long expiresPhysical, uint expiresCounter, long revision, int consistency, int state)
+    public async Task<bool> StoreKeyValue(string key, byte[]? value, long expiresPhysical, uint expiresCounter, long revision, int consistency, int state)
     {
         try
         {
@@ -179,7 +179,7 @@ public class SqlitePersistence : IPersistence
                 ex.Message, 
                 ex.StackTrace, 
                 key, 
-                value, 
+                value?.Length, 
                 expiresPhysical, 
                 expiresCounter, 
                 revision, 
@@ -207,7 +207,7 @@ public class SqlitePersistence : IPersistence
             while (reader.Read())
                 return new()
                 {
-                    Owner = reader.IsDBNull(0) ? null : reader.GetString(0),
+                    Owner = reader.IsDBNull(0) ? null : (byte[])reader[0],
                     Expires = new(reader.IsDBNull(1) ? 0 : reader.GetInt64(1), reader.IsDBNull(2) ? 0 : (uint)reader.GetInt64(2)),
                     FencingToken = reader.IsDBNull(3) ? 0 : reader.GetInt64(3)
                 };
@@ -236,7 +236,7 @@ public class SqlitePersistence : IPersistence
             while (reader.Read())
                 return new()
                 {
-                    Value = reader.IsDBNull(0) ? null : reader.GetString(0),
+                    Value = reader.IsDBNull(0) ? null : (byte[])reader[0],
                     Revision = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
                     Expires = new(reader.IsDBNull(2) ? 0 : reader.GetInt64(2), reader.IsDBNull(3) ? 0 : (uint)reader.GetInt64(3))
                 };

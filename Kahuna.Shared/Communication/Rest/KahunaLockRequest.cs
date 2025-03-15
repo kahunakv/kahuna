@@ -7,10 +7,10 @@ namespace Kahuna.Shared.Communication.Rest;
 public sealed class KahunaLockRequest
 {
     [JsonPropertyName("lockName")]
-    public string? LockName { get; set; }
+    public string? Resource { get; set; }
     
     [JsonPropertyName("lockId")]
-    public string? LockId { get; set; }
+    public byte[]? Owner { get; set; }
     
     [JsonPropertyName("expiresMs")]
     public int ExpiresMs { get; set; }

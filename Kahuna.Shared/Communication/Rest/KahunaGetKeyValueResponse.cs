@@ -14,7 +14,7 @@ public sealed class KahunaGetKeyValueResponse
     public KeyValueResponseType Type { get; set; }
     
     [JsonPropertyName("value")]
-    public string? Value { get; set; }
+    public byte[]? Value { get; set; }
     
     [JsonPropertyName("revision")]
     public long Revision { get; set; }

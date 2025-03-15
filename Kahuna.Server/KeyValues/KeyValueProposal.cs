@@ -7,7 +7,7 @@ public readonly struct KeyValueProposal
 {
     public string Key { get; } 
     
-    public string? Value { get; } 
+    public byte[]? Value { get; } 
     
     public long Revision { get; }
     
@@ -19,7 +19,7 @@ public readonly struct KeyValueProposal
     
     public KeyValueProposal(
         string key, 
-        string? value, 
+        byte[]? value, 
         long revision,
         HLCTimestamp expires, 
         HLCTimestamp lastUsed,

@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using Google.Protobuf;
 using Grpc.Core;
 using Grpc.Net.Client;
 using Kahuna.Configuration;
@@ -66,8 +67,8 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         {
             (KeyValueResponseType response, long revision) = await keyValues.TrySetKeyValue(
                 request.Key, 
-                request.Value, 
-                request.CompareValue,
+                request.Value?.ToByteArray(),
+                request.CompareValue?.ToByteArray(),
                 request.CompareRevision,
                 (KeyValueFlags)request.Flags,
                 request.ExpiresMs, 
@@ -151,7 +152,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
     }
     
     /// <summary>
-    /// Receives requests the key/value "delete" service
+    /// Receives requests for the key/value "delete" service
     /// </summary>
     /// <param name="request"></param>
     /// <param name="context"></param>
@@ -195,6 +196,12 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         return remoteResponse;
     }
     
+    /// <summary>
+    /// Receives requests for the key/value "get" service 
+    /// </summary>
+    /// <param name="request"></param>
+    /// <param name="context"></param>
+    /// <returns></returns>
     public override async Task<GrpcTryGetKeyValueResponse> TryGetKeyValue(GrpcTryGetKeyValueRequest request, ServerCallContext context)
     {
         if (string.IsNullOrEmpty(request.Key))
@@ -208,20 +215,21 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
         {
             (KeyValueResponseType type, ReadOnlyKeyValueContext? keyValueContext) = await keyValues.TryGetValue(request.Key, (KeyValueConsistency)request.Consistency);
-            if (type != KeyValueResponseType.Get)
+            
+            if (keyValueContext is not null)
                 return new()
                 {
-                    Type = (GrpcKeyValueResponseType)type
+                    ServedFrom = "",
+                    Type = (GrpcKeyValueResponseType)type,
+                    Value = keyValueContext?.Value is not null ? ByteString.CopyFrom(keyValueContext?.Value) : null,
+                    Revision = keyValueContext?.Revision ?? 0,
+                    ExpiresPhysical = keyValueContext?.Expires.L ?? 0,
+                    ExpiresCounter = keyValueContext?.Expires.C ?? 0,
                 };
-
+            
             return new()
             {
-                ServedFrom = "",
-                Type = (GrpcKeyValueResponseType)type,
-                Value = keyValueContext?.Value ?? "",
-                Revision = keyValueContext?.Revision ?? 0,
-                ExpiresPhysical = keyValueContext?.Expires.L ?? 0,
-                ExpiresCounter = keyValueContext?.Expires.C ?? 0,
+                Type = (GrpcKeyValueResponseType)type
             };
         }
             

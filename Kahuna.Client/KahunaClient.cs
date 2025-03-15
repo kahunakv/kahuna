@@ -7,6 +7,7 @@
  */
 
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Flurl.Http;
@@ -56,12 +57,12 @@ public class KahunaClient
         this.communication = (communication ?? new GrpcCommunication(logger));
     }
     
-    private async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string resource, string owner, TimeSpan expiryTime, LockConsistency consistency)
+    private async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string resource, byte[] owner, TimeSpan expiryTime, LockConsistency consistency)
     {
         return await communication.TryAcquireLock(GetRoundRobinUrl(), resource, owner, (int)expiryTime.TotalMilliseconds, consistency).ConfigureAwait(false);
     }
     
-    private async Task<(KahunaLockAcquireResult, string?, LockConsistency, long)> PeriodicallyTryAcquireLock(
+    private async Task<(KahunaLockAcquireResult, byte[]?, LockConsistency, long)> PeriodicallyTryAcquireLock(
         string resource, 
         TimeSpan expiryTime, 
         TimeSpan wait, 
@@ -71,7 +72,7 @@ public class KahunaClient
     {
         try
         {
-            string owner = Guid.NewGuid().ToString("N");
+            byte[] owner = Guid.NewGuid().ToByteArray();
             
             Stopwatch stopWatch = Stopwatch.StartNew();
             
@@ -108,11 +109,11 @@ public class KahunaClient
     /// <param name="expiryTime"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    private async Task<(KahunaLockAcquireResult, string?, LockConsistency, long)> SingleTimeTryAcquireLock(string resource, TimeSpan expiryTime, LockConsistency consistency)
+    private async Task<(KahunaLockAcquireResult, byte[]?, LockConsistency, long)> SingleTimeTryAcquireLock(string resource, TimeSpan expiryTime, LockConsistency consistency)
     {
         try
         {
-            string owner = Guid.NewGuid().ToString("N");
+            byte[] owner = Guid.NewGuid().ToByteArray();
 
             (KahunaLockAcquireResult result, long fencingToken) = await TryAcquireLock(resource, owner, expiryTime, consistency).ConfigureAwait(false);
 
@@ -189,7 +190,7 @@ public class KahunaClient
     /// <param name="duration"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<(bool, long)> TryExtend(string resource, string owner, TimeSpan duration, LockConsistency consistency = LockConsistency.Ephemeral)
+    public async Task<(bool, long)> TryExtend(string resource, byte[] owner, TimeSpan duration, LockConsistency consistency = LockConsistency.Ephemeral)
     {
         try
         {
@@ -211,11 +212,55 @@ public class KahunaClient
     /// <param name="durationMs"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<(bool, long)> TryExtend(string resource, string owner, int durationMs, LockConsistency consistency = LockConsistency.Ephemeral)
+    public async Task<(bool, long)> TryExtend(string resource, byte[] owner, int durationMs, LockConsistency consistency = LockConsistency.Ephemeral)
     {
         try
         {
             return await communication.TryExtend(GetRoundRobinUrl(), resource, owner, durationMs, consistency).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogInformation("Error extending lock instance: {Message}", ex.Message);
+            throw;
+        }
+    }
+    
+    /// <summary>
+    /// Tried to extend the lock by the specified duration
+    /// Returns true if the lock was successfully extended, false otherwise 
+    /// </summary>
+    /// <param name="resource"></param>
+    /// <param name="owner"></param>
+    /// <param name="durationMs"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
+    public async Task<(bool, long)> TryExtend(string resource, string owner, int durationMs, LockConsistency consistency = LockConsistency.Ephemeral)
+    {
+        try
+        {
+            return await communication.TryExtend(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), durationMs, consistency).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogInformation("Error extending lock instance: {Message}", ex.Message);
+            throw;
+        }
+    }
+    
+    /// <summary>
+    /// Tried to extend the lock by the specified duration
+    /// Returns true if the lock was successfully extended, false otherwise 
+    /// </summary>
+    /// <param name="resource"></param>
+    /// <param name="owner"></param>
+    /// <param name="durationMs"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
+    public async Task<(bool, long)> TryExtend(string resource, string owner, TimeSpan duration, LockConsistency consistency = LockConsistency.Ephemeral)
+    {
+        try
+        {
+            return await communication.TryExtend(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), (int)duration.TotalMilliseconds, consistency).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -231,11 +276,31 @@ public class KahunaClient
     /// <param name="owner"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<bool> Unlock(string resource, string owner, LockConsistency consistency = LockConsistency.Ephemeral)
+    public async Task<bool> Unlock(string resource, byte[] owner, LockConsistency consistency = LockConsistency.Ephemeral)
     {
         try
         {
             return await communication.TryUnlock(GetRoundRobinUrl(), resource, owner, consistency).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogInformation("Error unlocking lock instance: {Message}", ex.Message);
+            throw;
+        }
+    }
+    
+    /// <summary>
+    /// Unlocks a lock on a resource if the owner is the current lock owner
+    /// </summary>
+    /// <param name="resource"></param>
+    /// <param name="owner"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
+    public async Task<bool> Unlock(string resource, string owner, LockConsistency consistency = LockConsistency.Ephemeral)
+    {
+        try
+        {
+            return await communication.TryUnlock(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), consistency).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -271,11 +336,33 @@ public class KahunaClient
     /// <param name="expiryTime"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<(bool, long)> SetKeyValue(string key, string? value, int expiryTime = 30000, KeyValueFlags flags = KeyValueFlags.Set, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
+    public async Task<(bool, long)> SetKeyValue(string key, byte[]? value, int expiryTime = 30000, KeyValueFlags flags = KeyValueFlags.Set, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
     {
         try
         {
             return await communication.TrySetKeyValue(GetRoundRobinUrl(), key, value, expiryTime, flags, consistency).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError("Error setting key/value: {Message}", ex.Message);
+
+            throw;
+        }
+    }
+    
+    /// <summary>
+    /// Set key to hold the string value. If key already holds a value, it is overwritten
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="value"></param>
+    /// <param name="expiryTime"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
+    public async Task<(bool, long)> SetKeyValue(string key, string value, int expiryTime = 30000, KeyValueFlags flags = KeyValueFlags.Set, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
+    {
+        try
+        {
+            return await communication.TrySetKeyValue(GetRoundRobinUrl(), key, Encoding.UTF8.GetBytes(value), expiryTime, flags, consistency).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -294,11 +381,34 @@ public class KahunaClient
     /// <param name="expiryTime"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<(bool, long)> TryCompareValueAndSetKeyValue(string key, string? value, string? compareValue, int expiryTime = 30000, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
+    public async Task<(bool, long)> TryCompareValueAndSetKeyValue(string key, byte[] value, byte[] compareValue, int expiryTime = 30000, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
     {
         try
         {
             return await communication.TryCompareValueAndSetKeyValue(GetRoundRobinUrl(), key, value, compareValue, expiryTime, consistency).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError("Error setting key/value (cvas): {Message}", ex.Message);
+
+            throw;
+        }
+    }
+    
+    /// <summary>
+    /// Compare Value and Set (CVAS) operation. Sets the value of a key if the current value is equal to the expected value
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="value"></param>
+    /// <param name="compareValue"></param>
+    /// <param name="expiryTime"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
+    public async Task<(bool, long)> TryCompareValueAndSetKeyValue(string key, string value, string compareValue, int expiryTime = 30000, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
+    {
+        try
+        {
+            return await communication.TryCompareValueAndSetKeyValue(GetRoundRobinUrl(), key, Encoding.UTF8.GetBytes(value), Encoding.UTF8.GetBytes(compareValue), expiryTime, consistency).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -317,11 +427,34 @@ public class KahunaClient
     /// <param name="expiryTime"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string key, string? value, long compareRevision, int expiryTime = 30000, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
+    public async Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string key, byte[]? value, long compareRevision, int expiryTime = 30000, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
     {
         try
         {
             return await communication.TryCompareRevisionAndSetKeyValue(GetRoundRobinUrl(), key, value, compareRevision, expiryTime, consistency).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError("Error setting key/value (cras): {Message}", ex.Message);
+
+            throw;
+        }
+    }
+    
+    /// <summary>
+    /// Compare Revision and Set (CRAS) operation. Sets the value of a key if the current revision is equal to the expected value
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="value"></param>
+    /// <param name="compareRevision"></param>
+    /// <param name="expiryTime"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
+    public async Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string key, string value, long compareRevision, int expiryTime = 30000, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
+    {
+        try
+        {
+            return await communication.TryCompareRevisionAndSetKeyValue(GetRoundRobinUrl(), key, Encoding.UTF8.GetBytes(value), compareRevision, expiryTime, consistency).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -339,7 +472,7 @@ public class KahunaClient
     /// <param name="expiry"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<(bool, long)> SetKeyValue(string key, string? value, TimeSpan expiry, KeyValueFlags flags = KeyValueFlags.Set, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
+    public async Task<(bool, long)> SetKeyValue(string key, byte[]? value, TimeSpan expiry, KeyValueFlags flags = KeyValueFlags.Set, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
     {
         return await SetKeyValue(key, value, (int)expiry.TotalMilliseconds, flags, consistency).ConfigureAwait(false);
     }
@@ -350,7 +483,7 @@ public class KahunaClient
     /// <param name="key"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<(string?, long)> GetKeyValue(string key, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
+    public async Task<(byte[]?, long)> GetKeyValue(string key, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
     {
         try
         {
@@ -436,3 +569,4 @@ public class KahunaClient
         return urls[serverPointer % urls.Length];
     }
 }
+

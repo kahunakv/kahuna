@@ -42,7 +42,7 @@ public class RocksDbPersistence : IPersistence
             { "locks", new() }
         };
 
-        this.db = RocksDb.Open(dbOptions, fullPath, columnFamilies);
+        db = RocksDb.Open(dbOptions, fullPath, columnFamilies);
         
         columnFamilyKeys = db.GetColumnFamily("kv");
         columnFamilyLocks = db.GetColumnFamily("locks");
@@ -50,7 +50,7 @@ public class RocksDbPersistence : IPersistence
 
     public Task<bool> StoreLock(
         string resource, 
-        string? owner, 
+        byte[]? owner, 
         long expiresPhysical, 
         uint expiresCounter, 
         long fencingToken,
@@ -68,7 +68,7 @@ public class RocksDbPersistence : IPersistence
         };
         
         if (owner != null)
-            kvm.Owner = owner;
+            kvm.Owner = ByteString.CopyFrom(owner);
         
         db.Put(Encoding.UTF8.GetBytes(resource), Serialize(kvm), cf: columnFamilyLocks);
 
@@ -77,7 +77,7 @@ public class RocksDbPersistence : IPersistence
     
     public Task<bool> StoreKeyValue(
         string key, 
-        string? value, 
+        byte[]? value, 
         long expiresPhysical, 
         uint expiresCounter, 
         long revision,
@@ -95,7 +95,7 @@ public class RocksDbPersistence : IPersistence
         };
 
         if (value is not null)
-            kvm.Value = value;
+            kvm.Value = ByteString.CopyFrom(value);
         
         db.Put(Encoding.UTF8.GetBytes(key), Serialize(kvm), cf: columnFamilyKeys);
 
@@ -112,7 +112,7 @@ public class RocksDbPersistence : IPersistence
 
         LockContext context = new()
         {
-            Owner = message.Owner,
+            Owner = message.Owner?.ToByteArray(),
             FencingToken = message.FencingToken,
             Expires = new(message.ExpiresPhysical, message.ExpiresCounter),
         };
@@ -130,7 +130,7 @@ public class RocksDbPersistence : IPersistence
 
         KeyValueContext context = new()
         {
-            Value = message.Value,
+            Value = message.Value?.ToByteArray(),
             Revision = message.Revision,
             Expires = new(message.ExpiresPhysical, message.ExpiresCounter),
         };
