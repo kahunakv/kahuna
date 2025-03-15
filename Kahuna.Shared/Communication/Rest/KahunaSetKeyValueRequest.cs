@@ -12,6 +12,12 @@ public sealed class KahunaSetKeyValueRequest
     [JsonPropertyName("value")]
     public string? Value { get; set; }
     
+    [JsonPropertyName("compareValue")]
+    public string? CompareValue { get; set; }
+    
+    [JsonPropertyName("compareRevision")]
+    public long CompareRevision { get; set; }
+    
     [JsonPropertyName("expiresMs")]
     public int ExpiresMs { get; set; }
     

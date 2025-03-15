@@ -9,6 +9,8 @@ namespace Kahuna.Shared.Communication.Rest;
 [JsonSerializable(typeof(KahunaGetLockResponse))]
 [JsonSerializable(typeof(KahunaSetKeyValueRequest))]
 [JsonSerializable(typeof(KahunaGetKeyValueRequest))]
+[JsonSerializable(typeof(KahunaDeleteKeyValueRequest))]
+[JsonSerializable(typeof(KahunaExtendKeyValueRequest))]
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 public sealed partial class KahunaJsonContext : JsonSerializerContext
 {

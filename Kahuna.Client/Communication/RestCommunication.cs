@@ -288,6 +288,7 @@ public class RestCommunication : IKahunaCommunication
         {
             Key = key, 
             Value = value, 
+            CompareValue = compareValue,
             ExpiresMs = expiryTime,
             Flags = KeyValueFlags.SetIfEqualToValue,
             Consistency = consistency
@@ -332,8 +333,9 @@ public class RestCommunication : IKahunaCommunication
         {
             Key = key, 
             Value = value, 
+            CompareRevision = compareRevision,
             ExpiresMs = expiryTime,
-            Flags = KeyValueFlags.SetIfEqualToValue,
+            Flags = KeyValueFlags.SetIfEqualToRevision,
             Consistency = consistency
         };
         
@@ -411,13 +413,86 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to get key/value: " + response.Type, response.Type);
     }
 
-    public Task<(bool, long)> TryDeleteKeyValue(string url, string key, KeyValueConsistency consistency)
+    public async Task<(bool, long)> TryDeleteKeyValue(string url, string key, KeyValueConsistency consistency)
     {
-        throw new NotImplementedException();
+        KahunaDeleteKeyValueRequest request = new()
+        {
+            Key = key, 
+            Consistency = consistency
+        };
+        
+        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaDeleteKeyValueRequest);
+        
+        KahunaDeleteKeyValueResponse? response;
+        
+        do
+        {
+            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
+        
+            response = await retryPolicy.ExecuteAsync(() =>
+                url
+                    .WithOAuthBearerToken("xxx")
+                    .AppendPathSegments("v1/kv/try-delete")
+                    .WithHeader("Accept", "application/json")
+                    .WithHeader("Content-Type", "application/json")
+                    .WithTimeout(5)
+                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .PostStringAsync(payload)
+                    .ReceiveJson<KahunaDeleteKeyValueResponse>()).ConfigureAwait(false);
+
+            if (response is null)
+                throw new KahunaException("Response is null", LockResponseType.Errored);
+
+            if (response.Type == KeyValueResponseType.Deleted)
+                return (true, response.Revision);
+            
+            if (response.Type == KeyValueResponseType.DoesNotExist)
+                return (false, response.Revision);
+
+        } while (response.Type == KeyValueResponseType.MustRetry);
+            
+        throw new KahunaException("Failed to delete key/value: " + response.Type, response.Type);
     }
 
-    public Task<(bool, long)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueConsistency consistency)
+    public async Task<(bool, long)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueConsistency consistency)
     {
-        throw new NotImplementedException();
+        KahunaExtendKeyValueRequest request = new()
+        {
+            Key = key,
+            ExpiresMs = expiresMs,
+            Consistency = consistency
+        };
+        
+        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaExtendKeyValueRequest);
+        
+        KahunaDeleteKeyValueResponse? response;
+        
+        do
+        {
+            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
+        
+            response = await retryPolicy.ExecuteAsync(() =>
+                url
+                    .WithOAuthBearerToken("xxx")
+                    .AppendPathSegments("v1/kv/try-extend")
+                    .WithHeader("Accept", "application/json")
+                    .WithHeader("Content-Type", "application/json")
+                    .WithTimeout(5)
+                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .PostStringAsync(payload)
+                    .ReceiveJson<KahunaDeleteKeyValueResponse>()).ConfigureAwait(false);
+
+            if (response is null)
+                throw new KahunaException("Response is null", LockResponseType.Errored);
+
+            if (response.Type == KeyValueResponseType.Extended)
+                return (true, response.Revision);
+            
+            if (response.Type == KeyValueResponseType.DoesNotExist)
+                return (false, response.Revision);
+
+        } while (response.Type == KeyValueResponseType.MustRetry);
+            
+        throw new KahunaException("Failed to extend key/value: " + response.Type, response.Type);
     }
 }

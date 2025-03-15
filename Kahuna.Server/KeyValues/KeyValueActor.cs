@@ -151,19 +151,28 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
             default:
                 break;
         }
+        
+        KeyValueProposal proposal = new(
+            message.Key,
+            message.Value,
+            context.Revision + 1,
+            currentTime + message.ExpiresMs,
+            currentTime,
+            KeyValueState.Set
+        );
 
-        context.Value = message.Value;
+        if (message.Consistency == KeyValueConsistency.Linearizable)
+        {
+            bool success = await PersistAndReplicateKeyValueMessage(message.Type, proposal, currentTime);
+            if (!success)
+                return new(KeyValueResponseType.Errored);
+        }
+        
+        context.Value = proposal.Value;
         context.Revision++;
         context.Expires = currentTime + message.ExpiresMs;
         context.LastUsed = currentTime;
         context.State = KeyValueState.Set;
-
-        if (message.Consistency == KeyValueConsistency.Linearizable)
-        {
-            bool success = await PersistAndReplicateKeyValueMessage(message.Type, message.Key, context, currentTime, KeyValueState.Set);
-            if (!success)
-                return new(KeyValueResponseType.Errored);
-        }
 
         return new(KeyValueResponseType.Set, context.Revision);
     }
@@ -186,16 +195,25 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         
         if (context.Expires - currentTime < TimeSpan.Zero)
             return new(KeyValueResponseType.DoesNotExist, context.Revision);
-
-        context.Expires = currentTime + message.ExpiresMs;
-        context.LastUsed = currentTime;
-
+        
+        KeyValueProposal proposal = new(
+            message.Key,
+            context.Value,
+            context.Revision,
+            currentTime + message.ExpiresMs,
+            currentTime,
+            context.State
+        );
+        
         if (message.Consistency == KeyValueConsistency.Linearizable)
         {
-            bool success = await PersistAndReplicateKeyValueMessage(message.Type, message.Key, context, currentTime, KeyValueState.Set);
+            bool success = await PersistAndReplicateKeyValueMessage(message.Type, proposal, currentTime);
             if (!success)
                 return new(KeyValueResponseType.Errored);
         }
+        
+        context.Expires = proposal.Expires;
+        context.LastUsed = proposal.LastUsed;
 
         return new(KeyValueResponseType.Extended, context.Revision);
     }
@@ -215,17 +233,26 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
             return new(KeyValueResponseType.DoesNotExist, context.Revision);
         
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
-
-        context.Value = null;
-        context.LastUsed = currentTime;
-        context.State = KeyValueState.Deleted;
+        
+        KeyValueProposal proposal = new(
+            message.Key,
+            null,
+            context.Revision,
+            context.Expires,
+            currentTime,
+            KeyValueState.Deleted
+        );
 
         if (message.Consistency == KeyValueConsistency.Linearizable)
         {
-            bool success = await PersistAndReplicateKeyValueMessage(message.Type, message.Key, context, currentTime, KeyValueState.Deleted);
+            bool success = await PersistAndReplicateKeyValueMessage(message.Type, proposal, currentTime);
             if (!success)
                 return new(KeyValueResponseType.Errored);
         }
+        
+        context.Value = proposal.Value;
+        context.LastUsed = proposal.LastUsed;
+        context.State = proposal.State;
         
         return new(KeyValueResponseType.Deleted, context.Revision);
     }
@@ -239,12 +266,14 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
     {
         KeyValueContext? context = await GetKeyValueContext(message.Key, message.Consistency);
         if (context is null || context.State == KeyValueState.Deleted)
-            return new(KeyValueResponseType.DoesNotExist);
+            return new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueContext(null, context?.Revision ?? 0, HLCTimestamp.Zero));
 
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
 
         if (context.Expires - currentTime < TimeSpan.Zero)
-            return new(KeyValueResponseType.DoesNotExist);
+            return new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueContext(null, context?.Revision ?? 0, HLCTimestamp.Zero));
+        
+        context.LastUsed = currentTime;
 
         ReadOnlyKeyValueContext readOnlyKeyValueContext = new(context.Value, context.Revision, context.Expires);
 
@@ -278,38 +307,30 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
     /// Persists and replicates KeyValue message to the Raft cluster
     /// </summary>
     /// <param name="type"></param>
-    /// <param name="key"></param>
-    /// <param name="context"></param>
+    /// <param name="proposal"></param>
     /// <param name="currentTime"></param>
-    /// <param name="keyValueState"></param>
     /// <returns></returns>
-    private async Task<bool> PersistAndReplicateKeyValueMessage(
-        KeyValueRequestType type, 
-        string key, 
-        KeyValueContext context, 
-        HLCTimestamp currentTime, 
-        KeyValueState keyValueState
-    )
+    private async Task<bool> PersistAndReplicateKeyValueMessage(KeyValueRequestType type, KeyValueProposal proposal, HLCTimestamp currentTime)
     {
         if (!raft.Joined)
             return true;
 
-        int partitionId = raft.GetPartitionKey(key);
+        int partitionId = raft.GetPartitionKey(proposal.Key);
 
         KeyValueMessage kvm = new()
         {
             Type = (int)type,
-            Key = key,
-            Revision = context.Revision,
-            ExpireLogical = context.Expires.L,
-            ExpireCounter = context.Expires.C,
+            Key = proposal.Key,
+            Revision = proposal.Revision,
+            ExpireLogical = proposal.Expires.L,
+            ExpireCounter = proposal.Expires.C,
             TimeLogical = currentTime.L,
             TimeCounter = currentTime.C,
             Consistency = (int)KeyValueConsistency.LinearizableReplication
         };
         
-        if (context.Value is not null)
-            kvm.Value = context.Value;
+        if (proposal.Value is not null)
+            kvm.Value = proposal.Value;
 
         (bool success, RaftOperationStatus status, long _) = await raft.ReplicateLogs(
             partitionId,
@@ -319,7 +340,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
 
         if (!success)
         {
-            logger.LogWarning("Failed to replicate key/value {Key} Partition={Partition} Status={Status}", key, partitionId, status);
+            logger.LogWarning("Failed to replicate key/value {Key} Partition={Partition} Status={Status}", proposal.Key, partitionId, status);
             
             return false;
         }
@@ -327,12 +348,12 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         backgroundWriter.Send(new(
             BackgroundWriteType.QueueStoreLock,
             partitionId,
-            key,
-            context.Value,
-            context.Revision,
-            context.Expires,
+            proposal.Key,
+            proposal.Value,
+            proposal.Revision,
+            proposal.Expires,
             (int)KeyValueConsistency.Linearizable,
-            (int)keyValueState
+            (int)proposal.State
         ));
 
         return success;

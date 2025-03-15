@@ -6,6 +6,7 @@ using Kahuna.Locks;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.Locks;
 using Kommander;
+using Kommander.Time;
 
 namespace Kahuna.Communication.Rest;
 
@@ -181,9 +182,9 @@ public static class LocksHandlers
                     return new()
                     {
                         Type = response, 
-                        Owner = context.Owner, 
-                        Expires = context.Expires,
-                        FencingToken = context.FencingToken
+                        Owner = context?.Owner, 
+                        Expires = context?.Expires ?? HLCTimestamp.Zero,
+                        FencingToken = context?.FencingToken ?? 0
                     };
 
                 return new() { Type = response };

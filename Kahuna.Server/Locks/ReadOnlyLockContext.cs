@@ -6,18 +6,18 @@ namespace Kahuna.Locks;
 /// <summary>
 /// A snapshot of a lock context that is read-only.
 /// </summary>
-public sealed class ReadOnlyLockContext
+public readonly struct ReadOnlyLockContext
 {
     public string? Owner { get; }
     
-    public HLCTimestamp Expires { get; }
-    
     public long FencingToken { get; }
     
-    public ReadOnlyLockContext(string? owner, HLCTimestamp expires, long fencingToken)
+    public HLCTimestamp Expires { get; }
+    
+    public ReadOnlyLockContext(string? owner, long fencingToken, HLCTimestamp expires)
     {
         Owner = owner;
-        Expires = expires;
         FencingToken = fencingToken;
+        Expires = expires;
     }
 }

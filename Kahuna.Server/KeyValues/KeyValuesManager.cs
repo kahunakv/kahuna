@@ -1,14 +1,16 @@
 
+using Nixie;
+using Nixie.Routers;
+
 using Kahuna.Configuration;
 using Kahuna.Persistence;
 using Kahuna.Replication;
 using Kahuna.Replication.Protos;
 using Kahuna.Shared.KeyValue;
+
 using Kommander;
 using Kommander.Data;
 using Kommander.Time;
-using Nixie;
-using Nixie.Routers;
 
 namespace Kahuna.KeyValues;
 

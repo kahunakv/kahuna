@@ -128,19 +128,28 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             if (!isExpired)
                 return new(LockResponseType.Busy);
         }
-
-        context.FencingToken++;
-        context.Owner = message.Owner;
-        context.Expires = currentTime + message.ExpiresMs;
-        context.LastUsed = currentTime;
-        context.State = LockState.Locked;
+        
+        LockProposal proposal = new(
+            message.Resource,
+            message.Owner,
+            context.FencingToken + 1,
+            currentTime + message.ExpiresMs,
+            currentTime,
+            LockState.Locked
+        );
 
         if (message.Consistency == LockConsistency.Linearizable)
         {
-            bool success = await PersistAndReplicateLockMessage(message.Type, message.Resource, context, currentTime, LockState.Locked);
+            bool success = await PersistAndReplicateLockMessage(message.Type, proposal, currentTime);
             if (!success)
                 return new(LockResponseType.Errored);
         }
+        
+        context.FencingToken = proposal.FencingToken;
+        context.Owner = proposal.Owner;
+        context.Expires = proposal.Expires;
+        context.LastUsed = proposal.LastUsed;
+        context.State = proposal.State;
 
         return new(LockResponseType.Locked, context.FencingToken);
     }
@@ -162,15 +171,24 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
 
-        context.Expires = currentTime + message.ExpiresMs;
-        context.LastUsed = currentTime;
+        LockProposal proposal = new(
+            message.Resource,
+            context.Owner,
+            context.FencingToken,
+            currentTime + message.ExpiresMs,
+            currentTime,
+            context.State
+        );
 
         if (message.Consistency == LockConsistency.Linearizable)
         {
-            bool success = await PersistAndReplicateLockMessage(message.Type, message.Resource, context, currentTime, LockState.Locked);
+            bool success = await PersistAndReplicateLockMessage(message.Type, proposal, currentTime);
             if (!success)
                 return new(LockResponseType.Errored);
         }
+        
+        context.Expires = proposal.Expires;
+        context.LastUsed = proposal.LastUsed;
 
         return new(LockResponseType.Extended);
     }
@@ -191,16 +209,25 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
 
-        context.Owner = null;
-        context.LastUsed = currentTime;
-        context.State = LockState.Unlocked;
+        LockProposal proposal = new(
+            message.Resource,
+            null,
+            context.FencingToken,
+            context.Expires,
+            currentTime,
+            LockState.Unlocked
+        );
 
         if (message.Consistency == LockConsistency.Linearizable)
         {
-            bool success = await PersistAndReplicateLockMessage(message.Type, message.Resource, context, currentTime, LockState.Unlocked);
+            bool success = await PersistAndReplicateLockMessage(message.Type, proposal, currentTime);
             if (!success)
                 return new(LockResponseType.Errored);
         }
+        
+        context.Owner = proposal.Owner;
+        context.LastUsed = proposal.LastUsed;
+        context.State = proposal.State;
 
         return new(LockResponseType.Unlocked);
     }
@@ -214,14 +241,16 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     {
         LockContext? context = await GetLockContext(message.Resource, message.Consistency);
         if (context is null || context.State == LockState.Unlocked)
-            return new(LockResponseType.LockDoesNotExist);
+            return new(LockResponseType.LockDoesNotExist, new ReadOnlyLockContext(null, context?.FencingToken ?? 0, HLCTimestamp.Zero));
 
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
 
         if (context.Expires - currentTime < TimeSpan.Zero)
-            return new(LockResponseType.LockDoesNotExist);
+            return new(LockResponseType.LockDoesNotExist, new ReadOnlyLockContext(null, context?.FencingToken ?? 0, HLCTimestamp.Zero));
+        
+        context.LastUsed = currentTime;
 
-        ReadOnlyLockContext readOnlyLockContext = new(context.Owner, context.Expires, context.FencingToken);
+        ReadOnlyLockContext readOnlyLockContext = new(context.Owner, context.FencingToken, context.Expires);
 
         return new(LockResponseType.Got, readOnlyLockContext);
     }
@@ -259,38 +288,30 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     /// Persists and replicates lock message to the Raft cluster
     /// </summary>
     /// <param name="type"></param>
-    /// <param name="resource"></param>
-    /// <param name="context"></param>
+    /// <param name="proposal"></param>
     /// <param name="currentTime"></param>
-    /// <param name="lockState"></param>
     /// <returns></returns>
-    private async Task<bool> PersistAndReplicateLockMessage(
-        LockRequestType type, 
-        string resource, 
-        LockContext context, 
-        HLCTimestamp currentTime, 
-        LockState lockState
-    )
+    private async Task<bool> PersistAndReplicateLockMessage(LockRequestType type, LockProposal proposal ,HLCTimestamp currentTime)
     {
         if (!raft.Joined)
             return true;
 
-        int partitionId = raft.GetPartitionKey(resource);
+        int partitionId = raft.GetPartitionKey(proposal.Resource);
 
         LockMessage lockMessage = new()
         {
             Type = (int)type,
-            Resource = resource,
-            FencingToken = context.FencingToken,
-            ExpireLogical = context.Expires.L,
-            ExpireCounter = context.Expires.C,
+            Resource = proposal.Resource,
+            FencingToken = proposal.FencingToken,
+            ExpireLogical = proposal.Expires.L,
+            ExpireCounter = proposal.Expires.C,
             TimeLogical = currentTime.L,
             TimeCounter = currentTime.C,
             Consistency = (int)LockConsistency.ReplicationConsistent
         };
 
-        if (context.Owner is not null)
-            lockMessage.Owner = context.Owner;
+        if (proposal.Owner is not null)
+            lockMessage.Owner = proposal.Owner;
 
         (bool success, RaftOperationStatus status, long _) = await raft.ReplicateLogs(
             partitionId,
@@ -300,7 +321,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 
         if (!success)
         {
-            logger.LogWarning("Failed to replicate lock {Resource} Partition={Partition} Status={Status}", resource, partitionId, status);
+            logger.LogWarning("Failed to replicate lock {Resource} Partition={Partition} Status={Status}", proposal.Resource, partitionId, status);
             
             return false;
         }
@@ -308,12 +329,12 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         backgroundWriter.Send(new(
             BackgroundWriteType.QueueStoreLock,
             partitionId,
-            resource, 
-            context.Owner, 
-            context.FencingToken,
-            context.Expires,
+            proposal.Resource, 
+            proposal.Owner, 
+            proposal.FencingToken,
+            proposal.Expires,
             (int)LockConsistency.Linearizable,
-            (int)lockState
+            (int)proposal.State
         ));
 
         return success;

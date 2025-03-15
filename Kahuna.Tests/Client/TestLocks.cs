@@ -193,20 +193,18 @@ public class TestLocks
         total++;
     }
     
-    /*[Theory]
-    [InlineData(KahunaCommunicationType.Grpc, KahunaClientType.Single, LockConsistency.Linearizable)]
-    [InlineData(KahunaCommunicationType.Rest, KahunaClientType.Single, LockConsistency.Linearizable)]
-    [InlineData(KahunaCommunicationType.Grpc, KahunaClientType.Single, LockConsistency.Ephemeral)]
-    [InlineData(KahunaCommunicationType.Rest, KahunaClientType.Single, LockConsistency.Ephemeral)]
-    [InlineData(KahunaCommunicationType.Grpc, KahunaClientType.Pool, LockConsistency.Linearizable)]
-    [InlineData(KahunaCommunicationType.Rest, KahunaClientType.Pool, LockConsistency.Linearizable)]
-    [InlineData(KahunaCommunicationType.Grpc, KahunaClientType.Pool, LockConsistency.Ephemeral)]
-    [InlineData(KahunaCommunicationType.Rest, KahunaClientType.Pool, LockConsistency.Ephemeral)]
-    public async Task TestValidateAcquireAndExtendLock(KahunaCommunicationType communicationType, KahunaClientType clientType, LockConsistency consistency) 
+    [Theory, CombinatorialData]
+    public async Task TestValidateAcquireAndExtendLock(
+        [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
+        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(LockConsistency.Ephemeral, LockConsistency.Linearizable)] LockConsistency consistency
+    ) 
     {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+        
         string lockName = GetRandomLockName();
 
-        await using KahunaLock kLock = await locks.GetOrCreateLock(lockName, 10000, consistency: consistency);
+        await using KahunaLock kLock = await client.GetOrCreateLock(lockName, 10000, consistency: consistency);
 
         Assert.True(kLock.IsAcquired);
         Assert.Equal(0, kLock.FencingToken);
@@ -215,7 +213,7 @@ public class TestLocks
         Assert.True(extended);
         Assert.Equal(kLock.FencingToken, fencingToken);
 
-        KahunaLockInfo? lockInfo = await locks.GetLockInfo(lockName, consistency);
+        KahunaLockInfo? lockInfo = await client.GetLockInfo(lockName, consistency);
         Assert.NotNull(lockInfo);
         
         Assert.Equal(lockInfo.Owner, kLock.LockId);
@@ -225,7 +223,7 @@ public class TestLocks
         Assert.True(extended);
         Assert.Equal(kLock.FencingToken, fencingToken);
         
-        lockInfo = await locks.GetLockInfo(lockName, consistency);
+        lockInfo = await client.GetLockInfo(lockName, consistency);
         Assert.NotNull(lockInfo);
         
         Assert.Equal(lockInfo.Owner, kLock.LockId);
@@ -234,20 +232,18 @@ public class TestLocks
         //Assert.Equal(lockInfo.Expires > DateTime.UtcNow, true);
     }
     
-    [Theory]
-    [InlineData(KahunaCommunicationType.Grpc, KahunaClientType.Single, LockConsistency.Linearizable)]
-    [InlineData(KahunaCommunicationType.Rest, KahunaClientType.Single, LockConsistency.Linearizable)]
-    [InlineData(KahunaCommunicationType.Grpc, KahunaClientType.Single, LockConsistency.Ephemeral)]
-    [InlineData(KahunaCommunicationType.Rest, KahunaClientType.Single, LockConsistency.Ephemeral)]
-    [InlineData(KahunaCommunicationType.Grpc, KahunaClientType.Pool, LockConsistency.Linearizable)]
-    [InlineData(KahunaCommunicationType.Rest, KahunaClientType.Pool, LockConsistency.Linearizable)]
-    [InlineData(KahunaCommunicationType.Grpc, KahunaClientType.Pool, LockConsistency.Ephemeral)]
-    [InlineData(KahunaCommunicationType.Rest, KahunaClientType.Pool, LockConsistency.Ephemeral)]
-    public async Task TestAdquireLockAndGetInfo(KahunaCommunicationType communicationType, KahunaClientType clientType, LockConsistency consistency) 
+    [Theory, CombinatorialData]
+    public async Task TestAdquireLockAndGetInfo(
+        [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
+        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(LockConsistency.Ephemeral, LockConsistency.Linearizable)] LockConsistency consistency
+    ) 
     {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+        
         string lockName = GetRandomLockName();
 
-        await using KahunaLock kLock = await locks.GetOrCreateLock(lockName, 10000, consistency: consistency);
+        await using KahunaLock kLock = await client.GetOrCreateLock(lockName, 10000, consistency: consistency);
 
         Assert.True(kLock.IsAcquired);
         Assert.Equal(0, kLock.FencingToken);
@@ -273,7 +269,7 @@ public class TestLocks
         Assert.True(lockInfo.Expires - expires > TimeSpan.Zero);
         
         //Assert.Equal(lockInfo.Expires > DateTime.UtcNow, true);
-    }*/
+    }
     
     private KahunaClient GetClientByType(KahunaCommunicationType communicationType, KahunaClientType clientType)
     {

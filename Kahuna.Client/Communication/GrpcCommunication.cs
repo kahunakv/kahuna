@@ -184,7 +184,7 @@ public class GrpcCommunication : IKahunaCommunication
 
         } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
             
-        throw new KahunaException("Failed to set key/value: " + response.Type, (LockResponseType)response.Type);
+        throw new KahunaException("Failed to set key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
     public async Task<(bool, long)> TryCompareValueAndSetKeyValue(string url, string key, string? value, string? compareValue, int expiryTime, KeyValueConsistency consistency)
@@ -220,7 +220,7 @@ public class GrpcCommunication : IKahunaCommunication
 
         } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
             
-        throw new KahunaException("Failed to set key/value: " + response.Type, (LockResponseType)response.Type);
+        throw new KahunaException("Failed to set key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
     public async Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string url, string key, string? value, long compareRevision, int expiryTime, KeyValueConsistency consistency)
@@ -256,7 +256,7 @@ public class GrpcCommunication : IKahunaCommunication
 
         } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
             
-        throw new KahunaException("Failed to set key/value:" + response.Type, (LockResponseType)response.Type);
+        throw new KahunaException("Failed to set key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
     public async Task<(string?, long)> TryGetKeyValue(string url, string key, KeyValueConsistency consistency)
@@ -291,7 +291,7 @@ public class GrpcCommunication : IKahunaCommunication
             
         } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
             
-        throw new KahunaException("Failed to get key/value:" + response.Type, (LockResponseType)response.Type);
+        throw new KahunaException("Failed to get key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
     public async Task<(bool, long)> TryDeleteKeyValue(string url, string key, KeyValueConsistency consistency)
@@ -326,7 +326,7 @@ public class GrpcCommunication : IKahunaCommunication
             
         } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
             
-        throw new KahunaException("Failed to delete key/value: " + response.Type, (LockResponseType)response.Type);
+        throw new KahunaException("Failed to delete key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
     public async Task<(bool, long)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueConsistency consistency)
@@ -357,7 +357,7 @@ public class GrpcCommunication : IKahunaCommunication
             
         } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
             
-        throw new KahunaException("Failed to extend key/value", (LockResponseType)response.Type);
+        throw new KahunaException("Failed to extend key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
 
     private static GrpcChannel GetSharedChannel(string url)
