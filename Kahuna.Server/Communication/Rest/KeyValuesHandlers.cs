@@ -2,6 +2,8 @@ using System.Text.Json;
 using Flurl;
 using Flurl.Http;
 using Kahuna.KeyValues;
+using Kahuna.Server.KeyValues;
+using Kahuna.Server.ScriptParser;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
@@ -25,53 +27,22 @@ public static class KeyValuesHandlers
             if (request.ExpiresMs <= 0)
                 return new() { Type = KeyValueResponseType.InvalidInput };
             
-            int partitionId = raft.GetPartitionKey(request.Key);
+            (KeyValueResponseType response, long revision) = await keyValues.LocateAndTrySetKeyValue(
+                request.Key, 
+                request.Value,
+                request.CompareValue,
+                request.CompareRevision,
+                request.Flags,
+                request.ExpiresMs, 
+                request.Consistency,
+                CancellationToken.None
+            );
 
-            if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
+            return new KahunaSetKeyValueResponse
             {
-                (KeyValueResponseType response, long revision) = await keyValues.TrySetKeyValue(
-                    request.Key, 
-                    request.Value, 
-                    request.CompareValue, 
-                    request.CompareRevision, 
-                    request.Flags, 
-                    request.ExpiresMs, 
-                    request.Consistency
-                );
-
-                return new() { Type = response, Revision = revision };    
-            }
-            
-            string leader = await raft.WaitForLeader(partitionId, CancellationToken.None);
-            if (leader == raft.GetLocalEndpoint())
-                return new() { Type = KeyValueResponseType.MustRetry };
-            
-            logger.LogDebug("SET-KEYVALUE Redirect {Key} to leader partition {Partition} at {Leader}", request.Key, partitionId, leader);
-
-            try
-            {
-                string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaSetKeyValueRequest);
-
-                KahunaSetKeyValueResponse? response = await $"https://{leader}"
-                    .AppendPathSegments("v1/kv/try-set")
-                    .WithHeader("Accept", "application/json")
-                    .WithHeader("Content-Type", "application/json")
-                    .WithTimeout(5)
-                    .WithSettings(o => o.HttpVersion = "2.0")
-                    .PostStringAsync(payload)
-                    .ReceiveJson<KahunaSetKeyValueResponse>();
-                
-                if (response is not null)
-                    response.ServedFrom = $"https://{leader}";
-
-                return response;
-            }
-            catch (Exception ex)
-            {
-                logger.LogError("{Node}: {Name}\n{Message}", leader, ex.GetType().Name, ex.Message);
-                
-                return new() { Type = KeyValueResponseType.Errored };
-            }
+                Type = response,
+                Revision = revision
+            };
         });
 
         app.MapPost("/v1/kv/try-extend", async (KahunaExtendKeyValueRequest request, IKahuna keyValues, IRaft raft, ILogger<IKahuna> logger) =>
@@ -177,7 +148,58 @@ public static class KeyValuesHandlers
                     Type = KeyValueResponseType.InvalidInput
                 };
         
-            int partitionId = raft.GetPartitionKey(request.Key);
+            if (string.IsNullOrEmpty(request.Key))
+                return new()
+                {
+                    Type = KeyValueResponseType.InvalidInput
+                };
+        
+            (KeyValueResponseType type, ReadOnlyKeyValueContext? keyValueContext) = await keyValues.LocateAndTryGetValue(
+                request.Key, 
+                request.Consistency, 
+                CancellationToken.None
+            );
+        
+            if (keyValueContext is not null)
+            {
+                KahunaGetKeyValueResponse response = new()
+                {
+                    ServedFrom = "",
+                    Type = type,
+                    Value = keyValueContext.Value,
+                    Revision = keyValueContext.Revision,
+                    Expires = keyValueContext.Expires
+                };
+                
+                return response;
+            }
+
+            return new()
+            {
+                Type = type
+            };
+        });
+        
+        app.MapPost("/v1/kv/try-execute-tx", async (KahunaTxKeyValueRequest request, IKahuna keyValues, IRaft raft, ILogger<IKahuna> logger) =>
+        {
+            if (string.IsNullOrEmpty(request.Script))
+                return new()
+                {
+                    Type = KeyValueResponseType.InvalidInput
+                };
+            
+            KeyValueTransactionResult r = await keyValues.TryExecuteTx(request.Script);
+
+            return new KahunaTxKeyValueResponse
+            {
+                ServedFrom = r.ServedFrom,
+                Type = r.Type,
+                Value = r.Value,
+                Revision = r.Revision,
+                Expires = r.Expires
+            };
+
+            /*int partitionId = raft.GetPartitionKey(request.Script);
 
             if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
             {
@@ -197,28 +219,28 @@ public static class KeyValuesHandlers
                     Expires = keyValueContext?.Expires ?? HLCTimestamp.Zero
                 };
             }
-            
+
             string leader = await raft.WaitForLeader(partitionId, CancellationToken.None);
             if (leader == raft.GetLocalEndpoint())
                 return new()
                 {
                     Type = KeyValueResponseType.MustRetry
                 };
-            
+
             logger.LogDebug("GET-KEYVALUE Redirect {Key} to leader partition {Partition} at {Leader}", request.Key, partitionId, leader);
-            
+
             try
             {
                 string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaGetKeyValueRequest);
-                
-                KahunaGetKeyValueResponse? response = await $"https://{leader}"
+
+                KahunaTxKeyValueResponse? response = await $"https://{leader}"
                     .AppendPathSegments("v1/kv/try-get")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
                     .WithTimeout(5)
                     .WithSettings(o => o.HttpVersion = "2.0")
                     .PostStringAsync(payload)
-                    .ReceiveJson<KahunaGetKeyValueResponse>();
+                    .ReceiveJson<KahunaTxKeyValueResponse>();
 
                 if (response is not null)
                     response.ServedFrom = $"https://{leader}";
@@ -228,9 +250,9 @@ public static class KeyValuesHandlers
             catch (Exception ex)
             {
                 logger.LogError("{Node}: {Name}\n{Message}", leader, ex.GetType().Name, ex.Message);
-                    
+
                 return new() { Type = KeyValueResponseType.Errored };
-            }
+            }*/
         });
     }
 }

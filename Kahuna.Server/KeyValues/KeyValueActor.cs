@@ -122,7 +122,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
                     if (newContext.State != KeyValueState.Deleted)
                         exists = true;
                     
-                    if (newContext.Expires - currentTime < TimeSpan.Zero)
+                    if (newContext.Expires != HLCTimestamp.Zero && newContext.Expires - currentTime < TimeSpan.Zero)
                         exists = false;
                 }
             }
@@ -157,7 +157,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
             message.Key,
             message.Value,
             context.Revision + 1,
-            currentTime + message.ExpiresMs,
+            message.ExpiresMs > 0 ? (currentTime + message.ExpiresMs) : HLCTimestamp.Zero,
             currentTime,
             KeyValueState.Set
         );
@@ -170,10 +170,10 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         }
         
         context.Value = proposal.Value;
-        context.Revision++;
-        context.Expires = currentTime + message.ExpiresMs;
-        context.LastUsed = currentTime;
-        context.State = KeyValueState.Set;
+        context.Revision = proposal.Revision;
+        context.Expires = proposal.Expires;
+        context.LastUsed = proposal.LastUsed;
+        context.State = proposal.State;
 
         return new(KeyValueResponseType.Set, context.Revision);
     }
@@ -194,7 +194,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
         
-        if (context.Expires - currentTime < TimeSpan.Zero)
+        if (context.Expires != HLCTimestamp.Zero && context.Expires - currentTime < TimeSpan.Zero)
             return new(KeyValueResponseType.DoesNotExist, context.Revision);
         
         KeyValueProposal proposal = new(
@@ -271,7 +271,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
 
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
 
-        if (context.Expires - currentTime < TimeSpan.Zero)
+        if (context.Expires != HLCTimestamp.Zero && context.Expires - currentTime < TimeSpan.Zero)
             return new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueContext(null, context?.Revision ?? 0, HLCTimestamp.Zero));
         
         context.LastUsed = currentTime;

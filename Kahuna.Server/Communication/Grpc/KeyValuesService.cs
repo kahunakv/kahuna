@@ -55,49 +55,28 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
             };
         
-        if (request.ExpiresMs <= 0)
+        if (request.ExpiresMs < 0)
             return new()
             {
                 Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
             };
         
-        int partitionId = raft.GetPartitionKey(request.Key);
+        (KeyValueResponseType response, long revision) = await keyValues.LocateAndTrySetKeyValue(
+            request.Key, 
+            request.Value?.ToByteArray(),
+            request.CompareValue?.ToByteArray(),
+            request.CompareRevision,
+            (KeyValueFlags)request.Flags,
+            request.ExpiresMs, 
+            (KeyValueConsistency)request.Consistency,
+            context.CancellationToken
+        );
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, context.CancellationToken))
+        return new()
         {
-            (KeyValueResponseType response, long revision) = await keyValues.TrySetKeyValue(
-                request.Key, 
-                request.Value?.ToByteArray(),
-                request.CompareValue?.ToByteArray(),
-                request.CompareRevision,
-                (KeyValueFlags)request.Flags,
-                request.ExpiresMs, 
-                (KeyValueConsistency)request.Consistency
-            );
-
-            return new()
-            {
-                Type = (GrpcKeyValueResponseType)response,
-                Revision = revision
-            };
-        }
-            
-        string leader = await raft.WaitForLeader(partitionId, context.CancellationToken);
-        if (leader == raft.GetLocalEndpoint())
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry
-            };
-        
-        logger.LogDebug("SET-KEYVALUE Redirect {Key} to leader partition {Partition} at {Leader}", request.Key, partitionId, leader);
-        
-        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
-        
-        GrpcTrySetKeyValueResponse? remoteResponse = await client.TrySetKeyValueAsync(request);
-        remoteResponse.ServedFrom = $"https://{leader}";
-        return remoteResponse;
+            Type = (GrpcKeyValueResponseType)response,
+            Revision = revision
+        };
     }
     
     /// <summary>
@@ -114,7 +93,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
             };
         
-        if (request.ExpiresMs <= 0)
+        if (request.ExpiresMs < 0)
             return new()
             {
                 Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
@@ -210,50 +189,28 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
             };
         
-        int partitionId = raft.GetPartitionKey(request.Key);
-
-        if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
+        (KeyValueResponseType type, ReadOnlyKeyValueContext? keyValueContext) = await keyValues.LocateAndTryGetValue(request.Key, (KeyValueConsistency)request.Consistency, context.CancellationToken);
+        
+        if (keyValueContext is not null)
         {
-            (KeyValueResponseType type, ReadOnlyKeyValueContext? keyValueContext) = await keyValues.TryGetValue(request.Key, (KeyValueConsistency)request.Consistency);
-
-            if (keyValueContext is not null)
+            GrpcTryGetKeyValueResponse response = new()
             {
-                GrpcTryGetKeyValueResponse response = new()
-                {
-                    ServedFrom = "",
-                    Type = (GrpcKeyValueResponseType)type,
-                    Revision = keyValueContext.Revision,
-                    ExpiresPhysical = keyValueContext.Expires.L,
-                    ExpiresCounter = keyValueContext.Expires.C,
-                };
-
-                if (keyValueContext.Value is not null)
-                    response.Value = ByteString.CopyFrom(keyValueContext.Value);
-
-                return response;
-            }
-
-            return new()
-            {
-                Type = (GrpcKeyValueResponseType)type
+                ServedFrom = "",
+                Type = (GrpcKeyValueResponseType)type,
+                Revision = keyValueContext.Revision,
+                ExpiresPhysical = keyValueContext.Expires.L,
+                ExpiresCounter = keyValueContext.Expires.C,
             };
+
+            if (keyValueContext.Value is not null)
+                response.Value = ByteString.CopyFrom(keyValueContext.Value);
+
+            return response;
         }
-            
-        string leader = await raft.WaitForLeader(partitionId, CancellationToken.None);
-        if (leader == raft.GetLocalEndpoint())
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry
-            };
-        
-        logger.LogDebug("GET-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", request.Key, partitionId, leader);
-        
-        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
-        
-        GrpcTryGetKeyValueResponse? remoteResponse = await client.TryGetKeyValueAsync(request);
-        remoteResponse.ServedFrom = $"https://{leader}";
-        return remoteResponse;
+
+        return new()
+        {
+            Type = (GrpcKeyValueResponseType)type
+        };
     }
 }

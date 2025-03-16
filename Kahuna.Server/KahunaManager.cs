@@ -1,13 +1,17 @@
+
+using Nixie;
+using Nixie.Routers;
+
+using Kommander;
+using Kommander.Data;
+
 using Kahuna.Configuration;
 using Kahuna.KeyValues;
 using Kahuna.Locks;
 using Kahuna.Persistence;
+using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
-using Kommander;
-using Kommander.Data;
-using Nixie;
-using Nixie.Routers;
 
 namespace Kahuna;
 
@@ -135,6 +139,43 @@ public sealed class KahunaManager : IKahuna
     }
 
     /// <summary>
+    /// Locates the leader node for the given key and executes the TrySet request.
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="value"></param>
+    /// <param name="compareValue"></param>
+    /// <param name="compareRevision"></param>
+    /// <param name="flags"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
+    public async Task<(KeyValueResponseType, long)> LocateAndTrySetKeyValue(
+        string key,
+        byte[]? value,
+        byte[]? compareValue,
+        long compareRevision,
+        KeyValueFlags flags,
+        int expiresMs,
+        KeyValueConsistency consistency,
+        CancellationToken cancellationToken
+    )
+    {
+        return await keyValues.LocateAndTrySetKeyValue(key, value, compareValue, compareRevision, flags, expiresMs, consistency, cancellationToken);
+    }
+
+    /// <summary>
+    /// Locates the leader node for the given key and executes the TryGetValue request.
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="consistency"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryGetValue(string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    {
+        return keyValues.LocateAndTryGetValue(key, consistency, cancelationToken);
+    }
+
+    /// <summary>
     /// Set key to hold the string value. If key already holds a value, it is overwritten
     /// </summary>
     /// <param name="key"></param>
@@ -190,6 +231,16 @@ public sealed class KahunaManager : IKahuna
     public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryGetValue(string keyValueName, KeyValueConsistency consistency)
     {
         return keyValues.TryGetValue(keyValueName, consistency);
+    }
+    
+    /// <summary>
+    /// Executes a key/value transaction
+    /// </summary>
+    /// <param name="script"></param>
+    /// <returns></returns>
+    public Task<KeyValueTransactionResult> TryExecuteTx(string script)
+    {
+        return keyValues.TryExecuteTx(script);
     }
 
     public async Task<bool> OnReplicationReceived(RaftLog log)

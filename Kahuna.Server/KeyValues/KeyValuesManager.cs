@@ -2,15 +2,16 @@
 using Nixie;
 using Nixie.Routers;
 
+using Kommander;
+using Kommander.Data;
+using Kommander.Time;
+
 using Kahuna.Configuration;
 using Kahuna.Persistence;
 using Kahuna.Replication;
 using Kahuna.Replication.Protos;
+using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
-
-using Kommander;
-using Kommander.Data;
-using Kommander.Time;
 
 namespace Kahuna.KeyValues;
 
@@ -21,6 +22,10 @@ public sealed class KeyValuesManager
     private readonly IRaft raft;
 
     private readonly ILogger<IKahuna> logger;
+
+    private readonly KeyValueLocator locator;
+    
+    private readonly KeyValueTransactionCoordinator txCoordinator;
 
     private readonly IActorRef<ConsistentHashActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter;
 
@@ -54,6 +59,9 @@ public sealed class KeyValuesManager
         
         ephemeralKeyValuesRouter = GetEphemeralRouter(backgroundWriter, persistence, configuration);
         consistentKeyValuesRouter = GetConsistentRouter(backgroundWriter, persistence, configuration);
+
+        txCoordinator = new(this, configuration, raft, logger);
+        locator = new(this, configuration, raft, logger);
     }
 
     /// <summary>
@@ -205,6 +213,43 @@ public sealed class KeyValuesManager
     }
 
     /// <summary>
+    /// Locates the leader node for the given key and executes the TrySet request.
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="value"></param>
+    /// <param name="compareValue"></param>
+    /// <param name="compareRevision"></param>
+    /// <param name="flags"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
+    public async Task<(KeyValueResponseType, long)> LocateAndTrySetKeyValue(
+        string key,
+        byte[]? value,
+        byte[]? compareValue,
+        long compareRevision,
+        KeyValueFlags flags,
+        int expiresMs,
+        KeyValueConsistency consistency,
+        CancellationToken cancellationToken
+    )
+    {
+        return await locator.LocateAndTrySetKeyValue(key, value, compareValue, compareRevision, flags, expiresMs, consistency, cancellationToken);
+    }
+
+    /// <summary>
+    /// Locates the leader node for the given key and executes the TryGetValue request.
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="consistency"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryGetValue(string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    {
+        return await locator.LocateAndTryGetValue(key, consistency, cancelationToken);
+    }
+
+    /// <summary>
     /// Passes a TrySet request to the keyValueer actor for the given keyValue name.
     /// </summary>
     /// <param name="key"></param>
@@ -336,5 +381,15 @@ public sealed class KeyValuesManager
             response = await consistentKeyValuesRouter.Ask(request);
         
         return (response.Type, response.Context);
+    }
+
+    /// <summary>
+    /// Schedule a key/value transaction to be executed
+    /// </summary>
+    /// <param name="script"></param>
+    /// <returns></returns>
+    public async Task<KeyValueTransactionResult> TryExecuteTx(string script)
+    {
+        return await txCoordinator.TryExecuteTx(script);
     }
 }

@@ -7,11 +7,16 @@
   <RootNamespace>Kahuna.Server</RootNamespace>
 </PropertyGroup>
 
+  <PropertyGroup>
+    <NoWarn>SYSLIB0051</NoWarn>
+  </PropertyGroup>
+
 <ItemGroup>
   <PackageReference Include="Grpc.AspNetCore" Version="2.67.0" />
   <PackageReference Include="Grpc.AspNetCore.Server.Reflection" Version="2.67.0" />
   <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.2" />
   <PackageReference Include="CommandLineParser" Version="2.9.1" />
+  <PackageReference Include="YaccLexTools" Version="1.2.2" />
 </ItemGroup>
 
 <ItemGroup>
@@ -32,6 +37,26 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Kahuna.Shared\Kahuna.Shared.csproj" />
-  </ItemGroup>  
+  </ItemGroup>
+
+  <ItemGroup Label="ScriptParser">
+    <YaccFile Include="ScriptParser\ScriptParser.Language.grammar.y">
+      <OutputFile>ScriptParser\ScriptParser.Parser.Generated.cs</OutputFile>
+      <Arguments>/gplex /nolines</Arguments>
+    </YaccFile>
+    <None Include="ScriptParser\ScriptParser.Parser.Generated.cs">
+      <AutoGen>True</AutoGen>
+      <DesignTime>True</DesignTime>
+      <DependentUpon>ScriptParser\ScriptParser.Language.grammar.y</DependentUpon>
+    </None>
+    <LexFile Include="ScriptParser\ScriptParser.Language.analyzer.lex">
+      <OutputFile>ScriptParser\ScriptParser.Scanner.Generated.cs</OutputFile>
+    </LexFile>
+    <None Include="ScriptParser\ScriptParser.Scanner.Generated.cs">
+      <AutoGen>True</AutoGen>
+      <DesignTime>True</DesignTime>
+      <DependentUpon>ScriptParser\ScriptParser.Language.analyzer.lex</DependentUpon>
+    </None>
+  </ItemGroup>
   
 </Project>

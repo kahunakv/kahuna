@@ -55,6 +55,22 @@ public class TestKeyValues
     }
     
     [Theory, CombinatorialData]
+    public async Task TestSingleSetBytes(
+        [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
+        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+    )
+    {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+        
+        string keyName = GetRandomKeyName();
+
+        (bool success, long revision) = await client.SetKeyValue(keyName, "some-value"u8.ToArray(), 10000, consistency: consistency);
+        Assert.True(success);
+        Assert.Equal(0, revision);
+    }
+    
+    [Theory, CombinatorialData]
     public async Task TestSingleSetValueExpiresTimeSpan(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
@@ -66,6 +82,22 @@ public class TestKeyValues
         string keyName = GetRandomKeyName();
 
         (bool success, long revision) = await client.SetKeyValue(keyName, "some-value", TimeSpan.FromSeconds(10), consistency: consistency);
+        Assert.True(success);
+        Assert.Equal(0, revision);
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestSingleSetBytesExpiresTimeSpan(
+        [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
+        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+    )
+    {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+        
+        string keyName = GetRandomKeyName();
+
+        (bool success, long revision) = await client.SetKeyValue(keyName, "some-value"u8.ToArray(), TimeSpan.FromSeconds(10), consistency: consistency);
         Assert.True(success);
         Assert.Equal(0, revision);
     }

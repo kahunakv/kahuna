@@ -70,36 +70,27 @@ public class KahunaClient
         LockConsistency consistency
     )
     {
-        try
+        byte[] owner = Guid.NewGuid().ToByteArray();
+        
+        Stopwatch stopWatch = Stopwatch.StartNew();
+        
+        long fencingToken = -1;
+        KahunaLockAcquireResult result = KahunaLockAcquireResult.Error;
+
+        while (stopWatch.Elapsed < wait)
         {
-            byte[] owner = Guid.NewGuid().ToByteArray();
-            
-            Stopwatch stopWatch = Stopwatch.StartNew();
-            
-            long fencingToken = -1;
-            KahunaLockAcquireResult result = KahunaLockAcquireResult.Error;
+            (result, fencingToken) = await TryAcquireLock(resource, owner, expiryTime, consistency).ConfigureAwait(false);
 
-            while (stopWatch.Elapsed < wait)
+            if (result != KahunaLockAcquireResult.Success)
             {
-                (result, fencingToken) = await TryAcquireLock(resource, owner, expiryTime, consistency).ConfigureAwait(false);
-
-                if (result != KahunaLockAcquireResult.Success)
-                {
-                    await Task.Delay((int)Math.Max(100, retry.TotalMilliseconds + Random.Shared.Next(-50, 50))).ConfigureAwait(false);
-                    continue;
-                }
-
-                return (result, owner, consistency, fencingToken);
+                await Task.Delay((int)Math.Max(100, retry.TotalMilliseconds + Random.Shared.Next(-50, 50))).ConfigureAwait(false);
+                continue;
             }
 
-            return (result, null, consistency, fencingToken);
+            return (result, owner, consistency, fencingToken);
         }
-        catch (Exception ex)
-        {
-            logger?.LogError("Error locking lock instance: {Message}", ex.Message);
 
-            throw;
-        }
+        return (result, null, consistency, fencingToken);
     }
     
     /// <summary>
@@ -192,15 +183,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<(bool, long)> TryExtend(string resource, byte[] owner, TimeSpan duration, LockConsistency consistency = LockConsistency.Ephemeral)
     {
-        try
-        {
-            return await communication.TryExtend(GetRoundRobinUrl(), resource, owner, (int)duration.TotalMilliseconds, consistency).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            logger?.LogInformation("Error extending lock instance: {Message}", ex.Message);
-            throw;
-        }
+        return await communication.TryExtend(GetRoundRobinUrl(), resource, owner, (int)duration.TotalMilliseconds, consistency).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -214,15 +197,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<(bool, long)> TryExtend(string resource, byte[] owner, int durationMs, LockConsistency consistency = LockConsistency.Ephemeral)
     {
-        try
-        {
-            return await communication.TryExtend(GetRoundRobinUrl(), resource, owner, durationMs, consistency).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            logger?.LogInformation("Error extending lock instance: {Message}", ex.Message);
-            throw;
-        }
+        return await communication.TryExtend(GetRoundRobinUrl(), resource, owner, durationMs, consistency).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -236,15 +211,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<(bool, long)> TryExtend(string resource, string owner, int durationMs, LockConsistency consistency = LockConsistency.Ephemeral)
     {
-        try
-        {
-            return await communication.TryExtend(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), durationMs, consistency).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            logger?.LogInformation("Error extending lock instance: {Message}", ex.Message);
-            throw;
-        }
+        return await communication.TryExtend(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), durationMs, consistency).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -258,15 +225,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<(bool, long)> TryExtend(string resource, string owner, TimeSpan duration, LockConsistency consistency = LockConsistency.Ephemeral)
     {
-        try
-        {
-            return await communication.TryExtend(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), (int)duration.TotalMilliseconds, consistency).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            logger?.LogInformation("Error extending lock instance: {Message}", ex.Message);
-            throw;
-        }
+        return await communication.TryExtend(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), (int)duration.TotalMilliseconds, consistency).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -278,15 +237,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<bool> Unlock(string resource, byte[] owner, LockConsistency consistency = LockConsistency.Ephemeral)
     {
-        try
-        {
-            return await communication.TryUnlock(GetRoundRobinUrl(), resource, owner, consistency).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            logger?.LogInformation("Error unlocking lock instance: {Message}", ex.Message);
-            throw;
-        }
+        return await communication.TryUnlock(GetRoundRobinUrl(), resource, owner, consistency).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -298,15 +249,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<bool> Unlock(string resource, string owner, LockConsistency consistency = LockConsistency.Ephemeral)
     {
-        try
-        {
-            return await communication.TryUnlock(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), consistency).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            logger?.LogInformation("Error unlocking lock instance: {Message}", ex.Message);
-            throw;
-        }
+        return await communication.TryUnlock(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), consistency).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -317,15 +260,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<KahunaLockInfo?> GetLockInfo(string resource, LockConsistency consistency = LockConsistency.Ephemeral)
     {
-        try
-        {
-            return await communication.Get(GetRoundRobinUrl(), resource, consistency).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            logger?.LogError("Error getting lock instance: {Message}", ex.Message);
-            throw;
-        }
+        return await communication.Get(GetRoundRobinUrl(), resource, consistency).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -338,16 +273,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<(bool, long)> SetKeyValue(string key, byte[]? value, int expiryTime = 30000, KeyValueFlags flags = KeyValueFlags.Set, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
     {
-        try
-        {
-            return await communication.TrySetKeyValue(GetRoundRobinUrl(), key, value, expiryTime, flags, consistency).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            logger?.LogError("Error setting key/value: {Message}", ex.Message);
-
-            throw;
-        }
+        return await communication.TrySetKeyValue(GetRoundRobinUrl(), key, value, expiryTime, flags, consistency).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -360,16 +286,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<(bool, long)> SetKeyValue(string key, string value, int expiryTime = 30000, KeyValueFlags flags = KeyValueFlags.Set, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
     {
-        try
-        {
-            return await communication.TrySetKeyValue(GetRoundRobinUrl(), key, Encoding.UTF8.GetBytes(value), expiryTime, flags, consistency).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            logger?.LogError("Error setting key/value: {Message}", ex.Message);
-
-            throw;
-        }
+        return await communication.TrySetKeyValue(GetRoundRobinUrl(), key, Encoding.UTF8.GetBytes(value), expiryTime, flags, consistency).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -382,16 +299,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<(bool, long)> SetKeyValue(string key, string value, TimeSpan expiryTime, KeyValueFlags flags = KeyValueFlags.Set, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
     {
-        try
-        {
-            return await communication.TrySetKeyValue(GetRoundRobinUrl(), key, Encoding.UTF8.GetBytes(value), (int)expiryTime.TotalMilliseconds, flags, consistency).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            logger?.LogError("Error setting key/value: {Message}", ex.Message);
-
-            throw;
-        }
+        return await communication.TrySetKeyValue(GetRoundRobinUrl(), key, Encoding.UTF8.GetBytes(value), (int)expiryTime.TotalMilliseconds, flags, consistency).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -405,16 +313,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<(bool, long)> TryCompareValueAndSetKeyValue(string key, byte[] value, byte[] compareValue, int expiryTime = 30000, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
     {
-        try
-        {
-            return await communication.TryCompareValueAndSetKeyValue(GetRoundRobinUrl(), key, value, compareValue, expiryTime, consistency).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            logger?.LogError("Error setting key/value (cvas): {Message}", ex.Message);
-
-            throw;
-        }
+        return await communication.TryCompareValueAndSetKeyValue(GetRoundRobinUrl(), key, value, compareValue, expiryTime, consistency).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -428,16 +327,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<(bool, long)> TryCompareValueAndSetKeyValue(string key, string value, string compareValue, int expiryTime = 30000, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
     {
-        try
-        {
-            return await communication.TryCompareValueAndSetKeyValue(GetRoundRobinUrl(), key, Encoding.UTF8.GetBytes(value), Encoding.UTF8.GetBytes(compareValue), expiryTime, consistency).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            logger?.LogError("Error setting key/value (cvas): {Message}", ex.Message);
-
-            throw;
-        }
+        return await communication.TryCompareValueAndSetKeyValue(GetRoundRobinUrl(), key, Encoding.UTF8.GetBytes(value), Encoding.UTF8.GetBytes(compareValue), expiryTime, consistency).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -451,16 +341,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string key, byte[]? value, long compareRevision, int expiryTime = 30000, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
     {
-        try
-        {
-            return await communication.TryCompareRevisionAndSetKeyValue(GetRoundRobinUrl(), key, value, compareRevision, expiryTime, consistency).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            logger?.LogError("Error setting key/value (cras): {Message}", ex.Message);
-
-            throw;
-        }
+        return await communication.TryCompareRevisionAndSetKeyValue(GetRoundRobinUrl(), key, value, compareRevision, expiryTime, consistency).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -474,16 +355,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string key, string value, long compareRevision, int expiryTime = 30000, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
     {
-        try
-        {
-            return await communication.TryCompareRevisionAndSetKeyValue(GetRoundRobinUrl(), key, Encoding.UTF8.GetBytes(value), compareRevision, expiryTime, consistency).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            logger?.LogError("Error setting key/value (cras): {Message}", ex.Message);
-
-            throw;
-        }
+        return await communication.TryCompareRevisionAndSetKeyValue(GetRoundRobinUrl(), key, Encoding.UTF8.GetBytes(value), compareRevision, expiryTime, consistency).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -507,16 +379,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<(byte[]?, long)> GetKeyValue(string key, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
     {
-        try
-        {
-            return await communication.TryGetKeyValue(GetRoundRobinUrl(), key, consistency).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            logger?.LogError("Error setting key/value: {Message}", ex.Message);
-
-            throw;
-        }
+        return await communication.TryGetKeyValue(GetRoundRobinUrl(), key, consistency).ConfigureAwait(false); 
     }
     
     /// <summary>
@@ -527,16 +390,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<(bool, long)> DeleteKeyValue(string key, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
     {
-        try
-        {
-            return await communication.TryDeleteKeyValue(GetRoundRobinUrl(), key, consistency).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            logger?.LogError("Error deleting key/value: {Message}", ex.Message);
-
-            throw;
-        }
+        return await communication.TryDeleteKeyValue(GetRoundRobinUrl(), key, consistency).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -548,16 +402,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<(bool, long)> ExtendKeyValue(string key, int expiresMs, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
     {
-        try
-        {
-            return await communication.TryExtendKeyValue(GetRoundRobinUrl(), key, expiresMs, consistency).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            logger?.LogError("Error extending key/value: {Message}", ex.Message);
-
-            throw;
-        }
+        return await communication.TryExtendKeyValue(GetRoundRobinUrl(), key, expiresMs, consistency).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -569,16 +414,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<(bool, long)> ExtendKeyValue(string key, TimeSpan expiresMs, KeyValueConsistency consistency = KeyValueConsistency.Ephemeral)
     {
-        try
-        {
-            return await communication.TryExtendKeyValue(GetRoundRobinUrl(), key, (int)expiresMs.TotalMilliseconds, consistency).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            logger?.LogError("Error extending key/value: {Message}", ex.Message);
-
-            throw;
-        }
+        return await communication.TryExtendKeyValue(GetRoundRobinUrl(), key, (int)expiresMs.TotalMilliseconds, consistency).ConfigureAwait(false);
     }
     
     /// <summary>
