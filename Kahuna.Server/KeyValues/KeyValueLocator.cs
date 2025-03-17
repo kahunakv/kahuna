@@ -1,10 +1,11 @@
 
 using Google.Protobuf;
 using Grpc.Net.Client;
+
 using Kahuna.Communication.Grpc;
 using Kahuna.Configuration;
-using Kahuna.KeyValues;
 using Kahuna.Shared.KeyValue;
+
 using Kommander;
 using Kommander.Time;
 

@@ -1,7 +1,6 @@
 
-using Kahuna.KeyValues;
-using Kahuna.Locks;
 using Kahuna.Server.KeyValues;
+using Kahuna.Locks;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 using Kommander.Data;

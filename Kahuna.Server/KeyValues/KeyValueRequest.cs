@@ -3,7 +3,7 @@ using Kahuna.Shared.KeyValue;
 using Nixie.Routers;
 using Standart.Hash.xxHash;
 
-namespace Kahuna.KeyValues;
+namespace Kahuna.Server.KeyValues;
 
 /// <summary>
 /// Represents a request to perform an action on a key-value actor

@@ -4,9 +4,9 @@ using Kahuna.Locks;
 using Kahuna.Persistence.Protos;
 using RocksDbSharp;
 using Google.Protobuf;
-using Kahuna.KeyValues;
+using Kahuna.Server.KeyValues;
 
-namespace Kahuna.Persistence;
+namespace Kahuna.Server.Persistence;
 
 public class RocksDbPersistence : IPersistence
 {

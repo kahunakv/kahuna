@@ -1,17 +1,16 @@
 
 using Google.Protobuf;
-using Kahuna.Locks;
 using Nixie;
 using Kommander;
 using Kommander.Time;
 
-using Kahuna.Persistence;
+using Kahuna.Server.Persistence;
 using Kahuna.Replication;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Replication.Protos;
 using Kommander.Data;
 
-namespace Kahuna.KeyValues;
+namespace Kahuna.Server.KeyValues;
 
 /// <summary>
 /// Each of these actors functions as a worker, accepting requests to perform operations on key/value pairs.

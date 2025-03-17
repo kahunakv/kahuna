@@ -1,10 +1,10 @@
 
-using Kahuna.KeyValues;
 using Kahuna.Locks;
 using Kommander;
+using Kahuna.Server.KeyValues;
 using Microsoft.Data.Sqlite;
 
-namespace Kahuna.Persistence;
+namespace Kahuna.Server.Persistence;
 
 public class SqlitePersistence : IPersistence
 {

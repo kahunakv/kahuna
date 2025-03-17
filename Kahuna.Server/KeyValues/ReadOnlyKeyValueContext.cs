@@ -1,7 +1,7 @@
 
 using Kommander.Time;
 
-namespace Kahuna.KeyValues;
+namespace Kahuna.Server.KeyValues;
 
 public sealed class ReadOnlyKeyValueContext
 {

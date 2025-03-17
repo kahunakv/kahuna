@@ -1,5 +1,5 @@
 
-namespace Kahuna.Persistence;
+namespace Kahuna.Server.Persistence;
 
 public enum PersistenceResponseType
 {

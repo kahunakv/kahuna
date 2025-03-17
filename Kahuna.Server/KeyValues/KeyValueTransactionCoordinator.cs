@@ -1,9 +1,9 @@
+
+using Kommander;
 using System.Text;
 using Kahuna.Configuration;
-using Kahuna.KeyValues;
 using Kahuna.Server.ScriptParser;
 using Kahuna.Shared.KeyValue;
-using Kommander;
 
 namespace Kahuna.Server.KeyValues;
 
@@ -38,54 +38,110 @@ public sealed class KeyValueTransactionCoordinator
         switch (ast.nodeType)
         {
             case NodeType.Set:
-            {
-                (KeyValueResponseType type, long revision) = await manager.LocateAndTrySetKeyValue(
-                    ast.leftAst!.yytext!,
-                    Encoding.UTF8.GetBytes(ast.rightAst!.yytext!),
-                    null,
-                    0,
-                    KeyValueFlags.Set,
-                    0,
-                    KeyValueConsistency.Linearizable,
-                    CancellationToken.None
-                );
-
-                return new()
-                {
-                    ServedFrom = "",
-                    Type = type,
-                    Revision = revision
-                };
-            }
+                return await ExecuteSimpleSet(ast);
 
             case NodeType.Get:
-            {
-                (KeyValueResponseType type, ReadOnlyKeyValueContext? context) = await manager.LocateAndTryGetValue(
-                    ast.leftAst!.yytext!,
-                    KeyValueConsistency.Linearizable,
-                    CancellationToken.None
-                );
-
-                if (context is null)
-                {
-                    return new()
-                    {
-                        ServedFrom = "",
-                        Type = type
-                    };
-                }
-                
-                return new()
-                {
-                    ServedFrom = "",
-                    Type = type,
-                    Value = context.Value,
-                    Revision = context.Revision,
-                    Expires = context.Expires
-                };
-            }
+                return await ExecuteSimpleGet(ast);
+            
+            case NodeType.StmtList:
+                return await ExecuteTransaction(ast);
         }
         
         return new() { Type = KeyValueResponseType.Errored };
+    }
+
+    private async Task<KeyValueTransactionResult> ExecuteSimpleSet(NodeAst ast)
+    {
+        (KeyValueResponseType type, long revision) = await manager.LocateAndTrySetKeyValue(
+            ast.leftAst!.yytext!,
+            Encoding.UTF8.GetBytes(ast.rightAst!.yytext!),
+            null,
+            0,
+            KeyValueFlags.Set,
+            0,
+            KeyValueConsistency.Linearizable,
+            CancellationToken.None
+        );
+
+        return new()
+        {
+            ServedFrom = "",
+            Type = type,
+            Revision = revision
+        };
+    }
+    
+    private async Task<KeyValueTransactionResult> ExecuteSimpleGet(NodeAst ast)
+    {
+        (KeyValueResponseType type, ReadOnlyKeyValueContext? context) = await manager.LocateAndTryGetValue(
+            ast.leftAst!.yytext!,
+            KeyValueConsistency.Linearizable,
+            CancellationToken.None
+        );
+
+        if (context is null)
+        {
+            return new()
+            {
+                ServedFrom = "",
+                Type = type
+            };
+        }
+            
+        return new()
+        {
+            ServedFrom = "",
+            Type = type,
+            Value = context.Value,
+            Revision = context.Revision,
+            Expires = context.Expires
+        };
+    }
+
+    private async Task<KeyValueTransactionResult> ExecuteTransaction(NodeAst ast)
+    {
+        List<NodeAst> stmts = [];
+
+        LinearizeStmts(ast, stmts);
+        
+        foreach (NodeAst stmt in stmts)
+        {
+            switch (stmt.nodeType)
+            {
+                case NodeType.Set:
+                    await ExecuteSimpleSet(stmt);
+                    break;
+
+                case NodeType.Get:
+                    await ExecuteSimpleGet(stmt);
+                    break;
+            }
+        }
+
+        return new KeyValueTransactionResult();
+    }
+
+    private static void LinearizeStmts(NodeAst ast, List<NodeAst> stmts)
+    {
+        while (true)
+        {
+            if (ast.nodeType == NodeType.StmtList)
+            {
+                if (ast.leftAst is not null) 
+                    LinearizeStmts(ast.leftAst, stmts);
+
+                if (ast.rightAst is not null)
+                {
+                    ast = ast.rightAst!;
+                    continue;
+                }
+            }
+            else
+            {
+                stmts.Add(ast);
+            }
+
+            break;
+        }
     }
 }
