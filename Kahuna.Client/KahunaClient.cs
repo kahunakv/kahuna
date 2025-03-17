@@ -416,6 +416,16 @@ public class KahunaClient
     {
         return await communication.TryExtendKeyValue(GetRoundRobinUrl(), key, (int)expiresMs.TotalMilliseconds, consistency).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Executes a transaction on the key-value store
+    /// </summary>
+    /// <param name="script"></param>
+    /// <returns></returns>
+    public async Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransaction(string script)
+    {
+        return await communication.TryExecuteKeyValueTransaction(GetRoundRobinUrl(), script).ConfigureAwait(false);
+    }
     
     /// <summary>
     /// Chooses the next server in the list of servers in a round-robin fashion

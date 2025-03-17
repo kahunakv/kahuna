@@ -366,6 +366,39 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to extend key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
 
+    public async Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransaction(string url, string script)
+    {
+        GrpcTryExecuteTransactionRequest request = new()
+        {
+            Script = script
+        };
+        
+        GrpcTryExecuteTransactionResponse? response;
+        
+        do
+        {
+            GrpcChannel channel = GetSharedChannel(url);
+        
+            KeyValuer.KeyValuerClient client = new(channel);
+        
+            response = await client.TryExecuteTransactionAsync(request).ConfigureAwait(false);
+
+            if (response is null)
+                throw new KahunaException("Response is null", LockResponseType.Errored);
+
+            if (response.Type <= GrpcKeyValueResponseType.KeyvalueResponseTypeErrored)
+                return new()
+                {
+                    Type = (KeyValueResponseType)response.Type,
+                    Value = response.Value?.ToByteArray(),
+                    Revision = response.Revision
+                };
+
+        } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
+            
+        throw new KahunaException("Failed to extend key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
+    }
+
     private static GrpcChannel GetSharedChannel(string url)
     {
         if (!channels.TryGetValue(url, out GrpcChannel? channel))

@@ -32,4 +32,6 @@ public interface IKahunaCommunication
      Task<(bool, long)> TryDeleteKeyValue(string url, string key, KeyValueConsistency consistency);
 
      Task<(bool, long)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueConsistency consistency);
+
+     Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransaction(string url, string script);
 }

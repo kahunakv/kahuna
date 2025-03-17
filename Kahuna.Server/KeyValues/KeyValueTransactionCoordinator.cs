@@ -27,6 +27,8 @@ public sealed class KeyValueTransactionCoordinator
     
     public async Task<KeyValueTransactionResult> TryExecuteTx(string script)
     {
+        logger.LogDebug("Executing tx for {Script}", script);
+        
         NodeAst ast = ScriptParserProcessor.Parse(script);
         
         Console.WriteLine(ast.nodeType);

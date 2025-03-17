@@ -495,4 +495,9 @@ public class RestCommunication : IKahunaCommunication
             
         throw new KahunaException("Failed to extend key/value: " + response.Type, response.Type);
     }
+
+    public Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransaction(string url, string script)
+    {
+        throw new NotImplementedException();
+    }
 }

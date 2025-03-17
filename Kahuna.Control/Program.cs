@@ -26,8 +26,6 @@ if (opts is null)
 
 Console.WriteLine("Kahuna Shell 0.0.1 (alpha)\n");
 
-const int DefaultExpires = 5 * 86400 * 365;
-
 string historyPath = Path.GetTempPath() + Path.PathSeparator + "kahuna.history.json";
 List<string> history = await GetHistory(historyPath);
 
@@ -158,7 +156,7 @@ while (true)
         {
             history.Add(commandTrim);
             
-            await SetKey(commandTrim, KeyValueConsistency.Linearizable);
+            await SetKey(commandTrim);
             continue;
         }
         
@@ -166,7 +164,7 @@ while (true)
         {
             history.Add(commandTrim);
             
-            await GetKey(commandTrim, KeyValueConsistency.Linearizable);
+            await GetKey(commandTrim);
             continue;
         }
         
@@ -190,7 +188,7 @@ while (true)
         {
             history.Add(commandTrim);
             
-            await SetKey(commandTrim, KeyValueConsistency.Ephemeral);
+            await SetKey(commandTrim);
             continue;
         }
         
@@ -198,7 +196,7 @@ while (true)
         {
             history.Add(commandTrim);
             
-            await GetKey(commandTrim, KeyValueConsistency.Ephemeral);
+            await GetKey(commandTrim);
             continue;
         }
         
@@ -310,16 +308,14 @@ while (true)
 }
 
 
-static async Task<KahunaClient> GetConnection(Options opts)
+static Task<KahunaClient> GetConnection(Options opts)
 {
     string? connectionString = opts.ConnectionSource;
 
     if (string.IsNullOrEmpty(connectionString))
         connectionString = "https://localhost:8082";
-    
-    await Task.CompletedTask;
 
-    return new(connectionString, null, new Kahuna.Client.Communication.RestCommunication(null));
+    return Task.FromResult(new KahunaClient(connectionString, null, new Kahuna.Client.Communication.GrpcCommunication(null)));
 }
 
 static async Task<List<string>> GetHistory(string historyPath)
@@ -350,45 +346,28 @@ static async Task SaveHistory(string historyPath, List<string>? history)
         await File.WriteAllTextAsync(historyPath, JsonSerializer.Serialize(history));
 }
 
-async Task SetKey(string commandTrim, KeyValueConsistency consistency)
+async Task SetKey(string commandTrim)
 {
     Stopwatch stopwatch = Stopwatch.StartNew();
             
-    string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
-
-    int expires = DefaultExpires;
-    KeyValueFlags flags = KeyValueFlags.Set;
-
-    if (parts.Length >= 4)
-    {
-        if (parts[3].Equals("NX", StringComparison.InvariantCultureIgnoreCase))
-            flags = KeyValueFlags.SetIfNotExists;
-        else if (parts[3].Equals("XX", StringComparison.InvariantCultureIgnoreCase))
-            flags = KeyValueFlags.SetIfExists;
-        else
-            expires = int.Parse(parts[3]);
-    }
-
-    (bool success, long revision) = await connection.SetKeyValue(parts[1], Encoding.UTF8.GetBytes(parts[2]), expires, flags, consistency);
+    KahunaKeyValueTransactionResult result = await connection.ExecuteKeyValueTransaction(commandTrim);
             
-    if (success)
-        AnsiConsole.MarkupLine("r{0} [cyan]ok[/] {1}ms\n", revision, stopwatch.ElapsedMilliseconds);
+    if (result.Type == KeyValueResponseType.Set)
+        AnsiConsole.MarkupLine("r{0} [cyan]ok[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
     else
-        AnsiConsole.MarkupLine("r{0} [yellow](not set)[/] {1}ms\n", revision, stopwatch.ElapsedMilliseconds);
+        AnsiConsole.MarkupLine("r{0} [yellow](not set)[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
 }
 
-async Task GetKey(string commandTrim, KeyValueConsistency consistency)
+async Task GetKey(string commandTrim)
 {
     Stopwatch stopwatch = Stopwatch.StartNew();
             
-    string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
-
-    (byte[]? value, long revision) = await connection.GetKeyValue(parts[1], consistency);
+    KahunaKeyValueTransactionResult result = await connection.ExecuteKeyValueTransaction(commandTrim);
             
-    if (value is not null)
-        AnsiConsole.MarkupLine("r{0} [cyan]{1}[/] {2}ms\n", revision, Markup.Escape(Encoding.UTF8.GetString(value)), stopwatch.ElapsedMilliseconds);
+    if (result.Type == KeyValueResponseType.Get)
+        AnsiConsole.MarkupLine("r{0} [cyan]{1}[/] {2}ms\n", result.Revision, Markup.Escape(Encoding.UTF8.GetString(result.Value ?? [])), stopwatch.ElapsedMilliseconds);
     else
-        AnsiConsole.MarkupLine("r{0} [yellow]null[/] {1}ms\n", revision, stopwatch.ElapsedMilliseconds);
+        AnsiConsole.MarkupLine("r{0} [yellow]null[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
 }
 
 async Task DeleteKey(string commandTrim, KeyValueConsistency consistency)

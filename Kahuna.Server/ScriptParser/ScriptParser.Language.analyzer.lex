@@ -6,7 +6,7 @@
 %option stack, minimize, parser, verbose, persistbuffer, noembedbuffers
 
 TSet            (S|s)(E|e)(T|t)
-TGet            (G|s)(E|e)(T|t)
+TGet            (G|g)(E|e)(T|t)
 LParen          \(
 RParen          \)
 LBrace          \{

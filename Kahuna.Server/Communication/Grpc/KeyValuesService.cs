@@ -11,6 +11,7 @@ using Grpc.Core;
 using Grpc.Net.Client;
 using Kahuna.Configuration;
 using Kahuna.KeyValues;
+using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
 using Kommander;
 
@@ -212,5 +213,38 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         {
             Type = (GrpcKeyValueResponseType)type
         };
+    }
+
+    /// <summary>
+    /// Executes a transaction on the key/value store
+    /// </summary>
+    /// <param name="request"></param>
+    /// <param name="context"></param>
+    /// <returns></returns>
+    public override async Task<GrpcTryExecuteTransactionResponse> TryExecuteTransaction(GrpcTryExecuteTransactionRequest request, ServerCallContext context)
+    {
+        if (string.IsNullOrEmpty(request.Script))
+            return new()
+            {
+                Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
+            };
+            
+        KeyValueTransactionResult result = await keyValues.TryExecuteTx(request.Script);
+
+        GrpcTryExecuteTransactionResponse response = new()
+        {
+            Type = (GrpcKeyValueResponseType) result.Type,
+            Revision = result.Revision,
+            ExpiresPhysical = result.Expires.L,
+            ExpiresCounter = result.Expires.C,
+        };
+        
+        if (result.ServedFrom is not null)
+            response.ServedFrom = result.ServedFrom;
+        
+        if (result.Value is not null)
+            response.Value = ByteString.CopyFrom(result.Value);
+        
+        return response;
     }
 }

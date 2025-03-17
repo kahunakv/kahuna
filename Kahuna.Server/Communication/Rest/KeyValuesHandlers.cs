@@ -198,61 +198,6 @@ public static class KeyValuesHandlers
                 Revision = r.Revision,
                 Expires = r.Expires
             };
-
-            /*int partitionId = raft.GetPartitionKey(request.Script);
-
-            if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
-            {
-                (KeyValueResponseType type, ReadOnlyKeyValueContext? keyValueContext) = await keyValues.TryGetValue(request.Key, request.Consistency);
-                if (type != KeyValueResponseType.Get)
-                    return new()
-                    {
-                        Type = type
-                    };
-
-                return new()
-                {
-                    ServedFrom = "",
-                    Type = type,
-                    Value = keyValueContext?.Value,
-                    Revision = keyValueContext?.Revision ?? 0,
-                    Expires = keyValueContext?.Expires ?? HLCTimestamp.Zero
-                };
-            }
-
-            string leader = await raft.WaitForLeader(partitionId, CancellationToken.None);
-            if (leader == raft.GetLocalEndpoint())
-                return new()
-                {
-                    Type = KeyValueResponseType.MustRetry
-                };
-
-            logger.LogDebug("GET-KEYVALUE Redirect {Key} to leader partition {Partition} at {Leader}", request.Key, partitionId, leader);
-
-            try
-            {
-                string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaGetKeyValueRequest);
-
-                KahunaTxKeyValueResponse? response = await $"https://{leader}"
-                    .AppendPathSegments("v1/kv/try-get")
-                    .WithHeader("Accept", "application/json")
-                    .WithHeader("Content-Type", "application/json")
-                    .WithTimeout(5)
-                    .WithSettings(o => o.HttpVersion = "2.0")
-                    .PostStringAsync(payload)
-                    .ReceiveJson<KahunaTxKeyValueResponse>();
-
-                if (response is not null)
-                    response.ServedFrom = $"https://{leader}";
-
-                return response;
-            }
-            catch (Exception ex)
-            {
-                logger.LogError("{Node}: {Name}\n{Message}", leader, ex.GetType().Name, ex.Message);
-
-                return new() { Type = KeyValueResponseType.Errored };
-            }*/
         });
     }
 }

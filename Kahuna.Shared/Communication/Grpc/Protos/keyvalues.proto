@@ -5,6 +5,7 @@ service KeyValuer {
   rpc TryExtendKeyValue (GrpcTryExtendKeyValueRequest) returns (GrpcTryExtendKeyValueResponse);
   rpc TryDeleteKeyValue (GrpcTryDeleteKeyValueRequest) returns (GrpcTryDeleteKeyValueResponse);
   rpc TryGetKeyValue (GrpcTryGetKeyValueRequest) returns (GrpcTryGetKeyValueResponse);
+  rpc TryExecuteTransaction (GrpcTryExecuteTransactionRequest) returns (GrpcTryExecuteTransactionResponse);
 }
 
 message GrpcTrySetKeyValueRequest {
@@ -52,6 +53,19 @@ message GrpcTryGetKeyValueRequest {
 }
 
 message GrpcTryGetKeyValueResponse {
+  optional string ServedFrom = 1;
+  GrpcKeyValueResponseType Type = 2;
+  optional bytes Value = 3;
+  int64 Revision = 4;
+  int64 ExpiresPhysical = 5;
+  uint32 ExpiresCounter = 6;
+}
+
+message GrpcTryExecuteTransactionRequest {
+  string Script = 1;
+}
+
+message GrpcTryExecuteTransactionResponse {
   optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
   optional bytes Value = 3;

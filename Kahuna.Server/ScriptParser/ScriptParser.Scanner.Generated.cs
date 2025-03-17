@@ -5,8 +5,8 @@
 //  See accompanying file GPLEXcopyright.rtf.
 //
 //  GPLEX Version:  1.2.2
-//  DateTime: 3/15/2025 6:16:46 PM
-//  GPLEX input file <ScriptParser/ScriptParser.Language.analyzer.lex - 3/15/2025 6:16:44 PM>
+//  DateTime: 3/16/2025 6:10:00 PM
+//  GPLEX input file <ScriptParser/ScriptParser.Language.analyzer.lex - 3/16/2025 5:50:40 PM>
 //  GPLEX frame file <embedded resource>
 //
 //  Option settings: verbose, parser, stack, minimize
@@ -194,14 +194,14 @@ namespace Kahuna.Server.ScriptParser
           9, 9, 9, 9, 9, -1, -1, -1, -1, 9, -1, 9, 9, 9, 9, 9, 
           9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 
           9, 9, 9, 9, 9}),
-/* NxS[  10] */ // Shortest string "S"
+/* NxS[  10] */ // Shortest string "G"
       new Table(48, 75, -1, new sbyte[] {9, 9, 9, 9, 9, 9, 
           9, 9, 9, 9, -1, -1, -1, -1, -1, -1, -1, 9, 9, 9, 9, 16, 
           9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 
           9, 9, 9, 9, 9, -1, -1, -1, -1, 9, -1, 9, 9, 9, 9, 16, 
           9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 
           9, 9, 9, 9, 9}),
-/* NxS[  11] */ // Shortest string "G"
+/* NxS[  11] */ // Shortest string "S"
       new Table(48, 75, -1, new sbyte[] {9, 9, 9, 9, 9, 9, 
           9, 9, 9, 9, -1, -1, -1, -1, -1, -1, -1, 9, 9, 9, 9, 14, 
           9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 
@@ -210,28 +210,28 @@ namespace Kahuna.Server.ScriptParser
           9, 9, 9, 9, 9}),
 /* NxS[  12] */ new Table(0, 0, -1, null), // Shortest string "{"
 /* NxS[  13] */ new Table(0, 0, -1, null), // Shortest string "}"
-/* NxS[  14] */ // Shortest string "GE"
+/* NxS[  14] */ // Shortest string "SE"
       new Table(48, 75, -1, new sbyte[] {9, 9, 9, 9, 9, 9, 
           9, 9, 9, 9, -1, -1, -1, -1, -1, -1, -1, 9, 9, 9, 9, 9, 
           9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 15, 9, 
           9, 9, 9, 9, 9, -1, -1, -1, -1, 9, -1, 9, 9, 9, 9, 9, 
           9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 15, 9, 
           9, 9, 9, 9, 9}),
-/* NxS[  15] */ // Shortest string "GET"
+/* NxS[  15] */ // Shortest string "SET"
       new Table(48, 75, -1, new sbyte[] {9, 9, 9, 9, 9, 9, 
           9, 9, 9, 9, -1, -1, -1, -1, -1, -1, -1, 9, 9, 9, 9, 9, 
           9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 
           9, 9, 9, 9, 9, -1, -1, -1, -1, 9, -1, 9, 9, 9, 9, 9, 
           9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 
           9, 9, 9, 9, 9}),
-/* NxS[  16] */ // Shortest string "SE"
+/* NxS[  16] */ // Shortest string "GE"
       new Table(48, 75, -1, new sbyte[] {9, 9, 9, 9, 9, 9, 
           9, 9, 9, 9, -1, -1, -1, -1, -1, -1, -1, 9, 9, 9, 9, 9, 
           9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 17, 9, 
           9, 9, 9, 9, 9, -1, -1, -1, -1, 9, -1, 9, 9, 9, 9, 9, 
           9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 17, 9, 
           9, 9, 9, 9, 9}),
-/* NxS[  17] */ // Shortest string "SET"
+/* NxS[  17] */ // Shortest string "GET"
       new Table(48, 75, -1, new sbyte[] {9, 9, 9, 9, 9, 9, 
           9, 9, 9, 9, -1, -1, -1, -1, -1, -1, -1, 9, 9, 9, 9, 9, 
           9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 
@@ -265,9 +265,9 @@ namespace Kahuna.Server.ScriptParser
           -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 
           -1, 1, 28, 29, -1, -1, -1, -1, 30, 2, 3, -1, -1, -1, 31, -1, 
           -1, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, -1, -1, 6, 7, 8, 
-          -1, 32, 9, 9, 9, 9, 9, 9, 11, 9, 9, 9, 9, 9, 9, 9, 
-          9, 9, 9, 9, 10, 9, 9, 9, 9, 9, 9, 9, -1, -1, -1, -1, 
-          9, -1, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 
+          -1, 32, 9, 9, 9, 9, 9, 9, 10, 9, 9, 9, 9, 9, 9, 9, 
+          9, 9, 9, 9, 11, 9, 9, 9, 9, 9, 9, 9, -1, -1, -1, -1, 
+          9, -1, 9, 9, 9, 9, 9, 9, 10, 9, 9, 9, 9, 9, 9, 9, 
           9, 9, 9, 9, 11, 9, 9, 9, 9, 9, 9, 9, 12, -1, 13}),
 /* NxS[  28] */ // Shortest string "!"
       new Table(61, 1, -1, new sbyte[] {26}),
@@ -761,10 +761,10 @@ return (int)Token.TEQUALS;
 return (int)Token.TGREATERTHAN;
             break;
         case 9: // Recognized '{Identifier}',	Shortest string "A"
-        case 10: // Recognized '{Identifier}',	Shortest string "S"
-        case 11: // Recognized '{Identifier}',	Shortest string "G"
-        case 14: // Recognized '{Identifier}',	Shortest string "GE"
-        case 16: // Recognized '{Identifier}',	Shortest string "SE"
+        case 10: // Recognized '{Identifier}',	Shortest string "G"
+        case 11: // Recognized '{Identifier}',	Shortest string "S"
+        case 14: // Recognized '{Identifier}',	Shortest string "SE"
+        case 16: // Recognized '{Identifier}',	Shortest string "GE"
 yylval.s = yytext; return (int)Token.TIDENTIFIER;
             break;
         case 12: // Recognized '{LBrace}',	Shortest string "{"
@@ -773,11 +773,11 @@ return (int)Token.LBRACE;
         case 13: // Recognized '{RBrace}',	Shortest string "}"
 return (int)Token.RBRACE;
             break;
-        case 15: // Recognized '{TGet}',	Shortest string "GET"
-return (int)Token.TGET;
-            break;
-        case 17: // Recognized '{TSet}',	Shortest string "SET"
+        case 15: // Recognized '{TSet}',	Shortest string "SET"
 return (int)Token.TSET;
+            break;
+        case 17: // Recognized '{TGet}',	Shortest string "GET"
+return (int)Token.TGET;
             break;
         case 18: // Recognized '{Placeholder}',	Shortest string "@0"
 yylval.s = yytext; return (int)Token.TPLACEHOLDER;
