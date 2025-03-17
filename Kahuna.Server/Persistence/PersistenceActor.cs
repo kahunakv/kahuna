@@ -1,9 +1,9 @@
 
-using Kahuna.KeyValues;
 using Nixie;
 using Kahuna.Locks;
+using Kahuna.Server.KeyValues;
 
-namespace Kahuna.Persistence;
+namespace Kahuna.Server.Persistence;
 
 public sealed class PersistenceActor : IActor<PersistenceRequest, PersistenceResponse>
 {

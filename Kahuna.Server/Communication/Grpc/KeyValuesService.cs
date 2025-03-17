@@ -10,7 +10,7 @@ using Google.Protobuf;
 using Grpc.Core;
 using Grpc.Net.Client;
 using Kahuna.Configuration;
-using Kahuna.KeyValues;
+using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
 using Kommander;
 

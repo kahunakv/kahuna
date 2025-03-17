@@ -1,7 +1,7 @@
 
 using Kommander.Time;
 
-namespace Kahuna.KeyValues;
+namespace Kahuna.Server.KeyValues;
 
 /// <summary>
 /// 
@@ -27,6 +27,11 @@ public sealed class KeyValueContext
     /// HLC timestamp of the last time the lock was used
     /// </summary>
     public HLCTimestamp LastUsed { get; set; }
+
+    /// <summary>
+    /// 
+    /// </summary>
+    public KeyValueWriteIntent? WriteIntent { get; set; }
 
     /// <summary>
     /// Current state of the key

@@ -1,4 +1,5 @@
-namespace Kahuna.KeyValues;
+
+namespace Kahuna.Server.KeyValues;
 
 public enum KeyValueState
 {

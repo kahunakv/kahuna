@@ -1,7 +1,7 @@
 
 using Kahuna.Shared.KeyValue;
 
-namespace Kahuna.KeyValues;
+namespace Kahuna.Server.KeyValues;
 
 public readonly struct KeyValueResponse
 {

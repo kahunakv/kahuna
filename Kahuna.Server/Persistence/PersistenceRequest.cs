@@ -1,10 +1,8 @@
 
-using Kahuna.Locks;
-using Kahuna.Shared.Locks;
 using Kommander;
 using Nixie.Routers;
 
-namespace Kahuna.Persistence;
+namespace Kahuna.Server.Persistence;
 
 public sealed class PersistenceRequest : IConsistentHashable
 {

@@ -7,13 +7,12 @@ using Kommander.Data;
 using Kommander.Time;
 
 using Kahuna.Configuration;
-using Kahuna.Persistence;
+using Kahuna.Server.Persistence;
 using Kahuna.Replication;
 using Kahuna.Replication.Protos;
-using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
 
-namespace Kahuna.KeyValues;
+namespace Kahuna.Server.KeyValues;
 
 public sealed class KeyValuesManager
 {

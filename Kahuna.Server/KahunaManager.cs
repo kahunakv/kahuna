@@ -6,10 +6,9 @@ using Kommander;
 using Kommander.Data;
 
 using Kahuna.Configuration;
-using Kahuna.KeyValues;
-using Kahuna.Locks;
-using Kahuna.Persistence;
 using Kahuna.Server.KeyValues;
+using Kahuna.Locks;
+using Kahuna.Server.Persistence;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 

@@ -6,5 +6,7 @@ public enum KeyValueRequestType
     TrySet,
     TryExtend,
     TryDelete,
-    TryGet
+    TryGet,
+    TryAdquireExclusiveLock,
+    ReleaseExclusiveLock
 }

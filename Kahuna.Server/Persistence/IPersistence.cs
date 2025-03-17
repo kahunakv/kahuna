@@ -1,8 +1,8 @@
 
 using Kahuna.Locks;
-using Kahuna.KeyValues;
+using Kahuna.Server.KeyValues;
 
-namespace Kahuna.Persistence;
+namespace Kahuna.Server.Persistence;
 
 public interface IPersistence
 {
