@@ -6,6 +6,8 @@ service KeyValuer {
   rpc TryDeleteKeyValue (GrpcTryDeleteKeyValueRequest) returns (GrpcTryDeleteKeyValueResponse);
   rpc TryGetKeyValue (GrpcTryGetKeyValueRequest) returns (GrpcTryGetKeyValueResponse);
   rpc TryExecuteTransaction (GrpcTryExecuteTransactionRequest) returns (GrpcTryExecuteTransactionResponse);
+  rpc TryAcquireExclusiveLock (GrpcTryAcquireExclusiveLockRequest) returns (GrpcTryAcquireExclusiveLockResponse);
+  rpc TryReleaseExclusiveLock (GrpcTryReleaseExclusiveLockRequest) returns (GrpcTryReleaseExclusiveLockResponse);
 }
 
 message GrpcTrySetKeyValueRequest {
@@ -74,6 +76,31 @@ message GrpcTryExecuteTransactionResponse {
   uint32 ExpiresCounter = 6;
 }
 
+message GrpcTryAcquireExclusiveLockRequest {
+  int64 TransactionIdPhysical = 1;
+  uint32 TransactionIdCounter = 2;
+  string Key = 3;
+  int32 ExpiresMs = 4;
+  GrpcKeyValueConsistency Consistency = 5;
+}
+
+message GrpcTryAcquireExclusiveLockResponse {
+  optional string ServedFrom = 1;
+  GrpcKeyValueResponseType Type = 2;
+}
+
+message GrpcTryReleaseExclusiveLockRequest {
+  int64 TransactionIdPhysical = 1;
+  uint32 TransactionIdCounter = 2;
+  string Key = 3;
+  GrpcKeyValueConsistency Consistency = 4;
+}
+
+message GrpcTryReleaseExclusiveLockResponse {
+  optional string ServedFrom = 1;
+  GrpcKeyValueResponseType Type = 2;
+}
+
 enum GrpcKeyValueFlags {
   KEYVALUE_FLAGS_NONE = 0;
   KEYVALUE_FLAGS_SET = 1;
@@ -89,10 +116,14 @@ enum GrpcKeyValueResponseType {
   KEYVALUE_RESPONSE_TYPE_EXTENDED = 2;
   KEYVALUE_RESPONSE_TYPE_GOT = 3;
   KEYVALUE_RESPONSE_TYPE_DELETED = 4;
+  KEYVALUE_RESPONSE_TYPE_LOCKED = 5;
+  KEYVALUE_RESPONSE_TYPE_UNLOCKED = 6;
   KEYVALUE_RESPONSE_TYPE_ERRORED = 99;
   KEYVALUE_RESPONSE_TYPE_INVALID_INPUT = 100;
   KEYVALUE_RESPONSE_TYPE_MUST_RETRY = 101;
-  KEYVALUE_RESPONSE_TYPE_DOES_NOT_EXIST = 102;
+  KEYVALUE_RESPONSE_TYPE_ABORTED = 102;
+  KEYVALUE_RESPONSE_TYPE_DOES_NOT_EXIST = 103;
+  KEYVALUE_RESPONSE_TYPE_ALREADY_LOCKED = 104;
 }
 
 enum GrpcKeyValueConsistency {

@@ -247,6 +247,34 @@ public sealed class KeyValuesManager
     {
         return await locator.LocateAndTryGetValue(key, consistency, cancelationToken);
     }
+    
+    /// <summary>
+    /// Locates the leader node for the given key and executes the TryAcquireExclusiveLock request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="consistency"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public async Task<KeyValueResponseType> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    {
+        return await locator.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, consistency, cancelationToken);
+    }
+    
+    /// <summary>
+    /// Locates the leader node for the given key and executes the TryReleaseExclusiveLock request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="consistency"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public async Task<KeyValueResponseType> LocateAndTryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    {
+        return await locator.LocateAndTryReleaseExclusiveLock(transactionId, key, consistency, cancelationToken);
+    }
 
     /// <summary>
     /// Passes a TrySet request to the keyValueer actor for the given keyValue name.
@@ -271,6 +299,7 @@ public sealed class KeyValuesManager
     {
         KeyValueRequest request = new(
             KeyValueRequestType.TrySet, 
+            HLCTimestamp.Zero,
             key, 
             value, 
             compareValue,
@@ -304,7 +333,8 @@ public sealed class KeyValuesManager
     )
     {
         KeyValueRequest request = new(
-            KeyValueRequestType.TryExtend, 
+            KeyValueRequestType.TryExtend,
+            HLCTimestamp.Zero,
             key, 
             null, 
             null,
@@ -334,6 +364,7 @@ public sealed class KeyValuesManager
     {
         KeyValueRequest request = new(
             KeyValueRequestType.TryDelete, 
+            HLCTimestamp.Zero,
             key, 
             null, 
             null,
@@ -354,7 +385,7 @@ public sealed class KeyValuesManager
     }
     
     /// <summary>
-    /// Passes a Get request to the keyValueer actor for the given keyValue name.
+    /// Passes a Get request to the key/value actor for the given keyValue name.
     /// </summary>
     /// <param name="key"></param>
     /// <param name="consistency"></param>
@@ -363,6 +394,7 @@ public sealed class KeyValuesManager
     {
         KeyValueRequest request = new(
             KeyValueRequestType.TryGet, 
+            HLCTimestamp.Zero, 
             key, 
             null, 
             null,
@@ -380,6 +412,69 @@ public sealed class KeyValuesManager
             response = await consistentKeyValuesRouter.Ask(request);
         
         return (response.Type, response.Context);
+    }
+    
+    /// <summary>
+    /// Passes a TryAcquireExclusiveLock request to the key/value actor for the given keyValue name.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
+    public async Task<KeyValueResponseType> TryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueConsistency consistency)
+    {
+        KeyValueRequest request = new(
+            KeyValueRequestType.TryAcquireExclusiveLock, 
+            transactionId, 
+            key, 
+            null, 
+            null,
+            -1,
+            KeyValueFlags.None,
+            expiresMs, 
+            consistency
+        );
+
+        KeyValueResponse response;
+        
+        if (consistency == KeyValueConsistency.Ephemeral)
+            response = await ephemeralKeyValuesRouter.Ask(request);
+        else
+            response = await consistentKeyValuesRouter.Ask(request);
+        
+        return response.Type;
+    }
+    
+    /// <summary>
+    /// Passes a TryAcquireExclusiveLock request to the key/value actor for the given keyValue name.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
+    public async Task<KeyValueResponseType> TryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueConsistency consistency)
+    {
+        KeyValueRequest request = new(
+            KeyValueRequestType.TryReleaseExclusiveLock, 
+            transactionId, 
+            key, 
+            null, 
+            null,
+            -1,
+            KeyValueFlags.None,
+            0, 
+            consistency
+        );
+
+        KeyValueResponse response;
+        
+        if (consistency == KeyValueConsistency.Ephemeral)
+            response = await ephemeralKeyValuesRouter.Ask(request);
+        else
+            response = await consistentKeyValuesRouter.Ask(request);
+        
+        return response.Type;
     }
 
     /// <summary>

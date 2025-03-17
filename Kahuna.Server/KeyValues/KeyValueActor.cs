@@ -67,13 +67,14 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         try
         {
             logger.LogDebug(
-                "KeyValueActor Message: {Actor} {Type} {Key} {Value} {ExpiresMs} {Flags} {Consistency}",
+                "KeyValueActor Message: {Actor} {Type} Key={Key} {Value} Expires={ExpiresMs} Flags={Flags} TxId={TransactionId} {Consistency}",
                 actorContext.Self.Runner.Name,
                 message.Type,
                 message.Key,
                 message.Value?.Length,
                 message.ExpiresMs,
                 message.Flags,
+                message.TransactionId,
                 message.Consistency
             );
 
@@ -83,9 +84,11 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
             return message.Type switch
             {
                 KeyValueRequestType.TrySet => await TrySet(message),
-                KeyValueRequestType.TryDelete => await TryDelete(message),
                 KeyValueRequestType.TryExtend => await TryExtend(message),
+                KeyValueRequestType.TryDelete => await TryDelete(message),
                 KeyValueRequestType.TryGet => await TryGet(message),
+                KeyValueRequestType.TryAcquireExclusiveLock => await TryAdquireExclusiveLock(message),
+                KeyValueRequestType.TryReleaseExclusiveLock => await TryReleaseExclusiveLock(message),
                 _ => new(KeyValueResponseType.Errored)
             };
         }
@@ -96,7 +99,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
 
         return new(KeyValueResponseType.Errored);
     }
-    
+
     /// <summary>
     /// Tries to set a key value pair based on the specified flags
     /// </summary>
@@ -137,6 +140,9 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
             if (context.State == KeyValueState.Deleted)
                 exists = false;
         }
+        
+        if (context.WriteIntent is not null)
+            return new(KeyValueResponseType.MustRetry, 0);
 
         switch (message.Flags)
         {
@@ -185,11 +191,15 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
     private async Task<KeyValueResponse> TryExtend(KeyValueRequest message)
     {
         KeyValueContext? context = await GetKeyValueContext(message.Key, message.Consistency);
+        
         if (context is null)
             return new(KeyValueResponseType.DoesNotExist);
         
         if (context.State == KeyValueState.Deleted)
             return new(KeyValueResponseType.DoesNotExist, context.Revision);
+        
+        if (context.WriteIntent is not null)
+            return new(KeyValueResponseType.MustRetry, 0);
         
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
         
@@ -232,6 +242,9 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         if (context.State == KeyValueState.Deleted)
             return new(KeyValueResponseType.DoesNotExist, context.Revision);
         
+        if (context.WriteIntent is not null)
+            return new(KeyValueResponseType.MustRetry, 0);
+        
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
         
         KeyValueProposal proposal = new(
@@ -265,6 +278,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
     private async Task<KeyValueResponse> TryGet(KeyValueRequest message)
     {
         KeyValueContext? context = await GetKeyValueContext(message.Key, message.Consistency);
+        
         if (context is null || context.State == KeyValueState.Deleted)
             return new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueContext(null, context?.Revision ?? 0, HLCTimestamp.Zero));
 
@@ -278,6 +292,74 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         ReadOnlyKeyValueContext readOnlyKeyValueContext = new(context.Value, context.Revision, context.Expires);
 
         return new(KeyValueResponseType.Get, readOnlyKeyValueContext);
+    }
+    
+    /// <summary>
+    /// Acquires an exclusive lock on a key
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
+    private async Task<KeyValueResponse> TryAdquireExclusiveLock(KeyValueRequest message)
+    {
+        if (message.TransactionId == HLCTimestamp.Zero)
+            return new(KeyValueResponseType.Errored);
+        
+        HLCTimestamp currentTime = await raft.HybridLogicalClock.ReceiveEvent(message.TransactionId);
+
+        if (!keyValues.TryGetValue(message.Key, out KeyValueContext? context))
+        {
+            KeyValueContext? newContext = null;
+
+            /// Try to retrieve KeyValue context from persistence
+            if (message.Consistency == KeyValueConsistency.Linearizable)
+                newContext = await persistence.GetKeyValue(message.Key);
+
+            newContext ??= new() { Revision = -1 };
+            
+            context = newContext;
+
+            keyValues.Add(message.Key, newContext);
+        }
+
+        if (context.WriteIntent is not null)
+        {
+            if (context.WriteIntent.TransactionId == message.TransactionId)
+                return new(KeyValueResponseType.Locked);
+
+            if (context.WriteIntent.Expires != HLCTimestamp.Zero && context.WriteIntent.Expires - currentTime > TimeSpan.Zero)
+                return new(KeyValueResponseType.AlreadyLocked);
+        }
+
+        context.WriteIntent = new()
+        {
+            TransactionId = message.TransactionId,
+            Expires = message.TransactionId + message.ExpiresMs,
+        };
+        
+        return new(KeyValueResponseType.Locked);
+    }
+    
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
+    private async Task<KeyValueResponse> TryReleaseExclusiveLock(KeyValueRequest message)
+    {
+        if (message.TransactionId == HLCTimestamp.Zero)
+            return new(KeyValueResponseType.Errored);
+        
+        KeyValueContext? context = await GetKeyValueContext(message.Key, message.Consistency);
+        
+        if (context is null || context.State == KeyValueState.Deleted)
+            return new(KeyValueResponseType.DoesNotExist);
+        
+        if (context.WriteIntent is not null && context.WriteIntent.TransactionId != message.TransactionId)
+            return new(KeyValueResponseType.AlreadyLocked);
+
+        context.WriteIntent = null;
+        
+        return new(KeyValueResponseType.Unlocked);
     }
 
     private async ValueTask<KeyValueContext?> GetKeyValueContext(string resource, KeyValueConsistency? consistency)

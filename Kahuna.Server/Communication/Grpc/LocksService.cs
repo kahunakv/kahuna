@@ -196,7 +196,7 @@ public class LocksService : Locker.LockerBase
             {
                 ServedFrom = "",
                 Type = (GrpcLockResponseType)type,
-                Owner = lockContext?.Owner is not null ? ByteString.CopyFrom(lockContext?.Owner) : null,
+                Owner = lockContext?.Owner is not null ? ByteString.CopyFrom(lockContext.Owner) : null,
                 FencingToken = lockContext?.FencingToken ?? 0,
                 ExpiresPhysical = lockContext?.Expires.L ?? 0,
                 ExpiresCounter = lockContext?.Expires.C ?? 0,

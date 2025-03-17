@@ -13,6 +13,7 @@ using Kahuna.Configuration;
 using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
 using Kommander;
+using Kommander.Time;
 
 namespace Kahuna.Communication.Grpc;
 
@@ -207,6 +208,61 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
 
             return response;
         }
+
+        return new()
+        {
+            Type = (GrpcKeyValueResponseType)type
+        };
+    }
+    
+    /// <summary>
+    /// Receives requests for the key/value "AcquireExclusiveLock" service 
+    /// </summary>
+    /// <param name="request"></param>
+    /// <param name="context"></param>
+    /// <returns></returns>
+    public override async Task<GrpcTryAcquireExclusiveLockResponse> TryAcquireExclusiveLock(GrpcTryAcquireExclusiveLockRequest request, ServerCallContext context)
+    {
+        if (string.IsNullOrEmpty(request.Key))
+            return new()
+            {
+                Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
+            };
+        
+        KeyValueResponseType type = await keyValues.LocateAndTryAcquireExclusiveLock(
+            new(request.TransactionIdPhysical, request.TransactionIdCounter), 
+            request.Key, 
+            request.ExpiresMs, 
+            (KeyValueConsistency)request.Consistency, 
+            context.CancellationToken
+        );
+
+        return new()
+        {
+            Type = (GrpcKeyValueResponseType)type
+        };
+    }
+    
+    /// <summary>
+    /// Receives requests for the key/value "ReleaseExclusiveLock" service 
+    /// </summary>
+    /// <param name="request"></param>
+    /// <param name="context"></param>
+    /// <returns></returns>
+    public override async Task<GrpcTryReleaseExclusiveLockResponse> TryReleaseExclusiveLock(GrpcTryReleaseExclusiveLockRequest request, ServerCallContext context)
+    {
+        if (string.IsNullOrEmpty(request.Key))
+            return new()
+            {
+                Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
+            };
+        
+        KeyValueResponseType type = await keyValues.LocateAndTryReleaseExclusiveLock(
+            new(request.TransactionIdPhysical, request.TransactionIdCounter), 
+            request.Key, 
+            (KeyValueConsistency)request.Consistency, 
+            context.CancellationToken
+        );
 
         return new()
         {

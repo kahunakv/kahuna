@@ -1,5 +1,6 @@
 
 using Kahuna.Shared.KeyValue;
+using Kommander.Time;
 using Nixie.Routers;
 using Standart.Hash.xxHash;
 
@@ -11,6 +12,8 @@ namespace Kahuna.Server.KeyValues;
 public readonly struct KeyValueRequest : IConsistentHashable
 {
     public KeyValueRequestType Type { get; }
+    
+    public HLCTimestamp TransactionId { get; }
     
     public string Key { get; }
     
@@ -30,14 +33,19 @@ public readonly struct KeyValueRequest : IConsistentHashable
     /// Constructor
     /// </summary>
     /// <param name="type"></param>
+    /// <param name="transactionId"></param>
     /// <param name="key"></param>
     /// <param name="value"></param>
+    /// <param name="compareValue"></param>
+    /// <param name="compareRevision"></param>
+    /// <param name="flags"></param>
     /// <param name="expiresMs"></param>
     /// <param name="consistency"></param>
     public KeyValueRequest(
-        KeyValueRequestType type, 
+        KeyValueRequestType type,
+        HLCTimestamp transactionId,
         string key, 
-        byte[]? value, 
+        byte[]? value,
         byte[]? compareValue,
         long compareRevision,
         KeyValueFlags flags,
@@ -46,6 +54,7 @@ public readonly struct KeyValueRequest : IConsistentHashable
     )
     {
         Type = type;
+        TransactionId = transactionId;
         Key = key;
         Value = value;
         CompareValue = compareValue;

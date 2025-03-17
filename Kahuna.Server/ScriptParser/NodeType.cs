@@ -1,3 +1,4 @@
+
 namespace Kahuna.Server.ScriptParser;
 
 public enum NodeType

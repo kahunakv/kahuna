@@ -4,6 +4,7 @@ using Kahuna.Locks;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 using Kommander.Data;
+using Kommander.Time;
 
 namespace Kahuna;
 
@@ -28,6 +29,10 @@ public interface IKahuna
     public Task<(KeyValueResponseType, long)> TryDeleteKeyValue(string key, KeyValueConsistency consistency);
 
     public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryGetValue(string key, KeyValueConsistency consistency);
+
+    public Task<KeyValueResponseType> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueConsistency consistency, CancellationToken cancelationToken);
+    
+    public Task<KeyValueResponseType> LocateAndTryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken);
     
     public Task<KeyValueTransactionResult> TryExecuteTx(string script);
 

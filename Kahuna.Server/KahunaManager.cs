@@ -11,6 +11,7 @@ using Kahuna.Locks;
 using Kahuna.Server.Persistence;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
+using Kommander.Time;
 
 namespace Kahuna;
 
@@ -172,6 +173,33 @@ public sealed class KahunaManager : IKahuna
     public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryGetValue(string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
     {
         return keyValues.LocateAndTryGetValue(key, consistency, cancelationToken);
+    }
+    
+    /// <summary>
+    /// Locates the leader node for the given key and executes the TryAcquireExclusiveLock request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="consistency"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public Task<KeyValueResponseType> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    {
+        return keyValues.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, consistency, cancelationToken);
+    }
+
+    /// <summary>
+    /// Locates the leader node for the given key and executes the TryReleaseExclusiveLock request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="consistency"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public Task<KeyValueResponseType> LocateAndTryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    {
+        return keyValues.LocateAndTryReleaseExclusiveLock(transactionId, key, consistency, cancelationToken);
     }
 
     /// <summary>

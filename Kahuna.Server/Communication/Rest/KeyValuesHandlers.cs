@@ -185,15 +185,15 @@ public static class KeyValuesHandlers
                     Type = KeyValueResponseType.InvalidInput
                 };
             
-            KeyValueTransactionResult r = await keyValues.TryExecuteTx(request.Script);
+            KeyValueTransactionResult result = await keyValues.TryExecuteTx(request.Script);
 
             return new KahunaTxKeyValueResponse
             {
-                ServedFrom = r.ServedFrom,
-                Type = r.Type,
-                Value = r.Value,
-                Revision = r.Revision,
-                Expires = r.Expires
+                ServedFrom = result.ServedFrom,
+                Type = result.Type,
+                Value = result.Value,
+                Revision = result.Revision,
+                Expires = result.Expires
             };
         });
     }

@@ -1,3 +1,4 @@
+
 namespace Kahuna.Server.ScriptParser;
 
 /// <summary>

@@ -4,6 +4,7 @@ using System.Text;
 using Kahuna.Configuration;
 using Kahuna.Server.ScriptParser;
 using Kahuna.Shared.KeyValue;
+using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues;
 
@@ -100,45 +101,69 @@ public sealed class KeyValueTransactionCoordinator
 
     private async Task<KeyValueTransactionResult> ExecuteTransaction(NodeAst ast)
     {
-        List<NodeAst> stmts = [];
-
-        LinearizeStmts(ast, stmts);
+        HLCTimestamp transactionId = await raft.HybridLogicalClock.SendOrLocalEvent();
         
-        foreach (NodeAst stmt in stmts)
-        {
-            switch (stmt.nodeType)
-            {
-                case NodeType.Set:
-                    await ExecuteSimpleSet(stmt);
-                    break;
+        List<string> locksAcquired = [];
+        List<string> locksToAcquire = [];
 
-                case NodeType.Get:
-                    await ExecuteSimpleGet(stmt);
-                    break;
+        GetLocksToAcquire(ast, locksToAcquire);
+
+        try
+        {
+            foreach (string key in locksToAcquire)
+            {
+                KeyValueResponseType response = await manager.LocateAndTryAcquireExclusiveLock(transactionId, key, 5000, KeyValueConsistency.Linearizable, CancellationToken.None);
+
+                if (response == KeyValueResponseType.Locked)
+                {
+                    locksAcquired.Add(key);
+                    continue;
+                }
+
+                return new()
+                {
+                    Type = KeyValueResponseType.Aborted
+                };
+            }
+        }
+        finally
+        {
+            foreach (string key in locksAcquired)
+            {
+                KeyValueResponseType response = await manager.LocateAndTryReleaseExclusiveLock(transactionId, key, KeyValueConsistency.Linearizable, CancellationToken.None);
+                
+                Console.WriteLine(response);
             }
         }
 
         return new KeyValueTransactionResult();
     }
 
-    private static void LinearizeStmts(NodeAst ast, List<NodeAst> stmts)
+    private static void GetLocksToAcquire(NodeAst ast, List<string> locksToAcquire)
     {
         while (true)
         {
-            if (ast.nodeType == NodeType.StmtList)
+            //Console.WriteLine("AST={0}", ast.nodeType);
+            
+            switch (ast.nodeType)
             {
-                if (ast.leftAst is not null) 
-                    LinearizeStmts(ast.leftAst, stmts);
-
-                if (ast.rightAst is not null)
+                case NodeType.StmtList:
                 {
-                    ast = ast.rightAst!;
-                    continue;
+                    if (ast.leftAst is not null) 
+                        GetLocksToAcquire(ast.leftAst, locksToAcquire);
+
+                    if (ast.rightAst is not null)
+                    {
+                        ast = ast.rightAst!;
+                        continue;
+                    }
+
+                    break;
                 }
-            }
-            else
-            {
-                stmts.Add(ast);
+                
+                case NodeType.Set:
+                    locksToAcquire.Add(ast.leftAst!.yytext!);
+                    break;
             }
 
             break;

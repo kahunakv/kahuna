@@ -7,8 +7,12 @@ public enum KeyValueResponseType
     Extended = 2,
     Get = 3,
     Deleted = 4,
+    Locked = 5,
+    Unlocked = 6,
     Errored = 99,
     InvalidInput = 100,
     MustRetry = 101,
-    DoesNotExist = 102
+    Aborted = 102,
+    DoesNotExist = 103,
+    AlreadyLocked = 104
 }
