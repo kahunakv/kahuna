@@ -118,17 +118,28 @@ public sealed class KeyValueTransactionCoordinator
 
         return new KeyValueTransactionResult();
     }
-    
+
     private static void LinearizeStmts(NodeAst ast, List<NodeAst> stmts)
     {
-        if (ast.nodeType == NodeType.StmtList)
+        while (true)
         {
-            LinearizeStmts(ast.leftAst!, stmts);
-            LinearizeStmts(ast.rightAst!, stmts);
-        }
-        else
-        {
-            stmts.Add(ast);
+            if (ast.nodeType == NodeType.StmtList)
+            {
+                if (ast.leftAst is not null) 
+                    LinearizeStmts(ast.leftAst, stmts);
+
+                if (ast.rightAst is not null)
+                {
+                    ast = ast.rightAst!;
+                    continue;
+                }
+            }
+            else
+            {
+                stmts.Add(ast);
+            }
+
+            break;
         }
     }
 }
