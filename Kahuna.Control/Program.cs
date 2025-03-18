@@ -52,6 +52,9 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "extend",
         "nx",
         "xx",
+        "if",
+        "then",
+        "end",
         // locks
         "lock",
         "extend-lock",
@@ -85,7 +88,7 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
 
     editor = new()
     {
-        MultiLine = false,
+        MultiLine = true,
         Text = "",
         Prompt = new MyLineNumberPrompt(new(foreground: Color.PaleTurquoise1)),
         //Completion = new TestCompletion(),        
@@ -299,7 +302,9 @@ while (true)
             continue;
         }
         
-        AnsiConsole.MarkupLine("[yellow]unknown command[/]");
+        //AnsiConsole.MarkupLine("[yellow]unknown command[/]");
+
+        await RunCommand(commandTrim);
     }
     catch (Exception ex)
     {
@@ -396,6 +401,22 @@ async Task ExtendKey(string commandTrim, KeyValueConsistency consistency)
         AnsiConsole.MarkupLine("r{0} [cyan]extended[/] {1}ms\n", revision, stopwatch.ElapsedMilliseconds);
     else
         AnsiConsole.MarkupLine("r{0} [yellow]not found[/] {1}ms\n", revision, stopwatch.ElapsedMilliseconds);
+}
+
+async Task RunCommand(string commandTrim)
+{
+    Stopwatch stopwatch = Stopwatch.StartNew();
+            
+    KahunaKeyValueTransactionResult result = await connection.ExecuteKeyValueTransaction(commandTrim);
+            
+    if (result.Type == KeyValueResponseType.Get)
+        AnsiConsole.MarkupLine("r{0} [cyan]{1}[/] {2}ms\n", result.Revision, Markup.Escape(Encoding.UTF8.GetString(result.Value ?? [])), stopwatch.ElapsedMilliseconds);
+    else if (result.Type == KeyValueResponseType.DoesNotExist)
+        AnsiConsole.MarkupLine("r{0} [yellow]null[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
+    else if (result.Type == KeyValueResponseType.Set)
+        AnsiConsole.MarkupLine("r{0} [cyan]ok[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
+    else
+        AnsiConsole.MarkupLine("r{0} [yellow]null[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
 }
 
 public sealed class MyLineNumberPrompt : ILineEditorPrompt

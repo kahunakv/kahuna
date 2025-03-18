@@ -7,6 +7,14 @@
 
 TSet            (S|s)(E|e)(T|t)
 TGet            (G|g)(E|e)(T|t)
+TEset           (E|e)(S|s)(E|e)(T|t)
+TEget           (E|e)(G|g)(E|e)(T|t)
+TIf             (I|i)(F|f)
+TThen           (T|t)(H|h)(E|e)(N|n)
+TElse           (E|l)(L|l)(S|s)(E|e)
+TEnd            (E|e)(N|n)(D|d)
+TNx             (N|n)(X|x)
+TXx             (X|x)(X|x)
 LParen          \(
 RParen          \)
 LBrace          \{
@@ -74,6 +82,22 @@ TGreaterEquals  >=
 {TGet} { return (int)Token.TGET; }
 
 {TSet} { return (int)Token.TSET; }
+
+{TEget} { return (int)Token.TEGET; }
+
+{TEset} { return (int)Token.TESET; }
+
+{TIf} { return (int)Token.TIF; }
+
+{TElse} { return (int)Token.TELSE; }
+
+{TThen} { return (int)Token.TTHEN; }
+
+{TEnd} { return (int)Token.TEND; }
+
+{TNx} { return (int)Token.TNX; }
+
+{TXx} { return (int)Token.TXX; }
 
 {TEquals} { return (int)Token.TEQUALS; }
 

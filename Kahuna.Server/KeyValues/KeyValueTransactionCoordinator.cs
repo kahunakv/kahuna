@@ -78,7 +78,13 @@ public sealed class KeyValueTransactionCoordinator
                 return await ExecuteSet(HLCTimestamp.Zero, ast);
 
             case NodeType.Get:
-                return await ExecuteSimpleGet(ast);
+                return await ExecuteGet(HLCTimestamp.Zero, ast);
+            
+            case NodeType.Eset:
+                return await ExecuteEset(HLCTimestamp.Zero, ast);
+            
+            case NodeType.Eget:
+                return await ExecuteEget(HLCTimestamp.Zero, ast);
             
             case NodeType.StmtList:
                 return await ExecuteTransaction(ast);
@@ -109,11 +115,62 @@ public sealed class KeyValueTransactionCoordinator
         };
     }
     
-    private async Task<KeyValueTransactionResult> ExecuteSimpleGet(NodeAst ast)
+    private async Task<KeyValueTransactionResult> ExecuteEset(HLCTimestamp transactionId, NodeAst ast)
+    {
+        (KeyValueResponseType type, long revision) = await manager.LocateAndTrySetKeyValue(
+            transactionId,
+            key: ast.leftAst!.yytext!,
+            value: Encoding.UTF8.GetBytes(ast.rightAst!.yytext!),
+            null,
+            0,
+            KeyValueFlags.Set,
+            0,
+            KeyValueConsistency.Ephemeral,
+            CancellationToken.None
+        );
+
+        return new()
+        {
+            ServedFrom = "",
+            Type = type,
+            Revision = revision
+        };
+    }
+    
+    private async Task<KeyValueTransactionResult> ExecuteGet(HLCTimestamp transactionId, NodeAst ast)
     {
         (KeyValueResponseType type, ReadOnlyKeyValueContext? context) = await manager.LocateAndTryGetValue(
+            transactionId,
             ast.leftAst!.yytext!,
             KeyValueConsistency.Linearizable,
+            CancellationToken.None
+        );
+
+        if (context is null)
+        {
+            return new()
+            {
+                ServedFrom = "",
+                Type = type
+            };
+        }
+            
+        return new()
+        {
+            ServedFrom = "",
+            Type = type,
+            Value = context.Value,
+            Revision = context.Revision,
+            Expires = context.Expires
+        };
+    }
+    
+    private async Task<KeyValueTransactionResult> ExecuteEget(HLCTimestamp transactionId, NodeAst ast)
+    {
+        (KeyValueResponseType type, ReadOnlyKeyValueContext? context) = await manager.LocateAndTryGetValue(
+            transactionId,
+            ast.leftAst!.yytext!,
+            KeyValueConsistency.Ephemeral,
             CancellationToken.None
         );
 
@@ -140,90 +197,68 @@ public sealed class KeyValueTransactionCoordinator
     {
         HLCTimestamp transactionId = await raft.HybridLogicalClock.SendOrLocalEvent();
         
-        List<string> locksAcquired = [];
         List<string> locksToAcquire = [];
-        List<(string, HLCTimestamp)> prparedMutations = [];
+        List<string> locksAcquired = [];
 
         GetLocksToAcquire(ast, locksToAcquire);
 
         try
         {
+            List<Task<(KeyValueResponseType, string)>> acquireLocksTasks = new(locksToAcquire.Count);
+            
             // Step 1: Acquire locks
             foreach (string key in locksToAcquire)
-            {
-                KeyValueResponseType response = await manager.LocateAndTryAcquireExclusiveLock(transactionId, key, 5000, KeyValueConsistency.Linearizable, CancellationToken.None);
-
-                if (response == KeyValueResponseType.Locked)
-                {
-                    locksAcquired.Add(key);
-                    continue;
-                }
-                
-                Console.WriteLine(response);
-
-                return new()
-                {
-                    Type = KeyValueResponseType.Aborted
-                };
-            }
+                acquireLocksTasks.Add(manager.LocateAndTryAcquireExclusiveLock(transactionId, key, 5000, KeyValueConsistency.Linearizable, CancellationToken.None));
+            
+            (KeyValueResponseType, string)[] acquireResponses = await Task.WhenAll(acquireLocksTasks);
+            
+            if (acquireResponses.Any(r => r.Item1 != KeyValueResponseType.Locked))
+                return new() { Type = KeyValueResponseType.Aborted };
+            
+            locksAcquired = acquireResponses.Select(r => r.Item2).ToList();
             
             // Step 2: Execute transaction
-            await ExecuteTransactionInternal(transactionId, ast);
+            KeyValueTransactionResult result = await ExecuteTransactionInternal(transactionId, ast);
+            
+            List<Task<(KeyValueResponseType, HLCTimestamp, string)>> proposalTasks = new(locksToAcquire.Count);
             
             // Step 3: Prepare mutations
-            foreach (string key in locksAcquired)
-            {
-                (KeyValueResponseType response, HLCTimestamp proposalTicket) = await manager.LocateAndTryPrepareMutations(transactionId, key, KeyValueConsistency.Linearizable, CancellationToken.None);
-
-                if (response == KeyValueResponseType.Prepared)
-                {
-                    prparedMutations.Add((key, proposalTicket));
-                    continue;
-                }
-                
-                // @rollback
-                
-                Console.WriteLine(response);
-
-                return new()
-                {
-                    Type = KeyValueResponseType.Aborted
-                };
-            }
+            foreach (string key in locksToAcquire)
+                proposalTasks.Add(manager.LocateAndTryPrepareMutations(transactionId, key, KeyValueConsistency.Linearizable, CancellationToken.None));
+            
+            (KeyValueResponseType, HLCTimestamp, string)[] proposalResponses = await Task.WhenAll(proposalTasks);
+            
+            if (proposalResponses.Any(r => r.Item1 != KeyValueResponseType.Prepared))
+                return new() { Type = KeyValueResponseType.Aborted };
+            
+            List<(string key, HLCTimestamp ticketId)> mutationsPrepared = proposalResponses.Select(r => (r.Item3, r.Item2)).ToList();
+            
+            List<Task<(KeyValueResponseType, long)>> commitTasks = new(locksToAcquire.Count);
             
             // Step 4: Commit mutations
-            foreach ((string key, HLCTimestamp ticketId) in prparedMutations)
-            {
-                (KeyValueResponseType response, _) = await manager.LocateAndTryCommitMutations(transactionId, key, ticketId, KeyValueConsistency.Linearizable, CancellationToken.None);
-                
-                if (response == KeyValueResponseType.Committed)
-                    continue;
-                
-                Console.WriteLine(response);
-
-                return new()
-                {
-                    Type = KeyValueResponseType.Aborted
-                };
-            }
+            foreach ((string key, HLCTimestamp ticketId) in mutationsPrepared)
+                commitTasks.Add(manager.LocateAndTryCommitMutations(transactionId, key, ticketId, KeyValueConsistency.Linearizable, CancellationToken.None));
+            
+            await Task.WhenAll(commitTasks);
+            
+            return result;
         }
         finally
         {
+            List<Task<(KeyValueResponseType, string)>> releaseLocksTasks = new(locksToAcquire.Count);
+            
             // Final Step: Release locks
             foreach (string key in locksAcquired)
-            {
-                KeyValueResponseType response = await manager.LocateAndTryReleaseExclusiveLock(transactionId, key, KeyValueConsistency.Linearizable, CancellationToken.None);
-                
-                if (response != KeyValueResponseType.Unlocked)
-                    Console.WriteLine(response);
-            }
+                releaseLocksTasks.Add(manager.LocateAndTryReleaseExclusiveLock(transactionId, key, KeyValueConsistency.Linearizable, CancellationToken.None));
+            
+            await Task.WhenAll(releaseLocksTasks);
         }
-
-        return new KeyValueTransactionResult();
     }
 
-    private async Task ExecuteTransactionInternal(HLCTimestamp transactionId, NodeAst ast)
+    private async Task<KeyValueTransactionResult> ExecuteTransactionInternal(HLCTimestamp transactionId, NodeAst ast)
     {
+        KeyValueTransactionResult? result = null;
+        
         while (true)
         {
             //Console.WriteLine("AST={0}", ast.nodeType);
@@ -233,7 +268,7 @@ public sealed class KeyValueTransactionCoordinator
                 case NodeType.StmtList:
                 {
                     if (ast.leftAst is not null) 
-                        await ExecuteTransactionInternal(transactionId, ast.leftAst);
+                        result = await ExecuteTransactionInternal(transactionId, ast.leftAst);
 
                     if (ast.rightAst is not null)
                     {
@@ -247,10 +282,28 @@ public sealed class KeyValueTransactionCoordinator
                 case NodeType.Set:
                     await ExecuteSet(transactionId, ast);
                     break;
+
+                case NodeType.Get:
+                {
+                    result = await ExecuteGet(transactionId, ast);
+                    break;
+                }
+                
+                case NodeType.Eset:
+                    await ExecuteEset(transactionId, ast);
+                    break;
+
+                case NodeType.Eget:
+                {
+                    result = await ExecuteEget(transactionId, ast);
+                    break;
+                }
             }
 
             break;
         }
+
+        return result ?? new() { Type = KeyValueResponseType.Get, Revision = 0 };
     }
 
     private static void GetLocksToAcquire(NodeAst ast, List<string> locksToAcquire)

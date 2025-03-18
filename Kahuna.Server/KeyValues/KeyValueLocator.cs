@@ -112,11 +112,12 @@ internal sealed class KeyValueLocator
     /// <summary>
     /// Locates the leader node for the given key and executes the TryGetValue request.
     /// </summary>
+    /// <param name="transactionId"></param>
     /// <param name="key"></param>
     /// <param name="consistency"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryGetValue(string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
     {
         if (string.IsNullOrEmpty(key))
             return (KeyValueResponseType.InvalidInput, null);
@@ -124,7 +125,7 @@ internal sealed class KeyValueLocator
         int partitionId = raft.GetPartitionKey(key);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
-            return await manager.TryGetValue(key, consistency);
+            return await manager.TryGetValue(transactionId, key, consistency);
             
         string leader = await raft.WaitForLeader(partitionId, cancelationToken);
         if (leader == raft.GetLocalEndpoint())
@@ -138,6 +139,8 @@ internal sealed class KeyValueLocator
         
         GrpcTryGetKeyValueRequest request = new()
         {
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
             Key = key,
             Consistency = (GrpcKeyValueConsistency)consistency,
         };
@@ -162,10 +165,10 @@ internal sealed class KeyValueLocator
     /// <param name="consistency"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<KeyValueResponseType> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, string)> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueConsistency consistency, CancellationToken cancelationToken)
     {
         if (string.IsNullOrEmpty(key))
-            return KeyValueResponseType.InvalidInput;
+            return (KeyValueResponseType.InvalidInput, key);
         
         int partitionId = raft.GetPartitionKey(key);
 
@@ -174,7 +177,7 @@ internal sealed class KeyValueLocator
             
         string leader = await raft.WaitForLeader(partitionId, cancelationToken);
         if (leader == raft.GetLocalEndpoint())
-            return KeyValueResponseType.MustRetry;
+            return (KeyValueResponseType.MustRetry, key);
         
         logger.LogDebug("ACQUIRE-LOCK-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
         
@@ -195,7 +198,7 @@ internal sealed class KeyValueLocator
         
         remoteResponse.ServedFrom = $"https://{leader}";
         
-        return (KeyValueResponseType)remoteResponse.Type;
+        return ((KeyValueResponseType)remoteResponse.Type, key);
     }
     
     /// <summary>
@@ -206,10 +209,10 @@ internal sealed class KeyValueLocator
     /// <param name="consistency"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<KeyValueResponseType> LocateAndTryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, string)> LocateAndTryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
     {
         if (string.IsNullOrEmpty(key))
-            return KeyValueResponseType.InvalidInput;
+            return (KeyValueResponseType.InvalidInput, key);
         
         int partitionId = raft.GetPartitionKey(key);
 
@@ -218,7 +221,7 @@ internal sealed class KeyValueLocator
             
         string leader = await raft.WaitForLeader(partitionId, cancelationToken);
         if (leader == raft.GetLocalEndpoint())
-            return KeyValueResponseType.MustRetry;
+            return (KeyValueResponseType.MustRetry, key);
         
         logger.LogDebug("RELEASE-LOCK-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
         
@@ -238,7 +241,7 @@ internal sealed class KeyValueLocator
         
         remoteResponse.ServedFrom = $"https://{leader}";
         
-        return (KeyValueResponseType)remoteResponse.Type;
+        return ((KeyValueResponseType)remoteResponse.Type, key);
     }
     
     /// <summary>
@@ -249,10 +252,10 @@ internal sealed class KeyValueLocator
     /// <param name="consistency"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, HLCTimestamp)> LocateAndTryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, HLCTimestamp, string)> LocateAndTryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
     {
         if (string.IsNullOrEmpty(key))
-            return (KeyValueResponseType.InvalidInput, HLCTimestamp.Zero);
+            return (KeyValueResponseType.InvalidInput, HLCTimestamp.Zero, key);
         
         int partitionId = raft.GetPartitionKey(key);
 
@@ -261,7 +264,7 @@ internal sealed class KeyValueLocator
             
         string leader = await raft.WaitForLeader(partitionId, cancelationToken);
         if (leader == raft.GetLocalEndpoint())
-            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
+            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero, key);
         
         logger.LogDebug("PREPARE-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
         
@@ -281,7 +284,7 @@ internal sealed class KeyValueLocator
         
         remoteResponse.ServedFrom = $"https://{leader}";
         
-        return ((KeyValueResponseType)remoteResponse.Type, new(remoteResponse.ProposalTicketPhysical, remoteResponse.ProposalTicketCounter));
+        return ((KeyValueResponseType)remoteResponse.Type, new(remoteResponse.ProposalTicketPhysical, remoteResponse.ProposalTicketCounter), key);
     }
     
     /// <summary>

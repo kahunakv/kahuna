@@ -191,7 +191,12 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
             };
         
-        (KeyValueResponseType type, ReadOnlyKeyValueContext? keyValueContext) = await keyValues.LocateAndTryGetValue(request.Key, (KeyValueConsistency)request.Consistency, context.CancellationToken);
+        (KeyValueResponseType type, ReadOnlyKeyValueContext? keyValueContext) = await keyValues.LocateAndTryGetValue(
+            new(request.TransactionIdPhysical, request.TransactionIdCounter),
+            request.Key, 
+            (KeyValueConsistency)request.Consistency, 
+            context.CancellationToken
+        );
         
         if (keyValueContext is not null)
         {
@@ -230,7 +235,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
             };
         
-        KeyValueResponseType type = await keyValues.LocateAndTryAcquireExclusiveLock(
+        (KeyValueResponseType type, _) = await keyValues.LocateAndTryAcquireExclusiveLock(
             new(request.TransactionIdPhysical, request.TransactionIdCounter), 
             request.Key, 
             request.ExpiresMs, 
@@ -258,7 +263,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
             };
         
-        KeyValueResponseType type = await keyValues.LocateAndTryReleaseExclusiveLock(
+        (KeyValueResponseType type, string _) = await keyValues.LocateAndTryReleaseExclusiveLock(
             new(request.TransactionIdPhysical, request.TransactionIdCounter), 
             request.Key, 
             (KeyValueConsistency)request.Consistency, 
@@ -285,7 +290,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
             };
         
-        (KeyValueResponseType type, HLCTimestamp proposalTicket) = await keyValues.LocateAndTryPrepareMutations(
+        (KeyValueResponseType type, HLCTimestamp proposalTicket, string _) = await keyValues.LocateAndTryPrepareMutations(
             new(request.TransactionIdPhysical, request.TransactionIdCounter), 
             request.Key, 
             (KeyValueConsistency)request.Consistency, 

@@ -307,14 +307,42 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         if (context is null || context.State == KeyValueState.Deleted)
             return new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueContext(null, context?.Revision ?? 0, HLCTimestamp.Zero));
 
+        ReadOnlyKeyValueContext readOnlyKeyValueContext;
+
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
+
+        if (message.TransactionId != HLCTimestamp.Zero)
+        {
+            context.MvccEntries ??= new();
+
+            if (!context.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? entry))
+            {
+                entry = new()
+                {
+                    Value = context.Value, 
+                    Revision = context.Revision, 
+                    Expires = context.Expires, 
+                    LastUsed = context.LastUsed,
+                    State = context.State
+                };
+
+                context.MvccEntries.Add(message.TransactionId, entry);
+            }
+            
+            if (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
+                return new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueContext(null, entry?.Revision ?? 0, HLCTimestamp.Zero));
+            
+            readOnlyKeyValueContext = new(entry.Value, entry.Revision, entry.Expires);
+
+            return new(KeyValueResponseType.Get, readOnlyKeyValueContext);
+        }
 
         if (context.Expires != HLCTimestamp.Zero && context.Expires - currentTime < TimeSpan.Zero)
             return new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueContext(null, context?.Revision ?? 0, HLCTimestamp.Zero));
         
         context.LastUsed = currentTime;
 
-        ReadOnlyKeyValueContext readOnlyKeyValueContext = new(context.Value, context.Revision, context.Expires);
+        readOnlyKeyValueContext = new(context.Value, context.Revision, context.Expires);
 
         return new(KeyValueResponseType.Get, readOnlyKeyValueContext);
     }

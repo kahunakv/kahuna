@@ -386,7 +386,7 @@ public class GrpcCommunication : IKahunaCommunication
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
 
-            if (response.Type <= GrpcKeyValueResponseType.KeyvalueResponseTypeErrored)
+            if (response.Type is <= GrpcKeyValueResponseType.KeyvalueResponseTypeErrored or GrpcKeyValueResponseType.KeyvalueResponseTypeDoesNotExist)
                 return new()
                 {
                     Type = (KeyValueResponseType)response.Type,
@@ -396,7 +396,7 @@ public class GrpcCommunication : IKahunaCommunication
 
         } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
             
-        throw new KahunaException("Failed to extend key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
+        throw new KahunaException("Failed to execute key/value transaction:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
 
     private static GrpcChannel GetSharedChannel(string url)

@@ -8,5 +8,19 @@ public enum NodeType
     String,
     Identifier,
     Set,
-    Get
+    Get,
+    Eset,
+    Eget,
+    If,
+    Equals,
+    NotEquals,
+    LessThan,
+    GreaterThan,
+    LessThanEquals,
+    GreaterThanEquals,
+    And,
+    Or,
+    Not,
+    SetNotExists,
+    SetExists
 }

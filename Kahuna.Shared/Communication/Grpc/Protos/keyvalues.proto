@@ -54,8 +54,10 @@ message GrpcTryDeleteKeyValueResponse {
 }
 
 message GrpcTryGetKeyValueRequest {
-  string Key = 1;
-  GrpcKeyValueConsistency Consistency = 2;
+  int64 TransactionIdPhysical = 1;
+  uint32 TransactionIdCounter = 2;
+  string Key = 3;
+  GrpcKeyValueConsistency Consistency = 4;
 }
 
 message GrpcTryGetKeyValueResponse {

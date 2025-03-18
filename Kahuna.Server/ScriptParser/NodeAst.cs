@@ -17,7 +17,7 @@ public sealed class NodeAst
 
     public NodeAst? extendedFour;
 
-    public string? yytext;
+    public readonly string? yytext;
 
     public NodeAst(
         NodeType nodeType,

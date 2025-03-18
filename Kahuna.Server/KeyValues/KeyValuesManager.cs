@@ -242,13 +242,14 @@ public sealed class KeyValuesManager
     /// <summary>
     /// Locates the leader node for the given key and executes the TryGetValue request.
     /// </summary>
+    /// <param name="transactionId"></param>
     /// <param name="key"></param>
     /// <param name="consistency"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryGetValue(string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
     {
-        return await locator.LocateAndTryGetValue(key, consistency, cancelationToken);
+        return await locator.LocateAndTryGetValue(transactionId, key, consistency, cancelationToken);
     }
     
     /// <summary>
@@ -260,7 +261,7 @@ public sealed class KeyValuesManager
     /// <param name="consistency"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<KeyValueResponseType> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, string)> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueConsistency consistency, CancellationToken cancelationToken)
     {
         return await locator.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, consistency, cancelationToken);
     }
@@ -274,7 +275,7 @@ public sealed class KeyValuesManager
     /// <param name="consistency"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<KeyValueResponseType> LocateAndTryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, string)> LocateAndTryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
     {
         return await locator.LocateAndTryReleaseExclusiveLock(transactionId, key, consistency, cancelationToken);
     }
@@ -288,7 +289,7 @@ public sealed class KeyValuesManager
     /// <param name="consistency"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, HLCTimestamp)> LocateAndTryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, HLCTimestamp, string)> LocateAndTryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
     {
         return await locator.LocateAndTryPrepareMutations(transactionId, key, consistency, cancelationToken);
     }
@@ -422,14 +423,15 @@ public sealed class KeyValuesManager
     /// <summary>
     /// Passes a Get request to the key/value actor for the given keyValue name.
     /// </summary>
+    /// <param name="transactionId"></param>
     /// <param name="key"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryGetValue(string key, KeyValueConsistency consistency)
+    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryGetValue(HLCTimestamp transactionId, string key, KeyValueConsistency consistency)
     {
         KeyValueRequest request = new(
             KeyValueRequestType.TryGet, 
-            HLCTimestamp.Zero, 
+            transactionId, 
             key, 
             null, 
             null,
@@ -458,7 +460,7 @@ public sealed class KeyValuesManager
     /// <param name="expiresMs"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<KeyValueResponseType> TryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueConsistency consistency)
+    public async Task<(KeyValueResponseType, string)> TryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueConsistency consistency)
     {
         KeyValueRequest request = new(
             KeyValueRequestType.TryAcquireExclusiveLock, 
@@ -480,7 +482,7 @@ public sealed class KeyValuesManager
         else
             response = await consistentKeyValuesRouter.Ask(request);
         
-        return response.Type;
+        return (response.Type, key);
     }
     
     /// <summary>
@@ -490,7 +492,7 @@ public sealed class KeyValuesManager
     /// <param name="key"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<KeyValueResponseType> TryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueConsistency consistency)
+    public async Task<(KeyValueResponseType, string)> TryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueConsistency consistency)
     {
         KeyValueRequest request = new(
             KeyValueRequestType.TryReleaseExclusiveLock, 
@@ -512,7 +514,7 @@ public sealed class KeyValuesManager
         else
             response = await consistentKeyValuesRouter.Ask(request);
         
-        return response.Type;
+        return (response.Type, key);
     }
     
     /// <summary>
@@ -522,7 +524,7 @@ public sealed class KeyValuesManager
     /// <param name="key"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, HLCTimestamp)> TryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueConsistency consistency)
+    public async Task<(KeyValueResponseType, HLCTimestamp, string)> TryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueConsistency consistency)
     {
         KeyValueRequest request = new(
             KeyValueRequestType.TryPrepareMutations, 
@@ -544,7 +546,7 @@ public sealed class KeyValuesManager
         else
             response = await consistentKeyValuesRouter.Ask(request);
         
-        return (response.Type, response.Ticket);
+        return (response.Type, response.Ticket, key);
     }
     
     /// <summary>
