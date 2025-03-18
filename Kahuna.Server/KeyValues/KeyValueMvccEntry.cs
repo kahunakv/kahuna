@@ -3,10 +3,7 @@ using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues;
 
-/// <summary>
-/// 
-/// </summary>
-public sealed class KeyValueContext
+public sealed class KeyValueMvccEntry
 {
     /// <summary>
     /// The current value of the key.
@@ -24,22 +21,12 @@ public sealed class KeyValueContext
     public long Revision { get; set; }
     
     /// <summary>
-    /// HLC timestamp of the last time the lock was used
+    /// HLC timestamp of the last time the key/value was used (read or written)
     /// </summary>
     public HLCTimestamp LastUsed { get; set; }
-
-    /// <summary>
-    /// 
-    /// </summary>
-    public KeyValueWriteIntent? WriteIntent { get; set; }
     
     /// <summary>
-    /// Multiversion Concurrency Control (MVCC) values per TransactionId
+    /// State of the key
     /// </summary>
-    public Dictionary<HLCTimestamp, KeyValueMvccEntry>? MvccEntries { get; set; }
-
-    /// <summary>
-    /// Current state of the key
-    /// </summary>
-    public KeyValueState State { get; set; } = KeyValueState.Set;
+    public KeyValueState State { get; set; }
 }

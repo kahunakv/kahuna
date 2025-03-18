@@ -8,16 +8,20 @@ service KeyValuer {
   rpc TryExecuteTransaction (GrpcTryExecuteTransactionRequest) returns (GrpcTryExecuteTransactionResponse);
   rpc TryAcquireExclusiveLock (GrpcTryAcquireExclusiveLockRequest) returns (GrpcTryAcquireExclusiveLockResponse);
   rpc TryReleaseExclusiveLock (GrpcTryReleaseExclusiveLockRequest) returns (GrpcTryReleaseExclusiveLockResponse);
+  rpc TryPrepareMutations (GrpcTryPrepareMutationsRequest) returns (GrpcTryPrepareMutationsResponse);
+  rpc TryCommitMutations (GrpcTryCommitMutationsRequest) returns (GrpcTryCommitMutationsResponse);
 }
 
 message GrpcTrySetKeyValueRequest {
-  string Key = 1;
-  optional bytes Value = 2;
-  optional bytes CompareValue = 3;
-  int64 CompareRevision = 4;
-  GrpcKeyValueFlags Flags = 5;
-  int32 ExpiresMs = 6;
-  GrpcKeyValueConsistency Consistency = 7;
+  int64 TransactionIdPhysical = 1;
+  uint32 TransactionIdCounter = 2;
+  string Key = 3;
+  optional bytes Value = 4;
+  optional bytes CompareValue = 5;
+  int64 CompareRevision = 6;
+  GrpcKeyValueFlags Flags = 7;
+  int32 ExpiresMs = 8;
+  GrpcKeyValueConsistency Consistency = 9;
 }
 
 message GrpcTrySetKeyValueResponse {
@@ -101,6 +105,35 @@ message GrpcTryReleaseExclusiveLockResponse {
   GrpcKeyValueResponseType Type = 2;
 }
 
+message GrpcTryPrepareMutationsRequest {
+  int64 TransactionIdPhysical = 1;
+  uint32 TransactionIdCounter = 2;
+  string Key = 3;
+  GrpcKeyValueConsistency Consistency = 4;
+}
+
+message GrpcTryPrepareMutationsResponse {
+  optional string ServedFrom = 1;
+  GrpcKeyValueResponseType Type = 2;
+  int64 ProposalTicketPhysical = 3;
+  uint32 ProposalTicketCounter = 4;
+}
+
+message GrpcTryCommitMutationsRequest {
+  int64 TransactionIdPhysical = 1;
+  uint32 TransactionIdCounter = 2;
+  string Key = 3;
+  int64 ProposalTicketPhysical = 4;
+  uint32 ProposalTicketCounter = 5;
+  GrpcKeyValueConsistency Consistency = 6;
+}
+
+message GrpcTryCommitMutationsResponse {
+  optional string ServedFrom = 1;
+  GrpcKeyValueResponseType Type = 2;
+  int64 ProposalIndex = 3;
+}
+
 enum GrpcKeyValueFlags {
   KEYVALUE_FLAGS_NONE = 0;
   KEYVALUE_FLAGS_SET = 1;
@@ -118,6 +151,8 @@ enum GrpcKeyValueResponseType {
   KEYVALUE_RESPONSE_TYPE_DELETED = 4;
   KEYVALUE_RESPONSE_TYPE_LOCKED = 5;
   KEYVALUE_RESPONSE_TYPE_UNLOCKED = 6;
+  KEYVALUE_RESPONSE_TYPE_PROPOSED = 7;
+  KEYVALUE_RESPONSE_TYPE_COMMITTED = 8;
   KEYVALUE_RESPONSE_TYPE_ERRORED = 99;
   KEYVALUE_RESPONSE_TYPE_INVALID_INPUT = 100;
   KEYVALUE_RESPONSE_TYPE_MUST_RETRY = 101;

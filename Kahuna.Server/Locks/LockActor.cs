@@ -314,15 +314,15 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         if (proposal.Owner is not null)
             lockMessage.Owner = ByteString.CopyFrom(proposal.Owner);
 
-        (bool success, RaftOperationStatus status, long _) = await raft.ReplicateLogs(
+        RaftReplicationResult result = await raft.ReplicateLogs(
             partitionId,
             ReplicationTypes.Locks,
             ReplicationSerializer.Serialize(lockMessage)
         );
 
-        if (!success)
+        if (!result.Success)
         {
-            logger.LogWarning("Failed to replicate lock {Resource} Partition={Partition} Status={Status}", proposal.Resource, partitionId, status);
+            logger.LogWarning("Failed to replicate lock {Resource} Partition={Partition} Status={Status}", proposal.Resource, partitionId, result.Status);
             
             return false;
         }
@@ -338,7 +338,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             (int)proposal.State
         ));
 
-        return success;
+        return result.Success;
     }
 
     private async ValueTask Collect()

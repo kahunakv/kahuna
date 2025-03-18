@@ -8,5 +8,7 @@ public enum KeyValueRequestType
     TryDelete,
     TryGet,
     TryAcquireExclusiveLock,
-    TryReleaseExclusiveLock
+    TryReleaseExclusiveLock,
+    TryPrepareMutations,
+    TryCommitMutations
 }

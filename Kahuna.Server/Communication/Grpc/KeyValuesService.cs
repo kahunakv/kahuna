@@ -63,6 +63,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
             };
         
         (KeyValueResponseType response, long revision) = await keyValues.LocateAndTrySetKeyValue(
+            new(request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key, 
             request.Value?.ToByteArray(),
             request.CompareValue?.ToByteArray(),
@@ -267,6 +268,64 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         return new()
         {
             Type = (GrpcKeyValueResponseType)type
+        };
+    }
+    
+    /// <summary>
+    /// Receives requests for the key/value "PrepareMutations" service 
+    /// </summary>
+    /// <param name="request"></param>
+    /// <param name="context"></param>
+    /// <returns></returns>
+    public override async Task<GrpcTryPrepareMutationsResponse> TryPrepareMutations(GrpcTryPrepareMutationsRequest request, ServerCallContext context)
+    {
+        if (string.IsNullOrEmpty(request.Key))
+            return new()
+            {
+                Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
+            };
+        
+        (KeyValueResponseType type, HLCTimestamp proposalTicket) = await keyValues.LocateAndTryPrepareMutations(
+            new(request.TransactionIdPhysical, request.TransactionIdCounter), 
+            request.Key, 
+            (KeyValueConsistency)request.Consistency, 
+            context.CancellationToken
+        );
+
+        return new()
+        {
+            Type = (GrpcKeyValueResponseType)type,
+            ProposalTicketPhysical = proposalTicket.L,
+            ProposalTicketCounter = proposalTicket.C
+        };
+    }
+    
+    /// <summary>
+    /// Receives requests for the key/value "CommitMutations" service 
+    /// </summary>
+    /// <param name="request"></param>
+    /// <param name="context"></param>
+    /// <returns></returns>
+    public override async Task<GrpcTryCommitMutationsResponse> TryCommitMutations(GrpcTryCommitMutationsRequest request, ServerCallContext context)
+    {
+        if (string.IsNullOrEmpty(request.Key))
+            return new()
+            {
+                Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
+            };
+        
+        (KeyValueResponseType type, long commitIndex) = await keyValues.LocateAndTryCommitMutations(
+            new(request.TransactionIdPhysical, request.TransactionIdCounter), 
+            request.Key, 
+            new(request.ProposalTicketPhysical, request.ProposalTicketCounter),
+            (KeyValueConsistency)request.Consistency, 
+            context.CancellationToken
+        );
+
+        return new()
+        {
+            Type = (GrpcKeyValueResponseType)type,
+            ProposalIndex = commitIndex
         };
     }
 

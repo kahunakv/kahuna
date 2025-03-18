@@ -214,6 +214,7 @@ public sealed class KeyValuesManager
     /// <summary>
     /// Locates the leader node for the given key and executes the TrySet request.
     /// </summary>
+    /// <param name="transactionId"></param>
     /// <param name="key"></param>
     /// <param name="value"></param>
     /// <param name="compareValue"></param>
@@ -221,8 +222,10 @@ public sealed class KeyValuesManager
     /// <param name="flags"></param>
     /// <param name="expiresMs"></param>
     /// <param name="consistency"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public async Task<(KeyValueResponseType, long)> LocateAndTrySetKeyValue(
+        HLCTimestamp transactionId,
         string key,
         byte[]? value,
         byte[]? compareValue,
@@ -233,7 +236,7 @@ public sealed class KeyValuesManager
         CancellationToken cancellationToken
     )
     {
-        return await locator.LocateAndTrySetKeyValue(key, value, compareValue, compareRevision, flags, expiresMs, consistency, cancellationToken);
+        return await locator.LocateAndTrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, consistency, cancellationToken);
     }
 
     /// <summary>
@@ -275,6 +278,34 @@ public sealed class KeyValuesManager
     {
         return await locator.LocateAndTryReleaseExclusiveLock(transactionId, key, consistency, cancelationToken);
     }
+    
+    /// <summary>
+    /// Locates the leader node for the given key and executes the TryPrepareMutations request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="consistency"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public async Task<(KeyValueResponseType, HLCTimestamp)> LocateAndTryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    {
+        return await locator.LocateAndTryPrepareMutations(transactionId, key, consistency, cancelationToken);
+    }
+    
+    /// <summary>
+    /// Locates the leader node for the given key and executes the TryCommitMutations request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="ticketId"></param>
+    /// <param name="consistency"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public async Task<(KeyValueResponseType, long)> LocateAndTryCommitMutations(HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    {
+        return await locator.LocateAndTryCommitMutations(transactionId, key, ticketId, consistency, cancelationToken);
+    }
 
     /// <summary>
     /// Passes a TrySet request to the keyValueer actor for the given keyValue name.
@@ -288,6 +319,7 @@ public sealed class KeyValuesManager
     /// <param name="consistency"></param>
     /// <returns></returns>
     public async Task<(KeyValueResponseType, long)> TrySetKeyValue(
+        HLCTimestamp transactionId,
         string key, 
         byte[]? value, 
         byte[]? compareValue,
@@ -299,13 +331,14 @@ public sealed class KeyValuesManager
     {
         KeyValueRequest request = new(
             KeyValueRequestType.TrySet, 
-            HLCTimestamp.Zero,
+            transactionId,
             key, 
             value, 
             compareValue,
             compareRevision,
             flags,
             expiresMs, 
+            HLCTimestamp.Zero,
             consistency
         );
 
@@ -341,6 +374,7 @@ public sealed class KeyValuesManager
             -1,
             KeyValueFlags.None,
             expiresMs, 
+            HLCTimestamp.Zero,
             consistency
         );
 
@@ -371,6 +405,7 @@ public sealed class KeyValuesManager
             -1,
             KeyValueFlags.None,
             0, 
+            HLCTimestamp.Zero,
             consistency
         );
 
@@ -401,6 +436,7 @@ public sealed class KeyValuesManager
             -1,
             KeyValueFlags.None,
             0, 
+            HLCTimestamp.Zero,
             consistency
         );
 
@@ -433,6 +469,7 @@ public sealed class KeyValuesManager
             -1,
             KeyValueFlags.None,
             expiresMs, 
+            HLCTimestamp.Zero,
             consistency
         );
 
@@ -464,6 +501,7 @@ public sealed class KeyValuesManager
             -1,
             KeyValueFlags.None,
             0, 
+            HLCTimestamp.Zero,
             consistency
         );
 
@@ -475,6 +513,71 @@ public sealed class KeyValuesManager
             response = await consistentKeyValuesRouter.Ask(request);
         
         return response.Type;
+    }
+    
+    /// <summary>
+    /// Passes a TryPrepare request to the key/value actor for the given keyValue name.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
+    public async Task<(KeyValueResponseType, HLCTimestamp)> TryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueConsistency consistency)
+    {
+        KeyValueRequest request = new(
+            KeyValueRequestType.TryPrepareMutations, 
+            transactionId, 
+            key, 
+            null, 
+            null,
+            -1,
+            KeyValueFlags.None,
+            0, 
+            HLCTimestamp.Zero,
+            consistency
+        );
+
+        KeyValueResponse response;
+        
+        if (consistency == KeyValueConsistency.Ephemeral)
+            response = await ephemeralKeyValuesRouter.Ask(request);
+        else
+            response = await consistentKeyValuesRouter.Ask(request);
+        
+        return (response.Type, response.Ticket);
+    }
+    
+    /// <summary>
+    /// Passes a TryCommit request to the key/value actor for the given keyValue name.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="proposalTicketId"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
+    public async Task<(KeyValueResponseType, long)> TryCommitMutations(HLCTimestamp transactionId, string key, HLCTimestamp proposalTicketId, KeyValueConsistency consistency)
+    {
+        KeyValueRequest request = new(
+            KeyValueRequestType.TryCommitMutations, 
+            transactionId, 
+            key, 
+            null, 
+            null,
+            -1,
+            KeyValueFlags.None,
+            0, 
+            proposalTicketId,
+            consistency
+        );
+
+        KeyValueResponse response;
+        
+        if (consistency == KeyValueConsistency.Ephemeral)
+            response = await ephemeralKeyValuesRouter.Ask(request);
+        else
+            response = await consistentKeyValuesRouter.Ask(request);
+        
+        return (response.Type, response.Revision);
     }
 
     /// <summary>

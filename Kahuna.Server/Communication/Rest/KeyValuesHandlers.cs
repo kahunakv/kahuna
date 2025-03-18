@@ -21,10 +21,11 @@ public static class KeyValuesHandlers
             if (request.Value is null)
                 return new() { Type = KeyValueResponseType.InvalidInput };
             
-            if (request.ExpiresMs <= 0)
+            if (request.ExpiresMs < 0)
                 return new() { Type = KeyValueResponseType.InvalidInput };
             
             (KeyValueResponseType response, long revision) = await keyValues.LocateAndTrySetKeyValue(
+                request.TransactionId,
                 request.Key, 
                 request.Value,
                 request.CompareValue,

@@ -27,6 +27,8 @@ public readonly struct KeyValueRequest : IConsistentHashable
     
     public int ExpiresMs { get; }
     
+    public HLCTimestamp ProposalTicketId { get; }
+    
     public KeyValueConsistency Consistency { get; }
     
     /// <summary>
@@ -50,6 +52,7 @@ public readonly struct KeyValueRequest : IConsistentHashable
         long compareRevision,
         KeyValueFlags flags,
         int expiresMs, 
+        HLCTimestamp proposalTicketId,
         KeyValueConsistency consistency
     )
     {
@@ -61,6 +64,7 @@ public readonly struct KeyValueRequest : IConsistentHashable
         CompareRevision = compareRevision;
         Flags = flags;
         ExpiresMs = expiresMs;
+        ProposalTicketId = proposalTicketId;
         Consistency = consistency;
     }
 

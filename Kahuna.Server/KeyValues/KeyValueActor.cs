@@ -27,7 +27,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
 
     private readonly IRaft raft;
 
-    private readonly Dictionary<string, KeyValueContext> keyValues = new();
+    private readonly Dictionary<string, KeyValueContext> keyValuesStore = new();
     
     private readonly HashSet<string> keysToEvict = [];
 
@@ -89,6 +89,8 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
                 KeyValueRequestType.TryGet => await TryGet(message),
                 KeyValueRequestType.TryAcquireExclusiveLock => await TryAdquireExclusiveLock(message),
                 KeyValueRequestType.TryReleaseExclusiveLock => await TryReleaseExclusiveLock(message),
+                KeyValueRequestType.TryPrepareMutations => await TryPrepareMutations(message),
+                KeyValueRequestType.TryCommitMutations => await TryCommitMutations(message),
                 _ => new(KeyValueResponseType.Errored)
             };
         }
@@ -110,7 +112,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         bool exists = true;
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
 
-        if (!keyValues.TryGetValue(message.Key, out KeyValueContext? context))
+        if (!keyValuesStore.TryGetValue(message.Key, out KeyValueContext? context))
         {
             exists = false;
             KeyValueContext? newContext = null;
@@ -133,7 +135,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
             
             context = newContext;
 
-            keyValues.Add(message.Key, newContext);
+            keyValuesStore.Add(message.Key, newContext);
         }
         else
         {
@@ -141,7 +143,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
                 exists = false;
         }
         
-        if (context.WriteIntent is not null)
+        if (context.WriteIntent is not null && context.WriteIntent.TransactionId != message.TransactionId)
             return new(KeyValueResponseType.MustRetry, 0);
 
         switch (message.Flags)
@@ -157,12 +159,35 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
             default:
                 break;
         }
+
+        HLCTimestamp newExpires = message.ExpiresMs > 0 ? (currentTime + message.ExpiresMs) : HLCTimestamp.Zero;
+        
+        // Temporarily store the value in the MVCC entry if the transaction ID is set
+        if (message.TransactionId != HLCTimestamp.Zero)
+        {
+            context.MvccEntries ??= new();
+
+            if (!context.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? entry))
+            {
+                entry = new() { Revision = context.Revision };
+                
+                context.MvccEntries.Add(message.TransactionId, entry);
+            }
+
+            entry.Value = message.Value;
+            entry.Expires = newExpires;
+            entry.Revision++;
+            entry.LastUsed = currentTime;
+            entry.State = KeyValueState.Set;
+            
+            return new(KeyValueResponseType.Set, context.Revision);
+        }
         
         KeyValueProposal proposal = new(
             message.Key,
             message.Value,
             context.Revision + 1,
-            message.ExpiresMs > 0 ? (currentTime + message.ExpiresMs) : HLCTimestamp.Zero,
+            newExpires,
             currentTime,
             KeyValueState.Set
         );
@@ -306,7 +331,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         
         HLCTimestamp currentTime = await raft.HybridLogicalClock.ReceiveEvent(message.TransactionId);
 
-        if (!keyValues.TryGetValue(message.Key, out KeyValueContext? context))
+        if (!keyValuesStore.TryGetValue(message.Key, out KeyValueContext? context))
         {
             KeyValueContext? newContext = null;
 
@@ -318,14 +343,16 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
             
             context = newContext;
 
-            keyValues.Add(message.Key, newContext);
+            keyValuesStore.Add(message.Key, newContext);
         }
 
         if (context.WriteIntent is not null)
         {
-            if (context.WriteIntent.TransactionId == message.TransactionId)
+            // if the transactionId is the same owner no need to acquire the lock
+            if (context.WriteIntent.TransactionId == message.TransactionId) 
                 return new(KeyValueResponseType.Locked);
 
+            // Check if the lease is still active
             if (context.WriteIntent.Expires != HLCTimestamp.Zero && context.WriteIntent.Expires - currentTime > TimeSpan.Zero)
                 return new(KeyValueResponseType.AlreadyLocked);
         }
@@ -340,7 +367,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
     }
     
     /// <summary>
-    /// 
+    /// Releases any acquired exclusive lock on a key if the releaser is the given transaction id
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
@@ -361,10 +388,122 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         
         return new(KeyValueResponseType.Unlocked);
     }
+    
+    /// <summary>
+    /// Prepare the mutations made to the key currently held in the MVCC entry
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
+    private async Task<KeyValueResponse> TryPrepareMutations(KeyValueRequest message)
+    {
+        if (message.TransactionId == HLCTimestamp.Zero)
+            return new(KeyValueResponseType.Errored);
+        
+        KeyValueContext? context = await GetKeyValueContext(message.Key, message.Consistency);
+        
+        if (context is null || context.State == KeyValueState.Deleted)
+            return new(KeyValueResponseType.Errored);
+        
+        if (context.WriteIntent is null)
+            return new(KeyValueResponseType.Errored);
+        
+        if (context.WriteIntent.TransactionId != message.TransactionId)
+            return new(KeyValueResponseType.Errored);
+        
+        if (context.MvccEntries is null)
+            return new(KeyValueResponseType.Errored);
+
+        if (!context.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? entry))
+            return new(KeyValueResponseType.Errored);
+        
+        if (message.Consistency != KeyValueConsistency.Linearizable)
+            return new(KeyValueResponseType.Prepared);
+        
+        KeyValueProposal proposal = new(
+            message.Key,
+            entry.Value,
+            entry.Revision,
+            entry.Expires,
+            entry.LastUsed,
+            entry.State
+        );
+
+        (bool success, HLCTimestamp proposalTicket) = await PrepareKeyValueMessage(KeyValueRequestType.TrySet, proposal, message.TransactionId);
+        
+        if (!success)
+            return new(KeyValueResponseType.Errored);
+        
+        return new(KeyValueResponseType.Prepared, proposalTicket);
+    }
+    
+    /// <summary>
+    /// Prepare the mutations made to the key currently held in the MVCC entry
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
+    private async Task<KeyValueResponse> TryCommitMutations(KeyValueRequest message)
+    {
+        if (message.TransactionId == HLCTimestamp.Zero)
+            return new(KeyValueResponseType.Errored);
+        
+        KeyValueContext? context = await GetKeyValueContext(message.Key, message.Consistency);
+        
+        if (context is null || context.State == KeyValueState.Deleted)
+            return new(KeyValueResponseType.Errored);
+        
+        if (context.WriteIntent is null)
+            return new(KeyValueResponseType.Errored);
+        
+        if (context.WriteIntent.TransactionId != message.TransactionId)
+            return new(KeyValueResponseType.Errored);
+        
+        if (context.MvccEntries is null)
+            return new(KeyValueResponseType.Errored);
+
+        if (!context.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? entry))
+            return new(KeyValueResponseType.Errored);
+        
+        KeyValueProposal proposal = new(
+            message.Key,
+            entry.Value,
+            entry.Revision,
+            entry.Expires,
+            entry.LastUsed,
+            entry.State
+        );
+
+        if (message.Consistency != KeyValueConsistency.Linearizable)
+        {
+            context.Value = proposal.Value;
+            context.Expires = proposal.Expires;
+            context.Revision = proposal.Revision;
+            context.LastUsed = proposal.LastUsed;
+            context.State = proposal.State;
+            
+            context.MvccEntries.Remove(message.TransactionId);
+            
+            return new(KeyValueResponseType.Committed);
+        }
+        
+        (bool success, long commitIndex) = await CommitKeyValueMessage(message.Key, message.ProposalTicketId);
+        
+        if (!success)
+            return new(KeyValueResponseType.Errored);
+        
+        context.Value = proposal.Value;
+        context.Expires = proposal.Expires;
+        context.Revision = proposal.Revision;
+        context.LastUsed = proposal.LastUsed;
+        context.State = proposal.State;
+        
+        context.MvccEntries.Remove(message.TransactionId);
+        
+        return new(KeyValueResponseType.Committed, commitIndex);
+    }
 
     private async ValueTask<KeyValueContext?> GetKeyValueContext(string resource, KeyValueConsistency? consistency)
     {
-        if (!keyValues.TryGetValue(resource, out KeyValueContext? context))
+        if (!keyValuesStore.TryGetValue(resource, out KeyValueContext? context))
         {
             if (consistency == KeyValueConsistency.Linearizable)
             {
@@ -372,7 +511,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
                 if (context is not null)
                 {
                     context.LastUsed = await raft.HybridLogicalClock.SendOrLocalEvent();
-                    keyValues.Add(resource, context);
+                    keyValuesStore.Add(resource, context);
                     return context;
                 }
                 
@@ -386,7 +525,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
     }
 
     /// <summary>
-    /// Persists and replicates KeyValue message to the Raft cluster
+    /// Persists and replicates KeyValue messages to the Raft partition
     /// </summary>
     /// <param name="type"></param>
     /// <param name="proposal"></param>
@@ -414,15 +553,15 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         if (proposal.Value is not null)
             kvm.Value = ByteString.CopyFrom(proposal.Value);
 
-        (bool success, RaftOperationStatus status, long _) = await raft.ReplicateLogs(
+        RaftReplicationResult result = await raft.ReplicateLogs(
             partitionId,
             ReplicationTypes.KeyValues,
             ReplicationSerializer.Serialize(kvm)
         );
 
-        if (!success)
+        if (!result.Success)
         {
-            logger.LogWarning("Failed to replicate key/value {Key} Partition={Partition} Status={Status}", proposal.Key, partitionId, status);
+            logger.LogWarning("Failed to replicate key/value {Key} Partition={Partition} Status={Status}", proposal.Key, partitionId, result.Status);
             
             return false;
         }
@@ -438,20 +577,101 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
             (int)proposal.State
         ));
 
-        return success;
+        return result.Success;
+    }
+    
+    /// <summary>
+    /// Proposes a key value message to the partition
+    /// </summary>
+    /// <param name="type"></param>
+    /// <param name="proposal"></param>
+    /// <param name="currentTime"></param>
+    /// <returns></returns>
+    private async Task<(bool, HLCTimestamp)> PrepareKeyValueMessage(KeyValueRequestType type, KeyValueProposal proposal, HLCTimestamp currentTime)
+    {
+        if (!raft.Joined)
+            return (true, HLCTimestamp.Zero);
+
+        int partitionId = raft.GetPartitionKey(proposal.Key);
+
+        KeyValueMessage kvm = new()
+        {
+            Type = (int)type,
+            Key = proposal.Key,
+            Revision = proposal.Revision,
+            ExpireLogical = proposal.Expires.L,
+            ExpireCounter = proposal.Expires.C,
+            TimeLogical = currentTime.L,
+            TimeCounter = currentTime.C,
+            Consistency = (int)KeyValueConsistency.LinearizableReplication
+        };
+        
+        if (proposal.Value is not null)
+            kvm.Value = ByteString.CopyFrom(proposal.Value);
+
+        RaftReplicationResult result = await raft.ReplicateLogs(
+            partitionId,
+            ReplicationTypes.KeyValues,
+            ReplicationSerializer.Serialize(kvm),
+            autoCommit: false
+        );
+
+        if (!result.Success)
+        {
+            logger.LogWarning("Failed to propose key/value {Key} Partition={Partition} Status={Status}", proposal.Key, partitionId, result.Status);
+            
+            return (false, HLCTimestamp.Zero);
+        }
+        
+        logger.LogDebug("Successfully proposed key/value {Key} Partition={Partition} ProposalIndex={ProposalIndex}", proposal.Key, partitionId, result.CommitLogId);
+
+        return (result.Success, result.TicketId);
+    }
+    
+    /// <summary>
+    /// Commits a previously proposed key value message
+    /// </summary>
+    /// <param name="type"></param>
+    /// <param name="proposalTicketId"></param>
+    /// <returns></returns>
+    private async Task<(bool, long)> CommitKeyValueMessage(string key, HLCTimestamp proposalTicketId)
+    {
+        if (!raft.Joined)
+            return (true, 0);
+
+        int partitionId = raft.GetPartitionKey(key);
+
+        (bool success, RaftOperationStatus status, long commitLogId) = await raft.CommitLogs(
+            partitionId,
+            proposalTicketId
+        );
+
+        if (!success)
+        {
+            logger.LogWarning("Failed to commit key/value {Key} Partition={Partition} Status={Status}", key, partitionId, status);
+            
+            return (false, 0);
+        }
+        
+        logger.LogDebug("Successfully commmitted key/value {Key} Partition={Partition} ProposalIndex={ProposalIndex}", key, partitionId, commitLogId);
+
+        return (success, commitLogId);
     }
 
     private async ValueTask Collect()
     {
-        if (keyValues.Count < 2000)
+        if (keyValuesStore.Count < 2000)
             return;
         
         int number = 0;
         TimeSpan range = TimeSpan.FromMinutes(30);
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
 
-        foreach (KeyValuePair<string, KeyValueContext> key in keyValues)
+        foreach (KeyValuePair<string, KeyValueContext> key in keyValuesStore)
         {
+            if (key.Value.WriteIntent is not null)
+                continue;
+            
             if ((currentTime - key.Value.LastUsed) < range)
                 continue;
             
@@ -464,7 +684,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
 
         foreach (string key in keysToEvict)
         {
-            keyValues.Remove(key);
+            keyValuesStore.Remove(key);
             
             Console.WriteLine("Removed {0}", key);
         }

@@ -150,6 +150,7 @@ public sealed class KahunaManager : IKahuna
     /// <param name="consistency"></param>
     /// <returns></returns>
     public async Task<(KeyValueResponseType, long)> LocateAndTrySetKeyValue(
+        HLCTimestamp transactionId,
         string key,
         byte[]? value,
         byte[]? compareValue,
@@ -160,7 +161,17 @@ public sealed class KahunaManager : IKahuna
         CancellationToken cancellationToken
     )
     {
-        return await keyValues.LocateAndTrySetKeyValue(key, value, compareValue, compareRevision, flags, expiresMs, consistency, cancellationToken);
+        return await keyValues.LocateAndTrySetKeyValue(
+            transactionId, 
+            key, 
+            value, 
+            compareValue, 
+            compareRevision, 
+            flags, 
+            expiresMs, 
+            consistency, 
+            cancellationToken
+        );
     }
 
     /// <summary>
@@ -203,6 +214,32 @@ public sealed class KahunaManager : IKahuna
     }
 
     /// <summary>
+    /// Locates the leader node for the given key and executes the TryPrepareMutations request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="consistency"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public Task<(KeyValueResponseType, HLCTimestamp)> LocateAndTryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    {
+        return keyValues.LocateAndTryPrepareMutations(transactionId, key, consistency, cancelationToken);
+    }
+
+    /// <summary>
+    /// Locates the leader node for the given key and executes the TryCommitMutations request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="consistency"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public Task<(KeyValueResponseType, long)> LocateAndTryCommitMutations(HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    {
+        return keyValues.LocateAndTryCommitMutations(transactionId, key, ticketId, consistency, cancelationToken);
+    }
+
+    /// <summary>
     /// Set key to hold the string value. If key already holds a value, it is overwritten
     /// </summary>
     /// <param name="key"></param>
@@ -214,6 +251,7 @@ public sealed class KahunaManager : IKahuna
     /// <param name="consistency"></param>
     /// <returns></returns>
     public Task<(KeyValueResponseType, long)> TrySetKeyValue(
+        HLCTimestamp transactionId,
         string key, 
         byte[]? value,
         byte[]? compareValue,
@@ -223,7 +261,16 @@ public sealed class KahunaManager : IKahuna
         KeyValueConsistency consistency
     )
     {
-        return keyValues.TrySetKeyValue(key, value, compareValue, compareRevision, flags, expiresMs, consistency);
+        return keyValues.TrySetKeyValue(
+            transactionId, 
+            key, 
+            value, 
+            compareValue, 
+            compareRevision, 
+            flags, 
+            expiresMs, 
+            consistency
+        );
     }
 
     /// <summary>

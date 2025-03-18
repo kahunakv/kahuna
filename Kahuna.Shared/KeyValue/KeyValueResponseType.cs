@@ -9,6 +9,8 @@ public enum KeyValueResponseType
     Deleted = 4,
     Locked = 5,
     Unlocked = 6,
+    Prepared = 7,
+    Committed = 8,
     Errored = 99,
     InvalidInput = 100,
     MustRetry = 101,

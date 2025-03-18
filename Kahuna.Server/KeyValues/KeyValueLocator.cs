@@ -32,6 +32,7 @@ internal sealed class KeyValueLocator
     /// <summary>
     /// Locates the leader node for the given key and executes the TrySet request.
     /// </summary>
+    /// <param name="transactionId"></param>
     /// <param name="key"></param>
     /// <param name="value"></param>
     /// <param name="compareValue"></param>
@@ -39,8 +40,10 @@ internal sealed class KeyValueLocator
     /// <param name="flags"></param>
     /// <param name="expiresMs"></param>
     /// <param name="consistency"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public async Task<(KeyValueResponseType, long)> LocateAndTrySetKeyValue(
+        HLCTimestamp transactionId,
         string key,
         byte[]? value,
         byte[]? compareValue,
@@ -62,6 +65,7 @@ internal sealed class KeyValueLocator
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
         {
             return await manager.TrySetKeyValue(
+                transactionId,
                 key, 
                 value,
                 compareValue,
@@ -84,6 +88,8 @@ internal sealed class KeyValueLocator
 
         GrpcTrySetKeyValueRequest request = new()
         {
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
             Key = key,
             CompareRevision = compareRevision,
             Flags = (GrpcKeyValueFlags) flags,
@@ -233,5 +239,94 @@ internal sealed class KeyValueLocator
         remoteResponse.ServedFrom = $"https://{leader}";
         
         return (KeyValueResponseType)remoteResponse.Type;
+    }
+    
+    /// <summary>
+    /// Locates the leader node for the given key and executes the TryPrepareMutations request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="consistency"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public async Task<(KeyValueResponseType, HLCTimestamp)> LocateAndTryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    {
+        if (string.IsNullOrEmpty(key))
+            return (KeyValueResponseType.InvalidInput, HLCTimestamp.Zero);
+        
+        int partitionId = raft.GetPartitionKey(key);
+
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
+            return await manager.TryPrepareMutations(transactionId, key, consistency);
+            
+        string leader = await raft.WaitForLeader(partitionId, cancelationToken);
+        if (leader == raft.GetLocalEndpoint())
+            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
+        
+        logger.LogDebug("PREPARE-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
+        
+        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
+        
+        KeyValuer.KeyValuerClient client = new(channel);
+        
+        GrpcTryPrepareMutationsRequest request = new()
+        {
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
+            Key = key,
+            Consistency = (GrpcKeyValueConsistency)consistency,
+        };
+        
+        GrpcTryPrepareMutationsResponse? remoteResponse = await client.TryPrepareMutationsAsync(request);
+        
+        remoteResponse.ServedFrom = $"https://{leader}";
+        
+        return ((KeyValueResponseType)remoteResponse.Type, new(remoteResponse.ProposalTicketPhysical, remoteResponse.ProposalTicketCounter));
+    }
+    
+    /// <summary>
+    /// Locates the leader node for the given key and executes the TryCommitMutations request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="ticketId"></param>
+    /// <param name="consistency"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public async Task<(KeyValueResponseType, long)> LocateAndTryCommitMutations(HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    {
+        if (string.IsNullOrEmpty(key))
+            return (KeyValueResponseType.InvalidInput, 0);
+        
+        int partitionId = raft.GetPartitionKey(key);
+
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
+            return await manager.TryCommitMutations(transactionId, key, ticketId, consistency);
+            
+        string leader = await raft.WaitForLeader(partitionId, cancelationToken);
+        if (leader == raft.GetLocalEndpoint())
+            return (KeyValueResponseType.MustRetry, 0);
+        
+        logger.LogDebug("COMMIT-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
+        
+        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
+        
+        KeyValuer.KeyValuerClient client = new(channel);
+        
+        GrpcTryCommitMutationsRequest request = new()
+        {
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
+            Key = key,
+            ProposalTicketPhysical = ticketId.L,
+            ProposalTicketCounter = ticketId.C,
+            Consistency = (GrpcKeyValueConsistency)consistency,
+        };
+        
+        GrpcTryCommitMutationsResponse? remoteResponse = await client.TryCommitMutationsAsync(request);
+        
+        remoteResponse.ServedFrom = $"https://{leader}";
+        
+        return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.ProposalIndex);
     }
 }

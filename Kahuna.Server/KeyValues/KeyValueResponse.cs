@@ -1,5 +1,6 @@
 
 using Kahuna.Shared.KeyValue;
+using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues;
 
@@ -8,6 +9,8 @@ public readonly struct KeyValueResponse
     public KeyValueResponseType Type { get; }
     
     public long Revision { get; } 
+    
+    public HLCTimestamp Ticket { get; }
     
     public ReadOnlyKeyValueContext? Context { get; }
     
@@ -20,6 +23,12 @@ public readonly struct KeyValueResponse
     {
         Type = type;
         Revision = revision;
+    }
+    
+    public KeyValueResponse(KeyValueResponseType type, HLCTimestamp ticket)
+    {
+        Type = type;
+        Ticket = ticket;
     }
     
     public KeyValueResponse(KeyValueResponseType type, ReadOnlyKeyValueContext? context)
