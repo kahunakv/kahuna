@@ -232,9 +232,10 @@ namespace QUT.Gppg {
                         // nullable production will be correct.
                         LastSpan = scanner.yylloc;
                         NextToken = scanner.yylex();
-#if TRACE_ACTIONS
+                        
+//#if TRACE_ACTIONS
                        Console.Error.WriteLine( "Reading: Next token is {0}", TerminalToString( NextToken ) );
-#endif
+//#endif
                     }
 #if TRACE_ACTIONS
                     else 

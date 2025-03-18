@@ -15,8 +15,6 @@ using RadLine;
 using Spectre.Console;
 using Kahuna.Client;
 using Kahuna.Shared.KeyValue;
-using Kommander.Communication.Rest;
-using Microsoft.Extensions.Logging;
 
 ParserResult<Options> optsResult = Parser.Default.ParseArguments<Options>(args);
 
@@ -52,9 +50,15 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "extend",
         "nx",
         "xx",
+        "ex",
+        // control structures
         "if",
         "then",
         "end",
+        "begin",
+        "rollback",
+        "commit",
+        "return",
         // locks
         "lock",
         "extend-lock",
@@ -66,6 +70,7 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
 
     string[] commands =
     [
+        "run",
         "clear",
         "exit",
         "quit"
@@ -152,6 +157,12 @@ while (true)
         if (string.Equals(commandTrim, "clear", StringComparison.InvariantCultureIgnoreCase))
         {
             AnsiConsole.Clear();
+            continue;
+        }
+        
+        if (commandTrim.StartsWith("run ", StringComparison.InvariantCultureIgnoreCase))
+        {
+            await LoadAndRunScript(commandTrim);
             continue;
         }
 
@@ -417,6 +428,25 @@ async Task RunCommand(string commandTrim)
         AnsiConsole.MarkupLine("r{0} [cyan]ok[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
     else
         AnsiConsole.MarkupLine("r{0} [yellow]null[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
+}
+
+async Task LoadAndRunScript(string commandTrim)
+{
+    history.Add(commandTrim);
+            
+    string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
+    
+    if (!File.Exists(parts[1]))
+    {
+        AnsiConsole.MarkupLine("[red]File does not exist[/]");
+        return;
+    }
+    
+    string scriptText = await File.ReadAllTextAsync(parts[1]);
+    
+    Console.WriteLine(scriptText);
+
+    await RunCommand(scriptText);
 }
 
 public sealed class MyLineNumberPrompt : ILineEditorPrompt

@@ -17,9 +17,9 @@ internal partial class scriptParser
 {
     public scriptParser() : base(null) { }
 
-    public NodeAst Parse(string sqlStatement)
+    public NodeAst Parse(string script)
     {
-        byte[] inputBuffer = Encoding.Default.GetBytes(sqlStatement);
+        byte[] inputBuffer = Encoding.Default.GetBytes(script);
 
         MemoryStream stream = new(inputBuffer);
         scriptScanner scanner = new(stream);

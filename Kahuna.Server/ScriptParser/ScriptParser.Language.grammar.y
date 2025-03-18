@@ -20,9 +20,10 @@
 %left TADD TMINUS
 %left TMULT
 
-%token TDIGIT TFLOAT TSTRING TIDENTIFIER TPLACEHOLDER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV 
-%token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS 
-%token TSET TGET TESET TEGET LBRACE RBRACE TIF TELSE TTHEN TEND TNX TXX 
+%token LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV LBRACE RBRACE
+%token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS  
+%token TBEGIN TROLLBACK TCOMMIT TSET TGET TESET TEGET TIF TELSE TTHEN TEND TNX TXX TEX TRETURN
+%token TDIGIT TFLOAT TSTRING TIDENTIFIER TPLACEHOLDER 
 
 %%
 
@@ -34,13 +35,17 @@ stmt    : set_stmt { $$.n = $1.n; }
         | eset_stmt { $$.n = $1.n; } 
         | get_stmt { $$.n = $1.n; }
         | eget_stmt { $$.n = $1.n; }
-        | if_stmt { $$.n = $1.n; }          
+        | if_stmt { $$.n = $1.n; } 
+        | begin_stmt { $$.n = $1.n; }
+        | commit_stmt { $$.n = $1.n; }
+        | rollback_stmt { $$.n = $1.n; }
+        | return_stmt { $$.n = $1.n; }
         ;
 
-set_stmt : TSET identifier set_value { $$.n = new(NodeType.Set, $2.n, $3.n, null, null, null, null, null); }         
-         | TSET identifier set_value int { $$.n = new(NodeType.Set, $2.n, $3.n, $4.n, null, null, null, null); }
-         | TSET identifier set_value int set_not_exists { $$.n = new(NodeType.Set, $2.n, $3.n, $4.n, $5.n, null, null, null); }
-         | TSET identifier set_value set_not_exists { $$.n = new(NodeType.Set, $2.n, $3.n, null, $4.n, null, null, null); }
+set_stmt : TSET identifier expression { $$.n = new(NodeType.Set, $2.n, $3.n, null, null, null, null, null); }         
+         | TSET identifier expression TEX int { $$.n = new(NodeType.Set, $2.n, $3.n, $4.n, null, null, null, null); }
+         | TSET identifier expression TEX int set_not_exists { $$.n = new(NodeType.Set, $2.n, $3.n, $4.n, $5.n, null, null, null); }
+         | TSET identifier expression set_not_exists { $$.n = new(NodeType.Set, $2.n, $3.n, null, $4.n, null, null, null); }
          ;
          
 set_not_exists : TNX { $$.n = new(NodeType.SetNotExists, null, null, null, null, null, null, null); }
@@ -66,6 +71,18 @@ eget_stmt : TEGET identifier { $$.n = new(NodeType.Eget, $2.n, null, null, null,
          
 if_stmt : TIF expression TTHEN stmt_list TEND { $$.n = new(NodeType.If, $2.n, $4.n, null, null, null, null, null); }
         ;
+        
+begin_stmt : TBEGIN stmt_list TEND { $$.n = new(NodeType.Begin, $2.n, $3.n, null, null, null, null, null); }     
+           ;
+           
+commit_stmt : TCOMMIT { $$.n = new(NodeType.Commit, null, null, null, null, null, null, null); }     
+           ;           
+           
+rollback_stmt : TROLLBACK { $$.n = new(NodeType.Rollback, null, null, null, null, null, null, null); }     
+           ;
+           
+return_stmt : TRETURN expression { $$.n = new(NodeType.Return, $2.n, null, null, null, null, null, null); }     
+            ;
          
 expression : expression TEQUALS expression { $$.n = new(NodeType.Equals, $1.n, $3.n, null, null, null, null, null); }
            | expression TNOTEQUALS expression { $$.n = new(NodeType.NotEquals, $1.n, $3.n, null, null, null, null, null); }
@@ -84,10 +101,10 @@ expression : expression TEQUALS expression { $$.n = new(NodeType.Equals, $1.n, $
 identifier : TIDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, null, null, null, $$.s); }
            ;
 
-int     : TDIGIT { $$.n = new(NodeType.Integer, null, null, null, null, null, null, $$.s); }
-        ;
+int : TDIGIT { $$.n = new(NodeType.Integer, null, null, null, null, null, null, $$.s); }
+    ;
 
-string  : TSTRING { $$.n = new(NodeType.String, null, null, null, null, null, null, $$.s); }
-        ;
+string : TSTRING { $$.n = new(NodeType.String, null, null, null, null, null, null, $$.s); }
+       ;
 
 %%

@@ -22,5 +22,9 @@ public enum NodeType
     Or,
     Not,
     SetNotExists,
-    SetExists
+    SetExists,
+    Begin,
+    Rollback,
+    Commit,
+    Return
 }

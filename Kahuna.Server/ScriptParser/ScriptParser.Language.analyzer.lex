@@ -15,6 +15,12 @@ TElse           (E|l)(L|l)(S|s)(E|e)
 TEnd            (E|e)(N|n)(D|d)
 TNx             (N|n)(X|x)
 TXx             (X|x)(X|x)
+TEx             (E|e)(X|x)
+TBegin          (B|b)(E|e)(G|g)(I|i)(N|n)
+TCommit         (C|c)(O|o)(M|m)(M|m)(I|i)(T|t)
+TRollback       (R|r)(O|o)(L|l)(L|l)(B|b)(A|a)(C|c)(K|k)
+TReturn         (R|r)(E|e)(T|t)(U|u)(R|r)(N|n)
+TDelete         (D|d)(E|e)(L|l)(E|e)(T|t)(E|e)
 LParen          \(
 RParen          \)
 LBrace          \{
@@ -95,9 +101,19 @@ TGreaterEquals  >=
 
 {TEnd} { return (int)Token.TEND; }
 
+{TBegin} { return (int)Token.TBEGIN; }
+
+{TRollback} { return (int)Token.TROLLBACK; }
+
+{TCommit} { return (int)Token.TCOMMIT; }
+
 {TNx} { return (int)Token.TNX; }
 
 {TXx} { return (int)Token.TXX; }
+
+{TEx} { return (int)Token.TEX; }
+
+{TReturn} { return (int)Token.TRETURN; }
 
 {TEquals} { return (int)Token.TEQUALS; }
 
