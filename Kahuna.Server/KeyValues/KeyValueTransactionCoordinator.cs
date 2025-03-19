@@ -1,6 +1,8 @@
 
+using System.Globalization;
 using Kommander;
 using System.Text;
+using DotNext.Text;
 using Kahuna.Configuration;
 using Kahuna.Server.ScriptParser;
 using Kahuna.Shared.KeyValue;
@@ -62,29 +64,29 @@ public sealed class KeyValueTransactionCoordinator
         this.logger = logger;
     }
     
-    public async Task<KeyValueTransactionResult> TryExecuteTx(string script)
+    public async Task<KeyValueTransactionResult> TryExecuteTx(byte[] script, string? hash)
     {
-        logger.LogDebug("Executing tx for {Script}", script);
-        
-        NodeAst ast = ScriptParserProcessor.Parse(script);
-        
-        Console.WriteLine(ast.nodeType);
-        Console.WriteLine(ast.leftAst?.nodeType);
-        Console.WriteLine(ast.rightAst?.nodeType);
+        NodeAst ast = ScriptParserProcessor.Parse(script, hash);
 
         switch (ast.nodeType)
         {
             case NodeType.Set:
-                return await ExecuteSet(HLCTimestamp.Zero, ast, KeyValueConsistency.Linearizable);
+                return await ExecuteSet(GetTempTransactionContext(), ast, KeyValueConsistency.Linearizable);
 
             case NodeType.Get:
-                return await ExecuteGet(HLCTimestamp.Zero, ast);
+                return await ExecuteGet(GetTempTransactionContext(), ast, KeyValueConsistency.Linearizable);
+            
+            case NodeType.Delete:
+                return await ExecuteDelete(GetTempTransactionContext(), ast, KeyValueConsistency.Linearizable);
             
             case NodeType.Eset:
-                return await ExecuteSet(HLCTimestamp.Zero, ast, KeyValueConsistency.Ephemeral);
+                return await ExecuteSet(GetTempTransactionContext(), ast, KeyValueConsistency.Ephemeral);
             
             case NodeType.Eget:
-                return await ExecuteEget(HLCTimestamp.Zero, ast);
+                return await ExecuteGet(GetTempTransactionContext(), ast, KeyValueConsistency.Ephemeral);
+            
+            case NodeType.Edelete:
+                return await ExecuteDelete(GetTempTransactionContext(), ast, KeyValueConsistency.Ephemeral);
             
             case NodeType.StmtList:
                 return await ExecuteTransaction(ast, true);
@@ -96,7 +98,16 @@ public sealed class KeyValueTransactionCoordinator
         return new() { Type = KeyValueResponseType.Errored };
     }
 
-    private async Task<KeyValueTransactionResult> ExecuteSet(HLCTimestamp transactionId, NodeAst ast, KeyValueConsistency consistency)
+    private static KeyValueTransactionContext GetTempTransactionContext()
+    {
+        return new()
+        {
+            TransactionId = HLCTimestamp.Zero,
+            Action = KeyValueTransactionAction.Commit
+        };
+    }
+
+    private async Task<KeyValueTransactionResult> ExecuteSet(KeyValueTransactionContext context, NodeAst ast, KeyValueConsistency consistency)
     {
         if (ast.leftAst is null)
             throw new Exception("Invalid key");
@@ -106,21 +117,31 @@ public sealed class KeyValueTransactionCoordinator
         
         if (ast.rightAst is null)
             throw new Exception("Invalid value");
+
+        int expiresMs = 0;
         
-        if (ast.rightAst.yytext is null)
-            throw new Exception("Invalid value");
+        if (ast.extendedOne is not null)
+            expiresMs = int.Parse(ast.extendedOne.yytext!);
+        
+        KeyValueTransactionResult result = KeyValueTransactionExpression.Eval(context, ast.rightAst).ToTransactionRsult();
         
         (KeyValueResponseType type, long revision) = await manager.LocateAndTrySetKeyValue(
-            transactionId,
+            context.TransactionId,
             key: ast.leftAst.yytext,
-            value: Encoding.UTF8.GetBytes(ast.rightAst.yytext),
+            value: result.Value,
             null,
             0,
             KeyValueFlags.Set,
-            0,
+            expiresMs,
             consistency,
             CancellationToken.None
         );
+
+        context.Result = new()
+        {
+            Type = type,
+            Revision = revision
+        };
 
         return new()
         {
@@ -130,7 +151,7 @@ public sealed class KeyValueTransactionCoordinator
         };
     }
     
-    private async Task<KeyValueTransactionResult> ExecuteGet(HLCTimestamp transactionId, NodeAst ast)
+    private async Task<KeyValueTransactionResult> ExecuteDelete(KeyValueTransactionContext context, NodeAst ast, KeyValueConsistency consistency)
     {
         if (ast.leftAst is null)
             throw new Exception("Invalid key");
@@ -138,57 +159,69 @@ public sealed class KeyValueTransactionCoordinator
         if (ast.leftAst.yytext is null)
             throw new Exception("Invalid key");
         
-        (KeyValueResponseType type, ReadOnlyKeyValueContext? context) = await manager.LocateAndTryGetValue(
-            transactionId,
-            ast.leftAst.yytext,
-            KeyValueConsistency.Linearizable,
+        (KeyValueResponseType type, long revision) = await manager.LocateAndTryDeleteKeyValue(
+            context.TransactionId,
+            key: ast.leftAst.yytext,
+            consistency,
             CancellationToken.None
         );
-
-        if (context is null)
+        
+        context.Result = new()
         {
-            return new()
-            {
-                ServedFrom = "",
-                Type = type
-            };
-        }
-            
+            Type = type,
+            Revision = revision
+        };
+
         return new()
         {
             ServedFrom = "",
             Type = type,
-            Value = context.Value,
-            Revision = context.Revision,
-            Expires = context.Expires
+            Revision = revision
         };
     }
     
-    private async Task<KeyValueTransactionResult> ExecuteEget(HLCTimestamp transactionId, NodeAst ast)
+    private async Task<KeyValueTransactionResult> ExecuteGet(KeyValueTransactionContext context, NodeAst ast, KeyValueConsistency consistency)
     {
-        (KeyValueResponseType type, ReadOnlyKeyValueContext? context) = await manager.LocateAndTryGetValue(
-            transactionId,
-            ast.leftAst!.yytext!,
-            KeyValueConsistency.Ephemeral,
+        if (ast.leftAst is null)
+            throw new Exception("Invalid key");
+        
+        if (ast.leftAst.yytext is null)
+            throw new Exception("Invalid key");
+        
+        (KeyValueResponseType type, ReadOnlyKeyValueContext? readOnlyContext) = await manager.LocateAndTryGetValue(
+            context.TransactionId,
+            ast.leftAst.yytext,
+            consistency,
             CancellationToken.None
         );
 
-        if (context is null)
+        if (readOnlyContext is null)
         {
+            if (ast.rightAst is not null)
+                context.SetVariable(ast.rightAst.yytext!, new() { Type = KeyValueResponseType.Get, Value = null });
+            
             return new()
             {
                 ServedFrom = "",
                 Type = type
             };
         }
+        
+        if (ast.rightAst is not null)
+            context.SetVariable(ast.rightAst.yytext!, new()
+            {
+                Type = KeyValueResponseType.Get, 
+                Value = readOnlyContext.Value, 
+                Revision = readOnlyContext.Revision
+            });
             
         return new()
         {
             ServedFrom = "",
             Type = type,
-            Value = context.Value,
-            Revision = context.Revision,
-            Expires = context.Expires
+            Value = readOnlyContext.Value,
+            Revision = readOnlyContext.Revision,
+            Expires = readOnlyContext.Expires
         };
     }
     
@@ -211,7 +244,7 @@ public sealed class KeyValueTransactionCoordinator
             Result = new() { Type = KeyValueResponseType.Aborted }
         };
         
-        List<string> locksToAcquire = [];
+        HashSet<string> locksToAcquire = [];
 
         GetLocksToAcquire(ast, locksToAcquire);
 
@@ -232,8 +265,6 @@ public sealed class KeyValueTransactionCoordinator
             
             // Step 2: Execute transaction
             await ExecuteTransactionInternal(context, ast);
-            
-            Console.WriteLine(context.Action);
 
             if (context.Action == KeyValueTransactionAction.Commit)
             {
@@ -277,6 +308,9 @@ public sealed class KeyValueTransactionCoordinator
 
         if (proposalResponses.Any(r => r.Item1 != KeyValueResponseType.Prepared))
         {
+            foreach ((KeyValueResponseType, HLCTimestamp, string) proposalResponse in proposalResponses)
+                Console.WriteLine("{0} {1}", proposalResponse.Item3, proposalResponse.Item1);
+            
             context.Result = new() { Type = KeyValueResponseType.Aborted };
             return;
         }
@@ -316,25 +350,37 @@ public sealed class KeyValueTransactionCoordinator
                     break;
                 }
                 
+                case NodeType.If:
+                    await ExecuteIf(context, ast);
+                    break;
+                
                 case NodeType.Set:
-                    await ExecuteSet(context.TransactionId, ast, KeyValueConsistency.Linearizable);
+                    await ExecuteSet(context, ast, KeyValueConsistency.Linearizable);
+                    break;
+                
+                case NodeType.Delete:
+                    await ExecuteDelete(context, ast, KeyValueConsistency.Linearizable);
                     break;
 
                 case NodeType.Get:
                 {
-                    context.Result = await ExecuteGet(context.TransactionId, ast);
+                    context.Result = await ExecuteGet(context, ast, KeyValueConsistency.Linearizable);
                     break;
                 }
                 
                 case NodeType.Eset:
-                    await ExecuteSet(context.TransactionId, ast, KeyValueConsistency.Ephemeral);
+                    await ExecuteSet(context, ast, KeyValueConsistency.Ephemeral);
                     break;
 
                 case NodeType.Eget:
                 {
-                    context.Result = await ExecuteEget(context.TransactionId, ast);
+                    context.Result = await ExecuteGet(context, ast, KeyValueConsistency.Ephemeral);
                     break;
                 }
+                
+                case NodeType.Edelete:
+                    await ExecuteDelete(context, ast, KeyValueConsistency.Ephemeral);
+                    break;
                 
                 case NodeType.Commit:
                     context.Action = KeyValueTransactionAction.Commit;
@@ -345,6 +391,9 @@ public sealed class KeyValueTransactionCoordinator
                     break;
                 
                 case NodeType.Return:
+                    if (ast.leftAst is not null)
+                        context.Result = KeyValueTransactionExpression.Eval(context, ast.leftAst).ToTransactionRsult();
+                    
                     context.Status = KeyValueExecutionStatus.Stop;
                     break;
             }
@@ -353,7 +402,38 @@ public sealed class KeyValueTransactionCoordinator
         }
     }
 
-    private static void GetLocksToAcquire(NodeAst ast, List<string> locksToAcquire)
+    /// <summary>
+    /// Executes an "if" stmt
+    /// </summary>
+    /// <param name="context"></param>
+    /// <param name="ast"></param>
+    /// <exception cref="Exception"></exception>
+    private async Task ExecuteIf(KeyValueTransactionContext context, NodeAst ast)
+    {
+        if (ast.leftAst is null)
+            throw new Exception("Invalid IF expression");
+        
+        KeyValueExpressionResult expressionResult = KeyValueTransactionExpression.Eval(context, ast.leftAst);
+        
+        if (expressionResult.Type == KeyValueExpressionType.Bool && expressionResult.BoolValue)
+        {
+            if (ast.rightAst is not null) 
+                await ExecuteTransactionInternal(context, ast.rightAst);
+            
+            return;
+        }
+        
+        if (ast.extendedOne is not null) 
+            await ExecuteTransactionInternal(context, ast.extendedOne);
+    }
+
+    /// <summary>
+    /// Obtains that must be acquired to start the transaction
+    /// </summary>
+    /// <param name="ast"></param>
+    /// <param name="locksToAcquire"></param>
+    /// <exception cref="Exception"></exception>
+    private static void GetLocksToAcquire(NodeAst ast, HashSet<string> locksToAcquire)
     {
         while (true)
         {
@@ -375,8 +455,29 @@ public sealed class KeyValueTransactionCoordinator
                     break;
                 }
                 
+                case NodeType.If:
+                {
+                    if (ast.leftAst is not null) 
+                        GetLocksToAcquire(ast.leftAst, locksToAcquire);
+                    
+                    if (ast.rightAst is not null) 
+                        GetLocksToAcquire(ast.rightAst, locksToAcquire);
+
+                    break;
+                }
+                
                 case NodeType.Set:
-                    locksToAcquire.Add(ast.leftAst!.yytext!);
+                    if (ast.leftAst is null)
+                        throw new Exception("Invalid SET expression");
+                    
+                    locksToAcquire.Add(ast.leftAst.yytext!);
+                    break;
+                
+                case NodeType.Delete:
+                    if (ast.leftAst is null)
+                        throw new Exception("Invalid DELETE expression");
+                    
+                    locksToAcquire.Add(ast.leftAst.yytext!);
                     break;
             }
 

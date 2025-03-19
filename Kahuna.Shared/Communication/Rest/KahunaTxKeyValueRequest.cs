@@ -5,6 +5,9 @@ namespace Kahuna.Shared.Communication.Rest;
 
 public sealed class KahunaTxKeyValueRequest
 {
+    [JsonPropertyName("hash")]
+    public string? Hash { get; set; }
+    
     [JsonPropertyName("script")]
-    public string? Script { get; set; }
+    public byte[]? Script { get; set; }
 }

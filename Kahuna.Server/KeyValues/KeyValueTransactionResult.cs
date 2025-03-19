@@ -1,4 +1,5 @@
 
+using System.Text;
 using Kommander.Time;
 using Kahuna.Shared.KeyValue;
 
@@ -15,4 +16,13 @@ public sealed class KeyValueTransactionResult
     public long Revision { get; set; }
     
     public HLCTimestamp Expires { get; set; }
+
+    public KeyValueExpressionResult ToExpressionResult()
+    {
+        return new KeyValueExpressionResult()
+        {
+            Type = KeyValueExpressionType.String,
+            StrValue = Value is not null ? Encoding.UTF8.GetString(Value) : null,
+        };
+    }
 }

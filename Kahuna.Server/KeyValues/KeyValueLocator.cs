@@ -98,12 +98,55 @@ internal sealed class KeyValueLocator
         };
         
         if (value is not null)
-            request.Value = ByteString.CopyFrom(value);
+            request.Value = UnsafeByteOperations.UnsafeWrap(value);
         
         if (compareValue is not null)
-            request.CompareValue = ByteString.CopyFrom(compareValue);
+            request.CompareValue = UnsafeByteOperations.UnsafeWrap(compareValue);
         
         GrpcTrySetKeyValueResponse? remoteResponse = await client.TrySetKeyValueAsync(request);
+        remoteResponse.ServedFrom = $"https://{leader}";
+        
+        return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.Revision);
+    }
+    
+    /// <summary>
+    /// Locates the leader node for the given key and executes the TryDelete request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="consistency"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public async Task<(KeyValueResponseType, long)> LocateAndTryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    {
+        if (string.IsNullOrEmpty(key))
+            return (KeyValueResponseType.InvalidInput, 0);
+        
+        int partitionId = raft.GetPartitionKey(key);
+
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
+            return await manager.TryDeleteKeyValue(transactionId, key, consistency);
+            
+        string leader = await raft.WaitForLeader(partitionId, cancelationToken);
+        if (leader == raft.GetLocalEndpoint())
+            return (KeyValueResponseType.MustRetry, 0);
+        
+        logger.LogDebug("DELETE-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
+        
+        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
+        
+        KeyValuer.KeyValuerClient client = new(channel);
+        
+        GrpcTryDeleteKeyValueRequest request = new()
+        {
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
+            Key = key,
+            Consistency = (GrpcKeyValueConsistency)consistency,
+        };
+        
+        GrpcTryDeleteKeyValueResponse? remoteResponse = await client.TryDeleteKeyValueAsync(request);
+        
         remoteResponse.ServedFrom = $"https://{leader}";
         
         return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.Revision);

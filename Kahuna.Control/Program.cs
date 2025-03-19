@@ -31,6 +31,7 @@ KahunaClient connection = await GetConnection(opts);
 
 LineEditor? editor = null;
 Dictionary<string, KahunaLock> locks = new();
+Dictionary<string, KahunaScript> scripts = new();
 
 if (LineEditor.IsSupported(AnsiConsole.Console))
 {
@@ -165,60 +166,12 @@ while (true)
             await LoadAndRunScript(commandTrim);
             continue;
         }
-
-        if (commandTrim.StartsWith("set ", StringComparison.InvariantCultureIgnoreCase))
-        {
-            history.Add(commandTrim);
-            
-            await SetKey(commandTrim);
-            continue;
-        }
-        
-        if (commandTrim.StartsWith("get ", StringComparison.InvariantCultureIgnoreCase))
-        {
-            history.Add(commandTrim);
-            
-            await GetKey(commandTrim);
-            continue;
-        }
-        
-        if (commandTrim.StartsWith("delete ", StringComparison.InvariantCultureIgnoreCase) || commandTrim.StartsWith("del ", StringComparison.InvariantCultureIgnoreCase))
-        {
-            history.Add(commandTrim);
-            
-            await DeleteKey(commandTrim, KeyValueConsistency.Linearizable);
-            continue;
-        }
         
         if (commandTrim.StartsWith("extend ", StringComparison.InvariantCultureIgnoreCase))
         {
             history.Add(commandTrim);
             
             await ExtendKey(commandTrim, KeyValueConsistency.Linearizable);
-            continue;
-        }
-        
-        if (commandTrim.StartsWith("eset ", StringComparison.InvariantCultureIgnoreCase))
-        {
-            history.Add(commandTrim);
-            
-            await SetKey(commandTrim);
-            continue;
-        }
-        
-        if (commandTrim.StartsWith("eget ", StringComparison.InvariantCultureIgnoreCase))
-        {
-            history.Add(commandTrim);
-            
-            await GetKey(commandTrim);
-            continue;
-        }
-        
-        if (commandTrim.StartsWith("edelete ", StringComparison.InvariantCultureIgnoreCase) || commandTrim.StartsWith("edel ", StringComparison.InvariantCultureIgnoreCase))
-        {
-            history.Add(commandTrim);
-            
-            await DeleteKey(commandTrim, KeyValueConsistency.Ephemeral);
             continue;
         }
         
@@ -362,30 +315,6 @@ static async Task SaveHistory(string historyPath, List<string>? history)
         await File.WriteAllTextAsync(historyPath, JsonSerializer.Serialize(history));
 }
 
-async Task SetKey(string commandTrim)
-{
-    Stopwatch stopwatch = Stopwatch.StartNew();
-            
-    KahunaKeyValueTransactionResult result = await connection.ExecuteKeyValueTransaction(commandTrim);
-            
-    if (result.Type == KeyValueResponseType.Set)
-        AnsiConsole.MarkupLine("r{0} [cyan]ok[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
-    else
-        AnsiConsole.MarkupLine("r{0} [yellow](not set)[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
-}
-
-async Task GetKey(string commandTrim)
-{
-    Stopwatch stopwatch = Stopwatch.StartNew();
-            
-    KahunaKeyValueTransactionResult result = await connection.ExecuteKeyValueTransaction(commandTrim);
-            
-    if (result.Type == KeyValueResponseType.Get)
-        AnsiConsole.MarkupLine("r{0} [cyan]{1}[/] {2}ms\n", result.Revision, Markup.Escape(Encoding.UTF8.GetString(result.Value ?? [])), stopwatch.ElapsedMilliseconds);
-    else
-        AnsiConsole.MarkupLine("r{0} [yellow]null[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
-}
-
 async Task DeleteKey(string commandTrim, KeyValueConsistency consistency)
 {
     Stopwatch stopwatch = Stopwatch.StartNew();
@@ -417,8 +346,14 @@ async Task ExtendKey(string commandTrim, KeyValueConsistency consistency)
 async Task RunCommand(string commandTrim)
 {
     Stopwatch stopwatch = Stopwatch.StartNew();
-            
-    KahunaKeyValueTransactionResult result = await connection.ExecuteKeyValueTransaction(commandTrim);
+
+    if (!scripts.TryGetValue(commandTrim, out KahunaScript? script))
+    {
+        script = connection.LoadScript(commandTrim);
+        scripts.Add(commandTrim, script);
+    }
+    
+    KahunaKeyValueTransactionResult result = await script.Run();
             
     if (result.Type == KeyValueResponseType.Get)
         AnsiConsole.MarkupLine("r{0} [cyan]{1}[/] {2}ms\n", result.Revision, Markup.Escape(Encoding.UTF8.GetString(result.Value ?? [])), stopwatch.ElapsedMilliseconds);
@@ -444,7 +379,7 @@ async Task LoadAndRunScript(string commandTrim)
     
     string scriptText = await File.ReadAllTextAsync(parts[1]);
     
-    Console.WriteLine(scriptText);
+    AnsiConsole.MarkupLine("[purple]{0}[/]", Markup.Escape(scriptText));
 
     await RunCommand(scriptText);
 }

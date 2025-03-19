@@ -11,7 +11,7 @@ TEset           (E|e)(S|s)(E|e)(T|t)
 TEget           (E|e)(G|g)(E|e)(T|t)
 TIf             (I|i)(F|f)
 TThen           (T|t)(H|h)(E|e)(N|n)
-TElse           (E|l)(L|l)(S|s)(E|e)
+TElse           (E|e)(L|l)(S|s)(E|e)
 TEnd            (E|e)(N|n)(D|d)
 TNx             (N|n)(X|x)
 TXx             (X|x)(X|x)
@@ -21,6 +21,9 @@ TCommit         (C|c)(O|o)(M|m)(M|m)(I|i)(T|t)
 TRollback       (R|r)(O|o)(L|l)(L|l)(B|b)(A|a)(C|c)(K|k)
 TReturn         (R|r)(E|e)(T|t)(U|u)(R|r)(N|n)
 TDelete         (D|d)(E|e)(L|l)(E|e)(T|t)(E|e)
+TEDelete        (E|e)(D|d)(E|e)(L|l)(E|e)(T|t)(E|e)
+TTrue           (T|t)(R|r)(U|u)(E|e)
+TFalse          (F|f)(A|a)(L|L)(S|s)(E|e)
 LParen          \(
 RParen          \)
 LBrace          \{
@@ -93,6 +96,10 @@ TGreaterEquals  >=
 
 {TEset} { return (int)Token.TESET; }
 
+{TDelete} { return (int)Token.TDELETE; }
+
+{TEDelete} { return (int)Token.TEDELETE; }
+
 {TIf} { return (int)Token.TIF; }
 
 {TElse} { return (int)Token.TELSE; }
@@ -107,6 +114,10 @@ TGreaterEquals  >=
 
 {TCommit} { return (int)Token.TCOMMIT; }
 
+{TTrue} { return (int)Token.TTRUE; }
+
+{TFalse} { return (int)Token.TFALSE; }
+
 {TNx} { return (int)Token.TNX; }
 
 {TXx} { return (int)Token.TXX; }
@@ -120,6 +131,14 @@ TGreaterEquals  >=
 {TGreater} { return (int)Token.TGREATERTHAN; }
 
 {TGreaterEquals} { return (int)Token.TGREATERTHANEQUALS; }
+
+{TAdd} { return (int)Token.TADD; }
+
+{TMinus} { return (int)Token.TMINUS; }
+
+{TMult} { return (int)Token.TMULT; }
+
+{TDiv} { return (int)Token.TDIV; }
 
 {TLess} { return (int)Token.TLESSTHAN; }
 

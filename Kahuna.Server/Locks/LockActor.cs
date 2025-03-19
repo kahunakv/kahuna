@@ -312,7 +312,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         };
 
         if (proposal.Owner is not null)
-            lockMessage.Owner = ByteString.CopyFrom(proposal.Owner);
+            lockMessage.Owner = UnsafeByteOperations.UnsafeWrap(proposal.Owner);
 
         RaftReplicationResult result = await raft.ReplicateLogs(
             partitionId,

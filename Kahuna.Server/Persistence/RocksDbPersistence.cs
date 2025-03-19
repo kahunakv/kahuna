@@ -68,7 +68,7 @@ public class RocksDbPersistence : IPersistence
         };
         
         if (owner != null)
-            kvm.Owner = ByteString.CopyFrom(owner);
+            kvm.Owner = UnsafeByteOperations.UnsafeWrap(owner);
         
         db.Put(Encoding.UTF8.GetBytes(resource), Serialize(kvm), cf: columnFamilyLocks);
 
@@ -95,7 +95,7 @@ public class RocksDbPersistence : IPersistence
         };
 
         if (value is not null)
-            kvm.Value = ByteString.CopyFrom(value);
+            kvm.Value = UnsafeByteOperations.UnsafeWrap(value);
         
         db.Put(Encoding.UTF8.GetBytes(key), Serialize(kvm), cf: columnFamilyKeys);
 

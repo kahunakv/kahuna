@@ -22,11 +22,13 @@ public interface IKahuna
 
     public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken);
 
+    public Task<(KeyValueResponseType, long)> LocateAndTryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancellationToken);
+
     public Task<(KeyValueResponseType, long)> TrySetKeyValue(HLCTimestamp transactionId, string key, byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs, KeyValueConsistency consistency);
 
     public Task<(KeyValueResponseType, long)> TryExtendKeyValue(string key, int expiresMs, KeyValueConsistency consistency);
 
-    public Task<(KeyValueResponseType, long)> TryDeleteKeyValue(string key, KeyValueConsistency consistency);
+    public Task<(KeyValueResponseType, long)> TryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueConsistency consistency);
 
     public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryGetValue(HLCTimestamp transactionId,  string key, KeyValueConsistency consistency);
 
@@ -38,7 +40,7 @@ public interface IKahuna
     
     public Task<(KeyValueResponseType, long)> LocateAndTryCommitMutations(HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueConsistency consistency, CancellationToken cancelationToken);
     
-    public Task<KeyValueTransactionResult> TryExecuteTx(string script);
+    public Task<KeyValueTransactionResult> TryExecuteTx(byte[] script, string? hash);
 
     public Task<bool> OnReplicationReceived(RaftLog log);
 

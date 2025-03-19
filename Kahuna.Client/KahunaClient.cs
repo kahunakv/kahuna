@@ -418,13 +418,39 @@ public class KahunaClient
     }
 
     /// <summary>
-    /// Executes a transaction on the key-value store
+    /// Executes a script on the key-value store
+    /// Scripts are executed as all or nothing transactions
+    /// if one command fails the entire transaction is aborted
+    /// </summary>
+    /// <param name="script"></param>
+    /// <param name="hash"></param>
+    /// <returns></returns>
+    public async Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransaction(string script, string? hash = null)
+    {
+        return await communication.TryExecuteKeyValueTransaction(GetRoundRobinUrl(), Encoding.UTF8.GetBytes(script), hash).ConfigureAwait(false);
+    }
+    
+    /// <summary>
+    /// Executes a script on the key-value store
+    /// Scripts are executed as all or nothing transactions
+    /// if one command fails the entire transaction is aborted
+    /// </summary>
+    /// <param name="script"></param>
+    /// <param name="hash"></param>
+    /// <returns></returns>
+    public async Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransaction(byte[] script, string? hash = null)
+    {
+        return await communication.TryExecuteKeyValueTransaction(GetRoundRobinUrl(), script, hash).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Loads a Script reference allowing to reuse server caches and plannings 
     /// </summary>
     /// <param name="script"></param>
     /// <returns></returns>
-    public async Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransaction(string script)
+    public KahunaScript LoadScript(string script)
     {
-        return await communication.TryExecuteKeyValueTransaction(GetRoundRobinUrl(), script).ConfigureAwait(false);
+        return new KahunaScript(this, script);
     }
     
     /// <summary>

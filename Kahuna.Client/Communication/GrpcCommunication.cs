@@ -31,7 +31,7 @@ public class GrpcCommunication : IKahunaCommunication
         GrpcTryLockRequest request = new()
         {
             Resource = resource,
-            Owner = ByteString.CopyFrom(owner), 
+            Owner = UnsafeByteOperations.UnsafeWrap(owner), 
             ExpiresMs = expiryTime,
             Consistency = (GrpcLockConsistency)consistency
         };
@@ -65,7 +65,7 @@ public class GrpcCommunication : IKahunaCommunication
         GrpcUnlockRequest request = new()
         {
             Resource = resource, 
-            Owner = ByteString.CopyFrom(owner), 
+            Owner = UnsafeByteOperations.UnsafeWrap(owner), 
             Consistency = (GrpcLockConsistency)consistency
         };
         
@@ -98,7 +98,7 @@ public class GrpcCommunication : IKahunaCommunication
         GrpcExtendLockRequest request = new()
         {
             Resource = resource,
-            Owner = ByteString.CopyFrom(owner),
+            Owner = UnsafeByteOperations.UnsafeWrap(owner),
             ExpiresMs = expiryTime,
             Consistency = (GrpcLockConsistency)consistency
         };
@@ -158,7 +158,7 @@ public class GrpcCommunication : IKahunaCommunication
         GrpcTrySetKeyValueRequest request = new()
         {
             Key = key, 
-            Value = value is not null ? ByteString.CopyFrom(value) : null,
+            Value = value is not null ? UnsafeByteOperations.UnsafeWrap(value) : null,
             Flags = (GrpcKeyValueFlags)flags,
             ExpiresMs = expiryTime, 
             Consistency = (GrpcKeyValueConsistency)consistency
@@ -193,8 +193,8 @@ public class GrpcCommunication : IKahunaCommunication
         GrpcTrySetKeyValueRequest request = new()
         {
             Key = key, 
-            Value = value is not null ? ByteString.CopyFrom(value) : null,
-            CompareValue = compareValue is not null ? ByteString.CopyFrom(compareValue) : null,
+            Value = value is not null ? UnsafeByteOperations.UnsafeWrap(value) : null,
+            CompareValue = compareValue is not null ? UnsafeByteOperations.UnsafeWrap(compareValue) : null,
             Flags = GrpcKeyValueFlags.KeyvalueFlagsSetIfEqualToValue,
             ExpiresMs = expiryTime, 
             Consistency = (GrpcKeyValueConsistency)consistency
@@ -229,7 +229,7 @@ public class GrpcCommunication : IKahunaCommunication
         GrpcTrySetKeyValueRequest request = new()
         {
             Key = key, 
-            Value = value is not null ? ByteString.CopyFrom(value) : null,
+            Value = value is not null ? UnsafeByteOperations.UnsafeWrap(value) : null,
             CompareRevision = compareRevision,
             Flags = GrpcKeyValueFlags.KeyvalueFlagsSetIfEqualToRevision,
             ExpiresMs = expiryTime, 
@@ -366,12 +366,15 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to extend key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
 
-    public async Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransaction(string url, string script)
+    public async Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransaction(string url, byte[] script, string? hash)
     {
         GrpcTryExecuteTransactionRequest request = new()
         {
-            Script = script
+            Script = UnsafeByteOperations.UnsafeWrap(script)
         };
+        
+        if (hash is not null)
+            request.Hash = hash;
         
         GrpcTryExecuteTransactionResponse? response;
         

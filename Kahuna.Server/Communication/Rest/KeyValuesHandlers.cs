@@ -101,7 +101,7 @@ public static class KeyValuesHandlers
 
             if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
             {
-                (KeyValueResponseType response, long revision) = await keyValues.TryDeleteKeyValue(request.Key, request.Consistency);
+                (KeyValueResponseType response, long revision) = await keyValues.TryDeleteKeyValue(request.TransactionId, request.Key, request.Consistency);
 
                 return new() { Type = response, Revision = revision };
             }
@@ -179,15 +179,15 @@ public static class KeyValuesHandlers
             };
         });
         
-        app.MapPost("/v1/kv/try-execute-tx", async (KahunaTxKeyValueRequest request, IKahuna keyValues, IRaft raft, ILogger<IKahuna> logger) =>
+        app.MapPost("/v1/kv/try-execute-tx", async (KahunaTxKeyValueRequest request, IKahuna keyValues) =>
         {
-            if (string.IsNullOrEmpty(request.Script))
+            if (request.Script is null)
                 return new()
                 {
                     Type = KeyValueResponseType.InvalidInput
                 };
             
-            KeyValueTransactionResult result = await keyValues.TryExecuteTx(request.Script);
+            KeyValueTransactionResult result = await keyValues.TryExecuteTx(request.Script, request.Hash);
 
             return new KahunaTxKeyValueResponse
             {

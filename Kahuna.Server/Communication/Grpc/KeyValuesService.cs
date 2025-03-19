@@ -146,35 +146,18 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
             };
         
-        int partitionId = raft.GetPartitionKey(request.Key);
+        (KeyValueResponseType type, long revision) = await keyValues.LocateAndTryDeleteKeyValue(
+            new(request.TransactionIdPhysical, request.TransactionIdCounter),
+            request.Key, 
+            (KeyValueConsistency)request.Consistency, 
+            context.CancellationToken
+        );
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
+        return new()
         {
-            (KeyValueResponseType response, long revision) = await keyValues.TryDeleteKeyValue(request.Key, (KeyValueConsistency)request.Consistency);
-
-            return new()
-            {
-                Type = (GrpcKeyValueResponseType)response,
-                Revision = revision
-            };
-        }
-            
-        string leader = await raft.WaitForLeader(partitionId, CancellationToken.None);
-        if (leader == raft.GetLocalEndpoint())
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
-            };
-        
-        logger.LogDebug("DELETE-KEYVALUE Redirect {Key} to leader partition {Partition} at {Leader}", request.Key, partitionId, leader);
-        
-        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
-        
-        GrpcTryDeleteKeyValueResponse? remoteResponse = await client.TryDeleteKeyValueAsync(request);
-        remoteResponse.ServedFrom = $"https://{leader}";
-        return remoteResponse;
+            Type = (GrpcKeyValueResponseType)type,
+            Revision = revision
+        };
     }
     
     /// <summary>
@@ -210,7 +193,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
             };
 
             if (keyValueContext.Value is not null)
-                response.Value = ByteString.CopyFrom(keyValueContext.Value);
+                response.Value = UnsafeByteOperations.UnsafeWrap(keyValueContext.Value);
 
             return response;
         }
@@ -342,13 +325,13 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns></returns>
     public override async Task<GrpcTryExecuteTransactionResponse> TryExecuteTransaction(GrpcTryExecuteTransactionRequest request, ServerCallContext context)
     {
-        if (string.IsNullOrEmpty(request.Script))
+        if (request.Script is null)
             return new()
             {
                 Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
             };
             
-        KeyValueTransactionResult result = await keyValues.TryExecuteTx(request.Script);
+        KeyValueTransactionResult result = await keyValues.TryExecuteTx(request.Script.ToByteArray(), request.Hash);
 
         GrpcTryExecuteTransactionResponse response = new()
         {
@@ -362,7 +345,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
             response.ServedFrom = result.ServedFrom;
         
         if (result.Value is not null)
-            response.Value = ByteString.CopyFrom(result.Value);
+            response.Value = UnsafeByteOperations.UnsafeWrap(result.Value);
         
         return response;
     }

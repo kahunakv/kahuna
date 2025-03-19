@@ -253,6 +253,19 @@ public sealed class KeyValuesManager
     }
     
     /// <summary>
+    /// Locates the leader node for the given key and executes the TryDelete request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="consistency"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public async Task<(KeyValueResponseType, long)> LocateAndTryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancellationToken)
+    {
+        return await locator.LocateAndTryDeleteKeyValue(transactionId, key, consistency, cancellationToken);
+    }
+    
+    /// <summary>
     /// Locates the leader node for the given key and executes the TryAcquireExclusiveLock request.
     /// </summary>
     /// <param name="transactionId"></param>
@@ -390,16 +403,17 @@ public sealed class KeyValuesManager
     }
 
     /// <summary>
-    /// Removes the specified keys. A key is ignored if it does not exist.
+    /// Removes the specified key. A key is ignored if it does not exist.
     /// </summary>
+    /// <param name="transactionId"></param>
     /// <param name="key"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, long)> TryDeleteKeyValue(string key, KeyValueConsistency consistency)
+    public async Task<(KeyValueResponseType, long)> TryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueConsistency consistency)
     {
         KeyValueRequest request = new(
             KeyValueRequestType.TryDelete, 
-            HLCTimestamp.Zero,
+            transactionId,
             key, 
             null, 
             null,
@@ -586,9 +600,10 @@ public sealed class KeyValuesManager
     /// Schedule a key/value transaction to be executed
     /// </summary>
     /// <param name="script"></param>
+    /// <param name="hash"></param>
     /// <returns></returns>
-    public async Task<KeyValueTransactionResult> TryExecuteTx(string script)
+    public async Task<KeyValueTransactionResult> TryExecuteTx(byte[] script, string? hash)
     {
-        return await txCoordinator.TryExecuteTx(script);
+        return await txCoordinator.TryExecuteTx(script, hash);
     }
 }

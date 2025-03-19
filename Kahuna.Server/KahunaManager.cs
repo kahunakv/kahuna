@@ -186,6 +186,19 @@ public sealed class KahunaManager : IKahuna
     {
         return keyValues.LocateAndTryGetValue(transactionId, key, consistency, cancelationToken);
     }
+
+    /// <summary>
+    /// Locates the leader node for the given key and executes the TryDeleteValue request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="consistency"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public Task<(KeyValueResponseType, long)> LocateAndTryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancellationToken)
+    {
+        return keyValues.LocateAndTryDeleteKeyValue(transactionId, key, consistency, cancellationToken);
+    }
     
     /// <summary>
     /// Locates the leader node for the given key and executes the TryAcquireExclusiveLock request.
@@ -289,12 +302,13 @@ public sealed class KahunaManager : IKahuna
     /// <summary>
     /// Removes the specified key. A key is ignored if it does not exist.
     /// </summary>
+    /// <param name="transactionId"></param>
     /// <param name="key"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, long)> TryDeleteKeyValue(string key, KeyValueConsistency consistency)
+    public Task<(KeyValueResponseType, long)> TryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueConsistency consistency)
     {
-        return keyValues.TryDeleteKeyValue(key, consistency);
+        return keyValues.TryDeleteKeyValue(transactionId, key, consistency);
     }
 
     /// <summary>
@@ -313,10 +327,11 @@ public sealed class KahunaManager : IKahuna
     /// Executes a key/value transaction
     /// </summary>
     /// <param name="script"></param>
+    /// <param name="hash"></param>
     /// <returns></returns>
-    public Task<KeyValueTransactionResult> TryExecuteTx(string script)
+    public Task<KeyValueTransactionResult> TryExecuteTx(byte[] script, string? hash)
     {
-        return keyValues.TryExecuteTx(script);
+        return keyValues.TryExecuteTx(script, hash);
     }
 
     public async Task<bool> OnReplicationReceived(RaftLog log)

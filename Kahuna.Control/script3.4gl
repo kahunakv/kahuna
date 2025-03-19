@@ -1,0 +1,7 @@
+BEGIN
+ SET px 100
+ SET px2 1000
+ DELETE px
+ DELETE px2
+ COMMIT
+END

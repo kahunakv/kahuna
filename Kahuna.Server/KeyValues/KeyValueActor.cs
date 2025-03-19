@@ -267,10 +267,31 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         if (context.State == KeyValueState.Deleted)
             return new(KeyValueResponseType.DoesNotExist, context.Revision);
         
-        if (context.WriteIntent is not null)
+        if (context.WriteIntent is not null && context.WriteIntent.TransactionId != message.TransactionId)
             return new(KeyValueResponseType.MustRetry, 0);
         
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
+        
+        // Temporarily store the value in the MVCC entry if the transaction ID is set
+        if (message.TransactionId != HLCTimestamp.Zero)
+        {
+            context.MvccEntries ??= new();
+
+            if (!context.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? entry))
+            {
+                entry = new() { Revision = context.Revision };
+                
+                context.MvccEntries.Add(message.TransactionId, entry);
+            }
+
+            entry.Value = context.Value;
+            entry.Expires = context.Expires;
+            entry.Revision = context.Revision;
+            entry.LastUsed = currentTime;
+            entry.State = KeyValueState.Deleted;
+            
+            return new(KeyValueResponseType.Deleted, context.Revision);
+        }
         
         KeyValueProposal proposal = new(
             message.Key,
@@ -579,7 +600,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         };
         
         if (proposal.Value is not null)
-            kvm.Value = ByteString.CopyFrom(proposal.Value);
+            kvm.Value = UnsafeByteOperations.UnsafeWrap(proposal.Value);
 
         RaftReplicationResult result = await raft.ReplicateLogs(
             partitionId,
@@ -635,7 +656,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         };
         
         if (proposal.Value is not null)
-            kvm.Value = ByteString.CopyFrom(proposal.Value);
+            kvm.Value = UnsafeByteOperations.UnsafeWrap(proposal.Value);
 
         RaftReplicationResult result = await raft.ReplicateLogs(
             partitionId,

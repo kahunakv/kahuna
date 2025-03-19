@@ -43,8 +43,10 @@ message GrpcTryExtendKeyValueResponse {
 }
 
 message GrpcTryDeleteKeyValueRequest {
-  string Key = 1;
-  GrpcKeyValueConsistency Consistency = 2;
+  int64 TransactionIdPhysical = 1;
+  uint32 TransactionIdCounter = 2;
+  string Key = 3;
+  GrpcKeyValueConsistency Consistency = 4;
 }
 
 message GrpcTryDeleteKeyValueResponse {
@@ -70,7 +72,8 @@ message GrpcTryGetKeyValueResponse {
 }
 
 message GrpcTryExecuteTransactionRequest {
-  string Script = 1;
+  optional string Hash = 1;
+  bytes Script = 2;
 }
 
 message GrpcTryExecuteTransactionResponse {
