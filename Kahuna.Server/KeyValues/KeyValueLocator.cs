@@ -103,7 +103,7 @@ internal sealed class KeyValueLocator
         if (compareValue is not null)
             request.CompareValue = UnsafeByteOperations.UnsafeWrap(compareValue);
         
-        GrpcTrySetKeyValueResponse? remoteResponse = await client.TrySetKeyValueAsync(request);
+        GrpcTrySetKeyValueResponse? remoteResponse = await client.TrySetKeyValueAsync(request, cancellationToken: cancellationToken);
         remoteResponse.ServedFrom = $"https://{leader}";
         
         return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.Revision);
@@ -145,7 +145,7 @@ internal sealed class KeyValueLocator
             Consistency = (GrpcKeyValueConsistency)consistency,
         };
         
-        GrpcTryDeleteKeyValueResponse? remoteResponse = await client.TryDeleteKeyValueAsync(request);
+        GrpcTryDeleteKeyValueResponse? remoteResponse = await client.TryDeleteKeyValueAsync(request, cancellationToken: cancelationToken);
         
         remoteResponse.ServedFrom = $"https://{leader}";
         
@@ -188,7 +188,7 @@ internal sealed class KeyValueLocator
             Consistency = (GrpcKeyValueConsistency)consistency,
         };
         
-        GrpcTryGetKeyValueResponse? remoteResponse = await client.TryGetKeyValueAsync(request);
+        GrpcTryGetKeyValueResponse? remoteResponse = await client.TryGetKeyValueAsync(request, cancellationToken: cancelationToken);
         
         remoteResponse.ServedFrom = $"https://{leader}";
         
@@ -237,7 +237,7 @@ internal sealed class KeyValueLocator
             Consistency = (GrpcKeyValueConsistency)consistency,
         };
         
-        GrpcTryAcquireExclusiveLockResponse? remoteResponse = await client.TryAcquireExclusiveLockAsync(request);
+        GrpcTryAcquireExclusiveLockResponse? remoteResponse = await client.TryAcquireExclusiveLockAsync(request, cancellationToken: cancelationToken);
         
         remoteResponse.ServedFrom = $"https://{leader}";
         
@@ -280,7 +280,7 @@ internal sealed class KeyValueLocator
             Consistency = (GrpcKeyValueConsistency)consistency,
         };
         
-        GrpcTryReleaseExclusiveLockResponse? remoteResponse = await client.TryReleaseExclusiveLockAsync(request);
+        GrpcTryReleaseExclusiveLockResponse? remoteResponse = await client.TryReleaseExclusiveLockAsync(request, cancellationToken: cancelationToken);
         
         remoteResponse.ServedFrom = $"https://{leader}";
         
@@ -323,7 +323,7 @@ internal sealed class KeyValueLocator
             Consistency = (GrpcKeyValueConsistency)consistency,
         };
         
-        GrpcTryPrepareMutationsResponse? remoteResponse = await client.TryPrepareMutationsAsync(request);
+        GrpcTryPrepareMutationsResponse? remoteResponse = await client.TryPrepareMutationsAsync(request, cancellationToken: cancelationToken);
         
         remoteResponse.ServedFrom = $"https://{leader}";
         
@@ -369,7 +369,7 @@ internal sealed class KeyValueLocator
             Consistency = (GrpcKeyValueConsistency)consistency,
         };
         
-        GrpcTryCommitMutationsResponse? remoteResponse = await client.TryCommitMutationsAsync(request);
+        GrpcTryCommitMutationsResponse? remoteResponse = await client.TryCommitMutationsAsync(request, cancellationToken: cancelationToken);
         
         remoteResponse.ServedFrom = $"https://{leader}";
         

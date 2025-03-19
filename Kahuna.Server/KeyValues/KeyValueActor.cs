@@ -146,6 +146,57 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         if (context.WriteIntent is not null && context.WriteIntent.TransactionId != message.TransactionId)
             return new(KeyValueResponseType.MustRetry, 0);
 
+        HLCTimestamp newExpires = message.ExpiresMs > 0 ? (currentTime + message.ExpiresMs) : HLCTimestamp.Zero;
+        
+        // Temporarily store the value in the MVCC entry if the transaction ID is set
+        if (message.TransactionId != HLCTimestamp.Zero)
+        {
+            exists = true;
+            context.MvccEntries ??= new();
+
+            if (!context.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? entry))
+            {
+                entry = new()
+                {
+                    Value = context.Value, 
+                    Revision = context.Revision, 
+                    Expires = context.Expires, 
+                    LastUsed = context.LastUsed,
+                    State = context.State
+                };
+                
+                context.MvccEntries.Add(message.TransactionId, entry);
+            }
+            
+            if (entry.State == KeyValueState.Deleted)
+                exists = false;
+            
+            if (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
+                exists = false;
+            
+            switch (message.Flags)
+            {
+                case KeyValueFlags.SetIfExists when !exists:
+                case KeyValueFlags.SetIfNotExists when exists:
+                case KeyValueFlags.SetIfEqualToValue when exists && !((ReadOnlySpan<byte>)entry.Value).SequenceEqual(message.CompareValue):
+                case KeyValueFlags.SetIfEqualToRevision when exists && entry.Revision != message.CompareRevision:
+                    return new(KeyValueResponseType.NotSet, entry.Revision);
+
+                case KeyValueFlags.None:
+                case KeyValueFlags.Set:
+                default:
+                    break;
+            }
+
+            entry.Value = message.Value;
+            entry.Expires = newExpires;
+            entry.Revision++;
+            entry.LastUsed = currentTime;
+            entry.State = KeyValueState.Set;
+            
+            return new(KeyValueResponseType.Set, context.Revision);
+        }
+        
         switch (message.Flags)
         {
             case KeyValueFlags.SetIfExists when !exists:
@@ -158,29 +209,6 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
             case KeyValueFlags.Set:
             default:
                 break;
-        }
-
-        HLCTimestamp newExpires = message.ExpiresMs > 0 ? (currentTime + message.ExpiresMs) : HLCTimestamp.Zero;
-        
-        // Temporarily store the value in the MVCC entry if the transaction ID is set
-        if (message.TransactionId != HLCTimestamp.Zero)
-        {
-            context.MvccEntries ??= new();
-
-            if (!context.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? entry))
-            {
-                entry = new() { Revision = context.Revision };
-                
-                context.MvccEntries.Add(message.TransactionId, entry);
-            }
-
-            entry.Value = message.Value;
-            entry.Expires = newExpires;
-            entry.Revision++;
-            entry.LastUsed = currentTime;
-            entry.State = KeyValueState.Set;
-            
-            return new(KeyValueResponseType.Set, context.Revision);
         }
         
         KeyValueProposal proposal = new(
@@ -264,9 +292,6 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         if (context is null)
             return new(KeyValueResponseType.DoesNotExist);
         
-        if (context.State == KeyValueState.Deleted)
-            return new(KeyValueResponseType.DoesNotExist, context.Revision);
-        
         if (context.WriteIntent is not null && context.WriteIntent.TransactionId != message.TransactionId)
             return new(KeyValueResponseType.MustRetry, 0);
         
@@ -279,19 +304,28 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
 
             if (!context.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? entry))
             {
-                entry = new() { Revision = context.Revision };
+                entry = new()
+                {
+                    Value = context.Value, 
+                    Revision = context.Revision, 
+                    Expires = context.Expires, 
+                    LastUsed = context.LastUsed,
+                    State = context.State
+                };
                 
                 context.MvccEntries.Add(message.TransactionId, entry);
             }
-
-            entry.Value = context.Value;
-            entry.Expires = context.Expires;
-            entry.Revision = context.Revision;
-            entry.LastUsed = currentTime;
+            
+            if (context.State == KeyValueState.Deleted)
+                return new(KeyValueResponseType.DoesNotExist, entry.Revision);
+            
             entry.State = KeyValueState.Deleted;
             
-            return new(KeyValueResponseType.Deleted, context.Revision);
+            return new(KeyValueResponseType.Deleted, entry.Revision);
         }
+        
+        if (context.State == KeyValueState.Deleted)
+            return new(KeyValueResponseType.DoesNotExist, context.Revision);
         
         KeyValueProposal proposal = new(
             message.Key,
@@ -446,24 +480,47 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
     private async Task<KeyValueResponse> TryPrepareMutations(KeyValueRequest message)
     {
         if (message.TransactionId == HLCTimestamp.Zero)
+        {
+            logger.LogWarning("Cannot prepare mutations for missing transaction id");
+            
             return new(KeyValueResponseType.Errored);
-        
+        }
+
         KeyValueContext? context = await GetKeyValueContext(message.Key, message.Consistency);
-        
-        if (context is null || context.State == KeyValueState.Deleted)
+        if (context is null)
+        {
+            logger.LogWarning("Key/Value context is missing for {TransactionId}", message.TransactionId);
+            
             return new(KeyValueResponseType.Errored);
-        
+        }
+
         if (context.WriteIntent is null)
+        {
+            logger.LogWarning("Write intent is missing for {TransactionId}", message.TransactionId);
+            
             return new(KeyValueResponseType.Errored);
-        
+        }
+
         if (context.WriteIntent.TransactionId != message.TransactionId)
+        {
+            logger.LogWarning("Write intent conflict between {CurrentTransactionId} and {TransactionId}", context.WriteIntent.TransactionId, message.TransactionId);
+            
             return new(KeyValueResponseType.Errored);
-        
+        }
+
         if (context.MvccEntries is null)
+        {
+            logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [1]", message.TransactionId);
+            
             return new(KeyValueResponseType.Errored);
+        }
 
         if (!context.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? entry))
+        {
+            logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [2]", message.TransactionId);
+            
             return new(KeyValueResponseType.Errored);
+        }
         
         if (message.Consistency != KeyValueConsistency.Linearizable)
             return new(KeyValueResponseType.Prepared);
@@ -478,10 +535,14 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         );
 
         (bool success, HLCTimestamp proposalTicket) = await PrepareKeyValueMessage(KeyValueRequestType.TrySet, proposal, message.TransactionId);
-        
+
         if (!success)
+        {
+            logger.LogWarning("Failed to propose logs for {TransactionId}", message.TransactionId);
+            
             return new(KeyValueResponseType.Errored);
-        
+        }
+
         return new(KeyValueResponseType.Prepared, proposalTicket);
     }
     
@@ -493,25 +554,49 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
     private async Task<KeyValueResponse> TryCommitMutations(KeyValueRequest message)
     {
         if (message.TransactionId == HLCTimestamp.Zero)
+        {
+            logger.LogWarning("Cannot prepare mutations for missing transaction id");
+            
             return new(KeyValueResponseType.Errored);
-        
+        }
+
         KeyValueContext? context = await GetKeyValueContext(message.Key, message.Consistency);
-        
-        if (context is null || context.State == KeyValueState.Deleted)
+
+        if (context is null)
+        {
+            logger.LogWarning("Key/Value context is missing for {TransactionId}", message.TransactionId);
+            
             return new(KeyValueResponseType.Errored);
-        
+        }
+
         if (context.WriteIntent is null)
+        {
+            logger.LogWarning("Write intent is missing for {TransactionId}", message.TransactionId);
+            
             return new(KeyValueResponseType.Errored);
-        
+        }
+
         if (context.WriteIntent.TransactionId != message.TransactionId)
+        {
+            logger.LogWarning("Write intent conflict between {CurrentTransactionId} and {TransactionId}", context.WriteIntent.TransactionId, message.TransactionId);
+            
             return new(KeyValueResponseType.Errored);
-        
+        }
+
         if (context.MvccEntries is null)
+        {
+            logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [1]", message.TransactionId);
+            
             return new(KeyValueResponseType.Errored);
+        }
 
         if (!context.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? entry))
+        {
+            logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [2]", message.TransactionId);
+            
             return new(KeyValueResponseType.Errored);
-        
+        }
+
         KeyValueProposal proposal = new(
             message.Key,
             entry.Value,

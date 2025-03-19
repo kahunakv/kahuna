@@ -8,8 +8,6 @@ public static class KeyValueTransactionExpression
 {
     public static KeyValueExpressionResult Eval(KeyValueTransactionContext context, NodeAst ast)
     {
-        
-        
         switch (ast.nodeType)
         {
             case NodeType.Identifier:
@@ -71,10 +69,12 @@ public static class KeyValueTransactionExpression
             case NodeType.Commit:
             case NodeType.Return:
             case NodeType.ArgumentList:
+            case NodeType.Delete:
+            case NodeType.Edelete:
                 break;
             
             default:
-                throw new ArgumentOutOfRangeException();
+                throw new NotImplementedException();
         }
 
         return new() { Type = KeyValueExpressionType.Null };
