@@ -365,6 +365,7 @@ public sealed class MyLineNumberPrompt : ILineEditorPrompt
 
     public (Markup Markup, int Margin) GetPrompt(ILineEditorState state, int line)
     {
+        Console.Write(line);
         return (new Markup("kahuna-cli> ", _style), 1);
     }
 }

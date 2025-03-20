@@ -56,10 +56,10 @@ set_not_exists : TNX { $$.n = new(NodeType.SetNotExists, null, null, null, null,
                | TXX { $$.n = new(NodeType.SetExists, null, null, null, null, null, null, null); }
                ;
          
-eset_stmt : TESET identifier expression { $$.n = new(NodeType.Set, $2.n, $3.n, null, null, null, null, null); }         
-       | TESET identifier expression TEX int { $$.n = new(NodeType.Set, $2.n, $3.n, $5.n, null, null, null, null); }
-       | TESET identifier expression TEX int set_not_exists { $$.n = new(NodeType.Set, $2.n, $3.n, $5.n, $6.n, null, null, null); }
-       | TESET identifier expression set_not_exists { $$.n = new(NodeType.Set, $2.n, $3.n, null, $4.n, null, null, null); }
+eset_stmt : TESET identifier expression { $$.n = new(NodeType.Eset, $2.n, $3.n, null, null, null, null, null); }         
+       | TESET identifier expression TEX int { $$.n = new(NodeType.Eset, $2.n, $3.n, $5.n, null, null, null, null); }
+       | TESET identifier expression TEX int set_not_exists { $$.n = new(NodeType.Eset, $2.n, $3.n, $5.n, $6.n, null, null, null); }
+       | TESET identifier expression set_not_exists { $$.n = new(NodeType.Eset, $2.n, $3.n, null, $4.n, null, null, null); }
        ;                     
          
 get_stmt : TGET identifier { $$.n = new(NodeType.Get, $2.n, null, null, null, null, null, null); }
