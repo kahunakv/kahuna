@@ -1,5 +1,5 @@
 
-name: Kahuna
+name: kahuna
 services:
   kahuna1:
     build:
