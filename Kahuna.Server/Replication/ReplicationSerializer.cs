@@ -1,8 +1,8 @@
 
 using Google.Protobuf;
-using Kahuna.Replication.Protos;
+using Kahuna.Server.Replication.Protos;
 
-namespace Kahuna.Replication;
+namespace Kahuna.Server.Replication;
 
 public static class ReplicationSerializer
 {

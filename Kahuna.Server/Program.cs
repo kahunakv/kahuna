@@ -7,9 +7,9 @@ using Flurl.Http;
 using Kahuna;
 using Kahuna.Communication.Grpc;
 using Kahuna.Communication.Rest;
-using Kahuna.Configuration;
+using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
-using Kahuna.Locks;
+using Kahuna.Server.Locks;
 using Kahuna.Services;
 
 using Kommander;

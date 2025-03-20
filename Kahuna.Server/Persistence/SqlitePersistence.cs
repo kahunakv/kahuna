@@ -1,5 +1,5 @@
 
-using Kahuna.Locks;
+using Kahuna.Server.Locks;
 using Kommander;
 using Kahuna.Server.KeyValues;
 using Microsoft.Data.Sqlite;

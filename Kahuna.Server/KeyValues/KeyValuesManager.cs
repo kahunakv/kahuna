@@ -6,10 +6,10 @@ using Kommander;
 using Kommander.Data;
 using Kommander.Time;
 
-using Kahuna.Configuration;
+using Kahuna.Server.Configuration;
 using Kahuna.Server.Persistence;
-using Kahuna.Replication;
-using Kahuna.Replication.Protos;
+using Kahuna.Server.Replication;
+using Kahuna.Server.Replication.Protos;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues;

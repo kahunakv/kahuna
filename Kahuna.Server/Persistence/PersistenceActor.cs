@@ -1,6 +1,6 @@
 
 using Nixie;
-using Kahuna.Locks;
+using Kahuna.Server.Locks;
 using Kahuna.Server.KeyValues;
 
 namespace Kahuna.Server.Persistence;

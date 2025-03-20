@@ -1,7 +1,7 @@
 
 using System.Security.Cryptography.X509Certificates;
 
-namespace Kahuna.Configuration;
+namespace Kahuna.Server.Configuration;
 
 public static class ConfigurationValidator
 {

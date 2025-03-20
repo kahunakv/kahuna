@@ -3,7 +3,7 @@ using Google.Protobuf;
 using Grpc.Net.Client;
 
 using Kahuna.Communication.Grpc;
-using Kahuna.Configuration;
+using Kahuna.Server.Configuration;
 using Kahuna.Shared.KeyValue;
 
 using Kommander;

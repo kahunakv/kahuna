@@ -1,5 +1,5 @@
 
-namespace Kahuna.Configuration;
+namespace Kahuna.Server.Configuration;
 
 public sealed class KahunaConfiguration
 {

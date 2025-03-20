@@ -1,7 +1,7 @@
 
 using Kahuna.Shared.Locks;
 
-namespace Kahuna.Locks;
+namespace Kahuna.Server.Locks;
 
 /// <summary>
 /// Represents the response of the operation on the locker actor

@@ -1,16 +1,18 @@
 
-using Kahuna.Configuration;
-using Kahuna.Server.Persistence;
-using Kahuna.Replication;
-using Kahuna.Replication.Protos;
-using Kahuna.Shared.Locks;
-using Kommander;
-using Kommander.Data;
-using Kommander.Time;
 using Nixie;
 using Nixie.Routers;
 
-namespace Kahuna.Locks;
+using Kommander;
+using Kommander.Data;
+using Kommander.Time;
+
+using Kahuna.Server.Configuration;
+using Kahuna.Server.Persistence;
+using Kahuna.Server.Replication;
+using Kahuna.Server.Replication.Protos;
+using Kahuna.Shared.Locks;
+
+namespace Kahuna.Server.Locks;
 
 /// <summary>
 /// LockManager is a singleton class that manages lock actors.

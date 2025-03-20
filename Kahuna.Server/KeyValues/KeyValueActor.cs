@@ -1,14 +1,15 @@
 
-using Google.Protobuf;
 using Nixie;
+using Google.Protobuf;
+
 using Kommander;
 using Kommander.Time;
+using Kommander.Data;
 
 using Kahuna.Server.Persistence;
-using Kahuna.Replication;
+using Kahuna.Server.Replication;
 using Kahuna.Shared.KeyValue;
-using Kahuna.Replication.Protos;
-using Kommander.Data;
+using Kahuna.Server.Replication.Protos;
 
 namespace Kahuna.Server.KeyValues;
 

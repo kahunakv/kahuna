@@ -1,7 +1,7 @@
 
 using Kommander.Time;
 
-namespace Kahuna.Locks;
+namespace Kahuna.Server.Locks;
 
 public readonly struct LockProposal
 {

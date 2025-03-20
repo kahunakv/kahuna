@@ -3,7 +3,7 @@ using Kahuna.Shared.Locks;
 using Nixie.Routers;
 using Standart.Hash.xxHash;
 
-namespace Kahuna.Locks;
+namespace Kahuna.Server.Locks;
 
 /// <summary>
 /// Represents a request to perform an action on a locker actor

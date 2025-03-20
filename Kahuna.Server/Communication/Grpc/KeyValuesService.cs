@@ -6,14 +6,13 @@
  * file that was distributed with this source code.
  */
 
-using Google.Protobuf;
-using Grpc.Core;
-using Grpc.Net.Client;
-using Kahuna.Configuration;
-using Kahuna.Server.KeyValues;
-using Kahuna.Shared.KeyValue;
 using Kommander;
 using Kommander.Time;
+using Google.Protobuf;
+using Grpc.Core;
+using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues;
+using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Communication.Grpc;
 

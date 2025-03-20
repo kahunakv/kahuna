@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package Kahuna.Replication.Protos;
+package Kahuna.Server.Replication.Protos;
 
 message KeyValueMessage {
   int32 type = 1;

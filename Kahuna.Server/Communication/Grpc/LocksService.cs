@@ -2,8 +2,8 @@
 using Google.Protobuf;
 using Grpc.Core;
 using Grpc.Net.Client;
-using Kahuna.Configuration;
-using Kahuna.Locks;
+using Kahuna.Server.Configuration;
+using Kahuna.Server.Locks;
 using Kahuna.Shared.Locks;
 using Kommander;
 

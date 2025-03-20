@@ -1,6 +1,6 @@
 
 using System.Text;
-using Kahuna.Locks;
+using Kahuna.Server.Locks;
 using Kahuna.Persistence.Protos;
 using RocksDbSharp;
 using Google.Protobuf;

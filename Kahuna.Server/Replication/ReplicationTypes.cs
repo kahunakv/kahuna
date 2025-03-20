@@ -1,5 +1,5 @@
 
-namespace Kahuna.Replication;
+namespace Kahuna.Server.Replication;
 
 public static class ReplicationTypes
 {

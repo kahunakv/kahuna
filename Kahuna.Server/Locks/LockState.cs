@@ -1,4 +1,5 @@
-namespace Kahuna.Locks;
+
+namespace Kahuna.Server.Locks;
 
 public enum LockState
 {

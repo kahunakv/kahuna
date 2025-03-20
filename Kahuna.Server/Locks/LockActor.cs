@@ -1,15 +1,14 @@
 
+using Nixie;
+using Kommander;
+using Kommander.Time;
 using Google.Protobuf;
 using Kahuna.Server.Persistence;
-using Kahuna.Replication;
-using Kahuna.Replication.Protos;
+using Kahuna.Server.Replication;
+using Kahuna.Server.Replication.Protos;
 using Kahuna.Shared.Locks;
-using Kommander;
-using Kommander.Data;
-using Kommander.Time;
-using Nixie;
 
-namespace Kahuna.Locks;
+namespace Kahuna.Server.Locks;
 
 /// <summary>
 /// Actor to manage lock operations on resources

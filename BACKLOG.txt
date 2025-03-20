@@ -1,2 +1,4 @@
-- Ping endpoint 
-- Fix multiple OnReplicationReceived
+- Fix missing expr in script parser
+- Add support for placeholders in script parser
+- Escaped identifiers
+- Sequencer 

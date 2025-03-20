@@ -4,14 +4,14 @@ using Nixie.Routers;
 
 using Kommander;
 using Kommander.Data;
+using Kommander.Time;
 
-using Kahuna.Configuration;
+using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
-using Kahuna.Locks;
+using Kahuna.Server.Locks;
 using Kahuna.Server.Persistence;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
-using Kommander.Time;
 
 namespace Kahuna;
 
