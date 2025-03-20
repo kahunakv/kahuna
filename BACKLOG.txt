@@ -1,4 +1,10 @@
 - Fix missing expr in script parser
+- Support function calls in scripts
 - Add support for placeholders in script parser
 - Escaped identifiers
 - Sequencer 
+- Make SET flags order independent
+- Make scripts tests
+- Make Disk durability default
+- Rename LockConsistency to LockDurability
+- Add server tests

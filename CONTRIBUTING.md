@@ -9,7 +9,7 @@ Thank you for considering contributing to kahuna! Your contributions help improv
 1. Fork the repository on GitHub.
 2. Clone your forked repository to your local machine:
 ```bash
-git clone https://github.com/andresgutierrez/kahuna.git
+git clone https://github.com/kahunakv/kahuna.git
 ```
 3. Navigate to the cloned directory:
 ```bash
@@ -77,13 +77,13 @@ git push origin feature/your-feature-name
 
 ## Reporting Issues
 
-1. Check the [existing issues](https://github.com/andresgutierrez/kahuna/issues) before opening a new one to avoid duplicates.
+1. Check the [existing issues](https://github.com/kahunakv/kahuna/issues) before opening a new one to avoid duplicates.
 2. Open a new issue and provide detailed information about the problem, including steps to reproduce, expected behavior, and actual behavior.
 3. If you have a solution, feel free to submit a pull request along with the issue.
 
 ## Community and Support
 
-- Join our [discussion forum](https://github.com/andresgutierrez/kahuna/discussions) for general questions and support.
+- Join our [discussion forum](https://github.com/kahunakv/kahuna/discussions) for general questions and support.
 - Follow the [Code of Conduct](CODE_OF_CONDUCT.md) to ensure a welcoming and inclusive environment for all contributors.
 
 Thank you for your contributions!

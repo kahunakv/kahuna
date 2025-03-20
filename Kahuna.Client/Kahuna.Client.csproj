@@ -16,8 +16,8 @@
         <InvariantGlobalization>true</InvariantGlobalization>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>
         <PackageDescription>.NET client for Kahuna: Distributed locks and reliable key-value store</PackageDescription>
-        <PackageProjectUrl>https://github.com/andresgutierrez/kahuna</PackageProjectUrl>
-        <RepositoryUrl>https://github.com/andresgutierrez/kahuna</RepositoryUrl>
+        <PackageProjectUrl>https://github.com/kahunakv/kahuna</PackageProjectUrl>
+        <RepositoryUrl>https://github.com/kahunakv/kahuna</RepositoryUrl>
         <PackageReadmeFile>README.md</PackageReadmeFile>
         <PackageTags>distributed lock;locks;redlock;raft;consensus;paxos;distributed consensus;leader election;zookeeper</PackageTags>
     </PropertyGroup>

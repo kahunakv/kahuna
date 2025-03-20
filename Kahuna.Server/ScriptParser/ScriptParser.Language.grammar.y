@@ -22,8 +22,8 @@
 
 %token LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV LBRACE RBRACE
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS  
-%token TBEGIN TROLLBACK TCOMMIT TSET TGET TESET TEGET TDELETE TEDELETE TEXTEND TEEXTEND TIF TELSE TTHEN TEND TNX TXX TEX TRETURN
-%token TDIGIT TFLOAT TSTRING TIDENTIFIER TESCIDENTIFIER TPLACEHOLDER TTRUE TFALSE 
+%token TBEGIN TROLLBACK TCOMMIT TSET TGET TESET TEGET TDELETE TEDELETE TEXTEND TEEXTEND TIF TELSE TTHEN TEND TNX TXX TEX TCMP TCMPREV
+%token TRETURN TDIGIT TFLOAT TSTRING TIDENTIFIER TESCIDENTIFIER TPLACEHOLDER TTRUE TFALSE 
 
 %%
 
@@ -47,7 +47,9 @@ stmt    : set_stmt { $$.n = $1.n; }
         ;
 
 set_stmt : TSET identifier expression { $$.n = new(NodeType.Set, $2.n, $3.n, null, null, null, null, null); }         
+          | TSET identifier expression CMP expression { $$.n = new(NodeType.Set, $2.n, $3.n, null, null, $5.n, null, null); }
           | TSET identifier expression TEX int { $$.n = new(NodeType.Set, $2.n, $3.n, $5.n, null, null, null, null); }
+          | TSET identifier expression CMP expression TEX int { $$.n = new(NodeType.Set, $2.n, $3.n, $7.n, null, $5.n, null, null); }
           | TSET identifier expression TEX int set_not_exists { $$.n = new(NodeType.Set, $2.n, $3.n, $5.n, $6.n, null, null, null); }
           | TSET identifier expression set_not_exists { $$.n = new(NodeType.Set, $2.n, $3.n, null, $4.n, null, null, null); }
           ; 

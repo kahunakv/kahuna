@@ -158,6 +158,17 @@ public sealed class KeyValueTransactionCoordinator
         
         if (ast.extendedOne is not null)
             expiresMs = int.Parse(ast.extendedOne.yytext!);
+
+        KeyValueFlags flags = KeyValueFlags.Set;
+
+        if (ast.extendedTwo is not null)
+        {
+            if (ast.extendedTwo.nodeType == NodeType.SetNotExists)
+                flags = KeyValueFlags.SetIfNotExists;
+            
+            if (ast.extendedTwo.nodeType == NodeType.SetExists)
+                flags = KeyValueFlags.SetIfExists;
+        }
         
         KeyValueTransactionResult result = KeyValueTransactionExpression.Eval(context, ast.rightAst).ToTransactionRsult();
         
@@ -167,7 +178,7 @@ public sealed class KeyValueTransactionCoordinator
             value: result.Value,
             null,
             0,
-            KeyValueFlags.Set,
+            flags,
             expiresMs,
             consistency,
             cancellationToken
