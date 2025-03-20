@@ -266,6 +266,20 @@ public sealed class KeyValuesManager
     }
     
     /// <summary>
+    /// Locates the leader node for the given key and executes the TryExtend request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="consistency"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public async Task<(KeyValueResponseType, long)> LocateAndTryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueConsistency consistency, CancellationToken cancellationToken)
+    {
+        return await locator.LocateAndTryExtendKeyValue(transactionId, key, expiresMs, consistency, cancellationToken);
+    }
+    
+    /// <summary>
     /// Locates the leader node for the given key and executes the TryAcquireExclusiveLock request.
     /// </summary>
     /// <param name="transactionId"></param>
@@ -319,6 +333,20 @@ public sealed class KeyValuesManager
     public async Task<(KeyValueResponseType, long)> LocateAndTryCommitMutations(HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueConsistency consistency, CancellationToken cancelationToken)
     {
         return await locator.LocateAndTryCommitMutations(transactionId, key, ticketId, consistency, cancelationToken);
+    }
+    
+    /// <summary>
+    /// Locates the leader node for the given key and executes the TryRollbackMutations request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="ticketId"></param>
+    /// <param name="consistency"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public async Task<(KeyValueResponseType, long)> LocateAndTryRollbackMutations(HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    {
+        return await locator.LocateAndTryRollbackMutations(transactionId, key, ticketId, consistency, cancelationToken);
     }
 
     /// <summary>
@@ -374,6 +402,7 @@ public sealed class KeyValuesManager
     /// <param name="consistency"></param>
     /// <returns></returns>
     public async Task<(KeyValueResponseType, long)> TryExtendKeyValue(
+        HLCTimestamp transactionId,
         string key, 
         int expiresMs, 
         KeyValueConsistency consistency
@@ -381,7 +410,7 @@ public sealed class KeyValuesManager
     {
         KeyValueRequest request = new(
             KeyValueRequestType.TryExtend,
-            HLCTimestamp.Zero,
+            transactionId,
             key, 
             null, 
             null,
@@ -575,6 +604,39 @@ public sealed class KeyValuesManager
     {
         KeyValueRequest request = new(
             KeyValueRequestType.TryCommitMutations, 
+            transactionId, 
+            key, 
+            null, 
+            null,
+            -1,
+            KeyValueFlags.None,
+            0, 
+            proposalTicketId,
+            consistency
+        );
+
+        KeyValueResponse response;
+        
+        if (consistency == KeyValueConsistency.Ephemeral)
+            response = await ephemeralKeyValuesRouter.Ask(request);
+        else
+            response = await consistentKeyValuesRouter.Ask(request);
+        
+        return (response.Type, response.Revision);
+    }
+    
+    /// <summary>
+    /// Passes a TryRollback request to the key/value actor for the given keyValue name.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="proposalTicketId"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
+    public async Task<(KeyValueResponseType, long)> TryRollbackMutations(HLCTimestamp transactionId, string key, HLCTimestamp proposalTicketId, KeyValueConsistency consistency)
+    {
+        KeyValueRequest request = new(
+            KeyValueRequestType.TryRollbackMutations, 
             transactionId, 
             key, 
             null, 

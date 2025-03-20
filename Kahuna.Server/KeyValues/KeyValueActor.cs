@@ -91,6 +91,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
                 KeyValueRequestType.TryReleaseExclusiveLock => await TryReleaseExclusiveLock(message),
                 KeyValueRequestType.TryPrepareMutations => await TryPrepareMutations(message),
                 KeyValueRequestType.TryCommitMutations => await TryCommitMutations(message),
+                KeyValueRequestType.TryRollbackMutations => await TryRollbackMutations(message),
                 _ => new(KeyValueResponseType.Errored)
             };
         }
@@ -547,7 +548,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
     }
     
     /// <summary>
-    /// Prepare the mutations made to the key currently held in the MVCC entry
+    /// Commit the mutations made to the key currently held in the MVCC entry
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
@@ -555,7 +556,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
     {
         if (message.TransactionId == HLCTimestamp.Zero)
         {
-            logger.LogWarning("Cannot prepare mutations for missing transaction id");
+            logger.LogWarning("Cannot commit mutations for missing transaction id");
             
             return new(KeyValueResponseType.Errored);
         }
@@ -634,7 +635,102 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         
         return new(KeyValueResponseType.Committed, commitIndex);
     }
+    
+    /// <summary>
+    /// Rollback made to the key currently held in the MVCC entry
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
+    private async Task<KeyValueResponse> TryRollbackMutations(KeyValueRequest message)
+    {
+        if (message.TransactionId == HLCTimestamp.Zero)
+        {
+            logger.LogWarning("Cannot rollback mutations for missing transaction id");
+            
+            return new(KeyValueResponseType.Errored);
+        }
 
+        KeyValueContext? context = await GetKeyValueContext(message.Key, message.Consistency);
+
+        if (context is null)
+        {
+            logger.LogWarning("Key/Value context is missing for {TransactionId}", message.TransactionId);
+            
+            return new(KeyValueResponseType.Errored);
+        }
+
+        if (context.WriteIntent is null)
+        {
+            logger.LogWarning("Write intent is missing for {TransactionId}", message.TransactionId);
+            
+            return new(KeyValueResponseType.Errored);
+        }
+
+        if (context.WriteIntent.TransactionId != message.TransactionId)
+        {
+            logger.LogWarning("Write intent conflict between {CurrentTransactionId} and {TransactionId}", context.WriteIntent.TransactionId, message.TransactionId);
+            
+            return new(KeyValueResponseType.Errored);
+        }
+
+        if (context.MvccEntries is null)
+        {
+            logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [1]", message.TransactionId);
+            
+            return new(KeyValueResponseType.Errored);
+        }
+
+        if (!context.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? entry))
+        {
+            logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [2]", message.TransactionId);
+            
+            return new(KeyValueResponseType.Errored);
+        }
+
+        KeyValueProposal proposal = new(
+            message.Key,
+            entry.Value,
+            entry.Revision,
+            entry.Expires,
+            entry.LastUsed,
+            entry.State
+        );
+
+        if (message.Consistency != KeyValueConsistency.Linearizable)
+        {
+            context.Value = proposal.Value;
+            context.Expires = proposal.Expires;
+            context.Revision = proposal.Revision;
+            context.LastUsed = proposal.LastUsed;
+            context.State = proposal.State;
+            
+            context.MvccEntries.Remove(message.TransactionId);
+            
+            return new(KeyValueResponseType.RolledBack);
+        }
+        
+        (bool success, long commitIndex) = await RollbackKeyValueMessage(message.Key, message.ProposalTicketId);
+        
+        if (!success)
+            return new(KeyValueResponseType.Errored);
+        
+        context.Value = proposal.Value;
+        context.Expires = proposal.Expires;
+        context.Revision = proposal.Revision;
+        context.LastUsed = proposal.LastUsed;
+        context.State = proposal.State;
+        
+        context.MvccEntries.Remove(message.TransactionId);
+        
+        return new(KeyValueResponseType.RolledBack, commitIndex);
+    }
+
+    /// <summary>
+    /// Returns an existing KeyValueContext from memory or retrieves it from the persistence layer
+    /// </summary>
+    /// <param name="resource"></param>
+    /// <param name="consistency"></param>
+    /// <returns></returns>
     private async ValueTask<KeyValueContext?> GetKeyValueContext(string resource, KeyValueConsistency? consistency)
     {
         if (!keyValuesStore.TryGetValue(resource, out KeyValueContext? context))
@@ -726,6 +822,9 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         if (!raft.Joined)
             return (true, HLCTimestamp.Zero);
 
+        if (proposal.Key == "test")
+            return (false, HLCTimestamp.Zero);
+
         int partitionId = raft.GetPartitionKey(proposal.Key);
 
         KeyValueMessage kvm = new()
@@ -757,7 +856,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
             return (false, HLCTimestamp.Zero);
         }
         
-        logger.LogDebug("Successfully proposed key/value {Key} Partition={Partition} ProposalIndex={ProposalIndex}", proposal.Key, partitionId, result.CommitLogId);
+        logger.LogDebug("Successfully proposed key/value {Key} Partition={Partition} ProposalIndex={ProposalIndex}", proposal.Key, partitionId, result.LogIndex);
 
         return (result.Success, result.TicketId);
     }
@@ -765,7 +864,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
     /// <summary>
     /// Commits a previously proposed key value message
     /// </summary>
-    /// <param name="type"></param>
+    /// <param name="key"></param>
     /// <param name="proposalTicketId"></param>
     /// <returns></returns>
     private async Task<(bool, long)> CommitKeyValueMessage(string key, HLCTimestamp proposalTicketId)
@@ -790,6 +889,36 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         logger.LogDebug("Successfully commmitted key/value {Key} Partition={Partition} ProposalIndex={ProposalIndex}", key, partitionId, commitLogId);
 
         return (success, commitLogId);
+    }
+    
+    /// <summary>
+    /// Rollbacks a previously proposed key value message
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="proposalTicketId"></param>
+    /// <returns></returns>
+    private async Task<(bool, long)> RollbackKeyValueMessage(string key, HLCTimestamp proposalTicketId)
+    {
+        if (!raft.Joined)
+            return (true, 0);
+
+        int partitionId = raft.GetPartitionKey(key);
+
+        (bool success, RaftOperationStatus status, long logIndex) = await raft.RollbackLogs(
+            partitionId,
+            proposalTicketId
+        );
+
+        if (!success)
+        {
+            logger.LogWarning("Failed to rollback key/value {Key} Partition={Partition} Status={Status}", key, partitionId, status);
+            
+            return (false, 0);
+        }
+        
+        logger.LogDebug("Successfully rolled back key/value {Key} Partition={Partition} ProposalIndex={ProposalIndex}", key, partitionId, logIndex);
+
+        return (success, logIndex);
     }
 
     private async ValueTask Collect()

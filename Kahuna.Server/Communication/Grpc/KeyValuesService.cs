@@ -101,35 +101,19 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
             };
         
-        int partitionId = raft.GetPartitionKey(request.Key);
+        (KeyValueResponseType type, long revision) = await keyValues.LocateAndTryExtendKeyValue(
+            new(request.TransactionIdPhysical, request.TransactionIdCounter),
+            request.Key, 
+            request.ExpiresMs,
+            (KeyValueConsistency)request.Consistency, 
+            context.CancellationToken
+        );
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
+        return new()
         {
-            (KeyValueResponseType response, long revision) = await keyValues.TryExtendKeyValue(request.Key, request.ExpiresMs, (KeyValueConsistency)request.Consistency);
-
-            return new()
-            {
-                Type = (GrpcKeyValueResponseType)response,
-                Revision = revision
-            };
-        }
-            
-        string leader = await raft.WaitForLeader(partitionId, CancellationToken.None);
-        if (leader == raft.GetLocalEndpoint())
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
-            };
-        
-        logger.LogDebug("EXTEND-KEYVALUE Redirect {Key} to leader partition {Partition} at {Leader}", request.Key, partitionId, leader);
-        
-        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
-        
-        GrpcTryExtendKeyValueResponse? remoteResponse = await client.TryExtendKeyValueAsync(request);
-        remoteResponse.ServedFrom = $"https://{leader}";
-        return remoteResponse;
+            Type = (GrpcKeyValueResponseType)type,
+            Revision = revision
+        };
     }
     
     /// <summary>
@@ -314,6 +298,35 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         {
             Type = (GrpcKeyValueResponseType)type,
             ProposalIndex = commitIndex
+        };
+    }
+    
+    /// <summary>
+    /// Receives requests for the key/value "RollbackMutations" service 
+    /// </summary>
+    /// <param name="request"></param>
+    /// <param name="context"></param>
+    /// <returns></returns>
+    public override async Task<GrpcTryRollbackMutationsResponse> TryRollbackMutations(GrpcTryRollbackMutationsRequest request, ServerCallContext context)
+    {
+        if (string.IsNullOrEmpty(request.Key))
+            return new()
+            {
+                Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
+            };
+        
+        (KeyValueResponseType type, long rollbackIndex) = await keyValues.LocateAndTryRollbackMutations(
+            new(request.TransactionIdPhysical, request.TransactionIdCounter), 
+            request.Key, 
+            new(request.ProposalTicketPhysical, request.ProposalTicketCounter),
+            (KeyValueConsistency)request.Consistency, 
+            context.CancellationToken
+        );
+
+        return new()
+        {
+            Type = (GrpcKeyValueResponseType)type,
+            ProposalIndex = rollbackIndex
         };
     }
 

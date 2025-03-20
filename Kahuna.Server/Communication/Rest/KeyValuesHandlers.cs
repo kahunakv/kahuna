@@ -55,7 +55,7 @@ public static class KeyValuesHandlers
             
             if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
             {
-                (KeyValueResponseType response, long revision) = await keyValues.TryExtendKeyValue(request.Key, request.ExpiresMs, request.Consistency);
+                (KeyValueResponseType response, long revision) = await keyValues.TryExtendKeyValue(request.TransactionId, request.Key, request.ExpiresMs, request.Consistency);
 
                 return new() { Type = response, Revision = revision };    
             }

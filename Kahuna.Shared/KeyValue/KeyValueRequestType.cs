@@ -10,5 +10,6 @@ public enum KeyValueRequestType
     TryAcquireExclusiveLock,
     TryReleaseExclusiveLock,
     TryPrepareMutations,
-    TryCommitMutations
+    TryCommitMutations,
+    TryRollbackMutations
 }

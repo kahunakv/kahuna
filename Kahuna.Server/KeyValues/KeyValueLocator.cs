@@ -153,6 +153,51 @@ internal sealed class KeyValueLocator
     }
     
     /// <summary>
+    /// Locates the leader node for the given key and executes the TryExtend request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="consistency"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public async Task<(KeyValueResponseType, long)> LocateAndTryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    {
+        if (string.IsNullOrEmpty(key))
+            return (KeyValueResponseType.InvalidInput, 0);
+        
+        int partitionId = raft.GetPartitionKey(key);
+
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
+            return await manager.TryExtendKeyValue(transactionId, key, expiresMs, consistency);
+            
+        string leader = await raft.WaitForLeader(partitionId, cancelationToken);
+        if (leader == raft.GetLocalEndpoint())
+            return (KeyValueResponseType.MustRetry, 0);
+        
+        logger.LogDebug("EXTEND-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
+        
+        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
+        
+        KeyValuer.KeyValuerClient client = new(channel);
+        
+        GrpcTryExtendKeyValueRequest request = new()
+        {
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
+            Key = key,
+            ExpiresMs = expiresMs,
+            Consistency = (GrpcKeyValueConsistency)consistency,
+        };
+        
+        GrpcTryExtendKeyValueResponse? remoteResponse = await client.TryExtendKeyValueAsync(request, cancellationToken: cancelationToken);
+        
+        remoteResponse.ServedFrom = $"https://{leader}";
+        
+        return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.Revision);
+    }
+    
+    /// <summary>
     /// Locates the leader node for the given key and executes the TryGetValue request.
     /// </summary>
     /// <param name="transactionId"></param>
@@ -370,6 +415,52 @@ internal sealed class KeyValueLocator
         };
         
         GrpcTryCommitMutationsResponse? remoteResponse = await client.TryCommitMutationsAsync(request, cancellationToken: cancelationToken);
+        
+        remoteResponse.ServedFrom = $"https://{leader}";
+        
+        return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.ProposalIndex);
+    }
+    
+    /// <summary>
+    /// Locates the leader node for the given key and executes the TryRollbackMutations request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="ticketId"></param>
+    /// <param name="consistency"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public async Task<(KeyValueResponseType, long)> LocateAndTryRollbackMutations(HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    {
+        if (string.IsNullOrEmpty(key))
+            return (KeyValueResponseType.InvalidInput, 0);
+        
+        int partitionId = raft.GetPartitionKey(key);
+
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
+            return await manager.TryRollbackMutations(transactionId, key, ticketId, consistency);
+            
+        string leader = await raft.WaitForLeader(partitionId, cancelationToken);
+        if (leader == raft.GetLocalEndpoint())
+            return (KeyValueResponseType.MustRetry, 0);
+        
+        logger.LogDebug("ROLLBACK-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
+        
+        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
+        
+        KeyValuer.KeyValuerClient client = new(channel);
+        
+        GrpcTryRollbackMutationsRequest request = new()
+        {
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
+            Key = key,
+            ProposalTicketPhysical = ticketId.L,
+            ProposalTicketCounter = ticketId.C,
+            Consistency = (GrpcKeyValueConsistency)consistency,
+        };
+        
+        GrpcTryRollbackMutationsResponse? remoteResponse = await client.TryRollbackMutationsAsync(request, cancellationToken: cancelationToken);
         
         remoteResponse.ServedFrom = $"https://{leader}";
         

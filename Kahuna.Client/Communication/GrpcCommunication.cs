@@ -7,6 +7,7 @@
  */
 
 using System.Collections.Concurrent;
+using System.Net.Security;
 using Google.Protobuf;
 using Grpc.Net.Client;
 using Kahuna.Shared.KeyValue;
@@ -444,14 +445,23 @@ public class GrpcCommunication : IKahunaCommunication
     {
         if (!channels.TryGetValue(url, out GrpcChannel? channel))
         {
+            SslClientAuthenticationOptions sslOptions = new()
+            {
+                RemoteCertificateValidationCallback = delegate { return true; }
+            };
+        
+            SocketsHttpHandler handler = new()
+            {
+                SslOptions = sslOptions,
+                ConnectTimeout = TimeSpan.FromSeconds(10),
+                PooledConnectionIdleTimeout = Timeout.InfiniteTimeSpan,
+                KeepAlivePingDelay = TimeSpan.FromSeconds(30),
+                KeepAlivePingTimeout = TimeSpan.FromSeconds(10),
+                EnableMultipleHttp2Connections = true
+            };
+            
             channel = GrpcChannel.ForAddress(url, new() { 
-                HttpHandler = new SocketsHttpHandler
-                {
-                    EnableMultipleHttp2Connections = true,
-                    PooledConnectionIdleTimeout = TimeSpan.FromMinutes(10),
-                    KeepAlivePingDelay = TimeSpan.FromSeconds(30),
-                    KeepAlivePingTimeout = TimeSpan.FromSeconds(5)
-                } 
+                HttpHandler = handler
             });
                 
             channels.TryAdd(url, channel);

@@ -10,6 +10,7 @@ service KeyValuer {
   rpc TryReleaseExclusiveLock (GrpcTryReleaseExclusiveLockRequest) returns (GrpcTryReleaseExclusiveLockResponse);
   rpc TryPrepareMutations (GrpcTryPrepareMutationsRequest) returns (GrpcTryPrepareMutationsResponse);
   rpc TryCommitMutations (GrpcTryCommitMutationsRequest) returns (GrpcTryCommitMutationsResponse);
+  rpc TryRollbackMutations (GrpcTryRollbackMutationsRequest) returns (GrpcTryRollbackMutationsResponse);
 }
 
 message GrpcTrySetKeyValueRequest {
@@ -31,9 +32,11 @@ message GrpcTrySetKeyValueResponse {
 }
 
 message GrpcTryExtendKeyValueRequest {
-  string Key = 1;
-  int32 ExpiresMs = 2;
-  GrpcKeyValueConsistency Consistency = 3;
+  int64 TransactionIdPhysical = 1;
+  uint32 TransactionIdCounter = 2;
+  string Key = 3;
+  int32 ExpiresMs = 4;
+  GrpcKeyValueConsistency Consistency = 5;
 }
 
 message GrpcTryExtendKeyValueResponse {
@@ -139,6 +142,21 @@ message GrpcTryCommitMutationsResponse {
   int64 ProposalIndex = 3;
 }
 
+message GrpcTryRollbackMutationsRequest {
+  int64 TransactionIdPhysical = 1;
+  uint32 TransactionIdCounter = 2;
+  string Key = 3;
+  int64 ProposalTicketPhysical = 4;
+  uint32 ProposalTicketCounter = 5;
+  GrpcKeyValueConsistency Consistency = 6;
+}
+
+message GrpcTryRollbackMutationsResponse {
+  optional string ServedFrom = 1;
+  GrpcKeyValueResponseType Type = 2;
+  int64 ProposalIndex = 3;
+}
+
 enum GrpcKeyValueFlags {
   KEYVALUE_FLAGS_NONE = 0;
   KEYVALUE_FLAGS_SET = 1;
@@ -158,6 +176,7 @@ enum GrpcKeyValueResponseType {
   KEYVALUE_RESPONSE_TYPE_UNLOCKED = 6;
   KEYVALUE_RESPONSE_TYPE_PROPOSED = 7;
   KEYVALUE_RESPONSE_TYPE_COMMITTED = 8;
+  KEYVALUE_RESPONSE_TYPE_ROLLEDBACK = 9;
   KEYVALUE_RESPONSE_TYPE_ERRORED = 99;
   KEYVALUE_RESPONSE_TYPE_INVALID_INPUT = 100;
   KEYVALUE_RESPONSE_TYPE_MUST_RETRY = 101;

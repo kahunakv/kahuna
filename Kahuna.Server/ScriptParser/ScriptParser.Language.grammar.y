@@ -22,8 +22,8 @@
 
 %token LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV LBRACE RBRACE
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS  
-%token TBEGIN TROLLBACK TCOMMIT TSET TGET TESET TEGET TDELETE TEDELETE TIF TELSE TTHEN TEND TNX TXX TEX TRETURN
-%token TDIGIT TFLOAT TSTRING TIDENTIFIER TPLACEHOLDER TTRUE TFALSE
+%token TBEGIN TROLLBACK TCOMMIT TSET TGET TESET TEGET TDELETE TEDELETE TEXTEND TEEXTEND TIF TELSE TTHEN TEND TNX TXX TEX TRETURN
+%token TDIGIT TFLOAT TSTRING TIDENTIFIER TESCIDENTIFIER TPLACEHOLDER TTRUE TFALSE 
 
 %%
 
@@ -37,6 +37,8 @@ stmt    : set_stmt { $$.n = $1.n; }
         | eget_stmt { $$.n = $1.n; }
         | delete_stmt { $$.n = $1.n; }
         | edelete_stmt { $$.n = $1.n; }
+        | extend_stmt { $$.n = $1.n; }
+        | eextend_stmt { $$.n = $1.n; }
         | if_stmt { $$.n = $1.n; } 
         | begin_stmt { $$.n = $1.n; }
         | commit_stmt { $$.n = $1.n; }
@@ -72,7 +74,13 @@ delete_stmt : TDELETE identifier { $$.n = new(NodeType.Delete, $2.n, null, null,
             ;
             
 edelete_stmt : TEDELETE identifier { $$.n = new(NodeType.Edelete, $2.n, null, null, null, null, null, null); }
-            ;                      
+            ;
+            
+extend_stmt : TEXTEND identifier int { $$.n = new(NodeType.Extend, $2.n, $3.n, null, null, null, null, null); }
+            ;
+            
+eextend_stmt : TEEXTEND identifier int { $$.n = new(NodeType.Extend, $2.n, $3.n, null, null, null, null, null); }
+            ;              
          
 if_stmt : TIF expression TTHEN stmt_list TEND { $$.n = new(NodeType.If, $2.n, $4.n, null, null, null, null, null); }
         | TIF expression TTHEN stmt_list TELSE stmt_list TEND { $$.n = new(NodeType.If, $2.n, $4.n, $6.n, null, null, null, null); }

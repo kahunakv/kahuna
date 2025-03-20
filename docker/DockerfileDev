@@ -1,0 +1,27 @@
+
+ENV KAHUNA_RAFT_NODEID="$KAHUNA_RAFT_NODEID"
+ENV KAHUNA_RAFT_HOST="$KAHUNA_RAFT_HOST"
+ENV KAHUNA_RAFT_PORT="$KAHUNA_RAFT_PORT"
+ENV KAHUNA_HTTP_PORTS="$KAHUNA_HTTP_PORTS"
+ENV KAHUNA_HTTPS_PORTS="$KAHUNA_HTTPS_PORTS"
+ENV KAHUNA_INITIAL_CLUSTER="$KAHUNA_INITIAL_CLUSTER"
+
+COPY --chmod=755 <<EOT /app/entrypoint.sh
+#!/usr/bin/env bash
+
+mkdir -p /storage/data/v3
+mkdir -p /storage/wal/v3
+mkdir -p /storage/data/v1
+mkdir -p /storage/wal/v1
+
+echo "kahuna --raft-nodeid $KAHUNA_RAFT_NODEID --raft-host $KAHUNA_RAFT_HOST --raft-port $KAHUNA_RAFT_PORT --http-ports $KAHUNA_HTTP_PORTS --https-ports $KAHUNA_HTTPS_PORTS --https-certificate /app/certificate.pfx --initial-cluster $KAHUNA_INITIAL_CLUSTER --storage rocksdb --storage-path /storage/data --storage-revision v1 --wal-path /storage/wal --wal-revision v3"
+
+dotnet /app/Kahuna.Server.dll --raft-nodeid $KAHUNA_RAFT_NODEID --raft-host $KAHUNA_RAFT_HOST --raft-port $KAHUNA_RAFT_PORT --http-ports $KAHUNA_HTTP_PORTS --https-ports $KAHUNA_HTTPS_PORTS --https-certificate /app/certificate.pfx --initial-cluster $KAHUNA_INITIAL_CLUSTER --storage rocksdb --storage-path /storage/data --storage-revision v1 --wal-path /storage/wal --wal-revision v3
+EOT
+
+# when starting the container, run dotnet with the built dll
+ENTRYPOINT [ "/app/entrypoint.sh" ]
+
+# Swap entrypoints if the container is exploding and you want to keep it alive indefinitely so you can go look into it.
+#ENTRYPOINT ["tail", "-f", "/dev/null"]
+

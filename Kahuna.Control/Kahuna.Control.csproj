@@ -41,7 +41,7 @@
     </ItemGroup>
 
     <ItemGroup>
-        <ProjectReference Include="..\RadLine\RadLine\RadLine.csproj" />
+        <ProjectReference Include="..\Radline\RadLine\RadLine.csproj" />
         <ProjectReference Include="..\Kahuna.Client\Kahuna.Client.csproj" />
     </ItemGroup>
 

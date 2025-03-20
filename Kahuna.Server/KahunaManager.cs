@@ -201,6 +201,20 @@ public sealed class KahunaManager : IKahuna
     }
     
     /// <summary>
+    /// Locates the leader node for the given key and executes the TryExtendValue request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="consistency"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public Task<(KeyValueResponseType, long)> LocateAndTryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueConsistency consistency, CancellationToken cancellationToken)
+    {
+        return keyValues.LocateAndTryExtendKeyValue(transactionId, key, expiresMs, consistency, cancellationToken);
+    }
+    
+    /// <summary>
     /// Locates the leader node for the given key and executes the TryAcquireExclusiveLock request.
     /// </summary>
     /// <param name="transactionId"></param>
@@ -252,6 +266,19 @@ public sealed class KahunaManager : IKahuna
     {
         return keyValues.LocateAndTryCommitMutations(transactionId, key, ticketId, consistency, cancelationToken);
     }
+    
+    /// <summary>
+    /// Locates the leader node for the given key and executes the TryRollbackMutations request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="consistency"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public Task<(KeyValueResponseType, long)> LocateAndTryRollbackMutations(HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    {
+        return keyValues.LocateAndTryRollbackMutations(transactionId, key, ticketId, consistency, cancelationToken);
+    }
 
     /// <summary>
     /// Set key to hold the string value. If key already holds a value, it is overwritten
@@ -290,13 +317,14 @@ public sealed class KahunaManager : IKahuna
     /// <summary>
     /// Set a timeout on key. After the timeout has expired, the key will automatically be deleted
     /// </summary>
+    /// <param name="transactionId"></param>
     /// <param name="key"></param>
     /// <param name="expiresMs"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, long)> TryExtendKeyValue(string key, int expiresMs, KeyValueConsistency consistency)
+    public Task<(KeyValueResponseType, long)> TryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueConsistency consistency)
     {
-        return keyValues.TryExtendKeyValue(key, expiresMs, consistency);
+        return keyValues.TryExtendKeyValue(transactionId, key, expiresMs, consistency);
     }
 
     /// <summary>

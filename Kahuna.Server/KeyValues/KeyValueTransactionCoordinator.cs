@@ -79,6 +79,9 @@ public sealed class KeyValueTransactionCoordinator
             case NodeType.Delete:
                 return await ExecuteDelete(GetTempTransactionContext(), ast, KeyValueConsistency.Linearizable, CancellationToken.None);
             
+            case NodeType.Extend:
+                return await ExecuteExtend(GetTempTransactionContext(), ast, KeyValueConsistency.Linearizable, CancellationToken.None);
+            
             case NodeType.Eset:
                 return await ExecuteSet(GetTempTransactionContext(), ast, KeyValueConsistency.Ephemeral, CancellationToken.None);
             
@@ -87,6 +90,9 @@ public sealed class KeyValueTransactionCoordinator
             
             case NodeType.Edelete:
                 return await ExecuteDelete(GetTempTransactionContext(), ast, KeyValueConsistency.Ephemeral, CancellationToken.None);
+            
+            case NodeType.Eextend:
+                return await ExecuteExtend(GetTempTransactionContext(), ast, KeyValueConsistency.Ephemeral, CancellationToken.None);
             
             case NodeType.Begin:
                 return await ExecuteTransaction(ast.leftAst!, false);
@@ -213,6 +219,41 @@ public sealed class KeyValueTransactionCoordinator
         };
     }
     
+    private async Task<KeyValueTransactionResult> ExecuteExtend(KeyValueTransactionContext context, NodeAst ast, KeyValueConsistency consistency, CancellationToken cancellationToken)
+    {
+        if (ast.leftAst is null)
+            throw new Exception("Invalid key");
+        
+        if (ast.leftAst.yytext is null)
+            throw new Exception("Invalid key");
+        
+        int expiresMs = 0;
+        
+        if (ast.rightAst is not null)
+            expiresMs = int.Parse(ast.rightAst.yytext!);
+        
+        (KeyValueResponseType type, long revision) = await manager.LocateAndTryExtendKeyValue(
+            context.TransactionId,
+            key: ast.leftAst.yytext,
+            expiresMs: expiresMs,
+            consistency,
+            cancellationToken
+        );
+        
+        context.Result = new()
+        {
+            Type = type,
+            Revision = revision
+        };
+
+        return new()
+        {
+            ServedFrom = "",
+            Type = type,
+            Revision = revision
+        };
+    }
+    
     private async Task<KeyValueTransactionResult> ExecuteGet(KeyValueTransactionContext context, NodeAst ast, KeyValueConsistency consistency, CancellationToken cancellationToken)
     {
         if (ast.leftAst is null)
@@ -268,8 +309,6 @@ public sealed class KeyValueTransactionCoordinator
     /// <returns></returns>
     private async Task<KeyValueTransactionResult> ExecuteTransaction(NodeAst ast, bool autoCommit)
     {
-        Console.WriteLine("hiar 0");
-        
         using CancellationTokenSource cts = new();
         
         cts.CancelAfter(TimeSpan.FromMilliseconds(5000));
@@ -286,8 +325,6 @@ public sealed class KeyValueTransactionCoordinator
         HashSet<string> locksToAcquire = [];
 
         GetLocksToAcquire(ast, locksToAcquire);
-        
-        Console.WriteLine("hiar 1");
 
         try
         {
@@ -298,8 +335,6 @@ public sealed class KeyValueTransactionCoordinator
                 acquireLocksTasks.Add(manager.LocateAndTryAcquireExclusiveLock(transactionId, key, 5250, KeyValueConsistency.Linearizable, cts.Token));
             
             (KeyValueResponseType, string)[] acquireResponses = await Task.WhenAll(acquireLocksTasks);
-            
-            Console.WriteLine("hiar 2");
 
             if (acquireResponses.Any(r => r.Item1 != KeyValueResponseType.Locked))
             {
@@ -310,8 +345,6 @@ public sealed class KeyValueTransactionCoordinator
             }
 
             context.LocksAcquired = acquireResponses.Select(r => r.Item2).ToList();
-            
-            Console.WriteLine("hiar 3");
             
             // Step 2: Execute transaction
             await ExecuteTransactionInternal(context, ast, cts.Token);
@@ -359,8 +392,13 @@ public sealed class KeyValueTransactionCoordinator
         if (proposalResponses.Any(r => r.Item1 != KeyValueResponseType.Prepared))
         {
             foreach ((KeyValueResponseType, HLCTimestamp, string) proposalResponse in proposalResponses)
+            {
+                if (proposalResponse.Item1 == KeyValueResponseType.Prepared)
+                    await manager.LocateAndTryRollbackMutations(context.TransactionId, proposalResponse.Item3, proposalResponse.Item2, KeyValueConsistency.Linearizable, cancellationToken);
+                
                 Console.WriteLine("{0} {1}", proposalResponse.Item3, proposalResponse.Item1);
-            
+            }
+
             context.Result = new() { Type = KeyValueResponseType.Aborted };
             return;
         }
@@ -414,6 +452,10 @@ public sealed class KeyValueTransactionCoordinator
                 case NodeType.Delete:
                     await ExecuteDelete(context, ast, KeyValueConsistency.Linearizable, cancellationToken);
                     break;
+                
+                case NodeType.Extend:
+                    await ExecuteExtend(context, ast, KeyValueConsistency.Linearizable, cancellationToken);
+                    break;
 
                 case NodeType.Get:
                 {
@@ -433,6 +475,10 @@ public sealed class KeyValueTransactionCoordinator
                 
                 case NodeType.Edelete:
                     await ExecuteDelete(context, ast, KeyValueConsistency.Ephemeral, cancellationToken);
+                    break;
+                
+                case NodeType.Eextend:
+                    await ExecuteExtend(context, ast, KeyValueConsistency.Ephemeral, cancellationToken);
                     break;
                 
                 case NodeType.Commit:
@@ -560,6 +606,20 @@ public sealed class KeyValueTransactionCoordinator
                 case NodeType.Set:
                     if (ast.leftAst is null)
                         throw new Exception("Invalid SET expression");
+                    
+                    locksToAcquire.Add(ast.leftAst.yytext!);
+                    break;
+                
+                case NodeType.Get:
+                    if (ast.leftAst is null)
+                        throw new Exception("Invalid GET expression");
+                    
+                    locksToAcquire.Add(ast.leftAst.yytext!);
+                    break;
+                
+                case NodeType.Extend:
+                    if (ast.leftAst is null)
+                        throw new Exception("Invalid EXTEND expression");
                     
                     locksToAcquire.Add(ast.leftAst.yytext!);
                     break;

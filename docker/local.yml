@@ -1,8 +1,10 @@
 
+name: Kahuna
 services:
   kahuna1:
     build:
-      context: . #current dir as build context
+      context: .. #current dir as build context
+      dockerfile: docker/DockerfileLocal
       args:
         KAHUNA_RAFT_NODEID: kahuna1
         KAHUNA_RAFT_HOST: 172.30.0.2
@@ -22,7 +24,8 @@ services:
 
   kahuna2:
     build:
-      context: . #current dir as build context
+      context: .. #current dir as build context
+      dockerfile: docker/DockerfileLocal
       args:
         KAHUNA_RAFT_NODEID: kahuna2
         KAHUNA_RAFT_HOST: 172.30.0.3
@@ -42,7 +45,8 @@ services:
 
   kahuna3:
     build:
-      context: . #current dir as build context
+      context: .. #current dir as build context
+      dockerfile: docker/DockerfileLocal
       args:
         KAHUNA_RAFT_NODEID: kahuna3
         KAHUNA_RAFT_HOST: 172.30.0.4

@@ -22,6 +22,8 @@ TRollback       (R|r)(O|o)(L|l)(L|l)(B|b)(A|a)(C|c)(K|k)
 TReturn         (R|r)(E|e)(T|t)(U|u)(R|r)(N|n)
 TDelete         (D|d)(E|e)(L|l)(E|e)(T|t)(E|e)
 TEDelete        (E|e)(D|d)(E|e)(L|l)(E|e)(T|t)(E|e)
+TExtend         (E|e)(X|x)(T|t)(E|e)(N|n)(D|d)
+TEExtend        (E|e)(E|e)(X|x)(T|t)(E|e)(N|n)(D|d)
 TTrue           (T|t)(R|r)(U|u)(E|e)
 TFalse          (F|f)(A|a)(L|L)(S|s)(E|e)
 LParen          \(
@@ -100,6 +102,10 @@ TGreaterEquals  >=
 
 {TEDelete} { return (int)Token.TEDELETE; }
 
+{TExtend} { return (int)Token.TEXTEND; }
+
+{TEExtend} { return (int)Token.TEEXTEND; }
+
 {TIf} { return (int)Token.TIF; }
 
 {TElse} { return (int)Token.TELSE; }
@@ -149,6 +155,8 @@ TGreaterEquals  >=
 {TNotEquals2} { return (int)Token.TNOTEQUALS; }
 
 {Identifier} { yylval.s = yytext; return (int)Token.TIDENTIFIER; }
+
+{EscIdentifier} { yylval.s = yytext; return (int)Token.TESCIDENTIFIER; }
 
 {Placeholder} { yylval.s = yytext; return (int)Token.TPLACEHOLDER; }
 

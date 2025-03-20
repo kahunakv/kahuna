@@ -1,0 +1,29 @@
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build-env
+
+RUN rm -fr /src && mkdir -p /src
+COPY Radline/ /src/Radline/
+COPY Kahuna.Client /src/Kahuna.Client/
+COPY Kahuna.Shared /src/Kahuna.Shared/
+COPY Kahuna.Control /src/Kahuna.Control/
+
+# build the dotnet program
+WORKDIR /
+
+RUN cd /src/Kahuna.Control/ && dotnet publish -c release -o /app
+
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
+WORKDIR /app
+
+COPY --from=build-env /app .
+COPY --chmod=755 <<EOT /app/run.sh
+#!/usr/bin/env bash
+
+dotnet /app/Kahuna.Control.dll
+EOT
+
+# when starting the container, run dotnet with the built dll
+#ENTRYPOINT [ "sleep", "10000" ]
+
+# Swap entrypoints if the container is exploding and you want to keep it alive indefinitely so you can go look into it.
+ENTRYPOINT ["tail", "-f", "/dev/null"]
+

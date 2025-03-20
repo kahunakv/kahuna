@@ -22,7 +22,7 @@ Options? opts = optsResult.Value;
 if (opts is null)
     return;
 
-Console.WriteLine("Kahuna Shell 0.0.1 (alpha)\n");
+AnsiConsole.MarkupLine("[green]Kahuna Shell 0.0.1 (alpha)[/]\n");
 
 string historyPath = Path.GetTempPath() + Path.PathSeparator + "kahuna.history.json";
 List<string> history = await GetHistory(historyPath);
@@ -167,14 +167,6 @@ while (true)
             continue;
         }
         
-        if (commandTrim.StartsWith("extend ", StringComparison.InvariantCultureIgnoreCase))
-        {
-            history.Add(commandTrim);
-            
-            await ExtendKey(commandTrim, KeyValueConsistency.Linearizable);
-            continue;
-        }
-        
         if (commandTrim.StartsWith("lock ", StringComparison.InvariantCultureIgnoreCase))
         {
             history.Add(commandTrim);
@@ -265,8 +257,6 @@ while (true)
             
             continue;
         }
-        
-        //AnsiConsole.MarkupLine("[yellow]unknown command[/]");
 
         await RunCommand(commandTrim);
     }
@@ -315,34 +305,6 @@ static async Task SaveHistory(string historyPath, List<string>? history)
         await File.WriteAllTextAsync(historyPath, JsonSerializer.Serialize(history));
 }
 
-async Task DeleteKey(string commandTrim, KeyValueConsistency consistency)
-{
-    Stopwatch stopwatch = Stopwatch.StartNew();
-    
-    string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
-
-    (bool success, long revision) = await connection.DeleteKeyValue(parts[1], consistency);
-            
-    if (success)
-        AnsiConsole.MarkupLine("r{0} [cyan]deleted[/] {1}ms\n", revision, stopwatch.ElapsedMilliseconds);
-    else
-        AnsiConsole.MarkupLine("r{0} [yellow]not found[/] {1}ms\n", revision, stopwatch.ElapsedMilliseconds);
-}
-
-async Task ExtendKey(string commandTrim, KeyValueConsistency consistency)
-{
-    Stopwatch stopwatch = Stopwatch.StartNew();
-    
-    string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
-
-    (bool success, long revision) = await connection.ExtendKeyValue(parts[1], int.Parse(parts[2]), consistency);
-            
-    if (success)
-        AnsiConsole.MarkupLine("r{0} [cyan]extended[/] {1}ms\n", revision, stopwatch.ElapsedMilliseconds);
-    else
-        AnsiConsole.MarkupLine("r{0} [yellow]not found[/] {1}ms\n", revision, stopwatch.ElapsedMilliseconds);
-}
-
 async Task RunCommand(string commandTrim)
 {
     Stopwatch stopwatch = Stopwatch.StartNew();
@@ -358,9 +320,15 @@ async Task RunCommand(string commandTrim)
     if (result.Type == KeyValueResponseType.Get)
         AnsiConsole.MarkupLine("r{0} [cyan]{1}[/] {2}ms\n", result.Revision, Markup.Escape(Encoding.UTF8.GetString(result.Value ?? [])), stopwatch.ElapsedMilliseconds);
     else if (result.Type == KeyValueResponseType.DoesNotExist)
-        AnsiConsole.MarkupLine("r{0} [yellow]null[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
+        AnsiConsole.MarkupLine("r{0} [yellow]not found[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
     else if (result.Type == KeyValueResponseType.Set)
-        AnsiConsole.MarkupLine("r{0} [cyan]ok[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
+        AnsiConsole.MarkupLine("r{0} [cyan]set[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
+    else if (result.Type == KeyValueResponseType.NotSet)
+        AnsiConsole.MarkupLine("r{0} [yellow]not set[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
+    else if (result.Type == KeyValueResponseType.Deleted)
+        AnsiConsole.MarkupLine("r{0} [yellow]deleted[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
+    else if (result.Type == KeyValueResponseType.Extended)
+        AnsiConsole.MarkupLine("r{0} [yellow]extended[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
     else
         AnsiConsole.MarkupLine("r{0} [yellow]null[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
 }
@@ -378,6 +346,8 @@ async Task LoadAndRunScript(string commandTrim)
     }
     
     string scriptText = await File.ReadAllTextAsync(parts[1]);
+    if (string.IsNullOrWhiteSpace(scriptText))
+        return;
     
     AnsiConsole.MarkupLine("[purple]{0}[/]", Markup.Escape(scriptText));
 

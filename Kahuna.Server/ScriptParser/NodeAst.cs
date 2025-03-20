@@ -9,7 +9,7 @@ public sealed class NodeAst
 
     public readonly NodeAst? rightAst;
 
-    public NodeAst? extendedOne;
+    public readonly NodeAst? extendedOne;
 
     public NodeAst? extendedTwo;
 
