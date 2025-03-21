@@ -26,7 +26,7 @@ public sealed class KahunaLock : IAsyncDisposable
     
     private readonly byte[]? owner;
 
-    private readonly LockConsistency consistency;
+    private readonly LockDurability durability;
 
     private bool disposed;
 
@@ -42,13 +42,13 @@ public sealed class KahunaLock : IAsyncDisposable
     /// <param name="locks"></param>
     /// <param name="resource"></param>
     /// <param name="lockInfo"></param>
-    public KahunaLock(KahunaClient locks, string resource, (KahunaLockAcquireResult result, byte[]? owner, LockConsistency consistency, long fencingToken) lockInfo)
+    public KahunaLock(KahunaClient locks, string resource, (KahunaLockAcquireResult result, byte[]? owner, LockDurability durability, long fencingToken) lockInfo)
     {
         this.locks = locks;
         this.resource = resource;
         this.result = lockInfo.result;
         this.owner = lockInfo.owner;
-        this.consistency = lockInfo.consistency;
+        this.durability = lockInfo.durability;
         this.fencingToken = lockInfo.fencingToken;
     }
     
@@ -64,7 +64,7 @@ public sealed class KahunaLock : IAsyncDisposable
         if (!IsAcquired || owner is null)
             throw new KahunaException("Lock was not acquired", LockResponseType.Errored);
 
-        return await locks.TryExtend(resource, owner, duration, consistency);
+        return await locks.TryExtend(resource, owner, duration, durability);
     }
     
     /// <summary>
@@ -79,7 +79,7 @@ public sealed class KahunaLock : IAsyncDisposable
         if (!IsAcquired || owner is null)
             throw new KahunaException("Lock was not acquired", LockResponseType.Errored);
 
-        return await locks.TryExtend(resource, owner, durationMs, consistency);
+        return await locks.TryExtend(resource, owner, durationMs, durability);
     }
     
     /// <summary>
@@ -89,7 +89,7 @@ public sealed class KahunaLock : IAsyncDisposable
     /// <exception cref="KahunaException"></exception>
     public async Task<KahunaLockInfo?> GetInfo()
     {
-        return await locks.GetLockInfo(resource, consistency);
+        return await locks.GetLockInfo(resource, durability);
     }
 
     /// <summary>
@@ -102,7 +102,7 @@ public sealed class KahunaLock : IAsyncDisposable
         GC.SuppressFinalize(this);
 
         if (IsAcquired && owner is not null)
-            await locks.Unlock(resource, owner, consistency);
+            await locks.Unlock(resource, owner, durability);
     }
 
     ~KahunaLock()

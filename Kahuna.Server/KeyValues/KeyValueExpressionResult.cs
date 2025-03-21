@@ -44,4 +44,18 @@ public class KeyValueExpressionResult
             _ => throw new ArgumentOutOfRangeException()
         };
     }
+
+    public override string ToString()
+    {
+        return Type switch
+        {
+            KeyValueExpressionType.Null => "(null)",
+            KeyValueExpressionType.Bool => BoolValue ? "true" : "false",
+            KeyValueExpressionType.Long => LongValue.ToString(),
+            KeyValueExpressionType.Double => DoubleValue.ToString(CultureInfo.InvariantCulture),
+            KeyValueExpressionType.String => StrValue ?? "(null)",
+            KeyValueExpressionType.Bytes => "(bytes)",
+            _ => throw new ArgumentOutOfRangeException()
+        };
+    }
 }

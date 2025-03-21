@@ -1,4 +1,5 @@
 
+using System.Text;
 using Kommander;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.ScriptParser;
@@ -280,7 +281,7 @@ public sealed class KeyValueTransactionCoordinator
         if (readOnlyContext is null)
         {
             if (ast.rightAst is not null)
-                context.SetVariable(ast.rightAst.yytext!, new() { Type = KeyValueResponseType.Get, Value = null });
+                context.SetVariable(ast.rightAst.yytext!, new() { Type = KeyValueExpressionType.Null });
             
             return new()
             {
@@ -292,9 +293,8 @@ public sealed class KeyValueTransactionCoordinator
         if (ast.rightAst is not null)
             context.SetVariable(ast.rightAst.yytext!, new()
             {
-                Type = KeyValueResponseType.Get, 
-                Value = readOnlyContext.Value, 
-                Revision = readOnlyContext.Revision
+                Type = KeyValueExpressionType.String, 
+                StrValue = Encoding.UTF8.GetString(readOnlyContext.Value ?? [])
             });
             
         return new()
@@ -330,29 +330,33 @@ public sealed class KeyValueTransactionCoordinator
             Result = new() { Type = KeyValueResponseType.Aborted }
         };
         
-        HashSet<string> locksToAcquire = [];
+        HashSet<string> ephemeralLocksToAcquire = [];
+        HashSet<string> linearizableLocksToAcquire = [];
 
-        GetLocksToAcquire(ast, locksToAcquire);
+        GetLocksToAcquire(ast, ephemeralLocksToAcquire, linearizableLocksToAcquire);
 
         try
         {
-            List<Task<(KeyValueResponseType, string)>> acquireLocksTasks = new(locksToAcquire.Count);
+            List<Task<(KeyValueResponseType, string, KeyValueConsistency)>> acquireLocksTasks = new(ephemeralLocksToAcquire.Count + linearizableLocksToAcquire.Count);
             
             // Step 1: Acquire locks
-            foreach (string key in locksToAcquire)
-                acquireLocksTasks.Add(manager.LocateAndTryAcquireExclusiveLock(transactionId, key, 5250, KeyValueConsistency.Linearizable, cts.Token));
+            foreach (string key in linearizableLocksToAcquire)
+                acquireLocksTasks.Add(manager.LocateAndTryAcquireExclusiveLock(transactionId, key, 5050, KeyValueConsistency.Linearizable, cts.Token));
             
-            (KeyValueResponseType, string)[] acquireResponses = await Task.WhenAll(acquireLocksTasks);
+            foreach (string key in ephemeralLocksToAcquire)
+                acquireLocksTasks.Add(manager.LocateAndTryAcquireExclusiveLock(transactionId, key, 5050, KeyValueConsistency.Ephemeral, cts.Token));
+            
+            (KeyValueResponseType, string, KeyValueConsistency)[] acquireResponses = await Task.WhenAll(acquireLocksTasks);
 
             if (acquireResponses.Any(r => r.Item1 != KeyValueResponseType.Locked))
             {
-                foreach ((KeyValueResponseType, string) proposalResponse in acquireResponses)
+                foreach ((KeyValueResponseType, string, KeyValueConsistency) proposalResponse in acquireResponses)
                     Console.WriteLine("{0} {1}", proposalResponse.Item2, proposalResponse.Item1);
                 
                 return new() { Type = KeyValueResponseType.Aborted };
             }
 
-            context.LocksAcquired = acquireResponses.Select(r => r.Item2).ToList();
+            context.LocksAcquired = acquireResponses.Select(r => (r.Item2, r.Item3)).ToList();
             
             // Step 2: Execute transaction
             await ExecuteTransactionInternal(context, ast, cts.Token);
@@ -373,11 +377,11 @@ public sealed class KeyValueTransactionCoordinator
         {
             if (context.LocksAcquired is not null && context.LocksAcquired.Count > 0)
             {
-                List<Task<(KeyValueResponseType, string)>> releaseLocksTasks = new(locksToAcquire.Count);
+                List<Task<(KeyValueResponseType, string)>> releaseLocksTasks = new(ephemeralLocksToAcquire.Count + linearizableLocksToAcquire.Count);
 
                 // Final Step: Release locks
-                foreach (string key in context.LocksAcquired) 
-                    releaseLocksTasks.Add(manager.LocateAndTryReleaseExclusiveLock(transactionId, key, KeyValueConsistency.Linearizable, cts.Token));
+                foreach ((string key, KeyValueConsistency consistency) in context.LocksAcquired) 
+                    releaseLocksTasks.Add(manager.LocateAndTryReleaseExclusiveLock(transactionId, key, consistency, cts.Token));
 
                 await Task.WhenAll(releaseLocksTasks);
             }
@@ -389,20 +393,20 @@ public sealed class KeyValueTransactionCoordinator
         if (context.LocksAcquired is null)
             return;
         
-        List<Task<(KeyValueResponseType, HLCTimestamp, string)>> proposalTasks = new(context.LocksAcquired.Count);
+        List<Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueConsistency)>> proposalTasks = new(context.LocksAcquired.Count);
 
         // Step 3: Prepare mutations
-        foreach (string key in context.LocksAcquired)
-            proposalTasks.Add(manager.LocateAndTryPrepareMutations(context.TransactionId, key, KeyValueConsistency.Linearizable, cancellationToken));
+        foreach ((string key, KeyValueConsistency consistency) in context.LocksAcquired)
+            proposalTasks.Add(manager.LocateAndTryPrepareMutations(context.TransactionId, key, consistency, cancellationToken));
 
-        (KeyValueResponseType, HLCTimestamp, string)[] proposalResponses = await Task.WhenAll(proposalTasks);
+        (KeyValueResponseType, HLCTimestamp, string, KeyValueConsistency)[] proposalResponses = await Task.WhenAll(proposalTasks);
 
         if (proposalResponses.Any(r => r.Item1 != KeyValueResponseType.Prepared))
         {
-            foreach ((KeyValueResponseType, HLCTimestamp, string) proposalResponse in proposalResponses)
+            foreach ((KeyValueResponseType, HLCTimestamp, string, KeyValueConsistency) proposalResponse in proposalResponses)
             {
                 if (proposalResponse.Item1 == KeyValueResponseType.Prepared)
-                    await manager.LocateAndTryRollbackMutations(context.TransactionId, proposalResponse.Item3, proposalResponse.Item2, KeyValueConsistency.Linearizable, cancellationToken);
+                    await manager.LocateAndTryRollbackMutations(context.TransactionId, proposalResponse.Item3, proposalResponse.Item2, proposalResponse.Item4, cancellationToken);
                 
                 Console.WriteLine("{0} {1}", proposalResponse.Item3, proposalResponse.Item1);
             }
@@ -411,13 +415,13 @@ public sealed class KeyValueTransactionCoordinator
             return;
         }
 
-        List<(string key, HLCTimestamp ticketId)> mutationsPrepared = proposalResponses.Select(r => (r.Item3, r.Item2)).ToList();
+        List<(string key, HLCTimestamp ticketId, KeyValueConsistency consistency)> mutationsPrepared = proposalResponses.Select(r => (r.Item3, r.Item2, r.Item4)).ToList();
 
         List<Task<(KeyValueResponseType, long)>> commitTasks = new(context.LocksAcquired.Count);
 
         // Step 4: Commit mutations
-        foreach ((string key, HLCTimestamp ticketId) in mutationsPrepared)
-            commitTasks.Add(manager.LocateAndTryCommitMutations(context.TransactionId, key, ticketId, KeyValueConsistency.Linearizable, cancellationToken));
+        foreach ((string key, HLCTimestamp ticketId, KeyValueConsistency consistency) in mutationsPrepared)
+            commitTasks.Add(manager.LocateAndTryCommitMutations(context.TransactionId, key, ticketId, consistency, cancellationToken));
 
         await Task.WhenAll(commitTasks);
     }
@@ -452,6 +456,12 @@ public sealed class KeyValueTransactionCoordinator
                 case NodeType.If:
                     await ExecuteIf(context, ast, cancellationToken);
                     break;
+                
+                case NodeType.Let:
+                {
+                    ExecuteLet(context, ast);
+                    break;
+                }
                 
                 case NodeType.Set:
                     await ExecuteSet(context, ast, KeyValueConsistency.Linearizable, cancellationToken);
@@ -532,6 +542,8 @@ public sealed class KeyValueTransactionCoordinator
                     
                 case NodeType.SetNotExists:
                 case NodeType.SetExists:
+                case NodeType.SetCmp:
+                case NodeType.SetCmpRev:
                     break;
                 
                 default:
@@ -567,13 +579,27 @@ public sealed class KeyValueTransactionCoordinator
             await ExecuteTransactionInternal(context, ast.extendedOne, cancellationToken);
     }
 
+    private static void ExecuteLet(KeyValueTransactionContext context, NodeAst ast)
+    {
+        if (ast.leftAst is null)
+            throw new Exception("Invalid LET expression");
+        
+        if (ast.rightAst is null)
+            throw new Exception("Invalid LET expression");
+        
+        KeyValueExpressionResult result = KeyValueTransactionExpression.Eval(context, ast.rightAst);
+        
+        context.SetVariable(ast.leftAst.yytext!, result);
+    }
+
     /// <summary>
     /// Obtains that must be acquired to start the transaction
     /// </summary>
     /// <param name="ast"></param>
-    /// <param name="locksToAcquire"></param>
+    /// <param name="ephemeralLocks"></param>
+    /// <param name="linearizableLocks"></param>
     /// <exception cref="Exception"></exception>
-    private static void GetLocksToAcquire(NodeAst ast, HashSet<string> locksToAcquire)
+    private static void GetLocksToAcquire(NodeAst ast, HashSet<string> ephemeralLocks, HashSet<string> linearizableLocks)
     {
         while (true)
         {
@@ -584,7 +610,7 @@ public sealed class KeyValueTransactionCoordinator
                 case NodeType.StmtList:
                 {
                     if (ast.leftAst is not null) 
-                        GetLocksToAcquire(ast.leftAst, locksToAcquire);
+                        GetLocksToAcquire(ast.leftAst, ephemeralLocks, linearizableLocks);
 
                     if (ast.rightAst is not null)
                     {
@@ -597,16 +623,16 @@ public sealed class KeyValueTransactionCoordinator
                 
                 case NodeType.Begin:
                     if (ast.leftAst is not null) 
-                        GetLocksToAcquire(ast.leftAst, locksToAcquire);
+                        GetLocksToAcquire(ast.leftAst, ephemeralLocks, linearizableLocks);
                     break;
                 
                 case NodeType.If:
                 {
                     if (ast.rightAst is not null) 
-                        GetLocksToAcquire(ast.rightAst, locksToAcquire);
+                        GetLocksToAcquire(ast.rightAst, ephemeralLocks, linearizableLocks);
                     
                     if (ast.extendedOne is not null) 
-                        GetLocksToAcquire(ast.extendedOne, locksToAcquire);
+                        GetLocksToAcquire(ast.extendedOne, ephemeralLocks, linearizableLocks);
 
                     break;
                 }
@@ -615,28 +641,56 @@ public sealed class KeyValueTransactionCoordinator
                     if (ast.leftAst is null)
                         throw new Exception("Invalid SET expression");
                     
-                    locksToAcquire.Add(ast.leftAst.yytext!);
+                    linearizableLocks.Add(ast.leftAst.yytext!);
+                    break;
+                    
+                case NodeType.Eset:
+                    if (ast.leftAst is null)
+                        throw new Exception("Invalid SET expression");
+                    
+                    ephemeralLocks.Add(ast.leftAst.yytext!);
                     break;
                 
                 case NodeType.Get:
                     if (ast.leftAst is null)
+                        throw new Exception("Invalid SET expression");
+                    
+                    linearizableLocks.Add(ast.leftAst.yytext!);
+                    break;
+                    
+                case NodeType.Eget:
+                    if (ast.leftAst is null)
                         throw new Exception("Invalid GET expression");
                     
-                    locksToAcquire.Add(ast.leftAst.yytext!);
+                    ephemeralLocks.Add(ast.leftAst.yytext!);
                     break;
                 
                 case NodeType.Extend:
                     if (ast.leftAst is null)
                         throw new Exception("Invalid EXTEND expression");
                     
-                    locksToAcquire.Add(ast.leftAst.yytext!);
+                    linearizableLocks.Add(ast.leftAst.yytext!);
+                    break;
+                    
+                case NodeType.Eextend:
+                    if (ast.leftAst is null)
+                        throw new Exception("Invalid EXTEND expression");
+                    
+                    ephemeralLocks.Add(ast.leftAst.yytext!);
                     break;
                 
                 case NodeType.Delete:
                     if (ast.leftAst is null)
                         throw new Exception("Invalid DELETE expression");
                     
-                    locksToAcquire.Add(ast.leftAst.yytext!);
+                    linearizableLocks.Add(ast.leftAst.yytext!);
+                    break;
+                
+                case NodeType.Edelete:
+                    if (ast.leftAst is null)
+                        throw new Exception("Invalid DELETE expression");
+                    
+                    ephemeralLocks.Add(ast.leftAst.yytext!);
                     break;
             }
 

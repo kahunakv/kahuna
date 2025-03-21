@@ -9,6 +9,6 @@ public sealed class KahunaGetLockRequest
     [JsonPropertyName("lockName")]
     public string? LockName { get; set; }
     
-    [JsonPropertyName("consistency")]
-    public LockConsistency Consistency { get; set; }
+    [JsonPropertyName("durability")]
+    public LockDurability Durability { get; set; }
 }

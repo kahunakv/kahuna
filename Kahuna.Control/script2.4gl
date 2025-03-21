@@ -1,5 +1,5 @@
 
-s = GET status
+let s = GET status
 if s = "active" then
  set status "updated"
 else

@@ -13,13 +13,13 @@ namespace Kahuna.Client.Communication;
 
 public interface IKahunaCommunication
 {
-     Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string url, string resource, byte[] owner, int expiryTime, LockConsistency consistency);
+     Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string url, string resource, byte[] owner, int expiryTime, LockDurability durability);
 
-     Task<bool> TryUnlock(string url, string resource, byte[] owner, LockConsistency consistency);
+     Task<bool> TryUnlock(string url, string resource, byte[] owner, LockDurability durability);
 
-     Task<(bool, long)> TryExtend(string url, string resource, byte[] owner, int expiryTime, LockConsistency consistency);
+     Task<(bool, long)> TryExtend(string url, string resource, byte[] owner, int expiryTime, LockDurability durability);
 
-     Task<KahunaLockInfo?> Get(string url, string resource, LockConsistency consistency);
+     Task<KahunaLockInfo?> Get(string url, string resource, LockDurability durability);
 
      Task<(bool, long)> TrySetKeyValue(string url, string key, byte[]? value, int expiryTime, KeyValueFlags flags, KeyValueConsistency consistency);
 

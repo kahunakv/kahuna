@@ -51,7 +51,7 @@ public class LocksService : Locker.LockerBase
 
         if (!raft.Joined || await raft.AmILeader(partitionId, context.CancellationToken))
         {
-            (LockResponseType response, long fencingToken) = await locks.TryLock(request.Resource, request.Owner?.ToByteArray() ?? [], request.ExpiresMs, (LockConsistency)request.Consistency);
+            (LockResponseType response, long fencingToken) = await locks.TryLock(request.Resource, request.Owner?.ToByteArray() ?? [], request.ExpiresMs, (LockDurability)request.Durability);
 
             return new()
             {
@@ -102,7 +102,7 @@ public class LocksService : Locker.LockerBase
 
         if (!raft.Joined || await raft.AmILeader(partitionId, context.CancellationToken))
         {
-            (LockResponseType response, long fencingToken) = await locks.TryExtendLock(request.Resource, request.Owner?.ToByteArray() ?? [], request.ExpiresMs, (LockConsistency)request.Consistency);
+            (LockResponseType response, long fencingToken) = await locks.TryExtendLock(request.Resource, request.Owner?.ToByteArray() ?? [], request.ExpiresMs, (LockDurability)request.Durability);
 
             return new()
             {
@@ -147,7 +147,7 @@ public class LocksService : Locker.LockerBase
 
         if (!raft.Joined || await raft.AmILeader(partitionId, context.CancellationToken))
         {
-            LockResponseType response = await locks.TryUnlock(request.Resource, request.Owner?.ToByteArray() ?? [], (LockConsistency)request.Consistency);
+            LockResponseType response = await locks.TryUnlock(request.Resource, request.Owner?.ToByteArray() ?? [], (LockDurability)request.Durability);
 
             return new()
             {
@@ -185,7 +185,7 @@ public class LocksService : Locker.LockerBase
 
         if (!raft.Joined || await raft.AmILeader(partitionId, context.CancellationToken))
         {
-            (LockResponseType type, ReadOnlyLockContext? lockContext) = await locks.GetLock(request.Resource, (LockConsistency)request.Consistency);
+            (LockResponseType type, ReadOnlyLockContext? lockContext) = await locks.GetLock(request.Resource, (LockDurability)request.Durability);
             if (type != LockResponseType.Got)
                 return new()
                 {

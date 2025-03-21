@@ -22,7 +22,8 @@
 
 %token LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV LBRACE RBRACE
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS  
-%token TBEGIN TROLLBACK TCOMMIT TSET TGET TESET TEGET TDELETE TEDELETE TEXTEND TEEXTEND TIF TELSE TTHEN TEND TNX TXX TEX TCMP TCMPREV
+%token TBEGIN TROLLBACK TCOMMIT TLET TSET TGET TESET TEGET TDELETE TEDELETE TEXTEND TEEXTEND 
+%token TIF TELSE TTHEN TEND TNX TXX TEX TCMP TCMPREV
 %token TRETURN TDIGIT TFLOAT TSTRING TIDENTIFIER TESCIDENTIFIER TPLACEHOLDER TTRUE TFALSE 
 
 %%
@@ -39,6 +40,7 @@ stmt    : set_stmt { $$.n = $1.n; }
         | edelete_stmt { $$.n = $1.n; }
         | extend_stmt { $$.n = $1.n; }
         | eextend_stmt { $$.n = $1.n; }
+        | let_stmt { $$.n = $1.n; }
         | if_stmt { $$.n = $1.n; } 
         | begin_stmt { $$.n = $1.n; }
         | commit_stmt { $$.n = $1.n; }
@@ -47,9 +49,9 @@ stmt    : set_stmt { $$.n = $1.n; }
         ;
 
 set_stmt : TSET identifier expression { $$.n = new(NodeType.Set, $2.n, $3.n, null, null, null, null, null); }         
-          | TSET identifier expression CMP expression { $$.n = new(NodeType.Set, $2.n, $3.n, null, null, $5.n, null, null); }
+          | TSET identifier expression set_cmp { $$.n = new(NodeType.Set, $2.n, $3.n, null, null, $4.n, null, null); }
           | TSET identifier expression TEX int { $$.n = new(NodeType.Set, $2.n, $3.n, $5.n, null, null, null, null); }
-          | TSET identifier expression CMP expression TEX int { $$.n = new(NodeType.Set, $2.n, $3.n, $7.n, null, $5.n, null, null); }
+          | TSET identifier expression set_cmp TEX int { $$.n = new(NodeType.Set, $2.n, $3.n, $6.n, null, $4.n, null, null); }
           | TSET identifier expression TEX int set_not_exists { $$.n = new(NodeType.Set, $2.n, $3.n, $5.n, $6.n, null, null, null); }
           | TSET identifier expression set_not_exists { $$.n = new(NodeType.Set, $2.n, $3.n, null, $4.n, null, null, null); }
           ; 
@@ -57,6 +59,10 @@ set_stmt : TSET identifier expression { $$.n = new(NodeType.Set, $2.n, $3.n, nul
 set_not_exists : TNX { $$.n = new(NodeType.SetNotExists, null, null, null, null, null, null, null); }
                | TXX { $$.n = new(NodeType.SetExists, null, null, null, null, null, null, null); }
                ;
+               
+set_cmp : TCMP expression { $$.n = new(NodeType.SetCmp, $2.n, null, null, null, null, null, null); }
+        | TCMPREV expression { $$.n = new(NodeType.SetCmpRev, $2.n, null, null, null, null, null, null); }                 
+        ;
          
 eset_stmt : TESET identifier expression { $$.n = new(NodeType.Eset, $2.n, $3.n, null, null, null, null, null); }         
        | TESET identifier expression TEX int { $$.n = new(NodeType.Eset, $2.n, $3.n, $5.n, null, null, null, null); }
@@ -65,11 +71,11 @@ eset_stmt : TESET identifier expression { $$.n = new(NodeType.Eset, $2.n, $3.n, 
        ;                     
          
 get_stmt : TGET identifier { $$.n = new(NodeType.Get, $2.n, null, null, null, null, null, null); }
-         | identifier TEQUALS TGET identifier { $$.n = new(NodeType.Get, $4.n, $1.n, null, null, null, null, null); }
+         | TLET identifier TEQUALS TGET identifier { $$.n = new(NodeType.Get, $5.n, $2.n, null, null, null, null, null); }
          ;
          
 eget_stmt : TEGET identifier { $$.n = new(NodeType.Eget, $2.n, null, null, null, null, null, null); }
-          | identifier TEQUALS TEGET identifier { $$.n = new(NodeType.Eget, $4.n, $1.n, null, null, null, null, null); }
+          | TLET identifier TEQUALS TEGET identifier { $$.n = new(NodeType.Eget, $5.n, $2.n, null, null, null, null, null); }
           ;
           
 delete_stmt : TDELETE identifier { $$.n = new(NodeType.Delete, $2.n, null, null, null, null, null, null); }
@@ -82,7 +88,10 @@ extend_stmt : TEXTEND identifier int { $$.n = new(NodeType.Extend, $2.n, $3.n, n
             ;
             
 eextend_stmt : TEEXTEND identifier int { $$.n = new(NodeType.Extend, $2.n, $3.n, null, null, null, null, null); }
-            ;              
+            ;
+            
+let_stmt : TLET identifier TEQUALS expression { $$.n = new(NodeType.Let, $2.n, $4.n, null, null, null, null, null); }                   
+          ;                     
          
 if_stmt : TIF expression TTHEN stmt_list TEND { $$.n = new(NodeType.If, $2.n, $4.n, null, null, null, null, null); }
         | TIF expression TTHEN stmt_list TELSE stmt_list TEND { $$.n = new(NodeType.If, $2.n, $4.n, $6.n, null, null, null, null); }

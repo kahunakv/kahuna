@@ -27,14 +27,14 @@ public class GrpcCommunication : IKahunaCommunication
         this.logger = logger;
     }
     
-    public async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string url, string resource, byte[] owner, int expiryTime, LockConsistency consistency)
+    public async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string url, string resource, byte[] owner, int expiryTime, LockDurability durability)
     {
         GrpcTryLockRequest request = new()
         {
             Resource = resource,
             Owner = UnsafeByteOperations.UnsafeWrap(owner), 
             ExpiresMs = expiryTime,
-            Consistency = (GrpcLockConsistency)consistency
+            Durability = (GrpcLockDurability)durability
         };
         
         GrpcTryLockResponse? response;
@@ -61,13 +61,13 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to lock", (LockResponseType)response.Type);
     }
     
-    public async Task<bool> TryUnlock(string url, string resource, byte[] owner, LockConsistency consistency)
+    public async Task<bool> TryUnlock(string url, string resource, byte[] owner, LockDurability durability)
     {
         GrpcUnlockRequest request = new()
         {
             Resource = resource, 
             Owner = UnsafeByteOperations.UnsafeWrap(owner), 
-            Consistency = (GrpcLockConsistency)consistency
+            Durability = (GrpcLockDurability)durability
         };
         
         GrpcUnlockResponse? response;
@@ -94,14 +94,14 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to unlock", (LockResponseType)response.Type);
     }
     
-    public async Task<(bool, long)> TryExtend(string url, string resource, byte[] owner, int expiryTime, LockConsistency consistency)
+    public async Task<(bool, long)> TryExtend(string url, string resource, byte[] owner, int expiryTime, LockDurability durability)
     {
         GrpcExtendLockRequest request = new()
         {
             Resource = resource,
             Owner = UnsafeByteOperations.UnsafeWrap(owner),
             ExpiresMs = expiryTime,
-            Consistency = (GrpcLockConsistency)consistency
+            Durability = (GrpcLockDurability)durability
         };
         
         GrpcExtendLockResponse? response;
@@ -125,12 +125,12 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to extend", (LockResponseType)response.Type);
     }
     
-    public async Task<KahunaLockInfo?> Get(string url, string resource, LockConsistency consistency)
+    public async Task<KahunaLockInfo?> Get(string url, string resource, LockDurability durability)
     {
         GrpcGetLockRequest request = new()
         {
             Resource = resource, 
-            Consistency = (GrpcLockConsistency)consistency
+            Durability = (GrpcLockDurability)durability
         };
         
         GrpcGetLockResponse? response;

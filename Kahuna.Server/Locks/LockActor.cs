@@ -64,13 +64,13 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         try
         {
             logger.LogDebug(
-                "LockActor Message: {Actor} {Type} {Resource} {Owner} {ExpiresMs} {Consistency}", 
+                "LockActor Message: {Actor} {Type} {Resource} {Owner} {ExpiresMs} {Durability}", 
                 actorContext.Self.Runner.Name, 
                 message.Type, 
                 message.Resource, 
                 message.Owner?.Length, 
                 message.ExpiresMs,
-                message.Consistency
+                message.Durability
             );
 
             if ((operations++) % 1000 == 0)
@@ -108,7 +108,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             LockContext? newContext = null;
 
             /// Try to retrieve lock context from persistence
-            if (message.Consistency == LockConsistency.Linearizable)
+            if (message.Durability == LockDurability.Persistent)
                 newContext = await persistence.GetLock(message.Resource);
 
             newContext ??= new() { FencingToken = -1 };
@@ -138,7 +138,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             LockState.Locked
         );
 
-        if (message.Consistency == LockConsistency.Linearizable)
+        if (message.Durability == LockDurability.Persistent)
         {
             bool success = await PersistAndReplicateLockMessage(message.Type, proposal, currentTime);
             if (!success)
@@ -162,7 +162,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     /// <returns></returns>
     private async Task<LockResponse> TryExtendLock(LockRequest message)
     {
-        LockContext? context = await GetLockContext(message.Resource, message.Consistency);
+        LockContext? context = await GetLockContext(message.Resource, message.Durability);
         if (context is null || context.State == LockState.Unlocked)
             return new(LockResponseType.LockDoesNotExist);
 
@@ -180,7 +180,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             context.State
         );
 
-        if (message.Consistency == LockConsistency.Linearizable)
+        if (message.Durability == LockDurability.Persistent)
         {
             bool success = await PersistAndReplicateLockMessage(message.Type, proposal, currentTime);
             if (!success)
@@ -200,7 +200,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     /// <returns></returns>
     private async Task<LockResponse> TryUnlock(LockRequest message)
     {
-        LockContext? context = await GetLockContext(message.Resource, message.Consistency);
+        LockContext? context = await GetLockContext(message.Resource, message.Durability);
         if (context is null || context.State == LockState.Unlocked)
             return new(LockResponseType.LockDoesNotExist);
 
@@ -218,7 +218,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             LockState.Unlocked
         );
 
-        if (message.Consistency == LockConsistency.Linearizable)
+        if (message.Durability == LockDurability.Persistent)
         {
             bool success = await PersistAndReplicateLockMessage(message.Type, proposal, currentTime);
             if (!success)
@@ -239,7 +239,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     /// <returns></returns>
     private async Task<LockResponse> GetLock(LockRequest message)
     {
-        LockContext? context = await GetLockContext(message.Resource, message.Consistency);
+        LockContext? context = await GetLockContext(message.Resource, message.Durability);
         if (context is null || context.State == LockState.Unlocked)
             return new(LockResponseType.LockDoesNotExist, new ReadOnlyLockContext(null, context?.FencingToken ?? 0, HLCTimestamp.Zero));
 
@@ -259,13 +259,13 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     /// Returns an existing lock context from memory or tries to retrieve it from disk
     /// </summary>
     /// <param name="resource"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <returns></returns>
-    private async ValueTask<LockContext?> GetLockContext(string resource, LockConsistency? consistency)
+    private async ValueTask<LockContext?> GetLockContext(string resource, LockDurability? durability)
     {
         if (!locks.TryGetValue(resource, out LockContext? context))
         {
-            if (consistency == LockConsistency.Linearizable)
+            if (durability == LockDurability.Persistent)
             {
                 context = await persistence.GetLock(resource);
                 if (context is not null)
@@ -307,7 +307,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             ExpireCounter = proposal.Expires.C,
             TimeLogical = currentTime.L,
             TimeCounter = currentTime.C,
-            Consistency = (int)LockConsistency.ReplicationConsistent
+            Consistency = (int)LockDurability.ReplicationConsistent
         };
 
         if (proposal.Owner is not null)
@@ -333,7 +333,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             proposal.Owner, 
             proposal.FencingToken,
             proposal.Expires,
-            (int)LockConsistency.Linearizable,
+            (int)LockDurability.Persistent,
             (int)proposal.State
         ));
 

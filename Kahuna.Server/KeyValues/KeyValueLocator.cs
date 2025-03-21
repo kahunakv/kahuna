@@ -253,10 +253,10 @@ internal sealed class KeyValueLocator
     /// <param name="consistency"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, string)> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, string, KeyValueConsistency)> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueConsistency consistency, CancellationToken cancelationToken)
     {
         if (string.IsNullOrEmpty(key))
-            return (KeyValueResponseType.InvalidInput, key);
+            return (KeyValueResponseType.InvalidInput, key, consistency);
         
         int partitionId = raft.GetPartitionKey(key);
 
@@ -265,7 +265,7 @@ internal sealed class KeyValueLocator
             
         string leader = await raft.WaitForLeader(partitionId, cancelationToken);
         if (leader == raft.GetLocalEndpoint())
-            return (KeyValueResponseType.MustRetry, key);
+            return (KeyValueResponseType.MustRetry, key, consistency);
         
         logger.LogDebug("ACQUIRE-LOCK-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
         
@@ -286,7 +286,7 @@ internal sealed class KeyValueLocator
         
         remoteResponse.ServedFrom = $"https://{leader}";
         
-        return ((KeyValueResponseType)remoteResponse.Type, key);
+        return ((KeyValueResponseType)remoteResponse.Type, key, consistency);
     }
     
     /// <summary>
@@ -340,10 +340,10 @@ internal sealed class KeyValueLocator
     /// <param name="consistency"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, HLCTimestamp, string)> LocateAndTryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueConsistency)> LocateAndTryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
     {
         if (string.IsNullOrEmpty(key))
-            return (KeyValueResponseType.InvalidInput, HLCTimestamp.Zero, key);
+            return (KeyValueResponseType.InvalidInput, HLCTimestamp.Zero, key, consistency);
         
         int partitionId = raft.GetPartitionKey(key);
 
@@ -352,7 +352,7 @@ internal sealed class KeyValueLocator
             
         string leader = await raft.WaitForLeader(partitionId, cancelationToken);
         if (leader == raft.GetLocalEndpoint())
-            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero, key);
+            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero, key, consistency);
         
         logger.LogDebug("PREPARE-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
         
@@ -372,7 +372,7 @@ internal sealed class KeyValueLocator
         
         remoteResponse.ServedFrom = $"https://{leader}";
         
-        return ((KeyValueResponseType)remoteResponse.Type, new(remoteResponse.ProposalTicketPhysical, remoteResponse.ProposalTicketCounter), key);
+        return ((KeyValueResponseType)remoteResponse.Type, new(remoteResponse.ProposalTicketPhysical, remoteResponse.ProposalTicketCounter), key, consistency);
     }
     
     /// <summary>

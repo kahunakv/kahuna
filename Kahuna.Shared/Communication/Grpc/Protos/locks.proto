@@ -11,7 +11,7 @@ message GrpcTryLockRequest {
   string Resource = 1;
   bytes Owner = 2;
   int32 ExpiresMs = 3;
-  GrpcLockConsistency Consistency = 4;
+  GrpcLockDurability Durability = 4;
 }
 
 message GrpcTryLockResponse {
@@ -24,7 +24,7 @@ message GrpcExtendLockRequest {
   string Resource = 1;
   optional bytes Owner = 2;
   int32 ExpiresMs = 3;
-  GrpcLockConsistency Consistency = 4;
+  GrpcLockDurability Durability = 4;
 }
 
 message GrpcExtendLockResponse {
@@ -36,7 +36,7 @@ message GrpcExtendLockResponse {
 message GrpcUnlockRequest {
   string Resource = 1;
   optional bytes Owner = 2;
-  GrpcLockConsistency Consistency = 3;
+  GrpcLockDurability Durability = 3;
 }
 
 message GrpcUnlockResponse {
@@ -46,7 +46,7 @@ message GrpcUnlockResponse {
 
 message GrpcGetLockRequest {
   string Resource = 1;
-  GrpcLockConsistency Consistency = 2;
+  GrpcLockDurability durability = 2;
 }
 
 message GrpcGetLockResponse {
@@ -71,8 +71,8 @@ enum GrpcLockResponseType {
   LOCK_RESPONSE_TYPE_INVALID_OWNER = 103;
 }
 
-enum GrpcLockConsistency {
-  LOCK_CONSISTENCY_EPHEMERAL = 0;
-  LOCK_CONSISTENCY_LINEARIZABLE = 1;
-  LOCK_CONSISTENCY_REPLICATION_CONSISTENT = 2;
+enum GrpcLockDurability {
+  LOCK_DURABILITY_EPHEMERAL = 0;
+  LOCK_DURABILITY_PERSISTENT = 1;
+  LOCK_DURABILITY_REPLICATION_CONSISTENT = 2;
 }

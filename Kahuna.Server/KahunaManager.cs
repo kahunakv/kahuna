@@ -97,9 +97,9 @@ public sealed class KahunaManager : IKahuna
     /// <param name="expiresMs"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public Task<(LockResponseType, long)> TryLock(string resource, byte[] owner, int expiresMs, LockConsistency consistency)
+    public Task<(LockResponseType, long)> TryLock(string resource, byte[] owner, int expiresMs, LockDurability durability)
     {
-        return locks.TryLock(resource, owner, expiresMs, consistency);
+        return locks.TryLock(resource, owner, expiresMs, durability);
     }
 
     /// <summary>
@@ -110,9 +110,9 @@ public sealed class KahunaManager : IKahuna
     /// <param name="expiresMs"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public Task<(LockResponseType, long)> TryExtendLock(string resource, byte[] owner, int expiresMs, LockConsistency consistency)
+    public Task<(LockResponseType, long)> TryExtendLock(string resource, byte[] owner, int expiresMs, LockDurability durability)
     {
-        return locks.TryExtendLock(resource, owner, expiresMs, consistency);
+        return locks.TryExtendLock(resource, owner, expiresMs, durability);
     }
 
     /// <summary>
@@ -122,9 +122,9 @@ public sealed class KahunaManager : IKahuna
     /// <param name="owner"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public Task<LockResponseType> TryUnlock(string resource, byte[] owner, LockConsistency consistency)
+    public Task<LockResponseType> TryUnlock(string resource, byte[] owner, LockDurability durability)
     {
-        return locks.TryUnlock(resource, owner, consistency);
+        return locks.TryUnlock(resource, owner, durability);
     }
 
     /// <summary>
@@ -133,9 +133,9 @@ public sealed class KahunaManager : IKahuna
     /// <param name="resource"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(string resource, LockConsistency consistency)
+    public Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(string resource, LockDurability durability)
     {
-        return locks.GetLock(resource, consistency);
+        return locks.GetLock(resource, durability);
     }
 
     /// <summary>
@@ -223,7 +223,7 @@ public sealed class KahunaManager : IKahuna
     /// <param name="consistency"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, string)> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public Task<(KeyValueResponseType, string, KeyValueConsistency)> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueConsistency consistency, CancellationToken cancelationToken)
     {
         return keyValues.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, consistency, cancelationToken);
     }
@@ -249,7 +249,7 @@ public sealed class KahunaManager : IKahuna
     /// <param name="consistency"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, HLCTimestamp, string)> LocateAndTryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueConsistency)> LocateAndTryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
     {
         return keyValues.LocateAndTryPrepareMutations(transactionId, key, consistency, cancelationToken);
     }

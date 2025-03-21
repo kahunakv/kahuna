@@ -125,11 +125,18 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
                 newContext = await persistence.GetKeyValue(message.Key);
                 if (newContext is not null)
                 {
-                    if (newContext.State != KeyValueState.Deleted)
-                        exists = true;
-                    
-                    if (newContext.Expires != HLCTimestamp.Zero && newContext.Expires - currentTime < TimeSpan.Zero)
+                    if (newContext.State == KeyValueState.Deleted)
+                    {
+                        newContext.Value = null;
                         exists = false;
+                    }
+
+                    if (newContext.Expires != HLCTimestamp.Zero && newContext.Expires - currentTime < TimeSpan.Zero)
+                    {
+                        newContext.State = KeyValueState.Deleted;
+                        newContext.Value = null;
+                        exists = false;
+                    }
                 }
             }
 
@@ -142,7 +149,10 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         else
         {
             if (context.State == KeyValueState.Deleted)
+            {
+                context.Value = null;
                 exists = false;
+            }
         }
         
         if (context.WriteIntent is not null && context.WriteIntent.TransactionId != message.TransactionId)
@@ -169,13 +179,20 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
                 
                 context.MvccEntries.Add(message.TransactionId, entry);
             }
-            
+
             if (entry.State == KeyValueState.Deleted)
+            {
+                entry.Value = null;
                 exists = false;
-            
+            }
+
             if (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
+            {
+                entry.State = KeyValueState.Deleted;
+                entry.Value = null;
                 exists = false;
-            
+            }
+
             switch (message.Flags)
             {
                 case KeyValueFlags.SetIfExists when !exists:
@@ -360,9 +377,6 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
     private async Task<KeyValueResponse> TryGet(KeyValueRequest message)
     {
         KeyValueContext? context = await GetKeyValueContext(message.Key, message.Consistency);
-        
-        if (context is null || context.State == KeyValueState.Deleted)
-            return new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueContext(null, context?.Revision ?? 0, HLCTimestamp.Zero));
 
         ReadOnlyKeyValueContext readOnlyKeyValueContext;
 
@@ -370,6 +384,12 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
 
         if (message.TransactionId != HLCTimestamp.Zero)
         {
+            if (context is null)
+            {
+                context = new();
+                keyValuesStore.Add(message.Key, context);
+            }
+            
             context.MvccEntries ??= new();
 
             if (!context.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? entry))
@@ -386,6 +406,9 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
                 context.MvccEntries.Add(message.TransactionId, entry);
             }
             
+            if (entry.State == KeyValueState.Deleted)
+                return new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueContext(null, context?.Revision ?? 0, HLCTimestamp.Zero));
+            
             if (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
                 return new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueContext(null, entry?.Revision ?? 0, HLCTimestamp.Zero));
             
@@ -393,6 +416,12 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
 
             return new(KeyValueResponseType.Get, readOnlyKeyValueContext);
         }
+        
+        if (context is null)
+            return new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueContext(null, context?.Revision ?? 0, HLCTimestamp.Zero));
+        
+        if (context.State == KeyValueState.Deleted)
+            return new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueContext(null, context?.Revision ?? 0, HLCTimestamp.Zero));
 
         if (context.Expires != HLCTimestamp.Zero && context.Expires - currentTime < TimeSpan.Zero)
             return new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueContext(null, context?.Revision ?? 0, HLCTimestamp.Zero));
@@ -463,7 +492,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         
         KeyValueContext? context = await GetKeyValueContext(message.Key, message.Consistency);
         
-        if (context is null || context.State == KeyValueState.Deleted)
+        if (context is null)
             return new(KeyValueResponseType.DoesNotExist);
         
         if (context.WriteIntent is not null && context.WriteIntent.TransactionId != message.TransactionId)
@@ -688,61 +717,40 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
             return new(KeyValueResponseType.Errored);
         }
 
-        KeyValueProposal proposal = new(
-            message.Key,
-            entry.Value,
-            entry.Revision,
-            entry.Expires,
-            entry.LastUsed,
-            entry.State
-        );
-
         if (message.Consistency != KeyValueConsistency.Linearizable)
         {
-            context.Value = proposal.Value;
-            context.Expires = proposal.Expires;
-            context.Revision = proposal.Revision;
-            context.LastUsed = proposal.LastUsed;
-            context.State = proposal.State;
-            
             context.MvccEntries.Remove(message.TransactionId);
             
             return new(KeyValueResponseType.RolledBack);
         }
         
-        (bool success, long commitIndex) = await RollbackKeyValueMessage(message.Key, message.ProposalTicketId);
+        (bool success, long rollbackIndex) = await RollbackKeyValueMessage(message.Key, message.ProposalTicketId);
         
         if (!success)
             return new(KeyValueResponseType.Errored);
         
-        context.Value = proposal.Value;
-        context.Expires = proposal.Expires;
-        context.Revision = proposal.Revision;
-        context.LastUsed = proposal.LastUsed;
-        context.State = proposal.State;
-        
         context.MvccEntries.Remove(message.TransactionId);
         
-        return new(KeyValueResponseType.RolledBack, commitIndex);
+        return new(KeyValueResponseType.RolledBack, rollbackIndex);
     }
 
     /// <summary>
     /// Returns an existing KeyValueContext from memory or retrieves it from the persistence layer
     /// </summary>
-    /// <param name="resource"></param>
+    /// <param name="key"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    private async ValueTask<KeyValueContext?> GetKeyValueContext(string resource, KeyValueConsistency? consistency)
+    private async ValueTask<KeyValueContext?> GetKeyValueContext(string key, KeyValueConsistency? consistency)
     {
-        if (!keyValuesStore.TryGetValue(resource, out KeyValueContext? context))
+        if (!keyValuesStore.TryGetValue(key, out KeyValueContext? context))
         {
             if (consistency == KeyValueConsistency.Linearizable)
             {
-                context = await persistence.GetKeyValue(resource);
+                context = await persistence.GetKeyValue(key);
                 if (context is not null)
                 {
                     context.LastUsed = await raft.HybridLogicalClock.SendOrLocalEvent();
-                    keyValuesStore.Add(resource, context);
+                    keyValuesStore.Add(key, context);
                     return context;
                 }
                 

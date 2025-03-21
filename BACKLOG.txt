@@ -1,10 +1,17 @@
+Server:
 - Fix missing expr in script parser
+- Return verbose error to the client in failed transactions
 - Support function calls in scripts
+- Add support for NX flag in extend
 - Add support for placeholders in script parser
 - Escaped identifiers
 - Sequencer 
 - Make SET flags order independent
 - Make scripts tests
 - Make Disk durability default
-- Rename LockConsistency to LockDurability
+- Rename LockDurability to LockDurability
 - Add server tests
+
+Client:
+- Fix authentication in rest/grpc endpoints
+- Fix certificate validation in rest/grpc endpoints

@@ -18,7 +18,7 @@ public readonly struct LockRequest : IConsistentHashable
     
     public int ExpiresMs { get; }
     
-    public LockConsistency Consistency { get; }
+    public LockDurability Durability { get; }
     
     /// <summary>
     /// Constructor
@@ -28,13 +28,13 @@ public readonly struct LockRequest : IConsistentHashable
     /// <param name="owner"></param>
     /// <param name="expiresMs"></param>
     /// <param name="consistency"></param>
-    public LockRequest(LockRequestType type, string resource, byte[]? owner, int expiresMs, LockConsistency consistency)
+    public LockRequest(LockRequestType type, string resource, byte[]? owner, int expiresMs, LockDurability durability)
     {
         Type = type;
         Resource = resource;
         Owner = owner;
         ExpiresMs = expiresMs;
-        Consistency = consistency;
+        Durability = durability;
     }
 
     public int GetHash()

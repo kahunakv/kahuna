@@ -15,6 +15,6 @@ public sealed class KahunaLockRequest
     [JsonPropertyName("expiresMs")]
     public int ExpiresMs { get; set; }
     
-    [JsonPropertyName("consistency")]
-    public LockConsistency Consistency { get; set; }
+    [JsonPropertyName("durability")]
+    public LockDurability Durability { get; set; }
 }

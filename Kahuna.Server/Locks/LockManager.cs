@@ -29,7 +29,7 @@ public sealed class LockManager
 
     private readonly IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> ephemeralLocksRouter;
     
-    private readonly IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> consistentLocksRouter;
+    private readonly IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> persistentLocksRouter;
     
     /// <summary>
     /// Constructor
@@ -58,7 +58,7 @@ public sealed class LockManager
         this.persistenceActorRouter = persistenceActorRouter;
         
         ephemeralLocksRouter = GetEphemeralRouter(backgroundWriter, persistence, configuration);
-        consistentLocksRouter = GetConsistentRouter(backgroundWriter, persistence, configuration);
+        persistentLocksRouter = GetPersistentRouter(backgroundWriter, persistence, configuration);
     }
 
     /// <summary>
@@ -89,7 +89,7 @@ public sealed class LockManager
     /// <param name="persistence"></param>
     /// <param name="workers"></param>
     /// <returns></returns>
-    private IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> GetConsistentRouter(
+    private IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> GetPersistentRouter(
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, 
         IPersistence persistence, 
         KahunaConfiguration configuration
@@ -217,22 +217,22 @@ public sealed class LockManager
     /// <param name="expiresMs"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<(LockResponseType, long)> TryLock(string resource, byte[] owner, int expiresMs, LockConsistency consistency)
+    public async Task<(LockResponseType, long)> TryLock(string resource, byte[] owner, int expiresMs, LockDurability durability)
     {
         LockRequest request = new(
             LockRequestType.TryLock, 
             resource, 
             owner, 
             expiresMs, 
-            consistency
+            durability
         );
 
         LockResponse response;
         
-        if (consistency == LockConsistency.Ephemeral)
+        if (durability == LockDurability.Ephemeral)
             response = await ephemeralLocksRouter.Ask(request);
         else
-            response = await consistentLocksRouter.Ask(request);
+            response = await persistentLocksRouter.Ask(request);
         
         return (response.Type, response.FencingToken);
     }
@@ -245,22 +245,22 @@ public sealed class LockManager
     /// <param name="expiresMs"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<(LockResponseType, long)> TryExtendLock(string resource, byte[] owner, int expiresMs, LockConsistency consistency)
+    public async Task<(LockResponseType, long)> TryExtendLock(string resource, byte[] owner, int expiresMs, LockDurability durability)
     {
         LockRequest request = new(
             LockRequestType.TryExtendLock, 
             resource, 
             owner, 
             expiresMs, 
-            consistency
+            durability
         );
 
         LockResponse response;
         
-        if (consistency == LockConsistency.Ephemeral)
+        if (durability == LockDurability.Ephemeral)
             response = await ephemeralLocksRouter.Ask(request);
         else
-            response = await consistentLocksRouter.Ask(request);
+            response = await persistentLocksRouter.Ask(request);
         
         return (response.Type, response.FencingToken);
     }
@@ -272,22 +272,22 @@ public sealed class LockManager
     /// <param name="owner"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<LockResponseType> TryUnlock(string resource, byte[] owner, LockConsistency consistency)
+    public async Task<LockResponseType> TryUnlock(string resource, byte[] owner, LockDurability durability)
     {
         LockRequest request = new(
             LockRequestType.TryUnlock, 
             resource, 
             owner, 
             0, 
-            consistency
+            durability
         );
 
         LockResponse response;
         
-        if (consistency == LockConsistency.Ephemeral)
+        if (durability == LockDurability.Ephemeral)
             response = await ephemeralLocksRouter.Ask(request);
         else
-            response = await consistentLocksRouter.Ask(request);
+            response = await persistentLocksRouter.Ask(request);
         
         return response.Type;
     }
@@ -298,22 +298,22 @@ public sealed class LockManager
     /// <param name="resource"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(string resource, LockConsistency consistency)
+    public async Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(string resource, LockDurability durability)
     {
         LockRequest request = new(
             LockRequestType.Get, 
             resource, 
             null, 
             0, 
-            consistency
+            durability
         );
 
         LockResponse response;
         
-        if (consistency == LockConsistency.Ephemeral)
+        if (durability == LockDurability.Ephemeral)
             response = await ephemeralLocksRouter.Ask(request);
         else
-            response = await consistentLocksRouter.Ask(request);
+            response = await persistentLocksRouter.Ask(request);
         
         return (response.Type, response.Context);
     }

@@ -57,17 +57,17 @@ public class KahunaClient
         this.communication = (communication ?? new GrpcCommunication(logger));
     }
     
-    private async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string resource, byte[] owner, TimeSpan expiryTime, LockConsistency consistency)
+    private async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string resource, byte[] owner, TimeSpan expiryTime, LockDurability durability)
     {
-        return await communication.TryAcquireLock(GetRoundRobinUrl(), resource, owner, (int)expiryTime.TotalMilliseconds, consistency).ConfigureAwait(false);
+        return await communication.TryAcquireLock(GetRoundRobinUrl(), resource, owner, (int)expiryTime.TotalMilliseconds, durability).ConfigureAwait(false);
     }
     
-    private async Task<(KahunaLockAcquireResult, byte[]?, LockConsistency, long)> PeriodicallyTryAcquireLock(
+    private async Task<(KahunaLockAcquireResult, byte[]?, LockDurability, long)> PeriodicallyTryAcquireLock(
         string resource, 
         TimeSpan expiryTime, 
         TimeSpan wait, 
         TimeSpan retry,
-        LockConsistency consistency
+        LockDurability durability
     )
     {
         byte[] owner = Guid.NewGuid().ToByteArray();
@@ -79,7 +79,7 @@ public class KahunaClient
 
         while (stopWatch.Elapsed < wait)
         {
-            (result, fencingToken) = await TryAcquireLock(resource, owner, expiryTime, consistency).ConfigureAwait(false);
+            (result, fencingToken) = await TryAcquireLock(resource, owner, expiryTime, durability).ConfigureAwait(false);
 
             if (result != KahunaLockAcquireResult.Success)
             {
@@ -87,10 +87,10 @@ public class KahunaClient
                 continue;
             }
 
-            return (result, owner, consistency, fencingToken);
+            return (result, owner, durability, fencingToken);
         }
 
-        return (result, null, consistency, fencingToken);
+        return (result, null, durability, fencingToken);
     }
     
     /// <summary>
@@ -100,21 +100,21 @@ public class KahunaClient
     /// <param name="expiryTime"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    private async Task<(KahunaLockAcquireResult, byte[]?, LockConsistency, long)> SingleTimeTryAcquireLock(string resource, TimeSpan expiryTime, LockConsistency consistency)
+    private async Task<(KahunaLockAcquireResult, byte[]?, LockDurability, long)> SingleTimeTryAcquireLock(string resource, TimeSpan expiryTime, LockDurability durability)
     {
         try
         {
             byte[] owner = Guid.NewGuid().ToByteArray();
 
-            (KahunaLockAcquireResult result, long fencingToken) = await TryAcquireLock(resource, owner, expiryTime, consistency).ConfigureAwait(false);
+            (KahunaLockAcquireResult result, long fencingToken) = await TryAcquireLock(resource, owner, expiryTime, durability).ConfigureAwait(false);
 
-            return (result, owner, consistency, fencingToken);
+            return (result, owner, durability, fencingToken);
         }
         catch (Exception ex)
         {
             logger?.LogError("Error locking lock instance: {Message}", ex.Message);
 
-            return (KahunaLockAcquireResult.Error, null, consistency, -1);
+            return (KahunaLockAcquireResult.Error, null, durability, -1);
         }
     }
     
@@ -128,13 +128,13 @@ public class KahunaClient
     /// <param name="retryTime"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<KahunaLock> GetOrCreateLock(string resource, int expiryTime = 30000, int waitTime = 0, int retryTime = 0, LockConsistency consistency = LockConsistency.Ephemeral)
+    public async Task<KahunaLock> GetOrCreateLock(string resource, int expiryTime = 30000, int waitTime = 0, int retryTime = 0, LockDurability durability = LockDurability.Persistent)
     {
         TimeSpan expiry = TimeSpan.FromMilliseconds(expiryTime);
         TimeSpan wait = TimeSpan.FromMilliseconds(waitTime);
         TimeSpan retry = TimeSpan.FromMilliseconds(retryTime);
 
-        return await GetOrCreateLock(resource, expiry, wait, retry, consistency).ConfigureAwait(false);
+        return await GetOrCreateLock(resource, expiry, wait, retry, durability).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -148,15 +148,15 @@ public class KahunaClient
     /// <param name="consistency"></param>
     /// <returns></returns>
     /// <exception cref="KahunaException"></exception>
-    public async Task<KahunaLock> GetOrCreateLock(string resource, TimeSpan expiry, TimeSpan wait, TimeSpan retry, LockConsistency consistency = LockConsistency.Ephemeral)
+    public async Task<KahunaLock> GetOrCreateLock(string resource, TimeSpan expiry, TimeSpan wait, TimeSpan retry, LockDurability durability = LockDurability.Persistent)
     {        
         if (wait == TimeSpan.Zero)
-            return new(this, resource, await SingleTimeTryAcquireLock(resource, expiry, consistency).ConfigureAwait(false));
+            return new(this, resource, await SingleTimeTryAcquireLock(resource, expiry, durability).ConfigureAwait(false));
         
         if (retry == TimeSpan.Zero)
             throw new KahunaException("Retry cannot be zero", LockResponseType.InvalidInput);
         
-        return new(this, resource, await PeriodicallyTryAcquireLock(resource, expiry, wait, retry, consistency).ConfigureAwait(false));
+        return new(this, resource, await PeriodicallyTryAcquireLock(resource, expiry, wait, retry, durability).ConfigureAwait(false));
     }
 
     /// <summary>
@@ -167,9 +167,9 @@ public class KahunaClient
     /// <param name="expiry"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<KahunaLock> GetOrCreateLock(string resource, TimeSpan expiry, LockConsistency consistency = LockConsistency.Ephemeral)
+    public async Task<KahunaLock> GetOrCreateLock(string resource, TimeSpan expiry, LockDurability durability = LockDurability.Persistent)
     {
-        return new(this, resource, await SingleTimeTryAcquireLock(resource, expiry, consistency).ConfigureAwait(false));
+        return new(this, resource, await SingleTimeTryAcquireLock(resource, expiry, durability).ConfigureAwait(false));
     }
     
     /// <summary>
@@ -181,9 +181,9 @@ public class KahunaClient
     /// <param name="duration"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<(bool, long)> TryExtend(string resource, byte[] owner, TimeSpan duration, LockConsistency consistency = LockConsistency.Ephemeral)
+    public async Task<(bool, long)> TryExtend(string resource, byte[] owner, TimeSpan duration, LockDurability durability = LockDurability.Persistent)
     {
-        return await communication.TryExtend(GetRoundRobinUrl(), resource, owner, (int)duration.TotalMilliseconds, consistency).ConfigureAwait(false);
+        return await communication.TryExtend(GetRoundRobinUrl(), resource, owner, (int)duration.TotalMilliseconds, durability).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -195,9 +195,9 @@ public class KahunaClient
     /// <param name="durationMs"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<(bool, long)> TryExtend(string resource, byte[] owner, int durationMs, LockConsistency consistency = LockConsistency.Ephemeral)
+    public async Task<(bool, long)> TryExtend(string resource, byte[] owner, int durationMs, LockDurability durability = LockDurability.Persistent)
     {
-        return await communication.TryExtend(GetRoundRobinUrl(), resource, owner, durationMs, consistency).ConfigureAwait(false);
+        return await communication.TryExtend(GetRoundRobinUrl(), resource, owner, durationMs, durability).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -209,9 +209,9 @@ public class KahunaClient
     /// <param name="durationMs"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<(bool, long)> TryExtend(string resource, string owner, int durationMs, LockConsistency consistency = LockConsistency.Ephemeral)
+    public async Task<(bool, long)> TryExtend(string resource, string owner, int durationMs, LockDurability durability = LockDurability.Persistent)
     {
-        return await communication.TryExtend(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), durationMs, consistency).ConfigureAwait(false);
+        return await communication.TryExtend(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), durationMs, durability).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -223,9 +223,9 @@ public class KahunaClient
     /// <param name="durationMs"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<(bool, long)> TryExtend(string resource, string owner, TimeSpan duration, LockConsistency consistency = LockConsistency.Ephemeral)
+    public async Task<(bool, long)> TryExtend(string resource, string owner, TimeSpan duration, LockDurability durability = LockDurability.Persistent)
     {
-        return await communication.TryExtend(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), (int)duration.TotalMilliseconds, consistency).ConfigureAwait(false);
+        return await communication.TryExtend(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), (int)duration.TotalMilliseconds, durability).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -235,9 +235,9 @@ public class KahunaClient
     /// <param name="owner"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<bool> Unlock(string resource, byte[] owner, LockConsistency consistency = LockConsistency.Ephemeral)
+    public async Task<bool> Unlock(string resource, byte[] owner, LockDurability durability = LockDurability.Persistent)
     {
-        return await communication.TryUnlock(GetRoundRobinUrl(), resource, owner, consistency).ConfigureAwait(false);
+        return await communication.TryUnlock(GetRoundRobinUrl(), resource, owner, durability).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -247,9 +247,9 @@ public class KahunaClient
     /// <param name="owner"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<bool> Unlock(string resource, string owner, LockConsistency consistency = LockConsistency.Ephemeral)
+    public async Task<bool> Unlock(string resource, string owner, LockDurability durability = LockDurability.Persistent)
     {
-        return await communication.TryUnlock(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), consistency).ConfigureAwait(false);
+        return await communication.TryUnlock(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), durability).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -258,9 +258,9 @@ public class KahunaClient
     /// <param name="resource"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<KahunaLockInfo?> GetLockInfo(string resource, LockConsistency consistency = LockConsistency.Ephemeral)
+    public async Task<KahunaLockInfo?> GetLockInfo(string resource, LockDurability durability = LockDurability.Persistent)
     {
-        return await communication.Get(GetRoundRobinUrl(), resource, consistency).ConfigureAwait(false);
+        return await communication.Get(GetRoundRobinUrl(), resource, durability).ConfigureAwait(false);
     }
     
     /// <summary>

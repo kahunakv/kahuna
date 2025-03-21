@@ -32,7 +32,7 @@ public static class LocksHandlers
 
             if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
             {
-                (LockResponseType response, long fencingToken) = await locks.TryLock(request.Resource, request.Owner, request.ExpiresMs, request.Consistency);
+                (LockResponseType response, long fencingToken) = await locks.TryLock(request.Resource, request.Owner, request.ExpiresMs, request.Durability);
 
                 return new() { Type = response, FencingToken = fencingToken };    
             }
@@ -84,7 +84,7 @@ public static class LocksHandlers
             
             if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
             {
-                (LockResponseType response, long fencingToken) = await locks.TryExtendLock(request.Resource, request.Owner, request.ExpiresMs, request.Consistency);
+                (LockResponseType response, long fencingToken) = await locks.TryExtendLock(request.Resource, request.Owner, request.ExpiresMs, request.Durability);
 
                 return new() { Type = response, FencingToken = fencingToken };    
             }
@@ -133,7 +133,7 @@ public static class LocksHandlers
 
             if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
             {
-                LockResponseType response = await locks.TryUnlock(request.Resource, request.Owner, request.Consistency);
+                LockResponseType response = await locks.TryUnlock(request.Resource, request.Owner, request.Durability);
 
                 return new() { Type = response };
             }
@@ -179,7 +179,7 @@ public static class LocksHandlers
 
             if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
             {
-                (LockResponseType response, ReadOnlyLockContext? context) = await locks.GetLock(request.LockName, request.Consistency);
+                (LockResponseType response, ReadOnlyLockContext? context) = await locks.GetLock(request.LockName, request.Durability);
 
                 if (context is not null)
                     return new()

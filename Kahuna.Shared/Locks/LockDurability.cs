@@ -1,9 +1,9 @@
 
 namespace Kahuna.Shared.Locks;
 
-public enum LockConsistency
+public enum LockDurability
 {
     Ephemeral = 0,
-    Linearizable = 1,
+    Persistent = 1,
     ReplicationConsistent = 2
 }

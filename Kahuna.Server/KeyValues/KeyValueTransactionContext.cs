@@ -1,5 +1,5 @@
 
-using System.Text;
+using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues;
@@ -14,23 +14,26 @@ public sealed class KeyValueTransactionContext
     
     public KeyValueExecutionStatus Status { get; set; } = KeyValueExecutionStatus.Continue;
     
-    public List<string>? LocksAcquired { get; set; }
+    public List<(string, KeyValueConsistency)>? LocksAcquired { get; set; }
 
-    private Dictionary<string , KeyValueTransactionResult>? Variables { get; set; }
+    private Dictionary<string , KeyValueExpressionResult>? Variables { get; set; }
 
-    public KeyValueTransactionResult GetVariable(string varName)
+    public KeyValueExpressionResult GetVariable(string varName)
     {
         Console.WriteLine("Get variable {0}", varName);
         
         if (Variables is null)
             throw new InvalidOperationException("Undefined variable: " + varName);
         
-        return Variables[varName];
+        if (!Variables.TryGetValue(varName, out KeyValueExpressionResult? value))
+            throw new InvalidOperationException("Undefined variable: " + varName);
+
+        return value;
     }
     
-    public void SetVariable(string varName, KeyValueTransactionResult value)
+    public void SetVariable(string varName, KeyValueExpressionResult value)
     {
-        Console.WriteLine("Set variable {0} {1}", varName, Encoding.UTF8.GetString(value.Value ?? []));
+        Console.WriteLine("Set variable {0} {1}", varName, value.ToString());
         
         Variables ??= new();
         

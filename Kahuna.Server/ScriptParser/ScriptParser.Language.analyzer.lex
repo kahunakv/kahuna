@@ -5,6 +5,7 @@
 
 %option stack, minimize, parser, verbose, persistbuffer, noembedbuffers
 
+TLet            (L|l)(E|e)(T|t)
 TSet            (S|s)(E|e)(T|t)
 TGet            (G|g)(E|e)(T|t)
 TEset           (E|e)(S|s)(E|e)(T|t)
@@ -91,6 +92,8 @@ TGreaterEquals  >=
 {LBrace} { return (int)Token.LBRACE; }
 
 {RBrace} { return (int)Token.RBRACE; }
+
+{TLet} { return (int)Token.TLET; }
 
 {TGet} { return (int)Token.TGET; }
 

@@ -11,7 +11,7 @@ public static class KeyValueTransactionExpression
         switch (ast.nodeType)
         {
             case NodeType.Identifier:
-                return context.GetVariable(ast.yytext!).ToExpressionResult();
+                return context.GetVariable(ast.yytext!);
             
             case NodeType.Integer:
                 return new() { Type = KeyValueExpressionType.Long, LongValue = long.Parse(ast.yytext!) };
@@ -27,6 +27,9 @@ public static class KeyValueTransactionExpression
             
             case NodeType.Equals:
                 return EvalEquals(context, ast);
+            
+            case NodeType.GreaterThan:
+                return EvalGreaterThan(context, ast);
             
             case NodeType.NotEquals:
             {
@@ -46,14 +49,15 @@ public static class KeyValueTransactionExpression
             case NodeType.Div:
                 return EvalDiv(context, ast);
             
+            case NodeType.FuncCall:
+                return EvalFuncCall(context, ast);
+            
             case NodeType.LessThan:
-            case NodeType.GreaterThan:
             case NodeType.LessThanEquals:
             case NodeType.GreaterThanEquals:
             case NodeType.And:
             case NodeType.Or:
             case NodeType.Not:
-            case NodeType.FuncCall:
                 throw new NotImplementedException();
             
             case NodeType.StmtList:
@@ -78,6 +82,74 @@ public static class KeyValueTransactionExpression
         }
 
         return new() { Type = KeyValueExpressionType.Null };
+    }
+
+    private static KeyValueExpressionResult EvalFuncCall(KeyValueTransactionContext context, NodeAst ast)
+    {
+        if (ast.leftAst is null)
+            throw new Exception("Invalid left expression");
+                
+        if (ast.rightAst is null)
+            throw new Exception("Invalid right expression");
+        
+        List<KeyValueExpressionResult> arguments = [];
+        
+        GetFuncCallArguments(context, ast.rightAst, arguments);
+
+        switch (ast.leftAst.yytext!)
+        {
+            case "to_int":
+                return CastToLong(arguments);
+            
+            //case "to_str":
+            //    break;
+            
+            default:
+                throw new Exception($"Undefined function {ast.leftAst.yytext!} expression");
+        }
+    }
+
+    private static KeyValueExpressionResult CastToLong(List<KeyValueExpressionResult> arguments)
+    {
+        if (arguments.Count != 1)
+            throw new Exception("Invalid number of arguments for to_int function");
+
+        return arguments[0].Type switch
+        {
+            KeyValueExpressionType.Long => new() { Type = KeyValueExpressionType.Long, LongValue = arguments[0].LongValue },
+            KeyValueExpressionType.Double => new() { Type = KeyValueExpressionType.Long, DoubleValue = (long)arguments[0].DoubleValue },
+            KeyValueExpressionType.String => new() { Type = KeyValueExpressionType.Long, LongValue = long.Parse(arguments[0].StrValue ?? "0") },
+            _ => throw new Exception($"Cannot cast {arguments[0].Type} to int")
+        };
+    }
+
+    private static void GetFuncCallArguments(KeyValueTransactionContext context, NodeAst ast, List<KeyValueExpressionResult> arguments)
+    {
+        while (true)
+        {
+            switch (ast.nodeType)
+            {
+                case NodeType.ArgumentList:
+                {
+                    if (ast.leftAst is not null)
+                        GetFuncCallArguments(context, ast.leftAst, arguments);
+
+                    if (ast.rightAst is not null)
+                    {
+                        ast = ast.rightAst!;
+                        continue;
+                    }
+
+                    break;
+                }
+                
+                default:
+                    arguments.Add(Eval(context, ast));
+                    break;
+            }
+
+            break;
+        }
     }
 
     private static KeyValueExpressionResult EvalEquals(KeyValueTransactionContext context, NodeAst ast)
@@ -128,6 +200,36 @@ public static class KeyValueTransactionExpression
             case KeyValueExpressionType.Bytes when right.Type == KeyValueExpressionType.Bytes:
                 return new() { Type = KeyValueExpressionType.Bool, BoolValue = ((ReadOnlySpan<byte>)left.BytesValue).SequenceEqual(right.BytesValue) };
 
+            default:
+                throw new Exception("Invalid operands: " + left.Type + " == " + right.Type);
+        }
+    }
+    
+    private static KeyValueExpressionResult EvalGreaterThan(KeyValueTransactionContext context, NodeAst ast)
+    {
+        if (ast.leftAst is null)
+            throw new Exception("Invalid left expression");
+                
+        if (ast.rightAst is null)
+            throw new Exception("Invalid right expression");
+                
+        KeyValueExpressionResult left = Eval(context, ast.leftAst);
+        KeyValueExpressionResult right = Eval(context, ast.rightAst);
+        
+        switch (left.Type)
+        {
+            case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Long:
+                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.LongValue > right.LongValue };
+            
+            case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Long:
+                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.DoubleValue > right.LongValue };
+            
+            case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Double:
+                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.LongValue > right.DoubleValue };
+            
+            case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Double:
+                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.DoubleValue > right.DoubleValue };
+                
             default:
                 throw new Exception("Invalid operands: " + left.Type + " == " + right.Type);
         }

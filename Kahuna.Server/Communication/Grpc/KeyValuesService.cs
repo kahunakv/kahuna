@@ -201,7 +201,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
             };
         
-        (KeyValueResponseType type, _) = await keyValues.LocateAndTryAcquireExclusiveLock(
+        (KeyValueResponseType type, _, _) = await keyValues.LocateAndTryAcquireExclusiveLock(
             new(request.TransactionIdPhysical, request.TransactionIdCounter), 
             request.Key, 
             request.ExpiresMs, 
@@ -256,7 +256,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
             };
         
-        (KeyValueResponseType type, HLCTimestamp proposalTicket, string _) = await keyValues.LocateAndTryPrepareMutations(
+        (KeyValueResponseType type, HLCTimestamp proposalTicket, _, _) = await keyValues.LocateAndTryPrepareMutations(
             new(request.TransactionIdPhysical, request.TransactionIdCounter), 
             request.Key, 
             (KeyValueConsistency)request.Consistency, 
