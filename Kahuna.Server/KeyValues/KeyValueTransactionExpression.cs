@@ -129,6 +129,9 @@ public static class KeyValueTransactionExpression
             case "to_boolean":
                 return CastToBool(ast, arguments);
             
+            case "revision":
+                return GetRevision(ast, arguments);
+            
             default:
                 throw new KahunaScriptException($"Undefined function {ast.leftAst.yytext!} expression", ast.yyline);
         }
@@ -137,10 +140,11 @@ public static class KeyValueTransactionExpression
     private static KeyValueExpressionResult CastToLong(NodeAst ast, List<KeyValueExpressionResult> arguments)
     {
         if (arguments.Count != 1)
-            throw new KahunaScriptException("Invalid number of arguments for to_int function", ast.yyline);
+            throw new KahunaScriptException("Invalid number of arguments for 'to_int' function", ast.yyline);
 
         return arguments[0].Type switch
         {
+            KeyValueExpressionType.Bool => new() { Type = KeyValueExpressionType.Long, LongValue = arguments[0].BoolValue ? 1 : 0 },
             KeyValueExpressionType.Long => new() { Type = KeyValueExpressionType.Long, LongValue = arguments[0].LongValue },
             KeyValueExpressionType.Double => new() { Type = KeyValueExpressionType.Long, LongValue = (long)arguments[0].DoubleValue },
             KeyValueExpressionType.String => new() { Type = KeyValueExpressionType.Long, LongValue = long.Parse(arguments[0].StrValue ?? "0") },
@@ -151,7 +155,7 @@ public static class KeyValueTransactionExpression
     private static KeyValueExpressionResult CastToStr(NodeAst ast, List<KeyValueExpressionResult> arguments)
     {
         if (arguments.Count != 1)
-            throw new KahunaScriptException("Invalid number of arguments for to_str function", ast.yyline);
+            throw new KahunaScriptException("Invalid number of arguments for 'to_str' function", ast.yyline);
 
         return arguments[0].Type switch
         {
@@ -167,7 +171,7 @@ public static class KeyValueTransactionExpression
     private static KeyValueExpressionResult CastToBool(NodeAst ast, List<KeyValueExpressionResult> arguments)
     {
         if (arguments.Count != 1)
-            throw new KahunaScriptException("Invalid number of arguments for to_bool function", ast.yyline);
+            throw new KahunaScriptException("Invalid number of arguments for 'to_bool' function", ast.yyline);
 
         return arguments[0].Type switch
         {
@@ -177,6 +181,14 @@ public static class KeyValueTransactionExpression
             KeyValueExpressionType.String => new() { Type = KeyValueExpressionType.Bool, BoolValue = string.Compare(arguments[0].StrValue, "true", StringComparison.Ordinal) == 0 },
             _ => throw new KahunaScriptException($"Cannot cast {arguments[0].Type} to bool", ast.yyline)
         };
+    }
+    
+    private static KeyValueExpressionResult GetRevision(NodeAst ast, List<KeyValueExpressionResult> arguments)
+    {
+        if (arguments.Count != 1)
+            throw new KahunaScriptException("Invalid number of arguments for 'revision' function", ast.yyline);
+
+        return new() { Type = KeyValueExpressionType.Long, LongValue = arguments[0].Revision };
     }
 
     private static void GetFuncCallArguments(KeyValueTransactionContext context, NodeAst ast, List<KeyValueExpressionResult> arguments)

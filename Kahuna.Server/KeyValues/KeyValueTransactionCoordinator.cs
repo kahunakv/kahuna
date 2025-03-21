@@ -98,6 +98,7 @@ public sealed class KeyValueTransactionCoordinator
                     return await ExecuteTransaction(ast.leftAst!, false);
 
                 case NodeType.StmtList:
+                case NodeType.Let:
                 case NodeType.Integer:
                 case NodeType.String:
                 case NodeType.Float:
@@ -122,6 +123,8 @@ public sealed class KeyValueTransactionCoordinator
                 case NodeType.Return:
                     return await ExecuteTransaction(ast, true);
 
+                case NodeType.SetCmp:
+                case NodeType.SetCmpRev:
                 case NodeType.SetNotExists:
                 case NodeType.SetExists:
                     break;
@@ -131,7 +134,7 @@ public sealed class KeyValueTransactionCoordinator
                     throw new KahunaScriptException("Invalid transaction", ast.yyline);
 
                 default:
-                    throw new NotImplementedException();
+                    throw new KahunaScriptException("Unknown command: " + ast.nodeType, ast.yyline);
             }
 
             return new() { Type = KeyValueResponseType.Errored };
@@ -188,7 +191,7 @@ public sealed class KeyValueTransactionCoordinator
         if (ast.extendedThree is not null)
         {
             if (ast.extendedThree.leftAst is null)
-                throw new KahunaScriptException("Invalid SET cmp", ast.yyline);
+                throw new KahunaScriptException("Invalid SET cmp/cmprev", ast.yyline);
 
             if (ast.extendedThree.nodeType == NodeType.SetCmp)
             {

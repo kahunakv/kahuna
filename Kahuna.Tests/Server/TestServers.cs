@@ -8,7 +8,7 @@ public class TestServers
     [Fact]
     public void TestParserBegin()
     {
-        NodeAst ast = ScriptParserProcessor.Parse("BEGIN x = GET yy END");
+        NodeAst ast = ScriptParserProcessor.Parse("BEGIN LET x = GET yy END");
         
         Assert.Equal(NodeType.Begin, ast.nodeType);
         
