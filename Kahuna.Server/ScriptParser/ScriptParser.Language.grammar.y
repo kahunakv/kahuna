@@ -65,10 +65,12 @@ set_cmp : TCMP expression { $$.n = new(NodeType.SetCmp, $2.n, null, null, null, 
         ;
          
 eset_stmt : TESET identifier expression { $$.n = new(NodeType.Eset, $2.n, $3.n, null, null, null, null, null); }         
-       | TESET identifier expression TEX int { $$.n = new(NodeType.Eset, $2.n, $3.n, $5.n, null, null, null, null); }
-       | TESET identifier expression TEX int set_not_exists { $$.n = new(NodeType.Eset, $2.n, $3.n, $5.n, $6.n, null, null, null); }
-       | TESET identifier expression set_not_exists { $$.n = new(NodeType.Eset, $2.n, $3.n, null, $4.n, null, null, null); }
-       ;                     
+          | TESET identifier expression set_cmp { $$.n = new(NodeType.Eset, $2.n, $3.n, null, null, $4.n, null, null); }
+          | TESET identifier expression TEX int { $$.n = new(NodeType.Eset, $2.n, $3.n, $5.n, null, null, null, null); }
+          | TESET identifier expression set_cmp TEX int { $$.n = new(NodeType.Eset, $2.n, $3.n, $6.n, null, $4.n, null, null); }
+          | TESET identifier expression TEX int set_not_exists { $$.n = new(NodeType.Eset, $2.n, $3.n, $5.n, $6.n, null, null, null); }
+          | TESET identifier expression set_not_exists { $$.n = new(NodeType.Eset, $2.n, $3.n, null, $4.n, null, null, null); }
+          ;                  
          
 get_stmt : TGET identifier { $$.n = new(NodeType.Get, $2.n, null, null, null, null, null, null); }
          | TLET identifier TEQUALS TGET identifier { $$.n = new(NodeType.Get, $5.n, $2.n, null, null, null, null, null); }

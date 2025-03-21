@@ -1,4 +1,5 @@
 
+using System.Globalization;
 using System.Text;
 using Kahuna.Server.ScriptParser;
 
@@ -26,14 +27,29 @@ public static class KeyValueTransactionExpression
                 return new() { Type = KeyValueExpressionType.Bool, BoolValue = ast.yytext! == "true" };
             
             case NodeType.Equals:
-                return EvalEquals(context, ast);
+                return EvalEquals(context, ast, "==");
             
             case NodeType.GreaterThan:
-                return EvalGreaterThan(context, ast);
+                return EvalGreaterThan(context, ast, ">");
+            
+            case NodeType.LessThan:
+                return EvalLessThan(context, ast, "<");
+            
+            case NodeType.LessThanEquals:
+            {
+                KeyValueExpressionResult result = EvalGreaterThan(context, ast, "<=");
+                return new() { Type = KeyValueExpressionType.Bool, BoolValue = !result.BoolValue };
+            }
+            
+            case NodeType.GreaterThanEquals:
+            {
+                KeyValueExpressionResult result = EvalLessThan(context, ast, ">=");
+                return new() { Type = KeyValueExpressionType.Bool, BoolValue = !result.BoolValue };
+            }
             
             case NodeType.NotEquals:
             {
-                KeyValueExpressionResult result = EvalEquals(context, ast);
+                KeyValueExpressionResult result = EvalEquals(context, ast, "!=");
                 return new() { Type = KeyValueExpressionType.Bool, BoolValue = !result.BoolValue };
             }
             
@@ -52,11 +68,12 @@ public static class KeyValueTransactionExpression
             case NodeType.FuncCall:
                 return EvalFuncCall(context, ast);
             
-            case NodeType.LessThan:
-            case NodeType.LessThanEquals:
-            case NodeType.GreaterThanEquals:
             case NodeType.And:
+                return EvalAnd(context, ast);
+            
             case NodeType.Or:
+                return EvalOr(context, ast);
+            
             case NodeType.Not:
                 throw new NotImplementedException();
             
@@ -68,6 +85,8 @@ public static class KeyValueTransactionExpression
             case NodeType.If:
             case NodeType.SetNotExists:
             case NodeType.SetExists:
+            case NodeType.SetCmp:
+            case NodeType.SetCmpRev:
             case NodeType.Begin:
             case NodeType.Rollback:
             case NodeType.Commit:
@@ -99,10 +118,16 @@ public static class KeyValueTransactionExpression
         switch (ast.leftAst.yytext!)
         {
             case "to_int":
+            case "to_long":
+            case "to_number":
                 return CastToLong(arguments);
             
-            //case "to_str":
-            //    break;
+            case "to_str":
+                return CastToStr(arguments);
+            
+            case "to_bool":
+            case "to_boolean":
+                return CastToBool(arguments);
             
             default:
                 throw new Exception($"Undefined function {ast.leftAst.yytext!} expression");
@@ -117,9 +142,40 @@ public static class KeyValueTransactionExpression
         return arguments[0].Type switch
         {
             KeyValueExpressionType.Long => new() { Type = KeyValueExpressionType.Long, LongValue = arguments[0].LongValue },
-            KeyValueExpressionType.Double => new() { Type = KeyValueExpressionType.Long, DoubleValue = (long)arguments[0].DoubleValue },
+            KeyValueExpressionType.Double => new() { Type = KeyValueExpressionType.Long, LongValue = (long)arguments[0].DoubleValue },
             KeyValueExpressionType.String => new() { Type = KeyValueExpressionType.Long, LongValue = long.Parse(arguments[0].StrValue ?? "0") },
             _ => throw new Exception($"Cannot cast {arguments[0].Type} to int")
+        };
+    }
+    
+    private static KeyValueExpressionResult CastToStr(List<KeyValueExpressionResult> arguments)
+    {
+        if (arguments.Count != 1)
+            throw new Exception("Invalid number of arguments for to_str function");
+
+        return arguments[0].Type switch
+        {
+            KeyValueExpressionType.Long => new() { Type = KeyValueExpressionType.String, StrValue = arguments[0].LongValue.ToString() },
+            KeyValueExpressionType.Double => new() { Type = KeyValueExpressionType.String, StrValue = arguments[0].DoubleValue.ToString(CultureInfo.InvariantCulture) },
+            KeyValueExpressionType.String => new() { Type = KeyValueExpressionType.String, StrValue = arguments[0].StrValue ?? "" },
+            KeyValueExpressionType.Null => new() { Type = KeyValueExpressionType.String, StrValue = arguments[0].StrValue ?? "" },
+            KeyValueExpressionType.Bool => new() { Type = KeyValueExpressionType.String, StrValue = arguments[0].BoolValue.ToString() },
+            _ => throw new Exception($"Cannot cast {arguments[0].Type} to string")
+        };
+    }
+    
+    private static KeyValueExpressionResult CastToBool(List<KeyValueExpressionResult> arguments)
+    {
+        if (arguments.Count != 1)
+            throw new Exception("Invalid number of arguments for to_bool function");
+
+        return arguments[0].Type switch
+        {
+            KeyValueExpressionType.Bool => new() { Type = KeyValueExpressionType.Bool, BoolValue = arguments[0].BoolValue },
+            KeyValueExpressionType.Long => new() { Type = KeyValueExpressionType.Bool, BoolValue = arguments[0].LongValue != 0 },
+            KeyValueExpressionType.Double => new() { Type = KeyValueExpressionType.Bool, BoolValue = arguments[0].DoubleValue != 0 },
+            KeyValueExpressionType.String => new() { Type = KeyValueExpressionType.Bool, BoolValue = string.Compare(arguments[0].StrValue, "true", StringComparison.Ordinal) == 0 },
+            _ => throw new Exception($"Cannot cast {arguments[0].Type} to bool")
         };
     }
 
@@ -152,7 +208,7 @@ public static class KeyValueTransactionExpression
         }
     }
 
-    private static KeyValueExpressionResult EvalEquals(KeyValueTransactionContext context, NodeAst ast)
+    private static KeyValueExpressionResult EvalEquals(KeyValueTransactionContext context, NodeAst ast, string operatorType)
     {
         if (ast.leftAst is null)
             throw new Exception("Invalid left expression");
@@ -201,38 +257,69 @@ public static class KeyValueTransactionExpression
                 return new() { Type = KeyValueExpressionType.Bool, BoolValue = ((ReadOnlySpan<byte>)left.BytesValue).SequenceEqual(right.BytesValue) };
 
             default:
-                throw new Exception("Invalid operands: " + left.Type + " == " + right.Type);
+                throw new Exception($"Invalid operands: {left.Type} {operatorType} {right.Type}");
         }
     }
-    
-    private static KeyValueExpressionResult EvalGreaterThan(KeyValueTransactionContext context, NodeAst ast)
+
+    private static KeyValueExpressionResult EvalGreaterThan(KeyValueTransactionContext context, NodeAst ast,
+        string operatorType)
     {
         if (ast.leftAst is null)
             throw new Exception("Invalid left expression");
-                
+
         if (ast.rightAst is null)
             throw new Exception("Invalid right expression");
-                
+
         KeyValueExpressionResult left = Eval(context, ast.leftAst);
         KeyValueExpressionResult right = Eval(context, ast.rightAst);
-        
+
         switch (left.Type)
         {
             case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Long:
                 return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.LongValue > right.LongValue };
-            
+
             case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Long:
                 return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.DoubleValue > right.LongValue };
-            
+
             case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Double:
                 return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.LongValue > right.DoubleValue };
-            
+
             case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Double:
                 return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.DoubleValue > right.DoubleValue };
-                
+
             default:
-                throw new Exception("Invalid operands: " + left.Type + " == " + right.Type);
+                throw new Exception($"Invalid operands: {left.Type} {operatorType} {right.Type}");
         }
+    }
+
+    private static KeyValueExpressionResult EvalLessThan(KeyValueTransactionContext context, NodeAst ast, string operatorType)
+        {
+            if (ast.leftAst is null)
+                throw new Exception("Invalid left expression");
+                
+            if (ast.rightAst is null)
+                throw new Exception("Invalid right expression");
+                
+            KeyValueExpressionResult left = Eval(context, ast.leftAst);
+            KeyValueExpressionResult right = Eval(context, ast.rightAst);
+        
+            switch (left.Type)
+            {
+                case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Long:
+                    return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.LongValue < right.LongValue };
+            
+                case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Long:
+                    return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.DoubleValue < right.LongValue };
+            
+                case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Double:
+                    return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.LongValue < right.DoubleValue };
+            
+                case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Double:
+                    return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.DoubleValue < right.DoubleValue };
+                
+                default:
+                    throw new Exception($"Invalid operands: {left.Type} {operatorType} {right.Type}");
+            }
     }
 
     private static KeyValueExpressionResult EvalAdd(KeyValueTransactionContext context, NodeAst ast)
@@ -352,6 +439,72 @@ public static class KeyValueTransactionExpression
                 
             default:
                 throw new Exception("Invalid operands: " + left.Type + " == " + right.Type);
+        }
+    }
+    
+    private static KeyValueExpressionResult EvalAnd(KeyValueTransactionContext context, NodeAst ast)
+    {
+        if (ast.leftAst is null)
+            throw new Exception("Invalid left expression");
+                
+        if (ast.rightAst is null)
+            throw new Exception("Invalid right expression");
+                
+        KeyValueExpressionResult left = Eval(context, ast.leftAst);
+        KeyValueExpressionResult right = Eval(context, ast.rightAst);
+        
+        switch (left.Type)
+        {
+            case KeyValueExpressionType.Bool when right.Type == KeyValueExpressionType.Bool:
+                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.BoolValue && right.BoolValue };
+            
+            case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Long:
+                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.LongValue != 0 && right.LongValue != 0 };
+            
+            case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Long:
+                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.DoubleValue != 0 && right.LongValue != 0 };
+            
+            case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Double:
+                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.LongValue != 0 && right.DoubleValue != 0 };
+            
+            case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Double:
+                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.DoubleValue != 0 && right.DoubleValue != 0 };
+                
+            default:
+                throw new Exception("Invalid operands: " + left.Type + " and " + right.Type);
+        }
+    }
+    
+    private static KeyValueExpressionResult EvalOr(KeyValueTransactionContext context, NodeAst ast)
+    {
+        if (ast.leftAst is null)
+            throw new Exception("Invalid left expression");
+                
+        if (ast.rightAst is null)
+            throw new Exception("Invalid right expression");
+                
+        KeyValueExpressionResult left = Eval(context, ast.leftAst);
+        KeyValueExpressionResult right = Eval(context, ast.rightAst);
+        
+        switch (left.Type)
+        {
+            case KeyValueExpressionType.Bool when right.Type == KeyValueExpressionType.Bool:
+                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.BoolValue || right.BoolValue };
+            
+            case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Long:
+                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.LongValue != 0 || right.LongValue != 0 };
+            
+            case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Long:
+                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.DoubleValue != 0 || right.LongValue != 0 };
+            
+            case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Double:
+                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.LongValue != 0 || right.DoubleValue != 0 };
+            
+            case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Double:
+                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.DoubleValue != 0 || right.DoubleValue != 0 };
+                
+            default:
+                throw new Exception("Invalid operands: " + left.Type + " and " + right.Type);
         }
     }
 }

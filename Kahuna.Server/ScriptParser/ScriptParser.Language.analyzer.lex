@@ -28,7 +28,7 @@ TEDelete        (E|e)(D|d)(E|e)(L|l)(E|e)(T|t)(E|e)
 TExtend         (E|e)(X|x)(T|t)(E|e)(N|n)(D|d)
 TEExtend        (E|e)(E|e)(X|x)(T|t)(E|e)(N|n)(D|d)
 TTrue           (T|t)(R|r)(U|u)(E|e)
-TFalse          (F|f)(A|a)(L|L)(S|s)(E|e)
+TFalse          (F|f)(A|a)(L|l)(S|s)(E|e)
 LParen          \(
 RParen          \)
 LBrace          \{
@@ -66,6 +66,8 @@ TLess           <
 TGreater        >
 TLessEquals     <=
 TGreaterEquals  >=
+TOr             \|\|
+TAnd            &&
 
 %{
 
@@ -154,6 +156,10 @@ TGreaterEquals  >=
 {TMult} { return (int)Token.TMULT; }
 
 {TDiv} { return (int)Token.TDIV; }
+
+{TOr} { return (int)Token.TOR; }
+
+{TAnd} { return (int)Token.TAND; }
 
 {TLess} { return (int)Token.TLESSTHAN; }
 

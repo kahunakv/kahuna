@@ -1,4 +1,5 @@
 
+using System.Text;
 using Nixie;
 using Google.Protobuf;
 
@@ -130,12 +131,18 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
                         newContext.Value = null;
                         exists = false;
                     }
-
-                    if (newContext.Expires != HLCTimestamp.Zero && newContext.Expires - currentTime < TimeSpan.Zero)
+                    else
                     {
-                        newContext.State = KeyValueState.Deleted;
-                        newContext.Value = null;
-                        exists = false;
+                        if (newContext.Expires != HLCTimestamp.Zero && newContext.Expires - currentTime < TimeSpan.Zero)
+                        {
+                            newContext.State = KeyValueState.Deleted;
+                            newContext.Value = null;
+                            exists = false;
+                        }
+                        else
+                        {
+                            exists = true;
+                        }
                     }
                 }
             }
@@ -215,6 +222,9 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
             
             return new(KeyValueResponseType.Set, context.Revision);
         }
+        
+        if (message.CompareValue is not null)
+            Console.WriteLine("{0} {1} {2} {3}", exists, Encoding.UTF8.GetString(context.Value ?? []), Encoding.UTF8.GetString(message.Value ?? []), Encoding.UTF8.GetString(message.CompareValue ?? []));
         
         switch (message.Flags)
         {

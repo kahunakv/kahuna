@@ -171,14 +171,35 @@ public sealed class KeyValueTransactionCoordinator
                 flags = KeyValueFlags.SetIfExists;
         }
         
-        KeyValueTransactionResult result = KeyValueTransactionExpression.Eval(context, ast.rightAst).ToTransactionRsult();
+        long compareRevision = 0;
+        byte[]? compareValue = null;
+
+        if (ast.extendedThree is not null)
+        {
+            if (ast.extendedThree.leftAst is null)
+                throw new Exception("Invalid SET cmp");
+
+            if (ast.extendedThree.nodeType == NodeType.SetCmp)
+            {
+                flags = KeyValueFlags.SetIfEqualToValue;
+                compareValue = KeyValueTransactionExpression.Eval(context, ast.extendedThree.leftAst).ToBytes();
+            }
+            
+            if (ast.extendedThree.nodeType == NodeType.SetCmpRev)
+            {
+                flags = KeyValueFlags.SetIfEqualToRevision;
+                compareRevision = KeyValueTransactionExpression.Eval(context, ast.extendedThree.leftAst).Revision;
+            }
+        }
+        
+        KeyValueTransactionResult result = KeyValueTransactionExpression.Eval(context, ast.rightAst).ToTransactionResult();
         
         (KeyValueResponseType type, long revision) = await manager.LocateAndTrySetKeyValue(
             context.TransactionId,
             key: ast.leftAst.yytext,
             value: result.Value,
-            null,
-            0,
+            compareValue,
+            compareRevision,
             flags,
             expiresMs,
             consistency,
@@ -294,7 +315,8 @@ public sealed class KeyValueTransactionCoordinator
             context.SetVariable(ast.rightAst.yytext!, new()
             {
                 Type = KeyValueExpressionType.String, 
-                StrValue = Encoding.UTF8.GetString(readOnlyContext.Value ?? [])
+                StrValue = Encoding.UTF8.GetString(readOnlyContext.Value ?? []),
+                Revision = readOnlyContext.Revision
             });
             
         return new()
@@ -509,7 +531,7 @@ public sealed class KeyValueTransactionCoordinator
                 
                 case NodeType.Return:
                     if (ast.leftAst is not null)
-                        context.Result = KeyValueTransactionExpression.Eval(context, ast.leftAst).ToTransactionRsult();
+                        context.Result = KeyValueTransactionExpression.Eval(context, ast.leftAst).ToTransactionResult();
                     
                     context.Status = KeyValueExecutionStatus.Stop;
                     break;
@@ -537,7 +559,7 @@ public sealed class KeyValueTransactionCoordinator
                 case NodeType.Div:
                 case NodeType.FuncCall:
                 case NodeType.ArgumentList:
-                    context.Result = KeyValueTransactionExpression.Eval(context, ast).ToTransactionRsult();
+                    context.Result = KeyValueTransactionExpression.Eval(context, ast).ToTransactionResult();
                     break;
                     
                 case NodeType.SetNotExists:
@@ -588,6 +610,8 @@ public sealed class KeyValueTransactionCoordinator
             throw new Exception("Invalid LET expression");
         
         KeyValueExpressionResult result = KeyValueTransactionExpression.Eval(context, ast.rightAst);
+        
+        context.Result = result.ToTransactionResult();
         
         context.SetVariable(ast.leftAst.yytext!, result);
     }

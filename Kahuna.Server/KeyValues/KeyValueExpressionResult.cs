@@ -31,7 +31,7 @@ public class KeyValueExpressionResult
     
     public long Revision { get; set; }
 
-    public KeyValueTransactionResult ToTransactionRsult()
+    public KeyValueTransactionResult ToTransactionResult()
     {
         return Type switch
         {
@@ -55,6 +55,20 @@ public class KeyValueExpressionResult
             KeyValueExpressionType.Double => DoubleValue.ToString(CultureInfo.InvariantCulture),
             KeyValueExpressionType.String => StrValue ?? "(null)",
             KeyValueExpressionType.Bytes => "(bytes)",
+            _ => throw new ArgumentOutOfRangeException()
+        };
+    }
+
+    public byte[]? ToBytes()
+    {
+        return Type switch
+        {
+            KeyValueExpressionType.Null => null,
+            KeyValueExpressionType.Bool => BoolValue ? "true"u8.ToArray() : "false"u8.ToArray(),
+            KeyValueExpressionType.Long => Encoding.UTF8.GetBytes(LongValue.ToString()),
+            KeyValueExpressionType.Double => Encoding.UTF8.GetBytes(DoubleValue.ToString(CultureInfo.InvariantCulture)),
+            KeyValueExpressionType.String => StrValue is not null ? Encoding.UTF8.GetBytes(StrValue) : null,
+            KeyValueExpressionType.Bytes => BytesValue,
             _ => throw new ArgumentOutOfRangeException()
         };
     }

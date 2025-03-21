@@ -1,6 +1,6 @@
 Server:
 - Fix missing expr in script parser
-- Return verbose error to the client in failed transactions
+- Return verbose error (including lines) to the client in failed transactions
 - Support function calls in scripts
 - Add support for NX flag in extend
 - Add support for placeholders in script parser

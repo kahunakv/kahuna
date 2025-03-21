@@ -43,7 +43,7 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "edel",
         "edelete",
         "eextend",
-        // linearizable key/values
+        // key/values
         "set",
         "get",
         "del",
@@ -52,7 +52,10 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "nx",
         "xx",
         "ex",
+        "cmp",
+        "cmprev",
         // control structures
+        "let",
         "if",
         "then",
         "end",
@@ -67,7 +70,16 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "get-lock",
     ];
 
-    string[] functions = [];
+    string[] functions = [
+        "to_int",
+        "to_long",
+        "to_double",
+        "to_float",
+        "to_boolean",
+        "to_string",
+        "to_str",
+        "revision",
+    ];
 
     string[] commands =
     [
@@ -76,12 +88,20 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "exit",
         "quit"
     ];
+    
+    string[] constants =
+    [
+        "null",
+        "true",
+        "false"
+    ];
 
     WordHighlighter worldHighlighter = new();
 
     Style funcStyle = new(foreground: Color.Aqua);
     Style keywordStyle = new(foreground: Color.Blue);
     Style commandStyle = new(foreground: Color.LightSkyBlue1);
+    Style constantsStyle = new(foreground: Color.LightPink3);
 
     foreach (string keyword in keywords)
         worldHighlighter.AddWord(keyword, keywordStyle);
@@ -91,6 +111,9 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
 
     foreach (string command in commands)
         worldHighlighter.AddWord(command, commandStyle);
+    
+    foreach (string constant in constants)
+        worldHighlighter.AddWord(constant, constantsStyle);
 
     editor = new()
     {
