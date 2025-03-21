@@ -18,7 +18,7 @@ public static class KeyValueTransactionExpression
                 return new() { Type = KeyValueExpressionType.Long, LongValue = long.Parse(ast.yytext!) };
             
             case NodeType.String:
-                return new() { Type = KeyValueExpressionType.String, StrValue = ast.yytext!.Trim('\"') };
+                return new() { Type = KeyValueExpressionType.String, StrValue = ast.yytext! };
             
             case NodeType.Float:
                 return new() { Type = KeyValueExpressionType.String, DoubleValue = double.Parse(ast.yytext!) };

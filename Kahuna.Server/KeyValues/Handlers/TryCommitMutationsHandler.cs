@@ -1,0 +1,137 @@
+
+using Kahuna.Server.Persistence;
+using Kahuna.Shared.KeyValue;
+using Kommander;
+using Kommander.Data;
+using Kommander.Time;
+using Nixie;
+
+namespace Kahuna.Server.KeyValues.Handlers;
+
+internal sealed class TryCommitMutationsHandler : BaseHandler
+{
+    public TryCommitMutationsHandler(
+        Dictionary<string, KeyValueContext> keyValuesStore,
+        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
+        IPersistence persistence,
+        IRaft raft,
+        ILogger<IKahuna> logger
+    ) : base(keyValuesStore, backgroundWriter, persistence, raft, logger)
+    {
+
+    }
+
+    public async Task<KeyValueResponse> Execute(KeyValueRequest message)
+    {
+        if (message.TransactionId == HLCTimestamp.Zero)
+        {
+            logger.LogWarning("Cannot commit mutations for missing transaction id");
+            
+            return new(KeyValueResponseType.Errored);
+        }
+
+        KeyValueContext? context = await GetKeyValueContext(message.Key, message.Consistency);
+
+        if (context is null)
+        {
+            logger.LogWarning("Key/Value context is missing for {TransactionId}", message.TransactionId);
+            
+            return new(KeyValueResponseType.Errored);
+        }
+
+        if (context.WriteIntent is null)
+        {
+            logger.LogWarning("Write intent is missing for {TransactionId}", message.TransactionId);
+            
+            return new(KeyValueResponseType.Errored);
+        }
+
+        if (context.WriteIntent.TransactionId != message.TransactionId)
+        {
+            logger.LogWarning("Write intent conflict between {CurrentTransactionId} and {TransactionId}", context.WriteIntent.TransactionId, message.TransactionId);
+            
+            return new(KeyValueResponseType.Errored);
+        }
+
+        if (context.MvccEntries is null)
+        {
+            logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [1]", message.TransactionId);
+            
+            return new(KeyValueResponseType.Errored);
+        }
+
+        if (!context.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? entry))
+        {
+            logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [2]", message.TransactionId);
+            
+            return new(KeyValueResponseType.Errored);
+        }
+
+        KeyValueProposal proposal = new(
+            message.Key,
+            entry.Value,
+            entry.Revision,
+            entry.Expires,
+            entry.LastUsed,
+            entry.State
+        );
+
+        if (message.Consistency != KeyValueConsistency.Linearizable)
+        {
+            context.Value = proposal.Value;
+            context.Expires = proposal.Expires;
+            context.Revision = proposal.Revision;
+            context.LastUsed = proposal.LastUsed;
+            context.State = proposal.State;
+            
+            context.MvccEntries.Remove(message.TransactionId);
+            
+            return new(KeyValueResponseType.Committed);
+        }
+        
+        (bool success, long commitIndex) = await CommitKeyValueMessage(message.Key, message.ProposalTicketId);
+        
+        if (!success)
+            return new(KeyValueResponseType.Errored);
+        
+        context.Value = proposal.Value;
+        context.Expires = proposal.Expires;
+        context.Revision = proposal.Revision;
+        context.LastUsed = proposal.LastUsed;
+        context.State = proposal.State;
+        
+        context.MvccEntries.Remove(message.TransactionId);
+        
+        return new(KeyValueResponseType.Committed, commitIndex);
+    }
+    
+    /// <summary>
+    /// Commits a previously proposed key value message
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="proposalTicketId"></param>
+    /// <returns></returns>
+    private async Task<(bool, long)> CommitKeyValueMessage(string key, HLCTimestamp proposalTicketId)
+    {
+        if (!raft.Joined)
+            return (true, 0);
+
+        int partitionId = raft.GetPartitionKey(key);
+
+        (bool success, RaftOperationStatus status, long commitLogId) = await raft.CommitLogs(
+            partitionId,
+            proposalTicketId
+        );
+
+        if (!success)
+        {
+            logger.LogWarning("Failed to commit key/value {Key} Partition={Partition} Status={Status}", key, partitionId, status);
+            
+            return (false, 0);
+        }
+        
+        logger.LogDebug("Successfully commmitted key/value {Key} Partition={Partition} ProposalIndex={ProposalIndex}", key, partitionId, commitLogId);
+
+        return (success, commitLogId);
+    }
+}

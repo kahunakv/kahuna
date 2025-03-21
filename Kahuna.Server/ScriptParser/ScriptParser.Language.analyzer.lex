@@ -81,9 +81,9 @@ TAnd            &&
 
 {Decimal}		{ yylval.l = yyline; yylval.s = yytext; return (int)Token.TFLOAT; }
 
-{String}		{ yylval.l = yyline; yylval.s = yytext; return (int)Token.TSTRING; }
+{String}		{ yylval.l = yyline; yylval.s = yytext.Trim('\"'); return (int)Token.TSTRING; }
 
-{StringSingle}  { yylval.l = yyline; yylval.s = yytext; return (int)Token.TSTRING; }
+{StringSingle}  { yylval.l = yyline; yylval.s = yytext.Trim('\''); return (int)Token.TSTRING; }
 
 {Space}+		/* skip */
 

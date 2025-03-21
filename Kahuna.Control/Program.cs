@@ -24,7 +24,7 @@ if (opts is null)
 
 AnsiConsole.MarkupLine("[green]Kahuna Shell 0.0.1 (alpha)[/]\n");
 
-string historyPath = Path.GetTempPath() + Path.PathSeparator + "kahuna.history.json";
+string historyPath = string.Concat(Path.GetTempPath(), Path.PathSeparator, "kahuna.history.json"));
 List<string> history = await GetHistory(historyPath);
 
 KahunaClient connection = await GetConnection(opts);
@@ -294,10 +294,14 @@ static Task<KahunaClient> GetConnection(Options opts)
 {
     string? connectionString = opts.ConnectionSource;
 
-    if (string.IsNullOrEmpty(connectionString))
-        connectionString = "https://localhost:8082";
+    string[] connectionPool;
 
-    return Task.FromResult(new KahunaClient(connectionString, null, new Kahuna.Client.Communication.GrpcCommunication(null)));
+    if (string.IsNullOrEmpty(connectionString))
+        connectionPool = ["https://localhost:8082", "https://localhost:8084", "https://localhost:8086"];
+    else
+        connectionPool = connectionString.Split(",", StringSplitOptions.RemoveEmptyEntries).ToArray();
+
+    return Task.FromResult(new KahunaClient(connectionPool, null, new Kahuna.Client.Communication.GrpcCommunication(null)));
 }
 
 static async Task<List<string>> GetHistory(string historyPath)
