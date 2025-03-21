@@ -16,6 +16,8 @@ public sealed class KeyValueTransactionResult
     public long Revision { get; set; }
     
     public HLCTimestamp Expires { get; set; }
+    
+    public string? Reason { get; set; } 
 
     public KeyValueExpressionResult ToExpressionResult()
     {

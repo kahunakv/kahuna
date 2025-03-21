@@ -1,15 +1,11 @@
 Server:
 - Fix missing expr in script parser
-- Return verbose error (including lines) to the client in failed transactions
-- Support function calls in scripts
 - Add support for NX flag in extend
 - Add support for placeholders in script parser
-- Escaped identifiers
-- Sequencer 
-- Make SET flags order independent
+- Sequencer
 - Make scripts tests
 - Make Disk durability default
-- Rename LockDurability to LockDurability
+- Rename KeyValueDurability
 - Add server tests
 
 Client:

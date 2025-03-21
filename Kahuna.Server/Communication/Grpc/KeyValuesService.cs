@@ -359,6 +359,9 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         if (result.Value is not null)
             response.Value = UnsafeByteOperations.UnsafeWrap(result.Value);
         
+        if (result.Reason is not null)
+            response.Reason = result.Reason;
+        
         return response;
     }
 }

@@ -195,7 +195,8 @@ public static class KeyValuesHandlers
                 Type = result.Type,
                 Value = result.Value,
                 Revision = result.Revision,
-                Expires = result.Expires
+                Expires = result.Expires,
+                Reason = result.Reason
             };
         });
     }

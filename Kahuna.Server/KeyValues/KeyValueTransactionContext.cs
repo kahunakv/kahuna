@@ -1,4 +1,5 @@
 
+using Kahuna.Server.ScriptParser;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 
@@ -18,22 +19,22 @@ public sealed class KeyValueTransactionContext
 
     private Dictionary<string , KeyValueExpressionResult>? Variables { get; set; }
 
-    public KeyValueExpressionResult GetVariable(string varName)
+    public KeyValueExpressionResult GetVariable(NodeAst ast, string varName)
     {
-        Console.WriteLine("Get variable {0}", varName);
+        //Console.WriteLine("Get variable {0}", varName);
         
         if (Variables is null)
-            throw new InvalidOperationException("Undefined variable: " + varName);
+            throw new KahunaScriptException("Undefined variable: " + varName, ast.yyline);
         
         if (!Variables.TryGetValue(varName, out KeyValueExpressionResult? value))
-            throw new InvalidOperationException("Undefined variable: " + varName);
+            throw new KahunaScriptException("Undefined variable: " + varName, ast.yyline);
 
         return value;
     }
     
-    public void SetVariable(string varName, KeyValueExpressionResult value)
+    public void SetVariable(NodeAst ast, string varName, KeyValueExpressionResult value)
     {
-        Console.WriteLine("Set variable {0} {1}", varName, value.ToString());
+        //Console.WriteLine("Set variable {0} {1}", varName, value.ToString());
         
         Variables ??= new();
         

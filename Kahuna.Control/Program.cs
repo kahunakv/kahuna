@@ -353,7 +353,7 @@ async Task RunCommand(string commandTrim)
     else if (result.Type == KeyValueResponseType.Extended)
         AnsiConsole.MarkupLine("r{0} [yellow]extended[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
     else
-        AnsiConsole.MarkupLine("r{0} [yellow]null[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
+        AnsiConsole.MarkupLine("[yellow]{0}[/]ms\n", result.Type, stopwatch.ElapsedMilliseconds);
 }
 
 async Task LoadAndRunScript(string commandTrim)
@@ -372,9 +372,16 @@ async Task LoadAndRunScript(string commandTrim)
     if (string.IsNullOrWhiteSpace(scriptText))
         return;
     
-    AnsiConsole.MarkupLine("[purple]{0}[/]", Markup.Escape(scriptText));
+    try
+    {    
+        AnsiConsole.MarkupLine("[purple]{0}[/]", Markup.Escape(scriptText));
 
-    await RunCommand(scriptText);
+        await RunCommand(scriptText);
+    }
+    catch (Exception ex)
+    {
+        AnsiConsole.MarkupLine("[red]{0}[/]: {1}\n", Markup.Escape(ex.GetType().Name), Markup.Escape(ex.Message));
+    }
 }
 
 public sealed class MyLineNumberPrompt : ILineEditorPrompt

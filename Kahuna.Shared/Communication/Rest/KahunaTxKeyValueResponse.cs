@@ -15,4 +15,6 @@ public sealed class KahunaTxKeyValueResponse
     public long Revision { get; set; }
     
     public HLCTimestamp Expires { get; set; }
+    
+    public string? Reason { get; set; }
 }

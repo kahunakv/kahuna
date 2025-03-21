@@ -12,7 +12,7 @@ public static class KeyValueTransactionExpression
         switch (ast.nodeType)
         {
             case NodeType.Identifier:
-                return context.GetVariable(ast.yytext!);
+                return context.GetVariable(ast, ast.yytext!);
             
             case NodeType.Integer:
                 return new() { Type = KeyValueExpressionType.Long, LongValue = long.Parse(ast.yytext!) };
@@ -106,10 +106,10 @@ public static class KeyValueTransactionExpression
     private static KeyValueExpressionResult EvalFuncCall(KeyValueTransactionContext context, NodeAst ast)
     {
         if (ast.leftAst is null)
-            throw new Exception("Invalid left expression");
+            throw new KahunaScriptException("Invalid left expression", ast.yyline);
                 
         if (ast.rightAst is null)
-            throw new Exception("Invalid right expression");
+            throw new KahunaScriptException("Invalid right expression", ast.yyline);
         
         List<KeyValueExpressionResult> arguments = [];
         
@@ -120,38 +120,38 @@ public static class KeyValueTransactionExpression
             case "to_int":
             case "to_long":
             case "to_number":
-                return CastToLong(arguments);
+                return CastToLong(ast, arguments);
             
             case "to_str":
-                return CastToStr(arguments);
+                return CastToStr(ast, arguments);
             
             case "to_bool":
             case "to_boolean":
-                return CastToBool(arguments);
+                return CastToBool(ast, arguments);
             
             default:
-                throw new Exception($"Undefined function {ast.leftAst.yytext!} expression");
+                throw new KahunaScriptException($"Undefined function {ast.leftAst.yytext!} expression", ast.yyline);
         }
     }
 
-    private static KeyValueExpressionResult CastToLong(List<KeyValueExpressionResult> arguments)
+    private static KeyValueExpressionResult CastToLong(NodeAst ast, List<KeyValueExpressionResult> arguments)
     {
         if (arguments.Count != 1)
-            throw new Exception("Invalid number of arguments for to_int function");
+            throw new KahunaScriptException("Invalid number of arguments for to_int function", ast.yyline);
 
         return arguments[0].Type switch
         {
             KeyValueExpressionType.Long => new() { Type = KeyValueExpressionType.Long, LongValue = arguments[0].LongValue },
             KeyValueExpressionType.Double => new() { Type = KeyValueExpressionType.Long, LongValue = (long)arguments[0].DoubleValue },
             KeyValueExpressionType.String => new() { Type = KeyValueExpressionType.Long, LongValue = long.Parse(arguments[0].StrValue ?? "0") },
-            _ => throw new Exception($"Cannot cast {arguments[0].Type} to int")
+            _ => throw new KahunaScriptException($"Cannot cast {arguments[0].Type} to int", ast.yyline)
         };
     }
     
-    private static KeyValueExpressionResult CastToStr(List<KeyValueExpressionResult> arguments)
+    private static KeyValueExpressionResult CastToStr(NodeAst ast, List<KeyValueExpressionResult> arguments)
     {
         if (arguments.Count != 1)
-            throw new Exception("Invalid number of arguments for to_str function");
+            throw new KahunaScriptException("Invalid number of arguments for to_str function", ast.yyline);
 
         return arguments[0].Type switch
         {
@@ -160,14 +160,14 @@ public static class KeyValueTransactionExpression
             KeyValueExpressionType.String => new() { Type = KeyValueExpressionType.String, StrValue = arguments[0].StrValue ?? "" },
             KeyValueExpressionType.Null => new() { Type = KeyValueExpressionType.String, StrValue = arguments[0].StrValue ?? "" },
             KeyValueExpressionType.Bool => new() { Type = KeyValueExpressionType.String, StrValue = arguments[0].BoolValue.ToString() },
-            _ => throw new Exception($"Cannot cast {arguments[0].Type} to string")
+            _ => throw new KahunaScriptException($"Cannot cast {arguments[0].Type} to string", ast.yyline)
         };
     }
     
-    private static KeyValueExpressionResult CastToBool(List<KeyValueExpressionResult> arguments)
+    private static KeyValueExpressionResult CastToBool(NodeAst ast, List<KeyValueExpressionResult> arguments)
     {
         if (arguments.Count != 1)
-            throw new Exception("Invalid number of arguments for to_bool function");
+            throw new KahunaScriptException("Invalid number of arguments for to_bool function", ast.yyline);
 
         return arguments[0].Type switch
         {
@@ -175,7 +175,7 @@ public static class KeyValueTransactionExpression
             KeyValueExpressionType.Long => new() { Type = KeyValueExpressionType.Bool, BoolValue = arguments[0].LongValue != 0 },
             KeyValueExpressionType.Double => new() { Type = KeyValueExpressionType.Bool, BoolValue = arguments[0].DoubleValue != 0 },
             KeyValueExpressionType.String => new() { Type = KeyValueExpressionType.Bool, BoolValue = string.Compare(arguments[0].StrValue, "true", StringComparison.Ordinal) == 0 },
-            _ => throw new Exception($"Cannot cast {arguments[0].Type} to bool")
+            _ => throw new KahunaScriptException($"Cannot cast {arguments[0].Type} to bool", ast.yyline)
         };
     }
 
@@ -211,10 +211,10 @@ public static class KeyValueTransactionExpression
     private static KeyValueExpressionResult EvalEquals(KeyValueTransactionContext context, NodeAst ast, string operatorType)
     {
         if (ast.leftAst is null)
-            throw new Exception("Invalid left expression");
+            throw new KahunaScriptException("Invalid left expression", ast.yyline);
                 
         if (ast.rightAst is null)
-            throw new Exception("Invalid right expression");
+            throw new KahunaScriptException("Invalid right expression", ast.yyline);
         
         KeyValueExpressionResult left = Eval(context, ast.leftAst);
         KeyValueExpressionResult right = Eval(context, ast.rightAst);
@@ -257,7 +257,7 @@ public static class KeyValueTransactionExpression
                 return new() { Type = KeyValueExpressionType.Bool, BoolValue = ((ReadOnlySpan<byte>)left.BytesValue).SequenceEqual(right.BytesValue) };
 
             default:
-                throw new Exception($"Invalid operands: {left.Type} {operatorType} {right.Type}");
+                throw new KahunaScriptException($"Invalid operands: {left.Type} {operatorType} {right.Type}", ast.yyline);
         }
     }
 
@@ -265,10 +265,10 @@ public static class KeyValueTransactionExpression
         string operatorType)
     {
         if (ast.leftAst is null)
-            throw new Exception("Invalid left expression");
+            throw new KahunaScriptException("Invalid left expression", ast.yyline);
 
         if (ast.rightAst is null)
-            throw new Exception("Invalid right expression");
+            throw new KahunaScriptException("Invalid right expression", ast.yyline);
 
         KeyValueExpressionResult left = Eval(context, ast.leftAst);
         KeyValueExpressionResult right = Eval(context, ast.rightAst);
@@ -288,17 +288,17 @@ public static class KeyValueTransactionExpression
                 return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.DoubleValue > right.DoubleValue };
 
             default:
-                throw new Exception($"Invalid operands: {left.Type} {operatorType} {right.Type}");
+                throw new KahunaScriptException($"Invalid operands: {left.Type} {operatorType} {right.Type}", ast.yyline);
         }
     }
 
     private static KeyValueExpressionResult EvalLessThan(KeyValueTransactionContext context, NodeAst ast, string operatorType)
         {
             if (ast.leftAst is null)
-                throw new Exception("Invalid left expression");
+                throw new KahunaScriptException("Invalid left expression", ast.yyline);
                 
             if (ast.rightAst is null)
-                throw new Exception("Invalid right expression");
+                throw new KahunaScriptException("Invalid right expression", ast.yyline);
                 
             KeyValueExpressionResult left = Eval(context, ast.leftAst);
             KeyValueExpressionResult right = Eval(context, ast.rightAst);
@@ -318,17 +318,17 @@ public static class KeyValueTransactionExpression
                     return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.DoubleValue < right.DoubleValue };
                 
                 default:
-                    throw new Exception($"Invalid operands: {left.Type} {operatorType} {right.Type}");
+                    throw new KahunaScriptException($"Invalid operands: {left.Type} {operatorType} {right.Type}", ast.yyline);
             }
     }
 
     private static KeyValueExpressionResult EvalAdd(KeyValueTransactionContext context, NodeAst ast)
     {
         if (ast.leftAst is null)
-            throw new Exception("Invalid left expression");
+            throw new KahunaScriptException("Invalid left expression", ast.yyline);
                 
         if (ast.rightAst is null)
-            throw new Exception("Invalid right expression");
+            throw new KahunaScriptException("Invalid right expression", ast.yyline);
                 
         KeyValueExpressionResult left = Eval(context, ast.leftAst);
         KeyValueExpressionResult right = Eval(context, ast.rightAst);
@@ -348,17 +348,17 @@ public static class KeyValueTransactionExpression
                 return new() { Type = KeyValueExpressionType.Double, DoubleValue = left.DoubleValue + right.DoubleValue };
                 
             default:
-                throw new Exception("Invalid operands: " + left.Type + " == " + right.Type);
+                throw new KahunaScriptException("Invalid operands: " + left.Type + " + " + right.Type, ast.yyline);
         }
     }
     
     private static KeyValueExpressionResult EvalSub(KeyValueTransactionContext context, NodeAst ast)
     {
         if (ast.leftAst is null)
-            throw new Exception("Invalid left expression");
+            throw new KahunaScriptException("Invalid left expression", ast.yyline);
                 
         if (ast.rightAst is null)
-            throw new Exception("Invalid right expression");
+            throw new KahunaScriptException("Invalid right expression", ast.yyline);
                 
         KeyValueExpressionResult left = Eval(context, ast.leftAst);
         KeyValueExpressionResult right = Eval(context, ast.rightAst);
@@ -378,17 +378,17 @@ public static class KeyValueTransactionExpression
                 return new() { Type = KeyValueExpressionType.Double, DoubleValue = left.DoubleValue - right.DoubleValue };
                 
             default:
-                throw new Exception("Invalid operands: " + left.Type + " == " + right.Type);
+                throw new KahunaScriptException("Invalid operands: " + left.Type + " - " + right.Type, ast.yyline);
         }
     }
     
     private static KeyValueExpressionResult EvalMult(KeyValueTransactionContext context, NodeAst ast)
     {
         if (ast.leftAst is null)
-            throw new Exception("Invalid left expression");
+            throw new KahunaScriptException("Invalid left expression", ast.yyline);
                 
         if (ast.rightAst is null)
-            throw new Exception("Invalid right expression");
+            throw new KahunaScriptException("Invalid right expression", ast.yyline);
                 
         KeyValueExpressionResult left = Eval(context, ast.leftAst);
         KeyValueExpressionResult right = Eval(context, ast.rightAst);
@@ -408,17 +408,17 @@ public static class KeyValueTransactionExpression
                 return new() { Type = KeyValueExpressionType.Double, DoubleValue = left.DoubleValue * right.DoubleValue };
                 
             default:
-                throw new Exception("Invalid operands: " + left.Type + " == " + right.Type);
+                throw new KahunaScriptException("Invalid operands: " + left.Type + " * " + right.Type, ast.yyline);
         }
     }
     
     private static KeyValueExpressionResult EvalDiv(KeyValueTransactionContext context, NodeAst ast)
     {
         if (ast.leftAst is null)
-            throw new Exception("Invalid left expression");
+            throw new KahunaScriptException("Invalid left expression", ast.yyline);
                 
         if (ast.rightAst is null)
-            throw new Exception("Invalid right expression");
+            throw new KahunaScriptException("Invalid right expression", ast.yyline);
                 
         KeyValueExpressionResult left = Eval(context, ast.leftAst);
         KeyValueExpressionResult right = Eval(context, ast.rightAst);
@@ -438,17 +438,17 @@ public static class KeyValueTransactionExpression
                 return new() { Type = KeyValueExpressionType.Double, DoubleValue = left.DoubleValue / right.DoubleValue };
                 
             default:
-                throw new Exception("Invalid operands: " + left.Type + " == " + right.Type);
+                throw new KahunaScriptException("Invalid operands: " + left.Type + " / " + right.Type, ast.yyline);
         }
     }
     
     private static KeyValueExpressionResult EvalAnd(KeyValueTransactionContext context, NodeAst ast)
     {
         if (ast.leftAst is null)
-            throw new Exception("Invalid left expression");
+            throw new KahunaScriptException("Invalid left expression", ast.yyline);
                 
         if (ast.rightAst is null)
-            throw new Exception("Invalid right expression");
+            throw new KahunaScriptException("Invalid right expression", ast.yyline);
                 
         KeyValueExpressionResult left = Eval(context, ast.leftAst);
         KeyValueExpressionResult right = Eval(context, ast.rightAst);
@@ -471,17 +471,17 @@ public static class KeyValueTransactionExpression
                 return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.DoubleValue != 0 && right.DoubleValue != 0 };
                 
             default:
-                throw new Exception("Invalid operands: " + left.Type + " and " + right.Type);
+                throw new KahunaScriptException("Invalid operands: " + left.Type + " and " + right.Type, ast.yyline);
         }
     }
     
     private static KeyValueExpressionResult EvalOr(KeyValueTransactionContext context, NodeAst ast)
     {
         if (ast.leftAst is null)
-            throw new Exception("Invalid left expression");
+            throw new KahunaScriptException("Invalid left expression", ast.yyline);
                 
         if (ast.rightAst is null)
-            throw new Exception("Invalid right expression");
+            throw new KahunaScriptException("Invalid right expression", ast.yyline);
                 
         KeyValueExpressionResult left = Eval(context, ast.leftAst);
         KeyValueExpressionResult right = Eval(context, ast.rightAst);
@@ -504,7 +504,7 @@ public static class KeyValueTransactionExpression
                 return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.DoubleValue != 0 || right.DoubleValue != 0 };
                 
             default:
-                throw new Exception("Invalid operands: " + left.Type + " and " + right.Type);
+                throw new KahunaScriptException("Invalid operands: " + left.Type + " or " + right.Type, ast.yyline);
         }
     }
 }

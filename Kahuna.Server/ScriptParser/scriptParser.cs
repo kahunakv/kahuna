@@ -36,7 +36,7 @@ internal partial class scriptParser
         Parse();
 
         if (!string.IsNullOrEmpty(scanner.YYError))
-            throw new Exception(scanner.YYError);
+            throw new KahunaScriptException(scanner.YYError, scanner.yylloc.StartLine);
 
         NodeAst? root = CurrentSemanticValue.n;
 

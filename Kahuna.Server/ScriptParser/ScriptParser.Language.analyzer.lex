@@ -51,7 +51,7 @@ UNIESC          \\U{HexDig}{8}
 String          \"({StrChs}|{EscChr}|{OctEsc}|{HexEsc}|{UniEsc}|{UNIESC})*\"
 StringSingle    \'({StrChs2}|{EscChr}|{OctEsc}|{HexEsc}|{UniEsc}|{UNIESC})*\'
 Identifier      [a-zA-Z_][a-zA-Z0-9_]*
-EscIdentifier   (`)[a-zA-Z_][a-zA-Z0-9_]*(`)
+EscIdentifier   (`)({StrChs2}|{EscChr}|{OctEsc}|{HexEsc}|{UniEsc}|{UNIESC})*(`)
 Placeholder     (@)([a-zA-Z0-9_]+)
 TAt             @
 TAdd            \+
@@ -77,102 +77,102 @@ TAnd            &&
 
 /* Scanner body */
 
-{Number}		{ yylval.s = yytext; return (int)Token.TDIGIT; }
+{Number}		{ yylval.l = yyline; yylval.s = yytext; return (int)Token.TDIGIT; }
 
-{Decimal}		{ yylval.s = yytext; return (int)Token.TFLOAT; }
+{Decimal}		{ yylval.l = yyline; yylval.s = yytext; return (int)Token.TFLOAT; }
 
-{String}		{ yylval.s = yytext; return (int)Token.TSTRING; }
+{String}		{ yylval.l = yyline; yylval.s = yytext; return (int)Token.TSTRING; }
 
-{StringSingle}  { yylval.s = yytext; return (int)Token.TSTRING; }
+{StringSingle}  { yylval.l = yyline; yylval.s = yytext; return (int)Token.TSTRING; }
 
 {Space}+		/* skip */
 
-{LParen} { return (int)Token.LPAREN; }
+{LParen} { yylval.l = yyline; return (int)Token.LPAREN; }
 
-{RParen} { return (int)Token.RPAREN; }
+{RParen} { yylval.l = yyline; return (int)Token.RPAREN; }
 
-{LBrace} { return (int)Token.LBRACE; }
+{LBrace} { yylval.l = yyline; return (int)Token.LBRACE; }
 
-{RBrace} { return (int)Token.RBRACE; }
+{RBrace} { yylval.l = yyline; return (int)Token.RBRACE; }
 
-{TLet} { return (int)Token.TLET; }
+{TLet} { yylval.l = yyline; return (int)Token.TLET; }
 
-{TGet} { return (int)Token.TGET; }
+{TGet} { yylval.l = yyline; return (int)Token.TGET; }
 
-{TSet} { return (int)Token.TSET; }
+{TSet} { yylval.l = yyline; return (int)Token.TSET; }
 
-{TEget} { return (int)Token.TEGET; }
+{TEget} { yylval.l = yyline; return (int)Token.TEGET; }
 
-{TEset} { return (int)Token.TESET; }
+{TEset} { yylval.l = yyline; return (int)Token.TESET; }
 
-{TDelete} { return (int)Token.TDELETE; }
+{TDelete} { yylval.l = yyline; return (int)Token.TDELETE; }
 
-{TEDelete} { return (int)Token.TEDELETE; }
+{TEDelete} { yylval.l = yyline; return (int)Token.TEDELETE; }
 
-{TExtend} { return (int)Token.TEXTEND; }
+{TExtend} { yylval.l = yyline; return (int)Token.TEXTEND; }
 
-{TEExtend} { return (int)Token.TEEXTEND; }
+{TEExtend} { yylval.l = yyline; return (int)Token.TEEXTEND; }
 
-{TIf} { return (int)Token.TIF; }
+{TIf} { yylval.l = yyline; return (int)Token.TIF; }
 
-{TElse} { return (int)Token.TELSE; }
+{TElse} { yylval.l = yyline; return (int)Token.TELSE; }
 
-{TThen} { return (int)Token.TTHEN; }
+{TThen} { yylval.l = yyline; return (int)Token.TTHEN; }
 
-{TEnd} { return (int)Token.TEND; }
+{TEnd} { yylval.l = yyline; return (int)Token.TEND; }
 
-{TBegin} { return (int)Token.TBEGIN; }
+{TBegin} { yylval.l = yyline; return (int)Token.TBEGIN; }
 
-{TRollback} { return (int)Token.TROLLBACK; }
+{TRollback} { yylval.l = yyline; return (int)Token.TROLLBACK; }
 
-{TCommit} { return (int)Token.TCOMMIT; }
+{TCommit} { yylval.l = yyline; return (int)Token.TCOMMIT; }
 
-{TTrue} { return (int)Token.TTRUE; }
+{TTrue} { yylval.l = yyline; return (int)Token.TTRUE; }
 
-{TFalse} { return (int)Token.TFALSE; }
+{TFalse} { yylval.l = yyline; return (int)Token.TFALSE; }
 
-{TNx} { return (int)Token.TNX; }
+{TNx} { yylval.l = yyline; return (int)Token.TNX; }
 
-{TXx} { return (int)Token.TXX; }
+{TXx} { yylval.l = yyline; return (int)Token.TXX; }
 
-{TEx} { return (int)Token.TEX; }
+{TEx} { yylval.l = yyline; return (int)Token.TEX; }
 
-{TCmp} { return (int)Token.TCMP; }
+{TCmp} { yylval.l = yyline; return (int)Token.TCMP; }
 
-{TCmpRev} { return (int)Token.TCMPREV; }
+{TCmpRev} { yylval.l = yyline; return (int)Token.TCMPREV; }
 
-{TReturn} { return (int)Token.TRETURN; }
+{TReturn} { yylval.l = yyline; return (int)Token.TRETURN; }
 
-{TEquals} { return (int)Token.TEQUALS; }
+{TEquals} { yylval.l = yyline; return (int)Token.TEQUALS; }
 
-{TGreater} { return (int)Token.TGREATERTHAN; }
+{TGreater} { yylval.l = yyline; return (int)Token.TGREATERTHAN; }
 
-{TGreaterEquals} { return (int)Token.TGREATERTHANEQUALS; }
+{TGreaterEquals} { yylval.l = yyline; return (int)Token.TGREATERTHANEQUALS; }
 
-{TAdd} { return (int)Token.TADD; }
+{TAdd} { yylval.l = yyline; return (int)Token.TADD; }
 
-{TMinus} { return (int)Token.TMINUS; }
+{TMinus} { yylval.l = yyline; return (int)Token.TMINUS; }
 
-{TMult} { return (int)Token.TMULT; }
+{TMult} { yylval.l = yyline; return (int)Token.TMULT; }
 
-{TDiv} { return (int)Token.TDIV; }
+{TDiv} { yylval.l = yyline; return (int)Token.TDIV; }
 
-{TOr} { return (int)Token.TOR; }
+{TOr} { yylval.l = yyline; return (int)Token.TOR; }
 
-{TAnd} { return (int)Token.TAND; }
+{TAnd} { yylval.l = yyline; return (int)Token.TAND; }
 
-{TLess} { return (int)Token.TLESSTHAN; }
+{TLess} { yylval.l = yyline; return (int)Token.TLESSTHAN; }
 
-{TLessEquals} { return (int)Token.TLESSTHANEQUALS; }
+{TLessEquals} { yylval.l = yyline; return (int)Token.TLESSTHANEQUALS; }
 
-{TNotEquals} { return (int)Token.TNOTEQUALS; }
+{TNotEquals} { yylval.l = yyline; return (int)Token.TNOTEQUALS; }
 
-{TNotEquals2} { return (int)Token.TNOTEQUALS; }
+{TNotEquals2} { yylval.l = yyline; return (int)Token.TNOTEQUALS; }
 
-{Identifier} { yylval.s = yytext; return (int)Token.TIDENTIFIER; }
+{Identifier} { yylval.l = yyline; yylval.s = yytext; return (int)Token.TIDENTIFIER; }
 
-{EscIdentifier} { yylval.s = yytext; return (int)Token.TESCIDENTIFIER; }
+{EscIdentifier} { yylval.l = yyline; yylval.s = yytext.Trim('`'); return (int)Token.TIDENTIFIER; }
 
-{Placeholder} { yylval.s = yytext; return (int)Token.TPLACEHOLDER; }
+{Placeholder} { yylval.l = yyline; yylval.s = yytext; return (int)Token.TPLACEHOLDER; }
 
 %%

@@ -224,7 +224,15 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
         }
         
         if (message.CompareValue is not null)
-            Console.WriteLine("{0} {1} {2} {3}", exists, Encoding.UTF8.GetString(context.Value ?? []), Encoding.UTF8.GetString(message.Value ?? []), Encoding.UTF8.GetString(message.CompareValue ?? []));
+            Console.WriteLine(
+                "{0} {1} {2} {3} {4} {5}", 
+                exists, 
+                Encoding.UTF8.GetString(context.Value ?? []), 
+                Encoding.UTF8.GetString(message.Value ?? []), 
+                Encoding.UTF8.GetString(message.CompareValue ?? []),
+                context.Revision,
+                message.CompareRevision
+            );
         
         switch (message.Flags)
         {

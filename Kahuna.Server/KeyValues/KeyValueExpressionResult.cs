@@ -72,4 +72,18 @@ public class KeyValueExpressionResult
             _ => throw new ArgumentOutOfRangeException()
         };
     }
+    
+    public long ToLong()
+    {
+        return Type switch
+        {
+            KeyValueExpressionType.Null => -1,
+            KeyValueExpressionType.Bool => -1,
+            KeyValueExpressionType.Long => LongValue,
+            KeyValueExpressionType.Double => -1,
+            KeyValueExpressionType.String => StrValue is not null ? long.Parse(StrValue, NumberStyles.Integer, CultureInfo.InvariantCulture) : -1,
+            KeyValueExpressionType.Bytes => BytesValue is not null ? long.Parse(Encoding.UTF8.GetString(BytesValue), NumberStyles.Integer, CultureInfo.InvariantCulture) : -1,
+            _ => throw new ArgumentOutOfRangeException()
+        };
+    }
 }
