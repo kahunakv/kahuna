@@ -203,8 +203,6 @@ public sealed class KeyValueTransactionCoordinator
             {
                 flags = KeyValueFlags.SetIfEqualToRevision;
                 compareRevision = KeyValueTransactionExpression.Eval(context, ast.extendedThree.leftAst).ToLong();
-                
-                Console.WriteLine(compareRevision);
             }
         }
         

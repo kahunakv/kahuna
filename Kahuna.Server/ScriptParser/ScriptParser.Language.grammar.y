@@ -90,7 +90,7 @@ edelete_stmt : TEDELETE identifier { $$.n = new(NodeType.Edelete, $2.n, null, nu
 extend_stmt : TEXTEND identifier int { $$.n = new(NodeType.Extend, $2.n, $3.n, null, null, null, null, null, $1.l); }
             ;
             
-eextend_stmt : TEEXTEND identifier int { $$.n = new(NodeType.Extend, $2.n, $3.n, null, null, null, null, null, $1.l); }
+eextend_stmt : TEEXTEND identifier int { $$.n = new(NodeType.Eextend, $2.n, $3.n, null, null, null, null, null, $1.l); }
             ;
             
 let_stmt : TLET identifier TEQUALS expression { $$.n = new(NodeType.Let, $2.n, $4.n, null, null, null, null, null, $1.l); }                   
