@@ -6,9 +6,9 @@ namespace Kahuna.Server.Persistence;
 
 public interface IPersistence
 {
-    public Task<bool> StoreLock(string resource, byte[]? owner, long expiresPhysical, uint expiresCounter, long fencingToken, int consistency, int state);
+    public Task<bool> StoreLock(string resource, byte[]? owner, long expiresPhysical, uint expiresCounter, long fencingToken, int state);
 
-    public Task<bool> StoreKeyValue(string key, byte[]? value, long expiresPhysical, uint expiresCounter, long revision, int consistency, int state);
+    public Task<bool> StoreKeyValue(string key, byte[]? value, long expiresPhysical, uint expiresCounter, long revision, int state);
 
     public Task<LockContext?> GetLock(string resource);
     

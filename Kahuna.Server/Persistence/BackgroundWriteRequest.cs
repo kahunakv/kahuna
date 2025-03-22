@@ -20,8 +20,6 @@ public sealed class BackgroundWriteRequest
     
     public HLCTimestamp Expires { get; }
     
-    public int Consistency { get; }
-    
     public int State { get; }
     
     public BackgroundWriteRequest(
@@ -31,7 +29,6 @@ public sealed class BackgroundWriteRequest
         byte[]? value, 
         long revision, 
         HLCTimestamp expires, 
-        int consistency,
         int state
     )
     {
@@ -41,7 +38,6 @@ public sealed class BackgroundWriteRequest
         Value = value;
         Revision = revision;
         Expires = expires;
-        Consistency = consistency;
         State = state;
     }
     

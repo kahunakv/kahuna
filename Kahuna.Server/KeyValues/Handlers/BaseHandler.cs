@@ -86,7 +86,6 @@ internal abstract class BaseHandler
             proposal.Value,
             proposal.Revision,
             proposal.Expires,
-            (int)KeyValueConsistency.Linearizable,
             (int)proposal.State
         ));
 

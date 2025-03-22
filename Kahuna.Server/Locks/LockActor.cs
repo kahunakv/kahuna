@@ -333,7 +333,6 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             proposal.Owner, 
             proposal.FencingToken,
             proposal.Expires,
-            (int)LockDurability.Persistent,
             (int)proposal.State
         ));
 

@@ -135,7 +135,6 @@ public sealed class LockManager
                         lockMessage.FencingToken,
                         lockMessage.ExpireLogical,
                         lockMessage.ExpireCounter,
-                        lockMessage.Consistency,
                         (int)LockState.Locked
                     ));
                     
@@ -154,7 +153,6 @@ public sealed class LockManager
                         lockMessage.FencingToken,
                         lockMessage.ExpireLogical,
                         lockMessage.ExpireCounter,
-                        lockMessage.Consistency,
                         (int)LockState.Unlocked
                     ));
                     
@@ -173,7 +171,6 @@ public sealed class LockManager
                         lockMessage.FencingToken,
                         lockMessage.ExpireLogical,
                         lockMessage.ExpireCounter,
-                        lockMessage.Consistency,
                         (int)LockState.Locked
                     ));
 

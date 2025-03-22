@@ -8,8 +8,7 @@ message RocksDbLockMessage {
   int64 expiresPhysical = 3;
   uint32 expiresCounter = 4;
   int64 fencingToken = 5;
-  int32 consistency = 6;
-  int32 state = 7;
+  int32 state = 6;
 }
 
 message RocksDbKeyValueMessage {
@@ -18,6 +17,5 @@ message RocksDbKeyValueMessage {
   int64 expiresPhysical = 3;
   uint32 expiresCounter = 4;
   int64 revision = 5;
-  int32 consistency = 6;
-  int32 state = 7;
+  int32 state = 6;
 }

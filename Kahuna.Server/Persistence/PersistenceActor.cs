@@ -30,12 +30,11 @@ public sealed class PersistenceActor : IActor<PersistenceRequest, PersistenceRes
                     message.ExpiresLogical,
                     message.ExpiresCounter,
                     message.Revision,
-                    message.Consistency,
                     message.State
                 );
 
                 if (!success)
-                    return new(PersistenceResponseType.Failed);
+                    return PersistenceResponseStatic.FailedResponse;
             }
             break;
 
@@ -47,12 +46,11 @@ public sealed class PersistenceActor : IActor<PersistenceRequest, PersistenceRes
                     message.ExpiresLogical,
                     message.ExpiresCounter,
                     message.Revision,
-                    message.Consistency,
                     message.State
                 );
 
                 if (!success)
-                    return new(PersistenceResponseType.Failed);
+                    return PersistenceResponseStatic.FailedResponse;
             } 
             break;
 
@@ -71,6 +69,6 @@ public sealed class PersistenceActor : IActor<PersistenceRequest, PersistenceRes
                 return new(PersistenceResponseType.Found);
         }
 
-        return new(PersistenceResponseType.Success);
+        return PersistenceResponseStatic.SuccessResponse;
     }
 }

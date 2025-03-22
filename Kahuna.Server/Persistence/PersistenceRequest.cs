@@ -18,8 +18,6 @@ public sealed class PersistenceRequest : IConsistentHashable
     
     public uint ExpiresCounter { get; }
     
-    public int Consistency { get; }
-    
     public int State { get; }
     
     public PersistenceRequest(
@@ -29,7 +27,6 @@ public sealed class PersistenceRequest : IConsistentHashable
         long revision, 
         long expiresLogical,
         uint expiresCounter, 
-        int consistency,
         int state
     )
     {
@@ -39,7 +36,6 @@ public sealed class PersistenceRequest : IConsistentHashable
         Revision = revision;
         ExpiresLogical = expiresLogical;
         ExpiresCounter = expiresCounter;
-        Consistency = consistency;
         State = state;
     }
 
