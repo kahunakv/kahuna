@@ -52,6 +52,7 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "nx",
         "xx",
         "ex",
+        "at",
         "cmp",
         "cmprev",
         // control structures
