@@ -30,6 +30,7 @@ TEExtend        (E|e)(E|e)(X|x)(T|t)(E|e)(N|n)(D|d)
 TTrue           (T|t)(R|r)(U|u)(E|e)
 TFalse          (F|f)(A|a)(L|l)(S|s)(E|e)
 TAtWord         (A|a)(T|t)
+TNotWord        (N|n)(O|o)(T|t)
 LParen          \(
 RParen          \)
 LBrace          \{
@@ -63,6 +64,7 @@ TComma          ,
 TEquals         =
 TNotEquals      <>
 TNotEquals2     !=
+TNot            !
 TLess           <
 TGreater        >
 TLessEquals     <=
@@ -163,6 +165,10 @@ TAnd            &&
 {TAnd} { yylval.l = yyline; return (int)Token.TAND; }
 
 {TLess} { yylval.l = yyline; return (int)Token.TLESSTHAN; }
+
+{TNot} { yylval.l = yyline; return (int)Token.TNOT; }
+
+{TNotWord} { yylval.l = yyline; return (int)Token.TNOT; }
 
 {TLessEquals} { yylval.l = yyline; return (int)Token.TLESSTHANEQUALS; }
 

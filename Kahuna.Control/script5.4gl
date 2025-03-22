@@ -1,4 +1,7 @@
 begin
+ eset balance_user1 1000 nx
+ eset balance_user2 1000 nx
+
  let balance_user1_value = eget balance_user1
  let balance_user2_value = eget balance_user2
  
