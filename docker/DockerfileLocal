@@ -9,7 +9,7 @@ COPY Kahuna.Server /src/Kahuna.Server/
 # build the dotnet program
 WORKDIR /
 
-RUN cd /src/Kahuna.Server/ && dotnet publish -c release -o /app
+RUN cd /src/Kahuna.Server/ && dotnet publish --no-self-contained --runtime linux-x64 --configuration Release -o /app
 
 FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS runtime
 WORKDIR /app

@@ -75,7 +75,7 @@ public static class KeyValueTransactionExpression
                 return EvalOr(context, ast);
             
             case NodeType.Not:
-                throw new NotImplementedException();
+                return EvalNot(context, ast);
             
             case NodeType.StmtList:
             case NodeType.Set:
@@ -131,6 +131,10 @@ public static class KeyValueTransactionExpression
             
             case "revision":
                 return GetRevision(ast, arguments);
+            
+            case "len":
+            case "length":
+                return GetLength(ast, arguments);
             
             default:
                 throw new KahunaScriptException($"Undefined function {ast.leftAst.yytext!} expression", ast.yyline);
@@ -189,6 +193,20 @@ public static class KeyValueTransactionExpression
             throw new KahunaScriptException("Invalid number of arguments for 'revision' function", ast.yyline);
 
         return new() { Type = KeyValueExpressionType.Long, LongValue = arguments[0].Revision };
+    }
+    
+    private static KeyValueExpressionResult GetLength(NodeAst ast, List<KeyValueExpressionResult> arguments)
+    {
+        if (arguments.Count != 1)
+            throw new KahunaScriptException("Invalid number of arguments for 'length' function", ast.yyline);
+
+        KeyValueExpressionResult arg = arguments[0];
+
+        return arg.Type switch
+        {
+            KeyValueExpressionType.String => new() { Type = KeyValueExpressionType.Long, LongValue = arg.StrValue?.Length ?? 0 },
+            _ => throw new KahunaScriptException($"Cannot use 'length' function on argument {arg.Type}", ast.yyline)
+        };
     }
 
     private static void GetFuncCallArguments(KeyValueTransactionContext context, NodeAst ast, List<KeyValueExpressionResult> arguments)
@@ -517,6 +535,29 @@ public static class KeyValueTransactionExpression
                 
             default:
                 throw new KahunaScriptException("Invalid operands: " + left.Type + " or " + right.Type, ast.yyline);
+        }
+    }
+    
+    private static KeyValueExpressionResult EvalNot(KeyValueTransactionContext context, NodeAst ast)
+    {
+        if (ast.leftAst is null)
+            throw new KahunaScriptException("Invalid left expression", ast.yyline);
+                
+        KeyValueExpressionResult left = Eval(context, ast.leftAst);
+        
+        switch (left.Type)
+        {
+            case KeyValueExpressionType.Bool:
+                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.BoolValue };
+            
+            case KeyValueExpressionType.Long:
+                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.LongValue != 0 };
+            
+            case KeyValueExpressionType.Double:
+                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.DoubleValue != 0 };
+                
+            default:
+                throw new KahunaScriptException("Invalid operands: not(" + left.Type + ")", ast.yyline);
         }
     }
 }

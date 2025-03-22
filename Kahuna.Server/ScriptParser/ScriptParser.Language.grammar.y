@@ -20,6 +20,7 @@
 %left TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS
 %left TADD TMINUS
 %left TMULT TDIV
+%right TNOT
 
 %token LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV LBRACE RBRACE
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS  
@@ -129,7 +130,8 @@ expression : expression TEQUALS expression { $$.n = new(NodeType.Equals, $1.n, $
            | expression TMINUS expression { $$.n = new(NodeType.Subtract, $1.n, $3.n, null, null, null, null, null, $1.l); }
            | expression TMULT expression { $$.n = new(NodeType.Mult, $1.n, $3.n, null, null, null, null, null, $1.l); }
            | expression TDIV expression { $$.n = new(NodeType.Div, $1.n, $3.n, null, null, null, null, null, $1.l); }
-           | LPAREN expression RPAREN { $$.n = $2.n; $$.l = $2.l; }
+           | TNOT expression { $$.n = new(NodeType.Not, $2.n, null, null, null, null, null, null, $1.l); }
+           | LPAREN expression RPAREN { $$.n = $2.n; $$.l = $2.l; }           
            | fcall_expr { $$.n = $1.n; $$.l = $1.l; } 
            | identifier { $$.n = $1.n; $$.l = $1.l; }
            | int { $$.n = $1.n; $$.l = $1.l; }

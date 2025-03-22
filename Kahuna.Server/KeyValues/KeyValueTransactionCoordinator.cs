@@ -712,14 +712,16 @@ public sealed class KeyValueTransactionCoordinator
                     if (ast.leftAst is null)
                         throw new KahunaScriptException("Invalid SET expression", ast.yyline);
                     
-                    linearizableLocks.Add(ast.leftAst.yytext!);
+                    if (ast.extendedOne is null) // make sure if isn't querying a revision
+                        linearizableLocks.Add(ast.leftAst.yytext!);
                     break;
                     
                 case NodeType.Eget:
                     if (ast.leftAst is null)
                         throw new KahunaScriptException("Invalid GET expression", ast.yyline);
                     
-                    ephemeralLocks.Add(ast.leftAst.yytext!);
+                    if (ast.extendedOne is null) // make sure if isn't querying a revision
+                        ephemeralLocks.Add(ast.leftAst.yytext!);
                     break;
                 
                 case NodeType.Extend:

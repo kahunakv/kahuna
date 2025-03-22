@@ -15,6 +15,7 @@ using RadLine;
 using Spectre.Console;
 using Kahuna.Client;
 using Kahuna.Shared.KeyValue;
+using Kommander.Diagnostics;
 
 ParserResult<Options> optsResult = Parser.Default.ParseArguments<Options>(args);
 
@@ -49,13 +50,15 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "del",
         "delete",
         "extend",
+        "exists",
         "nx",
         "xx",
         "ex",
         "at",
         "cmp",
         "cmprev",
-        // control structures
+        // control structures or operators
+        "not",
         "let",
         "if",
         "then",
@@ -64,6 +67,7 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "rollback",
         "commit",
         "return",
+        "sleep",
         // locks
         "lock",
         "extend-lock",
@@ -331,11 +335,13 @@ static async Task SaveHistory(string historyPath, List<string>? history)
 {
     if (history is not null)
         await File.WriteAllTextAsync(historyPath, JsonSerializer.Serialize(history));
+    
+    //AnsiConsole.MarkupLine("[cyan]Saving history to {0}...[/]", Markup.Escape(historyPath));
 }
 
 async Task RunCommand(string commandTrim)
 {
-    Stopwatch stopwatch = Stopwatch.StartNew();
+    ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
     if (!scripts.TryGetValue(commandTrim, out KahunaScript? script))
     {
@@ -345,20 +351,49 @@ async Task RunCommand(string commandTrim)
     
     KahunaKeyValueTransactionResult result = await script.Run();
             
-    if (result.Type == KeyValueResponseType.Get)
-        AnsiConsole.MarkupLine("r{0} [cyan]{1}[/] {2}ms\n", result.Revision, Markup.Escape(Encoding.UTF8.GetString(result.Value ?? [])), stopwatch.ElapsedMilliseconds);
-    else if (result.Type == KeyValueResponseType.DoesNotExist)
-        AnsiConsole.MarkupLine("r{0} [yellow]not found[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
-    else if (result.Type == KeyValueResponseType.Set)
-        AnsiConsole.MarkupLine("r{0} [cyan]set[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
-    else if (result.Type == KeyValueResponseType.NotSet)
-        AnsiConsole.MarkupLine("r{0} [yellow]not set[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
-    else if (result.Type == KeyValueResponseType.Deleted)
-        AnsiConsole.MarkupLine("r{0} [yellow]deleted[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
-    else if (result.Type == KeyValueResponseType.Extended)
-        AnsiConsole.MarkupLine("r{0} [yellow]extended[/] {1}ms\n", result.Revision, stopwatch.ElapsedMilliseconds);
-    else
-        AnsiConsole.MarkupLine("[yellow]{0}[/]ms\n", result.Type, stopwatch.ElapsedMilliseconds);
+    switch (result.Type)
+    {
+        case KeyValueResponseType.Get:
+            AnsiConsole.MarkupLine("r{0} [cyan]{1}[/] {2}ms\n", result.Revision, Markup.Escape(Encoding.UTF8.GetString(result.Value ?? [])), stopwatch.GetElapsedMilliseconds());
+            break;
+        
+        case KeyValueResponseType.DoesNotExist:
+            AnsiConsole.MarkupLine("r{0} [yellow]not found[/] {1}ms\n", result.Revision, stopwatch.GetElapsedMilliseconds());
+            break;
+        
+        case KeyValueResponseType.Set:
+            AnsiConsole.MarkupLine("r{0} [cyan]set[/] {1}ms\n", result.Revision, stopwatch.GetElapsedMilliseconds());
+            break;
+        
+        case KeyValueResponseType.NotSet:
+            AnsiConsole.MarkupLine("r{0} [yellow]not set[/] {1}ms\n", result.Revision, stopwatch.GetElapsedMilliseconds());
+            break;
+        
+        case KeyValueResponseType.Deleted:
+            AnsiConsole.MarkupLine("r{0} [yellow]deleted[/] {1}ms\n", result.Revision, stopwatch.GetElapsedMilliseconds());
+            break;
+        
+        case KeyValueResponseType.Extended:
+            AnsiConsole.MarkupLine("r{0} [yellow]extended[/] {1}ms\n", result.Revision, stopwatch.GetElapsedMilliseconds());
+            break;
+
+        case KeyValueResponseType.Locked:
+        case KeyValueResponseType.Unlocked:
+        case KeyValueResponseType.Prepared:
+        case KeyValueResponseType.Committed:
+        case KeyValueResponseType.RolledBack:
+        case KeyValueResponseType.Errored:
+        case KeyValueResponseType.InvalidInput:
+        case KeyValueResponseType.MustRetry:
+        case KeyValueResponseType.Aborted:
+        case KeyValueResponseType.AlreadyLocked:
+        default:
+            AnsiConsole.MarkupLine("[yellow]{0}[/]ms\n", result.Type, stopwatch.GetElapsedMilliseconds());
+            break;
+    }
+    
+    if (result.Type != KeyValueResponseType.Errored && result.Type != KeyValueResponseType.MustRetry)
+        history.Add(commandTrim);
 }
 
 async Task LoadAndRunScript(string commandTrim)
@@ -400,7 +435,6 @@ public sealed class MyLineNumberPrompt : ILineEditorPrompt
 
     public (Markup Markup, int Margin) GetPrompt(ILineEditorState state, int line)
     {
-        Console.Write(line);
         return (new Markup("kahuna-cli> ", _style), 1);
     }
 }
@@ -409,4 +443,10 @@ public sealed class Options
 {
     [Option('c', "connection-source", Required = false, HelpText = "Set the connection string")]
     public string? ConnectionSource { get; set; }
+    
+    [Option("set", Required = false, HelpText = "Executes a 'set' command")]
+    public string? Set { get; set; }
+    
+    [Option("value", Required = false, HelpText = "Establish the parameter 'value'")]
+    public string? Value { get; set; }
 }
