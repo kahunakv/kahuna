@@ -306,9 +306,15 @@ public sealed class KeyValueTransactionCoordinator
         if (ast.leftAst.yytext is null)
             throw new KahunaScriptException("Invalid key", ast.yyline);
         
+        long compareRevision = -1;
+        
+        if (ast.extendedOne is not null)
+            compareRevision = int.Parse(ast.extendedOne.yytext!);
+        
         (KeyValueResponseType type, ReadOnlyKeyValueContext? readOnlyContext) = await manager.LocateAndTryGetValue(
             context.TransactionId,
             ast.leftAst.yytext,
+            compareRevision,
             consistency,
             cancellationToken
         );

@@ -52,13 +52,13 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         if (string.IsNullOrEmpty(request.Key))
             return new()
             {
-                Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
+                Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
         
         if (request.ExpiresMs < 0)
             return new()
             {
-                Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
+                Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
         
         (KeyValueResponseType response, long revision) = await keyValues.LocateAndTrySetKeyValue(
@@ -91,13 +91,13 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         if (string.IsNullOrEmpty(request.Key))
             return new()
             {
-                Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
+                Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
         
         if (request.ExpiresMs < 0)
             return new()
             {
-                Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
+                Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
         
         (KeyValueResponseType type, long revision) = await keyValues.LocateAndTryExtendKeyValue(
@@ -126,7 +126,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         if (string.IsNullOrEmpty(request.Key))
             return new()
             {
-                Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
+                Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
         
         (KeyValueResponseType type, long revision) = await keyValues.LocateAndTryDeleteKeyValue(
@@ -154,12 +154,13 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         if (string.IsNullOrEmpty(request.Key))
             return new()
             {
-                Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
+                Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
         
         (KeyValueResponseType type, ReadOnlyKeyValueContext? keyValueContext) = await keyValues.LocateAndTryGetValue(
             new(request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key, 
+            request.Revision,
             (KeyValueConsistency)request.Consistency, 
             context.CancellationToken
         );
@@ -198,7 +199,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         if (string.IsNullOrEmpty(request.Key))
             return new()
             {
-                Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
+                Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
         
         (KeyValueResponseType type, _, _) = await keyValues.LocateAndTryAcquireExclusiveLock(
@@ -226,7 +227,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         if (string.IsNullOrEmpty(request.Key))
             return new()
             {
-                Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
+                Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
         
         (KeyValueResponseType type, string _) = await keyValues.LocateAndTryReleaseExclusiveLock(
@@ -253,7 +254,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         if (string.IsNullOrEmpty(request.Key))
             return new()
             {
-                Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
+                Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
         
         (KeyValueResponseType type, HLCTimestamp proposalTicket, _, _) = await keyValues.LocateAndTryPrepareMutations(
@@ -282,7 +283,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         if (string.IsNullOrEmpty(request.Key))
             return new()
             {
-                Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
+                Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
         
         (KeyValueResponseType type, long commitIndex) = await keyValues.LocateAndTryCommitMutations(
@@ -311,7 +312,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         if (string.IsNullOrEmpty(request.Key))
             return new()
             {
-                Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
+                Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
         
         (KeyValueResponseType type, long rollbackIndex) = await keyValues.LocateAndTryRollbackMutations(
@@ -340,7 +341,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         if (request.Script is null)
             return new()
             {
-                Type = GrpcKeyValueResponseType.KeyvalueResponseTypeInvalidInput
+                Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
             
         KeyValueTransactionResult result = await keyValues.TryExecuteTx(request.Script.ToByteArray(), request.Hash);

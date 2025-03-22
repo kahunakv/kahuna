@@ -12,7 +12,7 @@ namespace Kahuna.Server.KeyValues.Handlers;
 
 internal abstract class BaseHandler
 {
-    protected IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
+    private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
     
     protected readonly IRaft raft;
 
@@ -80,7 +80,7 @@ internal abstract class BaseHandler
         }
 
         backgroundWriter.Send(new(
-            BackgroundWriteType.QueueStoreLock,
+            BackgroundWriteType.QueueStoreKeyValue,
             partitionId,
             proposal.Key,
             proposal.Value,

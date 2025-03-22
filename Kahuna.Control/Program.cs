@@ -24,7 +24,7 @@ if (opts is null)
 
 AnsiConsole.MarkupLine("[green]Kahuna Shell 0.0.1 (alpha)[/]\n");
 
-string historyPath = string.Concat(Path.GetTempPath(), Path.PathSeparator, "kahuna.history.json"));
+string historyPath = string.Concat(Path.GetTempPath(), Path.PathSeparator, "kahuna.history.json");
 List<string> history = await GetHistory(historyPath);
 
 KahunaClient connection = await GetConnection(opts);

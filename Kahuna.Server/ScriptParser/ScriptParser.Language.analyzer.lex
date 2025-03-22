@@ -29,6 +29,7 @@ TExtend         (E|e)(X|x)(T|t)(E|e)(N|n)(D|d)
 TEExtend        (E|e)(E|e)(X|x)(T|t)(E|e)(N|n)(D|d)
 TTrue           (T|t)(R|r)(U|u)(E|e)
 TFalse          (F|f)(A|a)(L|l)(S|s)(E|e)
+TAtWord         (A|a)(T|t)
 LParen          \(
 RParen          \)
 LBrace          \{
@@ -174,5 +175,9 @@ TAnd            &&
 {EscIdentifier} { yylval.l = yyline; yylval.s = yytext.Trim('`'); return (int)Token.TIDENTIFIER; }
 
 {Placeholder} { yylval.l = yyline; yylval.s = yytext; return (int)Token.TPLACEHOLDER; }
+
+{TAt} { yylval.l = yyline; return (int)Token.TAT; }
+
+{TAtWord} { yylval.l = yyline; return (int)Token.TAT; }
 
 %%

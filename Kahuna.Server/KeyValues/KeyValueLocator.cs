@@ -203,19 +203,25 @@ internal sealed class KeyValueLocator
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
     /// <param name="consistency"></param>
-    /// <param name="cancelationToken"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryGetValue(
+        HLCTimestamp transactionId, 
+        string key, 
+        long revision,
+        KeyValueConsistency consistency,
+        CancellationToken cancellationToken
+    )
     {
         if (string.IsNullOrEmpty(key))
             return (KeyValueResponseType.InvalidInput, null);
         
         int partitionId = raft.GetPartitionKey(key);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
-            return await manager.TryGetValue(transactionId, key, consistency);
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+            return await manager.TryGetValue(transactionId, key, revision, consistency);
             
-        string leader = await raft.WaitForLeader(partitionId, cancelationToken);
+        string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
             return (KeyValueResponseType.MustRetry, null);
         
@@ -230,10 +236,11 @@ internal sealed class KeyValueLocator
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
+            Revision = revision,
             Consistency = (GrpcKeyValueConsistency)consistency,
         };
         
-        GrpcTryGetKeyValueResponse? remoteResponse = await client.TryGetKeyValueAsync(request, cancellationToken: cancelationToken);
+        GrpcTryGetKeyValueResponse? remoteResponse = await client.TryGetKeyValueAsync(request, cancellationToken: cancellationToken);
         
         remoteResponse.ServedFrom = $"https://{leader}";
         

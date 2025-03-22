@@ -49,9 +49,9 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        (bool success, long revision) = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
     }
     
     [Theory, CombinatorialData]
@@ -65,9 +65,9 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        (bool success, long revision) = await client.SetKeyValue(keyName, "some-value"u8.ToArray(), 10000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value"u8.ToArray(), 10000, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
     }
     
     [Theory, CombinatorialData]
@@ -81,9 +81,9 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        (bool success, long revision) = await client.SetKeyValue(keyName, "some-value", TimeSpan.FromSeconds(10), consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", TimeSpan.FromSeconds(10), consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
     }
     
     [Theory, CombinatorialData]
@@ -97,9 +97,9 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        (bool success, long revision) = await client.SetKeyValue(keyName, "some-value"u8.ToArray(), TimeSpan.FromSeconds(10), consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value"u8.ToArray(), TimeSpan.FromSeconds(10), consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
     }
     
     [Theory, CombinatorialData]
@@ -113,13 +113,13 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        (bool success, long revision) = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
 
-        (success, revision) = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(1, revision);
+        result = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(1, result.Revision);
     }
     
     [Theory, CombinatorialData]
@@ -133,9 +133,9 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        (bool success, long revision) = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfNotExists, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfNotExists, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
     }
     
     [Theory, CombinatorialData]
@@ -149,13 +149,13 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        (bool success, long revision) = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfNotExists, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfNotExists, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
         
-        (success, revision) = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfNotExists, consistency: consistency);
-        Assert.False(success);
-        Assert.Equal(0, revision);
+        result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfNotExists, consistency: consistency);
+        Assert.False(result.Success);
+        Assert.Equal(0, result.Revision);
     }
     
     [Theory, CombinatorialData]
@@ -169,9 +169,9 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        (bool success, long revision) = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfExists, consistency: consistency);
-        Assert.False(success);
-        Assert.Equal(-1, revision);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfExists, consistency: consistency);
+        Assert.False(result.Success);
+        Assert.Equal(-1, result.Revision);
     }
     
     [Theory, CombinatorialData]
@@ -185,13 +185,13 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        (bool success, long revision) = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.Set, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.Set, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
         
-        (success, revision) = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfExists, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(1, revision);
+        result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfExists, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(1, result.Revision);
     }
     
     [Theory, CombinatorialData]
@@ -205,17 +205,17 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        (bool success, long revision) = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.Set, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.Set, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
         
-        (success, revision) = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfExists, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(1, revision);
+        result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfExists, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(1, result.Revision);
         
-        (success, revision) = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfNotExists, consistency: consistency);
-        Assert.False(success);
-        Assert.Equal(1, revision);
+        result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfNotExists, consistency: consistency);
+        Assert.False(result.Success);
+        Assert.Equal(1, result.Revision);
     }
     
     [Theory, CombinatorialData]
@@ -229,15 +229,15 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        (bool success, long revision) = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
         
-        (byte[]? value, revision) = await client.GetKeyValue(keyName, consistency);
-        Assert.NotNull(value);
-        Assert.Equal(0, revision);
+        result = await client.GetKeyValue(keyName, consistency);
+        Assert.NotNull(result.Value);
+        Assert.Equal(0, result.Revision);
         
-        Assert.Equal("some-value", Encoding.UTF8.GetString(value));
+        Assert.Equal("some-value", result.ValueAsString());
     }
     
     [Theory, CombinatorialData]
@@ -251,23 +251,23 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        (bool success, long revision) = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
         
-        (byte[]? value, revision) = await client.GetKeyValue(keyName, consistency);
-        Assert.NotNull(value);
-        Assert.Equal(0, revision);
+        result = await client.GetKeyValue(keyName, consistency);
+        Assert.NotNull(result.Value);
+        Assert.Equal(0, result.Revision);
         
-        Assert.Equal("some-value", Encoding.UTF8.GetString(value));
+        Assert.Equal("some-value", result.ValueAsString());
         
-        (success, revision) = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(1, revision);
+        result = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(1, result.Revision);
         
-        (value, revision) = await client.GetKeyValue(keyName, consistency);
-        Assert.NotNull(value);
-        Assert.Equal(1, revision);
+        result = await client.GetKeyValue(keyName, consistency);
+        Assert.NotNull(result.Value);
+        Assert.Equal(1, result.Revision);
     }
     
     [Theory, CombinatorialData]
@@ -281,15 +281,15 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        (bool success, long revision) = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfNotExists, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfNotExists, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
         
-        (byte[]? value, revision) = await client.GetKeyValue(keyName, consistency);
-        Assert.NotNull(value);
-        Assert.Equal(0, revision);
+        result = await client.GetKeyValue(keyName, consistency);
+        Assert.NotNull(result.Value);
+        Assert.Equal(0, result.Revision);
         
-        Assert.Equal("some-value", Encoding.UTF8.GetString(value));
+        Assert.Equal("some-value", result.ValueAsString());
     }
     
     [Theory, CombinatorialData]
@@ -303,21 +303,21 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        (bool success, long revision) = await client.SetKeyValue(keyName, "some-value", 1000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 1000, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
         
-        (byte[]? value, revision) = await client.GetKeyValue(keyName, consistency);
-        Assert.NotNull(value);
-        Assert.Equal(0, revision);
+        result = await client.GetKeyValue(keyName, consistency);
+        Assert.NotNull(result.Value);
+        Assert.Equal(0, result.Revision);
         
-        Assert.Equal("some-value", Encoding.UTF8.GetString(value));
+        Assert.Equal("some-value", result.ValueAsString());
         
         await Task.Delay(1500, TestContext.Current.CancellationToken);
         
-        (value, revision) = await client.GetKeyValue(keyName, consistency);
-        Assert.Null(value);
-        Assert.Equal(0, revision);
+        result = await client.GetKeyValue(keyName, consistency);
+        Assert.Null(result.Value);
+        Assert.Equal(0, result.Revision);
     }
     
     [Theory, CombinatorialData]
@@ -332,35 +332,35 @@ public class TestKeyValues
         string keyName1 = GetRandomKeyName();
         string keyName2 = GetRandomKeyName();
 
-        (bool success, long revision) = await client.SetKeyValue(keyName1, "some-value", 1000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result1 = await client.SetKeyValue(keyName1, "some-value", 1000, consistency: consistency);
+        Assert.True(result1.Success);
+        Assert.Equal(0, result1.Revision);
         
-        (success, revision) = await client.SetKeyValue(keyName2, "some-value", 1000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        result1 = await client.SetKeyValue(keyName2, "some-value", 1000, consistency: consistency);
+        Assert.True(result1.Success);
+        Assert.Equal(0, result1.Revision);
         
-        (byte[]? value1, revision) = await client.GetKeyValue(keyName1, consistency);
-        Assert.NotNull(value1);
-        Assert.Equal(0, revision);
+        result1 = await client.GetKeyValue(keyName1, consistency);
+        Assert.NotNull(result1.Value);
+        Assert.Equal(0, result1.Revision);
         
-        Assert.Equal("some-value", Encoding.UTF8.GetString(value1));
+        Assert.Equal("some-value", result1.ValueAsString());
         
-        (byte[]? value2, revision) = await client.GetKeyValue(keyName2, consistency);
-        Assert.NotNull(value2);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result2 = await client.GetKeyValue(keyName2, consistency);
+        Assert.NotNull(result2.Value);
+        Assert.Equal(0, result2.Revision);
         
-        Assert.Equal("some-value", Encoding.UTF8.GetString(value2));
+        Assert.Equal("some-value", result2.ValueAsString());
         
         await Task.Delay(1500, TestContext.Current.CancellationToken);
         
-        (value1, revision) = await client.GetKeyValue(keyName1, consistency);
-        Assert.Null(value1);
-        Assert.Equal(0, revision);
+        result1 = await client.GetKeyValue(keyName1, consistency);
+        Assert.Null(result1.Value);
+        Assert.Equal(0, result1.Revision);
         
-        (value2, revision) = await client.GetKeyValue(keyName1, consistency);
-        Assert.Null(value2);
-        Assert.Equal(0, revision);
+        result2 = await client.GetKeyValue(keyName1, consistency);
+        Assert.Null(result2.Value);
+        Assert.Equal(0, result2.Revision);
     }
     
     [Theory, CombinatorialData]
@@ -375,51 +375,51 @@ public class TestKeyValues
         string keyName1 = GetRandomKeyName();
         string keyName2 = GetRandomKeyName();
 
-        (bool success, long revision) = await client.SetKeyValue(keyName1, "some-value", 1000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result1 = await client.SetKeyValue(keyName1, "some-value", 1000, consistency: consistency);
+        Assert.True(result1.Success);
+        Assert.Equal(0, result1.Revision);
         
-        (success, revision) = await client.SetKeyValue(keyName2, "some-value", 1000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result2 = await client.SetKeyValue(keyName2, "some-value", 1000, consistency: consistency);
+        Assert.True(result2.Success);
+        Assert.Equal(0, result2.Revision);
         
-        (byte[]? value1, revision) = await client.GetKeyValue(keyName1, consistency);
-        Assert.NotNull(value1);
-        Assert.Equal(0, revision);
+        result1 = await client.GetKeyValue(keyName1, consistency);
+        Assert.NotNull(result1.Value);
+        Assert.Equal(0, result1.Revision);
         
-        Assert.Equal("some-value", Encoding.UTF8.GetString(value1));
+        Assert.Equal("some-value", result1.ValueAsString());
         
-        (byte[]? value2, revision) = await client.GetKeyValue(keyName2, consistency);
-        Assert.NotNull(value2);
-        Assert.Equal(0, revision);
+        result2 = await client.GetKeyValue(keyName2, consistency);
+        Assert.NotNull(result2.Value);
+        Assert.Equal(0, result2.Revision);
         
-        Assert.Equal("some-value", Encoding.UTF8.GetString(value2));
+        Assert.Equal("some-value", result2.ValueAsString());
         
         await Task.Delay(1500, TestContext.Current.CancellationToken);
         
-        (value1, revision) = await client.GetKeyValue(keyName1, consistency);
-        Assert.Null(value1);
-        Assert.Equal(0, revision);
+        result1 = await client.GetKeyValue(keyName1, consistency);
+        Assert.Null(result1.Value);
+        Assert.Equal(0, result1.Revision);
         
-        (value2, revision) = await client.GetKeyValue(keyName1, consistency);
-        Assert.Null(value2);
-        Assert.Equal(0, revision);
+        result1 = await client.GetKeyValue(keyName1, consistency);
+        Assert.Null(result1.Value);
+        Assert.Equal(0, result1.Revision);
         
-        (success, revision) = await client.SetKeyValue(keyName1, "some-value", 1000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(1, revision);
+        result1 = await client.SetKeyValue(keyName1, "some-value", 1000, consistency: consistency);
+        Assert.True(result1.Success);
+        Assert.Equal(1, result1.Revision);
         
-        (success, revision) = await client.SetKeyValue(keyName2, "some-value", 1000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(1, revision);
+        result2 = await client.SetKeyValue(keyName2, "some-value", 1000, consistency: consistency);
+        Assert.True(result2.Success);
+        Assert.Equal(1, result2.Revision);
         
-        (value1, revision) = await client.GetKeyValue(keyName1, consistency);
-        Assert.NotNull(value1);
-        Assert.Equal(1, revision);
+        result1 = await client.GetKeyValue(keyName1, consistency);
+        Assert.NotNull(result1.Value);
+        Assert.Equal(1, result1.Revision);
         
-        (value2, revision) = await client.GetKeyValue(keyName1, consistency);
-        Assert.NotNull(value2);
-        Assert.Equal(1, revision);
+        result2 = await client.GetKeyValue(keyName2, consistency);
+        Assert.NotNull(result2.Value);
+        Assert.Equal(1, result2.Revision);
     }
     
     [Theory, CombinatorialData]
@@ -433,15 +433,15 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        (bool success, long revision) = await client.SetKeyValue(keyName, "some-value", 1, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 1, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
         
         await Task.Delay(50, TestContext.Current.CancellationToken);
         
-        (byte[]? value, revision) = await client.GetKeyValue(keyName, consistency);
-        Assert.Null(value);
-        Assert.Equal(0, revision);
+        result = await client.GetKeyValue(keyName, consistency);
+        Assert.Null(result.Value);
+        Assert.Equal(0, result.Revision);
     }
     
     [Theory, CombinatorialData]
@@ -455,19 +455,19 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        (bool success, long revision) = await client.SetKeyValue(keyName, "some-value", 1000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 1000, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
         
-        (success, revision) = await client.ExtendKeyValue(keyName, 5000, consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        result = await client.ExtendKeyValue(keyName, 5000, consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
         
         await Task.Delay(2000, TestContext.Current.CancellationToken);
         
-        (byte[]? value1, revision) = await client.GetKeyValue(keyName, consistency);
-        Assert.NotNull(value1);
-        Assert.Equal(0, revision);
+        result = await client.GetKeyValue(keyName, consistency);
+        Assert.NotNull(result.Value);
+        Assert.Equal(0, result.Revision);
     }
     
     [Theory, CombinatorialData]
@@ -481,19 +481,19 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        (bool success, long revision) = await client.SetKeyValue(keyName, "some-value", TimeSpan.FromSeconds(1), consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", TimeSpan.FromSeconds(1), consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
         
-        (success, revision) = await client.ExtendKeyValue(keyName, TimeSpan.FromSeconds(5), consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        result = await client.ExtendKeyValue(keyName, TimeSpan.FromSeconds(5), consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
         
         await Task.Delay(2000, TestContext.Current.CancellationToken);
         
-        (byte[]? value1, revision) = await client.GetKeyValue(keyName, consistency);
-        Assert.NotNull(value1);
-        Assert.Equal(0, revision);
+        result = await client.GetKeyValue(keyName, consistency);
+        Assert.NotNull(result.Value);
+        Assert.Equal(0, result.Revision);
     }
     
     [Theory, CombinatorialData]
@@ -507,33 +507,33 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        (bool success, long revision) = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
         
-        (byte[]? value1, revision) = await client.GetKeyValue(keyName, consistency);
-        Assert.NotNull(value1);
-        Assert.Equal(0, revision);
+        result = await client.GetKeyValue(keyName, consistency);
+        Assert.NotNull(result.Value);
+        Assert.Equal(0, result.Revision);
         
-        Assert.Equal("some-value", Encoding.UTF8.GetString(value1));
+        Assert.Equal("some-value", result.ValueAsString());
         
-        (success, revision) = await client.DeleteKeyValue(keyName, consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        result = await client.DeleteKeyValue(keyName, consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
         
-        (value1, revision) = await client.GetKeyValue(keyName, consistency);
-        Assert.Null(value1);
-        Assert.Equal(0, revision);
+        result = await client.GetKeyValue(keyName, consistency);
+        Assert.Null(result.Value);
+        Assert.Equal(0, result.Revision);
         
-        (success, revision) = await client.SetKeyValue(keyName, "some-value-2", 10000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(1, revision);
+        result = await client.SetKeyValue(keyName, "some-value-2", 10000, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(1, result.Revision);
         
-        (value1, revision) = await client.GetKeyValue(keyName, consistency);
-        Assert.NotNull(value1);
-        Assert.Equal(1, revision);
+        result = await client.GetKeyValue(keyName, consistency);
+        Assert.NotNull(result.Value);
+        Assert.Equal(1, result.Revision);
         
-        Assert.Equal("some-value-2", Encoding.UTF8.GetString(value1));
+        Assert.Equal("some-value-2", result.ValueAsString());
     }
     
     [Theory, CombinatorialData]
@@ -547,31 +547,31 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        (bool success, long revision) = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
         
-        (byte[]? value1, revision) = await client.GetKeyValue(keyName, consistency);
-        Assert.NotNull(value1);
-        Assert.Equal(0, revision);
+        result = await client.GetKeyValue(keyName, consistency);
+        Assert.NotNull(result.Value);
+        Assert.Equal(0, result.Revision);
         
-        Assert.Equal("some-value", Encoding.UTF8.GetString(value1));
+        Assert.Equal("some-value", result.ValueAsString());
         
-        (success, revision) = await client.DeleteKeyValue(keyName, consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        result = await client.DeleteKeyValue(keyName, consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
         
-        (value1, revision) = await client.GetKeyValue(keyName, consistency);
-        Assert.Null(value1);
-        Assert.Equal(0, revision);
+        result = await client.GetKeyValue(keyName, consistency);
+        Assert.Null(result.Value);
+        Assert.Equal(0, result.Revision);
         
-        (success, revision) = await client.SetKeyValue(keyName, "some-value-2", 10000, flags: KeyValueFlags.SetIfExists, consistency: consistency);
-        Assert.False(success);
-        Assert.Equal(0, revision);
+        result = await client.SetKeyValue(keyName, "some-value-2", 10000, flags: KeyValueFlags.SetIfExists, consistency: consistency);
+        Assert.False(result.Success);
+        Assert.Equal(0, result.Revision);
         
-        (value1, revision) = await client.GetKeyValue(keyName, consistency);
-        Assert.Null(value1);
-        Assert.Equal(0, revision);
+        result = await client.GetKeyValue(keyName, consistency);
+        Assert.Null(result.Value);
+        Assert.Equal(0, result.Revision);
     }
 
     [Theory, CombinatorialData]
@@ -585,19 +585,19 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        (bool success, long revision) = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
         
-        (success, revision) = await client.TryCompareValueAndSetKeyValue(keyName, "some-new-value", "some-value", 10000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(1, revision);
+        result = await client.TryCompareValueAndSetKeyValue(keyName, "some-new-value", "some-value", 10000, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(1, result.Revision);
         
-        (byte[]? value, revision) = await client.GetKeyValue(keyName, consistency);
-        Assert.NotNull(value);
-        Assert.Equal(1, revision);
+        result = await client.GetKeyValue(keyName, consistency);
+        Assert.NotNull(result.Value);
+        Assert.Equal(1, result.Revision);
         
-        Assert.Equal("some-new-value", Encoding.UTF8.GetString(value));
+        Assert.Equal("some-new-value", result.ValueAsString());
     }
     
     [Theory, CombinatorialData]
@@ -611,19 +611,19 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        (bool success, long revision) = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
         
-        (success, revision) = await client.TryCompareValueAndSetKeyValue(keyName, "some-new-value", "other-some-value", 10000, consistency: consistency);
-        Assert.False(success);
-        Assert.Equal(0, revision);
+        result = await client.TryCompareValueAndSetKeyValue(keyName, "some-new-value", "other-some-value", 10000, consistency: consistency);
+        Assert.False(result.Success);
+        Assert.Equal(0, result.Revision);
         
-        (byte[]? value, revision) = await client.GetKeyValue(keyName, consistency);
-        Assert.NotNull(value);
-        Assert.Equal(0, revision);
+        result = await client.GetKeyValue(keyName, consistency);
+        Assert.NotNull(result.Value);
+        Assert.Equal(0, result.Revision);
         
-        Assert.Equal("some-value", Encoding.UTF8.GetString(value));
+        Assert.Equal("some-value", result.ValueAsString());
     }
     
     [Theory, CombinatorialData]
@@ -637,23 +637,23 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        (bool success, long revision) = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
         
-        (success, revision) = await client.SetKeyValue(keyName, "some-new-value", 10000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(1, revision);
+        result = await client.SetKeyValue(keyName, "some-new-value", 10000, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(1, result.Revision);
         
-        (success, revision) = await client.TryCompareRevisionAndSetKeyValue(keyName, "some-new-new-value", 1, 10000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(2, revision);
+        result = await client.TryCompareRevisionAndSetKeyValue(keyName, "some-new-new-value", 1, 10000, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(2, result.Revision);
         
-        (byte[]? value, revision) = await client.GetKeyValue(keyName, consistency);
-        Assert.NotNull(value);
-        Assert.Equal(2, revision);
+        result = await client.GetKeyValue(keyName, consistency);
+        Assert.NotNull(result.Value);
+        Assert.Equal(2, result.Revision);
         
-        Assert.Equal("some-new-new-value", Encoding.UTF8.GetString(value));
+        Assert.Equal("some-new-new-value", result.ValueAsString());
     }
     
     [Theory, CombinatorialData]
@@ -667,23 +667,23 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        (bool success, long revision) = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(0, revision);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
         
-        (success, revision) = await client.SetKeyValue(keyName, "some-new-value", 10000, consistency: consistency);
-        Assert.True(success);
-        Assert.Equal(1, revision);
+        result = await client.SetKeyValue(keyName, "some-new-value", 10000, consistency: consistency);
+        Assert.True(result.Success);
+        Assert.Equal(1, result.Revision);
         
-        (success, revision) = await client.TryCompareRevisionAndSetKeyValue(keyName, "some-new-new-value",10, 10000, consistency: consistency);
-        Assert.False(success);
-        Assert.Equal(1, revision);
+        result = await client.TryCompareRevisionAndSetKeyValue(keyName, "some-new-new-value",10, 10000, consistency: consistency);
+        Assert.False(result.Success);
+        Assert.Equal(1, result.Revision);
         
-        (byte[]? value, revision) = await client.GetKeyValue(keyName, consistency);
-        Assert.NotNull(value);
-        Assert.Equal(1, revision);
+        result = await client.GetKeyValue(keyName, consistency);
+        Assert.NotNull(result.Value);
+        Assert.Equal(1, result.Revision);
         
-        Assert.Equal("some-new-value", Encoding.UTF8.GetString(value));
+        Assert.Equal("some-new-value", result.ValueAsString());
     }
     
     private KahunaClient GetClientByType(KahunaCommunicationType communicationType, KahunaClientType clientType)

@@ -5,8 +5,8 @@
 //  See accompanying file GPLEXcopyright.rtf.
 //
 //  GPLEX Version:  1.2.3
-//  DateTime: 3/20/2025 8:35:51 PM
-//  GPLEX input file <ScriptParser/ScriptParser.Language.analyzer.lex - 3/20/2025 8:35:49 PM>
+//  DateTime: 3/21/2025 7:18:22 PM
+//  GPLEX input file <ScriptParser/ScriptParser.Language.analyzer.lex - 3/21/2025 11:59:25 AM>
 //  GPLEX frame file <embedded resource>
 //
 //  Option settings: verbose, parser, stack, minimize
@@ -839,7 +839,14 @@ namespace Kahuna.Server.ScriptParser
           13, 13, 13, 13, 13, -1, -1, -1, -1, 13, -1, 13, 13, 13, 13, 13, 
           13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 
           13, 13, 13, 13, 13}),
-/* NxS[ 108] */ new Table(0, 0, -1, null), // Shortest string "`A`"
+/* NxS[ 108] */ // Shortest string "``"
+      new Table(0, 97, 125, new short[] {-1, 125, 125, 125, 125, 125, 
+          125, -1, -1, -1, -1, -1, -1, -1, 125, 125, 125, 125, 125, 125, 125, 125, 
+          125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 
+          125, -1, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 
+          125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 
+          125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 
+          125, 125, 125, 125, 125, 125, 127, 125, 125, 125, 108}),
 /* NxS[ 109] */ // Shortest string "@0"
       new Table(48, 75, -1, new short[] {109, 109, 109, 109, 109, 109, 
           109, 109, 109, 109, -1, -1, -1, -1, -1, -1, -1, 109, 109, 109, 109, 109, 
@@ -900,20 +907,17 @@ namespace Kahuna.Server.ScriptParser
           109, 109, 109, 109, 109, 109, 109, 109, 109, 109, 109, 109, 109, 109, 109, 109, 
           109, 109, 109, 109, 109}),
 /* NxS[ 125] */ // Shortest string "`"
-      new Table(65, 58, -1, new short[] {127, 127, 127, 127, 127, 127, 
-          127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 
-          127, 127, 127, 127, -1, -1, -1, -1, 127, -1, 127, 127, 127, 127, 127, 127, 
-          127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 
-          127, 127, 127, 127}),
+      new Table(0, 97, 125, new short[] {-1, 125, 125, 125, 125, 125, 
+          125, -1, -1, -1, -1, -1, -1, -1, 125, 125, 125, 125, 125, 125, 125, 125, 
+          125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 
+          125, -1, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 
+          125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 
+          125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 
+          125, 125, 125, 125, 125, 125, 127, 125, 125, 125, 108}),
 /* NxS[ 126] */ // Shortest string "|"
       new Table(124, 1, -1, new short[] {29}),
-/* NxS[ 127] */ // Shortest string "`A"
-      new Table(48, 75, -1, new short[] {127, 127, 127, 127, 127, 127, 
-          127, 127, 127, 127, -1, -1, -1, -1, -1, -1, -1, 127, 127, 127, 127, 127, 
-          127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 
-          127, 127, 127, 127, 127, -1, -1, -1, -1, 127, 108, 127, 127, 127, 127, 127, 
-          127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 
-          127, 127, 127, 127, 127}),
+/* NxS[ 127] */ // Shortest string "`\\"
+      new Table(10, 4, 125, new short[] {-1, 125, 125, -1}),
 /* NxS[ 128] */ // Shortest string "0."
       new Table(48, 10, -1, new short[] {113, 113, 113, 113, 113, 113, 
           113, 113, 113, 113}),
@@ -1532,8 +1536,8 @@ yylval.l = yyline; return (int)Token.TCMPREV;
         case 107: // Recognized '{TBegin}',	Shortest string "BEGIN"
 yylval.l = yyline; return (int)Token.TBEGIN;
             break;
-        case 108: // Recognized '{EscIdentifier}',	Shortest string "`A`"
-yylval.l = yyline; yylval.s = yytext; return (int)Token.TESCIDENTIFIER;
+        case 108: // Recognized '{EscIdentifier}',	Shortest string "``"
+yylval.l = yyline; yylval.s = yytext.Trim('`'); return (int)Token.TIDENTIFIER;
             break;
         case 109: // Recognized '{Placeholder}',	Shortest string "@0"
 yylval.l = yyline; yylval.s = yytext; return (int)Token.TPLACEHOLDER;
@@ -1551,13 +1555,13 @@ yylval.l = yyline; return (int)Token.TNOTEQUALS;
 yylval.l = yyline; yylval.s = yytext; return (int)Token.TFLOAT;
             break;
         case 115: // Recognized '{StringSingle}',	Shortest string "''"
-yylval.l = yyline; yylval.s = yytext; return (int)Token.TSTRING;
+yylval.l = yyline; yylval.s = yytext.Trim('\''); return (int)Token.TSTRING;
             break;
         case 116: // Recognized '{TAnd}',	Shortest string "&&"
 yylval.l = yyline; return (int)Token.TAND;
             break;
         case 117: // Recognized '{String}',	Shortest string "\"\""
-yylval.l = yyline; yylval.s = yytext; return (int)Token.TSTRING;
+yylval.l = yyline; yylval.s = yytext.Trim('\"'); return (int)Token.TSTRING;
             break;
         case 118: // Recognized '{TNotEquals2}',	Shortest string "!="
 yylval.l = yyline; return (int)Token.TNOTEQUALS;

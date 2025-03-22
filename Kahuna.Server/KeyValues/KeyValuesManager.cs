@@ -28,9 +28,9 @@ public sealed class KeyValuesManager
 
     private readonly IActorRef<ConsistentHashActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter;
 
-    private readonly IActorRefStruct<ConsistentHashActorStruct<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> ephemeralKeyValuesRouter;
+    private readonly IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> ephemeralKeyValuesRouter;
     
-    private readonly IActorRefStruct<ConsistentHashActorStruct<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> consistentKeyValuesRouter;
+    private readonly IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> consistentKeyValuesRouter;
     
     /// <summary>
     /// Constructor
@@ -70,18 +70,20 @@ public sealed class KeyValuesManager
     /// <param name="persistence"></param>
     /// <param name="workers"></param>
     /// <returns></returns>
-    private IActorRefStruct<ConsistentHashActorStruct<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> GetEphemeralRouter(
+    private IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> GetEphemeralRouter(
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, 
         IPersistence persistence, 
         KahunaConfiguration configuration
     )
     {
-        List<IActorRefStruct<KeyValueActor, KeyValueRequest, KeyValueResponse>> ephemeralInstances = new(configuration.KeyValuesWorkers);
+        logger.LogDebug("Starting {Workers} ephemeral key/value workers", configuration.KeyValuesWorkers);
+        
+        List<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> ephemeralInstances = new(configuration.KeyValuesWorkers);
 
         for (int i = 0; i < configuration.KeyValuesWorkers; i++)
-            ephemeralInstances.Add(actorSystem.SpawnStruct<KeyValueActor, KeyValueRequest, KeyValueResponse>("ephemeral-keyvalue-" + i, backgroundWriter, persistence, logger));
+            ephemeralInstances.Add(actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>("ephemeral-keyvalue-" + i, backgroundWriter, persistence, logger));
 
-        return actorSystem.CreateConsistentHashRouterStruct(ephemeralInstances);
+        return actorSystem.CreateConsistentHashRouter(ephemeralInstances);
     }
 
     /// <summary>
@@ -91,18 +93,20 @@ public sealed class KeyValuesManager
     /// <param name="persistence"></param>
     /// <param name="workers"></param>
     /// <returns></returns>
-    private IActorRefStruct<ConsistentHashActorStruct<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> GetConsistentRouter(
+    private IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> GetConsistentRouter(
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, 
         IPersistence persistence, 
         KahunaConfiguration configuration
     )
     {
-        List<IActorRefStruct<KeyValueActor, KeyValueRequest, KeyValueResponse>> consistentInstances = new(configuration.KeyValuesWorkers);
+        logger.LogDebug("Starting {Workers} consistent key/value workers", configuration.KeyValuesWorkers);
+        
+        List<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> consistentInstances = new(configuration.KeyValuesWorkers);
 
         for (int i = 0; i < configuration.KeyValuesWorkers; i++)
-            consistentInstances.Add(actorSystem.SpawnStruct<KeyValueActor, KeyValueRequest, KeyValueResponse>("consistent-keyvalue-" + i, backgroundWriter, persistence, logger));
+            consistentInstances.Add(actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>("consistent-keyvalue-" + i, backgroundWriter, persistence, logger));
         
-        return actorSystem.CreateConsistentHashRouterStruct(consistentInstances);
+        return actorSystem.CreateConsistentHashRouter(consistentInstances);
     }
 
     /// <summary>
@@ -144,7 +148,10 @@ public sealed class KeyValuesManager
                     if (response is null)
                         return false;
 
-                    return response.Type == PersistenceResponseType.Success;
+                    if (response.Type == PersistenceResponseType.Success)
+                        logger.LogDebug("Replicated key/value set {Key} {Revision} to {Node}", keyValueMessage.Key, keyValueMessage.Revision, raft.GetLocalNodeId());
+
+                    return true;
                 }
 
                 case KeyValueRequestType.TryDelete:
@@ -163,7 +170,10 @@ public sealed class KeyValuesManager
                     if (response is null)
                         return false;
 
-                    return response.Type == PersistenceResponseType.Success;
+                    if (response.Type == PersistenceResponseType.Success)
+                        logger.LogDebug("Replicated key/value delete {Key} {Revision} to {Node}", keyValueMessage.Key, keyValueMessage.Revision, raft.GetLocalNodeId());
+
+                    return true;
                 }
 
                 case KeyValueRequestType.TryExtend:
@@ -182,7 +192,10 @@ public sealed class KeyValuesManager
                     if (response is null)
                         return false;
 
-                    return response.Type == PersistenceResponseType.Success;
+                    if (response.Type == PersistenceResponseType.Success)
+                        logger.LogDebug("Replicated key/value extend {Key} {Revision} to {Node}", keyValueMessage.Key, keyValueMessage.Revision, raft.GetLocalNodeId());
+
+                    return true;
                 }
 
                 case KeyValueRequestType.TryGet:
@@ -244,12 +257,19 @@ public sealed class KeyValuesManager
     /// </summary>
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
+    /// <param name="revision"></param>
     /// <param name="consistency"></param>
-    /// <param name="cancelationToken"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryGetValue(
+        HLCTimestamp transactionId, 
+        string key,
+        long revision, 
+        KeyValueConsistency consistency, 
+        CancellationToken cancellationToken
+    )
     {
-        return await locator.LocateAndTryGetValue(transactionId, key, consistency, cancelationToken);
+        return await locator.LocateAndTryGetValue(transactionId, key, revision, consistency, cancellationToken);
     }
     
     /// <summary>
@@ -384,12 +404,15 @@ public sealed class KeyValuesManager
             consistency
         );
 
-        KeyValueResponse response;
+        KeyValueResponse? response;
         
         if (consistency == KeyValueConsistency.Ephemeral)
             response = await ephemeralKeyValuesRouter.Ask(request);
         else
             response = await consistentKeyValuesRouter.Ask(request);
+        
+        if (response is null)
+            return (KeyValueResponseType.Errored, -1);
         
         return (response.Type, response.Revision);
     }
@@ -421,12 +444,15 @@ public sealed class KeyValuesManager
             consistency
         );
 
-        KeyValueResponse response;
+        KeyValueResponse? response;
         
         if (consistency == KeyValueConsistency.Ephemeral)
             response = await ephemeralKeyValuesRouter.Ask(request);
         else
             response = await consistentKeyValuesRouter.Ask(request);
+        
+        if (response is null)
+            return (KeyValueResponseType.Errored, -1);
         
         return (response.Type, response.Revision);
     }
@@ -453,12 +479,15 @@ public sealed class KeyValuesManager
             consistency
         );
 
-        KeyValueResponse response;
+        KeyValueResponse? response;
         
         if (consistency == KeyValueConsistency.Ephemeral)
             response = await ephemeralKeyValuesRouter.Ask(request);
         else
             response = await consistentKeyValuesRouter.Ask(request);
+        
+        if (response is null)
+            return (KeyValueResponseType.Errored, -1);
         
         return (response.Type, response.Revision);
     }
@@ -470,7 +499,12 @@ public sealed class KeyValuesManager
     /// <param name="key"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryGetValue(HLCTimestamp transactionId, string key, KeyValueConsistency consistency)
+    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryGetValue(
+        HLCTimestamp transactionId, 
+        string key,
+        long revision,
+        KeyValueConsistency consistency
+    )
     {
         KeyValueRequest request = new(
             KeyValueRequestType.TryGet, 
@@ -478,19 +512,22 @@ public sealed class KeyValuesManager
             key, 
             null, 
             null,
-            -1,
+            revision,
             KeyValueFlags.None,
             0, 
             HLCTimestamp.Zero,
             consistency
         );
 
-        KeyValueResponse response;
+        KeyValueResponse? response;
         
         if (consistency == KeyValueConsistency.Ephemeral)
             response = await ephemeralKeyValuesRouter.Ask(request);
         else
             response = await consistentKeyValuesRouter.Ask(request);
+        
+        if (response is null)
+            return (KeyValueResponseType.Errored, null);
         
         return (response.Type, response.Context);
     }
@@ -518,12 +555,15 @@ public sealed class KeyValuesManager
             consistency
         );
 
-        KeyValueResponse response;
+        KeyValueResponse? response;
         
         if (consistency == KeyValueConsistency.Ephemeral)
             response = await ephemeralKeyValuesRouter.Ask(request);
         else
             response = await consistentKeyValuesRouter.Ask(request);
+        
+        if (response is null)
+            return (KeyValueResponseType.Errored, key, consistency);
         
         return (response.Type, key, consistency);
     }
@@ -550,12 +590,15 @@ public sealed class KeyValuesManager
             consistency
         );
 
-        KeyValueResponse response;
+        KeyValueResponse? response;
         
         if (consistency == KeyValueConsistency.Ephemeral)
             response = await ephemeralKeyValuesRouter.Ask(request);
         else
             response = await consistentKeyValuesRouter.Ask(request);
+        
+        if (response is null)
+            return (KeyValueResponseType.Errored, key);
         
         return (response.Type, key);
     }
@@ -582,12 +625,15 @@ public sealed class KeyValuesManager
             consistency
         );
 
-        KeyValueResponse response;
+        KeyValueResponse? response;
         
         if (consistency == KeyValueConsistency.Ephemeral)
             response = await ephemeralKeyValuesRouter.Ask(request);
         else
             response = await consistentKeyValuesRouter.Ask(request);
+        
+        if (response is null)
+            return (KeyValueResponseType.Errored, HLCTimestamp.Zero, key, consistency);
         
         return (response.Type, response.Ticket, key, consistency);
     }
@@ -615,12 +661,15 @@ public sealed class KeyValuesManager
             consistency
         );
 
-        KeyValueResponse response;
+        KeyValueResponse? response;
         
         if (consistency == KeyValueConsistency.Ephemeral)
             response = await ephemeralKeyValuesRouter.Ask(request);
         else
             response = await consistentKeyValuesRouter.Ask(request);
+        
+        if (response is null)
+            return (KeyValueResponseType.Errored, -1);
         
         return (response.Type, response.Revision);
     }
@@ -648,12 +697,15 @@ public sealed class KeyValuesManager
             consistency
         );
 
-        KeyValueResponse response;
+        KeyValueResponse? response;
         
         if (consistency == KeyValueConsistency.Ephemeral)
             response = await ephemeralKeyValuesRouter.Ask(request);
         else
             response = await consistentKeyValuesRouter.Ask(request);
+        
+        if (response is null)
+            return (KeyValueResponseType.Errored, -1);
         
         return (response.Type, response.Revision);
     }

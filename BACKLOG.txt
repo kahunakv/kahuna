@@ -11,6 +11,8 @@ Server:
 - Hash keys by prefix
 - Add GetByPrefix in key/value
 - Add support for optimistic locking
+- Test cancellation tokens
+- Don't commit values for unchanged keys in transactions
 
 Client:
 - Fix authentication in rest/grpc endpoints

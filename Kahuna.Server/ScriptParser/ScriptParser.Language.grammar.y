@@ -25,7 +25,7 @@
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS  
 %token TBEGIN TROLLBACK TCOMMIT TLET TSET TGET TESET TEGET TDELETE TEDELETE TEXTEND TEEXTEND 
 %token TIF TELSE TTHEN TEND TNX TXX TEX TCMP TCMPREV
-%token TRETURN TDIGIT TFLOAT TSTRING TIDENTIFIER TESCIDENTIFIER TPLACEHOLDER TTRUE TFALSE 
+%token TRETURN TDIGIT TFLOAT TSTRING TIDENTIFIER TESCIDENTIFIER TPLACEHOLDER TTRUE TFALSE TAT
 
 %%
 
@@ -75,10 +75,14 @@ eset_stmt : TESET identifier expression { $$.n = new(NodeType.Eset, $2.n, $3.n, 
          
 get_stmt : TGET identifier { $$.n = new(NodeType.Get, $2.n, null, null, null, null, null, null, $1.l); }
          | TLET identifier TEQUALS TGET identifier { $$.n = new(NodeType.Get, $5.n, $2.n, null, null, null, null, null, $1.l); }
+         | TGET identifier TAT int { $$.n = new(NodeType.Get, $2.n, null, $4.n, null, null, null, null, $1.l); }
+         | TLET identifier TEQUALS TGET identifier TAT int { $$.n = new(NodeType.Get, $5.n, $2.n, $7.n, null, null, null, null, $1.l); }
          ;
          
 eget_stmt : TEGET identifier { $$.n = new(NodeType.Eget, $2.n, null, null, null, null, null, null, $1.l); }
           | TLET identifier TEQUALS TEGET identifier { $$.n = new(NodeType.Eget, $5.n, $2.n, null, null, null, null, null, $1.l); }
+          | TEGET identifier TAT int { $$.n = new(NodeType.Eget, $2.n, null, $4.n, null, null, null, null, $1.l); }
+          | TLET identifier TEQUALS TEGET identifier TAT int { $$.n = new(NodeType.Eget, $5.n, $2.n, $7.n, null, null, null, null, $1.l); }
           ;
           
 delete_stmt : TDELETE identifier { $$.n = new(NodeType.Delete, $2.n, null, null, null, null, null, null, $1.l); }

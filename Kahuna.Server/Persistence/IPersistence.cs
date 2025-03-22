@@ -13,4 +13,6 @@ public interface IPersistence
     public Task<LockContext?> GetLock(string resource);
     
     public Task<KeyValueContext?> GetKeyValue(string keyName);
+    
+    public Task<KeyValueContext?> GetKeyValueRevision(string keyName, long revision);
 }

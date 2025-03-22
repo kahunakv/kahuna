@@ -179,12 +179,13 @@ public sealed class KahunaManager : IKahuna
     /// </summary>
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
+    /// <param name="revision"></param>
     /// <param name="consistency"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, long revision, KeyValueConsistency consistency, CancellationToken cancelationToken)
     {
-        return keyValues.LocateAndTryGetValue(transactionId, key, consistency, cancelationToken);
+        return keyValues.LocateAndTryGetValue(transactionId, key, revision, consistency, cancelationToken);
     }
 
     /// <summary>
@@ -343,12 +344,18 @@ public sealed class KahunaManager : IKahuna
     /// Returns a value and its context by the specified key
     /// </summary>
     /// <param name="transactionId"></param>
-    /// <param name="keyValueName"></param>
+    /// <param name="keyName"></param>
+    /// <param name="revision"></param>
     /// <param name="consistency"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryGetValue(HLCTimestamp transactionId, string keyValueName, KeyValueConsistency consistency)
+    public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryGetValue(
+        HLCTimestamp transactionId, 
+        string keyName, 
+        long revision, 
+        KeyValueConsistency consistency
+    )
     {
-        return keyValues.TryGetValue(transactionId, keyValueName, consistency);
+        return keyValues.TryGetValue(transactionId, keyName, revision, consistency);
     }
     
     /// <summary>

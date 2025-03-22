@@ -27,7 +27,7 @@ public interface IKahunaCommunication
 
      Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string url, string key, byte[]? value, long compareRevision, int expiryTime, KeyValueConsistency consistency);
 
-     Task<(byte[]?, long)> TryGetKeyValue(string url, string key, KeyValueConsistency consistency);
+     Task<(bool, byte[]?, long)> TryGetKeyValue(string url, string key, long revision, KeyValueConsistency consistency);
 
      Task<(bool, long)> TryDeleteKeyValue(string url, string key, KeyValueConsistency consistency);
 

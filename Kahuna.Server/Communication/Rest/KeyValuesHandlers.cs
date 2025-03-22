@@ -155,6 +155,7 @@ public static class KeyValuesHandlers
             (KeyValueResponseType type, ReadOnlyKeyValueContext? keyValueContext) = await keyValues.LocateAndTryGetValue(
                 request.TransactionId,
                 request.Key, 
+                request.Revision,
                 request.Consistency, 
                 CancellationToken.None
             );

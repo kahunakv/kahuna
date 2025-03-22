@@ -100,10 +100,10 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     
     private async ValueTask FlushKeyValues()
     {
-        if (dirtyLocks.Count == 0)
+        if (dirtyKeyValues.Count == 0)
             return;
                 
-        while (dirtyLocks.TryDequeue(out BackgroundWriteRequest? keyValueRequest))
+        while (dirtyKeyValues.TryDequeue(out BackgroundWriteRequest? keyValueRequest))
         {
             partitionIds.Add(keyValueRequest.PartitionId);
                     

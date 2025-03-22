@@ -372,11 +372,12 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value: " + response.Type, response.Type);
     }
 
-    public async Task<(byte[]?, long)> TryGetKeyValue(string url, string key, KeyValueConsistency consistency)
+    public async Task<(bool, byte[]?, long)> TryGetKeyValue(string url, string key, long revision, KeyValueConsistency consistency)
     {
         KahunaGetKeyValueRequest request = new()
         {
             Key = key, 
+            Revision = revision,
             Consistency = consistency
         };
         
@@ -403,10 +404,10 @@ public class RestCommunication : IKahunaCommunication
                 throw new KahunaException("Response is null", LockResponseType.Errored);
 
             if (response.Type == KeyValueResponseType.Get)
-                return (response.Value, response.Revision);
+                return (true, response.Value, response.Revision);
             
             if (response.Type == KeyValueResponseType.DoesNotExist)
-                return (null, response.Revision);
+                return (false, null, response.Revision);
 
         } while (response.Type == KeyValueResponseType.MustRetry);
             

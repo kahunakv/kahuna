@@ -248,4 +248,33 @@ public class SqlitePersistence : IPersistence
         
         return null;
     }
+    
+    public async Task<KeyValueContext?> GetKeyValueRevision(string keyName, long revision)
+    {
+        try
+        {
+            SqliteConnection connection = await TryOpenDatabase(keyName);
+
+            const string query = "SELECT value, revision, expiresLogical, expiresCounter, consistency, state FROM keys WHERE key = @key";
+            await using SqliteCommand command = new(query, connection);
+
+            command.Parameters.AddWithValue("@key", keyName);
+
+            await using SqliteDataReader reader = await command.ExecuteReaderAsync();
+
+            while (reader.Read())
+                return new()
+                {
+                    Value = reader.IsDBNull(0) ? null : (byte[])reader[0],
+                    Revision = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
+                    Expires = new(reader.IsDBNull(2) ? 0 : reader.GetInt64(2), reader.IsDBNull(3) ? 0 : (uint)reader.GetInt64(3))
+                };
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("GetKeyValue: {0} {1} {2}", ex.GetType().Name, ex.Message, ex.StackTrace);
+        }
+        
+        return null;
+    }
 }

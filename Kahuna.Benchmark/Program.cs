@@ -76,9 +76,9 @@ async Task SetKeyConcurrently(KahunaClient keyValues)
         string key = GetRandomLockNameFromList(tokens);
         string value = GetRandomLockNameFromList(tokens);
 
-        (bool success, long revision) = await keyValues.SetKeyValue(key, value, TimeSpan.FromHours(5), KeyValueFlags.Set, KeyValueConsistency.Ephemeral);
+        KahunaKeyValue result = await keyValues.SetKeyValue(key, value, TimeSpan.FromHours(5), KeyValueFlags.Set, KeyValueConsistency.Ephemeral);
 
-        if (!success)
+        if (!result.Success)
             throw new KahunaException("Not set " + key, LockResponseType.Busy);
         
         //if (revision > 1)
@@ -100,7 +100,7 @@ async Task GetKeyConcurrently(KahunaClient keyValues)
     {
         string key = GetRandomLockNameFromList(tokens);
 
-        (byte[]? _, long revision) = await keyValues.GetKeyValue(key, KeyValueConsistency.Ephemeral);
+        KahunaKeyValue result = await keyValues.GetKeyValue(key, KeyValueConsistency.Ephemeral);
         
         //if (revision > 1)
         //   Console.WriteLine("Got repeated revision " + revision);

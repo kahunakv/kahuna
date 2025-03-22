@@ -9,7 +9,7 @@ namespace Kahuna.Server.KeyValues;
 /// <summary>
 /// Represents a request to perform an action on a key-value actor
 /// </summary>
-public readonly struct KeyValueRequest : IConsistentHashable
+public sealed class KeyValueRequest : IConsistentHashable
 {
     public KeyValueRequestType Type { get; }
     

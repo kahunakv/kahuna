@@ -18,9 +18,9 @@ namespace Kahuna.Server.KeyValues;
 /// The actor maintains an in-memory cache and if a key is not found, it attempts to retrieve it from disk.
 /// Operations with Linearizable consistency persist all modifications to disk.
 /// </summary>
-public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueResponse>
+public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
 {
-    private readonly IActorContextStruct<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext;
+    private readonly IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext;
     
     private readonly Dictionary<string, KeyValueContext> keyValuesStore = new();
 
@@ -55,7 +55,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
     /// <param name="raft"></param>
     /// <param name="logger"></param>
     public KeyValueActor(
-        IActorContextStruct<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext,
+        IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistence persistence,
         IRaft raft,
@@ -83,7 +83,7 @@ public sealed class KeyValueActor : IActorStruct<KeyValueRequest, KeyValueRespon
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    public async Task<KeyValueResponse> Receive(KeyValueRequest message)
+    public async Task<KeyValueResponse?> Receive(KeyValueRequest message)
     {
         try
         {

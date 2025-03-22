@@ -4,7 +4,7 @@ using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues;
 
-public readonly struct KeyValueResponse
+public sealed class KeyValueResponse
 {
     public KeyValueResponseType Type { get; }
     

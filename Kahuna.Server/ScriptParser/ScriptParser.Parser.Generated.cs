@@ -3,8 +3,8 @@
 // (see accompanying GPPGcopyright.rtf)
 
 // GPPG version 1.5.3
-// DateTime: 3/20/2025 8:41:49 PM
-// Input file <ScriptParser/ScriptParser.Language.grammar.y - 3/20/2025 8:41:45 PM>
+// DateTime: 3/21/2025 7:18:22 PM
+// Input file <ScriptParser/ScriptParser.Language.grammar.y - 3/21/2025 11:59:25 AM>
 
 // options: no-lines gplex
 
@@ -412,7 +412,7 @@ internal partial class scriptParser: ShiftReduceParser<ValueType, LexLocation>
 { CurrentSemanticValue.n = new(NodeType.Extend, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
         break;
       case 41: // eextend_stmt -> TEEXTEND, identifier, int
-{ CurrentSemanticValue.n = new(NodeType.Extend, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+{ CurrentSemanticValue.n = new(NodeType.Eextend, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
         break;
       case 42: // let_stmt -> TLET, identifier, TEQUALS, expression
 { CurrentSemanticValue.n = new(NodeType.Let, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }

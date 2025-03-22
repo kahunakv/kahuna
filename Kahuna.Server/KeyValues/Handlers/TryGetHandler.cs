@@ -25,6 +25,21 @@ internal sealed class TryGetHandler : BaseHandler
         KeyValueContext? context = await GetKeyValueContext(message.Key, message.Consistency);
 
         ReadOnlyKeyValueContext readOnlyKeyValueContext;
+        
+        // Revision is provided so we need to fetch a specific revision from storage
+        if (message.CompareRevision > -1)
+        {
+            if (message.Consistency == KeyValueConsistency.Linearizable)
+            {
+                KeyValueContext? revisionContext = await persistence.GetKeyValueRevision(message.Key, message.CompareRevision);
+                if (revisionContext is null)
+                    return new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueContext(null, 0, HLCTimestamp.Zero));
+
+                return new(KeyValueResponseType.Get, new ReadOnlyKeyValueContext(revisionContext.Value, message.CompareRevision, HLCTimestamp.Zero));
+            }
+            
+            return new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueContext(null, 0, HLCTimestamp.Zero)); 
+        }
 
         HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
 

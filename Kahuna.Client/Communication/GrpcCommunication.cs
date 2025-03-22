@@ -178,13 +178,13 @@ public class GrpcCommunication : IKahunaCommunication
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
 
-            if (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeSet)
+            if (response.Type == GrpcKeyValueResponseType.TypeSet)
                 return (true, response.Revision);
             
-            if (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeNotset)
+            if (response.Type == GrpcKeyValueResponseType.TypeNotset)
                 return (false, response.Revision);
 
-        } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
+        } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
             
         throw new KahunaException("Failed to set key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
@@ -196,7 +196,7 @@ public class GrpcCommunication : IKahunaCommunication
             Key = key, 
             Value = value is not null ? UnsafeByteOperations.UnsafeWrap(value) : null,
             CompareValue = compareValue is not null ? UnsafeByteOperations.UnsafeWrap(compareValue) : null,
-            Flags = GrpcKeyValueFlags.KeyvalueFlagsSetIfEqualToValue,
+            Flags = GrpcKeyValueFlags.SetIfEqualToValue,
             ExpiresMs = expiryTime, 
             Consistency = (GrpcKeyValueConsistency)consistency
         };
@@ -215,16 +215,16 @@ public class GrpcCommunication : IKahunaCommunication
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
 
-            if (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeSet)
+            if (response.Type == GrpcKeyValueResponseType.TypeSet)
                 return (true, response.Revision);
             
-            if (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeNotset)
+            if (response.Type == GrpcKeyValueResponseType.TypeNotset)
                 return (false, response.Revision);
             
             if (++retries >= 5)
                 throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
 
-        } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
+        } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
             
         throw new KahunaException("Failed to set key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
@@ -236,7 +236,7 @@ public class GrpcCommunication : IKahunaCommunication
             Key = key, 
             Value = value is not null ? UnsafeByteOperations.UnsafeWrap(value) : null,
             CompareRevision = compareRevision,
-            Flags = GrpcKeyValueFlags.KeyvalueFlagsSetIfEqualToRevision,
+            Flags = GrpcKeyValueFlags.SetIfEqualToRevision,
             ExpiresMs = expiryTime, 
             Consistency = (GrpcKeyValueConsistency)consistency
         };
@@ -255,28 +255,29 @@ public class GrpcCommunication : IKahunaCommunication
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
 
-            if (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeSet)
+            if (response.Type == GrpcKeyValueResponseType.TypeSet)
                 return (true, response.Revision);
             
-            if (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeNotset)
+            if (response.Type == GrpcKeyValueResponseType.TypeNotset)
                 return (false, response.Revision);
             
-            if (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry)
+            if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
                 logger?.LogDebug("Server asked to retry set key/value");
             
             if (++retries >= 5)
                 throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
 
-        } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
+        } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
             
         throw new KahunaException("Failed to set key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
-    public async Task<(byte[]?, long)> TryGetKeyValue(string url, string key, KeyValueConsistency consistency)
+    public async Task<(bool, byte[]?, long)> TryGetKeyValue(string url, string key, long revision, KeyValueConsistency consistency)
     {
         GrpcTryGetKeyValueRequest request = new()
         {
             Key = key, 
+            Revision = revision,
             Consistency = (GrpcKeyValueConsistency)consistency
         };
 
@@ -296,20 +297,20 @@ public class GrpcCommunication : IKahunaCommunication
 
             switch (response.Type)
             {
-                case GrpcKeyValueResponseType.KeyvalueResponseTypeGot:
-                    return (response.Value.ToArray(), response.Revision);
+                case GrpcKeyValueResponseType.TypeGot:
+                    return (true, response.Value.ToArray(), response.Revision);
                 
-                case GrpcKeyValueResponseType.KeyvalueResponseTypeDoesNotExist:
-                    return (null, 0);
+                case GrpcKeyValueResponseType.TypeDoesNotExist:
+                    return (false, null, 0);
             }
             
-            if (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry)
+            if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
                 logger?.LogDebug("Server asked to retry get key/value");
             
             if (++retries >= 5)
                 throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
             
-        } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
+        } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
             
         throw new KahunaException("Failed to get key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
@@ -338,20 +339,20 @@ public class GrpcCommunication : IKahunaCommunication
 
             switch (response.Type)
             {
-                case GrpcKeyValueResponseType.KeyvalueResponseTypeDeleted:
+                case GrpcKeyValueResponseType.TypeDeleted:
                     return (true, response.Revision);
                 
-                case GrpcKeyValueResponseType.KeyvalueResponseTypeDoesNotExist:
+                case GrpcKeyValueResponseType.TypeDoesNotExist:
                     return (false, response.Revision);
             }
             
-            if (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry)
+            if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
                 logger?.LogDebug("Server asked to retry delete key/value");
             
             if (++retries >= 5)
                 throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
             
-        } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
+        } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
             
         throw new KahunaException("Failed to delete key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
@@ -381,20 +382,20 @@ public class GrpcCommunication : IKahunaCommunication
 
             switch (response.Type)
             {
-                case GrpcKeyValueResponseType.KeyvalueResponseTypeExtended:
+                case GrpcKeyValueResponseType.TypeExtended:
                     return (true, response.Revision);
                 
-                case GrpcKeyValueResponseType.KeyvalueResponseTypeDoesNotExist:
+                case GrpcKeyValueResponseType.TypeDoesNotExist:
                     return (false, 0);
             }
             
-            if (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry)
+            if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
                 logger?.LogDebug("Server asked to retry extend key/value");
             
             if (++retries >= 5)
                 throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
             
-        } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
+        } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
             
         throw new KahunaException("Failed to extend key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
@@ -423,7 +424,7 @@ public class GrpcCommunication : IKahunaCommunication
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
 
-            if (response.Type is < GrpcKeyValueResponseType.KeyvalueResponseTypeErrored or GrpcKeyValueResponseType.KeyvalueResponseTypeDoesNotExist)
+            if (response.Type is < GrpcKeyValueResponseType.TypeErrored or GrpcKeyValueResponseType.TypeDoesNotExist)
                 return new()
                 {
                     Type = (KeyValueResponseType)response.Type,
@@ -431,18 +432,18 @@ public class GrpcCommunication : IKahunaCommunication
                     Revision = response.Revision
                 };
             
-            if (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry)
+            if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
                 logger?.LogDebug("Server asked to retry transaction");
             
             if (++retries >= 5)
                 throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
 
-        } while (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeMustRetry);
+        } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
         
         if (!string.IsNullOrEmpty(response.Reason))
             throw new KahunaException(response.Reason, (KeyValueResponseType)response.Type);
 
-        if (response.Type == GrpcKeyValueResponseType.KeyvalueResponseTypeAborted)
+        if (response.Type == GrpcKeyValueResponseType.TypeAborted)
             throw new KahunaException("Transaction aborted", (KeyValueResponseType)response.Type);
 
         throw new KahunaException("Failed to execute key/value transaction:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);

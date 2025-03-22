@@ -96,8 +96,14 @@ public class RocksDbPersistence : IPersistence
 
         if (value is not null)
             kvm.Value = UnsafeByteOperations.UnsafeWrap(value);
+
+        byte[] serialized = Serialize(kvm);
         
-        db.Put(Encoding.UTF8.GetBytes(key), Serialize(kvm), cf: columnFamilyKeys);
+        byte[] index = Encoding.UTF8.GetBytes(key + "~CURRENT");
+        db.Put(index, serialized, cf: columnFamilyKeys);
+        
+        index = Encoding.UTF8.GetBytes(key + "~" + revision);
+        db.Put(index, serialized, cf: columnFamilyKeys);
 
         return Task.FromResult(true);
     }
@@ -122,7 +128,25 @@ public class RocksDbPersistence : IPersistence
 
     public Task<KeyValueContext?> GetKeyValue(string keyName)
     {
-        byte[]? value = db.Get(Encoding.UTF8.GetBytes(keyName), cf: columnFamilyKeys);
+        byte[]? value = db.Get(Encoding.UTF8.GetBytes(keyName + "~CURRENT"), cf: columnFamilyKeys);
+        if (value is null)
+            return NullKeyValueContext;
+
+        RocksDbKeyValueMessage message = UnserializeKeyValueMessage(value);
+
+        KeyValueContext context = new()
+        {
+            Value = message.Value?.ToByteArray(),
+            Revision = message.Revision,
+            Expires = new(message.ExpiresPhysical, message.ExpiresCounter),
+        };
+
+        return Task.FromResult<KeyValueContext?>(context);
+    }
+
+    public Task<KeyValueContext?> GetKeyValueRevision(string keyName, long revision)
+    {
+        byte[]? value = db.Get(Encoding.UTF8.GetBytes(keyName + "~" + revision), cf: columnFamilyKeys);
         if (value is null)
             return NullKeyValueContext;
 
