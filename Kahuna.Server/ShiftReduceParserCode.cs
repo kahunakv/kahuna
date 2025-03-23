@@ -233,16 +233,16 @@ namespace QUT.Gppg {
                         LastSpan = scanner.yylloc;
                         NextToken = scanner.yylex();
                         
-//#if TRACE_ACTIONS
+#if TRACE_ACTIONS
                        Console.Error.WriteLine( "Reading: Next token is {0}", TerminalToString( NextToken ) );
-//#endif
+#endif
                     }
 #if TRACE_ACTIONS
                     else 
                         Console.Error.WriteLine( "Next token is still {0}", TerminalToString( NextToken ) );
 #endif
-                    if (FsaState.ParserTable.ContainsKey( NextToken ))
-                        action = FsaState.ParserTable[NextToken];
+                    if (FsaState.ParserTable.TryGetValue(NextToken, out int actionValue))
+                        action = actionValue;
                 }
 
                 if (action > 0)         // shift
@@ -356,8 +356,6 @@ namespace QUT.Gppg {
         protected abstract void DoAction( int actionNumber );
 
         private bool ErrorRecovery() {
-            bool discard;
-
             if (!recovering) // if not recovering from previous error
                 ReportError();
 
@@ -369,7 +367,7 @@ namespace QUT.Gppg {
             //  bool until after invalid tokens have been discarded.
             //
             ShiftErrorToken();
-            discard = DiscardInvalidTokens();
+            bool discard = DiscardInvalidTokens();
             recovering = true;
             tokensSinceLastError = 0;
             return discard;
