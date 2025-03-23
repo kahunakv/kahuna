@@ -141,7 +141,6 @@ public sealed class KeyValuesManager
                         keyValueMessage.Revision,
                         keyValueMessage.ExpireLogical,
                         keyValueMessage.ExpireCounter,
-                        keyValueMessage.Consistency,
                         (int)KeyValueState.Set
                     ));
                     
@@ -163,7 +162,6 @@ public sealed class KeyValuesManager
                         keyValueMessage.Revision,
                         keyValueMessage.ExpireLogical,
                         keyValueMessage.ExpireCounter,
-                        keyValueMessage.Consistency,
                         (int)KeyValueState.Deleted
                     ));
                     
@@ -185,7 +183,6 @@ public sealed class KeyValuesManager
                         keyValueMessage.Revision,
                         keyValueMessage.ExpireLogical,
                         keyValueMessage.ExpireCounter,
-                        keyValueMessage.Consistency,
                         (int)KeyValueState.Set
                     ));
 

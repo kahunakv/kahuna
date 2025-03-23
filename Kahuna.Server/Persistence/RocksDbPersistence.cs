@@ -54,7 +54,6 @@ public class RocksDbPersistence : IPersistence
         long expiresPhysical, 
         uint expiresCounter, 
         long fencingToken,
-        int consistency, 
         int state
     )
     {
@@ -63,7 +62,6 @@ public class RocksDbPersistence : IPersistence
             ExpiresPhysical = expiresPhysical,
             ExpiresCounter = expiresCounter,
             FencingToken = fencingToken,
-            Consistency = consistency,
             State = state
         };
         
@@ -81,7 +79,6 @@ public class RocksDbPersistence : IPersistence
         long expiresPhysical, 
         uint expiresCounter, 
         long revision,
-        int consistency, 
         int state
     )
     {
@@ -90,7 +87,6 @@ public class RocksDbPersistence : IPersistence
             ExpiresPhysical = expiresPhysical,
             ExpiresCounter = expiresCounter,
             Revision = revision,
-            Consistency = consistency,
             State = state
         };
 
@@ -98,12 +94,16 @@ public class RocksDbPersistence : IPersistence
             kvm.Value = UnsafeByteOperations.UnsafeWrap(value);
 
         byte[] serialized = Serialize(kvm);
+
+        using WriteBatch batch = new();
         
         byte[] index = Encoding.UTF8.GetBytes(key + "~CURRENT");
-        db.Put(index, serialized, cf: columnFamilyKeys);
+        batch.Put(index, serialized, cf: columnFamilyKeys);
         
         index = Encoding.UTF8.GetBytes(key + "~" + revision);
-        db.Put(index, serialized, cf: columnFamilyKeys);
+        batch.Put(index, serialized, cf: columnFamilyKeys);
+
+        db.Write(batch);
 
         return Task.FromResult(true);
     }

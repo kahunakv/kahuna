@@ -8,7 +8,7 @@ using Kahuna.Shared.Locks;
 
 Console.WriteLine("Kahuna Benchmark");
 
-const int numberOfLocks = 5000;
+const int numberOfLocks = 200;
 const int MaxTokens = 100_000;
 
 List<string> tokens = new(MaxTokens);
@@ -76,7 +76,7 @@ async Task SetKeyConcurrently(KahunaClient keyValues)
         string key = GetRandomLockNameFromList(tokens);
         string value = GetRandomLockNameFromList(tokens);
 
-        KahunaKeyValue result = await keyValues.SetKeyValue(key, value, TimeSpan.FromHours(5), KeyValueFlags.Set, KeyValueConsistency.Ephemeral);
+        KahunaKeyValue result = await keyValues.SetKeyValue(key, value, TimeSpan.FromHours(5), KeyValueFlags.Set, KeyValueConsistency.Linearizable);
 
         if (!result.Success)
             throw new KahunaException("Not set " + key, LockResponseType.Busy);
@@ -100,7 +100,7 @@ async Task GetKeyConcurrently(KahunaClient keyValues)
     {
         string key = GetRandomLockNameFromList(tokens);
 
-        KahunaKeyValue result = await keyValues.GetKeyValue(key, KeyValueConsistency.Ephemeral);
+        KahunaKeyValue result = await keyValues.GetKeyValue(key, KeyValueConsistency.Linearizable);
         
         //if (revision > 1)
         //   Console.WriteLine("Got repeated revision " + revision);

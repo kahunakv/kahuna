@@ -78,7 +78,6 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 lockRequest.Revision,
                 lockRequest.Expires.L,
                 lockRequest.Expires.C,
-                lockRequest.Consistency,
                 lockRequest.State
             ));
 
@@ -114,7 +113,6 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 keyValueRequest.Revision,
                 keyValueRequest.Expires.L,
                 keyValueRequest.Expires.C,
-                keyValueRequest.Consistency,
                 keyValueRequest.State
             ));
 
