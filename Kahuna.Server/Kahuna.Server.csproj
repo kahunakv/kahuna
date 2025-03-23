@@ -21,6 +21,7 @@
 
 <ItemGroup>
   <Folder Include="Cluster\" />
+  <Folder Include="KeyValues\Operators\" />
 </ItemGroup>
 
   <ItemGroup>

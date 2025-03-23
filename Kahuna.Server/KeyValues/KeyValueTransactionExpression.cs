@@ -1,6 +1,6 @@
 
-using System.Globalization;
 using System.Text;
+using Kahuna.Server.KeyValues.Functions;
 using Kahuna.Server.ScriptParser;
 
 namespace Kahuna.Server.KeyValues;
@@ -115,97 +115,14 @@ public static class KeyValueTransactionExpression
         
         GetFuncCallArguments(context, ast.rightAst, arguments);
 
-        switch (ast.leftAst.yytext!)
+        return ast.leftAst.yytext! switch
         {
-            case "to_int":
-            case "to_long":
-            case "to_number":
-                return CastToLong(ast, arguments);
-            
-            case "to_str":
-                return CastToStr(ast, arguments);
-            
-            case "to_bool":
-            case "to_boolean":
-                return CastToBool(ast, arguments);
-            
-            case "revision":
-                return GetRevision(ast, arguments);
-            
-            case "len":
-            case "length":
-                return GetLength(ast, arguments);
-            
-            default:
-                throw new KahunaScriptException($"Undefined function {ast.leftAst.yytext!} expression", ast.yyline);
-        }
-    }
-
-    private static KeyValueExpressionResult CastToLong(NodeAst ast, List<KeyValueExpressionResult> arguments)
-    {
-        if (arguments.Count != 1)
-            throw new KahunaScriptException("Invalid number of arguments for 'to_int' function", ast.yyline);
-
-        return arguments[0].Type switch
-        {
-            KeyValueExpressionType.Bool => new() { Type = KeyValueExpressionType.Long, LongValue = arguments[0].BoolValue ? 1 : 0 },
-            KeyValueExpressionType.Long => new() { Type = KeyValueExpressionType.Long, LongValue = arguments[0].LongValue },
-            KeyValueExpressionType.Double => new() { Type = KeyValueExpressionType.Long, LongValue = (long)arguments[0].DoubleValue },
-            KeyValueExpressionType.String => new() { Type = KeyValueExpressionType.Long, LongValue = long.Parse(arguments[0].StrValue ?? "0") },
-            _ => throw new KahunaScriptException($"Cannot cast {arguments[0].Type} to int", ast.yyline)
-        };
-    }
-    
-    private static KeyValueExpressionResult CastToStr(NodeAst ast, List<KeyValueExpressionResult> arguments)
-    {
-        if (arguments.Count != 1)
-            throw new KahunaScriptException("Invalid number of arguments for 'to_str' function", ast.yyline);
-
-        return arguments[0].Type switch
-        {
-            KeyValueExpressionType.Long => new() { Type = KeyValueExpressionType.String, StrValue = arguments[0].LongValue.ToString() },
-            KeyValueExpressionType.Double => new() { Type = KeyValueExpressionType.String, StrValue = arguments[0].DoubleValue.ToString(CultureInfo.InvariantCulture) },
-            KeyValueExpressionType.String => new() { Type = KeyValueExpressionType.String, StrValue = arguments[0].StrValue ?? "" },
-            KeyValueExpressionType.Null => new() { Type = KeyValueExpressionType.String, StrValue = arguments[0].StrValue ?? "" },
-            KeyValueExpressionType.Bool => new() { Type = KeyValueExpressionType.String, StrValue = arguments[0].BoolValue.ToString() },
-            _ => throw new KahunaScriptException($"Cannot cast {arguments[0].Type} to string", ast.yyline)
-        };
-    }
-    
-    private static KeyValueExpressionResult CastToBool(NodeAst ast, List<KeyValueExpressionResult> arguments)
-    {
-        if (arguments.Count != 1)
-            throw new KahunaScriptException("Invalid number of arguments for 'to_bool' function", ast.yyline);
-
-        return arguments[0].Type switch
-        {
-            KeyValueExpressionType.Bool => new() { Type = KeyValueExpressionType.Bool, BoolValue = arguments[0].BoolValue },
-            KeyValueExpressionType.Long => new() { Type = KeyValueExpressionType.Bool, BoolValue = arguments[0].LongValue != 0 },
-            KeyValueExpressionType.Double => new() { Type = KeyValueExpressionType.Bool, BoolValue = arguments[0].DoubleValue != 0 },
-            KeyValueExpressionType.String => new() { Type = KeyValueExpressionType.Bool, BoolValue = string.Compare(arguments[0].StrValue, "true", StringComparison.Ordinal) == 0 },
-            _ => throw new KahunaScriptException($"Cannot cast {arguments[0].Type} to bool", ast.yyline)
-        };
-    }
-    
-    private static KeyValueExpressionResult GetRevision(NodeAst ast, List<KeyValueExpressionResult> arguments)
-    {
-        if (arguments.Count != 1)
-            throw new KahunaScriptException("Invalid number of arguments for 'revision' function", ast.yyline);
-
-        return new() { Type = KeyValueExpressionType.Long, LongValue = arguments[0].Revision };
-    }
-    
-    private static KeyValueExpressionResult GetLength(NodeAst ast, List<KeyValueExpressionResult> arguments)
-    {
-        if (arguments.Count != 1)
-            throw new KahunaScriptException("Invalid number of arguments for 'length' function", ast.yyline);
-
-        KeyValueExpressionResult arg = arguments[0];
-
-        return arg.Type switch
-        {
-            KeyValueExpressionType.String => new() { Type = KeyValueExpressionType.Long, LongValue = arg.StrValue?.Length ?? 0 },
-            _ => throw new KahunaScriptException($"Cannot use 'length' function on argument {arg.Type}", ast.yyline)
+            "to_int" or "to_long" or "to_number" => CastToLongFunction.Execute(ast, arguments),
+            "to_str" => CastToStrFunction.Execute(ast, arguments),
+            "to_bool" or "to_boolean" => CastToBoolFunction.Execute(ast, arguments),
+            "revision" or "rev" => GetRevisionFunction.Execute(ast, arguments),
+            "len" or "length" => GetLengthFunction.Execute(ast, arguments),
+            _ => throw new KahunaScriptException($"Undefined function {ast.leftAst.yytext!} expression", ast.yyline)
         };
     }
 

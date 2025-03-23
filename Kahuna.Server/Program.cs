@@ -47,10 +47,7 @@ builder.Services.AddSingleton<IRaft>(services =>
         NodeId = opts.RaftNodeId,
         Host = opts.RaftHost,
         Port = opts.RaftPort,
-        MaxPartitions = opts.InitialClusterPartitions,
-        StartElectionTimeout = 2000,
-        EndElectionTimeout = 5000,
-        VotingTimeout = TimeSpan.FromSeconds(5)
+        MaxPartitions = opts.InitialClusterPartitions
     };
 
     IWAL walAdapter = opts.WalStorage switch

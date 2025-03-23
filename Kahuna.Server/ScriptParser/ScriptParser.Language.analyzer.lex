@@ -176,14 +176,14 @@ TAnd            &&
 
 {TNotEquals2} { yylval.l = yyline; return (int)Token.TNOTEQUALS; }
 
+{TAt} { yylval.l = yyline; return (int)Token.TAT; }
+
+{TAtWord} { yylval.l = yyline; return (int)Token.TAT; }
+
 {Identifier} { yylval.l = yyline; yylval.s = yytext; return (int)Token.TIDENTIFIER; }
 
 {EscIdentifier} { yylval.l = yyline; yylval.s = yytext.Trim('`'); return (int)Token.TIDENTIFIER; }
 
 {Placeholder} { yylval.l = yyline; yylval.s = yytext; return (int)Token.TPLACEHOLDER; }
-
-{TAt} { yylval.l = yyline; return (int)Token.TAT; }
-
-{TAtWord} { yylval.l = yyline; return (int)Token.TAT; }
 
 %%

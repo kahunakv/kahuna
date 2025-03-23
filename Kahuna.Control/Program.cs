@@ -83,7 +83,15 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "to_boolean",
         "to_string",
         "to_str",
+        "is_int",
+        "is_long",
+        "is_double",
+        "is_float",
+        "is_boolean",
+        "is_string",
+        "is_str",
         "revision",
+        "length",
     ];
 
     string[] commands =

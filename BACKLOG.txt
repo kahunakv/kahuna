@@ -1,5 +1,5 @@
 Server:
-- Fix missing expr in script parser
+- Split operators into many files under Operators/
 - Add support for NX flag in extend
 - Add support for EXISTS command in key/value
 - Add support for placeholders in script parser
