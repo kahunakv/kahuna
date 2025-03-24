@@ -15,7 +15,9 @@ public sealed class KeyValueTransactionContext
     
     public KeyValueExecutionStatus Status { get; set; } = KeyValueExecutionStatus.Continue;
     
-    public List<(string, KeyValueConsistency)>? LocksAcquired { get; set; }
+    public List<(string, KeyValueDurability)>? LocksAcquired { get; set; }
+    
+    public List<(string, KeyValueDurability)>? ModifiedKeys { get; set; }
 
     private Dictionary<string , KeyValueExpressionResult>? Variables { get; set; }
 

@@ -24,32 +24,32 @@ public class TestKeyValues
     public async Task TestEmptyKey(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
         
-        KahunaException ex = await Assert.ThrowsAsync<KahunaException>(() => SetEmptyKey(client, consistency));
+        KahunaException ex = await Assert.ThrowsAsync<KahunaException>(() => SetEmptyKey(client, durability));
         Assert.Contains("Failed to set key/value", ex.Message);
     }
 
-    private static async Task SetEmptyKey(KahunaClient client, KeyValueConsistency consistency)
+    private static async Task SetEmptyKey(KahunaClient client, KeyValueDurability durability)
     {
-        await client.SetKeyValue("", "some-value", 10000, consistency: consistency);
+        await client.SetKeyValue("", "some-value", 10000, durability: durability);
     }
     
     [Theory, CombinatorialData]
     public async Task TestSingleSetValue(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
     }
@@ -58,14 +58,14 @@ public class TestKeyValues
     public async Task TestSingleSetBytes(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value"u8.ToArray(), 10000, consistency: consistency);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value"u8.ToArray(), 10000, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
     }
@@ -74,14 +74,14 @@ public class TestKeyValues
     public async Task TestSingleSetValueExpiresTimeSpan(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", TimeSpan.FromSeconds(10), consistency: consistency);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", TimeSpan.FromSeconds(10), durability: durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
     }
@@ -90,14 +90,14 @@ public class TestKeyValues
     public async Task TestSingleSetBytesExpiresTimeSpan(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value"u8.ToArray(), TimeSpan.FromSeconds(10), consistency: consistency);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value"u8.ToArray(), TimeSpan.FromSeconds(10), durability: durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
     }
@@ -106,18 +106,18 @@ public class TestKeyValues
     public async Task TestSingleSetValueTwice(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
 
-        result = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(1, result.Revision);
     }
@@ -126,14 +126,14 @@ public class TestKeyValues
     public async Task TestSingleSetValueIfNotExists(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfNotExists, consistency: consistency);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfNotExists, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
     }
@@ -142,18 +142,18 @@ public class TestKeyValues
     public async Task TestSingleSetValueIfNotExistsTwice(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfNotExists, consistency: consistency);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfNotExists, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfNotExists, consistency: consistency);
+        result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfNotExists, durability: durability);
         Assert.False(result.Success);
         Assert.Equal(0, result.Revision);
     }
@@ -162,14 +162,14 @@ public class TestKeyValues
     public async Task TestSingleSetValueIfExists(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfExists, consistency: consistency);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfExists, durability: durability);
         Assert.False(result.Success);
         Assert.Equal(-1, result.Revision);
     }
@@ -178,18 +178,18 @@ public class TestKeyValues
     public async Task TestSingleSetValueIfExistsTwice(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.Set, consistency: consistency);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.Set, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfExists, consistency: consistency);
+        result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfExists, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(1, result.Revision);
     }
@@ -198,22 +198,22 @@ public class TestKeyValues
     public async Task TestSingleSetValueIfOrNotExists(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.Set, consistency: consistency);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.Set, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfExists, consistency: consistency);
+        result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfExists, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(1, result.Revision);
         
-        result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfNotExists, consistency: consistency);
+        result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfNotExists, durability: durability);
         Assert.False(result.Success);
         Assert.Equal(1, result.Revision);
     }
@@ -222,18 +222,18 @@ public class TestKeyValues
     public async Task TestSingleSetAndGetValue(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.GetKeyValue(keyName, consistency);
+        result = await client.GetKeyValue(keyName, durability);
         Assert.NotNull(result.Value);
         Assert.Equal(0, result.Revision);
         
@@ -244,28 +244,28 @@ public class TestKeyValues
     public async Task TestSingleSetAndGetValueTwice(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.GetKeyValue(keyName, consistency);
+        result = await client.GetKeyValue(keyName, durability);
         Assert.NotNull(result.Value);
         Assert.Equal(0, result.Revision);
         
         Assert.Equal("some-value", result.ValueAsString());
         
-        result = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(1, result.Revision);
         
-        result = await client.GetKeyValue(keyName, consistency);
+        result = await client.GetKeyValue(keyName, durability);
         Assert.NotNull(result.Value);
         Assert.Equal(1, result.Revision);
     }
@@ -274,18 +274,18 @@ public class TestKeyValues
     public async Task TestSingleSetValueIfNotExistsAndGetValue(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfNotExists, consistency: consistency);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfNotExists, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.GetKeyValue(keyName, consistency);
+        result = await client.GetKeyValue(keyName, durability);
         Assert.NotNull(result.Value);
         Assert.Equal(0, result.Revision);
         
@@ -296,18 +296,18 @@ public class TestKeyValues
     public async Task TestSingleSetAndGetValueExpires(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 1000, consistency: consistency);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 1000, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.GetKeyValue(keyName, consistency);
+        result = await client.GetKeyValue(keyName, durability);
         Assert.NotNull(result.Value);
         Assert.Equal(0, result.Revision);
         
@@ -315,7 +315,7 @@ public class TestKeyValues
         
         await Task.Delay(1500, TestContext.Current.CancellationToken);
         
-        result = await client.GetKeyValue(keyName, consistency);
+        result = await client.GetKeyValue(keyName, durability);
         Assert.Null(result.Value);
         Assert.Equal(0, result.Revision);
     }
@@ -324,7 +324,7 @@ public class TestKeyValues
     public async Task TestSingleSetAndGetValueExpires2(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType); 
@@ -332,21 +332,21 @@ public class TestKeyValues
         string keyName1 = GetRandomKeyName();
         string keyName2 = GetRandomKeyName();
 
-        KahunaKeyValue result1 = await client.SetKeyValue(keyName1, "some-value", 1000, consistency: consistency);
+        KahunaKeyValue result1 = await client.SetKeyValue(keyName1, "some-value", 1000, durability: durability);
         Assert.True(result1.Success);
         Assert.Equal(0, result1.Revision);
         
-        result1 = await client.SetKeyValue(keyName2, "some-value", 1000, consistency: consistency);
+        result1 = await client.SetKeyValue(keyName2, "some-value", 1000, durability: durability);
         Assert.True(result1.Success);
         Assert.Equal(0, result1.Revision);
         
-        result1 = await client.GetKeyValue(keyName1, consistency);
+        result1 = await client.GetKeyValue(keyName1, durability);
         Assert.NotNull(result1.Value);
         Assert.Equal(0, result1.Revision);
         
         Assert.Equal("some-value", result1.ValueAsString());
         
-        KahunaKeyValue result2 = await client.GetKeyValue(keyName2, consistency);
+        KahunaKeyValue result2 = await client.GetKeyValue(keyName2, durability);
         Assert.NotNull(result2.Value);
         Assert.Equal(0, result2.Revision);
         
@@ -354,11 +354,11 @@ public class TestKeyValues
         
         await Task.Delay(1500, TestContext.Current.CancellationToken);
         
-        result1 = await client.GetKeyValue(keyName1, consistency);
+        result1 = await client.GetKeyValue(keyName1, durability);
         Assert.Null(result1.Value);
         Assert.Equal(0, result1.Revision);
         
-        result2 = await client.GetKeyValue(keyName1, consistency);
+        result2 = await client.GetKeyValue(keyName1, durability);
         Assert.Null(result2.Value);
         Assert.Equal(0, result2.Revision);
     }
@@ -367,7 +367,7 @@ public class TestKeyValues
     public async Task TestSingleSetAndGetValueExpiresMultiple(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
@@ -375,21 +375,21 @@ public class TestKeyValues
         string keyName1 = GetRandomKeyName();
         string keyName2 = GetRandomKeyName();
 
-        KahunaKeyValue result1 = await client.SetKeyValue(keyName1, "some-value", 1000, consistency: consistency);
+        KahunaKeyValue result1 = await client.SetKeyValue(keyName1, "some-value", 1000, durability: durability);
         Assert.True(result1.Success);
         Assert.Equal(0, result1.Revision);
         
-        KahunaKeyValue result2 = await client.SetKeyValue(keyName2, "some-value", 1000, consistency: consistency);
+        KahunaKeyValue result2 = await client.SetKeyValue(keyName2, "some-value", 1000, durability: durability);
         Assert.True(result2.Success);
         Assert.Equal(0, result2.Revision);
         
-        result1 = await client.GetKeyValue(keyName1, consistency);
+        result1 = await client.GetKeyValue(keyName1, durability);
         Assert.NotNull(result1.Value);
         Assert.Equal(0, result1.Revision);
         
         Assert.Equal("some-value", result1.ValueAsString());
         
-        result2 = await client.GetKeyValue(keyName2, consistency);
+        result2 = await client.GetKeyValue(keyName2, durability);
         Assert.NotNull(result2.Value);
         Assert.Equal(0, result2.Revision);
         
@@ -397,27 +397,27 @@ public class TestKeyValues
         
         await Task.Delay(1500, TestContext.Current.CancellationToken);
         
-        result1 = await client.GetKeyValue(keyName1, consistency);
+        result1 = await client.GetKeyValue(keyName1, durability);
         Assert.Null(result1.Value);
         Assert.Equal(0, result1.Revision);
         
-        result1 = await client.GetKeyValue(keyName1, consistency);
+        result1 = await client.GetKeyValue(keyName1, durability);
         Assert.Null(result1.Value);
         Assert.Equal(0, result1.Revision);
         
-        result1 = await client.SetKeyValue(keyName1, "some-value", 1000, consistency: consistency);
+        result1 = await client.SetKeyValue(keyName1, "some-value", 1000, durability: durability);
         Assert.True(result1.Success);
         Assert.Equal(1, result1.Revision);
         
-        result2 = await client.SetKeyValue(keyName2, "some-value", 1000, consistency: consistency);
+        result2 = await client.SetKeyValue(keyName2, "some-value", 1000, durability: durability);
         Assert.True(result2.Success);
         Assert.Equal(1, result2.Revision);
         
-        result1 = await client.GetKeyValue(keyName1, consistency);
+        result1 = await client.GetKeyValue(keyName1, durability);
         Assert.NotNull(result1.Value);
         Assert.Equal(1, result1.Revision);
         
-        result2 = await client.GetKeyValue(keyName2, consistency);
+        result2 = await client.GetKeyValue(keyName2, durability);
         Assert.NotNull(result2.Value);
         Assert.Equal(1, result2.Revision);
     }
@@ -426,20 +426,20 @@ public class TestKeyValues
     public async Task TestSingleSetAndGetValueShortExpires(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 1, consistency: consistency);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 1, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
         await Task.Delay(50, TestContext.Current.CancellationToken);
         
-        result = await client.GetKeyValue(keyName, consistency);
+        result = await client.GetKeyValue(keyName, durability);
         Assert.Null(result.Value);
         Assert.Equal(0, result.Revision);
     }
@@ -448,24 +448,24 @@ public class TestKeyValues
     public async Task TestSingleSetValueAndExtend(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 1000, consistency: consistency);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 1000, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.ExtendKeyValue(keyName, 5000, consistency);
+        result = await client.ExtendKeyValue(keyName, 5000, durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
         await Task.Delay(2000, TestContext.Current.CancellationToken);
         
-        result = await client.GetKeyValue(keyName, consistency);
+        result = await client.GetKeyValue(keyName, durability);
         Assert.NotNull(result.Value);
         Assert.Equal(0, result.Revision);
     }
@@ -474,24 +474,24 @@ public class TestKeyValues
     public async Task TestSingleSetValueAndExtendTimeSpan(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", TimeSpan.FromSeconds(1), consistency: consistency);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", TimeSpan.FromSeconds(1), durability: durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.ExtendKeyValue(keyName, TimeSpan.FromSeconds(5), consistency);
+        result = await client.ExtendKeyValue(keyName, TimeSpan.FromSeconds(5), durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
         await Task.Delay(2000, TestContext.Current.CancellationToken);
         
-        result = await client.GetKeyValue(keyName, consistency);
+        result = await client.GetKeyValue(keyName, durability);
         Assert.NotNull(result.Value);
         Assert.Equal(0, result.Revision);
     }
@@ -500,36 +500,36 @@ public class TestKeyValues
     public async Task TestSingleSetValueAndDelete(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.GetKeyValue(keyName, consistency);
+        result = await client.GetKeyValue(keyName, durability);
         Assert.NotNull(result.Value);
         Assert.Equal(0, result.Revision);
         
         Assert.Equal("some-value", result.ValueAsString());
         
-        result = await client.DeleteKeyValue(keyName, consistency);
+        result = await client.DeleteKeyValue(keyName, durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.GetKeyValue(keyName, consistency);
+        result = await client.GetKeyValue(keyName, durability);
         Assert.Null(result.Value);
         Assert.Equal(0, result.Revision);
         
-        result = await client.SetKeyValue(keyName, "some-value-2", 10000, consistency: consistency);
+        result = await client.SetKeyValue(keyName, "some-value-2", 10000, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(1, result.Revision);
         
-        result = await client.GetKeyValue(keyName, consistency);
+        result = await client.GetKeyValue(keyName, durability);
         Assert.NotNull(result.Value);
         Assert.Equal(1, result.Revision);
         
@@ -540,36 +540,36 @@ public class TestKeyValues
     public async Task TestSingleSetValueAndDeleteAndSetIfExists(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.GetKeyValue(keyName, consistency);
+        result = await client.GetKeyValue(keyName, durability);
         Assert.NotNull(result.Value);
         Assert.Equal(0, result.Revision);
         
         Assert.Equal("some-value", result.ValueAsString());
         
-        result = await client.DeleteKeyValue(keyName, consistency);
+        result = await client.DeleteKeyValue(keyName, durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.GetKeyValue(keyName, consistency);
+        result = await client.GetKeyValue(keyName, durability);
         Assert.Null(result.Value);
         Assert.Equal(0, result.Revision);
         
-        result = await client.SetKeyValue(keyName, "some-value-2", 10000, flags: KeyValueFlags.SetIfExists, consistency: consistency);
+        result = await client.SetKeyValue(keyName, "some-value-2", 10000, flags: KeyValueFlags.SetIfExists, durability: durability);
         Assert.False(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.GetKeyValue(keyName, consistency);
+        result = await client.GetKeyValue(keyName, durability);
         Assert.Null(result.Value);
         Assert.Equal(0, result.Revision);
     }
@@ -578,22 +578,22 @@ public class TestKeyValues
     public async Task TestCompareValueAndSetKeyValue(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.TryCompareValueAndSetKeyValue(keyName, "some-new-value", "some-value", 10000, consistency: consistency);
+        result = await client.TryCompareValueAndSetKeyValue(keyName, "some-new-value", "some-value", 10000, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(1, result.Revision);
         
-        result = await client.GetKeyValue(keyName, consistency);
+        result = await client.GetKeyValue(keyName, durability);
         Assert.NotNull(result.Value);
         Assert.Equal(1, result.Revision);
         
@@ -604,22 +604,22 @@ public class TestKeyValues
     public async Task TestCompareUnknownValueAndSetKeyValue(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.TryCompareValueAndSetKeyValue(keyName, "some-new-value", "other-some-value", 10000, consistency: consistency);
+        result = await client.TryCompareValueAndSetKeyValue(keyName, "some-new-value", "other-some-value", 10000, durability: durability);
         Assert.False(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.GetKeyValue(keyName, consistency);
+        result = await client.GetKeyValue(keyName, durability);
         Assert.NotNull(result.Value);
         Assert.Equal(0, result.Revision);
         
@@ -630,26 +630,26 @@ public class TestKeyValues
     public async Task TestCompareRevisionAndSetKeyValue(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.SetKeyValue(keyName, "some-new-value", 10000, consistency: consistency);
+        result = await client.SetKeyValue(keyName, "some-new-value", 10000, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(1, result.Revision);
         
-        result = await client.TryCompareRevisionAndSetKeyValue(keyName, "some-new-new-value", 1, 10000, consistency: consistency);
+        result = await client.TryCompareRevisionAndSetKeyValue(keyName, "some-new-new-value", 1, 10000, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(2, result.Revision);
         
-        result = await client.GetKeyValue(keyName, consistency);
+        result = await client.GetKeyValue(keyName, durability);
         Assert.NotNull(result.Value);
         Assert.Equal(2, result.Revision);
         
@@ -660,26 +660,26 @@ public class TestKeyValues
     public async Task TestCompareUnknownRevisionAndSetKeyValue(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueConsistency.Ephemeral, KeyValueConsistency.Linearizable)] KeyValueConsistency consistency
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, consistency: consistency);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.SetKeyValue(keyName, "some-new-value", 10000, consistency: consistency);
+        result = await client.SetKeyValue(keyName, "some-new-value", 10000, durability: durability);
         Assert.True(result.Success);
         Assert.Equal(1, result.Revision);
         
-        result = await client.TryCompareRevisionAndSetKeyValue(keyName, "some-new-new-value",10, 10000, consistency: consistency);
+        result = await client.TryCompareRevisionAndSetKeyValue(keyName, "some-new-new-value",10, 10000, durability: durability);
         Assert.False(result.Success);
         Assert.Equal(1, result.Revision);
         
-        result = await client.GetKeyValue(keyName, consistency);
+        result = await client.GetKeyValue(keyName, durability);
         Assert.NotNull(result.Value);
         Assert.Equal(1, result.Revision);
         

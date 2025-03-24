@@ -154,7 +154,7 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to get lock information", (LockResponseType)response.Type);
     }
     
-    public async Task<(bool, long)> TrySetKeyValue(string url, string key, byte[]? value, int expiryTime, KeyValueFlags flags, KeyValueConsistency consistency)
+    public async Task<(bool, long)> TrySetKeyValue(string url, string key, byte[]? value, int expiryTime, KeyValueFlags flags, KeyValueDurability durability)
     {
         GrpcTrySetKeyValueRequest request = new()
         {
@@ -162,7 +162,7 @@ public class GrpcCommunication : IKahunaCommunication
             Value = value is not null ? UnsafeByteOperations.UnsafeWrap(value) : null,
             Flags = (GrpcKeyValueFlags)flags,
             ExpiresMs = expiryTime, 
-            Consistency = (GrpcKeyValueConsistency)consistency
+            Consistency = (GrpcKeyValueConsistency)durability
         };
         
         GrpcTrySetKeyValueResponse? response;
@@ -189,7 +189,7 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
-    public async Task<(bool, long)> TryCompareValueAndSetKeyValue(string url, string key, byte[]? value, byte[]? compareValue, int expiryTime, KeyValueConsistency consistency)
+    public async Task<(bool, long)> TryCompareValueAndSetKeyValue(string url, string key, byte[]? value, byte[]? compareValue, int expiryTime, KeyValueDurability durability)
     {
         GrpcTrySetKeyValueRequest request = new()
         {
@@ -198,7 +198,7 @@ public class GrpcCommunication : IKahunaCommunication
             CompareValue = compareValue is not null ? UnsafeByteOperations.UnsafeWrap(compareValue) : null,
             Flags = GrpcKeyValueFlags.SetIfEqualToValue,
             ExpiresMs = expiryTime, 
-            Consistency = (GrpcKeyValueConsistency)consistency
+            Consistency = (GrpcKeyValueConsistency)durability
         };
         
         int retries = 0;
@@ -229,7 +229,7 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
-    public async Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string url, string key, byte[]? value, long compareRevision, int expiryTime, KeyValueConsistency consistency)
+    public async Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string url, string key, byte[]? value, long compareRevision, int expiryTime, KeyValueDurability durability)
     {
         GrpcTrySetKeyValueRequest request = new()
         {
@@ -238,7 +238,7 @@ public class GrpcCommunication : IKahunaCommunication
             CompareRevision = compareRevision,
             Flags = GrpcKeyValueFlags.SetIfEqualToRevision,
             ExpiresMs = expiryTime, 
-            Consistency = (GrpcKeyValueConsistency)consistency
+            Consistency = (GrpcKeyValueConsistency)durability
         };
 
         int retries = 0;
@@ -272,13 +272,13 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
-    public async Task<(bool, byte[]?, long)> TryGetKeyValue(string url, string key, long revision, KeyValueConsistency consistency)
+    public async Task<(bool, byte[]?, long)> TryGetKeyValue(string url, string key, long revision, KeyValueDurability durability)
     {
         GrpcTryGetKeyValueRequest request = new()
         {
             Key = key, 
             Revision = revision,
-            Consistency = (GrpcKeyValueConsistency)consistency
+            Consistency = (GrpcKeyValueConsistency)durability
         };
 
         int retries = 0;
@@ -315,12 +315,12 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to get key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
-    public async Task<(bool, long)> TryDeleteKeyValue(string url, string key, KeyValueConsistency consistency)
+    public async Task<(bool, long)> TryDeleteKeyValue(string url, string key, KeyValueDurability durability)
     {
         GrpcTryDeleteKeyValueRequest request = new()
         {
             Key = key, 
-            Consistency = (GrpcKeyValueConsistency)consistency
+            Consistency = (GrpcKeyValueConsistency)durability
         };
         
         int retries = 0;
@@ -357,13 +357,13 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to delete key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
-    public async Task<(bool, long)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueConsistency consistency)
+    public async Task<(bool, long)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueDurability durability)
     {
         GrpcTryExtendKeyValueRequest request = new()
         {
             Key = key, 
             ExpiresMs = expiresMs, 
-            Consistency = (GrpcKeyValueConsistency)consistency
+            Consistency = (GrpcKeyValueConsistency)durability
         };
 
         int retries = 0;

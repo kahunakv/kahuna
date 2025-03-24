@@ -39,7 +39,7 @@ public sealed class KahunaManager : IKahuna
         
         IPersistence persistence = GetPersistence(configuration);
         
-        IActorRef<ConsistentHashActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter = GetPersistenceRouter(persistence, configuration, logger);
+        IActorRef<RoundRobinActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter = GetPersistenceRouter(persistence, configuration, logger);
         
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter = actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
             "background-writer", 
@@ -59,7 +59,7 @@ public sealed class KahunaManager : IKahuna
     /// <param name="configuration"></param>
     /// <param name="logger"></param>
     /// <returns></returns>
-    private IActorRef<ConsistentHashActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> GetPersistenceRouter(
+    private IActorRef<RoundRobinActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> GetPersistenceRouter(
         IPersistence persistence, 
         KahunaConfiguration configuration,
         ILogger logger
@@ -70,7 +70,7 @@ public sealed class KahunaManager : IKahuna
         for (int i = 0; i < configuration.PersistenceWorkers; i++)
             persistenceInstances.Add(actorSystem.Spawn<PersistenceActor, PersistenceRequest, PersistenceResponse>("persistence-" + i, persistence, logger));
 
-        return actorSystem.CreateConsistentHashRouter(persistenceInstances);
+        return actorSystem.CreateRoundRobinRouter(persistenceInstances);
     }
     
     /// <summary>
@@ -95,7 +95,7 @@ public sealed class KahunaManager : IKahuna
     /// <param name="resource"></param>
     /// <param name="owner"></param>
     /// <param name="expiresMs"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <returns></returns>
     public Task<(LockResponseType, long)> TryLock(string resource, byte[] owner, int expiresMs, LockDurability durability)
     {
@@ -108,7 +108,7 @@ public sealed class KahunaManager : IKahuna
     /// <param name="resource"></param>
     /// <param name="owner"></param>
     /// <param name="expiresMs"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <returns></returns>
     public Task<(LockResponseType, long)> TryExtendLock(string resource, byte[] owner, int expiresMs, LockDurability durability)
     {
@@ -120,7 +120,7 @@ public sealed class KahunaManager : IKahuna
     /// </summary>
     /// <param name="resource"></param>
     /// <param name="owner"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <returns></returns>
     public Task<LockResponseType> TryUnlock(string resource, byte[] owner, LockDurability durability)
     {
@@ -131,7 +131,7 @@ public sealed class KahunaManager : IKahuna
     /// Tries Unlocking the lock with the given name and id.
     /// </summary>
     /// <param name="resource"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <returns></returns>
     public Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(string resource, LockDurability durability)
     {
@@ -147,7 +147,7 @@ public sealed class KahunaManager : IKahuna
     /// <param name="compareRevision"></param>
     /// <param name="flags"></param>
     /// <param name="expiresMs"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <returns></returns>
     public async Task<(KeyValueResponseType, long)> LocateAndTrySetKeyValue(
         HLCTimestamp transactionId,
@@ -157,7 +157,7 @@ public sealed class KahunaManager : IKahuna
         long compareRevision,
         KeyValueFlags flags,
         int expiresMs,
-        KeyValueConsistency consistency,
+        KeyValueDurability durability,
         CancellationToken cancellationToken
     )
     {
@@ -169,7 +169,7 @@ public sealed class KahunaManager : IKahuna
             compareRevision, 
             flags, 
             expiresMs, 
-            consistency, 
+            durability, 
             cancellationToken
         );
     }
@@ -180,12 +180,12 @@ public sealed class KahunaManager : IKahuna
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
     /// <param name="revision"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, long revision, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability, CancellationToken cancelationToken)
     {
-        return keyValues.LocateAndTryGetValue(transactionId, key, revision, consistency, cancelationToken);
+        return keyValues.LocateAndTryGetValue(transactionId, key, revision, durability, cancelationToken);
     }
 
     /// <summary>
@@ -193,12 +193,12 @@ public sealed class KahunaManager : IKahuna
     /// </summary>
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, long)> LocateAndTryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancellationToken)
+    public Task<(KeyValueResponseType, long)> LocateAndTryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        return keyValues.LocateAndTryDeleteKeyValue(transactionId, key, consistency, cancellationToken);
+        return keyValues.LocateAndTryDeleteKeyValue(transactionId, key, durability, cancellationToken);
     }
     
     /// <summary>
@@ -207,12 +207,12 @@ public sealed class KahunaManager : IKahuna
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
     /// <param name="expiresMs"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, long)> LocateAndTryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueConsistency consistency, CancellationToken cancellationToken)
+    public Task<(KeyValueResponseType, long)> LocateAndTryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        return keyValues.LocateAndTryExtendKeyValue(transactionId, key, expiresMs, consistency, cancellationToken);
+        return keyValues.LocateAndTryExtendKeyValue(transactionId, key, expiresMs, durability, cancellationToken);
     }
     
     /// <summary>
@@ -221,12 +221,12 @@ public sealed class KahunaManager : IKahuna
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
     /// <param name="expiresMs"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, string, KeyValueConsistency)> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public Task<(KeyValueResponseType, string, KeyValueDurability)> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancelationToken)
     {
-        return keyValues.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, consistency, cancelationToken);
+        return keyValues.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, durability, cancelationToken);
     }
 
     /// <summary>
@@ -234,12 +234,12 @@ public sealed class KahunaManager : IKahuna
     /// </summary>
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, string)> LocateAndTryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public Task<(KeyValueResponseType, string)> LocateAndTryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancelationToken)
     {
-        return keyValues.LocateAndTryReleaseExclusiveLock(transactionId, key, consistency, cancelationToken);
+        return keyValues.LocateAndTryReleaseExclusiveLock(transactionId, key, durability, cancelationToken);
     }
 
     /// <summary>
@@ -247,12 +247,12 @@ public sealed class KahunaManager : IKahuna
     /// </summary>
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueConsistency)> LocateAndTryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> LocateAndTryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancelationToken)
     {
-        return keyValues.LocateAndTryPrepareMutations(transactionId, key, consistency, cancelationToken);
+        return keyValues.LocateAndTryPrepareMutations(transactionId, key, durability, cancelationToken);
     }
 
     /// <summary>
@@ -260,12 +260,12 @@ public sealed class KahunaManager : IKahuna
     /// </summary>
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, long)> LocateAndTryCommitMutations(HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public Task<(KeyValueResponseType, long)> LocateAndTryCommitMutations(HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancelationToken)
     {
-        return keyValues.LocateAndTryCommitMutations(transactionId, key, ticketId, consistency, cancelationToken);
+        return keyValues.LocateAndTryCommitMutations(transactionId, key, ticketId, durability, cancelationToken);
     }
     
     /// <summary>
@@ -273,12 +273,12 @@ public sealed class KahunaManager : IKahuna
     /// </summary>
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, long)> LocateAndTryRollbackMutations(HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public Task<(KeyValueResponseType, long)> LocateAndTryRollbackMutations(HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancelationToken)
     {
-        return keyValues.LocateAndTryRollbackMutations(transactionId, key, ticketId, consistency, cancelationToken);
+        return keyValues.LocateAndTryRollbackMutations(transactionId, key, ticketId, durability, cancelationToken);
     }
 
     /// <summary>
@@ -290,7 +290,7 @@ public sealed class KahunaManager : IKahuna
     /// <param name="compareRevision"></param>
     /// <param name="flags"></param>
     /// <param name="expiresMs"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <returns></returns>
     public Task<(KeyValueResponseType, long)> TrySetKeyValue(
         HLCTimestamp transactionId,
@@ -300,7 +300,7 @@ public sealed class KahunaManager : IKahuna
         long compareRevision,
         KeyValueFlags flags,
         int expiresMs, 
-        KeyValueConsistency consistency
+        KeyValueDurability durability
     )
     {
         return keyValues.TrySetKeyValue(
@@ -311,7 +311,7 @@ public sealed class KahunaManager : IKahuna
             compareRevision, 
             flags, 
             expiresMs, 
-            consistency
+            durability
         );
     }
 
@@ -321,11 +321,11 @@ public sealed class KahunaManager : IKahuna
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
     /// <param name="expiresMs"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, long)> TryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueConsistency consistency)
+    public Task<(KeyValueResponseType, long)> TryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability)
     {
-        return keyValues.TryExtendKeyValue(transactionId, key, expiresMs, consistency);
+        return keyValues.TryExtendKeyValue(transactionId, key, expiresMs, durability);
     }
 
     /// <summary>
@@ -333,11 +333,11 @@ public sealed class KahunaManager : IKahuna
     /// </summary>
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, long)> TryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueConsistency consistency)
+    public Task<(KeyValueResponseType, long)> TryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueDurability durability)
     {
-        return keyValues.TryDeleteKeyValue(transactionId, key, consistency);
+        return keyValues.TryDeleteKeyValue(transactionId, key, durability);
     }
 
     /// <summary>
@@ -346,16 +346,16 @@ public sealed class KahunaManager : IKahuna
     /// <param name="transactionId"></param>
     /// <param name="keyName"></param>
     /// <param name="revision"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <returns></returns>
     public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryGetValue(
         HLCTimestamp transactionId, 
         string keyName, 
         long revision, 
-        KeyValueConsistency consistency
+        KeyValueDurability durability
     )
     {
-        return keyValues.TryGetValue(transactionId, keyName, revision, consistency);
+        return keyValues.TryGetValue(transactionId, keyName, revision, durability);
     }
     
     /// <summary>

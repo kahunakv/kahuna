@@ -25,7 +25,7 @@ internal sealed class TryReleaseExclusiveLockHandler : BaseHandler
         if (message.TransactionId == HLCTimestamp.Zero)
             return new(KeyValueResponseType.Errored);
         
-        KeyValueContext? context = await GetKeyValueContext(message.Key, message.Consistency);
+        KeyValueContext? context = await GetKeyValueContext(message.Key, message.Durability);
         
         if (context is null)
             return new(KeyValueResponseType.DoesNotExist);
@@ -34,7 +34,9 @@ internal sealed class TryReleaseExclusiveLockHandler : BaseHandler
             return new(KeyValueResponseType.AlreadyLocked);
 
         context.WriteIntent = null;
-        
+
+        context.MvccEntries?.Remove(message.TransactionId);
+
         return new(KeyValueResponseType.Unlocked);
     }
 }

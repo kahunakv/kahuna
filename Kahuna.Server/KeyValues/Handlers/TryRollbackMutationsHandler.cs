@@ -30,7 +30,7 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
             return new(KeyValueResponseType.Errored);
         }
 
-        KeyValueContext? context = await GetKeyValueContext(message.Key, message.Consistency);
+        KeyValueContext? context = await GetKeyValueContext(message.Key, message.Durability);
 
         if (context is null)
         {
@@ -67,19 +67,13 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
             return new(KeyValueResponseType.Errored);
         }
 
-        if (message.Consistency != KeyValueConsistency.Linearizable)
-        {
-            context.MvccEntries.Remove(message.TransactionId);
-            
+        if (message.Durability != KeyValueDurability.Persistent)
             return new(KeyValueResponseType.RolledBack);
-        }
         
         (bool success, long rollbackIndex) = await RollbackKeyValueMessage(message.Key, message.ProposalTicketId);
         
         if (!success)
             return new(KeyValueResponseType.Errored);
-        
-        context.MvccEntries.Remove(message.TransactionId);
         
         return new(KeyValueResponseType.RolledBack, rollbackIndex);
     }

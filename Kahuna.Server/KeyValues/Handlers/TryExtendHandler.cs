@@ -22,7 +22,7 @@ internal sealed class TryExtendHandler : BaseHandler
 
     public async Task<KeyValueResponse> Execute(KeyValueRequest message)
     {
-        KeyValueContext? context = await GetKeyValueContext(message.Key, message.Consistency);
+        KeyValueContext? context = await GetKeyValueContext(message.Key, message.Durability);
         
         if (context is null)
             return new(KeyValueResponseType.DoesNotExist);
@@ -47,7 +47,7 @@ internal sealed class TryExtendHandler : BaseHandler
             context.State
         );
         
-        if (message.Consistency == KeyValueConsistency.Linearizable)
+        if (message.Durability == KeyValueDurability.Persistent)
         {
             bool success = await PersistAndReplicateKeyValueMessage(message.Type, proposal, currentTime);
             if (!success)

@@ -30,7 +30,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             return new(KeyValueResponseType.Errored);
         }
 
-        KeyValueContext? context = await GetKeyValueContext(message.Key, message.Consistency);
+        KeyValueContext? context = await GetKeyValueContext(message.Key, message.Durability);
 
         if (context is null)
         {
@@ -76,15 +76,13 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             entry.State
         );
 
-        if (message.Consistency != KeyValueConsistency.Linearizable)
+        if (message.Durability != KeyValueDurability.Persistent)
         {
             context.Value = proposal.Value;
             context.Expires = proposal.Expires;
             context.Revision = proposal.Revision;
             context.LastUsed = proposal.LastUsed;
             context.State = proposal.State;
-            
-            context.MvccEntries.Remove(message.TransactionId);
             
             return new(KeyValueResponseType.Committed);
         }
@@ -99,8 +97,6 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         context.Revision = proposal.Revision;
         context.LastUsed = proposal.LastUsed;
         context.State = proposal.State;
-        
-        context.MvccEntries.Remove(message.TransactionId);
         
         return new(KeyValueResponseType.Committed, commitIndex);
     }

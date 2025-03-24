@@ -27,7 +27,7 @@ public readonly struct LockRequest : IConsistentHashable
     /// <param name="resource"></param>
     /// <param name="owner"></param>
     /// <param name="expiresMs"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     public LockRequest(LockRequestType type, string resource, byte[]? owner, int expiresMs, LockDurability durability)
     {
         Type = type;

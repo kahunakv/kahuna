@@ -24,15 +24,7 @@ public sealed class PersistenceActor : IActor<PersistenceRequest, PersistenceRes
         {
             case PersistenceRequestType.StoreLock:
             {
-                bool success = await persistence.StoreLock(
-                    message.Key,
-                    message.Value,
-                    message.ExpiresLogical,
-                    message.ExpiresCounter,
-                    message.Revision,
-                    message.State
-                );
-
+                bool success = await persistence.StoreLocks(message.Items);
                 if (!success)
                     return PersistenceResponseStatic.FailedResponse;
             }
@@ -40,33 +32,14 @@ public sealed class PersistenceActor : IActor<PersistenceRequest, PersistenceRes
 
             case PersistenceRequestType.StoreKeyValue:
             {
-                bool success = await persistence.StoreKeyValue(
-                    message.Key,
-                    message.Value,
-                    message.ExpiresLogical,
-                    message.ExpiresCounter,
-                    message.Revision,
-                    message.State
-                );
-
+                bool success = await persistence.StoreKeyValues(message.Items);
                 if (!success)
                     return PersistenceResponseStatic.FailedResponse;
             } 
             break;
-
-            case PersistenceRequestType.GetLock:
-                LockContext? lockContext = await persistence.GetLock(message.Key);
-                if (lockContext == null)
-                    return new(PersistenceResponseType.NotFound);
-                
-                return new(PersistenceResponseType.Found);
             
-            case PersistenceRequestType.GetKeyValue:
-                KeyValueContext? keyValueContext = await persistence.GetKeyValue(message.Key);
-                if (keyValueContext == null)
-                    return new(PersistenceResponseType.NotFound);
-                
-                return new(PersistenceResponseType.Found);
+            default:
+                throw new ArgumentOutOfRangeException();
         }
 
         return PersistenceResponseStatic.SuccessResponse;

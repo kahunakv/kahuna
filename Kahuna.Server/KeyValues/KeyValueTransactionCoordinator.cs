@@ -71,28 +71,28 @@ public sealed class KeyValueTransactionCoordinator
             switch (ast.nodeType)
             {
                 case NodeType.Set:
-                    return await ExecuteSet(GetTempTransactionContext(), ast, KeyValueConsistency.Linearizable, CancellationToken.None);
+                    return await ExecuteSet(GetTempTransactionContext(), ast, KeyValueDurability.Persistent, CancellationToken.None);
 
                 case NodeType.Get:
-                    return await ExecuteGet(GetTempTransactionContext(), ast, KeyValueConsistency.Linearizable,CancellationToken.None);
+                    return await ExecuteGet(GetTempTransactionContext(), ast, KeyValueDurability.Persistent,CancellationToken.None);
 
                 case NodeType.Delete:
-                    return await ExecuteDelete(GetTempTransactionContext(), ast, KeyValueConsistency.Linearizable, CancellationToken.None);
+                    return await ExecuteDelete(GetTempTransactionContext(), ast, KeyValueDurability.Persistent, CancellationToken.None);
 
                 case NodeType.Extend:
-                    return await ExecuteExtend(GetTempTransactionContext(), ast, KeyValueConsistency.Linearizable, CancellationToken.None);
+                    return await ExecuteExtend(GetTempTransactionContext(), ast, KeyValueDurability.Persistent, CancellationToken.None);
 
                 case NodeType.Eset:
-                    return await ExecuteSet(GetTempTransactionContext(), ast, KeyValueConsistency.Ephemeral, CancellationToken.None);
+                    return await ExecuteSet(GetTempTransactionContext(), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
 
                 case NodeType.Eget:
-                    return await ExecuteGet(GetTempTransactionContext(), ast, KeyValueConsistency.Ephemeral, CancellationToken.None);
+                    return await ExecuteGet(GetTempTransactionContext(), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
 
                 case NodeType.Edelete:
-                    return await ExecuteDelete(GetTempTransactionContext(), ast, KeyValueConsistency.Ephemeral, CancellationToken.None);
+                    return await ExecuteDelete(GetTempTransactionContext(), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
 
                 case NodeType.Eextend:
-                    return await ExecuteExtend(GetTempTransactionContext(), ast, KeyValueConsistency.Ephemeral, CancellationToken.None);
+                    return await ExecuteExtend(GetTempTransactionContext(), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
 
                 case NodeType.Begin:
                     return await ExecuteTransaction(ast.leftAst!, false);
@@ -158,7 +158,7 @@ public sealed class KeyValueTransactionCoordinator
         };
     }
 
-    private async Task<KeyValueTransactionResult> ExecuteSet(KeyValueTransactionContext context, NodeAst ast, KeyValueConsistency consistency, CancellationToken cancellationToken)
+    private async Task<KeyValueTransactionResult> ExecuteSet(KeyValueTransactionContext context, NodeAst ast, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         if (ast.leftAst is null)
             throw new KahunaScriptException("Invalid key", ast.yyline);
@@ -216,9 +216,15 @@ public sealed class KeyValueTransactionCoordinator
             compareRevision,
             flags,
             expiresMs,
-            consistency,
+            durability,
             cancellationToken
         );
+
+        if (type == KeyValueResponseType.Set)
+        {
+            context.ModifiedKeys ??= [];
+            context.ModifiedKeys.Add((ast.leftAst.yytext, durability));
+        }
 
         context.Result = new()
         {
@@ -234,7 +240,7 @@ public sealed class KeyValueTransactionCoordinator
         };
     }
     
-    private async Task<KeyValueTransactionResult> ExecuteDelete(KeyValueTransactionContext context, NodeAst ast, KeyValueConsistency consistency, CancellationToken cancellationToken)
+    private async Task<KeyValueTransactionResult> ExecuteDelete(KeyValueTransactionContext context, NodeAst ast, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         if (ast.leftAst is null)
             throw new KahunaScriptException("Invalid key", ast.yyline);
@@ -245,9 +251,15 @@ public sealed class KeyValueTransactionCoordinator
         (KeyValueResponseType type, long revision) = await manager.LocateAndTryDeleteKeyValue(
             context.TransactionId,
             key: ast.leftAst.yytext,
-            consistency,
+            durability,
             cancellationToken
         );
+        
+        if (type == KeyValueResponseType.Deleted)
+        {
+            context.ModifiedKeys ??= [];
+            context.ModifiedKeys.Add((ast.leftAst.yytext, durability));
+        }
         
         context.Result = new()
         {
@@ -263,7 +275,7 @@ public sealed class KeyValueTransactionCoordinator
         };
     }
     
-    private async Task<KeyValueTransactionResult> ExecuteExtend(KeyValueTransactionContext context, NodeAst ast, KeyValueConsistency consistency, CancellationToken cancellationToken)
+    private async Task<KeyValueTransactionResult> ExecuteExtend(KeyValueTransactionContext context, NodeAst ast, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         if (ast.leftAst is null)
             throw new KahunaScriptException("Invalid key", ast.yyline);
@@ -280,9 +292,15 @@ public sealed class KeyValueTransactionCoordinator
             context.TransactionId,
             key: ast.leftAst.yytext,
             expiresMs: expiresMs,
-            consistency,
+            durability,
             cancellationToken
         );
+        
+        if (type == KeyValueResponseType.Extended)
+        {
+            context.ModifiedKeys ??= [];
+            context.ModifiedKeys.Add((ast.leftAst.yytext, durability));
+        }
         
         context.Result = new()
         {
@@ -298,7 +316,7 @@ public sealed class KeyValueTransactionCoordinator
         };
     }
     
-    private async Task<KeyValueTransactionResult> ExecuteGet(KeyValueTransactionContext context, NodeAst ast, KeyValueConsistency consistency, CancellationToken cancellationToken)
+    private async Task<KeyValueTransactionResult> ExecuteGet(KeyValueTransactionContext context, NodeAst ast, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         if (ast.leftAst is null)
             throw new KahunaScriptException("Invalid key", ast.yyline);
@@ -315,7 +333,7 @@ public sealed class KeyValueTransactionCoordinator
             context.TransactionId,
             ast.leftAst.yytext,
             compareRevision,
-            consistency,
+            durability,
             cancellationToken
         );
 
@@ -379,24 +397,24 @@ public sealed class KeyValueTransactionCoordinator
 
         try
         {
-            List<Task<(KeyValueResponseType, string, KeyValueConsistency)>> acquireLocksTasks =
+            List<Task<(KeyValueResponseType, string, KeyValueDurability)>> acquireLocksTasks =
                 new(ephemeralLocksToAcquire.Count + linearizableLocksToAcquire.Count);
 
             // Step 1: Acquire locks
             foreach (string key in linearizableLocksToAcquire)
                 acquireLocksTasks.Add(manager.LocateAndTryAcquireExclusiveLock(transactionId, key, 5050,
-                    KeyValueConsistency.Linearizable, cts.Token));
+                    KeyValueDurability.Persistent, cts.Token));
 
             foreach (string key in ephemeralLocksToAcquire)
                 acquireLocksTasks.Add(manager.LocateAndTryAcquireExclusiveLock(transactionId, key, 5050,
-                    KeyValueConsistency.Ephemeral, cts.Token));
+                    KeyValueDurability.Ephemeral, cts.Token));
 
-            (KeyValueResponseType, string, KeyValueConsistency)[] acquireResponses =
+            (KeyValueResponseType, string, KeyValueDurability)[] acquireResponses =
                 await Task.WhenAll(acquireLocksTasks);
 
             if (acquireResponses.Any(r => r.Item1 != KeyValueResponseType.Locked))
             {
-                foreach ((KeyValueResponseType, string, KeyValueConsistency) proposalResponse in acquireResponses)
+                foreach ((KeyValueResponseType, string, KeyValueDurability) proposalResponse in acquireResponses)
                     Console.WriteLine("{0} {1}", proposalResponse.Item2, proposalResponse.Item1);
 
                 return new() { Type = KeyValueResponseType.Aborted, Reason = "Failed to acquire locks" };;
@@ -434,8 +452,8 @@ public sealed class KeyValueTransactionCoordinator
                 List<Task<(KeyValueResponseType, string)>> releaseLocksTasks = new(ephemeralLocksToAcquire.Count + linearizableLocksToAcquire.Count);
 
                 // Final Step: Release locks
-                foreach ((string key, KeyValueConsistency consistency) in context.LocksAcquired) 
-                    releaseLocksTasks.Add(manager.LocateAndTryReleaseExclusiveLock(transactionId, key, consistency, cts.Token));
+                foreach ((string key, KeyValueDurability durability) in context.LocksAcquired) 
+                    releaseLocksTasks.Add(manager.LocateAndTryReleaseExclusiveLock(transactionId, key, durability, cts.Token));
 
                 await Task.WhenAll(releaseLocksTasks);
             }
@@ -444,20 +462,20 @@ public sealed class KeyValueTransactionCoordinator
 
     private async Task TwoPhaseCommit(KeyValueTransactionContext context, CancellationToken cancellationToken)
     {
-        if (context.LocksAcquired is null)
+        if (context.LocksAcquired is null || context.ModifiedKeys is null)
             return;
         
-        List<Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueConsistency)>> proposalTasks = new(context.LocksAcquired.Count);
+        List<Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> proposalTasks = new(context.LocksAcquired.Count);
 
         // Step 3: Prepare mutations
-        foreach ((string key, KeyValueConsistency consistency) in context.LocksAcquired)
-            proposalTasks.Add(manager.LocateAndTryPrepareMutations(context.TransactionId, key, consistency, cancellationToken));
+        foreach ((string key, KeyValueDurability durability) in context.ModifiedKeys)
+            proposalTasks.Add(manager.LocateAndTryPrepareMutations(context.TransactionId, key, durability, cancellationToken));
 
-        (KeyValueResponseType, HLCTimestamp, string, KeyValueConsistency)[] proposalResponses = await Task.WhenAll(proposalTasks);
+        (KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)[] proposalResponses = await Task.WhenAll(proposalTasks);
 
         if (proposalResponses.Any(r => r.Item1 != KeyValueResponseType.Prepared))
         {
-            foreach ((KeyValueResponseType, HLCTimestamp, string, KeyValueConsistency) proposalResponse in proposalResponses)
+            foreach ((KeyValueResponseType, HLCTimestamp, string, KeyValueDurability) proposalResponse in proposalResponses)
             {
                 if (proposalResponse.Item1 == KeyValueResponseType.Prepared)
                     await manager.LocateAndTryRollbackMutations(context.TransactionId, proposalResponse.Item3, proposalResponse.Item2, proposalResponse.Item4, cancellationToken);
@@ -469,13 +487,13 @@ public sealed class KeyValueTransactionCoordinator
             return;
         }
 
-        List<(string key, HLCTimestamp ticketId, KeyValueConsistency consistency)> mutationsPrepared = proposalResponses.Select(r => (r.Item3, r.Item2, r.Item4)).ToList();
+        List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> mutationsPrepared = proposalResponses.Select(r => (r.Item3, r.Item2, r.Item4)).ToList();
 
         List<Task<(KeyValueResponseType, long)>> commitTasks = new(context.LocksAcquired.Count);
 
         // Step 4: Commit mutations
-        foreach ((string key, HLCTimestamp ticketId, KeyValueConsistency consistency) in mutationsPrepared)
-            commitTasks.Add(manager.LocateAndTryCommitMutations(context.TransactionId, key, ticketId, consistency, cancellationToken));
+        foreach ((string key, HLCTimestamp ticketId, KeyValueDurability durability) in mutationsPrepared)
+            commitTasks.Add(manager.LocateAndTryCommitMutations(context.TransactionId, key, ticketId, durability, cancellationToken));
 
         await Task.WhenAll(commitTasks);
     }
@@ -519,39 +537,39 @@ public sealed class KeyValueTransactionCoordinator
                 }
                 
                 case NodeType.Set:
-                    await ExecuteSet(context, ast, KeyValueConsistency.Linearizable, cancellationToken);
+                    await ExecuteSet(context, ast, KeyValueDurability.Persistent, cancellationToken);
                     break;
                 
                 case NodeType.Delete:
-                    await ExecuteDelete(context, ast, KeyValueConsistency.Linearizable, cancellationToken);
+                    await ExecuteDelete(context, ast, KeyValueDurability.Persistent, cancellationToken);
                     break;
                 
                 case NodeType.Extend:
-                    await ExecuteExtend(context, ast, KeyValueConsistency.Linearizable, cancellationToken);
+                    await ExecuteExtend(context, ast, KeyValueDurability.Persistent, cancellationToken);
                     break;
 
                 case NodeType.Get:
                 {
-                    context.Result = await ExecuteGet(context, ast, KeyValueConsistency.Linearizable, cancellationToken);
+                    context.Result = await ExecuteGet(context, ast, KeyValueDurability.Persistent, cancellationToken);
                     break;
                 }
                 
                 case NodeType.Eset:
-                    await ExecuteSet(context, ast, KeyValueConsistency.Ephemeral, cancellationToken);
+                    await ExecuteSet(context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
 
                 case NodeType.Eget:
                 {
-                    context.Result = await ExecuteGet(context, ast, KeyValueConsistency.Ephemeral, cancellationToken);
+                    context.Result = await ExecuteGet(context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
                 }
                 
                 case NodeType.Edelete:
-                    await ExecuteDelete(context, ast, KeyValueConsistency.Ephemeral, cancellationToken);
+                    await ExecuteDelete(context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
                 
                 case NodeType.Eextend:
-                    await ExecuteExtend(context, ast, KeyValueConsistency.Ephemeral, cancellationToken);
+                    await ExecuteExtend(context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
                 
                 case NodeType.Commit:

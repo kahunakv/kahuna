@@ -261,7 +261,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     /// <param name="resource"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    private async ValueTask<LockContext?> GetLockContext(string resource, LockDurability? durability)
+    private async ValueTask<LockContext?> GetLockContext(string resource, LockDurability durability)
     {
         if (!locks.TryGetValue(resource, out LockContext? context))
         {
@@ -306,8 +306,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             ExpireLogical = proposal.Expires.L,
             ExpireCounter = proposal.Expires.C,
             TimeLogical = currentTime.L,
-            TimeCounter = currentTime.C,
-            Consistency = (int)LockDurability.ReplicationConsistent
+            TimeCounter = currentTime.C
         };
 
         if (proposal.Owner is not null)

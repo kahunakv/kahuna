@@ -10,7 +10,7 @@ public class KahunaKeyValue
     
     private readonly string key;
 
-    private readonly KeyValueConsistency consistency;
+    private readonly KeyValueDurability durability;
     
     public bool Success { get; }
     
@@ -18,23 +18,23 @@ public class KahunaKeyValue
     
     public byte[]? Value { get; }
 
-    public KahunaKeyValue(KahunaClient client, string key, bool success, long revision, KeyValueConsistency consistency)
+    public KahunaKeyValue(KahunaClient client, string key, bool success, long revision, KeyValueDurability durability)
     {
         this.client = client;
         this.key = key;
         Success = success;
         Revision = revision;
-        this.consistency = consistency;
+        this.durability = durability;
     }
     
-    public KahunaKeyValue(KahunaClient client, string key, bool success, byte[]? value, long revision, KeyValueConsistency consistency)
+    public KahunaKeyValue(KahunaClient client, string key, bool success, byte[]? value, long revision, KeyValueDurability durability)
     {
         this.client = client;
         this.key = key;
         Success = success;
         Value = value;
         Revision = revision;
-        this.consistency = consistency;
+        this.durability = durability;
     }
     
     public string? ValueAsString()

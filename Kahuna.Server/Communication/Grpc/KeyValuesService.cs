@@ -69,7 +69,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
             request.CompareRevision,
             (KeyValueFlags)request.Flags,
             request.ExpiresMs, 
-            (KeyValueConsistency)request.Consistency,
+            (KeyValueDurability)request.Consistency,
             context.CancellationToken
         );
 
@@ -104,7 +104,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
             new(request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key, 
             request.ExpiresMs,
-            (KeyValueConsistency)request.Consistency, 
+            (KeyValueDurability)request.Consistency, 
             context.CancellationToken
         );
 
@@ -132,7 +132,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         (KeyValueResponseType type, long revision) = await keyValues.LocateAndTryDeleteKeyValue(
             new(request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key, 
-            (KeyValueConsistency)request.Consistency, 
+            (KeyValueDurability)request.Consistency, 
             context.CancellationToken
         );
 
@@ -161,7 +161,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
             new(request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key, 
             request.Revision,
-            (KeyValueConsistency)request.Consistency, 
+            (KeyValueDurability)request.Consistency, 
             context.CancellationToken
         );
         
@@ -206,7 +206,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
             new(request.TransactionIdPhysical, request.TransactionIdCounter), 
             request.Key, 
             request.ExpiresMs, 
-            (KeyValueConsistency)request.Consistency, 
+            (KeyValueDurability)request.Consistency, 
             context.CancellationToken
         );
 
@@ -233,7 +233,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         (KeyValueResponseType type, string _) = await keyValues.LocateAndTryReleaseExclusiveLock(
             new(request.TransactionIdPhysical, request.TransactionIdCounter), 
             request.Key, 
-            (KeyValueConsistency)request.Consistency, 
+            (KeyValueDurability)request.Consistency, 
             context.CancellationToken
         );
 
@@ -260,7 +260,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         (KeyValueResponseType type, HLCTimestamp proposalTicket, _, _) = await keyValues.LocateAndTryPrepareMutations(
             new(request.TransactionIdPhysical, request.TransactionIdCounter), 
             request.Key, 
-            (KeyValueConsistency)request.Consistency, 
+            (KeyValueDurability)request.Consistency, 
             context.CancellationToken
         );
 
@@ -290,7 +290,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
             new(request.TransactionIdPhysical, request.TransactionIdCounter), 
             request.Key, 
             new(request.ProposalTicketPhysical, request.ProposalTicketCounter),
-            (KeyValueConsistency)request.Consistency, 
+            (KeyValueDurability)request.Consistency, 
             context.CancellationToken
         );
 
@@ -319,7 +319,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
             new(request.TransactionIdPhysical, request.TransactionIdCounter), 
             request.Key, 
             new(request.ProposalTicketPhysical, request.ProposalTicketCounter),
-            (KeyValueConsistency)request.Consistency, 
+            (KeyValueDurability)request.Consistency, 
             context.CancellationToken
         );
 

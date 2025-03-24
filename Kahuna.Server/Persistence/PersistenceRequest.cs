@@ -4,43 +4,47 @@ using Nixie.Routers;
 
 namespace Kahuna.Server.Persistence;
 
-public sealed class PersistenceRequest : IConsistentHashable
+public sealed class PersistenceRequestItem
 {
-    public PersistenceRequestType Type { get; }
-    
     public string Key { get; }
     
     public byte[]? Value { get; }
     
     public long Revision { get; }
     
-    public long ExpiresLogical { get; }
+    public long ExpiresPhysical { get; }
     
     public uint ExpiresCounter { get; }
     
     public int State { get; }
     
-    public PersistenceRequest(
-        PersistenceRequestType type,
+    public PersistenceRequestItem(
         string key, 
         byte[]? value, 
         long revision, 
-        long expiresLogical,
+        long expiresPhysical,
         uint expiresCounter, 
         int state
     )
     {
-        Type = type;
         Key = key;
         Value = value;
         Revision = revision;
-        ExpiresLogical = expiresLogical;
+        ExpiresPhysical = expiresPhysical;
         ExpiresCounter = expiresCounter;
         State = state;
     }
+}
 
-    public int GetHash()
+public sealed class PersistenceRequest
+{
+    public PersistenceRequestType Type { get; }
+    
+    public List<PersistenceRequestItem> Items { get; }
+    
+    public PersistenceRequest(PersistenceRequestType type, List<PersistenceRequestItem> items)
     {
-        return (int)HashUtils.ConsistentHash(Key, 4);
+        Type = type;
+        Items = items;
     }
 }

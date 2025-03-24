@@ -28,6 +28,6 @@ public sealed class KahunaSetKeyValueRequest
     [JsonPropertyName("flags")]
     public KeyValueFlags Flags { get; set; }
     
-    [JsonPropertyName("consistency")]
-    public KeyValueConsistency Consistency { get; set; }
+    [JsonPropertyName("durability")]
+    public KeyValueDurability Durability { get; set; }
 }

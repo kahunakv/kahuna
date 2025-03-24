@@ -53,7 +53,7 @@ public static class ConfigurationValidator
             configuration.BackgroundWriterWorkers = 1;
 
         if (configuration.PersistenceWorkers <= 0)
-            configuration.PersistenceWorkers = 8;
+            configuration.PersistenceWorkers = 4;
         
         return configuration;
     }

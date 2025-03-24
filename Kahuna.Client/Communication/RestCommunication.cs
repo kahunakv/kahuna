@@ -238,7 +238,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to get lock information", response.Type);
     }
 
-    public async Task<(bool, long)> TrySetKeyValue(string url, string key, byte[]? value, int expiryTime, KeyValueFlags flags, KeyValueConsistency consistency)
+    public async Task<(bool, long)> TrySetKeyValue(string url, string key, byte[]? value, int expiryTime, KeyValueFlags flags, KeyValueDurability durability)
     {
         KahunaSetKeyValueRequest request = new()
         {
@@ -246,7 +246,7 @@ public class RestCommunication : IKahunaCommunication
             Value = value, 
             ExpiresMs = expiryTime,
             Flags = flags,
-            Consistency = consistency
+            Durability = durability
         };
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaSetKeyValueRequest);
@@ -282,7 +282,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value: " + response.Type, response.Type);
     }
 
-    public async Task<(bool, long)> TryCompareValueAndSetKeyValue(string url, string key, byte[]? value, byte[]? compareValue, int expiryTime, KeyValueConsistency consistency)
+    public async Task<(bool, long)> TryCompareValueAndSetKeyValue(string url, string key, byte[]? value, byte[]? compareValue, int expiryTime, KeyValueDurability durability)
     {
         KahunaSetKeyValueRequest request = new()
         {
@@ -291,7 +291,7 @@ public class RestCommunication : IKahunaCommunication
             CompareValue = compareValue,
             ExpiresMs = expiryTime,
             Flags = KeyValueFlags.SetIfEqualToValue,
-            Consistency = consistency
+            Durability = durability
         };
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaSetKeyValueRequest);
@@ -327,7 +327,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value: " + response.Type, response.Type);
     }
 
-    public async Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string url, string key, byte[]? value, long compareRevision, int expiryTime, KeyValueConsistency consistency)
+    public async Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string url, string key, byte[]? value, long compareRevision, int expiryTime, KeyValueDurability durability)
     {
         KahunaSetKeyValueRequest request = new()
         {
@@ -336,7 +336,7 @@ public class RestCommunication : IKahunaCommunication
             CompareRevision = compareRevision,
             ExpiresMs = expiryTime,
             Flags = KeyValueFlags.SetIfEqualToRevision,
-            Consistency = consistency
+            Durability = durability
         };
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaSetKeyValueRequest);
@@ -372,13 +372,13 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value: " + response.Type, response.Type);
     }
 
-    public async Task<(bool, byte[]?, long)> TryGetKeyValue(string url, string key, long revision, KeyValueConsistency consistency)
+    public async Task<(bool, byte[]?, long)> TryGetKeyValue(string url, string key, long revision, KeyValueDurability durability)
     {
         KahunaGetKeyValueRequest request = new()
         {
             Key = key, 
             Revision = revision,
-            Consistency = consistency
+            Durability = durability
         };
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaGetKeyValueRequest);
@@ -414,12 +414,12 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to get key/value: " + response.Type, response.Type);
     }
 
-    public async Task<(bool, long)> TryDeleteKeyValue(string url, string key, KeyValueConsistency consistency)
+    public async Task<(bool, long)> TryDeleteKeyValue(string url, string key, KeyValueDurability durability)
     {
         KahunaDeleteKeyValueRequest request = new()
         {
             Key = key, 
-            Consistency = consistency
+            Durability = durability
         };
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaDeleteKeyValueRequest);
@@ -455,13 +455,13 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to delete key/value: " + response.Type, response.Type);
     }
 
-    public async Task<(bool, long)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueConsistency consistency)
+    public async Task<(bool, long)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueDurability durability)
     {
         KahunaExtendKeyValueRequest request = new()
         {
             Key = key,
             ExpiresMs = expiresMs,
-            Consistency = consistency
+            Durability = durability
         };
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaExtendKeyValueRequest);

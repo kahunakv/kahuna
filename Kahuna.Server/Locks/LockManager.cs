@@ -25,7 +25,7 @@ public sealed class LockManager
 
     private readonly ILogger<IKahuna> logger;
     
-    private readonly IActorRef<ConsistentHashActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter;
+    private readonly IActorRef<RoundRobinActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter;
 
     private readonly IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> ephemeralLocksRouter;
     
@@ -45,7 +45,7 @@ public sealed class LockManager
         ActorSystem actorSystem, 
         IRaft raft, 
         IPersistence persistence, 
-        IActorRef<ConsistentHashActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter,
+        IActorRef<RoundRobinActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         KahunaConfiguration configuration, 
         ILogger<IKahuna> logger
@@ -95,12 +95,12 @@ public sealed class LockManager
         KahunaConfiguration configuration
     )
     {
-        List<IActorRefStruct<LockActor, LockRequest, LockResponse>> consistentInstances = new(configuration.LocksWorkers);
+        List<IActorRefStruct<LockActor, LockRequest, LockResponse>> persistentInstances = new(configuration.LocksWorkers);
 
         for (int i = 0; i < configuration.LocksWorkers; i++)
-            consistentInstances.Add(actorSystem.SpawnStruct<LockActor, LockRequest, LockResponse>("consistent-lock-" + i, backgroundWriter, persistence, logger));
+            persistentInstances.Add(actorSystem.SpawnStruct<LockActor, LockRequest, LockResponse>("consistent-lock-" + i, backgroundWriter, persistence, logger));
         
-        return actorSystem.CreateConsistentHashRouterStruct(consistentInstances);
+        return actorSystem.CreateConsistentHashRouterStruct(persistentInstances);
     }
 
     /// <summary>
@@ -130,12 +130,16 @@ public sealed class LockManager
                 {
                     PersistenceResponse? response = await persistenceActorRouter.Ask(new(
                         PersistenceRequestType.StoreLock,
-                        lockMessage.Resource,
-                        lockMessage.Owner?.ToByteArray(),
-                        lockMessage.FencingToken,
-                        lockMessage.ExpireLogical,
-                        lockMessage.ExpireCounter,
-                        (int)LockState.Locked
+                        [
+                            new(
+                                lockMessage.Resource,
+                                lockMessage.Owner?.ToByteArray(),
+                                lockMessage.FencingToken,
+                                lockMessage.ExpireLogical,
+                                lockMessage.ExpireCounter,
+                                (int)LockState.Locked
+                            )
+                        ]
                     ));
                     
                     if (response is null)
@@ -148,12 +152,16 @@ public sealed class LockManager
                 {
                     PersistenceResponse? response = await persistenceActorRouter.Ask(new(
                         PersistenceRequestType.StoreLock,
-                        lockMessage.Resource,
-                        lockMessage.Owner?.ToByteArray(),
-                        lockMessage.FencingToken,
-                        lockMessage.ExpireLogical,
-                        lockMessage.ExpireCounter,
-                        (int)LockState.Unlocked
+                        [
+                            new(
+                                lockMessage.Resource,
+                                lockMessage.Owner?.ToByteArray(),
+                                lockMessage.FencingToken,
+                                lockMessage.ExpireLogical,
+                                lockMessage.ExpireCounter,
+                                (int)LockState.Unlocked
+                            )
+                        ]
                     ));
                     
                     if (response is null)
@@ -166,12 +174,16 @@ public sealed class LockManager
                 {
                     PersistenceResponse? response = await persistenceActorRouter.Ask(new(
                         PersistenceRequestType.StoreLock,
-                        lockMessage.Resource,
-                        lockMessage.Owner?.ToByteArray(),
-                        lockMessage.FencingToken,
-                        lockMessage.ExpireLogical,
-                        lockMessage.ExpireCounter,
-                        (int)LockState.Locked
+                        [
+                            new(
+                                lockMessage.Resource,
+                                lockMessage.Owner?.ToByteArray(),
+                                lockMessage.FencingToken,
+                                lockMessage.ExpireLogical,
+                                lockMessage.ExpireCounter,
+                                (int)LockState.Locked
+                            )
+                        ]
                     ));
 
                     if (response is null)
@@ -212,7 +224,7 @@ public sealed class LockManager
     /// <param name="resource"></param>
     /// <param name="owner"></param>
     /// <param name="expiresMs"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <returns></returns>
     public async Task<(LockResponseType, long)> TryLock(string resource, byte[] owner, int expiresMs, LockDurability durability)
     {
@@ -240,7 +252,7 @@ public sealed class LockManager
     /// <param name="resource"></param>
     /// <param name="owners"></param>
     /// <param name="expiresMs"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <returns></returns>
     public async Task<(LockResponseType, long)> TryExtendLock(string resource, byte[] owner, int expiresMs, LockDurability durability)
     {
@@ -267,7 +279,7 @@ public sealed class LockManager
     /// </summary>
     /// <param name="resource"></param>
     /// <param name="owner"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <returns></returns>
     public async Task<LockResponseType> TryUnlock(string resource, byte[] owner, LockDurability durability)
     {
@@ -293,7 +305,7 @@ public sealed class LockManager
     /// Passes a Get request to the locker actor for the given lock name.
     /// </summary>
     /// <param name="resource"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <returns></returns>
     public async Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(string resource, LockDurability durability)
     {

@@ -38,7 +38,7 @@ internal abstract class BaseHandler
     }
     
     /// <summary>
-    /// Persists and replicates KeyValue messages to the Raft partition
+    /// Persists and replicates the key/value messages to the Raft partition
     /// </summary>
     /// <param name="type"></param>
     /// <param name="proposal"></param>
@@ -59,8 +59,7 @@ internal abstract class BaseHandler
             ExpireLogical = proposal.Expires.L,
             ExpireCounter = proposal.Expires.C,
             TimeLogical = currentTime.L,
-            TimeCounter = currentTime.C,
-            Consistency = (int)KeyValueConsistency.LinearizableReplication
+            TimeCounter = currentTime.C
         };
         
         if (proposal.Value is not null)
@@ -79,6 +78,7 @@ internal abstract class BaseHandler
             return false;
         }
 
+        // Schedule save to be saved asynchronously in a background actor
         backgroundWriter.Send(new(
             BackgroundWriteType.QueueStoreKeyValue,
             partitionId,
@@ -96,13 +96,13 @@ internal abstract class BaseHandler
     /// Returns an existing KeyValueContext from memory or retrieves it from the persistence layer
     /// </summary>
     /// <param name="key"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <returns></returns>
-    protected async ValueTask<KeyValueContext?> GetKeyValueContext(string key, KeyValueConsistency? consistency)
+    protected async ValueTask<KeyValueContext?> GetKeyValueContext(string key, KeyValueDurability durability)
     {
         if (!keyValuesStore.TryGetValue(key, out KeyValueContext? context))
         {
-            if (consistency == KeyValueConsistency.Linearizable)
+            if (durability == KeyValueDurability.Persistent)
             {
                 context = await persistence.GetKeyValue(key);
                 if (context is not null)

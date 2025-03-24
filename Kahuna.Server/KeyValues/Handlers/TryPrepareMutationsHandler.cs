@@ -32,7 +32,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             return new(KeyValueResponseType.Errored);
         }
 
-        KeyValueContext? context = await GetKeyValueContext(message.Key, message.Consistency);
+        KeyValueContext? context = await GetKeyValueContext(message.Key, message.Durability);
         if (context is null)
         {
             logger.LogWarning("Key/Value context is missing for {TransactionId}", message.TransactionId);
@@ -68,7 +68,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             return new(KeyValueResponseType.Errored);
         }
         
-        if (message.Consistency != KeyValueConsistency.Linearizable)
+        if (message.Durability != KeyValueDurability.Persistent)
             return new(KeyValueResponseType.Prepared);
         
         KeyValueProposal proposal = new(
@@ -117,8 +117,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             ExpireLogical = proposal.Expires.L,
             ExpireCounter = proposal.Expires.C,
             TimeLogical = currentTime.L,
-            TimeCounter = currentTime.C,
-            Consistency = (int)KeyValueConsistency.LinearizableReplication
+            TimeCounter = currentTime.C
         };
         
         if (proposal.Value is not null)

@@ -29,7 +29,7 @@ public sealed class KeyValueRequest : IConsistentHashable
     
     public HLCTimestamp ProposalTicketId { get; }
     
-    public KeyValueConsistency Consistency { get; }
+    public KeyValueDurability Durability { get; }
     
     /// <summary>
     /// Constructor
@@ -42,7 +42,7 @@ public sealed class KeyValueRequest : IConsistentHashable
     /// <param name="compareRevision"></param>
     /// <param name="flags"></param>
     /// <param name="expiresMs"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     public KeyValueRequest(
         KeyValueRequestType type,
         HLCTimestamp transactionId,
@@ -53,7 +53,7 @@ public sealed class KeyValueRequest : IConsistentHashable
         KeyValueFlags flags,
         int expiresMs, 
         HLCTimestamp proposalTicketId,
-        KeyValueConsistency consistency
+        KeyValueDurability durability
     )
     {
         Type = type;
@@ -65,7 +65,7 @@ public sealed class KeyValueRequest : IConsistentHashable
         Flags = flags;
         ExpiresMs = expiresMs;
         ProposalTicketId = proposalTicketId;
-        Consistency = consistency;
+        Durability = durability;
     }
 
     public int GetHash()

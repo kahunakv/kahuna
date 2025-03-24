@@ -32,7 +32,7 @@ public static class KeyValuesHandlers
                 request.CompareRevision,
                 request.Flags,
                 request.ExpiresMs, 
-                request.Consistency,
+                request.Durability,
                 CancellationToken.None
             );
 
@@ -55,7 +55,7 @@ public static class KeyValuesHandlers
             
             if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
             {
-                (KeyValueResponseType response, long revision) = await keyValues.TryExtendKeyValue(request.TransactionId, request.Key, request.ExpiresMs, request.Consistency);
+                (KeyValueResponseType response, long revision) = await keyValues.TryExtendKeyValue(request.TransactionId, request.Key, request.ExpiresMs, request.Durability);
 
                 return new() { Type = response, Revision = revision };    
             }
@@ -101,7 +101,7 @@ public static class KeyValuesHandlers
 
             if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
             {
-                (KeyValueResponseType response, long revision) = await keyValues.TryDeleteKeyValue(request.TransactionId, request.Key, request.Consistency);
+                (KeyValueResponseType response, long revision) = await keyValues.TryDeleteKeyValue(request.TransactionId, request.Key, request.Durability);
 
                 return new() { Type = response, Revision = revision };
             }
@@ -156,7 +156,7 @@ public static class KeyValuesHandlers
                 request.TransactionId,
                 request.Key, 
                 request.Revision,
-                request.Consistency, 
+                request.Durability, 
                 CancellationToken.None
             );
         

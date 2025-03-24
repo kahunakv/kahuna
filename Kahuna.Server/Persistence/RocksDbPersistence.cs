@@ -48,60 +48,56 @@ public class RocksDbPersistence : IPersistence
         columnFamilyLocks = db.GetColumnFamily("locks");
     }
 
-    public Task<bool> StoreLock(
-        string resource, 
-        byte[]? owner, 
-        long expiresPhysical, 
-        uint expiresCounter, 
-        long fencingToken,
-        int state
-    )
+    public Task<bool> StoreLocks(List<PersistenceRequestItem> items)
     {
-        RocksDbLockMessage kvm = new()
+        using WriteBatch batch = new();
+
+        foreach (PersistenceRequestItem item in items)
         {
-            ExpiresPhysical = expiresPhysical,
-            ExpiresCounter = expiresCounter,
-            FencingToken = fencingToken,
-            State = state
-        };
+            RocksDbLockMessage kvm = new()
+            {
+                ExpiresPhysical = item.ExpiresPhysical,
+                ExpiresCounter = item.ExpiresCounter,
+                FencingToken = item.Revision,
+                State = item.State
+            };
+
+            if (item.Value != null)
+                kvm.Owner = UnsafeByteOperations.UnsafeWrap(item.Value);
+
+            batch.Put(Encoding.UTF8.GetBytes(item.Key), Serialize(kvm), cf: columnFamilyLocks);
+        }
         
-        if (owner != null)
-            kvm.Owner = UnsafeByteOperations.UnsafeWrap(owner);
-        
-        db.Put(Encoding.UTF8.GetBytes(resource), Serialize(kvm), cf: columnFamilyLocks);
+        db.Write(batch);
 
         return Task.FromResult(true);
     }
     
-    public Task<bool> StoreKeyValue(
-        string key, 
-        byte[]? value, 
-        long expiresPhysical, 
-        uint expiresCounter, 
-        long revision,
-        int state
-    )
+    public Task<bool> StoreKeyValues(List<PersistenceRequestItem> items)
     {
-        RocksDbKeyValueMessage kvm = new()
-        {
-            ExpiresPhysical = expiresPhysical,
-            ExpiresCounter = expiresCounter,
-            Revision = revision,
-            State = state
-        };
-
-        if (value is not null)
-            kvm.Value = UnsafeByteOperations.UnsafeWrap(value);
-
-        byte[] serialized = Serialize(kvm);
-
         using WriteBatch batch = new();
         
-        byte[] index = Encoding.UTF8.GetBytes(key + "~CURRENT");
-        batch.Put(index, serialized, cf: columnFamilyKeys);
-        
-        index = Encoding.UTF8.GetBytes(key + "~" + revision);
-        batch.Put(index, serialized, cf: columnFamilyKeys);
+        foreach (PersistenceRequestItem item in items)
+        {
+            RocksDbKeyValueMessage kvm = new()
+            {
+                ExpiresPhysical = item.ExpiresPhysical,
+                ExpiresCounter = item.ExpiresCounter,
+                Revision = item.Revision,
+                State = item.State
+            };
+
+            if (item.Value is not null)
+                kvm.Value = UnsafeByteOperations.UnsafeWrap(item.Value);
+
+            byte[] serialized = Serialize(kvm);
+
+            byte[] index = Encoding.UTF8.GetBytes(string.Concat(item.Key, "~CURRENT"));
+            batch.Put(index, serialized, cf: columnFamilyKeys);
+
+            index = Encoding.UTF8.GetBytes(string.Concat(item.Key, "~", item.Revision));
+            batch.Put(index, serialized, cf: columnFamilyKeys);
+        }
 
         db.Write(batch);
 
@@ -146,7 +142,7 @@ public class RocksDbPersistence : IPersistence
 
     public Task<KeyValueContext?> GetKeyValueRevision(string keyName, long revision)
     {
-        byte[]? value = db.Get(Encoding.UTF8.GetBytes(keyName + "~" + revision), cf: columnFamilyKeys);
+        byte[]? value = db.Get(Encoding.UTF8.GetBytes(string.Concat(keyName, "~", revision)), cf: columnFamilyKeys);
         if (value is null)
             return NullKeyValueContext;
 

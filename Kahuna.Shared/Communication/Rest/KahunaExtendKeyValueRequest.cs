@@ -17,5 +17,5 @@ public sealed class KahunaExtendKeyValueRequest
     public int ExpiresMs { get; set; }
     
     [JsonPropertyName("value")]
-    public KeyValueConsistency Consistency { get; set; }
+    public KeyValueDurability Durability { get; set; }
 }

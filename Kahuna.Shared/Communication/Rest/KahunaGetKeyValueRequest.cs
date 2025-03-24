@@ -17,5 +17,5 @@ public sealed class KahunaGetKeyValueRequest
     public long Revision { get; set; }
     
     [JsonPropertyName("value")]
-    public KeyValueConsistency Consistency { get; set; }
+    public KeyValueDurability Durability { get; set; }
 }

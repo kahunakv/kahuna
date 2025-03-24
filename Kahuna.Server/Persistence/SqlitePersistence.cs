@@ -89,149 +89,144 @@ public class SqlitePersistence : IPersistence
         }
     }
     
-    public async Task<bool> StoreLock(string resource, byte[]? owner, long expiresPhysical, uint expiresCounter, long fencingToken, int state)
+    public async Task<bool> StoreLocks(List<PersistenceRequestItem> items)
     {
         try
         {
-            (AsyncReaderWriterLock readerWriterLock, SqliteConnection connection) = await TryOpenDatabase(resource);
-
-            try
+            foreach (PersistenceRequestItem item in items)
             {
-                await readerWriterLock.EnterWriteLockAsync(TimeSpan.FromSeconds(5));
+                (AsyncReaderWriterLock readerWriterLock, SqliteConnection connection) = await TryOpenDatabase(item.Key);
 
-                const string insert = """
-                  INSERT INTO locks (resource, owner, expiresLogical, expiresCounter, fencingToken, state) 
-                  VALUES (@resource, @owner, @expiresLogical, @expiresCounter, @fencingToken, @state) 
-                  ON CONFLICT(resource) DO UPDATE SET owner=@owner, expiresLogical=@expiresLogical, expiresCounter=@expiresCounter, 
-                  fencingToken=@fencingToken, state=@state;
-                  """;
+                try
+                {
+                    await readerWriterLock.EnterWriteLockAsync(TimeSpan.FromSeconds(5));
 
-                await using SqliteCommand command = new(insert, connection);
+                    const string insert = """
+                      INSERT INTO locks (resource, owner, expiresLogical, expiresCounter, fencingToken, state) 
+                      VALUES (@resource, @owner, @expiresLogical, @expiresCounter, @fencingToken, @state) 
+                      ON CONFLICT(resource) DO UPDATE SET owner=@owner, expiresLogical=@expiresLogical, expiresCounter=@expiresCounter, 
+                      fencingToken=@fencingToken, state=@state;
+                      """;
 
-                command.Parameters.AddWithValue("@resource", resource);
+                    await using SqliteCommand command = new(insert, connection);
 
-                if (owner is null)
-                    command.Parameters.AddWithValue("@owner", DBNull.Value);
-                else
-                    command.Parameters.AddWithValue("@owner", owner);
+                    command.Parameters.AddWithValue("@resource", item.Key);
 
-                command.Parameters.AddWithValue("@expiresLogical", expiresPhysical);
-                command.Parameters.AddWithValue("@expiresCounter", expiresCounter);
-                command.Parameters.AddWithValue("@fencingToken", fencingToken);
-                command.Parameters.AddWithValue("@state", state);
+                    if (item.Value is null)
+                        command.Parameters.AddWithValue("@owner", DBNull.Value);
+                    else
+                        command.Parameters.AddWithValue("@owner", item.Value);
 
-                await command.ExecuteNonQueryAsync();
+                    command.Parameters.AddWithValue("@expiresLogical", item.ExpiresPhysical);
+                    command.Parameters.AddWithValue("@expiresCounter", item.ExpiresCounter);
+                    command.Parameters.AddWithValue("@fencingToken", item.Revision);
+                    command.Parameters.AddWithValue("@state", item.State);
 
-                return true;
-            }
-            finally
-            {
-                readerWriterLock.Release();
+                    await command.ExecuteNonQueryAsync();
+
+                    return true;
+                }
+                finally
+                {
+                    readerWriterLock.Release();
+                }
             }
         }
         catch (Exception ex)
         {
             Console.WriteLine(
-                "StoreLock: {0} {1} {2} [{3}][{4}][{5}][{6}][{7}][{8}]", 
+                "StoreLock: {0} {1} {2}", 
                 ex.GetType().Name, 
                 ex.Message, 
-                ex.StackTrace, 
-                resource, 
-                owner?.Length, 
-                expiresPhysical, 
-                expiresCounter, 
-                fencingToken,
-                state
+                ex.StackTrace
             );
         }
 
         return false;
     }
     
-    public async Task<bool> StoreKeyValue(string key, byte[]? value, long expiresPhysical, uint expiresCounter, long revision, int state)
+    public async Task<bool> StoreKeyValues(List<PersistenceRequestItem> items)
     {
         try
         {
-            (AsyncReaderWriterLock readerWriterLock, SqliteConnection connection) = await TryOpenDatabase(key);
-
-            try
+            foreach (PersistenceRequestItem item in items)
             {
-                await readerWriterLock.EnterWriteLockAsync(TimeSpan.FromSeconds(5));
 
-                const string insert = """
-                                      INSERT INTO keys (key, revision, value, expiresLogical, expiresCounter, state) 
-                                      VALUES (@key, @revision, @value, @expiresLogical, @expiresCounter, @state) 
-                                      ON CONFLICT(key, revision) DO UPDATE SET value=@value, expiresLogical=@expiresLogical, expiresCounter=@expiresCounter, state=@state;
-                                      """;
-
-                await using SqliteTransaction transaction = connection.BeginTransaction();
+                (AsyncReaderWriterLock readerWriterLock, SqliteConnection connection) = await TryOpenDatabase(item.Key);
 
                 try
                 {
-                    await using SqliteCommand command = new(insert, connection);
+                    await readerWriterLock.EnterWriteLockAsync(TimeSpan.FromSeconds(5));
 
-                    command.Transaction = transaction;
+                    const string insert = """
+                      INSERT INTO keys (key, revision, value, expiresLogical, expiresCounter, state) 
+                      VALUES (@key, @revision, @value, @expiresLogical, @expiresCounter, @state) 
+                      ON CONFLICT(key, revision) DO UPDATE SET value=@value, expiresLogical=@expiresLogical, expiresCounter=@expiresCounter, state=@state;
+                      """;
 
-                    command.Parameters.AddWithValue("@key", key);
+                    await using SqliteTransaction transaction = connection.BeginTransaction();
 
-                    if (value is null)
-                        command.Parameters.AddWithValue("@value", DBNull.Value);
-                    else
-                        command.Parameters.AddWithValue("@value", value);
+                    try
+                    {
+                        await using SqliteCommand command = new(insert, connection);
 
-                    command.Parameters.AddWithValue("@expiresLogical", expiresPhysical);
-                    command.Parameters.AddWithValue("@expiresCounter", expiresCounter);
-                    command.Parameters.AddWithValue("@revision", revision);
-                    command.Parameters.AddWithValue("@state", state);
+                        command.Transaction = transaction;
 
-                    await command.ExecuteNonQueryAsync();
+                        command.Parameters.AddWithValue("@key", item.Key);
 
-                    await using SqliteCommand command2 = new(insert, connection);
+                        if (item.Value is null)
+                            command.Parameters.AddWithValue("@value", DBNull.Value);
+                        else
+                            command.Parameters.AddWithValue("@value", item.Value);
 
-                    command2.Transaction = transaction;
+                        command.Parameters.AddWithValue("@expiresLogical", item.ExpiresPhysical);
+                        command.Parameters.AddWithValue("@expiresCounter", item.ExpiresCounter);
+                        command.Parameters.AddWithValue("@revision", item.Revision);
+                        command.Parameters.AddWithValue("@state", item.State);
 
-                    command2.Parameters.AddWithValue("@key", key);
+                        await command.ExecuteNonQueryAsync();
 
-                    if (value is null)
-                        command2.Parameters.AddWithValue("@value", DBNull.Value);
-                    else
-                        command2.Parameters.AddWithValue("@value", value);
+                        await using SqliteCommand command2 = new(insert, connection);
 
-                    command2.Parameters.AddWithValue("@expiresLogical", expiresPhysical);
-                    command2.Parameters.AddWithValue("@expiresCounter", expiresCounter);
-                    command2.Parameters.AddWithValue("@revision", -1);
-                    command2.Parameters.AddWithValue("@state", state);
+                        command2.Transaction = transaction;
 
-                    await command2.ExecuteNonQueryAsync();
+                        command2.Parameters.AddWithValue("@key", item.Key);
 
-                    transaction.Commit();
+                        if (item.Value is null)
+                            command2.Parameters.AddWithValue("@value", DBNull.Value);
+                        else
+                            command2.Parameters.AddWithValue("@value", item.Value);
 
-                    return true;
+                        command2.Parameters.AddWithValue("@expiresLogical", item.ExpiresPhysical);
+                        command2.Parameters.AddWithValue("@expiresCounter", item.ExpiresCounter);
+                        command2.Parameters.AddWithValue("@revision", -1);
+                        command2.Parameters.AddWithValue("@state", item.State);
+
+                        await command2.ExecuteNonQueryAsync();
+
+                        transaction.Commit();
+
+                        return true;
+                    }
+                    catch
+                    {
+                        transaction.Rollback();
+                        throw;
+                    }
                 }
-                catch
+                finally
                 {
-                    transaction.Rollback();
-                    throw;
+                    readerWriterLock.Release();
                 }
-            }
-            finally
-            {
-                readerWriterLock.Release();
             }
         }
         catch (Exception ex)
         {
             Console.WriteLine(
-                "StoreKeyValue: {0} {1} {2} [{3}][{4}][{5}][{6}][{7}][{8}]", 
+                "StoreKeyValue: {0} {1} {2}", 
                 ex.GetType().Name, 
                 ex.Message, 
-                ex.StackTrace, 
-                key, 
-                value?.Length, 
-                expiresPhysical, 
-                expiresCounter, 
-                revision, 
-                state
+                ex.StackTrace
             );
         }
 

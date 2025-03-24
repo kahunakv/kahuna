@@ -1,4 +1,5 @@
 
+using System.Diagnostics;
 using Nixie;
 using Google.Protobuf;
 using Kahuna.Server.KeyValues.Handlers;
@@ -48,6 +49,8 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
 
     private readonly TryCollectHandler tryCollectHandler;
 
+    private readonly Stopwatch stopwatch = Stopwatch.StartNew();
+
     /// <summary>
     /// Constructor
     /// </summary>
@@ -85,6 +88,8 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// <returns></returns>
     public async Task<KeyValueResponse?> Receive(KeyValueRequest message)
     {
+        stopwatch.Restart();
+
         try
         {
             logger.LogDebug(
@@ -96,7 +101,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 message.ExpiresMs,
                 message.Flags,
                 message.TransactionId,
-                message.Consistency
+                message.Durability
             );
 
             if ((operations++) % 1000 == 0)
@@ -119,6 +124,16 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         catch (Exception ex)
         {
             logger.LogError("Error processing message: {Type} {Message}\n{Stacktrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+        }
+        finally
+        {
+            logger.LogDebug(
+                "KeyValueActor Took: {Actor} {Type} Key={Key} Time={Elasped}ms",
+                actorContext.Self.Runner.Name,
+                message.Type,
+                message.Key,
+                stopwatch.ElapsedMilliseconds
+            );
         }
 
         return new(KeyValueResponseType.Errored);

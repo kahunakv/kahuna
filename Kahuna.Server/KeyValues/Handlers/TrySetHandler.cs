@@ -32,7 +32,7 @@ internal sealed class TrySetHandler : BaseHandler
             KeyValueContext? newContext = null;
 
             /// Try to retrieve KeyValue context from persistence
-            if (message.Consistency == KeyValueConsistency.Linearizable)
+            if (message.Durability == KeyValueDurability.Persistent)
             {
                 newContext = await persistence.GetKeyValue(message.Key);
                 if (newContext is not null)
@@ -168,7 +168,7 @@ internal sealed class TrySetHandler : BaseHandler
             KeyValueState.Set
         );
 
-        if (message.Consistency == KeyValueConsistency.Linearizable)
+        if (message.Durability == KeyValueDurability.Persistent)
         {
             bool success = await PersistAndReplicateKeyValueMessage(message.Type, proposal, currentTime);
             if (!success)

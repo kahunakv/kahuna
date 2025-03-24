@@ -22,14 +22,14 @@ internal sealed class TryGetHandler : BaseHandler
 
     public async Task<KeyValueResponse> Execute(KeyValueRequest message)
     {
-        KeyValueContext? context = await GetKeyValueContext(message.Key, message.Consistency);
+        KeyValueContext? context = await GetKeyValueContext(message.Key, message.Durability);
 
         ReadOnlyKeyValueContext readOnlyKeyValueContext;
         
         // Revision is provided so we need to fetch a specific revision from storage
         if (message.CompareRevision > -1)
         {
-            if (message.Consistency == KeyValueConsistency.Linearizable)
+            if (message.Durability == KeyValueDurability.Persistent)
             {
                 KeyValueContext? revisionContext = await persistence.GetKeyValueRevision(message.Key, message.CompareRevision);
                 if (revisionContext is null)

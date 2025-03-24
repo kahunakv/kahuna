@@ -39,7 +39,7 @@ internal sealed class KeyValueLocator
     /// <param name="compareRevision"></param>
     /// <param name="flags"></param>
     /// <param name="expiresMs"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public async Task<(KeyValueResponseType, long)> LocateAndTrySetKeyValue(
@@ -50,7 +50,7 @@ internal sealed class KeyValueLocator
         long compareRevision,
         KeyValueFlags flags,
         int expiresMs,
-        KeyValueConsistency consistency,
+        KeyValueDurability durability,
         CancellationToken cancellationToken
     )
     {
@@ -72,7 +72,7 @@ internal sealed class KeyValueLocator
                 compareRevision,
                 flags,
                 expiresMs, 
-                consistency
+                durability
             );
         }
             
@@ -94,7 +94,7 @@ internal sealed class KeyValueLocator
             CompareRevision = compareRevision,
             Flags = (GrpcKeyValueFlags) flags,
             ExpiresMs = expiresMs,
-            Consistency = (GrpcKeyValueConsistency) consistency,
+            Consistency = (GrpcKeyValueConsistency) durability,
         };
         
         if (value is not null)
@@ -114,10 +114,10 @@ internal sealed class KeyValueLocator
     /// </summary>
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, long)> LocateAndTryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, long)> LocateAndTryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancelationToken)
     {
         if (string.IsNullOrEmpty(key))
             return (KeyValueResponseType.InvalidInput, 0);
@@ -125,7 +125,7 @@ internal sealed class KeyValueLocator
         int partitionId = raft.GetPartitionKey(key);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
-            return await manager.TryDeleteKeyValue(transactionId, key, consistency);
+            return await manager.TryDeleteKeyValue(transactionId, key, durability);
             
         string leader = await raft.WaitForLeader(partitionId, cancelationToken);
         if (leader == raft.GetLocalEndpoint())
@@ -142,7 +142,7 @@ internal sealed class KeyValueLocator
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
-            Consistency = (GrpcKeyValueConsistency)consistency,
+            Consistency = (GrpcKeyValueConsistency)durability,
         };
         
         GrpcTryDeleteKeyValueResponse? remoteResponse = await client.TryDeleteKeyValueAsync(request, cancellationToken: cancelationToken);
@@ -158,10 +158,10 @@ internal sealed class KeyValueLocator
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
     /// <param name="expiresMs"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, long)> LocateAndTryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, long)> LocateAndTryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancelationToken)
     {
         if (string.IsNullOrEmpty(key))
             return (KeyValueResponseType.InvalidInput, 0);
@@ -169,7 +169,7 @@ internal sealed class KeyValueLocator
         int partitionId = raft.GetPartitionKey(key);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
-            return await manager.TryExtendKeyValue(transactionId, key, expiresMs, consistency);
+            return await manager.TryExtendKeyValue(transactionId, key, expiresMs, durability);
             
         string leader = await raft.WaitForLeader(partitionId, cancelationToken);
         if (leader == raft.GetLocalEndpoint())
@@ -187,7 +187,7 @@ internal sealed class KeyValueLocator
             TransactionIdCounter = transactionId.C,
             Key = key,
             ExpiresMs = expiresMs,
-            Consistency = (GrpcKeyValueConsistency)consistency,
+            Consistency = (GrpcKeyValueConsistency)durability,
         };
         
         GrpcTryExtendKeyValueResponse? remoteResponse = await client.TryExtendKeyValueAsync(request, cancellationToken: cancelationToken);
@@ -202,14 +202,14 @@ internal sealed class KeyValueLocator
     /// </summary>
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryGetValue(
         HLCTimestamp transactionId, 
         string key, 
         long revision,
-        KeyValueConsistency consistency,
+        KeyValueDurability durability,
         CancellationToken cancellationToken
     )
     {
@@ -219,7 +219,7 @@ internal sealed class KeyValueLocator
         int partitionId = raft.GetPartitionKey(key);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
-            return await manager.TryGetValue(transactionId, key, revision, consistency);
+            return await manager.TryGetValue(transactionId, key, revision, durability);
             
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
@@ -237,7 +237,7 @@ internal sealed class KeyValueLocator
             TransactionIdCounter = transactionId.C,
             Key = key,
             Revision = revision,
-            Consistency = (GrpcKeyValueConsistency)consistency,
+            Consistency = (GrpcKeyValueConsistency)durability,
         };
         
         GrpcTryGetKeyValueResponse? remoteResponse = await client.TryGetKeyValueAsync(request, cancellationToken: cancellationToken);
@@ -257,22 +257,22 @@ internal sealed class KeyValueLocator
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
     /// <param name="expiresMs"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, string, KeyValueConsistency)> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, string, KeyValueDurability)> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancelationToken)
     {
         if (string.IsNullOrEmpty(key))
-            return (KeyValueResponseType.InvalidInput, key, consistency);
+            return (KeyValueResponseType.InvalidInput, key, durability);
         
         int partitionId = raft.GetPartitionKey(key);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
-            return await manager.TryAcquireExclusiveLock(transactionId, key, expiresMs, consistency);
+            return await manager.TryAcquireExclusiveLock(transactionId, key, expiresMs, durability);
             
         string leader = await raft.WaitForLeader(partitionId, cancelationToken);
         if (leader == raft.GetLocalEndpoint())
-            return (KeyValueResponseType.MustRetry, key, consistency);
+            return (KeyValueResponseType.MustRetry, key, durability);
         
         logger.LogDebug("ACQUIRE-LOCK-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
         
@@ -286,14 +286,14 @@ internal sealed class KeyValueLocator
             TransactionIdCounter = transactionId.C,
             Key = key,
             ExpiresMs = expiresMs,
-            Consistency = (GrpcKeyValueConsistency)consistency,
+            Consistency = (GrpcKeyValueConsistency)durability,
         };
         
         GrpcTryAcquireExclusiveLockResponse? remoteResponse = await client.TryAcquireExclusiveLockAsync(request, cancellationToken: cancelationToken);
         
         remoteResponse.ServedFrom = $"https://{leader}";
         
-        return ((KeyValueResponseType)remoteResponse.Type, key, consistency);
+        return ((KeyValueResponseType)remoteResponse.Type, key, durability);
     }
     
     /// <summary>
@@ -301,10 +301,10 @@ internal sealed class KeyValueLocator
     /// </summary>
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, string)> LocateAndTryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, string)> LocateAndTryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancelationToken)
     {
         if (string.IsNullOrEmpty(key))
             return (KeyValueResponseType.InvalidInput, key);
@@ -312,7 +312,7 @@ internal sealed class KeyValueLocator
         int partitionId = raft.GetPartitionKey(key);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
-            return await manager.TryReleaseExclusiveLock(transactionId, key, consistency);
+            return await manager.TryReleaseExclusiveLock(transactionId, key, durability);
             
         string leader = await raft.WaitForLeader(partitionId, cancelationToken);
         if (leader == raft.GetLocalEndpoint())
@@ -329,7 +329,7 @@ internal sealed class KeyValueLocator
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
-            Consistency = (GrpcKeyValueConsistency)consistency,
+            Consistency = (GrpcKeyValueConsistency)durability,
         };
         
         GrpcTryReleaseExclusiveLockResponse? remoteResponse = await client.TryReleaseExclusiveLockAsync(request, cancellationToken: cancelationToken);
@@ -344,22 +344,22 @@ internal sealed class KeyValueLocator
     /// </summary>
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueConsistency)> LocateAndTryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> LocateAndTryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancelationToken)
     {
         if (string.IsNullOrEmpty(key))
-            return (KeyValueResponseType.InvalidInput, HLCTimestamp.Zero, key, consistency);
+            return (KeyValueResponseType.InvalidInput, HLCTimestamp.Zero, key, durability);
         
         int partitionId = raft.GetPartitionKey(key);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
-            return await manager.TryPrepareMutations(transactionId, key, consistency);
+            return await manager.TryPrepareMutations(transactionId, key, durability);
             
         string leader = await raft.WaitForLeader(partitionId, cancelationToken);
         if (leader == raft.GetLocalEndpoint())
-            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero, key, consistency);
+            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero, key, durability);
         
         logger.LogDebug("PREPARE-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
         
@@ -372,14 +372,14 @@ internal sealed class KeyValueLocator
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
-            Consistency = (GrpcKeyValueConsistency)consistency,
+            Consistency = (GrpcKeyValueConsistency)durability,
         };
         
         GrpcTryPrepareMutationsResponse? remoteResponse = await client.TryPrepareMutationsAsync(request, cancellationToken: cancelationToken);
         
         remoteResponse.ServedFrom = $"https://{leader}";
         
-        return ((KeyValueResponseType)remoteResponse.Type, new(remoteResponse.ProposalTicketPhysical, remoteResponse.ProposalTicketCounter), key, consistency);
+        return ((KeyValueResponseType)remoteResponse.Type, new(remoteResponse.ProposalTicketPhysical, remoteResponse.ProposalTicketCounter), key, durability);
     }
     
     /// <summary>
@@ -388,10 +388,10 @@ internal sealed class KeyValueLocator
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
     /// <param name="ticketId"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, long)> LocateAndTryCommitMutations(HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, long)> LocateAndTryCommitMutations(HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancelationToken)
     {
         if (string.IsNullOrEmpty(key))
             return (KeyValueResponseType.InvalidInput, 0);
@@ -399,7 +399,7 @@ internal sealed class KeyValueLocator
         int partitionId = raft.GetPartitionKey(key);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
-            return await manager.TryCommitMutations(transactionId, key, ticketId, consistency);
+            return await manager.TryCommitMutations(transactionId, key, ticketId, durability);
             
         string leader = await raft.WaitForLeader(partitionId, cancelationToken);
         if (leader == raft.GetLocalEndpoint())
@@ -418,7 +418,7 @@ internal sealed class KeyValueLocator
             Key = key,
             ProposalTicketPhysical = ticketId.L,
             ProposalTicketCounter = ticketId.C,
-            Consistency = (GrpcKeyValueConsistency)consistency,
+            Consistency = (GrpcKeyValueConsistency)durability,
         };
         
         GrpcTryCommitMutationsResponse? remoteResponse = await client.TryCommitMutationsAsync(request, cancellationToken: cancelationToken);
@@ -434,10 +434,10 @@ internal sealed class KeyValueLocator
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
     /// <param name="ticketId"></param>
-    /// <param name="consistency"></param>
+    /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, long)> LocateAndTryRollbackMutations(HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueConsistency consistency, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, long)> LocateAndTryRollbackMutations(HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancelationToken)
     {
         if (string.IsNullOrEmpty(key))
             return (KeyValueResponseType.InvalidInput, 0);
@@ -445,7 +445,7 @@ internal sealed class KeyValueLocator
         int partitionId = raft.GetPartitionKey(key);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
-            return await manager.TryRollbackMutations(transactionId, key, ticketId, consistency);
+            return await manager.TryRollbackMutations(transactionId, key, ticketId, durability);
             
         string leader = await raft.WaitForLeader(partitionId, cancelationToken);
         if (leader == raft.GetLocalEndpoint())
@@ -464,7 +464,7 @@ internal sealed class KeyValueLocator
             Key = key,
             ProposalTicketPhysical = ticketId.L,
             ProposalTicketCounter = ticketId.C,
-            Consistency = (GrpcKeyValueConsistency)consistency,
+            Consistency = (GrpcKeyValueConsistency)durability,
         };
         
         GrpcTryRollbackMutationsResponse? remoteResponse = await client.TryRollbackMutationsAsync(request, cancellationToken: cancelationToken);

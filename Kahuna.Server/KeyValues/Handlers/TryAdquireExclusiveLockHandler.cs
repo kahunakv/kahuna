@@ -32,7 +32,7 @@ internal sealed class TryAdquireExclusiveLockHandler : BaseHandler
             KeyValueContext? newContext = null;
 
             /// Try to retrieve KeyValue context from persistence
-            if (message.Consistency == KeyValueConsistency.Linearizable)
+            if (message.Durability == KeyValueDurability.Persistent)
                 newContext = await persistence.GetKeyValue(message.Key);
 
             newContext ??= new() { Revision = -1 };

@@ -1,4 +1,5 @@
 
+using System.Diagnostics;
 using Nixie;
 using Nixie.Routers;
 
@@ -7,13 +8,13 @@ using Kommander;
 namespace Kahuna.Server.Persistence;
 
 /*
- * Writes dirty locks from memory to disk before they are forced out by backend processes.
+ * Writes dirty locks/key-values from memory to disk in batches before they are forced out by backend processes.
  */
 public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 {
     private readonly IRaft raft;
     
-    private readonly IActorRef<ConsistentHashActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter;
+    private readonly IActorRef<RoundRobinActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter;
 
     private readonly ILogger<IKahuna> logger;
     
@@ -23,10 +24,14 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     
     private readonly HashSet<int> partitionIds = [];
     
+    private readonly Stopwatch stopwatch = Stopwatch.StartNew();
+    
+    private bool pendingCheckpoint = true;
+    
     public BackgroundWriterActor(
         IActorContext<BackgroundWriterActor, BackgroundWriteRequest> context,
         IRaft raft,
-        IActorRef<ConsistentHashActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter,
+        IActorRef<RoundRobinActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter,
         ILogger<IKahuna> logger
     )
     {
@@ -56,9 +61,28 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 break;
             
             case BackgroundWriteType.Flush:
+                await CheckpointPartitions();
                 await FlushLocks();
                 await FlushKeyValues();
                 break;
+            
+            default:
+                throw new ArgumentOutOfRangeException();
+        }
+    }
+
+    private async ValueTask CheckpointPartitions()
+    {
+        if (dirtyLocks.Count == 0 && dirtyKeyValues.Count == 0)
+        {
+            if (pendingCheckpoint)
+            {
+                foreach (int partitionId in partitionIds)
+                    await raft.ReplicateCheckpoint(partitionId);
+                
+                partitionIds.Clear();
+                pendingCheckpoint = false;
+            }
         }
     }
 
@@ -66,69 +90,83 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     {
         if (dirtyLocks.Count == 0)
             return;
+        
+        stopwatch.Restart();
                 
-        while (dirtyLocks.TryDequeue(out BackgroundWriteRequest? lockRequest))
+        List<PersistenceRequestItem> items = [];
+                
+        while (dirtyLocks.TryDequeue(out BackgroundWriteRequest? keyValueRequest))
         {
-            partitionIds.Add(lockRequest.PartitionId);
-                    
-            PersistenceResponse? response = await persistenceActorRouter.Ask(new(
-                PersistenceRequestType.StoreLock,
-                lockRequest.Key,
-                lockRequest.Value,
-                lockRequest.Revision,
-                lockRequest.Expires.L,
-                lockRequest.Expires.C,
-                lockRequest.State
+            partitionIds.Add(keyValueRequest.PartitionId);
+            
+            items.Add(new(
+                keyValueRequest.Key, 
+                keyValueRequest.Value, 
+                keyValueRequest.Revision, 
+                keyValueRequest.Expires.L, 
+                keyValueRequest.Expires.C, 
+                keyValueRequest.State
             ));
-
-            if (response == null)
-                break;
-
-            if (response.Type == PersistenceResponseType.Failed)
-                break;
+        }
+        
+        PersistenceResponse? response = await persistenceActorRouter.Ask(new(PersistenceRequestType.StoreLock, items));
+        
+        if (response == null)
+        {
+            logger.LogError("Coundn't store batch of {Count} locks", items.Count);
+            return;
         }
 
-        if (partitionIds.Count == 0)
+        if (response.Type == PersistenceResponseType.Failed)
+        {
+            logger.LogError("Coundn't store batch of {Count} locks", items.Count);
             return;
+        }
         
-        foreach (int partitionId in partitionIds)
-            await raft.ReplicateCheckpoint(partitionId);
-                
-        partitionIds.Clear();
+        logger.LogDebug("Successfully stored batch of {Count} locks in {Elapsed}ms", items.Count, stopwatch.ElapsedMilliseconds);
+        
+        pendingCheckpoint = true;
     }
     
     private async ValueTask FlushKeyValues()
     {
         if (dirtyKeyValues.Count == 0)
             return;
+        
+        stopwatch.Restart();
+
+        List<PersistenceRequestItem> items = [];
                 
         while (dirtyKeyValues.TryDequeue(out BackgroundWriteRequest? keyValueRequest))
         {
             partitionIds.Add(keyValueRequest.PartitionId);
-                    
-            PersistenceResponse? response = await persistenceActorRouter.Ask(new(
-                PersistenceRequestType.StoreKeyValue,
-                keyValueRequest.Key,
-                keyValueRequest.Value,
-                keyValueRequest.Revision,
-                keyValueRequest.Expires.L,
-                keyValueRequest.Expires.C,
+            
+            items.Add(new(
+                keyValueRequest.Key, 
+                keyValueRequest.Value, 
+                keyValueRequest.Revision, 
+                keyValueRequest.Expires.L, 
+                keyValueRequest.Expires.C, 
                 keyValueRequest.State
             ));
+        }
+        
+        PersistenceResponse? response = await persistenceActorRouter.Ask(new(PersistenceRequestType.StoreKeyValue, items));
 
-            if (response == null)
-                break;
-
-            if (response.Type == PersistenceResponseType.Failed)
-                break;
+        if (response == null)
+        {
+            logger.LogError("Coundn't store batch of {Count} key-values", items.Count);
+            return;
         }
 
-        if (partitionIds.Count == 0)
+        if (response.Type == PersistenceResponseType.Failed)
+        {
+            logger.LogError("Coundn't store batch of {Count} key-values", items.Count);
             return;
+        }
         
-        foreach (int partitionId in partitionIds)
-            await raft.ReplicateCheckpoint(partitionId);
-                
-        partitionIds.Clear();
+        logger.LogDebug("Successfully stored batch of {Count} key-values in {Elapsed}ms", items.Count, stopwatch.ElapsedMilliseconds);
+        
+        pendingCheckpoint = true;
     }
 }

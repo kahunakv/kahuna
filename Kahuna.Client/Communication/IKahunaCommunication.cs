@@ -21,17 +21,17 @@ public interface IKahunaCommunication
 
      Task<KahunaLockInfo?> Get(string url, string resource, LockDurability durability);
 
-     Task<(bool, long)> TrySetKeyValue(string url, string key, byte[]? value, int expiryTime, KeyValueFlags flags, KeyValueConsistency consistency);
+     Task<(bool, long)> TrySetKeyValue(string url, string key, byte[]? value, int expiryTime, KeyValueFlags flags, KeyValueDurability durability);
 
-     Task<(bool, long)> TryCompareValueAndSetKeyValue(string url, string key, byte[]? value, byte[]? compareValue, int expiryTime, KeyValueConsistency consistency);
+     Task<(bool, long)> TryCompareValueAndSetKeyValue(string url, string key, byte[]? value, byte[]? compareValue, int expiryTime, KeyValueDurability durability);
 
-     Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string url, string key, byte[]? value, long compareRevision, int expiryTime, KeyValueConsistency consistency);
+     Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string url, string key, byte[]? value, long compareRevision, int expiryTime, KeyValueDurability durability);
 
-     Task<(bool, byte[]?, long)> TryGetKeyValue(string url, string key, long revision, KeyValueConsistency consistency);
+     Task<(bool, byte[]?, long)> TryGetKeyValue(string url, string key, long revision, KeyValueDurability durability);
 
-     Task<(bool, long)> TryDeleteKeyValue(string url, string key, KeyValueConsistency consistency);
+     Task<(bool, long)> TryDeleteKeyValue(string url, string key, KeyValueDurability durability);
 
-     Task<(bool, long)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueConsistency consistency);
+     Task<(bool, long)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueDurability durability);
 
      Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransaction(string url, byte[] script, string? hash);
 }

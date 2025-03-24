@@ -11,5 +11,4 @@ message LockMessage {
   uint32 expireCounter = 6;
   int64 timeLogical = 7;
   uint32 timeCounter = 8;
-  int32 consistency = 9;
 }
