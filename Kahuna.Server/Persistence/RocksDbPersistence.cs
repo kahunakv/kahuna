@@ -13,6 +13,8 @@ public class RocksDbPersistence : IPersistence
     private static readonly Task<LockContext?> NullLockContext = Task.FromResult<LockContext?>(null);
     
     private static readonly Task<KeyValueContext?> NullKeyValueContext = Task.FromResult<KeyValueContext?>(null);
+
+    private static readonly WriteOptions DefaultWriteOptions = new WriteOptions().SetSync(true);
     
     private readonly RocksDb db;
 
@@ -68,7 +70,7 @@ public class RocksDbPersistence : IPersistence
             batch.Put(Encoding.UTF8.GetBytes(item.Key), Serialize(kvm), cf: columnFamilyLocks);
         }
         
-        db.Write(batch);
+        db.Write(batch, DefaultWriteOptions);
 
         return Task.FromResult(true);
     }
@@ -99,7 +101,7 @@ public class RocksDbPersistence : IPersistence
             batch.Put(index, serialized, cf: columnFamilyKeys);
         }
 
-        db.Write(batch);
+        db.Write(batch, DefaultWriteOptions);
 
         return Task.FromResult(true);
     }

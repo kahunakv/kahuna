@@ -26,7 +26,7 @@
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS  
 %token TBEGIN TROLLBACK TCOMMIT TLET TSET TGET TESET TEGET TDELETE TEDELETE TEXTEND TEEXTEND 
 %token TIF TELSE TTHEN TEND TNX TXX TEX TCMP TCMPREV
-%token TRETURN TDIGIT TFLOAT TSTRING TIDENTIFIER TESCIDENTIFIER TPLACEHOLDER TTRUE TFALSE TAT
+%token TRETURN TSLEEP TDIGIT TFLOAT TSTRING TIDENTIFIER TESCIDENTIFIER TPLACEHOLDER TTRUE TFALSE TAT
 
 %%
 
@@ -48,6 +48,7 @@ stmt    : set_stmt { $$.n = $1.n; $$.l = $1.l; }
         | commit_stmt { $$.n = $1.n; $$.l = $1.l; }
         | rollback_stmt { $$.n = $1.n; $$.l = $1.l; }
         | return_stmt { $$.n = $1.n; $$.l = $1.l; }
+        | sleep_stmt { $$.n = $1.n; $$.l = $1.l; }
         ;
 
 set_stmt : TSET identifier expression { $$.n = new(NodeType.Set, $2.n, $3.n, null, null, null, null, null, $1.l); }         
@@ -117,6 +118,9 @@ rollback_stmt : TROLLBACK { $$.n = new(NodeType.Rollback, null, null, null, null
 return_stmt : TRETURN expression { $$.n = new(NodeType.Return, $2.n, null, null, null, null, null, null, $1.l); }
             | TRETURN { $$.n = new(NodeType.Return, null, null, null, null, null, null, null, $1.l); }     
             ;
+            
+sleep_stmt : TSLEEP int { $$.n = new(NodeType.Sleep, $2.n, null, null, null, null, null, null, $1.l); }
+           ;
          
 expression : expression TEQUALS expression { $$.n = new(NodeType.Equals, $1.n, $3.n, null, null, null, null, null, $1.l); }
            | expression TNOTEQUALS expression { $$.n = new(NodeType.NotEquals, $1.n, $3.n, null, null, null, null, null, $1.l); }

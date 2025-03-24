@@ -41,7 +41,7 @@ internal sealed class TryGetHandler : BaseHandler
             return new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueContext(null, 0, HLCTimestamp.Zero)); 
         }
 
-        HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
+        HLCTimestamp currentTime = await raft.HybridLogicalClock.TrySendOrLocalEvent();
 
         if (message.TransactionId != HLCTimestamp.Zero)
         {

@@ -97,7 +97,8 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 
         while (dirtyLocks.TryDequeue(out BackgroundWriteRequest? keyValueRequest))
         {
-            partitionIds.Add(keyValueRequest.PartitionId);
+            if (keyValueRequest.PartitionId >= 0)
+                partitionIds.Add(keyValueRequest.PartitionId);
             
             items.Add(new(
                 keyValueRequest.Key, 
@@ -139,7 +140,8 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 
         while (dirtyKeyValues.TryDequeue(out BackgroundWriteRequest? keyValueRequest))
         {
-            partitionIds.Add(keyValueRequest.PartitionId);
+            if (keyValueRequest.PartitionId >= 0)
+                partitionIds.Add(keyValueRequest.PartitionId);
             
             items.Add(new(
                 keyValueRequest.Key, 

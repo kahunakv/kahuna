@@ -88,9 +88,22 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         }
         
         (bool success, long commitIndex) = await CommitKeyValueMessage(message.Key, message.ProposalTicketId);
-        
         if (!success)
             return new(KeyValueResponseType.Errored);
+        
+        if (message.Durability == KeyValueDurability.Persistent)
+        {
+            // Schedule save to be saved asynchronously in a background actor
+            backgroundWriter.Send(new(
+                BackgroundWriteType.QueueStoreKeyValue,
+                -1,
+                proposal.Key,
+                proposal.Value,
+                proposal.Revision,
+                proposal.Expires,
+                (int)proposal.State
+            ));
+        }
         
         context.Value = proposal.Value;
         context.Expires = proposal.Expires;

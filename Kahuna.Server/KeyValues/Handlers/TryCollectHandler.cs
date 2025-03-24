@@ -28,7 +28,7 @@ internal sealed class TryCollectHandler : BaseHandler
         
         int number = 0;
         TimeSpan range = TimeSpan.FromMinutes(30);
-        HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
+        HLCTimestamp currentTime = await raft.HybridLogicalClock.TrySendOrLocalEvent();
 
         foreach (KeyValuePair<string, KeyValueContext> key in keyValuesStore)
         {

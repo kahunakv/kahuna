@@ -29,7 +29,7 @@ internal sealed class TryDeleteHandler : BaseHandler
         if (context.WriteIntent is not null && context.WriteIntent.TransactionId != message.TransactionId)
             return new(KeyValueResponseType.MustRetry, 0);
         
-        HLCTimestamp currentTime = await raft.HybridLogicalClock.SendOrLocalEvent();
+        HLCTimestamp currentTime = await raft.HybridLogicalClock.TrySendOrLocalEvent();
         
         // Temporarily store the value in the MVCC entry if the transaction ID is set
         if (message.TransactionId != HLCTimestamp.Zero)

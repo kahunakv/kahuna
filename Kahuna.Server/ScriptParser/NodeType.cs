@@ -41,5 +41,6 @@ public enum NodeType
     Begin,
     Rollback,
     Commit,
-    Return
+    Return,
+    Sleep
 }

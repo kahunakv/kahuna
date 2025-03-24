@@ -23,6 +23,7 @@ TBegin          (B|b)(E|e)(G|g)(I|i)(N|n)
 TCommit         (C|c)(O|o)(M|m)(M|m)(I|i)(T|t)
 TRollback       (R|r)(O|o)(L|l)(L|l)(B|b)(A|a)(C|c)(K|k)
 TReturn         (R|r)(E|e)(T|t)(U|u)(R|r)(N|n)
+TSleep          (S|s)(L|l)(E|e)(E|e)(P|p)
 TDelete         (D|d)(E|e)(L|l)(E|e)(T|t)(E|e)
 TEDelete        (E|e)(D|d)(E|e)(L|l)(E|e)(T|t)(E|e)
 TExtend         (E|e)(X|x)(T|t)(E|e)(N|n)(D|d)
@@ -145,6 +146,8 @@ TAnd            &&
 {TCmpRev} { yylval.l = yyline; return (int)Token.TCMPREV; }
 
 {TReturn} { yylval.l = yyline; return (int)Token.TRETURN; }
+
+{TSleep} { yylval.l = yyline; return (int)Token.TSLEEP; }
 
 {TEquals} { yylval.l = yyline; return (int)Token.TEQUALS; }
 

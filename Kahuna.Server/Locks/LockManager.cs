@@ -202,7 +202,8 @@ public sealed class LockManager
         } 
         catch (Exception ex)
         {
-            logger.LogError(ex, "Error processing replication message");
+            logger.LogError("{Type}: {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+
             return false;
         }
 

@@ -26,6 +26,8 @@ public sealed class KeyValuesManager
     
     private readonly KeyValueTransactionCoordinator txCoordinator;
 
+    private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
+
     private readonly IActorRef<RoundRobinActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter;
 
     private readonly IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> ephemeralKeyValuesRouter;
@@ -52,12 +54,13 @@ public sealed class KeyValuesManager
     {
         this.actorSystem = actorSystem;
         this.raft = raft;
+        this.backgroundWriter = backgroundWriter;
         this.logger = logger;
         
         this.persistenceActorRouter = persistenceActorRouter;
         
-        ephemeralKeyValuesRouter = GetEphemeralRouter(backgroundWriter, persistence, configuration);
-        consistentKeyValuesRouter = GetConsistentRouter(backgroundWriter, persistence, configuration);
+        ephemeralKeyValuesRouter = GetEphemeralRouter(persistence, configuration);
+        consistentKeyValuesRouter = GetConsistentRouter(persistence, configuration);
 
         txCoordinator = new(this, configuration, raft, logger);
         locator = new(this, configuration, raft, logger);
@@ -71,7 +74,6 @@ public sealed class KeyValuesManager
     /// <param name="workers"></param>
     /// <returns></returns>
     private IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> GetEphemeralRouter(
-        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, 
         IPersistence persistence, 
         KahunaConfiguration configuration
     )
@@ -94,7 +96,6 @@ public sealed class KeyValuesManager
     /// <param name="workers"></param>
     /// <returns></returns>
     private IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> GetConsistentRouter(
-        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, 
         IPersistence persistence, 
         KahunaConfiguration configuration
     )
@@ -134,7 +135,7 @@ public sealed class KeyValuesManager
             {
                 case KeyValueRequestType.TrySet:
                 {
-                    PersistenceResponse? response = await persistenceActorRouter.Ask(new(
+                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
                         PersistenceRequestType.StoreKeyValue,
                         [new(
                             keyValueMessage.Key,
@@ -150,14 +151,24 @@ public sealed class KeyValuesManager
                         return false;
 
                     if (response.Type == PersistenceResponseType.Success)
-                        logger.LogDebug("Replicated key/value set {Key} {Revision} to {Node}", keyValueMessage.Key, keyValueMessage.Revision, raft.GetLocalNodeId());
+                        logger.LogDebug("Replicated key/value set {Key} {Revision} to {Node}", keyValueMessage.Key, keyValueMessage.Revision, raft.GetLocalNodeId());*/
+
+                    backgroundWriter.Send(new(
+                        BackgroundWriteType.QueueStoreKeyValue,
+                        -1,
+                        keyValueMessage.Key,
+                        keyValueMessage.Value?.ToByteArray(),
+                        keyValueMessage.Revision,
+                        new(keyValueMessage.ExpireLogical, keyValueMessage.ExpireCounter),
+                        (int)KeyValueState.Set
+                    ));
 
                     return true;
                 }
 
                 case KeyValueRequestType.TryDelete:
                 {
-                    PersistenceResponse? response = await persistenceActorRouter.Ask(new(
+                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
                         PersistenceRequestType.StoreKeyValue,
                         [new(
                             keyValueMessage.Key,
@@ -173,14 +184,24 @@ public sealed class KeyValuesManager
                         return false;
 
                     if (response.Type == PersistenceResponseType.Success)
-                        logger.LogDebug("Replicated key/value delete {Key} {Revision} to {Node}", keyValueMessage.Key, keyValueMessage.Revision, raft.GetLocalNodeId());
+                        logger.LogDebug("Replicated key/value delete {Key} {Revision} to {Node}", keyValueMessage.Key, keyValueMessage.Revision, raft.GetLocalNodeId());*/
+                    
+                    backgroundWriter.Send(new(
+                        BackgroundWriteType.QueueStoreKeyValue,
+                        -1,
+                        keyValueMessage.Key,
+                        keyValueMessage.Value?.ToByteArray(),
+                        keyValueMessage.Revision,
+                        new(keyValueMessage.ExpireLogical, keyValueMessage.ExpireCounter),
+                        (int)KeyValueState.Deleted
+                    ));
 
                     return true;
                 }
 
                 case KeyValueRequestType.TryExtend:
                 {
-                    PersistenceResponse? response = await persistenceActorRouter.Ask(new(
+                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
                         PersistenceRequestType.StoreKeyValue,
                         [new(
                             keyValueMessage.Key,
@@ -196,7 +217,17 @@ public sealed class KeyValuesManager
                         return false;
 
                     if (response.Type == PersistenceResponseType.Success)
-                        logger.LogDebug("Replicated key/value extend {Key} {Revision} to {Node}", keyValueMessage.Key, keyValueMessage.Revision, raft.GetLocalNodeId());
+                        logger.LogDebug("Replicated key/value extend {Key} {Revision} to {Node}", keyValueMessage.Key, keyValueMessage.Revision, raft.GetLocalNodeId());*/
+                    
+                    backgroundWriter.Send(new(
+                        BackgroundWriteType.QueueStoreKeyValue,
+                        -1,
+                        keyValueMessage.Key,
+                        keyValueMessage.Value?.ToByteArray(),
+                        keyValueMessage.Revision,
+                        new(keyValueMessage.ExpireLogical, keyValueMessage.ExpireCounter),
+                        (int)KeyValueState.Set
+                    ));
 
                     return true;
                 }

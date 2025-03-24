@@ -8,7 +8,7 @@ using Kahuna.Shared.Locks;
 
 Console.WriteLine("Kahuna Benchmark");
 
-const int numberOfLocks = 200;
+const int numberOfTasks = 10;
 const int MaxTokens = 100_000;
 
 List<string> tokens = new(MaxTokens);
@@ -18,7 +18,19 @@ for (int k = 0; k < MaxTokens; k++)
 
 KahunaClient locks = new(["https://localhost:8082", "https://localhost:8084", "https://localhost:8086"], null);
 
-List<Task> tasks = new(numberOfLocks * 2);
+const string myScript = """
+BEGIN 
+ SET ppa 1000 NX 
+ LET x = GET ppa
+ LET xn = to_int(x) + 1
+ SET ppa xn
+ COMMIT
+END
+""";
+
+KahunaScript kahunaScript = locks.LoadScript(myScript);
+
+List<Task> tasks = new(numberOfTasks * 2);
 
 Stopwatch stopwatch = Stopwatch.StartNew();
 
@@ -26,10 +38,12 @@ for (int j = 0; j < 25; j++)
 {
     tasks.Clear();
 
-    for (int i = 0; i < numberOfLocks; i++)
+    for (int i = 0; i < numberOfTasks; i++)
     {
-        tasks.Add(SetKeyConcurrently(locks));
-        tasks.Add(GetKeyConcurrently(locks));
+        //tasks.Add(SetKeyConcurrently(locks));
+        //tasks.Add(GetKeyConcurrently(locks));
+        
+        tasks.Add(ExecuteTxConcurrently(kahunaScript));
     }
 
     await Task.WhenAll(tasks);
@@ -112,6 +126,28 @@ async Task GetKeyConcurrently(KahunaClient keyValues)
     catch (Exception ex)
     {
         Console.WriteLine("Exception {0}", ex.Message);
+    }
+}
+
+async Task ExecuteTxConcurrently(KahunaScript ks)
+{
+    for (int i = 0; i < 10; i++)
+    {
+        try
+        {
+            await ks.Run();
+            return;
+        }
+        catch (KahunaException ex)
+        {
+            if (ex.KeyValueErrorCode == KeyValueResponseType.Aborted)
+            {
+                await Task.Delay(50);
+                continue;
+            }
+
+            throw;
+        }
     }
 }
 

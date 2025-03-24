@@ -71,28 +71,36 @@ public sealed class KeyValueTransactionCoordinator
             switch (ast.nodeType)
             {
                 case NodeType.Set:
-                    return await ExecuteSet(GetTempTransactionContext(), ast, KeyValueDurability.Persistent, CancellationToken.None);
+                    return await ExecuteSet(GetTempTransactionContext(), ast, KeyValueDurability.Persistent,
+                        CancellationToken.None);
 
                 case NodeType.Get:
-                    return await ExecuteGet(GetTempTransactionContext(), ast, KeyValueDurability.Persistent,CancellationToken.None);
+                    return await ExecuteGet(GetTempTransactionContext(), ast, KeyValueDurability.Persistent,
+                        CancellationToken.None);
 
                 case NodeType.Delete:
-                    return await ExecuteDelete(GetTempTransactionContext(), ast, KeyValueDurability.Persistent, CancellationToken.None);
+                    return await ExecuteDelete(GetTempTransactionContext(), ast, KeyValueDurability.Persistent,
+                        CancellationToken.None);
 
                 case NodeType.Extend:
-                    return await ExecuteExtend(GetTempTransactionContext(), ast, KeyValueDurability.Persistent, CancellationToken.None);
+                    return await ExecuteExtend(GetTempTransactionContext(), ast, KeyValueDurability.Persistent,
+                        CancellationToken.None);
 
                 case NodeType.Eset:
-                    return await ExecuteSet(GetTempTransactionContext(), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
+                    return await ExecuteSet(GetTempTransactionContext(), ast, KeyValueDurability.Ephemeral,
+                        CancellationToken.None);
 
                 case NodeType.Eget:
-                    return await ExecuteGet(GetTempTransactionContext(), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
+                    return await ExecuteGet(GetTempTransactionContext(), ast, KeyValueDurability.Ephemeral,
+                        CancellationToken.None);
 
                 case NodeType.Edelete:
-                    return await ExecuteDelete(GetTempTransactionContext(), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
+                    return await ExecuteDelete(GetTempTransactionContext(), ast, KeyValueDurability.Ephemeral,
+                        CancellationToken.None);
 
                 case NodeType.Eextend:
-                    return await ExecuteExtend(GetTempTransactionContext(), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
+                    return await ExecuteExtend(GetTempTransactionContext(), ast, KeyValueDurability.Ephemeral,
+                        CancellationToken.None);
 
                 case NodeType.Begin:
                     return await ExecuteTransaction(ast.leftAst!, false);
@@ -121,6 +129,7 @@ public sealed class KeyValueTransactionCoordinator
                 case NodeType.FuncCall:
                 case NodeType.ArgumentList:
                 case NodeType.Return:
+                case NodeType.Sleep:
                     return await ExecuteTransaction(ast, true);
 
                 case NodeType.SetCmp:
@@ -143,8 +152,18 @@ public sealed class KeyValueTransactionCoordinator
         {
             return new() { Type = KeyValueResponseType.Errored, Reason = ex.Message + " at line " + ex.Line };
         }
+        catch (TaskCanceledException)
+        {
+            return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
+        }
+        catch (OperationCanceledException)
+        {
+            return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
+        }
         catch (Exception ex)
-        {            
+        {
+            logger.LogError("TryExecuteTx: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            
             return new() { Type = KeyValueResponseType.Errored, Reason = ex.Message };
         }
     }
@@ -381,6 +400,7 @@ public sealed class KeyValueTransactionCoordinator
         
         cts.CancelAfter(TimeSpan.FromMilliseconds(5000));
         
+        // Need HLC timestamp for the transaction id
         HLCTimestamp transactionId = await raft.HybridLogicalClock.SendOrLocalEvent();
         
         KeyValueTransactionContext context = new()
@@ -397,20 +417,16 @@ public sealed class KeyValueTransactionCoordinator
 
         try
         {
-            List<Task<(KeyValueResponseType, string, KeyValueDurability)>> acquireLocksTasks =
-                new(ephemeralLocksToAcquire.Count + linearizableLocksToAcquire.Count);
+            List<Task<(KeyValueResponseType, string, KeyValueDurability)>> acquireLocksTasks = new(ephemeralLocksToAcquire.Count + linearizableLocksToAcquire.Count);
 
             // Step 1: Acquire locks
             foreach (string key in linearizableLocksToAcquire)
-                acquireLocksTasks.Add(manager.LocateAndTryAcquireExclusiveLock(transactionId, key, 5050,
-                    KeyValueDurability.Persistent, cts.Token));
+                acquireLocksTasks.Add(manager.LocateAndTryAcquireExclusiveLock(transactionId, key, 5050, KeyValueDurability.Persistent, cts.Token));
 
             foreach (string key in ephemeralLocksToAcquire)
-                acquireLocksTasks.Add(manager.LocateAndTryAcquireExclusiveLock(transactionId, key, 5050,
-                    KeyValueDurability.Ephemeral, cts.Token));
+                acquireLocksTasks.Add(manager.LocateAndTryAcquireExclusiveLock(transactionId, key, 5050, KeyValueDurability.Ephemeral, cts.Token));
 
-            (KeyValueResponseType, string, KeyValueDurability)[] acquireResponses =
-                await Task.WhenAll(acquireLocksTasks);
+            (KeyValueResponseType, string, KeyValueDurability)[] acquireResponses = await Task.WhenAll(acquireLocksTasks);
 
             if (acquireResponses.Any(r => r.Item1 != KeyValueResponseType.Locked))
             {
@@ -587,6 +603,10 @@ public sealed class KeyValueTransactionCoordinator
                     context.Status = KeyValueExecutionStatus.Stop;
                     break;
                 
+                case NodeType.Sleep:
+                    await ExecuteSleep(ast, cancellationToken);
+                    break;
+                
                 case NodeType.Begin:
                     throw new KahunaScriptException("Nested transactions are not supported", ast.yyline);
                 
@@ -665,6 +685,20 @@ public sealed class KeyValueTransactionCoordinator
         context.Result = result.ToTransactionResult();
         
         context.SetVariable(ast.leftAst, ast.leftAst.yytext!, result);
+    }
+    
+    private static async Task ExecuteSleep(NodeAst ast, CancellationToken cancellationToken)
+    {
+        if (ast.leftAst is null)
+            throw new KahunaScriptException("Invalid SLEEP duration", ast.yyline);
+                    
+        if (!long.TryParse(ast.leftAst.yytext, out long duration))
+            throw new KahunaScriptException($"Invalid SLEEP duration {duration}", ast.yyline);
+                    
+        if (duration is < 0 or > 300000)
+            throw new KahunaScriptException($"Invalid SLEEP duration {duration}", ast.yyline);
+                    
+        await Task.Delay(TimeSpan.FromMilliseconds(duration), cancellationToken);
     }
 
     /// <summary>
@@ -769,6 +803,40 @@ public sealed class KeyValueTransactionCoordinator
                     
                     ephemeralLocks.Add(ast.leftAst.yytext!);
                     break;
+                
+                case NodeType.Integer:
+                case NodeType.String:
+                case NodeType.Float:
+                case NodeType.Boolean:
+                case NodeType.Identifier:
+                case NodeType.Let:
+                case NodeType.Equals:
+                case NodeType.NotEquals:
+                case NodeType.LessThan:
+                case NodeType.GreaterThan:
+                case NodeType.LessThanEquals:
+                case NodeType.GreaterThanEquals:
+                case NodeType.And:
+                case NodeType.Or:
+                case NodeType.Not:
+                case NodeType.Add:
+                case NodeType.Subtract:
+                case NodeType.Mult:
+                case NodeType.Div:
+                case NodeType.FuncCall:
+                case NodeType.ArgumentList:
+                case NodeType.SetNotExists:
+                case NodeType.SetExists:
+                case NodeType.SetCmp:
+                case NodeType.SetCmpRev:
+                case NodeType.Rollback:
+                case NodeType.Commit:
+                case NodeType.Return:
+                case NodeType.Sleep:
+                    break;
+                
+                default:
+                    throw new ArgumentOutOfRangeException();
             }
 
             break;

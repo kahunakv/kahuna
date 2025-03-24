@@ -12,7 +12,7 @@ namespace Kahuna.Server.KeyValues.Handlers;
 
 internal abstract class BaseHandler
 {
-    private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
+    protected readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
     
     protected readonly IRaft raft;
 
@@ -107,7 +107,7 @@ internal abstract class BaseHandler
                 context = await persistence.GetKeyValue(key);
                 if (context is not null)
                 {
-                    context.LastUsed = await raft.HybridLogicalClock.SendOrLocalEvent();
+                    context.LastUsed = await raft.HybridLogicalClock.TrySendOrLocalEvent();
                     keyValuesStore.Add(key, context);
                     return context;
                 }
