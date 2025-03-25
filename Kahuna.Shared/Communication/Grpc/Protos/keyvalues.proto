@@ -22,7 +22,7 @@ message GrpcTrySetKeyValueRequest {
   int64 CompareRevision = 6;
   GrpcKeyValueFlags Flags = 7;
   int32 ExpiresMs = 8;
-  GrpcKeyValueConsistency Consistency = 9;
+  GrpcKeyValueDurability Durability = 9;
 }
 
 message GrpcTrySetKeyValueResponse {
@@ -36,7 +36,7 @@ message GrpcTryExtendKeyValueRequest {
   uint32 TransactionIdCounter = 2;
   string Key = 3;
   int32 ExpiresMs = 4;
-  GrpcKeyValueConsistency Consistency = 5;
+  GrpcKeyValueDurability Durability = 5;
 }
 
 message GrpcTryExtendKeyValueResponse {
@@ -49,7 +49,7 @@ message GrpcTryDeleteKeyValueRequest {
   int64 TransactionIdPhysical = 1;
   uint32 TransactionIdCounter = 2;
   string Key = 3;
-  GrpcKeyValueConsistency Consistency = 4;
+  GrpcKeyValueDurability Durability = 4;
 }
 
 message GrpcTryDeleteKeyValueResponse {
@@ -63,7 +63,7 @@ message GrpcTryGetKeyValueRequest {
   uint32 TransactionIdCounter = 2;
   string Key = 3;
   int64 Revision = 4;
-  GrpcKeyValueConsistency Consistency = 5;
+  GrpcKeyValueDurability Durability = 5;
 }
 
 message GrpcTryGetKeyValueResponse {
@@ -78,6 +78,12 @@ message GrpcTryGetKeyValueResponse {
 message GrpcTryExecuteTransactionRequest {
   optional string Hash = 1;
   bytes Script = 2;
+  repeated GrpcKeyValueParameter Parameters = 3;
+}
+
+message GrpcKeyValueParameter {
+  string Key = 1;
+  optional string Value = 2;
 }
 
 message GrpcTryExecuteTransactionResponse {
@@ -95,7 +101,7 @@ message GrpcTryAcquireExclusiveLockRequest {
   uint32 TransactionIdCounter = 2;
   string Key = 3;
   int32 ExpiresMs = 4;
-  GrpcKeyValueConsistency Consistency = 5;
+  GrpcKeyValueDurability Durability = 5;
 }
 
 message GrpcTryAcquireExclusiveLockResponse {
@@ -107,7 +113,7 @@ message GrpcTryReleaseExclusiveLockRequest {
   int64 TransactionIdPhysical = 1;
   uint32 TransactionIdCounter = 2;
   string Key = 3;
-  GrpcKeyValueConsistency Consistency = 4;
+  GrpcKeyValueDurability Durability = 4;
 }
 
 message GrpcTryReleaseExclusiveLockResponse {
@@ -119,7 +125,7 @@ message GrpcTryPrepareMutationsRequest {
   int64 TransactionIdPhysical = 1;
   uint32 TransactionIdCounter = 2;
   string Key = 3;
-  GrpcKeyValueConsistency Consistency = 4;
+  GrpcKeyValueDurability Durability = 4;
 }
 
 message GrpcTryPrepareMutationsResponse {
@@ -135,7 +141,7 @@ message GrpcTryCommitMutationsRequest {
   string Key = 3;
   int64 ProposalTicketPhysical = 4;
   uint32 ProposalTicketCounter = 5;
-  GrpcKeyValueConsistency Consistency = 6;
+  GrpcKeyValueDurability Durability = 6;
 }
 
 message GrpcTryCommitMutationsResponse {
@@ -150,7 +156,7 @@ message GrpcTryRollbackMutationsRequest {
   string Key = 3;
   int64 ProposalTicketPhysical = 4;
   uint32 ProposalTicketCounter = 5;
-  GrpcKeyValueConsistency Consistency = 6;
+  GrpcKeyValueDurability Durability = 6;
 }
 
 message GrpcTryRollbackMutationsResponse {
@@ -187,8 +193,7 @@ enum GrpcKeyValueResponseType {
   TYPE_ALREADY_LOCKED = 104;
 }
 
-enum GrpcKeyValueConsistency {
+enum GrpcKeyValueDurability {
   EPHEMERAL = 0;
-  LINEARIZABLE = 1;
-  REPLICATION_CONSISTENT = 2;
+  PERSISTENT = 1;
 }

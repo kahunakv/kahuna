@@ -363,10 +363,11 @@ public sealed class KahunaManager : IKahuna
     /// </summary>
     /// <param name="script"></param>
     /// <param name="hash"></param>
+    /// <param name="parameters"></param>
     /// <returns></returns>
-    public Task<KeyValueTransactionResult> TryExecuteTx(byte[] script, string? hash)
+    public Task<KeyValueTransactionResult> TryExecuteTx(byte[] script, string? hash, List<KeyValueParameter>? parameters)
     {
-        return keyValues.TryExecuteTx(script, hash);
+        return keyValues.TryExecuteTx(script, hash, parameters);
     }
 
     public async Task<bool> OnReplicationReceived(RaftLog log)

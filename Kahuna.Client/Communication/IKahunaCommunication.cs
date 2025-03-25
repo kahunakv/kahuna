@@ -33,5 +33,5 @@ public interface IKahunaCommunication
 
      Task<(bool, long)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueDurability durability);
 
-     Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransaction(string url, byte[] script, string? hash);
+     Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransaction(string url, byte[] script, string? hash, List<KeyValueParameter>? parameters);
 }

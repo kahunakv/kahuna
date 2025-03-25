@@ -9,6 +9,7 @@
 using System.Collections.Concurrent;
 using System.Net.Security;
 using Google.Protobuf;
+using Google.Protobuf.Collections;
 using Grpc.Net.Client;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
@@ -162,7 +163,7 @@ public class GrpcCommunication : IKahunaCommunication
             Value = value is not null ? UnsafeByteOperations.UnsafeWrap(value) : null,
             Flags = (GrpcKeyValueFlags)flags,
             ExpiresMs = expiryTime, 
-            Consistency = (GrpcKeyValueConsistency)durability
+            Durability = (GrpcKeyValueDurability)durability
         };
         
         GrpcTrySetKeyValueResponse? response;
@@ -198,7 +199,7 @@ public class GrpcCommunication : IKahunaCommunication
             CompareValue = compareValue is not null ? UnsafeByteOperations.UnsafeWrap(compareValue) : null,
             Flags = GrpcKeyValueFlags.SetIfEqualToValue,
             ExpiresMs = expiryTime, 
-            Consistency = (GrpcKeyValueConsistency)durability
+            Durability = (GrpcKeyValueDurability)durability
         };
         
         int retries = 0;
@@ -238,7 +239,7 @@ public class GrpcCommunication : IKahunaCommunication
             CompareRevision = compareRevision,
             Flags = GrpcKeyValueFlags.SetIfEqualToRevision,
             ExpiresMs = expiryTime, 
-            Consistency = (GrpcKeyValueConsistency)durability
+            Durability = (GrpcKeyValueDurability)durability
         };
 
         int retries = 0;
@@ -278,7 +279,7 @@ public class GrpcCommunication : IKahunaCommunication
         {
             Key = key, 
             Revision = revision,
-            Consistency = (GrpcKeyValueConsistency)durability
+            Durability = (GrpcKeyValueDurability)durability
         };
 
         int retries = 0;
@@ -320,7 +321,7 @@ public class GrpcCommunication : IKahunaCommunication
         GrpcTryDeleteKeyValueRequest request = new()
         {
             Key = key, 
-            Consistency = (GrpcKeyValueConsistency)durability
+            Durability = (GrpcKeyValueDurability)durability
         };
         
         int retries = 0;
@@ -363,7 +364,7 @@ public class GrpcCommunication : IKahunaCommunication
         {
             Key = key, 
             ExpiresMs = expiresMs, 
-            Consistency = (GrpcKeyValueConsistency)durability
+            Durability = (GrpcKeyValueDurability)durability
         };
 
         int retries = 0;
@@ -400,7 +401,7 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to extend key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
 
-    public async Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransaction(string url, byte[] script, string? hash)
+    public async Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransaction(string url, byte[] script, string? hash, List<KeyValueParameter>? parameters)
     {
         GrpcTryExecuteTransactionRequest request = new()
         {
@@ -409,6 +410,9 @@ public class GrpcCommunication : IKahunaCommunication
         
         if (hash is not null)
             request.Hash = hash;
+        
+        if (parameters is not null)
+            request.Parameters.AddRange(GetTransactionParameters(parameters));
 
         int retries = 0;
         GrpcTryExecuteTransactionResponse? response;
@@ -447,6 +451,26 @@ public class GrpcCommunication : IKahunaCommunication
             throw new KahunaException("Transaction aborted", (KeyValueResponseType)response.Type);
 
         throw new KahunaException("Failed to execute key/value transaction:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
+    }
+
+    private static RepeatedField<GrpcKeyValueParameter> GetTransactionParameters(List<KeyValueParameter> parameters)
+    {
+        RepeatedField<GrpcKeyValueParameter> grpcParameters = new();
+        
+        foreach (KeyValueParameter parameter in parameters)
+        {
+            GrpcKeyValueParameter grpcParameter = new()
+            {
+                Key = parameter.Key
+            };
+
+            if (parameter.Value is not null)
+                grpcParameter.Value = parameter.Value;
+            
+            grpcParameters.Add(grpcParameter);
+        }
+        
+        return grpcParameters;
     }
 
     private static GrpcChannel GetSharedChannel(string url)

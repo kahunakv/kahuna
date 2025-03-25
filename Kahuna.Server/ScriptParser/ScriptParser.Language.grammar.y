@@ -146,6 +146,7 @@ expression : expression TEQUALS expression { $$.n = new(NodeType.Equals, $1.n, $
            | LPAREN expression RPAREN { $$.n = $2.n; $$.l = $2.l; }           
            | fcall_expr { $$.n = $1.n; $$.l = $1.l; } 
            | identifier { $$.n = $1.n; $$.l = $1.l; }
+           | placeholder { $$.n = $1.n; $$.l = $1.l; }
            | int { $$.n = $1.n; $$.l = $1.l; }
            | float { $$.n = $1.n; $$.l = $1.l; }
            | string { $$.n = $1.n; $$.l = $1.l; }
@@ -168,10 +169,14 @@ simple_expr : identifier { $$.n = $1.n; $$.l = $1.l; }
             | float { $$.n = $1.n; $$.l = $1.l; }
             | string { $$.n = $1.n; $$.l = $1.l; }
             | boolean { $$.n = $1.n; $$.l = $1.l; }
+            | placeholder { $$.n = $1.n; $$.l = $1.l; }
             ;            
            
 identifier : TIDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, null, null, null, $$.s, $1.l); }
            ;
+           
+placeholder : TPLACEHOLDER { $$.n = new(NodeType.Placeholder, null, null, null, null, null, null, $$.s, $1.l); }
+           ;           
 
 int : TDIGIT { $$.n = new(NodeType.Integer, null, null, null, null, null, null, $$.s, $1.l); }
     ;

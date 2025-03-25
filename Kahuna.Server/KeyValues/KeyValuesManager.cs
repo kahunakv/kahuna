@@ -749,9 +749,10 @@ public sealed class KeyValuesManager
     /// </summary>
     /// <param name="script"></param>
     /// <param name="hash"></param>
+    /// <param name="parameters"></param>
     /// <returns></returns>
-    public async Task<KeyValueTransactionResult> TryExecuteTx(byte[] script, string? hash)
+    public async Task<KeyValueTransactionResult> TryExecuteTx(byte[] script, string? hash, List<KeyValueParameter>? parameters)
     {
-        return await txCoordinator.TryExecuteTx(script, hash);
+        return await txCoordinator.TryExecuteTx(script, hash, parameters);
     }
 }

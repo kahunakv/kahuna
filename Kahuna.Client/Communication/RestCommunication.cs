@@ -498,11 +498,13 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to extend key/value: " + response.Type, response.Type);
     }
 
-    public async Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransaction(string url, byte[] script, string? hash)
+    public async Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransaction(string url, byte[] script, string? hash, List<KeyValueParameter>? parameters)
     {
         KeyValueTransactionRequest request = new()
         {
-            Script = script
+            Hash = hash,
+            Script = script,
+            Parameters = parameters
         };
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KeyValueTransactionRequest);

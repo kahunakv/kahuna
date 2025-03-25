@@ -95,7 +95,13 @@ public static class KeyValueTransactionExpression
             case NodeType.Delete:
             case NodeType.Edelete:
                 break;
-            
+
+            case NodeType.Let:
+            case NodeType.Extend:
+            case NodeType.Eextend:
+            case NodeType.BeginOptionList:
+            case NodeType.BeginOption:
+            case NodeType.Sleep:
             default:
                 throw new NotImplementedException();
         }

@@ -9,6 +9,7 @@
 using Kommander;
 using Kommander.Time;
 using Google.Protobuf;
+using Google.Protobuf.Collections;
 using Grpc.Core;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
@@ -69,7 +70,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
             request.CompareRevision,
             (KeyValueFlags)request.Flags,
             request.ExpiresMs, 
-            (KeyValueDurability)request.Consistency,
+            (KeyValueDurability)request.Durability,
             context.CancellationToken
         );
 
@@ -104,7 +105,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
             new(request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key, 
             request.ExpiresMs,
-            (KeyValueDurability)request.Consistency, 
+            (KeyValueDurability)request.Durability, 
             context.CancellationToken
         );
 
@@ -132,7 +133,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         (KeyValueResponseType type, long revision) = await keyValues.LocateAndTryDeleteKeyValue(
             new(request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key, 
-            (KeyValueDurability)request.Consistency, 
+            (KeyValueDurability)request.Durability, 
             context.CancellationToken
         );
 
@@ -161,7 +162,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
             new(request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key, 
             request.Revision,
-            (KeyValueDurability)request.Consistency, 
+            (KeyValueDurability)request.Durability, 
             context.CancellationToken
         );
         
@@ -206,7 +207,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
             new(request.TransactionIdPhysical, request.TransactionIdCounter), 
             request.Key, 
             request.ExpiresMs, 
-            (KeyValueDurability)request.Consistency, 
+            (KeyValueDurability)request.Durability, 
             context.CancellationToken
         );
 
@@ -233,7 +234,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         (KeyValueResponseType type, string _) = await keyValues.LocateAndTryReleaseExclusiveLock(
             new(request.TransactionIdPhysical, request.TransactionIdCounter), 
             request.Key, 
-            (KeyValueDurability)request.Consistency, 
+            (KeyValueDurability)request.Durability, 
             context.CancellationToken
         );
 
@@ -260,7 +261,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         (KeyValueResponseType type, HLCTimestamp proposalTicket, _, _) = await keyValues.LocateAndTryPrepareMutations(
             new(request.TransactionIdPhysical, request.TransactionIdCounter), 
             request.Key, 
-            (KeyValueDurability)request.Consistency, 
+            (KeyValueDurability)request.Durability, 
             context.CancellationToken
         );
 
@@ -290,7 +291,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
             new(request.TransactionIdPhysical, request.TransactionIdCounter), 
             request.Key, 
             new(request.ProposalTicketPhysical, request.ProposalTicketCounter),
-            (KeyValueDurability)request.Consistency, 
+            (KeyValueDurability)request.Durability, 
             context.CancellationToken
         );
 
@@ -319,7 +320,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
             new(request.TransactionIdPhysical, request.TransactionIdCounter), 
             request.Key, 
             new(request.ProposalTicketPhysical, request.ProposalTicketCounter),
-            (KeyValueDurability)request.Consistency, 
+            (KeyValueDurability)request.Durability, 
             context.CancellationToken
         );
 
@@ -344,7 +345,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
             
-        KeyValueTransactionResult result = await keyValues.TryExecuteTx(request.Script.ToByteArray(), request.Hash);
+        KeyValueTransactionResult result = await keyValues.TryExecuteTx(request.Script.ToByteArray(), request.Hash, GetParameters(request.Parameters));
 
         GrpcTryExecuteTransactionResponse response = new()
         {
@@ -364,5 +365,15 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
             response.Reason = result.Reason;
         
         return response;
+    }
+
+    private static List<KeyValueParameter> GetParameters(RepeatedField<GrpcKeyValueParameter> requestParameters)
+    {
+        List<KeyValueParameter> parameters = new(requestParameters.Count);
+        
+        foreach (var parameter in requestParameters)
+            parameters.Add(new() { Key = parameter.Key, Value = parameter.Value });
+        
+        return parameters;
     }
 }

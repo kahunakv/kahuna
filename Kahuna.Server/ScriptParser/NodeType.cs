@@ -8,6 +8,7 @@ public enum NodeType
     Float,
     Boolean,
     Identifier,
+    Placeholder,
     StmtList,
     Let,
     Set,

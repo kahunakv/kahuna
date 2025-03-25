@@ -188,7 +188,7 @@ public static class KeyValuesHandlers
                     Type = KeyValueResponseType.InvalidInput
                 };
             
-            KeyValueTransactionResult result = await keyValues.TryExecuteTx(request.Script, request.Hash);
+            KeyValueTransactionResult result = await keyValues.TryExecuteTx(request.Script, request.Hash, request.Parameters);
 
             return new KahunaTxKeyValueResponse
             {

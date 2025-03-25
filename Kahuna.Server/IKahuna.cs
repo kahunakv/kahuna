@@ -45,7 +45,7 @@ public interface IKahuna
     
     public Task<(KeyValueResponseType, long)> LocateAndTryRollbackMutations(HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancelationToken);
     
-    public Task<KeyValueTransactionResult> TryExecuteTx(byte[] script, string? hash);
+    public Task<KeyValueTransactionResult> TryExecuteTx(byte[] script, string? hash, List<KeyValueParameter>? parameters);
 
     public Task<bool> OnReplicationReceived(RaftLog log);
 

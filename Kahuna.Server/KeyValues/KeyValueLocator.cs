@@ -94,7 +94,7 @@ internal sealed class KeyValueLocator
             CompareRevision = compareRevision,
             Flags = (GrpcKeyValueFlags) flags,
             ExpiresMs = expiresMs,
-            Consistency = (GrpcKeyValueConsistency) durability,
+            Durability = (GrpcKeyValueDurability) durability,
         };
         
         if (value is not null)
@@ -142,7 +142,7 @@ internal sealed class KeyValueLocator
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
-            Consistency = (GrpcKeyValueConsistency)durability,
+            Durability = (GrpcKeyValueDurability)durability,
         };
         
         GrpcTryDeleteKeyValueResponse? remoteResponse = await client.TryDeleteKeyValueAsync(request, cancellationToken: cancelationToken);
@@ -187,7 +187,7 @@ internal sealed class KeyValueLocator
             TransactionIdCounter = transactionId.C,
             Key = key,
             ExpiresMs = expiresMs,
-            Consistency = (GrpcKeyValueConsistency)durability,
+            Durability = (GrpcKeyValueDurability)durability,
         };
         
         GrpcTryExtendKeyValueResponse? remoteResponse = await client.TryExtendKeyValueAsync(request, cancellationToken: cancelationToken);
@@ -237,7 +237,7 @@ internal sealed class KeyValueLocator
             TransactionIdCounter = transactionId.C,
             Key = key,
             Revision = revision,
-            Consistency = (GrpcKeyValueConsistency)durability,
+            Durability = (GrpcKeyValueDurability) durability,
         };
         
         GrpcTryGetKeyValueResponse? remoteResponse = await client.TryGetKeyValueAsync(request, cancellationToken: cancellationToken);
@@ -286,7 +286,7 @@ internal sealed class KeyValueLocator
             TransactionIdCounter = transactionId.C,
             Key = key,
             ExpiresMs = expiresMs,
-            Consistency = (GrpcKeyValueConsistency)durability,
+            Durability = (GrpcKeyValueDurability)durability,
         };
         
         GrpcTryAcquireExclusiveLockResponse? remoteResponse = await client.TryAcquireExclusiveLockAsync(request, cancellationToken: cancelationToken);
@@ -329,7 +329,7 @@ internal sealed class KeyValueLocator
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
-            Consistency = (GrpcKeyValueConsistency)durability,
+            Durability = (GrpcKeyValueDurability)durability,
         };
         
         GrpcTryReleaseExclusiveLockResponse? remoteResponse = await client.TryReleaseExclusiveLockAsync(request, cancellationToken: cancelationToken);
@@ -372,7 +372,7 @@ internal sealed class KeyValueLocator
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
-            Consistency = (GrpcKeyValueConsistency)durability,
+            Durability = (GrpcKeyValueDurability)durability,
         };
         
         GrpcTryPrepareMutationsResponse? remoteResponse = await client.TryPrepareMutationsAsync(request, cancellationToken: cancelationToken);
@@ -418,7 +418,7 @@ internal sealed class KeyValueLocator
             Key = key,
             ProposalTicketPhysical = ticketId.L,
             ProposalTicketCounter = ticketId.C,
-            Consistency = (GrpcKeyValueConsistency)durability,
+            Durability = (GrpcKeyValueDurability)durability,
         };
         
         GrpcTryCommitMutationsResponse? remoteResponse = await client.TryCommitMutationsAsync(request, cancellationToken: cancelationToken);
@@ -464,7 +464,7 @@ internal sealed class KeyValueLocator
             Key = key,
             ProposalTicketPhysical = ticketId.L,
             ProposalTicketCounter = ticketId.C,
-            Consistency = (GrpcKeyValueConsistency)durability,
+            Durability = (GrpcKeyValueDurability)durability,
         };
         
         GrpcTryRollbackMutationsResponse? remoteResponse = await client.TryRollbackMutationsAsync(request, cancellationToken: cancelationToken);
