@@ -11,6 +11,7 @@ using System.Text;
 using Kahuna.Client.Communication;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
+using Kommander.Diagnostics;
 using Microsoft.Extensions.Logging;
 
 namespace Kahuna.Client;
@@ -38,7 +39,7 @@ public class KahunaClient
     {
         this.urls = [url];
         this.logger = logger;
-        this.communication = (communication ?? new GrpcCommunication(logger));
+        this.communication = communication ?? new GrpcCommunication(logger);
     }
     
     /// <summary>
@@ -67,14 +68,14 @@ public class KahunaClient
         LockDurability durability
     )
     {
-        byte[] owner = Guid.NewGuid().ToByteArray();
+        byte[] owner = Encoding.UTF8.GetBytes(Guid.NewGuid().ToString("N"));
         
-        Stopwatch stopWatch = Stopwatch.StartNew();
+        ValueStopwatch stopWatch = ValueStopwatch.StartNew();
         
         long fencingToken = -1;
         KahunaLockAcquireResult result = KahunaLockAcquireResult.Error;
 
-        while (stopWatch.Elapsed < wait)
+        while (stopWatch.GetElapsedTime() < wait)
         {
             (result, fencingToken) = await TryAcquireLock(resource, owner, expiryTime, durability).ConfigureAwait(false);
 
@@ -101,7 +102,7 @@ public class KahunaClient
     {
         try
         {
-            byte[] owner = Guid.NewGuid().ToByteArray();
+            byte[] owner = Encoding.UTF8.GetBytes(Guid.NewGuid().ToString("N"));
 
             (KahunaLockAcquireResult result, long fencingToken) = await TryAcquireLock(resource, owner, expiryTime, durability).ConfigureAwait(false);
 

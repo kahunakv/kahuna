@@ -1,4 +1,5 @@
 
+using Kahuna.Shared.KeyValue;
 using System.Text.Json.Serialization;
 
 namespace Kahuna.Shared.Communication.Rest;
@@ -11,6 +12,7 @@ namespace Kahuna.Shared.Communication.Rest;
 [JsonSerializable(typeof(KahunaGetKeyValueRequest))]
 [JsonSerializable(typeof(KahunaDeleteKeyValueRequest))]
 [JsonSerializable(typeof(KahunaExtendKeyValueRequest))]
+[JsonSerializable(typeof(KeyValueTransactionRequest))]
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 public sealed partial class KahunaJsonContext : JsonSerializerContext
 {

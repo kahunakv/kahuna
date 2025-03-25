@@ -5,16 +5,6 @@ using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues;
 
-public enum KeyValueExpressionType
-{
-    Null,
-    Bool,
-    Long,
-    Double,
-    String,
-    Bytes,
-}
-
 public class KeyValueExpressionResult
 {
     public KeyValueExpressionType Type { get; set; }

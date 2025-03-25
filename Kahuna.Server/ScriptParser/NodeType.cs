@@ -39,6 +39,8 @@ public enum NodeType
     SetCmp,
     SetCmpRev,
     Begin,
+    BeginOptionList,
+    BeginOption,
     Rollback,
     Commit,
     Return,

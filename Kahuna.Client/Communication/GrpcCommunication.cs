@@ -86,7 +86,7 @@ public class GrpcCommunication : IKahunaCommunication
             if (response.Type == GrpcLockResponseType.LockResponseTypeUnlocked)
                 return true;
             
-            if (response.Type == GrpcLockResponseType.LockResponseTypeInvalidOwner)
+            if (response.Type is GrpcLockResponseType.LockResponseTypeInvalidOwner or GrpcLockResponseType.LockResponseTypeLockDoesNotExist)
                 return false;
 
         } while (response.Type == GrpcLockResponseType.LockResponseTypeMustRetry);

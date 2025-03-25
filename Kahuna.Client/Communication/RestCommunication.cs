@@ -151,9 +151,10 @@ public class RestCommunication : IKahunaCommunication
             if (response.Type == LockResponseType.Unlocked)
                 return true;
 
+            if (response.Type == LockResponseType.LockDoesNotExist)
+                return false;
+
         } while (response.Type == LockResponseType.MustRetry);
-        
-        Console.WriteLine(response.Type);
         
         throw new KahunaException("Failed to unlock", response.Type);
     }
@@ -497,8 +498,61 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to extend key/value: " + response.Type, response.Type);
     }
 
-    public Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransaction(string url, byte[] script, string? hash)
+    public async Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransaction(string url, byte[] script, string? hash)
     {
-        throw new NotImplementedException();
+        KeyValueTransactionRequest request = new()
+        {
+            Script = script
+        };
+        
+        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KeyValueTransactionRequest);
+
+        int retries = 0;
+        KeyValueTransactionResponse? response;
+        
+        do
+        {
+            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
+        
+            response = await retryPolicy.ExecuteAsync(() =>
+                url
+                    .WithOAuthBearerToken("xxx")
+                    .AppendPathSegments("v1/kv/try-execute-tx")
+                    .WithHeader("Accept", "application/json")
+                    .WithHeader("Content-Type", "application/json")
+                    .WithTimeout(5)
+                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .PostStringAsync(payload)
+                    .ReceiveJson<KeyValueTransactionResponse>())
+                    .ConfigureAwait(false);
+
+            if (response is null)
+                throw new KahunaException("Response is null", LockResponseType.Errored);
+            
+            if (response.Type is < KeyValueResponseType.Errored or KeyValueResponseType.DoesNotExist)
+                return new()
+                {
+                    Type = response.Type,
+                    Value = response.Value,
+                    Revision = response.Revision
+                };
+            
+            if (response.Type == KeyValueResponseType.MustRetry)
+                logger?.LogDebug("Server asked to retry transaction");
+            
+            if (++retries >= 5)
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
+
+        } while (response.Type == KeyValueResponseType.MustRetry);
+            
+        //throw new KahunaException("Failed to extend key/value: " + response.Type, response.Type);
+        
+        if (!string.IsNullOrEmpty(response.Reason))
+            throw new KahunaException(response.Reason, response.Type);
+
+        if (response.Type == KeyValueResponseType.Aborted)
+            throw new KahunaException("Transaction aborted", response.Type);
+
+        throw new KahunaException("Failed to execute key/value transaction:" + response.Type, response.Type);
     }
 }

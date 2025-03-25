@@ -103,7 +103,7 @@ public sealed class KeyValueTransactionCoordinator
                         CancellationToken.None);
 
                 case NodeType.Begin:
-                    return await ExecuteTransaction(ast.leftAst!, false);
+                    return await ExecuteTransaction(ast.leftAst!, ast.rightAst, false);
 
                 case NodeType.StmtList:
                 case NodeType.Let:
@@ -130,7 +130,7 @@ public sealed class KeyValueTransactionCoordinator
                 case NodeType.ArgumentList:
                 case NodeType.Return:
                 case NodeType.Sleep:
-                    return await ExecuteTransaction(ast, true);
+                    return await ExecuteTransaction(ast, null, true);
 
                 case NodeType.SetCmp:
                 case NodeType.SetCmpRev:
@@ -385,20 +385,56 @@ public sealed class KeyValueTransactionCoordinator
             Expires = readOnlyContext.Expires
         };
     }
-    
+
     /// <summary>
     /// Executes a transaction using Two-Phase commit protocol (2PC).
-    ///
+    /// 
     /// The autoCommit flag offers an specific commit/rollback instruction or an automatic commit behavior on success.
     /// </summary>
+    /// <param name="astLeftAst"></param>
     /// <param name="ast"></param>
     /// <param name="autoCommit"></param>
     /// <returns></returns>
-    private async Task<KeyValueTransactionResult> ExecuteTransaction(NodeAst ast, bool autoCommit)
+    private async Task<KeyValueTransactionResult> ExecuteTransaction(NodeAst ast, NodeAst? optionsAst, bool autoCommit)
     {
+        long timeout = 5000;
         using CancellationTokenSource cts = new();
+        KeyValueTransactionLocking locking = KeyValueTransactionLocking.Pessimistic;
         
-        cts.CancelAfter(TimeSpan.FromMilliseconds(5000));
+        if (optionsAst?.nodeType is NodeType.BeginOptionList or NodeType.BeginOption)
+        {
+            Dictionary<string, string> options = new();
+            
+            GetTransactionOptions(optionsAst, options);
+
+            if (options.TryGetValue("locking", out string? optionValue))
+            {
+                locking = optionValue switch
+                {
+                    "pessimistic" => KeyValueTransactionLocking.Pessimistic,
+                    "optimistic" => KeyValueTransactionLocking.Optimistic,
+                    _ => throw new KahunaScriptException("Unsupported locking option: " + optionValue, optionsAst.yyline)
+                };
+            }
+            
+            if (options.TryGetValue("autoCommit", out optionValue))
+            {
+                autoCommit = optionValue switch
+                {
+                    "true" => true,
+                    "false" => false,
+                    _ => throw new KahunaScriptException("Unsupported autoCommit option: " + optionValue, optionsAst.yyline)
+                };
+            }
+            
+            if (options.TryGetValue("timeout", out optionValue))
+            {
+                if (!long.TryParse(optionValue, out timeout))
+                    throw new KahunaScriptException("Invalid timeout option: " + timeout, optionsAst.yyline);
+            }
+        }
+        
+        cts.CancelAfter(TimeSpan.FromMilliseconds(timeout));
         
         // Need HLC timestamp for the transaction id
         HLCTimestamp transactionId = await raft.HybridLogicalClock.SendOrLocalEvent();
@@ -406,6 +442,7 @@ public sealed class KeyValueTransactionCoordinator
         KeyValueTransactionContext context = new()
         {
             TransactionId = transactionId,
+            Locking = locking,
             Action = autoCommit ? KeyValueTransactionAction.Commit : KeyValueTransactionAction.Abort,
             Result = new() { Type = KeyValueResponseType.Aborted }
         };
@@ -413,30 +450,34 @@ public sealed class KeyValueTransactionCoordinator
         HashSet<string> ephemeralLocksToAcquire = [];
         HashSet<string> linearizableLocksToAcquire = [];
 
-        GetLocksToAcquire(ast, ephemeralLocksToAcquire, linearizableLocksToAcquire);
+        if (locking == KeyValueTransactionLocking.Pessimistic)
+            GetLocksToAcquire(ast, ephemeralLocksToAcquire, linearizableLocksToAcquire);
 
         try
         {
             List<Task<(KeyValueResponseType, string, KeyValueDurability)>> acquireLocksTasks = new(ephemeralLocksToAcquire.Count + linearizableLocksToAcquire.Count);
 
-            // Step 1: Acquire locks
-            foreach (string key in linearizableLocksToAcquire)
-                acquireLocksTasks.Add(manager.LocateAndTryAcquireExclusiveLock(transactionId, key, 5050, KeyValueDurability.Persistent, cts.Token));
-
-            foreach (string key in ephemeralLocksToAcquire)
-                acquireLocksTasks.Add(manager.LocateAndTryAcquireExclusiveLock(transactionId, key, 5050, KeyValueDurability.Ephemeral, cts.Token));
-
-            (KeyValueResponseType, string, KeyValueDurability)[] acquireResponses = await Task.WhenAll(acquireLocksTasks);
-
-            if (acquireResponses.Any(r => r.Item1 != KeyValueResponseType.Locked))
+            // Step 1: Acquire locks in advance for pessimistic locking
+            if (locking == KeyValueTransactionLocking.Pessimistic)
             {
-                foreach ((KeyValueResponseType, string, KeyValueDurability) proposalResponse in acquireResponses)
-                    Console.WriteLine("{0} {1}", proposalResponse.Item2, proposalResponse.Item1);
+                foreach (string key in linearizableLocksToAcquire)
+                    acquireLocksTasks.Add(manager.LocateAndTryAcquireExclusiveLock(transactionId, key, 5050, KeyValueDurability.Persistent, cts.Token));
 
-                return new() { Type = KeyValueResponseType.Aborted, Reason = "Failed to acquire locks" };;
+                foreach (string key in ephemeralLocksToAcquire)
+                    acquireLocksTasks.Add(manager.LocateAndTryAcquireExclusiveLock(transactionId, key, 5050, KeyValueDurability.Ephemeral, cts.Token));
+
+                (KeyValueResponseType, string, KeyValueDurability)[] acquireResponses = await Task.WhenAll(acquireLocksTasks);
+
+                if (acquireResponses.Any(r => r.Item1 != KeyValueResponseType.Locked))
+                {
+                    foreach ((KeyValueResponseType, string, KeyValueDurability) proposalResponse in acquireResponses)
+                        Console.WriteLine("{0} {1}", proposalResponse.Item2, proposalResponse.Item1);
+
+                    return new() { Type = KeyValueResponseType.Aborted, Reason = "Failed to acquire locks" }; 
+                }
+
+                context.LocksAcquired = acquireResponses.Select(r => (r.Item2, r.Item3)).ToList();
             }
-
-            context.LocksAcquired = acquireResponses.Select(r => (r.Item2, r.Item3)).ToList();
 
             // Step 2: Execute transaction
             await ExecuteTransactionInternal(context, ast, cts.Token);
@@ -473,6 +514,41 @@ public sealed class KeyValueTransactionCoordinator
 
                 await Task.WhenAll(releaseLocksTasks);
             }
+        }
+    }
+
+    private static void GetTransactionOptions(NodeAst ast, Dictionary<string, string> options)
+    {
+        while (true)
+        {
+            switch (ast.nodeType)
+            {
+                case NodeType.BeginOptionList:
+                {
+                    if (ast.leftAst is not null)
+                        GetTransactionOptions(ast.leftAst, options);
+
+                    if (ast.rightAst is not null)
+                    {
+                        ast = ast.rightAst!;
+                        continue;
+                    }
+
+                    break;
+                }
+                
+                case NodeType.BeginOption:
+                    if (ast.leftAst is null)
+                        throw new KahunaScriptException("Invalid BEGIN option", ast.yyline);
+                    
+                    if (ast.rightAst is null)
+                        throw new KahunaScriptException("Invalid BEGIN option", ast.yyline);
+                    
+                    options.Add(ast.leftAst.yytext, ast.rightAst.yytext);
+                    break;
+            }
+
+            break;
         }
     }
 

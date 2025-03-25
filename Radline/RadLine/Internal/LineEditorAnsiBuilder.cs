@@ -233,16 +233,16 @@ namespace RadLine
 
         private IRenderable BuildHighlightedText(string text)
         {
-            var highlighter = _accessor.Highlighter;
+            IHighlighter? highlighter = _accessor.Highlighter;
             if (highlighter == null)
             {
                 return new Text(text);
             }
 
-            var paragraph = new Paragraph();
-            foreach (var token in StringTokenizer.Tokenize(text))
+            Paragraph paragraph = new();
+            foreach (string token in StringTokenizer.Tokenize(text))
             {
-                var style = string.IsNullOrWhiteSpace(token) ? null : highlighter.Highlight(token);
+                Style? style = string.IsNullOrWhiteSpace(token) ? null : highlighter.Highlight(token);
                 paragraph.Append(token, style);
             }
 

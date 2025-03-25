@@ -108,6 +108,13 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "true",
         "false"
     ];
+    
+    string[] regexes =
+    [
+        @"(?<number>\b\d+(\.\d+)?\b)",
+        "(?<singlequote>'(?:\\\\'|[^'])*')",
+        "(?<doublequote>\"(?:\\\\\"|[^\"])*\")"
+    ];
 
     WordHighlighter worldHighlighter = new();
 
@@ -127,6 +134,9 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
     
     foreach (string constant in constants)
         worldHighlighter.AddWord(constant, constantsStyle);
+    
+    foreach (string regex in regexes)
+        worldHighlighter.AddRegex(regex, constantsStyle);
 
     editor = new()
     {
@@ -177,7 +187,7 @@ while (true)
             {
                 try
                 {
-                    AnsiConsole.MarkupLine("[yellow]Disposing lock {0}...[/]", kvp.Value.Owner);
+                    AnsiConsole.MarkupLine("[yellow]Disposing lock {0}...[/]", Markup.Escape(Encoding.UTF8.GetString(kvp.Value.Owner)));
 
                     await kvp.Value.DisposeAsync();
                 }
@@ -314,7 +324,7 @@ static Task<KahunaClient> GetConnection(Options opts)
     else
         connectionPool = connectionString.Split(",", StringSplitOptions.RemoveEmptyEntries).ToArray();
 
-    return Task.FromResult(new KahunaClient(connectionPool, null, new Kahuna.Client.Communication.GrpcCommunication(null)));
+    return Task.FromResult(new KahunaClient(connectionPool, null, new Kahuna.Client.Communication.RestCommunication(null)));
 }
 
 static async Task<List<string>> GetHistory(string historyPath)

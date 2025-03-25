@@ -6,10 +6,11 @@ namespace RadLine
     {
         public static IEnumerable<string> Tokenize(string text)
         {
-            var buffer = string.Empty;
-            foreach (var character in text)
+            string buffer = string.Empty;
+            
+            foreach (char character in text)
             {
-                if (char.IsLetterOrDigit(character))
+                if (char.IsLetterOrDigit(character) || character == '\"' || character == '"')
                 {
                     buffer += character;
                 }
@@ -21,14 +22,12 @@ namespace RadLine
                         buffer = string.Empty;
                     }
 
-                    yield return new string(character, 1);
+                    yield return new(character, 1);
                 }
             }
 
             if (buffer.Length > 0)
-            {
                 yield return buffer;
-            }
         }
     }
 }

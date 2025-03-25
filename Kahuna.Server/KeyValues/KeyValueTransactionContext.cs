@@ -5,9 +5,15 @@ using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues;
 
+/// <summary>
+/// Represents the context of a transaction.
+/// It includes all the necessary information to execute a transaction.
+/// </summary>
 public sealed class KeyValueTransactionContext
 {
     public HLCTimestamp TransactionId { get; set; }
+    
+    public KeyValueTransactionLocking Locking { get; set; }
     
     public KeyValueTransactionResult? Result { get; set; }
 

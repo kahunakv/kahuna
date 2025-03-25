@@ -106,8 +106,16 @@ if_stmt : TIF expression TTHEN stmt_list TEND { $$.n = new(NodeType.If, $2.n, $4
         | TIF expression TTHEN stmt_list TELSE stmt_list TEND { $$.n = new(NodeType.If, $2.n, $4.n, $6.n, null, null, null, null, $1.l); }
         ;
         
-begin_stmt : TBEGIN stmt_list TEND { $$.n = new(NodeType.Begin, $2.n, $3.n, null, null, null, null, null, $1.l); }     
+begin_stmt : TBEGIN stmt_list TEND { $$.n = new(NodeType.Begin, $2.n, null, null, null, null, null, null, $1.l); }     
+           | TBEGIN LPAREN begin_options RPAREN stmt_list TEND { $$.n = new(NodeType.Begin, $5.n, $3.n, null, null, null, null, null, $1.l); }
            ;
+           
+begin_options : begin_options TCOMMA begin_option { $$.n = new(NodeType.BeginOptionList, $2.n, null, null, null, null, null, null, $1.l); }
+              | begin_option { $$.n = $1.n; $$.l = $1.l; }
+              ;
+             
+begin_option : identifier TEQUALS simple_expr { $$.n = new(NodeType.BeginOption, $1.n, $3.n, null, null, null, null, null, $1.l); }             
+             ; 
            
 commit_stmt : TCOMMIT { $$.n = new(NodeType.Commit, null, null, null, null, null, null, null, $1.l); }     
            ;           
@@ -153,7 +161,14 @@ fcall_argument_list  : fcall_argument_list TCOMMA fcall_argument_item { $$.n = n
                      ;
 
 fcall_argument_item : expression { $$.n = $1.n; $$.s = $1.s; $$.l = $1.l; }
-                    ;           
+                    ;
+                    
+simple_expr : identifier { $$.n = $1.n; $$.l = $1.l; }
+            | int { $$.n = $1.n; $$.l = $1.l; }
+            | float { $$.n = $1.n; $$.l = $1.l; }
+            | string { $$.n = $1.n; $$.l = $1.l; }
+            | boolean { $$.n = $1.n; $$.l = $1.l; }
+            ;            
            
 identifier : TIDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, null, null, null, $$.s, $1.l); }
            ;
