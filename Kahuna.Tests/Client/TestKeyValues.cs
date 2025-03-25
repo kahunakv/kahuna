@@ -12,13 +12,6 @@ public class TestKeyValues
     private const string url = "https://localhost:8082";
 
     private readonly string[] urls = ["https://localhost:8082", "https://localhost:8084", "https://localhost:8086"];
-
-    //private int total;
-
-    private static string GetRandomKeyName()
-    {
-        return Guid.NewGuid().ToString("N")[..16];
-    }
     
     [Theory, CombinatorialData]
     public async Task TestEmptyKey(
@@ -704,5 +697,10 @@ public class TestKeyValues
             KahunaCommunicationType.Rest => new RestCommunication(null),
             _ => throw new ArgumentOutOfRangeException(nameof(communicationType), communicationType, null)
         };
+    }
+    
+    private static string GetRandomKeyName()
+    {
+        return Guid.NewGuid().ToString("N")[..16];
     }
 }

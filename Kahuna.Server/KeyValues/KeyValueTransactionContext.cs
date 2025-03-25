@@ -24,6 +24,8 @@ public sealed class KeyValueTransactionContext
     public List<(string, KeyValueDurability)>? LocksAcquired { get; set; }
     
     public List<(string, KeyValueDurability)>? ModifiedKeys { get; set; }
+    
+    public List<KeyValueParameter>? Parameters { get; set; }
 
     private Dictionary<string , KeyValueExpressionResult>? Variables { get; set; }
 

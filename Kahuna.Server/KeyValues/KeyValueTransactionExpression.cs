@@ -26,6 +26,9 @@ public static class KeyValueTransactionExpression
             case NodeType.Boolean:
                 return new() { Type = KeyValueExpressionType.Bool, BoolValue = ast.yytext! == "true" };
             
+            case NodeType.Placeholder:
+                return new() { Type = KeyValueExpressionType.String, StrValue = "some value" };
+            
             case NodeType.Equals:
                 return EvalEquals(context, ast, "==");
             

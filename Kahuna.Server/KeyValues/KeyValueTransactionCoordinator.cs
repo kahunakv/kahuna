@@ -72,31 +72,31 @@ public sealed class KeyValueTransactionCoordinator
             switch (ast.nodeType)
             {
                 case NodeType.Set:
-                    return await ExecuteSet(GetTempTransactionContext(), ast, KeyValueDurability.Persistent, CancellationToken.None);
+                    return await ExecuteSet(GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
 
                 case NodeType.Get:
-                    return await ExecuteGet(GetTempTransactionContext(), ast, KeyValueDurability.Persistent, CancellationToken.None);
+                    return await ExecuteGet(GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
 
                 case NodeType.Delete:
-                    return await ExecuteDelete(GetTempTransactionContext(), ast, KeyValueDurability.Persistent, CancellationToken.None);
+                    return await ExecuteDelete(GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
 
                 case NodeType.Extend:
-                    return await ExecuteExtend(GetTempTransactionContext(), ast, KeyValueDurability.Persistent, CancellationToken.None);
+                    return await ExecuteExtend(GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
 
                 case NodeType.Eset:
-                    return await ExecuteSet(GetTempTransactionContext(), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
+                    return await ExecuteSet(GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
 
                 case NodeType.Eget:
-                    return await ExecuteGet(GetTempTransactionContext(), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
+                    return await ExecuteGet(GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
 
                 case NodeType.Edelete:
-                    return await ExecuteDelete(GetTempTransactionContext(), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
+                    return await ExecuteDelete(GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
 
                 case NodeType.Eextend:
-                    return await ExecuteExtend(GetTempTransactionContext(), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
+                    return await ExecuteExtend(GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
 
                 case NodeType.Begin:
-                    return await ExecuteTransaction(ast.leftAst!, ast.rightAst, false);
+                    return await ExecuteTransaction(ast.leftAst!, ast.rightAst, parameters, false);
 
                 case NodeType.StmtList:
                 case NodeType.Let:
@@ -123,7 +123,10 @@ public sealed class KeyValueTransactionCoordinator
                 case NodeType.ArgumentList:
                 case NodeType.Return:
                 case NodeType.Sleep:
-                    return await ExecuteTransaction(ast, null, true);
+                case NodeType.Placeholder:
+                case NodeType.BeginOptionList:
+                case NodeType.BeginOption:
+                    return await ExecuteTransaction(ast, null, parameters, true);
 
                 case NodeType.SetCmp:
                 case NodeType.SetCmpRev:
@@ -134,7 +137,7 @@ public sealed class KeyValueTransactionCoordinator
                 case NodeType.Rollback:
                 case NodeType.Commit:
                     throw new KahunaScriptException("Invalid transaction", ast.yyline);
-
+                
                 default:
                     throw new KahunaScriptException("Unknown command: " + ast.nodeType, ast.yyline);
             }
@@ -161,12 +164,14 @@ public sealed class KeyValueTransactionCoordinator
         }
     }
 
-    private static KeyValueTransactionContext GetTempTransactionContext()
+    private static KeyValueTransactionContext GetTempTransactionContext(List<KeyValueParameter>? parameters)
     {
         return new()
         {
             TransactionId = HLCTimestamp.Zero,
-            Action = KeyValueTransactionAction.Commit
+            Locking = KeyValueTransactionLocking.Pessimistic,
+            Action = KeyValueTransactionAction.Commit,
+            Parameters = parameters
         };
     }
 
@@ -183,7 +188,7 @@ public sealed class KeyValueTransactionCoordinator
 
         if (context.Locking == KeyValueTransactionLocking.Optimistic)
         {
-            (KeyValueResponseType lockResponseType, _, KeyValueDurability _) = await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, ast.leftAst.yytext, 5050, durability, cancellationToken);
+            /*(KeyValueResponseType lockResponseType, _, KeyValueDurability _) = await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, ast.leftAst.yytext, 5050, durability, cancellationToken);
 
             if (lockResponseType != KeyValueResponseType.Locked)
             {
@@ -191,7 +196,7 @@ public sealed class KeyValueTransactionCoordinator
                 context.Status = KeyValueExecutionStatus.Stop;
                 
                 return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted" };
-            }
+            }*/
 
             context.LocksAcquired ??= [];
             context.LocksAcquired.Add((ast.leftAst.yytext, durability));
@@ -286,7 +291,7 @@ public sealed class KeyValueTransactionCoordinator
 
         if (context.Locking == KeyValueTransactionLocking.Optimistic)
         {
-            (KeyValueResponseType lockResponseType, _, KeyValueDurability _) = await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, ast.leftAst.yytext, 5050, durability, cancellationToken);
+            /*(KeyValueResponseType lockResponseType, _, KeyValueDurability _) = await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, ast.leftAst.yytext, 5050, durability, cancellationToken);
 
             if (lockResponseType != KeyValueResponseType.Locked)
             {
@@ -294,9 +299,10 @@ public sealed class KeyValueTransactionCoordinator
                 context.Status = KeyValueExecutionStatus.Stop;
 
                 return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted" };
-            }
+            }*/
 
             context.LocksAcquired ??= [];
+            context.LocksAcquired.Add((ast.leftAst.yytext, durability));
         }
 
         (KeyValueResponseType type, long revision) = await manager.LocateAndTryDeleteKeyValue(
@@ -343,7 +349,7 @@ public sealed class KeyValueTransactionCoordinator
         
         if (context.Locking == KeyValueTransactionLocking.Optimistic)
         {
-            (KeyValueResponseType lockResponseType, _, KeyValueDurability _) = await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, ast.leftAst.yytext, 5050, durability, cancellationToken);
+            /*(KeyValueResponseType lockResponseType, _, KeyValueDurability _) = await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, ast.leftAst.yytext, 5050, durability, cancellationToken);
 
             if (lockResponseType != KeyValueResponseType.Locked)
             {
@@ -351,7 +357,7 @@ public sealed class KeyValueTransactionCoordinator
                 context.Status = KeyValueExecutionStatus.Stop;
                 
                 return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted" };
-            }
+            }*/
 
             context.LocksAcquired ??= [];
             context.LocksAcquired.Add((ast.leftAst.yytext, durability));
@@ -407,7 +413,7 @@ public sealed class KeyValueTransactionCoordinator
         
         if (context.Locking == KeyValueTransactionLocking.Optimistic)
         {
-            (KeyValueResponseType lockResponseType, _, KeyValueDurability _) = await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, ast.leftAst.yytext, 5050, durability, cancellationToken);
+            /*(KeyValueResponseType lockResponseType, _, KeyValueDurability _) = await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, ast.leftAst.yytext, 5050, durability, cancellationToken);
 
             if (lockResponseType != KeyValueResponseType.Locked)
             {
@@ -415,7 +421,7 @@ public sealed class KeyValueTransactionCoordinator
                 context.Status = KeyValueExecutionStatus.Stop;
                 
                 return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted" };
-            }
+            }*/
 
             context.LocksAcquired ??= [];
             context.LocksAcquired.Add((ast.leftAst.yytext, durability));
@@ -472,14 +478,15 @@ public sealed class KeyValueTransactionCoordinator
 
     /// <summary>
     /// Executes a transaction using Two-Phase commit protocol (2PC).
-    /// 
-    /// The autoCommit flag offers an specific commit/rollback instruction or an automatic commit behavior on success.
+    /// The autoCommit flag offers an specific commit/rollback instruction or an automatic commit behavior on success. 
     /// </summary>
-    /// <param name="astLeftAst"></param>
     /// <param name="ast"></param>
+    /// <param name="optionsAst"></param>
+    /// <param name="parameters"></param>
     /// <param name="autoCommit"></param>
     /// <returns></returns>
-    private async Task<KeyValueTransactionResult> ExecuteTransaction(NodeAst ast, NodeAst? optionsAst, bool autoCommit)
+    /// <exception cref="KahunaScriptException"></exception>
+    private async Task<KeyValueTransactionResult> ExecuteTransaction(NodeAst ast, NodeAst? optionsAst, List<KeyValueParameter>? parameters, bool autoCommit)
     {
         long timeout = 5000;
         using CancellationTokenSource cts = new();
@@ -528,12 +535,14 @@ public sealed class KeyValueTransactionCoordinator
             TransactionId = transactionId,
             Locking = locking,
             Action = autoCommit ? KeyValueTransactionAction.Commit : KeyValueTransactionAction.Abort,
-            Result = new() { Type = KeyValueResponseType.Aborted }
+            Result = new() { Type = KeyValueResponseType.Aborted },
+            Parameters = parameters
         };
         
         HashSet<string> ephemeralLocksToAcquire = [];
         HashSet<string> linearizableLocksToAcquire = [];
 
+        // Acquire all locks in advance for pessimistic locking
         if (locking == KeyValueTransactionLocking.Pessimistic)
             GetLocksToAcquire(ast, ephemeralLocksToAcquire, linearizableLocksToAcquire);
 
@@ -582,9 +591,17 @@ public sealed class KeyValueTransactionCoordinator
         {
             return new() { Type = KeyValueResponseType.Errored, Reason = ex.Message + " at line " + ex.Line };
         }
+        catch (TaskCanceledException)
+        {
+            return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
+        }
+        catch (OperationCanceledException)
+        {
+            return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
+        }
         catch (Exception ex)
         {
-            return new() { Type = KeyValueResponseType.Errored, Reason = ex.Message };
+            return new() { Type = KeyValueResponseType.Errored, Reason = ex.GetType().Name + ": " + ex.Message };
         }
         finally
         {

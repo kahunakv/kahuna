@@ -30,12 +30,12 @@ internal sealed class TryReleaseExclusiveLockHandler : BaseHandler
         if (context is null)
             return new(KeyValueResponseType.DoesNotExist);
         
+        context.MvccEntries?.Remove(message.TransactionId);
+        
         if (context.WriteIntent is not null && context.WriteIntent.TransactionId != message.TransactionId)
             return new(KeyValueResponseType.AlreadyLocked);
 
         context.WriteIntent = null;
-
-        context.MvccEntries?.Remove(message.TransactionId);
 
         return new(KeyValueResponseType.Unlocked);
     }

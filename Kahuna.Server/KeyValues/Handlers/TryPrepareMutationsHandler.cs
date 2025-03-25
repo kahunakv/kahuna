@@ -40,17 +40,10 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             return new(KeyValueResponseType.Errored);
         }
 
-        if (context.WriteIntent is null)
-        {
-            logger.LogWarning("Write intent is missing for {TransactionId}", message.TransactionId);
-            
-            return new(KeyValueResponseType.Errored);
-        }
-
-        if (context.WriteIntent.TransactionId != message.TransactionId)
+        if (context.WriteIntent is not null && context.WriteIntent.TransactionId != message.TransactionId)
         {
             logger.LogWarning("Write intent conflict between {CurrentTransactionId} and {TransactionId}", context.WriteIntent.TransactionId, message.TransactionId);
-            
+        
             return new(KeyValueResponseType.Errored);
         }
 
@@ -68,6 +61,21 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             return new(KeyValueResponseType.Errored);
         }
         
+        if (context.LastUsed.CompareTo(message.TransactionId) > 0)
+        {
+            logger.LogWarning("Transaction {TransactionId} conflicts with {ExistingTransactionId} [3]", message.TransactionId, context.LastUsed);
+            
+            return new(KeyValueResponseType.Errored);
+        }
+
+        // in optimistic concurrency, we create the write intent if it doesn't exist
+        // this is to ensure that the assigned transaction will gain the race
+        context.WriteIntent ??= new()
+        {
+            TransactionId = message.TransactionId,
+            Expires = message.TransactionId + TimeSpan.FromMilliseconds(5000)
+        };
+        
         if (message.Durability != KeyValueDurability.Persistent)
             return new(KeyValueResponseType.Prepared);
         
@@ -81,7 +89,6 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         );
 
         (bool success, HLCTimestamp proposalTicket) = await PrepareKeyValueMessage(KeyValueRequestType.TrySet, proposal, message.TransactionId);
-
         if (!success)
         {
             logger.LogWarning("Failed to propose logs for {TransactionId}", message.TransactionId);

@@ -61,6 +61,7 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "not",
         "let",
         "if",
+        "else",
         "then",
         "end",
         "begin",

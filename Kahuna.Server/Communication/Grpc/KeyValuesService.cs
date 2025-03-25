@@ -371,7 +371,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
     {
         List<KeyValueParameter> parameters = new(requestParameters.Count);
         
-        foreach (var parameter in requestParameters)
+        foreach (GrpcKeyValueParameter? parameter in requestParameters)
             parameters.Add(new() { Key = parameter.Key, Value = parameter.Value });
         
         return parameters;
