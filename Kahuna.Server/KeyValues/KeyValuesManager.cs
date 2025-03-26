@@ -233,6 +233,7 @@ public sealed class KeyValuesManager
                 }
 
                 case KeyValueRequestType.TryGet:
+                case KeyValueRequestType.TryExists:
                     break;
 
                 default:
@@ -304,6 +305,26 @@ public sealed class KeyValuesManager
     )
     {
         return await locator.LocateAndTryGetValue(transactionId, key, revision, durability, cancellationToken);
+    }
+    
+    /// <summary>
+    /// Locates the leader node for the given key and executes the TryExistsValue request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="revision"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryExistsValue(
+        HLCTimestamp transactionId, 
+        string key,
+        long revision, 
+        KeyValueDurability durability, 
+        CancellationToken cancellationToken
+    )
+    {
+        return await locator.LocateAndTryExistsValue(transactionId, key, revision, durability, cancellationToken);
     }
     
     /// <summary>
@@ -542,6 +563,46 @@ public sealed class KeyValuesManager
     {
         KeyValueRequest request = new(
             KeyValueRequestType.TryGet, 
+            transactionId, 
+            key, 
+            null, 
+            null,
+            revision,
+            KeyValueFlags.None,
+            0, 
+            HLCTimestamp.Zero,
+            durability
+        );
+
+        KeyValueResponse? response;
+        
+        if (durability == KeyValueDurability.Ephemeral)
+            response = await ephemeralKeyValuesRouter.Ask(request);
+        else
+            response = await consistentKeyValuesRouter.Ask(request);
+        
+        if (response is null)
+            return (KeyValueResponseType.Errored, null);
+        
+        return (response.Type, response.Context);
+    }
+    
+    /// <summary>
+    /// Passes a Exists request to the key/value actor for the given keyValue name.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="durability"></param>
+    /// <returns></returns>
+    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryExistsValue(
+        HLCTimestamp transactionId, 
+        string key,
+        long revision,
+        KeyValueDurability durability
+    )
+    {
+        KeyValueRequest request = new(
+            KeyValueRequestType.TryExists, 
             transactionId, 
             key, 
             null, 

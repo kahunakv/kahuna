@@ -44,6 +44,7 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "edel",
         "edelete",
         "eextend",
+        "eexists",
         // key/values
         "set",
         "get",
@@ -394,6 +395,10 @@ async Task RunCommand(string commandTrim)
         
         case KeyValueResponseType.Extended:
             AnsiConsole.MarkupLine("r{0} [yellow]extended[/] {1}ms\n", result.Revision, stopwatch.GetElapsedMilliseconds());
+            break;
+        
+        case KeyValueResponseType.Exists:
+            AnsiConsole.MarkupLine("r{0} [yellow]exists[/] {1}ms\n", result.Revision, stopwatch.GetElapsedMilliseconds());
             break;
 
         case KeyValueResponseType.Locked:

@@ -418,6 +418,19 @@ public class KahunaClient
     }
     
     /// <summary>
+    /// Checks if a key does exist
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="durability"></param>
+    /// <returns></returns>
+    public async Task<KahunaKeyValue> ExistsKeyValue(string key, KeyValueDurability durability = KeyValueDurability.Persistent)
+    {
+        (bool success, long revision) = await communication.TryExistsKeyValue(GetRoundRobinUrl(), key, -1, durability).ConfigureAwait(false);
+        
+        return new(this, key, success, revision, durability);
+    }
+    
+    /// <summary>
     /// Get the value of a key at a specific revision. If the key's revision does not exist success is false and null is returned
     /// </summary>
     /// <param name="key"></param>

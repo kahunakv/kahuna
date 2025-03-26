@@ -190,6 +190,48 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
     }
     
     /// <summary>
+    /// Receives requests for the key/value "exists" service 
+    /// </summary>
+    /// <param name="request"></param>
+    /// <param name="context"></param>
+    /// <returns></returns>
+    public override async Task<GrpcTryExistsKeyValueResponse> TryExistsKeyValue(GrpcTryExistsKeyValueRequest request, ServerCallContext context)
+    {
+        if (string.IsNullOrEmpty(request.Key))
+            return new()
+            {
+                Type = GrpcKeyValueResponseType.TypeInvalidInput
+            };
+        
+        (KeyValueResponseType type, ReadOnlyKeyValueContext? keyValueContext) = await keyValues.LocateAndTryExistsValue(
+            new(request.TransactionIdPhysical, request.TransactionIdCounter),
+            request.Key, 
+            request.Revision,
+            (KeyValueDurability)request.Durability, 
+            context.CancellationToken
+        );
+        
+        if (keyValueContext is not null)
+        {
+            GrpcTryExistsKeyValueResponse response = new()
+            {
+                ServedFrom = "",
+                Type = (GrpcKeyValueResponseType)type,
+                Revision = keyValueContext.Revision,
+                ExpiresPhysical = keyValueContext.Expires.L,
+                ExpiresCounter = keyValueContext.Expires.C,
+            };
+            
+            return response;
+        }
+
+        return new()
+        {
+            Type = (GrpcKeyValueResponseType)type
+        };
+    }
+    
+    /// <summary>
     /// Receives requests for the key/value "AcquireExclusiveLock" service 
     /// </summary>
     /// <param name="request"></param>

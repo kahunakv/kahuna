@@ -12,6 +12,7 @@ public enum KeyValueResponseType
     Prepared = 7,
     Committed = 8,
     RolledBack = 9,
+    Exists = 10,
     Errored = 99,
     InvalidInput = 100,
     MustRetry = 101,

@@ -28,6 +28,8 @@ public interface IKahunaCommunication
      Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string url, string key, byte[]? value, long compareRevision, int expiryTime, KeyValueDurability durability);
 
      Task<(bool, byte[]?, long)> TryGetKeyValue(string url, string key, long revision, KeyValueDurability durability);
+     
+     Task<(bool, long)> TryExistsKeyValue(string url, string key, long revision, KeyValueDurability durability);
 
      Task<(bool, long)> TryDeleteKeyValue(string url, string key, KeyValueDurability durability);
 

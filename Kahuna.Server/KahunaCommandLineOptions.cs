@@ -56,9 +56,12 @@ public sealed class KahunaCommandLineOptions
     [Option("locks-workers", Required = false, HelpText = "Number of ephemeral/consistent workers")]
     public int LocksWorkers { get; set; } = 0;
     
-    [Option("persistence-workers", Required = false, HelpText = "Number of persistence workers")]
-    public int PersistenceWorkers { get; set; } = 8;
+    [Option("persistence-workers", Required = false, HelpText = "Number of persistence workers", Default = 4)]
+    public int PersistenceWorkers { get; set; } = 4;
     
-    [Option("background-writer-workers", Required = false, HelpText = "Number of background writers workers")]
-    public int BackgroundWritersWorkers { get; set; } = 0;
+    [Option("background-writer-workers", Required = false, HelpText = "Number of background writers workers", Default = 1)]
+    public int BackgroundWritersWorkers { get; set; } = 1;
+    
+    [Option("default-transaction-timeout", Required = false, HelpText = "Default transaction timeout in milliseconds", Default = 5000)]
+    public int DefaultTransactionTimeout { get; set; } = 5000;
 }

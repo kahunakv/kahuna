@@ -530,6 +530,32 @@ public class TestKeyValues
     }
     
     [Theory, CombinatorialData]
+    public async Task TestSingleSetValueAndExists(
+        [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
+        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+        
+        string keyName = GetRandomKeyName();
+
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
+        
+        result = await client.GetKeyValue(keyName, durability);
+        Assert.NotNull(result.Value);
+        Assert.Equal(0, result.Revision);
+        
+        Assert.Equal("some-value", result.ValueAsString());
+        
+        result = await client.ExistsKeyValue(keyName, durability);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
+    }
+    
+    [Theory, CombinatorialData]
     public async Task TestSingleSetValueAndDeleteAndSetIfExists(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 

@@ -36,6 +36,8 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private readonly TryDeleteHandler tryDeleteHandler;
 
     private readonly TryGetHandler tryGetHandler;
+    
+    private readonly TryExistsHandler tryExistsHandler;
 
     private readonly TryAdquireExclusiveLockHandler tryAdquireExclusiveLockHandler;
     
@@ -72,6 +74,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         tryExtendHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
         tryDeleteHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
         tryGetHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
+        tryExistsHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
         tryAdquireExclusiveLockHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
         tryReleaseExclusiveLockHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
         tryPrepareMutationsHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
@@ -113,6 +116,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.TryExtend => await TryExtend(message),
                 KeyValueRequestType.TryDelete => await TryDelete(message),
                 KeyValueRequestType.TryGet => await TryGet(message),
+                KeyValueRequestType.TryExists => await TryExists(message),
                 KeyValueRequestType.TryAcquireExclusiveLock => await TryAdquireExclusiveLock(message),
                 KeyValueRequestType.TryReleaseExclusiveLock => await TryReleaseExclusiveLock(message),
                 KeyValueRequestType.TryPrepareMutations => await TryPrepareMutations(message),
@@ -177,6 +181,16 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private Task<KeyValueResponse> TryGet(KeyValueRequest message)
     {
         return tryGetHandler.Execute(message);
+    }
+    
+    /// <summary>
+    /// Checks if a key exists
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
+    private Task<KeyValueResponse> TryExists(KeyValueRequest message)
+    {
+        return tryExistsHandler.Execute(message);
     }
     
     /// <summary>

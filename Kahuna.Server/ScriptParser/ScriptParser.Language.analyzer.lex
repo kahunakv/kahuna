@@ -28,6 +28,8 @@ TDelete         (D|d)(E|e)(L|l)(E|e)(T|t)(E|e)
 TEDelete        (E|e)(D|d)(E|e)(L|l)(E|e)(T|t)(E|e)
 TExtend         (E|e)(X|x)(T|t)(E|e)(N|n)(D|d)
 TEExtend        (E|e)(E|e)(X|x)(T|t)(E|e)(N|n)(D|d)
+TExists         (E|e)(X|x)(I|i)(S|s)(T|t)(S|s)
+TEExists        (E|e)(E|e)(X|x)(I|i)(S|s)(T|t)(S|s)
 TTrue           (T|t)(R|r)(U|u)(E|e)
 TFalse          (F|f)(A|a)(L|l)(S|s)(E|e)
 TAtWord         (A|a)(T|t)
@@ -112,6 +114,10 @@ TAnd            &&
 {TDelete} { yylval.l = yyline; return (int)Token.TDELETE; }
 
 {TEDelete} { yylval.l = yyline; return (int)Token.TEDELETE; }
+
+{TExists} { yylval.l = yyline; return (int)Token.TEXISTS; }
+
+{TEExists} { yylval.l = yyline; return (int)Token.TEEXISTS; }
 
 {TExtend} { yylval.l = yyline; return (int)Token.TEXTEND; }
 

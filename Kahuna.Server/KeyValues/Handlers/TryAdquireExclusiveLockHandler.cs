@@ -35,7 +35,7 @@ internal sealed class TryAdquireExclusiveLockHandler : BaseHandler
             if (message.Durability == KeyValueDurability.Persistent)
                 newContext = await persistence.GetKeyValue(message.Key);
 
-            newContext ??= new() { Revision = -1 };
+            newContext ??= new() { State = KeyValueState.Undefined, Revision = -1 };
             
             context = newContext;
 
@@ -58,6 +58,8 @@ internal sealed class TryAdquireExclusiveLockHandler : BaseHandler
             TransactionId = message.TransactionId,
             Expires = message.TransactionId + message.ExpiresMs,
         };
+        
+        logger.LogDebug("Assigned {Key} write intent to TxId={TransactionId}", message.Key, message.TransactionId);
         
         return new(KeyValueResponseType.Locked);
     }

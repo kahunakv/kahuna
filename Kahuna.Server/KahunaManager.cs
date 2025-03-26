@@ -187,6 +187,20 @@ public sealed class KahunaManager : IKahuna
     {
         return keyValues.LocateAndTryGetValue(transactionId, key, revision, durability, cancelationToken);
     }
+    
+    /// <summary>
+    /// Locates the leader node for the given key and executes the TryExistsValue request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="revision"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryExistsValue(HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability, CancellationToken cancelationToken)
+    {
+        return keyValues.LocateAndTryExistsValue(transactionId, key, revision, durability, cancelationToken);
+    }
 
     /// <summary>
     /// Locates the leader node for the given key and executes the TryDeleteValue request.
@@ -356,6 +370,24 @@ public sealed class KahunaManager : IKahuna
     )
     {
         return keyValues.TryGetValue(transactionId, keyName, revision, durability);
+    }
+    
+    /// <summary>
+    /// Checks if a key exists and its context (without the value)
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="keyName"></param>
+    /// <param name="revision"></param>
+    /// <param name="durability"></param>
+    /// <returns></returns>
+    public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryExistsValue(
+        HLCTimestamp transactionId, 
+        string keyName, 
+        long revision, 
+        KeyValueDurability durability
+    )
+    {
+        return keyValues.TryExistsValue(transactionId, keyName, revision, durability);
     }
     
     /// <summary>

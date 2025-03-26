@@ -24,7 +24,7 @@
 
 %token LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV LBRACE RBRACE
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS  
-%token TBEGIN TROLLBACK TCOMMIT TLET TSET TGET TESET TEGET TDELETE TEDELETE TEXTEND TEEXTEND 
+%token TBEGIN TROLLBACK TCOMMIT TLET TSET TGET TESET TEGET TDELETE TEDELETE TEXTEND TEEXTEND TEXISTS TEEXISTS
 %token TIF TELSE TTHEN TEND TNX TXX TEX TCMP TCMPREV
 %token TRETURN TSLEEP TDIGIT TFLOAT TSTRING TIDENTIFIER TESCIDENTIFIER TPLACEHOLDER TTRUE TFALSE TAT
 
@@ -38,6 +38,8 @@ stmt    : set_stmt { $$.n = $1.n; $$.l = $1.l; }
         | eset_stmt { $$.n = $1.n; $$.l = $1.l; } 
         | get_stmt { $$.n = $1.n; $$.l = $1.l; }
         | eget_stmt { $$.n = $1.n; $$.l = $1.l; }
+        | exists_stmt { $$.n = $1.n; $$.l = $1.l; }
+        | eexists_stmt { $$.n = $1.n; $$.l = $1.l; }
         | delete_stmt { $$.n = $1.n; $$.l = $1.l; }
         | edelete_stmt { $$.n = $1.n; $$.l = $1.l; }
         | extend_stmt { $$.n = $1.n; $$.l = $1.l; }
@@ -86,6 +88,18 @@ eget_stmt : TEGET key_name { $$.n = new(NodeType.Eget, $2.n, null, null, null, n
           | TEGET key_name TAT int { $$.n = new(NodeType.Eget, $2.n, null, $4.n, null, null, null, null, $1.l); }
           | TLET identifier TEQUALS TEGET key_name TAT int { $$.n = new(NodeType.Eget, $5.n, $2.n, $7.n, null, null, null, null, $1.l); }
           ;
+          
+exists_stmt : TEXISTS key_name { $$.n = new(NodeType.Exists, $2.n, null, null, null, null, null, null, $1.l); }
+       | TLET identifier TEQUALS TEXISTS key_name { $$.n = new(NodeType.Exists, $5.n, $2.n, null, null, null, null, null, $1.l); }
+       | TEXISTS key_name TAT int { $$.n = new(NodeType.Exists, $2.n, null, $4.n, null, null, null, null, $1.l); }
+       | TLET identifier TEQUALS TEXISTS key_name TAT int { $$.n = new(NodeType.Exists, $5.n, $2.n, $7.n, null, null, null, null, $1.l); }
+       ;
+       
+eexists_stmt : TEEXISTS key_name { $$.n = new(NodeType.Eexists, $2.n, null, null, null, null, null, null, $1.l); }
+        | TLET identifier TEQUALS TEEXISTS key_name { $$.n = new(NodeType.Eexists, $5.n, $2.n, null, null, null, null, null, $1.l); }
+        | TEEXISTS key_name TAT int { $$.n = new(NodeType.Eexists, $2.n, null, $4.n, null, null, null, null, $1.l); }
+        | TLET identifier TEQUALS TEEXISTS key_name TAT int { $$.n = new(NodeType.Eexists, $5.n, $2.n, $7.n, null, null, null, null, $1.l); }
+        ;
           
 delete_stmt : TDELETE key_name { $$.n = new(NodeType.Delete, $2.n, null, null, null, null, null, null, $1.l); }
             ;

@@ -76,6 +76,9 @@ public sealed class KeyValueTransactionCoordinator
 
                 case NodeType.Get:
                     return await ExecuteGet(GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
+                
+                case NodeType.Exists:
+                    return await ExecuteExists(GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
 
                 case NodeType.Delete:
                     return await ExecuteDelete(GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
@@ -88,6 +91,9 @@ public sealed class KeyValueTransactionCoordinator
 
                 case NodeType.Eget:
                     return await ExecuteGet(GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
+                
+                case NodeType.Eexists:
+                    return await ExecuteExists(GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
 
                 case NodeType.Edelete:
                     return await ExecuteDelete(GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
@@ -443,6 +449,71 @@ public sealed class KeyValueTransactionCoordinator
             Expires = readOnlyContext.Expires
         };
     }
+    
+    private async Task<KeyValueTransactionResult> ExecuteExists(KeyValueTransactionContext context, NodeAst ast, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        if (ast.leftAst is null)
+            throw new KahunaScriptException("Invalid key", ast.yyline);
+        
+        if (ast.leftAst.yytext is null)
+            throw new KahunaScriptException("Invalid key", ast.yyline);
+        
+        string keyName = GetKeyName(context, ast.leftAst);
+        
+        if (context.Locking == KeyValueTransactionLocking.Optimistic)
+        {
+            context.LocksAcquired ??= [];
+            context.LocksAcquired.Add((keyName, durability));
+        }
+        
+        long compareRevision = -1;
+        
+        if (ast.extendedOne is not null)
+            compareRevision = int.Parse(ast.extendedOne.yytext!);
+        
+        (KeyValueResponseType type, ReadOnlyKeyValueContext? readOnlyContext) = await manager.LocateAndTryExistsValue(
+            context.TransactionId,
+            keyName,
+            compareRevision,
+            durability,
+            cancellationToken
+        );
+        
+        if (type is KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry)
+        {
+            context.Action = KeyValueTransactionAction.Abort;
+            context.Status = KeyValueExecutionStatus.Stop;
+        }
+
+        if (readOnlyContext is null)
+        {
+            if (ast.rightAst is not null)
+                context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new() { Type = KeyValueExpressionType.Null });
+            
+            return new()
+            {
+                ServedFrom = "",
+                Type = type
+            };
+        }
+        
+        if (ast.rightAst is not null)
+            context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new()
+            {
+                Type = KeyValueExpressionType.Bool, 
+                BoolValue = type == KeyValueResponseType.Exists,
+                Revision = readOnlyContext.Revision
+            });
+            
+        return new()
+        {
+            ServedFrom = "",
+            Type = type,
+            Value = readOnlyContext.Value,
+            Revision = readOnlyContext.Revision,
+            Expires = readOnlyContext.Expires
+        };
+    }
 
     /// <summary>
     /// Executes a transaction using Two-Phase commit protocol (2PC).
@@ -456,7 +527,7 @@ public sealed class KeyValueTransactionCoordinator
     /// <exception cref="KahunaScriptException"></exception>
     private async Task<KeyValueTransactionResult> ExecuteTransaction(NodeAst ast, NodeAst? optionsAst, List<KeyValueParameter>? parameters, bool autoCommit)
     {
-        long timeout = 5000;
+        long timeout = configuration.DefaultTransactionTimeout;
         using CancellationTokenSource cts = new();
         KeyValueTransactionLocking locking = KeyValueTransactionLocking.Pessimistic;
         
@@ -721,6 +792,12 @@ public sealed class KeyValueTransactionCoordinator
                     break;
                 }
                 
+                case NodeType.Exists:
+                {
+                    context.Result = await ExecuteExists(context, ast, KeyValueDurability.Persistent, cancellationToken);
+                    break;
+                }
+                
                 case NodeType.Eset:
                     await ExecuteSet(context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
@@ -728,6 +805,12 @@ public sealed class KeyValueTransactionCoordinator
                 case NodeType.Eget:
                 {
                     context.Result = await ExecuteGet(context, ast, KeyValueDurability.Ephemeral, cancellationToken);
+                    break;
+                }
+                
+                case NodeType.Eexists:
+                {
+                    context.Result = await ExecuteExists(context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
                 }
                 

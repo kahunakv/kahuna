@@ -17,7 +17,8 @@ public static class ConfigurationValidator
             PersistenceWorkers = opts.PersistenceWorkers,
             Storage = opts.Storage,
             StoragePath = opts.StoragePath,
-            StorageRevision = opts.StorageRevision
+            StorageRevision = opts.StorageRevision,
+            DefaultTransactionTimeout = opts.DefaultTransactionTimeout,
         };
         
         if (!string.IsNullOrEmpty(configuration.HttpsCertificate))

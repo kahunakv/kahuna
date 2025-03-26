@@ -5,6 +5,7 @@ service KeyValuer {
   rpc TryExtendKeyValue (GrpcTryExtendKeyValueRequest) returns (GrpcTryExtendKeyValueResponse);
   rpc TryDeleteKeyValue (GrpcTryDeleteKeyValueRequest) returns (GrpcTryDeleteKeyValueResponse);
   rpc TryGetKeyValue (GrpcTryGetKeyValueRequest) returns (GrpcTryGetKeyValueResponse);
+  rpc TryExistsKeyValue (GrpcTryExistsKeyValueRequest) returns (GrpcTryExistsKeyValueResponse);
   rpc TryExecuteTransaction (GrpcTryExecuteTransactionRequest) returns (GrpcTryExecuteTransactionResponse);
   rpc TryAcquireExclusiveLock (GrpcTryAcquireExclusiveLockRequest) returns (GrpcTryAcquireExclusiveLockResponse);
   rpc TryReleaseExclusiveLock (GrpcTryReleaseExclusiveLockRequest) returns (GrpcTryReleaseExclusiveLockResponse);
@@ -73,6 +74,22 @@ message GrpcTryGetKeyValueResponse {
   int64 Revision = 4;
   int64 ExpiresPhysical = 5;
   uint32 ExpiresCounter = 6;
+}
+
+message GrpcTryExistsKeyValueRequest {
+  int64 TransactionIdPhysical = 1;
+  uint32 TransactionIdCounter = 2;
+  string Key = 3;
+  int64 Revision = 4;
+  GrpcKeyValueDurability Durability = 5;
+}
+
+message GrpcTryExistsKeyValueResponse {
+  optional string ServedFrom = 1;
+  GrpcKeyValueResponseType Type = 2;
+  int64 Revision = 3;
+  int64 ExpiresPhysical = 4;
+  uint32 ExpiresCounter = 5;
 }
 
 message GrpcTryExecuteTransactionRequest {
@@ -185,6 +202,7 @@ enum GrpcKeyValueResponseType {
   TYPE_PROPOSED = 7;
   TYPE_COMMITTED = 8;
   TYPE_ROLLEDBACK = 9;
+  TYPE_EXISTS = 10;
   TYPE_ERRORED = 99;
   TYPE_INVALID_INPUT = 100;
   TYPE_MUST_RETRY = 101;

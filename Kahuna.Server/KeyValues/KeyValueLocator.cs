@@ -252,6 +252,60 @@ internal sealed class KeyValueLocator
     }
     
     /// <summary>
+    /// Locates the leader node for the given key and executes the TryExistsValue request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryExistsValue(
+        HLCTimestamp transactionId, 
+        string key, 
+        long revision,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        if (string.IsNullOrEmpty(key))
+            return (KeyValueResponseType.InvalidInput, null);
+        
+        int partitionId = raft.GetPartitionKey(key);
+
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+            return await manager.TryExistsValue(transactionId, key, revision, durability);
+            
+        string leader = await raft.WaitForLeader(partitionId, cancellationToken);
+        if (leader == raft.GetLocalEndpoint())
+            return (KeyValueResponseType.MustRetry, null);
+        
+        logger.LogDebug("EXISTS-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
+        
+        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
+        
+        KeyValuer.KeyValuerClient client = new(channel);
+        
+        GrpcTryExistsKeyValueRequest request = new()
+        {
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
+            Key = key,
+            Revision = revision,
+            Durability = (GrpcKeyValueDurability) durability,
+        };
+        
+        GrpcTryExistsKeyValueResponse? remoteResponse = await client.TryExistsKeyValueAsync(request, cancellationToken: cancellationToken);
+        
+        remoteResponse.ServedFrom = $"https://{leader}";
+        
+        return ((KeyValueResponseType)remoteResponse.Type, new(
+            null,
+            remoteResponse.Revision,
+            new(remoteResponse.ExpiresPhysical, remoteResponse.ExpiresCounter)
+        ));
+    }
+    
+    /// <summary>
     /// Locates the leader node for the given key and executes the TryAcquireExclusiveLock request.
     /// </summary>
     /// <param name="transactionId"></param>

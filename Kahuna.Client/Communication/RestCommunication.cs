@@ -414,6 +414,48 @@ public class RestCommunication : IKahunaCommunication
             
         throw new KahunaException("Failed to get key/value: " + response.Type, response.Type);
     }
+    
+    public async Task<(bool, long)> TryExistsKeyValue(string url, string key, long revision, KeyValueDurability durability)
+    {
+        KahunaExistsKeyValueRequest request = new()
+        {
+            Key = key, 
+            Revision = revision,
+            Durability = durability
+        };
+        
+        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaExistsKeyValueRequest);
+        
+        KahunaExistsKeyValueResponse? response;
+        
+        do
+        {
+            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
+        
+            response = await retryPolicy.ExecuteAsync(() =>
+                url
+                    .WithOAuthBearerToken("xxx")
+                    .AppendPathSegments("v1/kv/try-exists")
+                    .WithHeader("Accept", "application/json")
+                    .WithHeader("Content-Type", "application/json")
+                    .WithTimeout(5)
+                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .PostStringAsync(payload)
+                    .ReceiveJson<KahunaExistsKeyValueResponse>()).ConfigureAwait(false);
+
+            if (response is null)
+                throw new KahunaException("Response is null", LockResponseType.Errored);
+
+            if (response.Type == KeyValueResponseType.Exists)
+                return (true, response.Revision);
+            
+            if (response.Type == KeyValueResponseType.DoesNotExist)
+                return (false, response.Revision);
+
+        } while (response.Type == KeyValueResponseType.MustRetry);
+            
+        throw new KahunaException("Failed to check if exists key/value: " + response.Type, response.Type);
+    }
 
     public async Task<(bool, long)> TryDeleteKeyValue(string url, string key, KeyValueDurability durability)
     {

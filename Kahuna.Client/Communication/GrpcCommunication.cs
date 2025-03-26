@@ -315,6 +315,49 @@ public class GrpcCommunication : IKahunaCommunication
             
         throw new KahunaException("Failed to get key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
+
+    public async Task<(bool, long)> TryExistsKeyValue(string url, string key, long revision, KeyValueDurability durability)
+    {
+        GrpcTryExistsKeyValueRequest request = new()
+        {
+            Key = key, 
+            Revision = revision,
+            Durability = (GrpcKeyValueDurability)durability
+        };
+
+        int retries = 0;
+        GrpcTryExistsKeyValueResponse? response;
+        
+        do
+        {
+            GrpcChannel channel = GetSharedChannel(url);
+        
+            KeyValuer.KeyValuerClient client = new(channel);
+        
+            response = await client.TryExistsKeyValueAsync(request).ConfigureAwait(false);
+
+            if (response is null)
+                throw new KahunaException("Response is null", LockResponseType.Errored);
+
+            switch (response.Type)
+            {
+                case GrpcKeyValueResponseType.TypeExists:
+                    return (true, response.Revision);
+                
+                case GrpcKeyValueResponseType.TypeDoesNotExist:
+                    return (false, 0);
+            }
+            
+            if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
+                logger?.LogDebug("Server asked to retry exists key/value");
+            
+            if (++retries >= 5)
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
+            
+        } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
+            
+        throw new KahunaException("Failed to check if exists key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
+    }
     
     public async Task<(bool, long)> TryDeleteKeyValue(string url, string key, KeyValueDurability durability)
     {

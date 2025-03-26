@@ -180,6 +180,47 @@ public static class KeyValuesHandlers
             };
         });
         
+        app.MapPost("/v1/kv/try-exists", async (KahunaExistsKeyValueRequest request, IKahuna keyValues, IRaft raft, ILogger<IKahuna> logger) =>
+        {
+            if (string.IsNullOrEmpty(request.Key))
+                return new()
+                {
+                    Type = KeyValueResponseType.InvalidInput
+                };
+        
+            if (string.IsNullOrEmpty(request.Key))
+                return new()
+                {
+                    Type = KeyValueResponseType.InvalidInput
+                };
+        
+            (KeyValueResponseType type, ReadOnlyKeyValueContext? keyValueContext) = await keyValues.LocateAndTryExistsValue(
+                request.TransactionId,
+                request.Key, 
+                request.Revision,
+                request.Durability, 
+                CancellationToken.None
+            );
+        
+            if (keyValueContext is not null)
+            {
+                KahunaExistsKeyValueResponse response = new()
+                {
+                    ServedFrom = "",
+                    Type = type,
+                    Revision = keyValueContext.Revision,
+                    Expires = keyValueContext.Expires
+                };
+                
+                return response;
+            }
+
+            return new()
+            {
+                Type = type
+            };
+        });
+        
         app.MapPost("/v1/kv/try-execute-tx", async (KahunaTxKeyValueRequest request, IKahuna keyValues) =>
         {
             if (request.Script is null)

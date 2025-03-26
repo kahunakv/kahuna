@@ -22,4 +22,6 @@ public sealed class KahunaConfiguration
     public string StoragePath { get; set; } = "";
     
     public string StorageRevision { get; set; } = "";
+    
+    public int DefaultTransactionTimeout { get; set; }
 }
