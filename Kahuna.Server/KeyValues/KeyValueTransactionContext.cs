@@ -50,4 +50,18 @@ public sealed class KeyValueTransactionContext
         
         Variables[varName] = value;
     }
+    
+    public string GetParameter(NodeAst ast)
+    {
+        if (Parameters is null)
+            throw new KahunaScriptException("Undefined parameter: " + ast.yytext!, ast.yyline);
+        
+        foreach (KeyValueParameter variable in Parameters)
+        {
+            if (variable.Key == ast.yytext!)
+                return variable.Value!;
+        }
+        
+        throw new KahunaScriptException("Undefined parameter: " + ast.yytext!, ast.yyline);
+    }
 }

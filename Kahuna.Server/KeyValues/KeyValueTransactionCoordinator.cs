@@ -185,21 +185,13 @@ public sealed class KeyValueTransactionCoordinator
         
         if (ast.rightAst is null)
             throw new KahunaScriptException("Invalid value", ast.yyline);
+        
+        string keyName = GetKeyName(context, ast.leftAst);
 
         if (context.Locking == KeyValueTransactionLocking.Optimistic)
         {
-            /*(KeyValueResponseType lockResponseType, _, KeyValueDurability _) = await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, ast.leftAst.yytext, 5050, durability, cancellationToken);
-
-            if (lockResponseType != KeyValueResponseType.Locked)
-            {
-                context.Action = KeyValueTransactionAction.Abort;
-                context.Status = KeyValueExecutionStatus.Stop;
-                
-                return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted" };
-            }*/
-
             context.LocksAcquired ??= [];
-            context.LocksAcquired.Add((ast.leftAst.yytext, durability));
+            context.LocksAcquired.Add((keyName, durability));
         }
 
         int expiresMs = 0;
@@ -243,7 +235,7 @@ public sealed class KeyValueTransactionCoordinator
         
         (KeyValueResponseType type, long revision) = await manager.LocateAndTrySetKeyValue(
             context.TransactionId,
-            key: ast.leftAst.yytext,
+            key: keyName,
             value: result.Value,
             compareValue,
             compareRevision,
@@ -256,7 +248,7 @@ public sealed class KeyValueTransactionCoordinator
         if (type == KeyValueResponseType.Set)
         {
             context.ModifiedKeys ??= [];
-            context.ModifiedKeys.Add((ast.leftAst.yytext, durability));
+            context.ModifiedKeys.Add((keyName, durability));
         }
         else
         {
@@ -289,25 +281,17 @@ public sealed class KeyValueTransactionCoordinator
         if (ast.leftAst.yytext is null)
             throw new KahunaScriptException("Invalid key", ast.yyline);
 
+        string keyName = GetKeyName(context, ast.leftAst);
+
         if (context.Locking == KeyValueTransactionLocking.Optimistic)
         {
-            /*(KeyValueResponseType lockResponseType, _, KeyValueDurability _) = await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, ast.leftAst.yytext, 5050, durability, cancellationToken);
-
-            if (lockResponseType != KeyValueResponseType.Locked)
-            {
-                context.Action = KeyValueTransactionAction.Abort;
-                context.Status = KeyValueExecutionStatus.Stop;
-
-                return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted" };
-            }*/
-
             context.LocksAcquired ??= [];
-            context.LocksAcquired.Add((ast.leftAst.yytext, durability));
+            context.LocksAcquired.Add((keyName, durability));
         }
 
         (KeyValueResponseType type, long revision) = await manager.LocateAndTryDeleteKeyValue(
             context.TransactionId,
-            key: ast.leftAst.yytext,
+            key: keyName,
             durability,
             cancellationToken
         );
@@ -316,7 +300,7 @@ public sealed class KeyValueTransactionCoordinator
         {
             case KeyValueResponseType.Deleted:
                 context.ModifiedKeys ??= [];
-                context.ModifiedKeys.Add((ast.leftAst.yytext, durability));
+                context.ModifiedKeys.Add((keyName, durability));
                 break;
             
             case KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry:
@@ -347,20 +331,12 @@ public sealed class KeyValueTransactionCoordinator
         if (ast.leftAst.yytext is null)
             throw new KahunaScriptException("Invalid key", ast.yyline);
         
+        string keyName = GetKeyName(context, ast.leftAst);
+        
         if (context.Locking == KeyValueTransactionLocking.Optimistic)
         {
-            /*(KeyValueResponseType lockResponseType, _, KeyValueDurability _) = await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, ast.leftAst.yytext, 5050, durability, cancellationToken);
-
-            if (lockResponseType != KeyValueResponseType.Locked)
-            {
-                context.Action = KeyValueTransactionAction.Abort;
-                context.Status = KeyValueExecutionStatus.Stop;
-                
-                return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted" };
-            }*/
-
             context.LocksAcquired ??= [];
-            context.LocksAcquired.Add((ast.leftAst.yytext, durability));
+            context.LocksAcquired.Add((keyName, durability));
         }
         
         int expiresMs = 0;
@@ -370,7 +346,7 @@ public sealed class KeyValueTransactionCoordinator
         
         (KeyValueResponseType type, long revision) = await manager.LocateAndTryExtendKeyValue(
             context.TransactionId,
-            key: ast.leftAst.yytext,
+            key: keyName,
             expiresMs: expiresMs,
             durability,
             cancellationToken
@@ -380,7 +356,7 @@ public sealed class KeyValueTransactionCoordinator
         {
             case KeyValueResponseType.Extended:
                 context.ModifiedKeys ??= [];
-                context.ModifiedKeys.Add((ast.leftAst.yytext, durability));
+                context.ModifiedKeys.Add((keyName, durability));
                 break;
             
             case KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry:
@@ -411,20 +387,12 @@ public sealed class KeyValueTransactionCoordinator
         if (ast.leftAst.yytext is null)
             throw new KahunaScriptException("Invalid key", ast.yyline);
         
+        string keyName = GetKeyName(context, ast.leftAst);
+        
         if (context.Locking == KeyValueTransactionLocking.Optimistic)
         {
-            /*(KeyValueResponseType lockResponseType, _, KeyValueDurability _) = await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, ast.leftAst.yytext, 5050, durability, cancellationToken);
-
-            if (lockResponseType != KeyValueResponseType.Locked)
-            {
-                context.Action = KeyValueTransactionAction.Abort;
-                context.Status = KeyValueExecutionStatus.Stop;
-                
-                return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted" };
-            }*/
-
             context.LocksAcquired ??= [];
-            context.LocksAcquired.Add((ast.leftAst.yytext, durability));
+            context.LocksAcquired.Add((keyName, durability));
         }
         
         long compareRevision = -1;
@@ -434,7 +402,7 @@ public sealed class KeyValueTransactionCoordinator
         
         (KeyValueResponseType type, ReadOnlyKeyValueContext? readOnlyContext) = await manager.LocateAndTryGetValue(
             context.TransactionId,
-            ast.leftAst.yytext,
+            keyName,
             compareRevision,
             durability,
             cancellationToken
@@ -544,7 +512,7 @@ public sealed class KeyValueTransactionCoordinator
 
         // Acquire all locks in advance for pessimistic locking
         if (locking == KeyValueTransactionLocking.Pessimistic)
-            GetLocksToAcquire(ast, ephemeralLocksToAcquire, linearizableLocksToAcquire);
+            GetLocksToAcquire(context, ast, ephemeralLocksToAcquire, linearizableLocksToAcquire);
 
         try
         {
@@ -884,14 +852,26 @@ public sealed class KeyValueTransactionCoordinator
         await Task.Delay(TimeSpan.FromMilliseconds(duration), cancellationToken);
     }
 
+    private static string GetKeyName(KeyValueTransactionContext context, NodeAst ast)
+    {
+        return ast.nodeType switch
+        {
+            NodeType.Identifier => ast.yytext!,
+            NodeType.Placeholder => context.GetParameter(ast),
+            _ => throw new KahunaScriptException($"Invalid key name type {ast.nodeType}", ast.yyline)
+        };
+    }
+
     /// <summary>
     /// Obtains that must be acquired to start the transaction
     /// </summary>
+    /// <param name="context"></param>
     /// <param name="ast"></param>
     /// <param name="ephemeralLocks"></param>
     /// <param name="linearizableLocks"></param>
-    /// <exception cref="Exception"></exception>
-    private static void GetLocksToAcquire(NodeAst ast, HashSet<string> ephemeralLocks, HashSet<string> linearizableLocks)
+    /// <exception cref="KahunaScriptException"></exception>
+    /// <exception cref="ArgumentOutOfRangeException"></exception>
+    private static void GetLocksToAcquire(KeyValueTransactionContext context, NodeAst ast, HashSet<string> ephemeralLocks, HashSet<string> linearizableLocks)
     {
         while (true)
         {
@@ -902,7 +882,7 @@ public sealed class KeyValueTransactionCoordinator
                 case NodeType.StmtList:
                 {
                     if (ast.leftAst is not null) 
-                        GetLocksToAcquire(ast.leftAst, ephemeralLocks, linearizableLocks);
+                        GetLocksToAcquire(context, ast.leftAst, ephemeralLocks, linearizableLocks);
 
                     if (ast.rightAst is not null)
                     {
@@ -915,16 +895,16 @@ public sealed class KeyValueTransactionCoordinator
                 
                 case NodeType.Begin:
                     if (ast.leftAst is not null) 
-                        GetLocksToAcquire(ast.leftAst, ephemeralLocks, linearizableLocks);
+                        GetLocksToAcquire(context, ast.leftAst, ephemeralLocks, linearizableLocks);
                     break;
                 
                 case NodeType.If:
                 {
                     if (ast.rightAst is not null) 
-                        GetLocksToAcquire(ast.rightAst, ephemeralLocks, linearizableLocks);
+                        GetLocksToAcquire(context, ast.rightAst, ephemeralLocks, linearizableLocks);
                     
                     if (ast.extendedOne is not null) 
-                        GetLocksToAcquire(ast.extendedOne, ephemeralLocks, linearizableLocks);
+                        GetLocksToAcquire(context, ast.extendedOne, ephemeralLocks, linearizableLocks);
 
                     break;
                 }
@@ -933,14 +913,14 @@ public sealed class KeyValueTransactionCoordinator
                     if (ast.leftAst is null)
                         throw new KahunaScriptException("Invalid SET expression", ast.yyline);
                     
-                    linearizableLocks.Add(ast.leftAst.yytext!);
+                    linearizableLocks.Add(GetKeyName(context, ast.leftAst));
                     break;
                     
                 case NodeType.Eset:
                     if (ast.leftAst is null)
                         throw new KahunaScriptException("Invalid SET expression", ast.yyline);
                     
-                    ephemeralLocks.Add(ast.leftAst.yytext!);
+                    ephemeralLocks.Add(GetKeyName(context, ast.leftAst));
                     break;
                 
                 case NodeType.Get:
@@ -948,7 +928,7 @@ public sealed class KeyValueTransactionCoordinator
                         throw new KahunaScriptException("Invalid SET expression", ast.yyline);
                     
                     if (ast.extendedOne is null) // make sure if isn't querying a revision
-                        linearizableLocks.Add(ast.leftAst.yytext!);
+                        linearizableLocks.Add(GetKeyName(context, ast.leftAst));
                     break;
                     
                 case NodeType.Eget:
@@ -956,35 +936,35 @@ public sealed class KeyValueTransactionCoordinator
                         throw new KahunaScriptException("Invalid GET expression", ast.yyline);
                     
                     if (ast.extendedOne is null) // make sure if isn't querying a revision
-                        ephemeralLocks.Add(ast.leftAst.yytext!);
+                        ephemeralLocks.Add(GetKeyName(context, ast.leftAst));
                     break;
                 
                 case NodeType.Extend:
                     if (ast.leftAst is null)
                         throw new KahunaScriptException("Invalid EXTEND expression", ast.yyline);
                     
-                    linearizableLocks.Add(ast.leftAst.yytext!);
+                    linearizableLocks.Add(GetKeyName(context, ast.leftAst));
                     break;
                     
                 case NodeType.Eextend:
                     if (ast.leftAst is null)
                         throw new KahunaScriptException("Invalid EXTEND expression", ast.yyline);
                     
-                    ephemeralLocks.Add(ast.leftAst.yytext!);
+                    ephemeralLocks.Add(GetKeyName(context, ast.leftAst));
                     break;
                 
                 case NodeType.Delete:
                     if (ast.leftAst is null)
                         throw new KahunaScriptException("Invalid DELETE expression", ast.yyline);
                     
-                    linearizableLocks.Add(ast.leftAst.yytext!);
+                    linearizableLocks.Add(GetKeyName(context, ast.leftAst));
                     break;
                 
                 case NodeType.Edelete:
                     if (ast.leftAst is null)
                         throw new KahunaScriptException("Invalid DELETE expression", ast.yyline);
                     
-                    ephemeralLocks.Add(ast.leftAst.yytext!);
+                    ephemeralLocks.Add(GetKeyName(context, ast.leftAst));
                     break;
                 
                 case NodeType.Integer:

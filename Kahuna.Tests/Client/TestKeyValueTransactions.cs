@@ -104,6 +104,79 @@ public class TestKeyValueTransactions
         Assert.Equal(0, response.Revision);
     }
     
+    [Theory, CombinatorialData]
+    public async Task TestSnapshotIsolationConflict(
+        [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType,
+        [CombinatorialValues(KahunaClientType.Single)] KahunaClientType clientType
+    )
+    {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+        
+        string keyNameA = GetRandomKeyName();
+        string keyNameB = GetRandomKeyName();
+        
+        KahunaKeyValue result = await client.SetKeyValue(keyNameA, "10");
+        Assert.True(result.Success);
+        
+        result = await client.SetKeyValue(keyNameB, "10");
+        Assert.True(result.Success);
+
+        const string script1 = """
+        BEGIN (locking="optimistic")
+         LET av = GET @keyA
+         LET bv = GET @keyB
+         IF to_int(av) + to_int(bv) = 20 THEN
+          SET @keyA 0
+         END
+         COMMIT
+        END 
+        """;
+        
+        const string script2 = """
+        BEGIN (locking="optimistic")
+         LET av = GET @keyA
+         LET bv = GET @keyB
+         IF to_int(av) + to_int(bv) = 20 THEN
+          SET @keyB 0
+         END
+         COMMIT
+        END 
+        """;
+
+        try
+        {
+            await Task.WhenAll(
+                client.ExecuteKeyValueTransaction(
+                    script1,
+                    null, 
+                    [new() { Key = "@keyA", Value = keyNameA }, new() { Key = "@keyB", Value = keyNameB }]
+                ),
+                client.ExecuteKeyValueTransaction(
+                    script2,
+                    null, 
+                    [new() { Key = "@keyA", Value = keyNameA }, new() { Key = "@keyB", Value = keyNameB }]
+                )
+            );
+            
+            Assert.False(true);
+        }
+        catch (KahunaException e)
+        {
+            Assert.Equal(KeyValueResponseType.Aborted, e.KeyValueErrorCode);
+        }
+        
+        KahunaKeyValue resultA = await client.GetKeyValue(keyNameA);
+        KahunaKeyValue resultB = await client.GetKeyValue(keyNameB);
+        
+        Assert.True(
+            ("10" == resultA.ValueAsString() && "0" == resultB.ValueAsString()) || 
+            ("0" == resultA.ValueAsString() && "10" == resultB.ValueAsString())
+        );
+
+        //Assert.Equal(KeyValueResponseType.Set, response.Type);
+        //Assert.Equal(0, response.Revision);
+    }
+    
     private KahunaClient GetClientByType(KahunaCommunicationType communicationType, KahunaClientType clientType)
     {
         return clientType switch

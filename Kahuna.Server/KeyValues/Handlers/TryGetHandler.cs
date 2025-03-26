@@ -50,7 +50,7 @@ internal sealed class TryGetHandler : BaseHandler
         {
             if (context is null)
             {
-                context = new();
+                context = new() { State = KeyValueState.Undefined, Revision = -1 };
                 keyValuesStore.Add(message.Key, context);
             }
             
@@ -70,7 +70,7 @@ internal sealed class TryGetHandler : BaseHandler
                 context.MvccEntries.Add(message.TransactionId, entry);
             }
             
-            if (entry.State == KeyValueState.Deleted)
+            if (entry.State is KeyValueState.Undefined or KeyValueState.Deleted)
                 return new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueContext(null, context?.Revision ?? 0, HLCTimestamp.Zero));
             
             if (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)

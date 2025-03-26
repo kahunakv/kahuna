@@ -68,6 +68,20 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             return new(KeyValueResponseType.Errored);
         }
 
+        foreach ((HLCTimestamp key, KeyValueMvccEntry _) in context.MvccEntries)
+        {
+            if (key.CompareTo(message.TransactionId) > 0)
+            {
+                logger.LogWarning("Transaction {TransactionId} conflicts with {ExistingTransactionId} [4]", message.TransactionId, context.LastUsed);
+            
+                return new(KeyValueResponseType.Errored);
+            }
+        }
+        
+        // Transaction queried a value that didn't exist
+        if (entry.State == KeyValueState.Undefined)
+            return new(KeyValueResponseType.Prepared);
+
         // in optimistic concurrency, we create the write intent if it doesn't exist
         // this is to ensure that the assigned transaction will gain the race
         context.WriteIntent ??= new()

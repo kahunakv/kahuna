@@ -51,12 +51,12 @@ stmt    : set_stmt { $$.n = $1.n; $$.l = $1.l; }
         | sleep_stmt { $$.n = $1.n; $$.l = $1.l; }
         ;
 
-set_stmt : TSET identifier expression { $$.n = new(NodeType.Set, $2.n, $3.n, null, null, null, null, null, $1.l); }         
-          | TSET identifier expression set_cmp { $$.n = new(NodeType.Set, $2.n, $3.n, null, null, $4.n, null, null, $1.l); }
-          | TSET identifier expression TEX int { $$.n = new(NodeType.Set, $2.n, $3.n, $5.n, null, null, null, null, $1.l); }
-          | TSET identifier expression set_cmp TEX int { $$.n = new(NodeType.Set, $2.n, $3.n, $6.n, null, $4.n, null, null, $1.l); }
-          | TSET identifier expression TEX int set_not_exists { $$.n = new(NodeType.Set, $2.n, $3.n, $5.n, $6.n, null, null, null, $1.l); }
-          | TSET identifier expression set_not_exists { $$.n = new(NodeType.Set, $2.n, $3.n, null, $4.n, null, null, null, $1.l); }
+set_stmt : TSET key_name expression { $$.n = new(NodeType.Set, $2.n, $3.n, null, null, null, null, null, $1.l); }         
+          | TSET key_name expression set_cmp { $$.n = new(NodeType.Set, $2.n, $3.n, null, null, $4.n, null, null, $1.l); }
+          | TSET key_name expression TEX int { $$.n = new(NodeType.Set, $2.n, $3.n, $5.n, null, null, null, null, $1.l); }
+          | TSET key_name expression set_cmp TEX int { $$.n = new(NodeType.Set, $2.n, $3.n, $6.n, null, $4.n, null, null, $1.l); }
+          | TSET key_name expression TEX int set_not_exists { $$.n = new(NodeType.Set, $2.n, $3.n, $5.n, $6.n, null, null, null, $1.l); }
+          | TSET key_name expression set_not_exists { $$.n = new(NodeType.Set, $2.n, $3.n, null, $4.n, null, null, null, $1.l); }
           ; 
          
 set_not_exists : TNX { $$.n = new(NodeType.SetNotExists, null, null, null, null, null, null, null, $1.l); }
@@ -67,37 +67,41 @@ set_cmp : TCMP expression { $$.n = new(NodeType.SetCmp, $2.n, null, null, null, 
         | TCMPREV expression { $$.n = new(NodeType.SetCmpRev, $2.n, null, null, null, null, null, null, $1.l); }                 
         ;
          
-eset_stmt : TESET identifier expression { $$.n = new(NodeType.Eset, $2.n, $3.n, null, null, null, null, null, $1.l); }         
-          | TESET identifier expression set_cmp { $$.n = new(NodeType.Eset, $2.n, $3.n, null, null, $4.n, null, null, $1.l); }
-          | TESET identifier expression TEX int { $$.n = new(NodeType.Eset, $2.n, $3.n, $5.n, null, null, null, null, $1.l); }
-          | TESET identifier expression set_cmp TEX int { $$.n = new(NodeType.Eset, $2.n, $3.n, $6.n, null, $4.n, null, null, $1.l); }
-          | TESET identifier expression TEX int set_not_exists { $$.n = new(NodeType.Eset, $2.n, $3.n, $5.n, $6.n, null, null, null, $1.l); }
-          | TESET identifier expression set_not_exists { $$.n = new(NodeType.Eset, $2.n, $3.n, null, $4.n, null, null, null, $1.l); }
+eset_stmt : TESET key_name expression { $$.n = new(NodeType.Eset, $2.n, $3.n, null, null, null, null, null, $1.l); }         
+          | TESET key_name expression set_cmp { $$.n = new(NodeType.Eset, $2.n, $3.n, null, null, $4.n, null, null, $1.l); }
+          | TESET key_name expression TEX int { $$.n = new(NodeType.Eset, $2.n, $3.n, $5.n, null, null, null, null, $1.l); }
+          | TESET key_name expression set_cmp TEX int { $$.n = new(NodeType.Eset, $2.n, $3.n, $6.n, null, $4.n, null, null, $1.l); }
+          | TESET key_name expression TEX int set_not_exists { $$.n = new(NodeType.Eset, $2.n, $3.n, $5.n, $6.n, null, null, null, $1.l); }
+          | TESET key_name expression set_not_exists { $$.n = new(NodeType.Eset, $2.n, $3.n, null, $4.n, null, null, null, $1.l); }
           ;                  
          
-get_stmt : TGET identifier { $$.n = new(NodeType.Get, $2.n, null, null, null, null, null, null, $1.l); }
-         | TLET identifier TEQUALS TGET identifier { $$.n = new(NodeType.Get, $5.n, $2.n, null, null, null, null, null, $1.l); }
-         | TGET identifier TAT int { $$.n = new(NodeType.Get, $2.n, null, $4.n, null, null, null, null, $1.l); }
-         | TLET identifier TEQUALS TGET identifier TAT int { $$.n = new(NodeType.Get, $5.n, $2.n, $7.n, null, null, null, null, $1.l); }
+get_stmt : TGET key_name { $$.n = new(NodeType.Get, $2.n, null, null, null, null, null, null, $1.l); }
+         | TLET identifier TEQUALS TGET key_name { $$.n = new(NodeType.Get, $5.n, $2.n, null, null, null, null, null, $1.l); }
+         | TGET key_name TAT int { $$.n = new(NodeType.Get, $2.n, null, $4.n, null, null, null, null, $1.l); }
+         | TLET identifier TEQUALS TGET key_name TAT int { $$.n = new(NodeType.Get, $5.n, $2.n, $7.n, null, null, null, null, $1.l); }
          ;
          
-eget_stmt : TEGET identifier { $$.n = new(NodeType.Eget, $2.n, null, null, null, null, null, null, $1.l); }
-          | TLET identifier TEQUALS TEGET identifier { $$.n = new(NodeType.Eget, $5.n, $2.n, null, null, null, null, null, $1.l); }
-          | TEGET identifier TAT int { $$.n = new(NodeType.Eget, $2.n, null, $4.n, null, null, null, null, $1.l); }
-          | TLET identifier TEQUALS TEGET identifier TAT int { $$.n = new(NodeType.Eget, $5.n, $2.n, $7.n, null, null, null, null, $1.l); }
+eget_stmt : TEGET key_name { $$.n = new(NodeType.Eget, $2.n, null, null, null, null, null, null, $1.l); }
+          | TLET identifier TEQUALS TEGET key_name { $$.n = new(NodeType.Eget, $5.n, $2.n, null, null, null, null, null, $1.l); }
+          | TEGET key_name TAT int { $$.n = new(NodeType.Eget, $2.n, null, $4.n, null, null, null, null, $1.l); }
+          | TLET identifier TEQUALS TEGET key_name TAT int { $$.n = new(NodeType.Eget, $5.n, $2.n, $7.n, null, null, null, null, $1.l); }
           ;
           
-delete_stmt : TDELETE identifier { $$.n = new(NodeType.Delete, $2.n, null, null, null, null, null, null, $1.l); }
+delete_stmt : TDELETE key_name { $$.n = new(NodeType.Delete, $2.n, null, null, null, null, null, null, $1.l); }
             ;
             
-edelete_stmt : TEDELETE identifier { $$.n = new(NodeType.Edelete, $2.n, null, null, null, null, null, null, $1.l); }
+edelete_stmt : TEDELETE key_name { $$.n = new(NodeType.Edelete, $2.n, null, null, null, null, null, null, $1.l); }
             ;
             
-extend_stmt : TEXTEND identifier int { $$.n = new(NodeType.Extend, $2.n, $3.n, null, null, null, null, null, $1.l); }
+extend_stmt : TEXTEND key_name int { $$.n = new(NodeType.Extend, $2.n, $3.n, null, null, null, null, null, $1.l); }
             ;
             
-eextend_stmt : TEEXTEND identifier int { $$.n = new(NodeType.Eextend, $2.n, $3.n, null, null, null, null, null, $1.l); }
+eextend_stmt : TEEXTEND key_name int { $$.n = new(NodeType.Eextend, $2.n, $3.n, null, null, null, null, null, $1.l); }
             ;
+            
+key_name : identifier { $$.n = $1.n; $$.l = $1.l; }
+         | placeholder  { $$.n = $1.n; $$.l = $1.l; }
+         ;
             
 let_stmt : TLET identifier TEQUALS expression { $$.n = new(NodeType.Let, $2.n, $4.n, null, null, null, null, null, $1.l); }                   
           ;                     
