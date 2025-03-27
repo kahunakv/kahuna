@@ -15,4 +15,6 @@ public interface IPersistence
     public Task<KeyValueContext?> GetKeyValue(string keyName);
     
     public Task<KeyValueContext?> GetKeyValueRevision(string keyName, long revision);
+
+    public IAsyncEnumerable<(string, ReadOnlyKeyValueContext)> GetKeyValueByPrefix(string prefixKeyName);
 }

@@ -408,6 +408,78 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         
         return response;
     }
+    
+    /// <summary>
+    /// Returns key/value pairs by prefix
+    /// </summary>
+    /// <param name="request"></param>
+    /// <param name="context"></param>
+    /// <returns></returns>
+    public override async Task<GrpcScanByPrefixResponse> ScanByPrefix(GrpcScanByPrefixRequest request, ServerCallContext context)
+    {
+        if (request.PrefixKey is null)
+            return new()
+            {
+                Type = GrpcKeyValueResponseType.TypeInvalidInput
+            };
+            
+        KeyValueGetByPrefixResult result = await keyValues.ScanByPrefix(request.PrefixKey, (KeyValueDurability) request.Durability);
+
+        GrpcScanByPrefixResponse response = new()
+        {
+            Type = GrpcKeyValueResponseType.TypeGot,
+        };
+        
+        response.Items.Add(GetKeyValueItems(result.Items));
+        
+        return response;
+    }
+    
+    /// <summary>
+    /// Scans all nodes in the cluster and returns key/value pairs by prefix
+    /// </summary>
+    /// <param name="request"></param>
+    /// <param name="context"></param>
+    /// <returns></returns>
+    public override async Task<GrpcScanAllByPrefixResponse> ScanAllByPrefix(GrpcScanAllByPrefixRequest request, ServerCallContext context)
+    {
+        if (request.PrefixKey is null)
+            return new()
+            {
+                Type = GrpcKeyValueResponseType.TypeInvalidInput
+            };
+            
+        KeyValueGetByPrefixResult result = await keyValues.ScanAllByPrefix(request.PrefixKey, (KeyValueDurability) request.Durability);
+
+        GrpcScanAllByPrefixResponse response = new()
+        {
+            Type = GrpcKeyValueResponseType.TypeGot,
+        };
+        
+        if (result.Items.Count > 0)
+            response.Items.Add(GetKeyValueItems(result.Items));
+        
+        return response;
+    }
+
+    private static IEnumerable<GrpcKeyValueByPrefixItemResponse> GetKeyValueItems(List<(string, ReadOnlyKeyValueContext)> resultItems)
+    {
+        foreach ((string key, ReadOnlyKeyValueContext context) in resultItems)
+        {
+            GrpcKeyValueByPrefixItemResponse response = new()
+            {
+                Key = key,
+                Revision = context.Revision,
+                ExpiresPhysical = context.Expires.L,
+                ExpiresCounter = context.Expires.C,
+            };
+            
+            if (context.Value is not null)
+                response.Value = UnsafeByteOperations.UnsafeWrap(context.Value);
+            
+            yield return response;
+        }
+    }
 
     private static List<KeyValueParameter> GetParameters(RepeatedField<GrpcKeyValueParameter> requestParameters)
     {

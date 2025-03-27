@@ -23,7 +23,7 @@ internal sealed class TryReleaseExclusiveLockHandler : BaseHandler
     public async Task<KeyValueResponse> Execute(KeyValueRequest message)
     {
         if (message.TransactionId == HLCTimestamp.Zero)
-            return new(KeyValueResponseType.Errored);
+            return KeyValueStaticResponses.ErroredResponse;
         
         KeyValueContext? context = await GetKeyValueContext(message.Key, message.Durability);
         

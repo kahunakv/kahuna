@@ -10,6 +10,8 @@ namespace Kahuna.Server.Persistence;
 
 public class RocksDbPersistence : IPersistence
 {
+    private const string CurrentMarker = "~CURRENT";
+    
     private static readonly Task<LockContext?> NullLockContext = Task.FromResult<LockContext?>(null);
     
     private static readonly Task<KeyValueContext?> NullKeyValueContext = Task.FromResult<KeyValueContext?>(null);
@@ -94,7 +96,7 @@ public class RocksDbPersistence : IPersistence
 
             byte[] serialized = Serialize(kvm);
 
-            byte[] index = Encoding.UTF8.GetBytes(string.Concat(item.Key, "~CURRENT"));
+            byte[] index = Encoding.UTF8.GetBytes(string.Concat(item.Key, CurrentMarker));
             batch.Put(index, serialized, cf: columnFamilyKeys);
 
             index = Encoding.UTF8.GetBytes(string.Concat(item.Key, "~", item.Revision));
@@ -126,7 +128,7 @@ public class RocksDbPersistence : IPersistence
 
     public Task<KeyValueContext?> GetKeyValue(string keyName)
     {
-        byte[]? value = db.Get(Encoding.UTF8.GetBytes(keyName + "~CURRENT"), cf: columnFamilyKeys);
+        byte[]? value = db.Get(Encoding.UTF8.GetBytes(keyName + CurrentMarker), cf: columnFamilyKeys);
         if (value is null)
             return NullKeyValueContext;
 
@@ -158,6 +160,38 @@ public class RocksDbPersistence : IPersistence
         };
 
         return Task.FromResult<KeyValueContext?>(context);
+    }
+
+    public async IAsyncEnumerable<(string, ReadOnlyKeyValueContext)> GetKeyValueByPrefix(string prefixKeyName)
+    {
+        await Task.CompletedTask;
+        
+        byte[] prefixBytes = Encoding.UTF8.GetBytes(prefixKeyName);
+        
+        using Iterator? iterator = db.NewIterator(cf: columnFamilyKeys);
+        iterator.Seek(prefixBytes);
+
+        while (iterator.Valid())
+        {
+            string key = Encoding.UTF8.GetString(iterator.Key());
+            
+            if (!key.StartsWith(prefixKeyName)) 
+                break; // Stop when we leave the prefix range
+            
+            if (!key.EndsWith(CurrentMarker))
+            {
+                iterator.Next();
+                continue;
+            }
+            
+            string keyWithoutMarker = key[..^CurrentMarker.Length];
+            
+            RocksDbKeyValueMessage message = UnserializeKeyValueMessage(iterator.Value());
+
+            yield return (keyWithoutMarker, new(message.Value?.ToByteArray(), message.Revision, new(message.ExpiresPhysical, message.ExpiresCounter)));
+
+            iterator.Next();
+        }
     }
 
     private static byte[] Serialize(RocksDbLockMessage message)

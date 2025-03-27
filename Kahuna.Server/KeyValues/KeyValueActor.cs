@@ -37,6 +37,8 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
 
     private readonly TryGetHandler tryGetHandler;
     
+    private readonly TryScanByPrefixHandler tryScanByPrefixHandler;
+    
     private readonly TryExistsHandler tryExistsHandler;
 
     private readonly TryAdquireExclusiveLockHandler tryAdquireExclusiveLockHandler;
@@ -74,6 +76,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         tryExtendHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
         tryDeleteHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
         tryGetHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
+        tryScanByPrefixHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
         tryExistsHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
         tryAdquireExclusiveLockHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
         tryReleaseExclusiveLockHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
@@ -122,6 +125,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.TryPrepareMutations => await TryPrepareMutations(message),
                 KeyValueRequestType.TryCommitMutations => await TryCommitMutations(message),
                 KeyValueRequestType.TryRollbackMutations => await TryRollbackMutations(message),
+                KeyValueRequestType.ScanByPrefix => await ScanByPrefix(message),
                 _ => new(KeyValueResponseType.Errored)
             };
         }
@@ -181,6 +185,16 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private Task<KeyValueResponse> TryGet(KeyValueRequest message)
     {
         return tryGetHandler.Execute(message);
+    }
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
+    private Task<KeyValueResponse> ScanByPrefix(KeyValueRequest message)
+    {
+        return tryScanByPrefixHandler.Execute(message);
     }
     
     /// <summary>

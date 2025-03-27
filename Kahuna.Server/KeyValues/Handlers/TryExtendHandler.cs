@@ -25,10 +25,10 @@ internal sealed class TryExtendHandler : BaseHandler
         KeyValueContext? context = await GetKeyValueContext(message.Key, message.Durability);
         
         if (context is null)
-            return new(KeyValueResponseType.DoesNotExist);
+            return KeyValueStaticResponses.DoesNotExistResponse;
         
         if (context.State == KeyValueState.Deleted)
-            return new(KeyValueResponseType.DoesNotExist, context.Revision);
+            return KeyValueStaticResponses.DoesNotExistResponse;
         
         if (context.WriteIntent is not null)
             return new(KeyValueResponseType.MustRetry, 0);
@@ -51,7 +51,7 @@ internal sealed class TryExtendHandler : BaseHandler
         {
             bool success = await PersistAndReplicateKeyValueMessage(message.Type, proposal, currentTime);
             if (!success)
-                return new(KeyValueResponseType.Errored);
+                return KeyValueStaticResponses.ErroredResponse;
         }
         
         context.Expires = proposal.Expires;

@@ -51,6 +51,10 @@ public interface IKahuna
     
     public Task<KeyValueTransactionResult> TryExecuteTx(byte[] script, string? hash, List<KeyValueParameter>? parameters);
 
+    public Task<KeyValueGetByPrefixResult> ScanByPrefix(string prefixKeyName, KeyValueDurability durability);
+
+    public Task<KeyValueGetByPrefixResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability);
+
     public Task<bool> OnReplicationReceived(RaftLog log);
 
     public void OnReplicationError(RaftLog log);

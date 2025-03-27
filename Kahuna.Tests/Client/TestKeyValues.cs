@@ -705,6 +705,56 @@ public class TestKeyValues
         Assert.Equal("some-new-value", result.ValueAsString());
     }
     
+    [Theory, CombinatorialData]
+    public async Task TestScanAllByPrefix(
+        [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType, 
+        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+        
+        string prefix = GetRandomKeyName();
+
+        KahunaKeyValue result = await client.SetKeyValue(prefix + "/" + GetRandomKeyName(), "some-value", 10000, durability: durability);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
+        
+        result = await client.SetKeyValue(prefix + "/" + GetRandomKeyName(), "some-value", 10000, durability: durability);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
+        
+        result = await client.SetKeyValue(prefix + "/" + GetRandomKeyName(), "some-value", 10000, durability: durability);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
+        
+        (bool success, List<string> items) = await client.ScanAllByPrefix(prefix, durability: durability);
+        Assert.True(success);
+        
+        Assert.Equal(3, items.Count);
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestScanAllByExactPrefix(
+        [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType, 
+        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+        
+        string randomKey = GetRandomKeyName();
+
+        KahunaKeyValue result = await client.SetKeyValue(randomKey, "some-value", 10000, durability: durability);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
+        
+        (bool success, List<string> items) = await client.ScanAllByPrefix(randomKey, durability: durability);
+        Assert.True(success);
+        
+        Assert.Single(items);
+    }
+    
     private KahunaClient GetClientByType(KahunaCommunicationType communicationType, KahunaClientType clientType)
     {
         return clientType switch

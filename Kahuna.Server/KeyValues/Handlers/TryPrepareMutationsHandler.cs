@@ -29,7 +29,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         {
             logger.LogWarning("Cannot prepare mutations for missing transaction id");
             
-            return new(KeyValueResponseType.Errored);
+            return KeyValueStaticResponses.ErroredResponse;
         }
 
         KeyValueContext? context = await GetKeyValueContext(message.Key, message.Durability);
@@ -37,35 +37,35 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         {
             logger.LogWarning("Key/Value context is missing for {TransactionId}", message.TransactionId);
             
-            return new(KeyValueResponseType.Errored);
+            return KeyValueStaticResponses.ErroredResponse;
         }
 
         if (context.WriteIntent is not null && context.WriteIntent.TransactionId != message.TransactionId)
         {
             logger.LogWarning("Write intent conflict between {CurrentTransactionId} and {TransactionId}", context.WriteIntent.TransactionId, message.TransactionId);
         
-            return new(KeyValueResponseType.Errored);
+            return KeyValueStaticResponses.ErroredResponse;
         }
 
         if (context.MvccEntries is null)
         {
             logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [1]", message.TransactionId);
             
-            return new(KeyValueResponseType.Errored);
+            return KeyValueStaticResponses.ErroredResponse;
         }
 
         if (!context.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? entry))
         {
             logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [2]", message.TransactionId);
             
-            return new(KeyValueResponseType.Errored);
+            return KeyValueStaticResponses.ErroredResponse;
         }
         
         if (context.LastUsed.CompareTo(message.TransactionId) > 0)
         {
             logger.LogWarning("Transaction {TransactionId} conflicts with {ExistingTransactionId} [3]", message.TransactionId, context.LastUsed);
             
-            return new(KeyValueResponseType.Errored);
+            return KeyValueStaticResponses.ErroredResponse;
         }
 
         foreach ((HLCTimestamp key, KeyValueMvccEntry _) in context.MvccEntries)
@@ -74,7 +74,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             {
                 logger.LogWarning("Transaction {TransactionId} conflicts with {ExistingTransactionId} [4]", message.TransactionId, context.LastUsed);
             
-                return new(KeyValueResponseType.Errored);
+                return KeyValueStaticResponses.ErroredResponse;
             }
         }
         
@@ -107,7 +107,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         {
             logger.LogWarning("Failed to propose logs for {TransactionId}", message.TransactionId);
             
-            return new(KeyValueResponseType.Errored);
+            return KeyValueStaticResponses.ErroredResponse;
         }
 
         return new(KeyValueResponseType.Prepared, proposalTicket);

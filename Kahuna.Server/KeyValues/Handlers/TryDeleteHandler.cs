@@ -24,7 +24,7 @@ internal sealed class TryDeleteHandler : BaseHandler
     {
         KeyValueContext? context = await GetKeyValueContext(message.Key, message.Durability);
         if (context is null)
-            return new(KeyValueResponseType.DoesNotExist);
+            return KeyValueStaticResponses.DoesNotExistResponse;
         
         if (context.WriteIntent is not null && context.WriteIntent.TransactionId != message.TransactionId)
             return new(KeyValueResponseType.MustRetry, 0);
@@ -74,7 +74,7 @@ internal sealed class TryDeleteHandler : BaseHandler
         {
             bool success = await PersistAndReplicateKeyValueMessage(message.Type, proposal, currentTime);
             if (!success)
-                return new(KeyValueResponseType.Errored);
+                return KeyValueStaticResponses.ErroredResponse;
         }
         
         context.Value = proposal.Value;

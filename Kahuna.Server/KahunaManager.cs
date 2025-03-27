@@ -402,6 +402,28 @@ public sealed class KahunaManager : IKahuna
         return keyValues.TryExecuteTx(script, hash, parameters);
     }
 
+    /// <summary>
+    /// Scans the current node in the cluster and returns key/value pairs by prefix
+    /// </summary>
+    /// <param name="prefixKeyName"></param>
+    /// <param name="durability"></param>
+    /// <returns></returns>
+    public Task<KeyValueGetByPrefixResult> ScanByPrefix(string prefixKeyName, KeyValueDurability durability)
+    {
+        return keyValues.ScanByPrefix(prefixKeyName, durability);
+    }
+    
+    /// <summary>
+    /// Scans all nodes in the cluster and returns key/value pairs by prefix
+    /// </summary>
+    /// <param name="prefixKeyName"></param>
+    /// <param name="durability"></param>
+    /// <returns></returns>
+    public Task<KeyValueGetByPrefixResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability)
+    {
+        return keyValues.ScanAllByPrefix(prefixKeyName, durability);
+    }
+
     public async Task<bool> OnReplicationReceived(RaftLog log)
     {
         await Task.WhenAll(locks.OnReplicationReceived(log), keyValues.OnReplicationReceived(log));

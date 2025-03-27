@@ -12,6 +12,8 @@ service KeyValuer {
   rpc TryPrepareMutations (GrpcTryPrepareMutationsRequest) returns (GrpcTryPrepareMutationsResponse);
   rpc TryCommitMutations (GrpcTryCommitMutationsRequest) returns (GrpcTryCommitMutationsResponse);
   rpc TryRollbackMutations (GrpcTryRollbackMutationsRequest) returns (GrpcTryRollbackMutationsResponse);
+  rpc ScanByPrefix (GrpcScanByPrefixRequest) returns (GrpcScanByPrefixResponse);
+  rpc ScanAllByPrefix (GrpcScanAllByPrefixRequest) returns (GrpcScanAllByPrefixResponse);
 }
 
 message GrpcTrySetKeyValueRequest {
@@ -180,6 +182,35 @@ message GrpcTryRollbackMutationsResponse {
   optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
   int64 ProposalIndex = 3;
+}
+
+message GrpcScanByPrefixRequest {
+  string PrefixKey = 1;
+  GrpcKeyValueDurability Durability = 2;
+}
+
+message GrpcScanByPrefixResponse {
+  optional string ServedFrom = 1;
+  GrpcKeyValueResponseType Type = 2;
+  repeated GrpcKeyValueByPrefixItemResponse Items = 3;
+}
+
+message GrpcScanAllByPrefixRequest {
+  string PrefixKey = 1;
+  GrpcKeyValueDurability Durability = 2;
+}
+
+message GrpcScanAllByPrefixResponse {
+  GrpcKeyValueResponseType Type = 1;
+  repeated GrpcKeyValueByPrefixItemResponse Items = 2;
+}
+
+message GrpcKeyValueByPrefixItemResponse {
+  string Key = 1;
+  optional bytes Value = 2;
+  int64 Revision = 3;
+  int64 ExpiresPhysical = 4;
+  uint32 ExpiresCounter = 5;
 }
 
 enum GrpcKeyValueFlags {

@@ -23,7 +23,7 @@ internal sealed class TryAdquireExclusiveLockHandler : BaseHandler
     public async Task<KeyValueResponse> Execute(KeyValueRequest message)
     {
         if (message.TransactionId == HLCTimestamp.Zero)
-            return new(KeyValueResponseType.Errored);
+            return KeyValueStaticResponses.ErroredResponse;
         
         HLCTimestamp currentTime = await raft.HybridLogicalClock.ReceiveEvent(message.TransactionId);
 
@@ -46,11 +46,11 @@ internal sealed class TryAdquireExclusiveLockHandler : BaseHandler
         {
             // if the transactionId is the same owner no need to acquire the lock
             if (context.WriteIntent.TransactionId == message.TransactionId) 
-                return new(KeyValueResponseType.Locked);
+                return KeyValueStaticResponses.LockedResponse;
 
             // Check if the lease is still active
             if (context.WriteIntent.Expires != HLCTimestamp.Zero && context.WriteIntent.Expires - currentTime > TimeSpan.Zero)
-                return new(KeyValueResponseType.AlreadyLocked);
+                return KeyValueStaticResponses.AlreadyLockedResponse;
         }
 
         context.WriteIntent = new()
@@ -61,6 +61,6 @@ internal sealed class TryAdquireExclusiveLockHandler : BaseHandler
         
         logger.LogDebug("Assigned {Key} write intent to TxId={TransactionId}", message.Key, message.TransactionId);
         
-        return new(KeyValueResponseType.Locked);
+        return KeyValueStaticResponses.LockedResponse;
     }
 }

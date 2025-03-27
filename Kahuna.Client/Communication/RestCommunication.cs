@@ -599,4 +599,9 @@ public class RestCommunication : IKahunaCommunication
 
         throw new KahunaException("Failed to execute key/value transaction:" + response.Type, response.Type);
     }
+
+    public Task<(bool, List<string>)> ScanAllByPrefix(string url, string prefixKey, KeyValueDurability durability)
+    {
+        throw new NotImplementedException();
+    }
 }

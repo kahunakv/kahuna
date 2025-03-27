@@ -172,7 +172,7 @@ internal sealed class TrySetHandler : BaseHandler
         {
             bool success = await PersistAndReplicateKeyValueMessage(message.Type, proposal, currentTime);
             if (!success)
-                return new(KeyValueResponseType.Errored);
+                return KeyValueStaticResponses.ErroredResponse;
         }
         
         context.Value = proposal.Value;

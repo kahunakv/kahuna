@@ -27,7 +27,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         {
             logger.LogWarning("Cannot commit mutations for missing transaction id");
             
-            return new(KeyValueResponseType.Errored);
+            return KeyValueStaticResponses.ErroredResponse;
         }
 
         KeyValueContext? context = await GetKeyValueContext(message.Key, message.Durability);
@@ -36,35 +36,35 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         {
             logger.LogWarning("Key/Value context is missing for {TransactionId}", message.TransactionId);
             
-            return new(KeyValueResponseType.Errored);
+            return KeyValueStaticResponses.ErroredResponse;;
         }
 
         if (context.WriteIntent is null)
         {
             logger.LogWarning("Write intent is missing for {TransactionId}", message.TransactionId);
             
-            return new(KeyValueResponseType.Errored);
+            return KeyValueStaticResponses.ErroredResponse;
         }
 
         if (context.WriteIntent.TransactionId != message.TransactionId)
         {
             logger.LogWarning("Write intent conflict between {CurrentTransactionId} and {TransactionId}", context.WriteIntent.TransactionId, message.TransactionId);
             
-            return new(KeyValueResponseType.Errored);
+            return KeyValueStaticResponses.ErroredResponse;
         }
 
         if (context.MvccEntries is null)
         {
             logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [1]", message.TransactionId);
             
-            return new(KeyValueResponseType.Errored);
+            return KeyValueStaticResponses.ErroredResponse;
         }
 
         if (!context.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? entry))
         {
             logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [2]", message.TransactionId);
             
-            return new(KeyValueResponseType.Errored);
+            return KeyValueStaticResponses.ErroredResponse;
         }
 
         KeyValueProposal proposal = new(
@@ -89,7 +89,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         
         (bool success, long commitIndex) = await CommitKeyValueMessage(message.Key, message.ProposalTicketId);
         if (!success)
-            return new(KeyValueResponseType.Errored);
+            return KeyValueStaticResponses.ErroredResponse;
         
         if (message.Durability == KeyValueDurability.Persistent)
         {

@@ -14,6 +14,8 @@ public sealed class KeyValueResponse
     
     public ReadOnlyKeyValueContext? Context { get; }
     
+    public List<(string, ReadOnlyKeyValueContext)>? Items { get; }
+    
     public KeyValueResponse(KeyValueResponseType type)
     {
         Type = type;
@@ -35,5 +37,11 @@ public sealed class KeyValueResponse
     {
         Type = type;
         Context = context;
+    }
+    
+    public KeyValueResponse(KeyValueResponseType type, List<(string, ReadOnlyKeyValueContext)> items)
+    {
+        Type = type;
+        Items = items;
     }
 }

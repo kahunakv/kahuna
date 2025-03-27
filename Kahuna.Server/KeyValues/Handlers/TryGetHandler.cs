@@ -33,12 +33,12 @@ internal sealed class TryGetHandler : BaseHandler
             {
                 KeyValueContext? revisionContext = await persistence.GetKeyValueRevision(message.Key, message.CompareRevision);
                 if (revisionContext is null)
-                    return new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueContext(null, 0, HLCTimestamp.Zero));
+                    return KeyValueStaticResponses.DoesNotExistContextResponse;
 
                 return new(KeyValueResponseType.Get, new ReadOnlyKeyValueContext(revisionContext.Value, message.CompareRevision, HLCTimestamp.Zero));
             }
             
-            return new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueContext(null, 0, HLCTimestamp.Zero)); 
+            return KeyValueStaticResponses.DoesNotExistContextResponse; 
         }
         
         if (context?.WriteIntent != null && context.WriteIntent.TransactionId != message.TransactionId)
@@ -71,10 +71,10 @@ internal sealed class TryGetHandler : BaseHandler
             }
             
             if (entry.State is KeyValueState.Undefined or KeyValueState.Deleted)
-                return new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueContext(null, context?.Revision ?? 0, HLCTimestamp.Zero));
+                return KeyValueStaticResponses.DoesNotExistContextResponse;
             
             if (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
-                return new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueContext(null, entry?.Revision ?? 0, HLCTimestamp.Zero));
+                return KeyValueStaticResponses.DoesNotExistContextResponse;
             
             readOnlyKeyValueContext = new(entry.Value, entry.Revision, entry.Expires);
 
@@ -82,13 +82,13 @@ internal sealed class TryGetHandler : BaseHandler
         }
         
         if (context is null)
-            return new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueContext(null, context?.Revision ?? 0, HLCTimestamp.Zero));
+            return KeyValueStaticResponses.DoesNotExistContextResponse;
         
         if (context.State == KeyValueState.Deleted)
-            return new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueContext(null, context?.Revision ?? 0, HLCTimestamp.Zero));
+            return KeyValueStaticResponses.DoesNotExistContextResponse;
 
         if (context.Expires != HLCTimestamp.Zero && context.Expires - currentTime < TimeSpan.Zero)
-            return new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueContext(null, context?.Revision ?? 0, HLCTimestamp.Zero));
+            return KeyValueStaticResponses.DoesNotExistContextResponse;
         
         context.LastUsed = currentTime;
 

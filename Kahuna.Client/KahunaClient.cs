@@ -513,6 +513,17 @@ public class KahunaClient
     }
 
     /// <summary>
+    /// Scan all nodes for keys with a specific prefix
+    /// </summary>
+    /// <param name="prefixKey"></param>
+    /// <param name="durability"></param>
+    /// <returns></returns>
+    public async Task<(bool, List<string>)> ScanAllByPrefix(string prefixKey, KeyValueDurability durability)
+    {
+        return await communication.ScanAllByPrefix(GetRoundRobinUrl(), prefixKey, durability).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Loads a Script reference allowing to reuse server caches and plannings 
     /// </summary>
     /// <param name="script"></param>

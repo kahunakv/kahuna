@@ -1,5 +1,7 @@
 
+using System.Collections.Concurrent;
 using Google.Protobuf;
+using Google.Protobuf.Collections;
 using Grpc.Net.Client;
 
 using Kahuna.Communication.Grpc;
@@ -526,5 +528,62 @@ internal sealed class KeyValueLocator
         remoteResponse.ServedFrom = $"https://{leader}";
         
         return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.ProposalIndex);
+    }
+
+    /// <summary>
+    /// Scans all nodes in the cluster and returns key/value pairs by prefix 
+    /// </summary>
+    /// <param name="prefixKeyName"></param>
+    /// <param name="durability"></param>
+    /// <returns></returns>
+    public async Task<KeyValueGetByPrefixResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability)
+    {
+        ConcurrentBag<(string, ReadOnlyKeyValueContext)> unionItems = [];
+        
+        KeyValueGetByPrefixResult items = await manager.ScanByPrefix(prefixKeyName, durability);
+
+        IList<RaftNode> nodes = raft.GetNodes();
+        
+        List<Task> tasks = new(nodes.Count);
+        
+        foreach (RaftNode node in nodes)
+            tasks.Add(NodeScanByPrefix(unionItems, node, prefixKeyName, durability));
+        
+        await Task.WhenAll(tasks);
+        
+        foreach ((string, ReadOnlyKeyValueContext) item in unionItems)
+            items.Items.Add(item);
+
+        return items;
+    }
+
+    private async Task NodeScanByPrefix(ConcurrentBag<(string, ReadOnlyKeyValueContext)> unionItems, RaftNode node, string prefixKeyName, KeyValueDurability durability)
+    {
+        GrpcChannel channel = SharedChannels.GetChannel(node.Endpoint, configuration);
+            
+        GrpcScanByPrefixRequest request = new()
+        {
+            PrefixKey = prefixKeyName,
+            Durability = (GrpcKeyValueDurability)durability,
+        };
+            
+        KeyValuer.KeyValuerClient client = new(channel);
+
+        GrpcScanByPrefixResponse? response = await client.ScanByPrefixAsync(request);
+
+        if (response.Type == GrpcKeyValueResponseType.TypeGot)
+        {
+            foreach (GrpcKeyValueByPrefixItemResponse item in response.Items)
+                unionItems.Add(ScanByPrefixItems(item));
+        }
+    }
+
+    private static (string, ReadOnlyKeyValueContext) ScanByPrefixItems(GrpcKeyValueByPrefixItemResponse item)
+    {
+        return (item.Key, new(
+            item.Value?.ToByteArray(),
+            item.Revision,
+            new(item.ExpiresPhysical, item.ExpiresCounter)
+        ));
     }
 }

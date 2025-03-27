@@ -20,6 +20,8 @@ public sealed class KeyValuesManager
 
     private readonly IRaft raft;
 
+    private readonly IPersistence persistence;
+
     private readonly ILogger<IKahuna> logger;
 
     private readonly KeyValueLocator locator;
@@ -32,7 +34,11 @@ public sealed class KeyValuesManager
 
     private readonly IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> ephemeralKeyValuesRouter;
     
-    private readonly IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> consistentKeyValuesRouter;
+    private readonly IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> persistentKeyValuesRouter;
+
+    private readonly List<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> ephemeralInstances = [];
+    
+    private readonly List<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> persistentInstances = [];
     
     /// <summary>
     /// Constructor
@@ -56,31 +62,29 @@ public sealed class KeyValuesManager
         this.raft = raft;
         this.backgroundWriter = backgroundWriter;
         this.logger = logger;
-        
+
+        this.persistence = persistence;
         this.persistenceActorRouter = persistenceActorRouter;
         
-        ephemeralKeyValuesRouter = GetEphemeralRouter(persistence, configuration);
-        consistentKeyValuesRouter = GetConsistentRouter(persistence, configuration);
+        ephemeralKeyValuesRouter = GetEphemeralRouter(configuration);
+        persistentKeyValuesRouter = GetConsistentRouter(configuration);
 
         txCoordinator = new(this, configuration, raft, logger);
         locator = new(this, configuration, raft, logger);
     }
 
     /// <summary>
-    /// Creates the ephemeral keyValues router
+    /// Creates the ephemeral key/values router
     /// </summary>
     /// <param name="backgroundWriter"></param>
     /// <param name="persistence"></param>
     /// <param name="workers"></param>
     /// <returns></returns>
     private IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> GetEphemeralRouter(
-        IPersistence persistence, 
         KahunaConfiguration configuration
     )
     {
         logger.LogDebug("Starting {Workers} ephemeral key/value workers", configuration.KeyValuesWorkers);
-        
-        List<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> ephemeralInstances = new(configuration.KeyValuesWorkers);
 
         for (int i = 0; i < configuration.KeyValuesWorkers; i++)
             ephemeralInstances.Add(actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>("ephemeral-keyvalue-" + i, backgroundWriter, persistence, logger));
@@ -89,25 +93,22 @@ public sealed class KeyValuesManager
     }
 
     /// <summary>
-    /// Creates the consistent keyValues router
+    /// Creates the consistent key/values router
     /// </summary>
     /// <param name="backgroundWriter"></param>
     /// <param name="persistence"></param>
     /// <param name="workers"></param>
     /// <returns></returns>
     private IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> GetConsistentRouter(
-        IPersistence persistence, 
         KahunaConfiguration configuration
     )
     {
         logger.LogDebug("Starting {Workers} consistent key/value workers", configuration.KeyValuesWorkers);
-        
-        List<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> consistentInstances = new(configuration.KeyValuesWorkers);
 
         for (int i = 0; i < configuration.KeyValuesWorkers; i++)
-            consistentInstances.Add(actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>("consistent-keyvalue-" + i, backgroundWriter, persistence, logger));
+            persistentInstances.Add(actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>("consistent-keyvalue-" + i, backgroundWriter, persistence, logger));
         
-        return actorSystem.CreateConsistentHashRouter(consistentInstances);
+        return actorSystem.CreateConsistentHashRouter(persistentInstances);
     }
 
     /// <summary>
@@ -464,7 +465,7 @@ public sealed class KeyValuesManager
         if (durability == KeyValueDurability.Ephemeral)
             response = await ephemeralKeyValuesRouter.Ask(request);
         else
-            response = await consistentKeyValuesRouter.Ask(request);
+            response = await persistentKeyValuesRouter.Ask(request);
         
         if (response is null)
             return (KeyValueResponseType.Errored, -1);
@@ -504,7 +505,7 @@ public sealed class KeyValuesManager
         if (durability == KeyValueDurability.Ephemeral)
             response = await ephemeralKeyValuesRouter.Ask(request);
         else
-            response = await consistentKeyValuesRouter.Ask(request);
+            response = await persistentKeyValuesRouter.Ask(request);
         
         if (response is null)
             return (KeyValueResponseType.Errored, -1);
@@ -539,7 +540,7 @@ public sealed class KeyValuesManager
         if (durability == KeyValueDurability.Ephemeral)
             response = await ephemeralKeyValuesRouter.Ask(request);
         else
-            response = await consistentKeyValuesRouter.Ask(request);
+            response = await persistentKeyValuesRouter.Ask(request);
         
         if (response is null)
             return (KeyValueResponseType.Errored, -1);
@@ -579,7 +580,7 @@ public sealed class KeyValuesManager
         if (durability == KeyValueDurability.Ephemeral)
             response = await ephemeralKeyValuesRouter.Ask(request);
         else
-            response = await consistentKeyValuesRouter.Ask(request);
+            response = await persistentKeyValuesRouter.Ask(request);
         
         if (response is null)
             return (KeyValueResponseType.Errored, null);
@@ -619,7 +620,7 @@ public sealed class KeyValuesManager
         if (durability == KeyValueDurability.Ephemeral)
             response = await ephemeralKeyValuesRouter.Ask(request);
         else
-            response = await consistentKeyValuesRouter.Ask(request);
+            response = await persistentKeyValuesRouter.Ask(request);
         
         if (response is null)
             return (KeyValueResponseType.Errored, null);
@@ -655,7 +656,7 @@ public sealed class KeyValuesManager
         if (durability == KeyValueDurability.Ephemeral)
             response = await ephemeralKeyValuesRouter.Ask(request);
         else
-            response = await consistentKeyValuesRouter.Ask(request);
+            response = await persistentKeyValuesRouter.Ask(request);
         
         if (response is null)
             return (KeyValueResponseType.Errored, key, durability);
@@ -690,7 +691,7 @@ public sealed class KeyValuesManager
         if (durability == KeyValueDurability.Ephemeral)
             response = await ephemeralKeyValuesRouter.Ask(request);
         else
-            response = await consistentKeyValuesRouter.Ask(request);
+            response = await persistentKeyValuesRouter.Ask(request);
         
         if (response is null)
             return (KeyValueResponseType.Errored, key);
@@ -725,7 +726,7 @@ public sealed class KeyValuesManager
         if (durability == KeyValueDurability.Ephemeral)
             response = await ephemeralKeyValuesRouter.Ask(request);
         else
-            response = await consistentKeyValuesRouter.Ask(request);
+            response = await persistentKeyValuesRouter.Ask(request);
         
         if (response is null)
             return (KeyValueResponseType.Errored, HLCTimestamp.Zero, key, durability);
@@ -761,7 +762,7 @@ public sealed class KeyValuesManager
         if (durability == KeyValueDurability.Ephemeral)
             response = await ephemeralKeyValuesRouter.Ask(request);
         else
-            response = await consistentKeyValuesRouter.Ask(request);
+            response = await persistentKeyValuesRouter.Ask(request);
         
         if (response is null)
             return (KeyValueResponseType.Errored, -1);
@@ -797,7 +798,7 @@ public sealed class KeyValuesManager
         if (durability == KeyValueDurability.Ephemeral)
             response = await ephemeralKeyValuesRouter.Ask(request);
         else
-            response = await consistentKeyValuesRouter.Ask(request);
+            response = await persistentKeyValuesRouter.Ask(request);
         
         if (response is null)
             return (KeyValueResponseType.Errored, -1);
@@ -815,5 +816,83 @@ public sealed class KeyValuesManager
     public async Task<KeyValueTransactionResult> TryExecuteTx(byte[] script, string? hash, List<KeyValueParameter>? parameters)
     {
         return await txCoordinator.TryExecuteTx(script, hash, parameters);
+    }
+
+    /// <summary>
+    /// Scans all nodes in the cluster and returns key/value pairs by prefix 
+    /// </summary>
+    /// <param name="prefixKeyName"></param>
+    /// <param name="durability"></param>
+    /// <returns></returns>
+    public async Task<KeyValueGetByPrefixResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability)
+    {
+        return await locator.ScanAllByPrefix(prefixKeyName, durability);
+    }
+
+    /// <summary>
+    /// Scans the current node and returns key/value pairs by prefix 
+    /// </summary>
+    /// <param name="prefixKeyName"></param>
+    /// <param name="durability"></param>
+    /// <returns></returns>
+    /// <exception cref="KahunaServerException"></exception>
+    public async Task<KeyValueGetByPrefixResult> ScanByPrefix(string prefixKeyName, KeyValueDurability durability)
+    {
+        HLCTimestamp currentTime = await raft.HybridLogicalClock.TrySendOrLocalEvent();
+        
+        KeyValueRequest request = new(
+            KeyValueRequestType.ScanByPrefix,
+            currentTime,
+            prefixKeyName,
+            null,
+            null,
+            -1,
+            KeyValueFlags.None,
+            0,
+            HLCTimestamp.Zero,
+            durability
+        );
+        
+        List<(string, ReadOnlyKeyValueContext)> items = [];
+        
+        if (durability == KeyValueDurability.Ephemeral)
+        {
+            List<Task<KeyValueResponse?>> tasks = new(ephemeralInstances.Count);
+            
+            // Ephemeral GetByPrefix does a brute force search on every ephemeral actor
+            foreach (IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actor in ephemeralInstances)
+                tasks.Add(actor.Ask(request));
+            
+            KeyValueResponse?[] responses = await Task.WhenAll(tasks);
+
+            foreach (KeyValueResponse? response in responses)
+            {
+                if (response is { Type: KeyValueResponseType.Get, Items: not null })
+                    items.AddRange(response.Items);    
+            }
+            
+            return new(items);
+        }
+
+        if (durability == KeyValueDurability.Persistent)
+        {
+            List<Task<KeyValueResponse?>> tasks = new(persistentInstances.Count);
+            
+            // Persistent GetByPrefix does a brute force search on every persistent actor
+            foreach (IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actor in persistentInstances)
+                tasks.Add(actor.Ask(request));
+            
+            KeyValueResponse?[] responses = await Task.WhenAll(tasks);
+
+            foreach (KeyValueResponse? response in responses)
+            {
+                if (response is { Type: KeyValueResponseType.Get, Items: not null })
+                    items.AddRange(response.Items);    
+            }
+            
+            return new(items);
+        }
+
+        throw new KahunaServerException("Unknown durability");
     }
 }

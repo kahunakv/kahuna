@@ -29,6 +29,11 @@ public class SqlitePersistence : IPersistence
     {
         int shard = (int)HashUtils.ConsistentHash(resource, MaxShards);
         
+        return await TryOpenDatabaseByShard(shard);
+    }
+    
+    private async ValueTask<(AsyncReaderWriterLock readerWriterLock, SqliteConnection connection)> TryOpenDatabaseByShard(int shard)
+    {
         if (connections.TryGetValue(shard, out (AsyncReaderWriterLock readerWriterLock, SqliteConnection connection) sqlConnection))
             return sqlConnection;
         
@@ -347,5 +352,39 @@ public class SqlitePersistence : IPersistence
         }
         
         return null;
+    }
+    
+    public async IAsyncEnumerable<(string, ReadOnlyKeyValueContext)> GetKeyValueByPrefix(string prefixKeyName)
+    {
+        for (int i = 0; i < MaxShards; i++)
+        {
+            (AsyncReaderWriterLock readerWriterLock, SqliteConnection connection) = await TryOpenDatabaseByShard(i);
+
+            try
+            {
+                await readerWriterLock.EnterReadLockAsync(TimeSpan.FromSeconds(5));
+
+                const string query = "SELECT key, value, revision, expiresLogical, expiresCounter, state FROM keys WHERE key LIKE @key";
+                await using SqliteCommand command = new(query, connection);
+
+                command.Parameters.AddWithValue("@key", prefixKeyName + "%");
+
+                await using SqliteDataReader reader = await command.ExecuteReaderAsync();
+
+                while (reader.Read())
+                    yield return (reader.IsDBNull(0) ? "" : reader.GetString(0), new(
+                        value: reader.IsDBNull(1) ? null : (byte[])reader[1],
+                        revision: reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                        expires: new(
+                            reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                            reader.IsDBNull(4) ? 0 : (uint)reader.GetInt64(4)
+                        )
+                    ));
+            }
+            finally
+            {
+                readerWriterLock.Release();
+            }
+        }
     }
 }

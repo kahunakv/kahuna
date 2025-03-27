@@ -495,6 +495,45 @@ public class GrpcCommunication : IKahunaCommunication
 
         throw new KahunaException("Failed to execute key/value transaction:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
+    
+    public async Task<(bool, List<string>)> ScanAllByPrefix(string url, string prefixKey, KeyValueDurability durability)
+    {
+        GrpcScanAllByPrefixRequest request = new()
+        {
+            PrefixKey = prefixKey, 
+            Durability = (GrpcKeyValueDurability)durability
+        };
+
+        int retries = 0;
+        GrpcScanAllByPrefixResponse? response;
+        
+        do
+        {
+            GrpcChannel channel = GetSharedChannel(url);
+        
+            KeyValuer.KeyValuerClient client = new(channel);
+        
+            response = await client.ScanAllByPrefixAsync(request).ConfigureAwait(false);
+
+            if (response is null)
+                throw new KahunaException("Response is null", LockResponseType.Errored);
+            
+            if (response.Type == GrpcKeyValueResponseType.TypeGot)
+                return (true, response.Items.Select(x => x.Key).ToList());
+            
+            if (response.Type == GrpcKeyValueResponseType.TypeDoesNotExist)
+                return (false, []);
+            
+            if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
+                logger?.LogDebug("Server asked to retry get key/value by prefix");
+            
+            if (++retries >= 5)
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
+            
+        } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
+            
+        throw new KahunaException("Failed to scan key/value by prefix: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
+    }
 
     private static RepeatedField<GrpcKeyValueParameter> GetTransactionParameters(List<KeyValueParameter> parameters)
     {
