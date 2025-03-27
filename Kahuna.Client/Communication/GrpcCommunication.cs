@@ -28,7 +28,7 @@ public class GrpcCommunication : IKahunaCommunication
         this.logger = logger;
     }
     
-    public async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string url, string resource, byte[] owner, int expiryTime, LockDurability durability)
+    public async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string url, string resource, byte[] owner, int expiryTime, LockDurability durability, CancellationToken cancellationToken)
     {
         GrpcTryLockRequest request = new()
         {
@@ -46,7 +46,7 @@ public class GrpcCommunication : IKahunaCommunication
         
             Locker.LockerClient client = new(channel);
         
-            response = await client.TryLockAsync(request).ConfigureAwait(false);
+            response = await client.TryLockAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -62,7 +62,7 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to lock", (LockResponseType)response.Type);
     }
     
-    public async Task<bool> TryUnlock(string url, string resource, byte[] owner, LockDurability durability)
+    public async Task<bool> TryUnlock(string url, string resource, byte[] owner, LockDurability durability, CancellationToken cancellationToken)
     {
         GrpcUnlockRequest request = new()
         {
@@ -79,7 +79,7 @@ public class GrpcCommunication : IKahunaCommunication
         
             Locker.LockerClient client = new(channel);
         
-            response = await client.UnlockAsync(request).ConfigureAwait(false);
+            response = await client.UnlockAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -95,7 +95,7 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to unlock", (LockResponseType)response.Type);
     }
     
-    public async Task<(bool, long)> TryExtend(string url, string resource, byte[] owner, int expiryTime, LockDurability durability)
+    public async Task<(bool, long)> TryExtend(string url, string resource, byte[] owner, int expiryTime, LockDurability durability, CancellationToken cancellationToken)
     {
         GrpcExtendLockRequest request = new()
         {
@@ -113,7 +113,7 @@ public class GrpcCommunication : IKahunaCommunication
         
             Locker.LockerClient client = new(channel);
         
-            response = await client.TryExtendLockAsync(request).ConfigureAwait(false);
+            response = await client.TryExtendLockAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -126,7 +126,7 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to extend", (LockResponseType)response.Type);
     }
     
-    public async Task<KahunaLockInfo?> Get(string url, string resource, LockDurability durability)
+    public async Task<KahunaLockInfo?> Get(string url, string resource, LockDurability durability, CancellationToken cancellationToken)
     {
         GrpcGetLockRequest request = new()
         {
@@ -142,7 +142,7 @@ public class GrpcCommunication : IKahunaCommunication
         
             Locker.LockerClient client = new(channel);
         
-            response = await client.GetLockAsync(request).ConfigureAwait(false);
+            response = await client.GetLockAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -155,7 +155,7 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to get lock information", (LockResponseType)response.Type);
     }
     
-    public async Task<(bool, long)> TrySetKeyValue(string url, string key, byte[]? value, int expiryTime, KeyValueFlags flags, KeyValueDurability durability)
+    public async Task<(bool, long)> TrySetKeyValue(string url, string key, byte[]? value, int expiryTime, KeyValueFlags flags, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcTrySetKeyValueRequest request = new()
         {
@@ -174,7 +174,7 @@ public class GrpcCommunication : IKahunaCommunication
         
             KeyValuer.KeyValuerClient client = new(channel);
         
-            response = await client.TrySetKeyValueAsync(request).ConfigureAwait(false);
+            response = await client.TrySetKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -190,7 +190,7 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
-    public async Task<(bool, long)> TryCompareValueAndSetKeyValue(string url, string key, byte[]? value, byte[]? compareValue, int expiryTime, KeyValueDurability durability)
+    public async Task<(bool, long)> TryCompareValueAndSetKeyValue(string url, string key, byte[]? value, byte[]? compareValue, int expiryTime, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcTrySetKeyValueRequest request = new()
         {
@@ -211,7 +211,7 @@ public class GrpcCommunication : IKahunaCommunication
         
             KeyValuer.KeyValuerClient client = new(channel);
         
-            response = await client.TrySetKeyValueAsync(request).ConfigureAwait(false);
+            response = await client.TrySetKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -230,7 +230,7 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
-    public async Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string url, string key, byte[]? value, long compareRevision, int expiryTime, KeyValueDurability durability)
+    public async Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string url, string key, byte[]? value, long compareRevision, int expiryTime, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcTrySetKeyValueRequest request = new()
         {
@@ -251,7 +251,7 @@ public class GrpcCommunication : IKahunaCommunication
         
             KeyValuer.KeyValuerClient client = new(channel);
         
-            response = await client.TrySetKeyValueAsync(request).ConfigureAwait(false);
+            response = await client.TrySetKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -273,7 +273,7 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
-    public async Task<(bool, byte[]?, long)> TryGetKeyValue(string url, string key, long revision, KeyValueDurability durability)
+    public async Task<(bool, byte[]?, long)> TryGetKeyValue(string url, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcTryGetKeyValueRequest request = new()
         {
@@ -291,7 +291,7 @@ public class GrpcCommunication : IKahunaCommunication
         
             KeyValuer.KeyValuerClient client = new(channel);
         
-            response = await client.TryGetKeyValueAsync(request).ConfigureAwait(false);
+            response = await client.TryGetKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -316,7 +316,7 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to get key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
 
-    public async Task<(bool, long)> TryExistsKeyValue(string url, string key, long revision, KeyValueDurability durability)
+    public async Task<(bool, long)> TryExistsKeyValue(string url, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcTryExistsKeyValueRequest request = new()
         {
@@ -334,7 +334,7 @@ public class GrpcCommunication : IKahunaCommunication
         
             KeyValuer.KeyValuerClient client = new(channel);
         
-            response = await client.TryExistsKeyValueAsync(request).ConfigureAwait(false);
+            response = await client.TryExistsKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -359,7 +359,7 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to check if exists key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
-    public async Task<(bool, long)> TryDeleteKeyValue(string url, string key, KeyValueDurability durability)
+    public async Task<(bool, long)> TryDeleteKeyValue(string url, string key, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcTryDeleteKeyValueRequest request = new()
         {
@@ -376,7 +376,7 @@ public class GrpcCommunication : IKahunaCommunication
         
             KeyValuer.KeyValuerClient client = new(channel);
         
-            response = await client.TryDeleteKeyValueAsync(request).ConfigureAwait(false);
+            response = await client.TryDeleteKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -401,7 +401,7 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to delete key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
-    public async Task<(bool, long)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueDurability durability)
+    public async Task<(bool, long)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcTryExtendKeyValueRequest request = new()
         {
@@ -419,7 +419,7 @@ public class GrpcCommunication : IKahunaCommunication
         
             KeyValuer.KeyValuerClient client = new(channel);
         
-            response = await client.TryExtendKeyValueAsync(request).ConfigureAwait(false);
+            response = await client.TryExtendKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -444,7 +444,7 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to extend key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
 
-    public async Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransaction(string url, byte[] script, string? hash, List<KeyValueParameter>? parameters)
+    public async Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransaction(string url, byte[] script, string? hash, List<KeyValueParameter>? parameters, CancellationToken cancellationToken)
     {
         GrpcTryExecuteTransactionRequest request = new()
         {
@@ -466,7 +466,7 @@ public class GrpcCommunication : IKahunaCommunication
         
             KeyValuer.KeyValuerClient client = new(channel);
         
-            response = await client.TryExecuteTransactionAsync(request).ConfigureAwait(false);
+            response = await client.TryExecuteTransactionAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -493,10 +493,10 @@ public class GrpcCommunication : IKahunaCommunication
         if (response.Type == GrpcKeyValueResponseType.TypeAborted)
             throw new KahunaException("Transaction aborted", (KeyValueResponseType)response.Type);
 
-        throw new KahunaException("Failed to execute key/value transaction:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
+        throw new KahunaException("Failed to execute key/value transaction: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
-    public async Task<(bool, List<string>)> ScanAllByPrefix(string url, string prefixKey, KeyValueDurability durability)
+    public async Task<(bool, List<string>)> ScanAllByPrefix(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcScanAllByPrefixRequest request = new()
         {
@@ -513,7 +513,7 @@ public class GrpcCommunication : IKahunaCommunication
         
             KeyValuer.KeyValuerClient client = new(channel);
         
-            response = await client.ScanAllByPrefixAsync(request).ConfigureAwait(false);
+            response = await client.ScanAllByPrefixAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);

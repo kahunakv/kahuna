@@ -30,7 +30,7 @@ public class TestLocks
         
         string lockName = GetRandomLockName();
 
-        await using KahunaLock kLock = await client.GetOrCreateLock(lockName, 1000, durability: durability);
+        await using KahunaLock kLock = await client.GetOrCreateLock(lockName, 1000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.True(kLock.IsAcquired);
         Assert.Equal(0, kLock.FencingToken);
@@ -48,8 +48,8 @@ public class TestLocks
         string lockName = GetRandomLockName();
 
         // Attempt to acquire the same lock twice:
-        KahunaLock kLock1 = await client.GetOrCreateLock(lockName, 10000, durability: durability);
-        KahunaLock kLock2 = await client.GetOrCreateLock(lockName, 10000, durability: durability);
+        KahunaLock kLock1 = await client.GetOrCreateLock(lockName, 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
+        KahunaLock kLock2 = await client.GetOrCreateLock(lockName, 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.True(kLock1.IsAcquired);
         Assert.Equal(0, kLock1.FencingToken);
@@ -61,7 +61,7 @@ public class TestLocks
         await kLock2.DisposeAsync();
 
         // Now try acquiring the lock again:
-        await using KahunaLock kLock3 = await client.GetOrCreateLock(lockName, 1000, durability: durability);
+        await using KahunaLock kLock3 = await client.GetOrCreateLock(lockName, 1000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(kLock3.IsAcquired);
         Assert.Equal(1, kLock3.FencingToken);
     }
@@ -77,13 +77,13 @@ public class TestLocks
         
         string lockName = GetRandomLockName();
 
-        KahunaLock kLock = await client.GetOrCreateLock(lockName, TimeSpan.FromSeconds(1), durability: durability);
+        KahunaLock kLock = await client.GetOrCreateLock(lockName, TimeSpan.FromSeconds(1), durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(kLock.IsAcquired);
         Assert.Equal(0, kLock.FencingToken);
 
         await kLock.DisposeAsync();
 
-        await using KahunaLock kLock2 = await client.GetOrCreateLock(lockName, TimeSpan.FromSeconds(1), durability: durability);
+        await using KahunaLock kLock2 = await client.GetOrCreateLock(lockName, TimeSpan.FromSeconds(1), durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(kLock2.IsAcquired);
         Assert.Equal(1, kLock2.FencingToken);
     }
@@ -104,7 +104,8 @@ public class TestLocks
             expiryTime: 1000, 
             waitTime: 1000, 
             retryTime: 500,
-            durability: durability
+            durability: durability, 
+            TestContext.Current.CancellationToken
         );
         
         Assert.True(kLock.IsAcquired);
@@ -112,7 +113,7 @@ public class TestLocks
 
         await kLock.DisposeAsync();
 
-        await using KahunaLock kLock2 = await client.GetOrCreateLock(lockName, TimeSpan.FromSeconds(1), durability: durability);
+        await using KahunaLock kLock2 = await client.GetOrCreateLock(lockName, TimeSpan.FromSeconds(1), durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(kLock2.IsAcquired);
         Assert.Equal(1, kLock2.FencingToken);
     }
@@ -134,7 +135,7 @@ public class TestLocks
         await Task.WhenAll(tasks);
     }
     
-    private async Task AcquireLockConcurrently(KahunaClient client, LockDurability durability) 
+    private static async Task AcquireLockConcurrently(KahunaClient client, LockDurability durability) 
     {
         string lockName = GetRandomLockName();
 
@@ -204,26 +205,26 @@ public class TestLocks
         
         string lockName = GetRandomLockName();
 
-        await using KahunaLock kLock = await client.GetOrCreateLock(lockName, 10000, durability: durability);
+        await using KahunaLock kLock = await client.GetOrCreateLock(lockName, 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.True(kLock.IsAcquired);
         Assert.Equal(0, kLock.FencingToken);
         
-        (bool extended, long fencingToken) = await kLock.TryExtend(TimeSpan.FromSeconds(10));
+        (bool extended, long fencingToken) = await kLock.TryExtend(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         Assert.True(extended);
         Assert.Equal(kLock.FencingToken, fencingToken);
 
-        KahunaLockInfo? lockInfo = await client.GetLockInfo(lockName, durability);
+        KahunaLockInfo? lockInfo = await client.GetLockInfo(lockName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.NotNull(lockInfo);
         
         Assert.Equal(lockInfo.Owner, kLock.Owner);
         HLCTimestamp expires = lockInfo.Expires;
         
-        (extended, fencingToken) = await kLock.TryExtend(TimeSpan.FromSeconds(10));
+        (extended, fencingToken) = await kLock.TryExtend(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         Assert.True(extended);
         Assert.Equal(kLock.FencingToken, fencingToken);
         
-        lockInfo = await client.GetLockInfo(lockName, durability);
+        lockInfo = await client.GetLockInfo(lockName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.NotNull(lockInfo);
         
         Assert.Equal(lockInfo.Owner, kLock.Owner);
@@ -243,12 +244,12 @@ public class TestLocks
         
         string lockName = GetRandomLockName();
 
-        await using KahunaLock kLock = await client.GetOrCreateLock(lockName, 10000, durability: durability);
+        await using KahunaLock kLock = await client.GetOrCreateLock(lockName, 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.True(kLock.IsAcquired);
         Assert.Equal(0, kLock.FencingToken);
         
-        (bool extended, long fencingToken) = await kLock.TryExtend(TimeSpan.FromSeconds(10));
+        (bool extended, long fencingToken) = await kLock.TryExtend(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         Assert.True(extended);
         Assert.Equal(kLock.FencingToken, fencingToken);
 
@@ -258,7 +259,7 @@ public class TestLocks
         Assert.Equal(lockInfo.Owner, kLock.Owner);
         HLCTimestamp expires = lockInfo.Expires;
         
-        (extended, fencingToken) = await kLock.TryExtend(TimeSpan.FromSeconds(10));
+        (extended, fencingToken) = await kLock.TryExtend(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         Assert.True(extended);
         Assert.Equal(kLock.FencingToken, fencingToken);
         

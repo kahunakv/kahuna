@@ -24,8 +24,8 @@ public sealed class LockManager
     private readonly IRaft raft;
 
     private readonly ILogger<IKahuna> logger;
-    
-    private readonly IActorRef<RoundRobinActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter;
+
+    private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
 
     private readonly IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> ephemeralLocksRouter;
     
@@ -37,7 +37,6 @@ public sealed class LockManager
     /// <param name="actorSystem"></param>
     /// <param name="raft"></param>
     /// <param name="persistence"></param>
-    /// <param name="persistenceActorRouter"></param>
     /// <param name="backgroundWriter"></param>
     /// <param name="configuration"></param>
     /// <param name="logger"></param>
@@ -45,7 +44,6 @@ public sealed class LockManager
         ActorSystem actorSystem, 
         IRaft raft, 
         IPersistence persistence, 
-        IActorRef<RoundRobinActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         KahunaConfiguration configuration, 
         ILogger<IKahuna> logger
@@ -53,12 +51,11 @@ public sealed class LockManager
     {
         this.actorSystem = actorSystem;
         this.raft = raft;
+        this.backgroundWriter = backgroundWriter;
         this.logger = logger;
         
-        this.persistenceActorRouter = persistenceActorRouter;
-        
-        ephemeralLocksRouter = GetEphemeralRouter(backgroundWriter, persistence, configuration);
-        persistentLocksRouter = GetPersistentRouter(backgroundWriter, persistence, configuration);
+        ephemeralLocksRouter = GetEphemeralRouter(persistence, configuration);
+        persistentLocksRouter = GetPersistentRouter(persistence, configuration);
     }
 
     /// <summary>
@@ -69,7 +66,6 @@ public sealed class LockManager
     /// <param name="workers"></param>
     /// <returns></returns>
     private IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> GetEphemeralRouter(
-        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, 
         IPersistence persistence, 
         KahunaConfiguration configuration
     )
@@ -90,7 +86,6 @@ public sealed class LockManager
     /// <param name="workers"></param>
     /// <returns></returns>
     private IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> GetPersistentRouter(
-        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, 
         IPersistence persistence, 
         KahunaConfiguration configuration
     )
@@ -128,7 +123,7 @@ public sealed class LockManager
             {
                 case LockRequestType.TryLock:
                 {
-                    PersistenceResponse? response = await persistenceActorRouter.Ask(new(
+                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
                         PersistenceRequestType.StoreLock,
                         [
                             new(
@@ -145,12 +140,24 @@ public sealed class LockManager
                     if (response is null)
                         return false;
 
-                    return response.Type == PersistenceResponseType.Success;
+                    return response.Type == PersistenceResponseType.Success;*/
+                    
+                    backgroundWriter.Send(new(
+                        BackgroundWriteType.QueueStoreLock,
+                        -1,
+                        lockMessage.Resource,
+                        lockMessage.Owner?.ToByteArray(),
+                        lockMessage.FencingToken,
+                        new(lockMessage.ExpireLogical, lockMessage.ExpireCounter),
+                        (int)LockState.Locked
+                    ));
+
+                    return true;
                 }
 
                 case LockRequestType.TryUnlock:
                 {
-                    PersistenceResponse? response = await persistenceActorRouter.Ask(new(
+                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
                         PersistenceRequestType.StoreLock,
                         [
                             new(
@@ -167,12 +174,24 @@ public sealed class LockManager
                     if (response is null)
                         return false;
 
-                    return response.Type == PersistenceResponseType.Success;
+                    return response.Type == PersistenceResponseType.Success;*/
+                    
+                    backgroundWriter.Send(new(
+                        BackgroundWriteType.QueueStoreLock,
+                        -1,
+                        lockMessage.Resource,
+                        lockMessage.Owner?.ToByteArray(),
+                        lockMessage.FencingToken,
+                        new(lockMessage.ExpireLogical, lockMessage.ExpireCounter),
+                        (int)LockState.Unlocked
+                    ));
+                    
+                    return true;
                 }
 
                 case LockRequestType.TryExtendLock:
                 {
-                    PersistenceResponse? response = await persistenceActorRouter.Ask(new(
+                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
                         PersistenceRequestType.StoreLock,
                         [
                             new(
@@ -189,7 +208,19 @@ public sealed class LockManager
                     if (response is null)
                         return false;
 
-                    return response.Type == PersistenceResponseType.Success;
+                    return response.Type == PersistenceResponseType.Success;*/
+                    
+                    backgroundWriter.Send(new(
+                        BackgroundWriteType.QueueStoreLock,
+                        -1,
+                        lockMessage.Resource,
+                        lockMessage.Owner?.ToByteArray(),
+                        lockMessage.FencingToken,
+                        new(lockMessage.ExpireLogical, lockMessage.ExpireCounter),
+                        (int)LockState.Locked
+                    ));
+
+                    return true;
                 }
 
                 case LockRequestType.Get:

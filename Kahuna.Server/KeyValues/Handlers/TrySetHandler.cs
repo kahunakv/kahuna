@@ -34,7 +34,7 @@ internal sealed class TrySetHandler : BaseHandler
             /// Try to retrieve KeyValue context from persistence
             if (message.Durability == KeyValueDurability.Persistent)
             {
-                newContext = await persistence.GetKeyValue(message.Key);
+                newContext = persistence.GetKeyValue(message.Key);
                 if (newContext is not null)
                 {
                     if (newContext.State == KeyValueState.Deleted)

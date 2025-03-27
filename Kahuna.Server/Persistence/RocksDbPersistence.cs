@@ -12,10 +12,6 @@ public class RocksDbPersistence : IPersistence
 {
     private const string CurrentMarker = "~CURRENT";
     
-    private static readonly Task<LockContext?> NullLockContext = Task.FromResult<LockContext?>(null);
-    
-    private static readonly Task<KeyValueContext?> NullKeyValueContext = Task.FromResult<KeyValueContext?>(null);
-
     private static readonly WriteOptions DefaultWriteOptions = new WriteOptions().SetSync(true);
     
     private readonly RocksDb db;
@@ -52,7 +48,7 @@ public class RocksDbPersistence : IPersistence
         columnFamilyLocks = db.GetColumnFamily("locks");
     }
 
-    public Task<bool> StoreLocks(List<PersistenceRequestItem> items)
+    public bool StoreLocks(List<PersistenceRequestItem> items)
     {
         using WriteBatch batch = new();
 
@@ -74,10 +70,10 @@ public class RocksDbPersistence : IPersistence
         
         db.Write(batch, DefaultWriteOptions);
 
-        return Task.FromResult(true);
+        return true;
     }
     
-    public Task<bool> StoreKeyValues(List<PersistenceRequestItem> items)
+    public bool StoreKeyValues(List<PersistenceRequestItem> items)
     {
         using WriteBatch batch = new();
         
@@ -105,14 +101,14 @@ public class RocksDbPersistence : IPersistence
 
         db.Write(batch, DefaultWriteOptions);
 
-        return Task.FromResult(true);
+        return true;
     }
 
-    public Task<LockContext?> GetLock(string resource)
+    public LockContext? GetLock(string resource)
     {
         byte[]? value = db.Get(Encoding.UTF8.GetBytes(resource), cf: columnFamilyLocks);
         if (value is null)
-            return NullLockContext;
+            return null;
 
         RocksDbLockMessage message = UnserializeLockMessage(value);
 
@@ -123,14 +119,14 @@ public class RocksDbPersistence : IPersistence
             Expires = new(message.ExpiresPhysical, message.ExpiresCounter),
         };
 
-        return Task.FromResult<LockContext?>(context);
+        return context;
     }
 
-    public Task<KeyValueContext?> GetKeyValue(string keyName)
+    public KeyValueContext? GetKeyValue(string keyName)
     {
         byte[]? value = db.Get(Encoding.UTF8.GetBytes(keyName + CurrentMarker), cf: columnFamilyKeys);
         if (value is null)
-            return NullKeyValueContext;
+            return null;
 
         RocksDbKeyValueMessage message = UnserializeKeyValueMessage(value);
 
@@ -141,14 +137,14 @@ public class RocksDbPersistence : IPersistence
             Expires = new(message.ExpiresPhysical, message.ExpiresCounter),
         };
 
-        return Task.FromResult<KeyValueContext?>(context);
+        return context;
     }
 
-    public Task<KeyValueContext?> GetKeyValueRevision(string keyName, long revision)
+    public KeyValueContext? GetKeyValueRevision(string keyName, long revision)
     {
         byte[]? value = db.Get(Encoding.UTF8.GetBytes(string.Concat(keyName, "~", revision)), cf: columnFamilyKeys);
         if (value is null)
-            return NullKeyValueContext;
+            return null;
 
         RocksDbKeyValueMessage message = UnserializeKeyValueMessage(value);
 
@@ -159,13 +155,11 @@ public class RocksDbPersistence : IPersistence
             Expires = new(message.ExpiresPhysical, message.ExpiresCounter),
         };
 
-        return Task.FromResult<KeyValueContext?>(context);
+        return context;
     }
 
-    public async IAsyncEnumerable<(string, ReadOnlyKeyValueContext)> GetKeyValueByPrefix(string prefixKeyName)
+    public IEnumerable<(string, ReadOnlyKeyValueContext)> GetKeyValueByPrefix(string prefixKeyName)
     {
-        await Task.CompletedTask;
-        
         byte[] prefixBytes = Encoding.UTF8.GetBytes(prefixKeyName);
         
         using Iterator? iterator = db.NewIterator(cf: columnFamilyKeys);

@@ -39,38 +39,15 @@ public sealed class KahunaManager : IKahuna
         
         IPersistence persistence = GetPersistence(configuration);
         
-        IActorRef<RoundRobinActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter = GetPersistenceRouter(persistence, configuration, logger);
-        
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter = actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
             "background-writer", 
             raft, 
-            persistenceActorRouter, 
+            persistence, 
             logger
         );
         
-        this.locks = new(actorSystem, raft, persistence, persistenceActorRouter, backgroundWriter, configuration, logger);
-        this.keyValues = new(actorSystem, raft, persistence, persistenceActorRouter, backgroundWriter, configuration, logger);
-    }
-    
-    /// <summary>
-    /// Creates the persistence router
-    /// </summary>
-    /// <param name="persistence"></param>
-    /// <param name="configuration"></param>
-    /// <param name="logger"></param>
-    /// <returns></returns>
-    private IActorRef<RoundRobinActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> GetPersistenceRouter(
-        IPersistence persistence, 
-        KahunaConfiguration configuration,
-        ILogger logger
-    )
-    {
-        List<IActorRef<PersistenceActor, PersistenceRequest, PersistenceResponse>> persistenceInstances = new(configuration.PersistenceWorkers);
-
-        for (int i = 0; i < configuration.PersistenceWorkers; i++)
-            persistenceInstances.Add(actorSystem.Spawn<PersistenceActor, PersistenceRequest, PersistenceResponse>("persistence-" + i, persistence, logger));
-
-        return actorSystem.CreateRoundRobinRouter(persistenceInstances);
+        this.locks = new(actorSystem, raft, persistence, backgroundWriter, configuration, logger);
+        this.keyValues = new(actorSystem, raft, persistence, backgroundWriter, configuration, logger);
     }
     
     /// <summary>

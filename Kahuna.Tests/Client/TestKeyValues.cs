@@ -42,7 +42,14 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(
+            keyName, 
+            "some-value", 
+            10000, 
+            durability: durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
     }
@@ -58,7 +65,14 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value"u8.ToArray(), 10000, durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(
+            keyName, 
+            "some-value"u8.ToArray(), 
+            10000, 
+            durability: durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
     }
@@ -74,7 +88,14 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", TimeSpan.FromSeconds(10), durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(
+            keyName, 
+            "some-value", 
+            TimeSpan.FromSeconds(10), 
+            durability: durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
     }
@@ -90,7 +111,14 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value"u8.ToArray(), TimeSpan.FromSeconds(10), durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(
+            keyName, 
+            "some-value"u8.ToArray(), 
+            TimeSpan.FromSeconds(10), 
+            durability: durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
     }
@@ -106,11 +134,25 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(
+            keyName, 
+            "some-value", 
+            10000, 
+            durability: durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
 
-        result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
+        result = await client.SetKeyValue(
+            keyName, 
+            "some-value", 
+            10000, 
+            durability: durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
         Assert.True(result.Success);
         Assert.Equal(1, result.Revision);
     }
@@ -126,7 +168,15 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfNotExists, durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(
+            keyName, 
+            "some-value", 
+            10000, 
+            flags: KeyValueFlags.SetIfNotExists, 
+            durability: durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
     }
@@ -142,11 +192,27 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfNotExists, durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(
+            keyName, 
+            "some-value", 
+            10000, 
+            flags: KeyValueFlags.SetIfNotExists, 
+            durability: durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfNotExists, durability: durability);
+        result = await client.SetKeyValue(
+            keyName, 
+            "some-value", 
+            10000, 
+            flags: KeyValueFlags.SetIfNotExists, 
+            durability: durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
         Assert.False(result.Success);
         Assert.Equal(0, result.Revision);
     }
@@ -162,7 +228,15 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfExists, durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(
+            keyName, 
+            "some-value", 
+            10000, 
+            flags: KeyValueFlags.SetIfExists, 
+            durability: durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
         Assert.False(result.Success);
         Assert.Equal(-1, result.Revision);
     }
@@ -178,11 +252,27 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.Set, durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(
+            keyName, 
+            "some-value", 
+            10000, 
+            flags: KeyValueFlags.Set, 
+            durability: durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfExists, durability: durability);
+        result = await client.SetKeyValue(
+            keyName, 
+            "some-value", 
+            10000, 
+            flags: KeyValueFlags.SetIfExists, 
+            durability: durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
         Assert.True(result.Success);
         Assert.Equal(1, result.Revision);
     }
@@ -198,15 +288,39 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.Set, durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(
+            keyName, 
+            "some-value", 
+            10000, 
+            flags: KeyValueFlags.Set, 
+            durability: durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfExists, durability: durability);
+        result = await client.SetKeyValue(
+            keyName, 
+            "some-value", 
+            10000, 
+            flags: KeyValueFlags.SetIfExists, 
+            durability: durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
         Assert.True(result.Success);
         Assert.Equal(1, result.Revision);
         
-        result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfNotExists, durability: durability);
+        result = await client.SetKeyValue(
+            keyName, 
+            "some-value", 
+            10000, 
+            flags: KeyValueFlags.SetIfNotExists, 
+            durability: durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
         Assert.False(result.Success);
         Assert.Equal(1, result.Revision);
     }
@@ -222,11 +336,22 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(
+            keyName, 
+            "some-value", 
+            10000, 
+            durability: durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.GetKeyValue(keyName, durability);
+        result = await client.GetKeyValue(
+            keyName, 
+            durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
         Assert.NotNull(result.Value);
         Assert.Equal(0, result.Revision);
         
@@ -244,21 +369,43 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(
+            keyName, 
+            "some-value", 
+            10000, 
+            durability: durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.GetKeyValue(keyName, durability);
+        result = await client.GetKeyValue(
+            keyName, 
+            durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
         Assert.NotNull(result.Value);
         Assert.Equal(0, result.Revision);
         
         Assert.Equal("some-value", result.ValueAsString());
         
-        result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
+        result = await client.SetKeyValue(
+            keyName, 
+            "some-value", 
+            10000, 
+            durability: durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
         Assert.True(result.Success);
         Assert.Equal(1, result.Revision);
         
-        result = await client.GetKeyValue(keyName, durability);
+        result = await client.GetKeyValue(
+            keyName, 
+            durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
         Assert.NotNull(result.Value);
         Assert.Equal(1, result.Revision);
     }
@@ -274,11 +421,24 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, flags: KeyValueFlags.SetIfNotExists, durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(
+            keyName, 
+            "some-value", 
+            10000, 
+            flags: KeyValueFlags.SetIfNotExists, 
+            durability: durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.GetKeyValue(keyName, durability);
+        result = await client.GetKeyValue(
+            keyName, 
+            durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
         Assert.NotNull(result.Value);
         Assert.Equal(0, result.Revision);
         
@@ -296,11 +456,21 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 1000, durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(
+            keyName, 
+            "some-value", 
+            1000, 
+            durability: durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.GetKeyValue(keyName, durability);
+        result = await client.GetKeyValue(
+            keyName, 
+            durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
         Assert.NotNull(result.Value);
         Assert.Equal(0, result.Revision);
         
@@ -308,7 +478,11 @@ public class TestKeyValues
         
         await Task.Delay(1500, TestContext.Current.CancellationToken);
         
-        result = await client.GetKeyValue(keyName, durability);
+        result = await client.GetKeyValue(
+            keyName, 
+            durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
         Assert.Null(result.Value);
         Assert.Equal(0, result.Revision);
     }
@@ -325,21 +499,33 @@ public class TestKeyValues
         string keyName1 = GetRandomKeyName();
         string keyName2 = GetRandomKeyName();
 
-        KahunaKeyValue result1 = await client.SetKeyValue(keyName1, "some-value", 1000, durability: durability);
+        KahunaKeyValue result1 = await client.SetKeyValue(
+            keyName1, 
+            "some-value", 
+            1000, 
+            durability: durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
         Assert.True(result1.Success);
         Assert.Equal(0, result1.Revision);
         
-        result1 = await client.SetKeyValue(keyName2, "some-value", 1000, durability: durability);
+        result1 = await client.SetKeyValue(
+            keyName2, 
+            "some-value", 
+            1000, 
+            durability: durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
         Assert.True(result1.Success);
         Assert.Equal(0, result1.Revision);
         
-        result1 = await client.GetKeyValue(keyName1, durability);
+        result1 = await client.GetKeyValue(keyName1, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.NotNull(result1.Value);
         Assert.Equal(0, result1.Revision);
         
         Assert.Equal("some-value", result1.ValueAsString());
         
-        KahunaKeyValue result2 = await client.GetKeyValue(keyName2, durability);
+        KahunaKeyValue result2 = await client.GetKeyValue(keyName2, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.NotNull(result2.Value);
         Assert.Equal(0, result2.Revision);
         
@@ -347,11 +533,11 @@ public class TestKeyValues
         
         await Task.Delay(1500, TestContext.Current.CancellationToken);
         
-        result1 = await client.GetKeyValue(keyName1, durability);
+        result1 = await client.GetKeyValue(keyName1, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Null(result1.Value);
         Assert.Equal(0, result1.Revision);
         
-        result2 = await client.GetKeyValue(keyName1, durability);
+        result2 = await client.GetKeyValue(keyName1, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Null(result2.Value);
         Assert.Equal(0, result2.Revision);
     }
@@ -368,21 +554,33 @@ public class TestKeyValues
         string keyName1 = GetRandomKeyName();
         string keyName2 = GetRandomKeyName();
 
-        KahunaKeyValue result1 = await client.SetKeyValue(keyName1, "some-value", 1000, durability: durability);
+        KahunaKeyValue result1 = await client.SetKeyValue(
+            keyName1, 
+            "some-value", 
+            1000, 
+            durability: durability, 
+            cancellationToken: TestContext.Current.CancellationToken
+        );
         Assert.True(result1.Success);
         Assert.Equal(0, result1.Revision);
         
-        KahunaKeyValue result2 = await client.SetKeyValue(keyName2, "some-value", 1000, durability: durability);
+        KahunaKeyValue result2 = await client.SetKeyValue(
+            keyName2, 
+            "some-value", 
+            1000, 
+            durability: durability, 
+            cancellationToken: TestContext.Current.CancellationToken
+        );
         Assert.True(result2.Success);
         Assert.Equal(0, result2.Revision);
         
-        result1 = await client.GetKeyValue(keyName1, durability);
+        result1 = await client.GetKeyValue(keyName1, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.NotNull(result1.Value);
         Assert.Equal(0, result1.Revision);
         
         Assert.Equal("some-value", result1.ValueAsString());
         
-        result2 = await client.GetKeyValue(keyName2, durability);
+        result2 = await client.GetKeyValue(keyName2, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.NotNull(result2.Value);
         Assert.Equal(0, result2.Revision);
         
@@ -390,27 +588,27 @@ public class TestKeyValues
         
         await Task.Delay(1500, TestContext.Current.CancellationToken);
         
-        result1 = await client.GetKeyValue(keyName1, durability);
+        result1 = await client.GetKeyValue(keyName1, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Null(result1.Value);
         Assert.Equal(0, result1.Revision);
         
-        result1 = await client.GetKeyValue(keyName1, durability);
+        result1 = await client.GetKeyValue(keyName1, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Null(result1.Value);
         Assert.Equal(0, result1.Revision);
         
-        result1 = await client.SetKeyValue(keyName1, "some-value", 1000, durability: durability);
+        result1 = await client.SetKeyValue(keyName1, "some-value", 1000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result1.Success);
         Assert.Equal(1, result1.Revision);
         
-        result2 = await client.SetKeyValue(keyName2, "some-value", 1000, durability: durability);
+        result2 = await client.SetKeyValue(keyName2, "some-value", 1000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result2.Success);
         Assert.Equal(1, result2.Revision);
         
-        result1 = await client.GetKeyValue(keyName1, durability);
+        result1 = await client.GetKeyValue(keyName1, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.NotNull(result1.Value);
         Assert.Equal(1, result1.Revision);
         
-        result2 = await client.GetKeyValue(keyName2, durability);
+        result2 = await client.GetKeyValue(keyName2, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.NotNull(result2.Value);
         Assert.Equal(1, result2.Revision);
     }
@@ -426,13 +624,13 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 1, durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 1, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
         await Task.Delay(50, TestContext.Current.CancellationToken);
         
-        result = await client.GetKeyValue(keyName, durability);
+        result = await client.GetKeyValue(keyName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Null(result.Value);
         Assert.Equal(0, result.Revision);
     }
@@ -448,17 +646,17 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 1000, durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 1000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.ExtendKeyValue(keyName, 5000, durability);
+        result = await client.ExtendKeyValue(keyName, 5000, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
         await Task.Delay(2000, TestContext.Current.CancellationToken);
         
-        result = await client.GetKeyValue(keyName, durability);
+        result = await client.GetKeyValue(keyName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.NotNull(result.Value);
         Assert.Equal(0, result.Revision);
     }
@@ -474,17 +672,17 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", TimeSpan.FromSeconds(1), durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", TimeSpan.FromSeconds(1), durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.ExtendKeyValue(keyName, TimeSpan.FromSeconds(5), durability);
+        result = await client.ExtendKeyValue(keyName, TimeSpan.FromSeconds(5), durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
         await Task.Delay(2000, TestContext.Current.CancellationToken);
         
-        result = await client.GetKeyValue(keyName, durability);
+        result = await client.GetKeyValue(keyName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.NotNull(result.Value);
         Assert.Equal(0, result.Revision);
     }
@@ -500,29 +698,29 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.GetKeyValue(keyName, durability);
+        result = await client.GetKeyValue(keyName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.NotNull(result.Value);
         Assert.Equal(0, result.Revision);
         
         Assert.Equal("some-value", result.ValueAsString());
         
-        result = await client.DeleteKeyValue(keyName, durability);
+        result = await client.DeleteKeyValue(keyName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.GetKeyValue(keyName, durability);
+        result = await client.GetKeyValue(keyName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Null(result.Value);
         Assert.Equal(0, result.Revision);
         
-        result = await client.SetKeyValue(keyName, "some-value-2", 10000, durability: durability);
+        result = await client.SetKeyValue(keyName, "some-value-2", 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         Assert.Equal(1, result.Revision);
         
-        result = await client.GetKeyValue(keyName, durability);
+        result = await client.GetKeyValue(keyName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.NotNull(result.Value);
         Assert.Equal(1, result.Revision);
         
@@ -540,17 +738,17 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.GetKeyValue(keyName, durability);
+        result = await client.GetKeyValue(keyName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.NotNull(result.Value);
         Assert.Equal(0, result.Revision);
         
         Assert.Equal("some-value", result.ValueAsString());
         
-        result = await client.ExistsKeyValue(keyName, durability);
+        result = await client.ExistsKeyValue(keyName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
     }
@@ -566,29 +764,29 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.GetKeyValue(keyName, durability);
+        result = await client.GetKeyValue(keyName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.NotNull(result.Value);
         Assert.Equal(0, result.Revision);
         
         Assert.Equal("some-value", result.ValueAsString());
         
-        result = await client.DeleteKeyValue(keyName, durability);
+        result = await client.DeleteKeyValue(keyName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.GetKeyValue(keyName, durability);
+        result = await client.GetKeyValue(keyName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Null(result.Value);
         Assert.Equal(0, result.Revision);
         
-        result = await client.SetKeyValue(keyName, "some-value-2", 10000, flags: KeyValueFlags.SetIfExists, durability: durability);
+        result = await client.SetKeyValue(keyName, "some-value-2", 10000, flags: KeyValueFlags.SetIfExists, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.False(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.GetKeyValue(keyName, durability);
+        result = await client.GetKeyValue(keyName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Null(result.Value);
         Assert.Equal(0, result.Revision);
     }
@@ -604,15 +802,15 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.TryCompareValueAndSetKeyValue(keyName, "some-new-value", "some-value", 10000, durability: durability);
+        result = await client.TryCompareValueAndSetKeyValue(keyName, "some-new-value", "some-value", 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         Assert.Equal(1, result.Revision);
         
-        result = await client.GetKeyValue(keyName, durability);
+        result = await client.GetKeyValue(keyName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.NotNull(result.Value);
         Assert.Equal(1, result.Revision);
         
@@ -630,15 +828,15 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.TryCompareValueAndSetKeyValue(keyName, "some-new-value", "other-some-value", 10000, durability: durability);
+        result = await client.TryCompareValueAndSetKeyValue(keyName, "some-new-value", "other-some-value", 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.False(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.GetKeyValue(keyName, durability);
+        result = await client.GetKeyValue(keyName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.NotNull(result.Value);
         Assert.Equal(0, result.Revision);
         
@@ -656,19 +854,19 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.SetKeyValue(keyName, "some-new-value", 10000, durability: durability);
+        result = await client.SetKeyValue(keyName, "some-new-value", 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         Assert.Equal(1, result.Revision);
         
-        result = await client.TryCompareRevisionAndSetKeyValue(keyName, "some-new-new-value", 1, 10000, durability: durability);
+        result = await client.TryCompareRevisionAndSetKeyValue(keyName, "some-new-new-value", 1, 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         Assert.Equal(2, result.Revision);
         
-        result = await client.GetKeyValue(keyName, durability);
+        result = await client.GetKeyValue(keyName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.NotNull(result.Value);
         Assert.Equal(2, result.Revision);
         
@@ -686,19 +884,19 @@ public class TestKeyValues
         
         string keyName = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.SetKeyValue(keyName, "some-new-value", 10000, durability: durability);
+        result = await client.SetKeyValue(keyName, "some-new-value", 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         Assert.Equal(1, result.Revision);
         
-        result = await client.TryCompareRevisionAndSetKeyValue(keyName, "some-new-new-value",10, 10000, durability: durability);
+        result = await client.TryCompareRevisionAndSetKeyValue(keyName, "some-new-new-value",10, 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.False(result.Success);
         Assert.Equal(1, result.Revision);
         
-        result = await client.GetKeyValue(keyName, durability);
+        result = await client.GetKeyValue(keyName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.NotNull(result.Value);
         Assert.Equal(1, result.Revision);
         
@@ -716,19 +914,19 @@ public class TestKeyValues
         
         string prefix = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(prefix + "/" + GetRandomKeyName(), "some-value", 10000, durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(prefix + "/" + GetRandomKeyName(), "some-value", 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.SetKeyValue(prefix + "/" + GetRandomKeyName(), "some-value", 10000, durability: durability);
+        result = await client.SetKeyValue(prefix + "/" + GetRandomKeyName(), "some-value", 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        result = await client.SetKeyValue(prefix + "/" + GetRandomKeyName(), "some-value", 10000, durability: durability);
+        result = await client.SetKeyValue(prefix + "/" + GetRandomKeyName(), "some-value", 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        (bool success, List<string> items) = await client.ScanAllByPrefix(prefix, durability: durability);
+        (bool success, List<string> items) = await client.ScanAllByPrefix(prefix, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(success);
         
         Assert.Equal(3, items.Count);
@@ -745,11 +943,11 @@ public class TestKeyValues
         
         string randomKey = GetRandomKeyName();
 
-        KahunaKeyValue result = await client.SetKeyValue(randomKey, "some-value", 10000, durability: durability);
+        KahunaKeyValue result = await client.SetKeyValue(randomKey, "some-value", 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        (bool success, List<string> items) = await client.ScanAllByPrefix(randomKey, durability: durability);
+        (bool success, List<string> items) = await client.ScanAllByPrefix(randomKey, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(success);
         
         Assert.Single(items);

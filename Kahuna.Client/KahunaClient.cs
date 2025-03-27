@@ -55,9 +55,9 @@ public class KahunaClient
         this.communication = (communication ?? new GrpcCommunication(logger));
     }
     
-    private async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string resource, byte[] owner, TimeSpan expiryTime, LockDurability durability)
+    private async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string resource, byte[] owner, TimeSpan expiryTime, LockDurability durability, CancellationToken cancellationToken = default)
     {
-        return await communication.TryAcquireLock(GetRoundRobinUrl(), resource, owner, (int)expiryTime.TotalMilliseconds, durability).ConfigureAwait(false);
+        return await communication.TryAcquireLock(GetRoundRobinUrl(), resource, owner, (int)expiryTime.TotalMilliseconds, durability, cancellationToken).ConfigureAwait(false);
     }
     
     private async Task<(KahunaLockAcquireResult, byte[]?, LockDurability, long)> PeriodicallyTryAcquireLock(
@@ -65,7 +65,8 @@ public class KahunaClient
         TimeSpan expiryTime, 
         TimeSpan wait, 
         TimeSpan retry,
-        LockDurability durability
+        LockDurability durability,
+        CancellationToken cancellationToken = default
     )
     {
         byte[] owner = Encoding.UTF8.GetBytes(Guid.NewGuid().ToString("N"));
@@ -77,7 +78,7 @@ public class KahunaClient
 
         while (stopWatch.GetElapsedTime() < wait)
         {
-            (result, fencingToken) = await TryAcquireLock(resource, owner, expiryTime, durability).ConfigureAwait(false);
+            (result, fencingToken) = await TryAcquireLock(resource, owner, expiryTime, durability, cancellationToken).ConfigureAwait(false);
 
             if (result != KahunaLockAcquireResult.Success)
             {
@@ -98,7 +99,7 @@ public class KahunaClient
     /// <param name="expiryTime"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    private async Task<(KahunaLockAcquireResult, byte[]?, LockDurability, long)> SingleTimeTryAcquireLock(string resource, TimeSpan expiryTime, LockDurability durability)
+    private async Task<(KahunaLockAcquireResult, byte[]?, LockDurability, long)> SingleTimeTryAcquireLock(string resource, TimeSpan expiryTime, LockDurability durability, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -126,7 +127,7 @@ public class KahunaClient
     /// <param name="retryTime"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KahunaLock> GetOrCreateLock(string resource, int expiryTime = 30000, int waitTime = 0, int retryTime = 0, LockDurability durability = LockDurability.Persistent)
+    public async Task<KahunaLock> GetOrCreateLock(string resource, int expiryTime = 30000, int waitTime = 0, int retryTime = 0, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {
         TimeSpan expiry = TimeSpan.FromMilliseconds(expiryTime);
         TimeSpan wait = TimeSpan.FromMilliseconds(waitTime);
@@ -146,7 +147,7 @@ public class KahunaClient
     /// <param name="durability"></param>
     /// <returns></returns>
     /// <exception cref="KahunaException"></exception>
-    public async Task<KahunaLock> GetOrCreateLock(string resource, TimeSpan expiry, TimeSpan wait, TimeSpan retry, LockDurability durability = LockDurability.Persistent)
+    public async Task<KahunaLock> GetOrCreateLock(string resource, TimeSpan expiry, TimeSpan wait, TimeSpan retry, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {        
         if (wait == TimeSpan.Zero)
             return new(this, resource, await SingleTimeTryAcquireLock(resource, expiry, durability).ConfigureAwait(false));
@@ -165,7 +166,7 @@ public class KahunaClient
     /// <param name="expiry"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KahunaLock> GetOrCreateLock(string resource, TimeSpan expiry, LockDurability durability = LockDurability.Persistent)
+    public async Task<KahunaLock> GetOrCreateLock(string resource, TimeSpan expiry, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {
         return new(this, resource, await SingleTimeTryAcquireLock(resource, expiry, durability).ConfigureAwait(false));
     }
@@ -178,10 +179,11 @@ public class KahunaClient
     /// <param name="owner"></param>
     /// <param name="duration"></param>
     /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<(bool, long)> TryExtend(string resource, byte[] owner, TimeSpan duration, LockDurability durability = LockDurability.Persistent)
+    public async Task<(bool, long)> TryExtend(string resource, byte[] owner, TimeSpan duration, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        return await communication.TryExtend(GetRoundRobinUrl(), resource, owner, (int)duration.TotalMilliseconds, durability).ConfigureAwait(false);
+        return await communication.TryExtend(GetRoundRobinUrl(), resource, owner, (int)duration.TotalMilliseconds, durability, cancellationToken).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -193,9 +195,9 @@ public class KahunaClient
     /// <param name="durationMs"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(bool, long)> TryExtend(string resource, byte[] owner, int durationMs, LockDurability durability = LockDurability.Persistent)
+    public async Task<(bool, long)> TryExtend(string resource, byte[] owner, int durationMs, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        return await communication.TryExtend(GetRoundRobinUrl(), resource, owner, durationMs, durability).ConfigureAwait(false);
+        return await communication.TryExtend(GetRoundRobinUrl(), resource, owner, durationMs, durability, cancellationToken).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -207,9 +209,9 @@ public class KahunaClient
     /// <param name="durationMs"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(bool, long)> TryExtend(string resource, string owner, int durationMs, LockDurability durability = LockDurability.Persistent)
+    public async Task<(bool, long)> TryExtend(string resource, string owner, int durationMs, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        return await communication.TryExtend(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), durationMs, durability).ConfigureAwait(false);
+        return await communication.TryExtend(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), durationMs, durability, cancellationToken).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -221,9 +223,9 @@ public class KahunaClient
     /// <param name="durationMs"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(bool, long)> TryExtend(string resource, string owner, TimeSpan duration, LockDurability durability = LockDurability.Persistent)
+    public async Task<(bool, long)> TryExtend(string resource, string owner, TimeSpan duration, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        return await communication.TryExtend(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), (int)duration.TotalMilliseconds, durability).ConfigureAwait(false);
+        return await communication.TryExtend(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), (int)duration.TotalMilliseconds, durability, cancellationToken).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -233,9 +235,9 @@ public class KahunaClient
     /// <param name="owner"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<bool> Unlock(string resource, byte[] owner, LockDurability durability = LockDurability.Persistent)
+    public async Task<bool> Unlock(string resource, byte[] owner, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        return await communication.TryUnlock(GetRoundRobinUrl(), resource, owner, durability).ConfigureAwait(false);
+        return await communication.TryUnlock(GetRoundRobinUrl(), resource, owner, durability, cancellationToken).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -245,9 +247,9 @@ public class KahunaClient
     /// <param name="owner"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<bool> Unlock(string resource, string owner, LockDurability durability = LockDurability.Persistent)
+    public async Task<bool> Unlock(string resource, string owner, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        return await communication.TryUnlock(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), durability).ConfigureAwait(false);
+        return await communication.TryUnlock(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), durability, cancellationToken).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -256,9 +258,9 @@ public class KahunaClient
     /// <param name="resource"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KahunaLockInfo?> GetLockInfo(string resource, LockDurability durability = LockDurability.Persistent)
+    public async Task<KahunaLockInfo?> GetLockInfo(string resource, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        return await communication.Get(GetRoundRobinUrl(), resource, durability).ConfigureAwait(false);
+        return await communication.Get(GetRoundRobinUrl(), resource, durability, cancellationToken).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -269,9 +271,9 @@ public class KahunaClient
     /// <param name="expiryTime"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KahunaKeyValue> SetKeyValue(string key, byte[]? value, int expiryTime = 0, KeyValueFlags flags = KeyValueFlags.Set, KeyValueDurability durability = KeyValueDurability.Persistent)
+    public async Task<KahunaKeyValue> SetKeyValue(string key, byte[]? value, int expiryTime = 0, KeyValueFlags flags = KeyValueFlags.Set, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, long revision) = await communication.TrySetKeyValue(GetRoundRobinUrl(), key, value, expiryTime, flags, durability).ConfigureAwait(false);
+        (bool success, long revision) = await communication.TrySetKeyValue(GetRoundRobinUrl(), key, value, expiryTime, flags, durability, cancellationToken).ConfigureAwait(false);
         
         return new(this, key, success, revision, durability);
     }
@@ -284,9 +286,9 @@ public class KahunaClient
     /// <param name="expiryTime"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KahunaKeyValue> SetKeyValue(string key, string value, int expiryTime = 0, KeyValueFlags flags = KeyValueFlags.Set, KeyValueDurability durability = KeyValueDurability.Persistent)
+    public async Task<KahunaKeyValue> SetKeyValue(string key, string value, int expiryTime = 0, KeyValueFlags flags = KeyValueFlags.Set, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, long revision) = await communication.TrySetKeyValue(GetRoundRobinUrl(), key, Encoding.UTF8.GetBytes(value), expiryTime, flags, durability).ConfigureAwait(false);
+        (bool success, long revision) = await communication.TrySetKeyValue(GetRoundRobinUrl(), key, Encoding.UTF8.GetBytes(value), expiryTime, flags, durability, cancellationToken).ConfigureAwait(false);
         
         return new(this, key, success, revision, durability);
     }
@@ -299,9 +301,9 @@ public class KahunaClient
     /// <param name="expiryTime"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KahunaKeyValue> SetKeyValue(string key, string value, TimeSpan expiryTime, KeyValueFlags flags = KeyValueFlags.Set, KeyValueDurability durability = KeyValueDurability.Persistent)
+    public async Task<KahunaKeyValue> SetKeyValue(string key, string value, TimeSpan expiryTime, KeyValueFlags flags = KeyValueFlags.Set, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, long revision) = await communication.TrySetKeyValue(GetRoundRobinUrl(), key, Encoding.UTF8.GetBytes(value), (int)expiryTime.TotalMilliseconds, flags, durability).ConfigureAwait(false);
+        (bool success, long revision) = await communication.TrySetKeyValue(GetRoundRobinUrl(), key, Encoding.UTF8.GetBytes(value), (int)expiryTime.TotalMilliseconds, flags, durability, cancellationToken).ConfigureAwait(false);
         
         return new(this, key, success, revision, durability);
     }
@@ -315,9 +317,9 @@ public class KahunaClient
     /// <param name="expiryTime"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KahunaKeyValue> TryCompareValueAndSetKeyValue(string key, byte[] value, byte[] compareValue, int expiryTime = 30000, KeyValueDurability durability = KeyValueDurability.Persistent)
+    public async Task<KahunaKeyValue> TryCompareValueAndSetKeyValue(string key, byte[] value, byte[] compareValue, int expiryTime = 30000, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, long revision) = await communication.TryCompareValueAndSetKeyValue(GetRoundRobinUrl(), key, value, compareValue, expiryTime, durability).ConfigureAwait(false);
+        (bool success, long revision) = await communication.TryCompareValueAndSetKeyValue(GetRoundRobinUrl(), key, value, compareValue, expiryTime, durability, cancellationToken).ConfigureAwait(false);
         
         return new(this, key, success, revision, durability);
     }
@@ -331,7 +333,7 @@ public class KahunaClient
     /// <param name="expiryTime"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KahunaKeyValue> TryCompareValueAndSetKeyValue(string key, string value, string compareValue, int expiryTime = 0, KeyValueDurability durability = KeyValueDurability.Persistent)
+    public async Task<KahunaKeyValue> TryCompareValueAndSetKeyValue(string key, string value, string compareValue, int expiryTime = 0, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
         (bool success, long revision) = await communication.TryCompareValueAndSetKeyValue(
             GetRoundRobinUrl(), 
@@ -339,7 +341,8 @@ public class KahunaClient
             Encoding.UTF8.GetBytes(value), 
             Encoding.UTF8.GetBytes(compareValue), 
             expiryTime, 
-            durability
+            durability,
+            cancellationToken
         ).ConfigureAwait(false);
         
         return new(this, key, success, revision, durability);
@@ -354,7 +357,7 @@ public class KahunaClient
     /// <param name="expiryTime"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KahunaKeyValue> TryCompareRevisionAndSetKeyValue(string key, byte[]? value, long compareRevision, int expiryTime = 0, KeyValueDurability durability = KeyValueDurability.Persistent)
+    public async Task<KahunaKeyValue> TryCompareRevisionAndSetKeyValue(string key, byte[]? value, long compareRevision, int expiryTime = 0, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
         (bool success, long revision) = await communication.TryCompareRevisionAndSetKeyValue(
             GetRoundRobinUrl(), 
@@ -362,7 +365,8 @@ public class KahunaClient
             value, 
             compareRevision, 
             expiryTime, 
-            durability
+            durability,
+            cancellationToken
         ).ConfigureAwait(false);
         
         return new(this, key, success, revision, durability);
@@ -377,7 +381,7 @@ public class KahunaClient
     /// <param name="expiryTime"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KahunaKeyValue> TryCompareRevisionAndSetKeyValue(string key, string value, long compareRevision, int expiryTime = 0, KeyValueDurability durability = KeyValueDurability.Persistent)
+    public async Task<KahunaKeyValue> TryCompareRevisionAndSetKeyValue(string key, string value, long compareRevision, int expiryTime = 0, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
         (bool success, long revision) = await communication.TryCompareRevisionAndSetKeyValue(
             GetRoundRobinUrl(), 
@@ -385,7 +389,8 @@ public class KahunaClient
             Encoding.UTF8.GetBytes(value), 
             compareRevision, 
             expiryTime, 
-            durability
+            durability,
+            cancellationToken
         ).ConfigureAwait(false);
         
         return new(this, key, success, revision, durability);
@@ -399,9 +404,9 @@ public class KahunaClient
     /// <param name="expiry"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KahunaKeyValue> SetKeyValue(string key, byte[]? value, TimeSpan expiry, KeyValueFlags flags = KeyValueFlags.Set, KeyValueDurability durability = KeyValueDurability.Persistent)
+    public async Task<KahunaKeyValue> SetKeyValue(string key, byte[]? value, TimeSpan expiry, KeyValueFlags flags = KeyValueFlags.Set, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        return await SetKeyValue(key, value, (int)expiry.TotalMilliseconds, flags, durability).ConfigureAwait(false);
+        return await SetKeyValue(key, value, (int)expiry.TotalMilliseconds, flags, durability, cancellationToken).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -410,9 +415,9 @@ public class KahunaClient
     /// <param name="key"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KahunaKeyValue> GetKeyValue(string key, KeyValueDurability durability = KeyValueDurability.Persistent)
+    public async Task<KahunaKeyValue> GetKeyValue(string key, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, byte[]? value, long revision) = await communication.TryGetKeyValue(GetRoundRobinUrl(), key, -1, durability).ConfigureAwait(false);
+        (bool success, byte[]? value, long revision) = await communication.TryGetKeyValue(GetRoundRobinUrl(), key, -1, durability, cancellationToken).ConfigureAwait(false);
         
         return new(this, key, success, value, revision, durability);
     }
@@ -423,9 +428,9 @@ public class KahunaClient
     /// <param name="key"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KahunaKeyValue> ExistsKeyValue(string key, KeyValueDurability durability = KeyValueDurability.Persistent)
+    public async Task<KahunaKeyValue> ExistsKeyValue(string key, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, long revision) = await communication.TryExistsKeyValue(GetRoundRobinUrl(), key, -1, durability).ConfigureAwait(false);
+        (bool success, long revision) = await communication.TryExistsKeyValue(GetRoundRobinUrl(), key, -1, durability, cancellationToken).ConfigureAwait(false);
         
         return new(this, key, success, revision, durability);
     }
@@ -437,9 +442,9 @@ public class KahunaClient
     /// <param name="revision"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KahunaKeyValue> GetKeyValueRevision(string key, long revision, KeyValueDurability durability = KeyValueDurability.Persistent)
+    public async Task<KahunaKeyValue> GetKeyValueRevision(string key, long revision, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, byte[]? value, long returnRevision) = await communication.TryGetKeyValue(GetRoundRobinUrl(), key, revision, durability).ConfigureAwait(false);
+        (bool success, byte[]? value, long returnRevision) = await communication.TryGetKeyValue(GetRoundRobinUrl(), key, revision, durability, cancellationToken).ConfigureAwait(false);
         
         return new(this, key, success, value, returnRevision, durability);
     }
@@ -450,9 +455,9 @@ public class KahunaClient
     /// <param name="key"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KahunaKeyValue> DeleteKeyValue(string key, KeyValueDurability durability = KeyValueDurability.Persistent)
+    public async Task<KahunaKeyValue> DeleteKeyValue(string key, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, long revision) = await communication.TryDeleteKeyValue(GetRoundRobinUrl(), key, durability).ConfigureAwait(false);
+        (bool success, long revision) = await communication.TryDeleteKeyValue(GetRoundRobinUrl(), key, durability, cancellationToken).ConfigureAwait(false);
         
         return new(this, key, success, revision, durability);
     }
@@ -464,9 +469,9 @@ public class KahunaClient
     /// <param name="expiresMs"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KahunaKeyValue> ExtendKeyValue(string key, int expiresMs, KeyValueDurability durability = KeyValueDurability.Persistent)
+    public async Task<KahunaKeyValue> ExtendKeyValue(string key, int expiresMs, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, long revision) = await communication.TryExtendKeyValue(GetRoundRobinUrl(), key, expiresMs, durability).ConfigureAwait(false);
+        (bool success, long revision) = await communication.TryExtendKeyValue(GetRoundRobinUrl(), key, expiresMs, durability, cancellationToken).ConfigureAwait(false);
         
         return new(this, key, success, revision, durability);
     }
@@ -478,9 +483,9 @@ public class KahunaClient
     /// <param name="expiresMs"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KahunaKeyValue> ExtendKeyValue(string key, TimeSpan expiresMs, KeyValueDurability durability = KeyValueDurability.Persistent)
+    public async Task<KahunaKeyValue> ExtendKeyValue(string key, TimeSpan expiresMs, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, long revision) = await communication.TryExtendKeyValue(GetRoundRobinUrl(), key, (int)expiresMs.TotalMilliseconds, durability).ConfigureAwait(false);
+        (bool success, long revision) = await communication.TryExtendKeyValue(GetRoundRobinUrl(), key, (int)expiresMs.TotalMilliseconds, durability, cancellationToken).ConfigureAwait(false);
         
         return new(this, key, success, revision, durability);
     }
@@ -493,9 +498,9 @@ public class KahunaClient
     /// <param name="script"></param>
     /// <param name="hash"></param>
     /// <returns></returns>
-    public async Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransaction(string script, string? hash = null, List<KeyValueParameter>? parameters = null)
+    public async Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransaction(string script, string? hash = null, List<KeyValueParameter>? parameters = null, CancellationToken cancellationToken = default)
     {
-        return await communication.TryExecuteKeyValueTransaction(GetRoundRobinUrl(), Encoding.UTF8.GetBytes(script), hash, parameters).ConfigureAwait(false);
+        return await communication.TryExecuteKeyValueTransaction(GetRoundRobinUrl(), Encoding.UTF8.GetBytes(script), hash, parameters, cancellationToken).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -507,9 +512,9 @@ public class KahunaClient
     /// <param name="hash"></param>
     /// <param name="parameters"></param>
     /// <returns></returns>
-    public async Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransaction(byte[] script, string? hash = null, List<KeyValueParameter>? parameters = null)
+    public async Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransaction(byte[] script, string? hash = null, List<KeyValueParameter>? parameters = null, CancellationToken cancellationToken = default)
     {
-        return await communication.TryExecuteKeyValueTransaction(GetRoundRobinUrl(), script, hash, parameters).ConfigureAwait(false);
+        return await communication.TryExecuteKeyValueTransaction(GetRoundRobinUrl(), script, hash, parameters, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -518,9 +523,9 @@ public class KahunaClient
     /// <param name="prefixKey"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(bool, List<string>)> ScanAllByPrefix(string prefixKey, KeyValueDurability durability)
+    public async Task<(bool, List<string>)> ScanAllByPrefix(string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken = default)
     {
-        return await communication.ScanAllByPrefix(GetRoundRobinUrl(), prefixKey, durability).ConfigureAwait(false);
+        return await communication.ScanAllByPrefix(GetRoundRobinUrl(), prefixKey, durability, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

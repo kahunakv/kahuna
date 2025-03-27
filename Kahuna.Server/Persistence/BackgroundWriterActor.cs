@@ -13,8 +13,8 @@ namespace Kahuna.Server.Persistence;
 public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 {
     private readonly IRaft raft;
-    
-    private readonly IActorRef<RoundRobinActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter;
+
+    private readonly IPersistence persistence;
 
     private readonly ILogger<IKahuna> logger;
     
@@ -26,17 +26,19 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     
     private readonly Stopwatch stopwatch = Stopwatch.StartNew();
     
+    private readonly CustomIOThreadPool threadPool;
+    
     private bool pendingCheckpoint = true;
     
     public BackgroundWriterActor(
         IActorContext<BackgroundWriterActor, BackgroundWriteRequest> context,
         IRaft raft,
-        IActorRef<RoundRobinActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter,
+        IPersistence persistence,
         ILogger<IKahuna> logger
     )
     {
         this.raft = raft;
-        this.persistenceActorRouter = persistenceActorRouter;
+        this.persistence = persistence;
         this.logger = logger;
         
         context.ActorSystem.StartPeriodicTimer(
@@ -45,7 +47,10 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             new(BackgroundWriteType.Flush),
             TimeSpan.FromSeconds(1),
             TimeSpan.FromMilliseconds(200)
-        );    
+        );
+        
+        threadPool = new(4);
+        threadPool.Start();
     }
     
     public async Task Receive(BackgroundWriteRequest message)
@@ -95,22 +100,30 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 
         List<PersistenceRequestItem> items = [];
                 
-        while (dirtyLocks.TryDequeue(out BackgroundWriteRequest? keyValueRequest))
+        while (dirtyLocks.TryDequeue(out BackgroundWriteRequest? lockRequest))
         {
-            if (keyValueRequest.PartitionId >= 0)
-                partitionIds.Add(keyValueRequest.PartitionId);
+            if (lockRequest.PartitionId >= 0)
+                partitionIds.Add(lockRequest.PartitionId);
             
             items.Add(new(
-                keyValueRequest.Key, 
-                keyValueRequest.Value, 
-                keyValueRequest.Revision, 
-                keyValueRequest.Expires.L, 
-                keyValueRequest.Expires.C, 
-                keyValueRequest.State
+                lockRequest.Key, 
+                lockRequest.Value, 
+                lockRequest.Revision, 
+                lockRequest.Expires.L, 
+                lockRequest.Expires.C, 
+                lockRequest.State
             ));
         }
+
+        await threadPool.EnqueueTask(() =>
+        {
+            // Simulate a long-running IO operation
+            persistence.StoreLocks(items);
+            
+            return "Result 1";
+        });
         
-        PersistenceResponse? response = await persistenceActorRouter.Ask(new(PersistenceRequestType.StoreLock, items));
+        /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(PersistenceRequestType.StoreLock, items));
         
         if (response == null)
         {
@@ -122,7 +135,7 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         {
             logger.LogError("Coundn't store batch of {Count} locks", items.Count);
             return;
-        }
+        }*/
         
         logger.LogDebug("Successfully stored batch of {Count} locks in {Elapsed}ms", items.Count, stopwatch.ElapsedMilliseconds);
         
@@ -153,7 +166,17 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             ));
         }
         
-        PersistenceResponse? response = await persistenceActorRouter.Ask(new(PersistenceRequestType.StoreKeyValue, items));
+        await threadPool.EnqueueTask(() =>
+        {
+            // Simulate a long-running IO operation
+            persistence.StoreKeyValues(items);
+            
+            //persistence.StoreKeyValue(items);
+            
+            return "Result 1";
+        });
+        
+        /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(PersistenceRequestType.StoreKeyValue, items));
 
         if (response == null)
         {
@@ -165,7 +188,7 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         {
             logger.LogError("Coundn't store batch of {Count} key-values", items.Count);
             return;
-        }
+        }*/
         
         logger.LogDebug("Successfully stored batch of {Count} key-values in {Elapsed}ms", items.Count, stopwatch.ElapsedMilliseconds);
         

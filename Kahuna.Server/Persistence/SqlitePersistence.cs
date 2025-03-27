@@ -1,5 +1,6 @@
 
 using DotNext.Threading;
+using DotNext.Threading.Tasks;
 using Kahuna.Server.Locks;
 using Kommander;
 using Kahuna.Server.KeyValues;
@@ -13,7 +14,7 @@ public class SqlitePersistence : IPersistence
     
     private readonly SemaphoreSlim semaphore = new(1, 1);
     
-    private readonly Dictionary<int, (AsyncReaderWriterLock, SqliteConnection)> connections = new();
+    private readonly Dictionary<int, (ReaderWriterLock, SqliteConnection)> connections = new();
     
     private readonly string path;
     
@@ -25,21 +26,21 @@ public class SqlitePersistence : IPersistence
         this.dbRevision = dbRevision;
     }
     
-    private async ValueTask<(AsyncReaderWriterLock readerWriterLock, SqliteConnection connection)> TryOpenDatabase(string resource)
+    private (ReaderWriterLock readerWriterLock, SqliteConnection connection) TryOpenDatabase(string resource)
     {
         int shard = (int)HashUtils.ConsistentHash(resource, MaxShards);
         
-        return await TryOpenDatabaseByShard(shard);
+        return TryOpenDatabaseByShard(shard);
     }
     
-    private async ValueTask<(AsyncReaderWriterLock readerWriterLock, SqliteConnection connection)> TryOpenDatabaseByShard(int shard)
+    private (ReaderWriterLock readerWriterLock, SqliteConnection connection) TryOpenDatabaseByShard(int shard)
     {
-        if (connections.TryGetValue(shard, out (AsyncReaderWriterLock readerWriterLock, SqliteConnection connection) sqlConnection))
+        if (connections.TryGetValue(shard, out (ReaderWriterLock readerWriterLock, SqliteConnection connection) sqlConnection))
             return sqlConnection;
         
         try
         {
-            await semaphore.WaitAsync();
+            semaphore.Wait();
 
             if (connections.TryGetValue(shard, out sqlConnection))
                 return sqlConnection;
@@ -60,8 +61,8 @@ public class SqlitePersistence : IPersistence
             );
             """;
             
-            await using SqliteCommand command1 = new(createTableQuery, connection);
-            await command1.ExecuteNonQueryAsync();
+            using SqliteCommand command1 = new(createTableQuery, connection);
+            command1.ExecuteNonQuery();
             
             const string createTableQuery2 = """
             CREATE TABLE IF NOT EXISTS keys (
@@ -75,14 +76,14 @@ public class SqlitePersistence : IPersistence
             );
             """;
             
-            await using SqliteCommand command2 = new(createTableQuery2, connection);
-            await command2.ExecuteNonQueryAsync();
+            using SqliteCommand command2 = new(createTableQuery2, connection);
+            command2.ExecuteNonQuery();
             
             const string pragmasQuery = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY;";
-            await using SqliteCommand command3 = new(pragmasQuery, connection);
-            await command3.ExecuteNonQueryAsync();
+            using SqliteCommand command3 = new(pragmasQuery, connection);
+            command3.ExecuteNonQuery();
 
-            AsyncReaderWriterLock readerWriterLock = new();
+            ReaderWriterLock readerWriterLock = new();
             
             connections.Add(shard, (readerWriterLock, connection));
 
@@ -94,17 +95,17 @@ public class SqlitePersistence : IPersistence
         }
     }
     
-    public async Task<bool> StoreLocks(List<PersistenceRequestItem> items)
+    public bool StoreLocks(List<PersistenceRequestItem> items)
     {
         try
         {
             foreach (PersistenceRequestItem item in items)
             {
-                (AsyncReaderWriterLock readerWriterLock, SqliteConnection connection) = await TryOpenDatabase(item.Key);
+                (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabase(item.Key);
 
                 try
                 {
-                    await readerWriterLock.EnterWriteLockAsync(TimeSpan.FromSeconds(5));
+                    readerWriterLock.AcquireWriterLock(TimeSpan.FromSeconds(5));
 
                     const string insert = """
                       INSERT INTO locks (resource, owner, expiresLogical, expiresCounter, fencingToken, state) 
@@ -113,7 +114,7 @@ public class SqlitePersistence : IPersistence
                       fencingToken=@fencingToken, state=@state;
                       """;
 
-                    await using SqliteCommand command = new(insert, connection);
+                    using SqliteCommand command = new(insert, connection);
 
                     command.Parameters.AddWithValue("@resource", item.Key);
 
@@ -127,13 +128,13 @@ public class SqlitePersistence : IPersistence
                     command.Parameters.AddWithValue("@fencingToken", item.Revision);
                     command.Parameters.AddWithValue("@state", item.State);
 
-                    await command.ExecuteNonQueryAsync();
+                    command.ExecuteNonQuery();
 
                     return true;
                 }
                 finally
                 {
-                    readerWriterLock.Release();
+                    readerWriterLock.ReleaseWriterLock();
                 }
             }
         }
@@ -150,18 +151,17 @@ public class SqlitePersistence : IPersistence
         return false;
     }
     
-    public async Task<bool> StoreKeyValues(List<PersistenceRequestItem> items)
+    public bool StoreKeyValues(List<PersistenceRequestItem> items)
     {
         try
         {
             foreach (PersistenceRequestItem item in items)
             {
-
-                (AsyncReaderWriterLock readerWriterLock, SqliteConnection connection) = await TryOpenDatabase(item.Key);
+                (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabase(item.Key);
 
                 try
                 {
-                    await readerWriterLock.EnterWriteLockAsync(TimeSpan.FromSeconds(5));
+                    readerWriterLock.AcquireWriterLock(TimeSpan.FromSeconds(5));
 
                     const string insert = """
                       INSERT INTO keys (key, revision, value, expiresLogical, expiresCounter, state) 
@@ -169,11 +169,11 @@ public class SqlitePersistence : IPersistence
                       ON CONFLICT(key, revision) DO UPDATE SET value=@value, expiresLogical=@expiresLogical, expiresCounter=@expiresCounter, state=@state;
                       """;
 
-                    await using SqliteTransaction transaction = connection.BeginTransaction();
+                    using SqliteTransaction transaction = connection.BeginTransaction();
 
                     try
                     {
-                        await using SqliteCommand command = new(insert, connection);
+                        using SqliteCommand command = new(insert, connection);
 
                         command.Transaction = transaction;
 
@@ -189,9 +189,9 @@ public class SqlitePersistence : IPersistence
                         command.Parameters.AddWithValue("@revision", item.Revision);
                         command.Parameters.AddWithValue("@state", item.State);
 
-                        await command.ExecuteNonQueryAsync();
+                        command.ExecuteNonQuery();
 
-                        await using SqliteCommand command2 = new(insert, connection);
+                        using SqliteCommand command2 = new(insert, connection);
 
                         command2.Transaction = transaction;
 
@@ -207,7 +207,7 @@ public class SqlitePersistence : IPersistence
                         command2.Parameters.AddWithValue("@revision", -1);
                         command2.Parameters.AddWithValue("@state", item.State);
 
-                        await command2.ExecuteNonQueryAsync();
+                        command2.ExecuteNonQuery();
 
                         transaction.Commit();
 
@@ -221,7 +221,7 @@ public class SqlitePersistence : IPersistence
                 }
                 finally
                 {
-                    readerWriterLock.Release();
+                    readerWriterLock.ReleaseWriterLock();
                 }
             }
         }
@@ -238,22 +238,22 @@ public class SqlitePersistence : IPersistence
         return false;
     }
 
-    public async Task<LockContext?> GetLock(string resource)
+    public LockContext? GetLock(string resource)
     {
         try
         {
-            (AsyncReaderWriterLock readerWriterLock, SqliteConnection connection) = await TryOpenDatabase(resource);
+            (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabase(resource);
             
             try
             {
-                await readerWriterLock.EnterReadLockAsync(TimeSpan.FromSeconds(5));
+                readerWriterLock.AcquireReaderLock(TimeSpan.FromSeconds(5));
 
                 const string query = "SELECT owner, expiresLogical, expiresCounter, fencingToken, state FROM locks WHERE resource = @resource";
-                await using SqliteCommand command = new(query, connection);
+                using SqliteCommand command = new(query, connection);
 
                 command.Parameters.AddWithValue("@resource", resource);
 
-                await using SqliteDataReader reader = await command.ExecuteReaderAsync();
+                using SqliteDataReader reader = command.ExecuteReader();
 
                 while (reader.Read())
                     return new()
@@ -265,7 +265,7 @@ public class SqlitePersistence : IPersistence
             }
             finally
             {
-                readerWriterLock.Release();
+                readerWriterLock.ReleaseReaderLock();
             }
         }
         catch (Exception ex)
@@ -276,22 +276,22 @@ public class SqlitePersistence : IPersistence
         return null;
     }
 
-    public async Task<KeyValueContext?> GetKeyValue(string keyName)
+    public KeyValueContext? GetKeyValue(string keyName)
     {
         try
         {
-            (AsyncReaderWriterLock readerWriterLock, SqliteConnection connection) = await TryOpenDatabase(keyName);
+            (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabase(keyName);
 
             try
             {
-                await readerWriterLock.EnterReadLockAsync(TimeSpan.FromSeconds(5));
+                readerWriterLock.AcquireReadLock(TimeSpan.FromSeconds(5));
 
                 const string query = "SELECT value, revision, expiresLogical, expiresCounter, state FROM keys WHERE key = @key AND revision = -1";
-                await using SqliteCommand command = new(query, connection);
+                using SqliteCommand command = new(query, connection);
 
                 command.Parameters.AddWithValue("@key", keyName);
 
-                await using SqliteDataReader reader = await command.ExecuteReaderAsync();
+                using SqliteDataReader reader = command.ExecuteReader();
 
                 while (reader.Read())
                     return new()
@@ -303,7 +303,7 @@ public class SqlitePersistence : IPersistence
             }
             finally
             {
-                readerWriterLock.Release();
+                readerWriterLock.ReleaseReaderLock();
             }
         }
         catch (Exception ex)
@@ -314,23 +314,23 @@ public class SqlitePersistence : IPersistence
         return null;
     }
     
-    public async Task<KeyValueContext?> GetKeyValueRevision(string keyName, long revision)
+    public KeyValueContext? GetKeyValueRevision(string keyName, long revision)
     {
         try
         {
-            (AsyncReaderWriterLock readerWriterLock, SqliteConnection connection) = await TryOpenDatabase(keyName);
+            (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabase(keyName);
 
             try
             {
-                await readerWriterLock.EnterReadLockAsync(TimeSpan.FromSeconds(5));
+                readerWriterLock.AcquireReaderLock(TimeSpan.FromSeconds(5));
 
                 const string query = "SELECT value, revision, expiresLogical, expiresCounter, state FROM keys WHERE key = @key AND revision = @revision";
-                await using SqliteCommand command = new(query, connection);
+                using SqliteCommand command = new(query, connection);
 
                 command.Parameters.AddWithValue("@key", keyName);
                 command.Parameters.AddWithValue("@revision", revision);
 
-                await using SqliteDataReader reader = await command.ExecuteReaderAsync();
+                using SqliteDataReader reader = command.ExecuteReader();
 
                 while (reader.Read())
                     return new()
@@ -343,7 +343,7 @@ public class SqlitePersistence : IPersistence
             }
             finally
             {
-                readerWriterLock.Release();
+                readerWriterLock.ReleaseReaderLock();
             }
         }
         catch (Exception ex)
@@ -354,22 +354,22 @@ public class SqlitePersistence : IPersistence
         return null;
     }
     
-    public async IAsyncEnumerable<(string, ReadOnlyKeyValueContext)> GetKeyValueByPrefix(string prefixKeyName)
+    public IEnumerable<(string, ReadOnlyKeyValueContext)> GetKeyValueByPrefix(string prefixKeyName)
     {
         for (int i = 0; i < MaxShards; i++)
         {
-            (AsyncReaderWriterLock readerWriterLock, SqliteConnection connection) = await TryOpenDatabaseByShard(i);
+            (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(i);
 
             try
             {
-                await readerWriterLock.EnterReadLockAsync(TimeSpan.FromSeconds(5));
+                readerWriterLock.AcquireReaderLock(TimeSpan.FromSeconds(5));
 
                 const string query = "SELECT key, value, revision, expiresLogical, expiresCounter, state FROM keys WHERE key LIKE @key";
-                await using SqliteCommand command = new(query, connection);
+                using SqliteCommand command = new(query, connection);
 
                 command.Parameters.AddWithValue("@key", prefixKeyName + "%");
 
-                await using SqliteDataReader reader = await command.ExecuteReaderAsync();
+                using SqliteDataReader reader = command.ExecuteReader();
 
                 while (reader.Read())
                     yield return (reader.IsDBNull(0) ? "" : reader.GetString(0), new(
@@ -383,7 +383,7 @@ public class SqlitePersistence : IPersistence
             }
             finally
             {
-                readerWriterLock.Release();
+                readerWriterLock.ReleaseReaderLock();
             }
         }
     }

@@ -31,7 +31,7 @@ internal sealed class TryGetHandler : BaseHandler
         {
             if (message.Durability == KeyValueDurability.Persistent)
             {
-                KeyValueContext? revisionContext = await persistence.GetKeyValueRevision(message.Key, message.CompareRevision);
+                KeyValueContext? revisionContext = persistence.GetKeyValueRevision(message.Key, message.CompareRevision);
                 if (revisionContext is null)
                     return KeyValueStaticResponses.DoesNotExistContextResponse;
 

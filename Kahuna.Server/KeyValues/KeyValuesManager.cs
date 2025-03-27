@@ -30,8 +30,6 @@ public sealed class KeyValuesManager
 
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
 
-    private readonly IActorRef<RoundRobinActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter;
-
     private readonly IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> ephemeralKeyValuesRouter;
     
     private readonly IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> persistentKeyValuesRouter;
@@ -46,13 +44,13 @@ public sealed class KeyValuesManager
     /// <param name="actorSystem"></param>
     /// <param name="raft"></param>
     /// <param name="persistence"></param>
+    /// <param name="backgroundWriter"></param>
     /// <param name="configuration"></param>
     /// <param name="logger"></param>
     public KeyValuesManager(
         ActorSystem actorSystem, 
         IRaft raft, 
         IPersistence persistence, 
-        IActorRef<RoundRobinActor<PersistenceActor, PersistenceRequest, PersistenceResponse>, PersistenceRequest, PersistenceResponse> persistenceActorRouter,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         KahunaConfiguration configuration, 
         ILogger<IKahuna> logger
@@ -64,7 +62,6 @@ public sealed class KeyValuesManager
         this.logger = logger;
 
         this.persistence = persistence;
-        this.persistenceActorRouter = persistenceActorRouter;
         
         ephemeralKeyValuesRouter = GetEphemeralRouter(configuration);
         persistentKeyValuesRouter = GetConsistentRouter(configuration);

@@ -73,7 +73,7 @@ public class RestCommunication : IKahunaCommunication
         };
     }
     
-    public async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string url, string resource, byte[] owner, int expiryTime, LockDurability durability)
+    public async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string url, string resource, byte[] owner, int expiryTime, LockDurability durability, CancellationToken cancellationToken)
     {
         KahunaLockRequest request = new()
         {
@@ -97,9 +97,8 @@ public class RestCommunication : IKahunaCommunication
                 .AppendPathSegments("v1/locks/try-lock")
                 .WithHeader("Accept", "application/json")
                 .WithHeader("Content-Type", "application/json")
-                .WithTimeout(5)
                 .WithSettings(o => o.HttpVersion = "2.0")
-                .PostStringAsync(payload)
+                .PostStringAsync(payload, cancellationToken: cancellationToken)
                 .ReceiveJson<KahunaLockResponse>()).ConfigureAwait(false);
 
             if (response is null)
@@ -116,7 +115,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to lock", response.Type);
     }
     
-    public async Task<bool> TryUnlock(string url, string resource, byte[] owner, LockDurability durability)
+    public async Task<bool> TryUnlock(string url, string resource, byte[] owner, LockDurability durability, CancellationToken cancellationToken)
     {
         KahunaLockRequest request = new()
         {
@@ -139,9 +138,8 @@ public class RestCommunication : IKahunaCommunication
                 .AppendPathSegments("v1/locks/try-unlock")
                 .WithHeader("Accept", "application/json")
                 .WithHeader("Content-Type", "application/json")
-                .WithTimeout(5)
                 .WithSettings(o => o.HttpVersion = "2.0")
-                .PostStringAsync(payload)
+                .PostStringAsync(payload, cancellationToken: cancellationToken)
                 .ReceiveJson<KahunaLockResponse>())
                 .ConfigureAwait(false);
 
@@ -159,7 +157,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to unlock", response.Type);
     }
     
-    public async Task<(bool, long)> TryExtend(string url, string resource, byte[] owner, int expiryTime, LockDurability durability)
+    public async Task<(bool, long)> TryExtend(string url, string resource, byte[] owner, int expiryTime, LockDurability durability, CancellationToken cancellationToken)
     {
         KahunaLockRequest request = new()
         {
@@ -183,9 +181,8 @@ public class RestCommunication : IKahunaCommunication
                     .AppendPathSegments("v1/locks/try-extend")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
-                    .WithTimeout(5)
                     .WithSettings(o => o.HttpVersion = "2.0")
-                    .PostStringAsync(payload)
+                    .PostStringAsync(payload, cancellationToken: cancellationToken)
                     .ReceiveJson<KahunaLockResponse>())
             .ConfigureAwait(false);
             
@@ -200,7 +197,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to extend lock", response.Type);
     }
     
-    public async Task<KahunaLockInfo?> Get(string url, string resource, LockDurability durability)
+    public async Task<KahunaLockInfo?> Get(string url, string resource, LockDurability durability, CancellationToken cancellationToken)
     {
         KahunaGetLockRequest request = new()
         {
@@ -222,9 +219,8 @@ public class RestCommunication : IKahunaCommunication
                         .AppendPathSegments("v1/locks/get-info")
                         .WithHeader("Accept", "application/json")
                         .WithHeader("Content-Type", "application/json")
-                        .WithTimeout(5)
                         .WithSettings(o => o.HttpVersion = "2.0")
-                        .PostStringAsync(payload)
+                        .PostStringAsync(payload, cancellationToken: cancellationToken)
                         .ReceiveJson<KahunaGetLockResponse>())
                 .ConfigureAwait(false);
 
@@ -239,7 +235,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to get lock information", response.Type);
     }
 
-    public async Task<(bool, long)> TrySetKeyValue(string url, string key, byte[]? value, int expiryTime, KeyValueFlags flags, KeyValueDurability durability)
+    public async Task<(bool, long)> TrySetKeyValue(string url, string key, byte[]? value, int expiryTime, KeyValueFlags flags, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         KahunaSetKeyValueRequest request = new()
         {
@@ -264,10 +260,10 @@ public class RestCommunication : IKahunaCommunication
                     .AppendPathSegments("v1/kv/try-set")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
-                    .WithTimeout(5)
                     .WithSettings(o => o.HttpVersion = "2.0")
-                    .PostStringAsync(payload)
-                    .ReceiveJson<KahunaSetKeyValueResponse>()).ConfigureAwait(false);
+                    .PostStringAsync(payload, cancellationToken: cancellationToken)
+                    .ReceiveJson<KahunaSetKeyValueResponse>())
+                    .ConfigureAwait(false);
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -283,7 +279,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value: " + response.Type, response.Type);
     }
 
-    public async Task<(bool, long)> TryCompareValueAndSetKeyValue(string url, string key, byte[]? value, byte[]? compareValue, int expiryTime, KeyValueDurability durability)
+    public async Task<(bool, long)> TryCompareValueAndSetKeyValue(string url, string key, byte[]? value, byte[]? compareValue, int expiryTime, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         KahunaSetKeyValueRequest request = new()
         {
@@ -309,10 +305,10 @@ public class RestCommunication : IKahunaCommunication
                     .AppendPathSegments("v1/kv/try-set")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
-                    .WithTimeout(5)
                     .WithSettings(o => o.HttpVersion = "2.0")
-                    .PostStringAsync(payload)
-                    .ReceiveJson<KahunaSetKeyValueResponse>()).ConfigureAwait(false);
+                    .PostStringAsync(payload, cancellationToken: cancellationToken)
+                    .ReceiveJson<KahunaSetKeyValueResponse>())
+                    .ConfigureAwait(false);
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -328,7 +324,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value: " + response.Type, response.Type);
     }
 
-    public async Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string url, string key, byte[]? value, long compareRevision, int expiryTime, KeyValueDurability durability)
+    public async Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string url, string key, byte[]? value, long compareRevision, int expiryTime, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         KahunaSetKeyValueRequest request = new()
         {
@@ -354,10 +350,10 @@ public class RestCommunication : IKahunaCommunication
                     .AppendPathSegments("v1/kv/try-set")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
-                    .WithTimeout(5)
                     .WithSettings(o => o.HttpVersion = "2.0")
-                    .PostStringAsync(payload)
-                    .ReceiveJson<KahunaSetKeyValueResponse>()).ConfigureAwait(false);
+                    .PostStringAsync(payload, cancellationToken: cancellationToken)
+                    .ReceiveJson<KahunaSetKeyValueResponse>())
+                    .ConfigureAwait(false);
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -373,7 +369,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value: " + response.Type, response.Type);
     }
 
-    public async Task<(bool, byte[]?, long)> TryGetKeyValue(string url, string key, long revision, KeyValueDurability durability)
+    public async Task<(bool, byte[]?, long)> TryGetKeyValue(string url, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         KahunaGetKeyValueRequest request = new()
         {
@@ -396,10 +392,10 @@ public class RestCommunication : IKahunaCommunication
                     .AppendPathSegments("v1/kv/try-get")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
-                    .WithTimeout(5)
                     .WithSettings(o => o.HttpVersion = "2.0")
-                    .PostStringAsync(payload)
-                    .ReceiveJson<KahunaGetKeyValueResponse>()).ConfigureAwait(false);
+                    .PostStringAsync(payload, cancellationToken: cancellationToken)
+                    .ReceiveJson<KahunaGetKeyValueResponse>())
+                    .ConfigureAwait(false);
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -415,7 +411,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to get key/value: " + response.Type, response.Type);
     }
     
-    public async Task<(bool, long)> TryExistsKeyValue(string url, string key, long revision, KeyValueDurability durability)
+    public async Task<(bool, long)> TryExistsKeyValue(string url, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         KahunaExistsKeyValueRequest request = new()
         {
@@ -438,10 +434,10 @@ public class RestCommunication : IKahunaCommunication
                     .AppendPathSegments("v1/kv/try-exists")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
-                    .WithTimeout(5)
                     .WithSettings(o => o.HttpVersion = "2.0")
-                    .PostStringAsync(payload)
-                    .ReceiveJson<KahunaExistsKeyValueResponse>()).ConfigureAwait(false);
+                    .PostStringAsync(payload, cancellationToken: cancellationToken)
+                    .ReceiveJson<KahunaExistsKeyValueResponse>())
+                    .ConfigureAwait(false);
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -457,7 +453,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to check if exists key/value: " + response.Type, response.Type);
     }
 
-    public async Task<(bool, long)> TryDeleteKeyValue(string url, string key, KeyValueDurability durability)
+    public async Task<(bool, long)> TryDeleteKeyValue(string url, string key, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         KahunaDeleteKeyValueRequest request = new()
         {
@@ -479,10 +475,10 @@ public class RestCommunication : IKahunaCommunication
                     .AppendPathSegments("v1/kv/try-delete")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
-                    .WithTimeout(5)
                     .WithSettings(o => o.HttpVersion = "2.0")
-                    .PostStringAsync(payload)
-                    .ReceiveJson<KahunaDeleteKeyValueResponse>()).ConfigureAwait(false);
+                    .PostStringAsync(payload, cancellationToken: cancellationToken)
+                    .ReceiveJson<KahunaDeleteKeyValueResponse>())
+                    .ConfigureAwait(false);
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -498,7 +494,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to delete key/value: " + response.Type, response.Type);
     }
 
-    public async Task<(bool, long)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueDurability durability)
+    public async Task<(bool, long)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         KahunaExtendKeyValueRequest request = new()
         {
@@ -521,10 +517,10 @@ public class RestCommunication : IKahunaCommunication
                     .AppendPathSegments("v1/kv/try-extend")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
-                    .WithTimeout(5)
                     .WithSettings(o => o.HttpVersion = "2.0")
-                    .PostStringAsync(payload)
-                    .ReceiveJson<KahunaDeleteKeyValueResponse>()).ConfigureAwait(false);
+                    .PostStringAsync(payload, cancellationToken: cancellationToken)
+                    .ReceiveJson<KahunaDeleteKeyValueResponse>())
+                    .ConfigureAwait(false);
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -540,7 +536,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to extend key/value: " + response.Type, response.Type);
     }
 
-    public async Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransaction(string url, byte[] script, string? hash, List<KeyValueParameter>? parameters)
+    public async Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransaction(string url, byte[] script, string? hash, List<KeyValueParameter>? parameters, CancellationToken cancellationToken)
     {
         KeyValueTransactionRequest request = new()
         {
@@ -564,9 +560,8 @@ public class RestCommunication : IKahunaCommunication
                     .AppendPathSegments("v1/kv/try-execute-tx")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
-                    .WithTimeout(5)
                     .WithSettings(o => o.HttpVersion = "2.0")
-                    .PostStringAsync(payload)
+                    .PostStringAsync(payload, cancellationToken: cancellationToken)
                     .ReceiveJson<KeyValueTransactionResponse>())
                     .ConfigureAwait(false);
 
@@ -600,7 +595,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to execute key/value transaction:" + response.Type, response.Type);
     }
 
-    public Task<(bool, List<string>)> ScanAllByPrefix(string url, string prefixKey, KeyValueDurability durability)
+    public Task<(bool, List<string>)> ScanAllByPrefix(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         throw new NotImplementedException();
     }

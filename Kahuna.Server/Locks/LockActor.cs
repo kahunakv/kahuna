@@ -109,7 +109,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 
             /// Try to retrieve lock context from persistence
             if (message.Durability == LockDurability.Persistent)
-                newContext = await persistence.GetLock(message.Resource);
+                newContext = persistence.GetLock(message.Resource);
 
             newContext ??= new() { FencingToken = -1 };
             
@@ -267,7 +267,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         {
             if (durability == LockDurability.Persistent)
             {
-                context = await persistence.GetLock(resource);
+                context = persistence.GetLock(resource);
                 if (context is not null)
                 {
                     context.LastUsed = await raft.HybridLogicalClock.TrySendOrLocalEvent();
@@ -291,7 +291,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     /// <param name="proposal"></param>
     /// <param name="currentTime"></param>
     /// <returns></returns>
-    private async Task<bool> PersistAndReplicateLockMessage(LockRequestType type, LockProposal proposal ,HLCTimestamp currentTime)
+    private async Task<bool> PersistAndReplicateLockMessage(LockRequestType type, LockProposal proposal, HLCTimestamp currentTime)
     {
         if (!raft.Joined)
             return true;

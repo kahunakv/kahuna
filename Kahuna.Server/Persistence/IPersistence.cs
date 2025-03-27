@@ -6,15 +6,15 @@ namespace Kahuna.Server.Persistence;
 
 public interface IPersistence
 {
-    public Task<bool> StoreLocks(List<PersistenceRequestItem> items);
+    public bool StoreLocks(List<PersistenceRequestItem> items);
 
-    public Task<bool> StoreKeyValues(List<PersistenceRequestItem> items);
+    public bool StoreKeyValues(List<PersistenceRequestItem> items);
 
-    public Task<LockContext?> GetLock(string resource);
+    public LockContext? GetLock(string resource);
     
-    public Task<KeyValueContext?> GetKeyValue(string keyName);
+    public KeyValueContext? GetKeyValue(string keyName);
     
-    public Task<KeyValueContext?> GetKeyValueRevision(string keyName, long revision);
+    public KeyValueContext? GetKeyValueRevision(string keyName, long revision);
 
-    public IAsyncEnumerable<(string, ReadOnlyKeyValueContext)> GetKeyValueByPrefix(string prefixKeyName);
+    public IEnumerable<(string, ReadOnlyKeyValueContext)> GetKeyValueByPrefix(string prefixKeyName);
 }

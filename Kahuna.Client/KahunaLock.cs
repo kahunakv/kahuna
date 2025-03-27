@@ -54,32 +54,34 @@ public sealed class KahunaLock : IAsyncDisposable
     
     /// <summary>
     /// Try to extend the lock by the specified duration.
-    /// Returns true if the lock was successfully extended, false otherwise.
+    /// Returns true if the lock was successfully extended, false otherwise. 
     /// </summary>
     /// <param name="duration"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
     /// <exception cref="KahunaException"></exception>
-    public async Task<(bool, long)> TryExtend(TimeSpan duration)
+    public async Task<(bool, long)> TryExtend(TimeSpan duration, CancellationToken cancellationToken = default)
     {
         if (!IsAcquired || owner is null)
             throw new KahunaException("Lock was not acquired", LockResponseType.Errored);
 
-        return await locks.TryExtend(resource, owner, duration, durability);
+        return await locks.TryExtend(resource, owner, duration, durability, cancellationToken);
     }
     
     /// <summary>
     /// Try to extend the lock by the specified duration.
-    /// Returns true if the lock was successfully extended, false otherwise.
+    /// Returns true if the lock was successfully extended, false otherwise. 
     /// </summary>
     /// <param name="durationMs"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
     /// <exception cref="KahunaException"></exception>
-    public async Task<(bool, long)> TryExtend(int durationMs)
+    public async Task<(bool, long)> TryExtend(int durationMs, CancellationToken cancellationToken = default)
     {
         if (!IsAcquired || owner is null)
             throw new KahunaException("Lock was not acquired", LockResponseType.Errored);
 
-        return await locks.TryExtend(resource, owner, durationMs, durability);
+        return await locks.TryExtend(resource, owner, durationMs, durability, cancellationToken);
     }
     
     /// <summary>

@@ -19,7 +19,10 @@ public class TestKeyValueTransactions
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
 
-        KahunaKeyValueTransactionResult response = await client.ExecuteKeyValueTransaction("SET `" + GetRandomKeyName() + "` 'some value'");
+        KahunaKeyValueTransactionResult response = await client.ExecuteKeyValueTransaction(
+            "SET `" + GetRandomKeyName() + "` 'some value'",
+            cancellationToken: TestContext.Current.CancellationToken
+        );
         
         Assert.Equal(KeyValueResponseType.Set, response.Type);
         Assert.Equal(0, response.Revision);
@@ -33,9 +36,11 @@ public class TestKeyValueTransactions
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
 
-        KahunaKeyValueTransactionResult response = await client.ExecuteKeyValueTransaction("SET `" + GetRandomKeyName() + "` @value", parameters: [
-            new() { Key = "@value", Value = "some value" }
-        ]);
+        KahunaKeyValueTransactionResult response = await client.ExecuteKeyValueTransaction(
+            "SET `" + GetRandomKeyName() + "` @value", 
+            parameters: [new() { Key = "@value", Value = "some value" }],
+            cancellationToken: TestContext.Current.CancellationToken
+        );
         
         Assert.Equal(KeyValueResponseType.Set, response.Type);
         Assert.Equal(0, response.Revision);
@@ -51,12 +56,12 @@ public class TestKeyValueTransactions
 
         string keyName = GetRandomKeyName();
         
-        KahunaKeyValueTransactionResult response = await client.ExecuteKeyValueTransaction("SET `" + keyName + "` 'some value'");
+        KahunaKeyValueTransactionResult response = await client.ExecuteKeyValueTransaction("SET `" + keyName + "` 'some value'", cancellationToken: TestContext.Current.CancellationToken);
         
         Assert.Equal(KeyValueResponseType.Set, response.Type);
         Assert.Equal(0, response.Revision);
 
-        response = await client.ExecuteKeyValueTransaction("GET `" + keyName + "`");
+        response = await client.ExecuteKeyValueTransaction("GET `" + keyName + "`", cancellationToken: TestContext.Current.CancellationToken);
         
         Assert.Equal(KeyValueResponseType.Get, response.Type);
         Assert.Equal(0, response.Revision);
@@ -72,12 +77,12 @@ public class TestKeyValueTransactions
 
         string keyName = GetRandomKeyName();
         
-        KahunaKeyValueTransactionResult response = await client.ExecuteKeyValueTransaction("SET `" + keyName + "` 'some value'");
+        KahunaKeyValueTransactionResult response = await client.ExecuteKeyValueTransaction("SET `" + keyName + "` 'some value'", cancellationToken: TestContext.Current.CancellationToken);
         
         Assert.Equal(KeyValueResponseType.Set, response.Type);
         Assert.Equal(0, response.Revision);
 
-        response = await client.ExecuteKeyValueTransaction("EXTEND `" + keyName + "` 1000");
+        response = await client.ExecuteKeyValueTransaction("EXTEND `" + keyName + "` 1000", cancellationToken: TestContext.Current.CancellationToken);
         
         Assert.Equal(KeyValueResponseType.Extended, response.Type);
         Assert.Equal(0, response.Revision);
@@ -93,12 +98,18 @@ public class TestKeyValueTransactions
 
         string keyName = GetRandomKeyName();
         
-        KahunaKeyValueTransactionResult response = await client.ExecuteKeyValueTransaction("SET `" + keyName + "` 'some value'");
+        KahunaKeyValueTransactionResult response = await client.ExecuteKeyValueTransaction(
+            "SET `" + keyName + "` 'some value'",
+            cancellationToken: TestContext.Current.CancellationToken
+        );
         
         Assert.Equal(KeyValueResponseType.Set, response.Type);
         Assert.Equal(0, response.Revision);
 
-        response = await client.ExecuteKeyValueTransaction("EXISTS `" + keyName + "`");
+        response = await client.ExecuteKeyValueTransaction(
+            "EXISTS `" + keyName + "`",
+            cancellationToken: TestContext.Current.CancellationToken
+        );
         
         Assert.Equal(KeyValueResponseType.Exists, response.Type);
         Assert.Equal(0, response.Revision);
@@ -114,12 +125,18 @@ public class TestKeyValueTransactions
 
         string keyName = GetRandomKeyName();
         
-        KahunaKeyValueTransactionResult response = await client.ExecuteKeyValueTransaction("SET `" + keyName + "` 'some value'");
+        KahunaKeyValueTransactionResult response = await client.ExecuteKeyValueTransaction(
+            "SET `" + keyName + "` 'some value'",
+            cancellationToken: TestContext.Current.CancellationToken
+        );
         
         Assert.Equal(KeyValueResponseType.Set, response.Type);
         Assert.Equal(0, response.Revision);
 
-        response = await client.ExecuteKeyValueTransaction("DELETE `" + keyName + "`");
+        response = await client.ExecuteKeyValueTransaction(
+            "DELETE `" + keyName + "`",
+            cancellationToken: TestContext.Current.CancellationToken
+        );
         
         Assert.Equal(KeyValueResponseType.Deleted, response.Type);
         Assert.Equal(0, response.Revision);
@@ -136,10 +153,10 @@ public class TestKeyValueTransactions
         string keyNameA = GetRandomKeyName();
         string keyNameB = GetRandomKeyName();
         
-        KahunaKeyValue result = await client.SetKeyValue(keyNameA, "10");
+        KahunaKeyValue result = await client.SetKeyValue(keyNameA, "10", cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         
-        result = await client.SetKeyValue(keyNameB, "10");
+        result = await client.SetKeyValue(keyNameB, "10", cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
 
         const string script1 = """
@@ -170,12 +187,14 @@ public class TestKeyValueTransactions
                 client.ExecuteKeyValueTransaction(
                     script1,
                     null, 
-                    [new() { Key = "@keyA", Value = keyNameA }, new() { Key = "@keyB", Value = keyNameB }]
+                    [new() { Key = "@keyA", Value = keyNameA }, new() { Key = "@keyB", Value = keyNameB }],
+                    cancellationToken: TestContext.Current.CancellationToken
                 ),
                 client.ExecuteKeyValueTransaction(
                     script2,
                     null, 
-                    [new() { Key = "@keyA", Value = keyNameA }, new() { Key = "@keyB", Value = keyNameB }]
+                    [new() { Key = "@keyA", Value = keyNameA }, new() { Key = "@keyB", Value = keyNameB }],
+                    cancellationToken: TestContext.Current.CancellationToken
                 )
             );
             
@@ -186,8 +205,8 @@ public class TestKeyValueTransactions
             Assert.Equal(KeyValueResponseType.Aborted, e.KeyValueErrorCode);
         }
         
-        KahunaKeyValue resultA = await client.GetKeyValue(keyNameA);
-        KahunaKeyValue resultB = await client.GetKeyValue(keyNameB);
+        KahunaKeyValue resultA = await client.GetKeyValue(keyNameA, cancellationToken: TestContext.Current.CancellationToken);
+        KahunaKeyValue resultB = await client.GetKeyValue(keyNameB, cancellationToken: TestContext.Current.CancellationToken);
         
         Assert.True(
             ("10" == resultA.ValueAsString() && "0" == resultB.ValueAsString()) || 
@@ -229,12 +248,14 @@ public class TestKeyValueTransactions
                 client.ExecuteKeyValueTransaction(
                     script1,
                     null, 
-                    [new() { Key = "@keyA", Value = keyNameA }]
+                    [new() { Key = "@keyA", Value = keyNameA }], 
+                    cancellationToken: TestContext.Current.CancellationToken
                 ),
                 client.ExecuteKeyValueTransaction(
                     script2,
                     null, 
-                    [new() { Key = "@keyA", Value = keyNameA }]
+                    [new() { Key = "@keyA", Value = keyNameA }], 
+                    cancellationToken: TestContext.Current.CancellationToken
                 )
             );
             
