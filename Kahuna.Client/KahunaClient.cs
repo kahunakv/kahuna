@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using System.Diagnostics;
 using System.Text;
 using Kahuna.Client.Communication;
 using Kahuna.Shared.KeyValue;
@@ -82,7 +81,7 @@ public class KahunaClient
 
             if (result != KahunaLockAcquireResult.Success)
             {
-                await Task.Delay((int)Math.Max(100, retry.TotalMilliseconds + Random.Shared.Next(-50, 50))).ConfigureAwait(false);
+                await Task.Delay((int)Math.Max(100, retry.TotalMilliseconds + Random.Shared.Next(-50, 50)), cancellationToken).ConfigureAwait(false);
                 continue;
             }
 
@@ -105,7 +104,7 @@ public class KahunaClient
         {
             byte[] owner = Encoding.UTF8.GetBytes(Guid.NewGuid().ToString("N"));
 
-            (KahunaLockAcquireResult result, long fencingToken) = await TryAcquireLock(resource, owner, expiryTime, durability).ConfigureAwait(false);
+            (KahunaLockAcquireResult result, long fencingToken) = await TryAcquireLock(resource, owner, expiryTime, durability, cancellationToken).ConfigureAwait(false);
 
             return (result, owner, durability, fencingToken);
         }
@@ -133,7 +132,7 @@ public class KahunaClient
         TimeSpan wait = TimeSpan.FromMilliseconds(waitTime);
         TimeSpan retry = TimeSpan.FromMilliseconds(retryTime);
 
-        return await GetOrCreateLock(resource, expiry, wait, retry, durability).ConfigureAwait(false);
+        return await GetOrCreateLock(resource, expiry, wait, retry, durability, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -150,12 +149,12 @@ public class KahunaClient
     public async Task<KahunaLock> GetOrCreateLock(string resource, TimeSpan expiry, TimeSpan wait, TimeSpan retry, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {        
         if (wait == TimeSpan.Zero)
-            return new(this, resource, await SingleTimeTryAcquireLock(resource, expiry, durability).ConfigureAwait(false));
+            return new(this, resource, await SingleTimeTryAcquireLock(resource, expiry, durability, cancellationToken).ConfigureAwait(false));
         
         if (retry == TimeSpan.Zero)
             throw new KahunaException("Retry cannot be zero", LockResponseType.InvalidInput);
         
-        return new(this, resource, await PeriodicallyTryAcquireLock(resource, expiry, wait, retry, durability).ConfigureAwait(false));
+        return new(this, resource, await PeriodicallyTryAcquireLock(resource, expiry, wait, retry, durability, cancellationToken).ConfigureAwait(false));
     }
 
     /// <summary>
@@ -168,7 +167,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<KahunaLock> GetOrCreateLock(string resource, TimeSpan expiry, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        return new(this, resource, await SingleTimeTryAcquireLock(resource, expiry, durability).ConfigureAwait(false));
+        return new(this, resource, await SingleTimeTryAcquireLock(resource, expiry, durability, cancellationToken).ConfigureAwait(false));
     }
     
     /// <summary>

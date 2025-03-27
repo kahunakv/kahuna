@@ -26,8 +26,6 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     
     private readonly Stopwatch stopwatch = Stopwatch.StartNew();
     
-    private readonly CustomIOThreadPool threadPool;
-    
     private bool pendingCheckpoint = true;
     
     public BackgroundWriterActor(
@@ -48,9 +46,6 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             TimeSpan.FromSeconds(1),
             TimeSpan.FromMilliseconds(200)
         );
-        
-        threadPool = new(4);
-        threadPool.Start();
     }
     
     public async Task Receive(BackgroundWriteRequest message)
@@ -115,27 +110,13 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             ));
         }
 
-        await threadPool.EnqueueTask(() =>
-        {
-            // Simulate a long-running IO operation
-            persistence.StoreLocks(items);
-            
-            return "Result 1";
-        });
+        bool success = await raft.WriteThreadPool.EnqueueTask(() => persistence.StoreLocks(items));
         
-        /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(PersistenceRequestType.StoreLock, items));
-        
-        if (response == null)
+        if (!success)
         {
             logger.LogError("Coundn't store batch of {Count} locks", items.Count);
             return;
         }
-
-        if (response.Type == PersistenceResponseType.Failed)
-        {
-            logger.LogError("Coundn't store batch of {Count} locks", items.Count);
-            return;
-        }*/
         
         logger.LogDebug("Successfully stored batch of {Count} locks in {Elapsed}ms", items.Count, stopwatch.ElapsedMilliseconds);
         
@@ -166,29 +147,13 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             ));
         }
         
-        await threadPool.EnqueueTask(() =>
-        {
-            // Simulate a long-running IO operation
-            persistence.StoreKeyValues(items);
-            
-            //persistence.StoreKeyValue(items);
-            
-            return "Result 1";
-        });
+        bool success = await raft.WriteThreadPool.EnqueueTask(() => persistence.StoreKeyValues(items));
         
-        /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(PersistenceRequestType.StoreKeyValue, items));
-
-        if (response == null)
+        if (!success)
         {
             logger.LogError("Coundn't store batch of {Count} key-values", items.Count);
             return;
         }
-
-        if (response.Type == PersistenceResponseType.Failed)
-        {
-            logger.LogError("Coundn't store batch of {Count} key-values", items.Count);
-            return;
-        }*/
         
         logger.LogDebug("Successfully stored batch of {Count} key-values in {Elapsed}ms", items.Count, stopwatch.ElapsedMilliseconds);
         

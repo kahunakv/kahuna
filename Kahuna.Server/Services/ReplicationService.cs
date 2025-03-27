@@ -19,7 +19,7 @@ public sealed class ReplicationService : BackgroundService //, IDisposable
         this.kahuna = kahuna;
         this.raft = raft;
         this.logger = logger;
-        this.x = new ThreadStatsLogger(logger);
+        this.x = new(logger);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)

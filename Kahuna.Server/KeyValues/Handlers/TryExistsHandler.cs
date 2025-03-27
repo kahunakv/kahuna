@@ -30,7 +30,7 @@ internal sealed class TryExistsHandler : BaseHandler
         {
             if (message.Durability == KeyValueDurability.Persistent)
             {
-                KeyValueContext? revisionContext = persistence.GetKeyValueRevision(message.Key, message.CompareRevision);
+                KeyValueContext? revisionContext = await raft.ReadThreadPool.EnqueueTask(() => persistence.GetKeyValueRevision(message.Key, message.CompareRevision));
                 if (revisionContext is null)
                     return KeyValueStaticResponses.DoesNotExistContextResponse;
 

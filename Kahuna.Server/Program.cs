@@ -47,7 +47,9 @@ builder.Services.AddSingleton<IRaft>(services =>
         NodeId = opts.RaftNodeId,
         Host = opts.RaftHost,
         Port = opts.RaftPort,
-        MaxPartitions = opts.InitialClusterPartitions
+        MaxPartitions = opts.InitialClusterPartitions,
+        ReadIOThreads = 8,
+        WriteIOThreads = 8
     };
 
     IWAL walAdapter = opts.WalStorage switch

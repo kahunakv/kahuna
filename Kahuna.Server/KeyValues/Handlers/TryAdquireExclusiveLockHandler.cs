@@ -33,7 +33,7 @@ internal sealed class TryAdquireExclusiveLockHandler : BaseHandler
 
             /// Try to retrieve KeyValue context from persistence
             if (message.Durability == KeyValueDurability.Persistent)
-                newContext = persistence.GetKeyValue(message.Key);
+                newContext = await raft.ReadThreadPool.EnqueueTask(() => persistence.GetKeyValue(message.Key));
 
             newContext ??= new() { State = KeyValueState.Undefined, Revision = -1 };
             

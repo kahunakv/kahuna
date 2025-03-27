@@ -53,11 +53,8 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-port", Required = false, HelpText = "Port to bind incoming Raft consensus and replication requests", Default = 2070)]
     public int RaftPort { get; set; } = 2070;
     
-    [Option("locks-workers", Required = false, HelpText = "Number of ephemeral/consistent workers")]
-    public int LocksWorkers { get; set; } = 0;
-    
-    [Option("persistence-workers", Required = false, HelpText = "Number of persistence workers", Default = 4)]
-    public int PersistenceWorkers { get; set; } = 4;
+    [Option("locks-workers", Required = false, HelpText = "Number of ephemeral/consistent workers", Default = 128)]
+    public int LocksWorkers { get; set; } = 128;
     
     [Option("background-writer-workers", Required = false, HelpText = "Number of background writers workers", Default = 1)]
     public int BackgroundWritersWorkers { get; set; } = 1;

@@ -38,6 +38,7 @@ public class GrpcCommunication : IKahunaCommunication
             Durability = (GrpcLockDurability)durability
         };
         
+        int retries = 0;
         GrpcTryLockResponse? response;
         
         do
@@ -56,6 +57,9 @@ public class GrpcCommunication : IKahunaCommunication
             
             if (response.Type == GrpcLockResponseType.LockResponseTypeBusy)
                 return (KahunaLockAcquireResult.Conflicted, -1);
+            
+            if (++retries >= 5)
+                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
 
         } while (response.Type == GrpcLockResponseType.LockResponseTypeMustRetry);
             
@@ -71,6 +75,7 @@ public class GrpcCommunication : IKahunaCommunication
             Durability = (GrpcLockDurability)durability
         };
         
+        int retries = 0;
         GrpcUnlockResponse? response;
         
         do
@@ -89,10 +94,13 @@ public class GrpcCommunication : IKahunaCommunication
             
             if (response.Type is GrpcLockResponseType.LockResponseTypeInvalidOwner or GrpcLockResponseType.LockResponseTypeLockDoesNotExist)
                 return false;
+            
+            if (++retries >= 5)
+                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
 
         } while (response.Type == GrpcLockResponseType.LockResponseTypeMustRetry);
         
-        throw new KahunaException("Failed to unlock", (LockResponseType)response.Type);
+        throw new KahunaException("Failed to unlock: " + response.Type, (LockResponseType)response.Type);
     }
     
     public async Task<(bool, long)> TryExtend(string url, string resource, byte[] owner, int expiryTime, LockDurability durability, CancellationToken cancellationToken)
@@ -105,6 +113,7 @@ public class GrpcCommunication : IKahunaCommunication
             Durability = (GrpcLockDurability)durability
         };
         
+        int retries = 0;
         GrpcExtendLockResponse? response;
         
         do
@@ -120,6 +129,9 @@ public class GrpcCommunication : IKahunaCommunication
                 
             if (response.Type == GrpcLockResponseType.LockResponseTypeExtended)
                 return (true, response.FencingToken);
+            
+            if (++retries >= 5)
+                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
 
         } while (response.Type == GrpcLockResponseType.LockResponseTypeMustRetry);
         
@@ -134,6 +146,7 @@ public class GrpcCommunication : IKahunaCommunication
             Durability = (GrpcLockDurability)durability
         };
         
+        int retries = 0;
         GrpcGetLockResponse? response;
         
         do
@@ -149,6 +162,9 @@ public class GrpcCommunication : IKahunaCommunication
                 
             if (response.Type == GrpcLockResponseType.LockResponseTypeGot)
                 return new(response.Owner?.ToByteArray(), new(response.ExpiresPhysical, response.ExpiresCounter), response.FencingToken);
+            
+            if (++retries >= 5)
+                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
 
         } while (response.Type == GrpcLockResponseType.LockResponseTypeMustRetry);
         
@@ -166,6 +182,7 @@ public class GrpcCommunication : IKahunaCommunication
             Durability = (GrpcKeyValueDurability)durability
         };
         
+        int retries = 0;
         GrpcTrySetKeyValueResponse? response;
         
         do
@@ -184,6 +201,9 @@ public class GrpcCommunication : IKahunaCommunication
             
             if (response.Type == GrpcKeyValueResponseType.TypeNotset)
                 return (false, response.Revision);
+            
+            if (++retries >= 5)
+                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
 
         } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
             

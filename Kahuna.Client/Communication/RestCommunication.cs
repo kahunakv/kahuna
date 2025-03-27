@@ -84,7 +84,8 @@ public class RestCommunication : IKahunaCommunication
         };
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
-        
+
+        int retries = 0;
         KahunaLockResponse? response;
         
         do
@@ -109,6 +110,9 @@ public class RestCommunication : IKahunaCommunication
             
             if (response.Type == LockResponseType.Busy)
                 return (KahunaLockAcquireResult.Conflicted, response.FencingToken);
+            
+            if (++retries >= 5)
+                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
 
         } while (response.Type == LockResponseType.MustRetry);
             
@@ -126,6 +130,7 @@ public class RestCommunication : IKahunaCommunication
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
         
+        int retries = 0;
         KahunaLockResponse? response;
         
         do
@@ -151,10 +156,13 @@ public class RestCommunication : IKahunaCommunication
 
             if (response.Type == LockResponseType.LockDoesNotExist)
                 return false;
+            
+            if (++retries >= 5)
+                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
 
         } while (response.Type == LockResponseType.MustRetry);
         
-        throw new KahunaException("Failed to unlock", response.Type);
+        throw new KahunaException("Failed to unlock: " + response.Type, response.Type);
     }
     
     public async Task<(bool, long)> TryExtend(string url, string resource, byte[] owner, int expiryTime, LockDurability durability, CancellationToken cancellationToken)
@@ -169,6 +177,7 @@ public class RestCommunication : IKahunaCommunication
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
 
+        int retries = 0;
         KahunaLockResponse? response;
         
         do
@@ -184,13 +193,16 @@ public class RestCommunication : IKahunaCommunication
                     .WithSettings(o => o.HttpVersion = "2.0")
                     .PostStringAsync(payload, cancellationToken: cancellationToken)
                     .ReceiveJson<KahunaLockResponse>())
-            .ConfigureAwait(false);
+                    .ConfigureAwait(false);
             
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
             
             if (response.Type == LockResponseType.Extended)
                 return (true, response.FencingToken);
+            
+            if (++retries >= 5)
+                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
 
         } while (response.Type == LockResponseType.MustRetry);
         
@@ -207,6 +219,7 @@ public class RestCommunication : IKahunaCommunication
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaGetLockRequest);
 
+        int retries = 0;
         KahunaGetLockResponse? response;
 
         do
@@ -222,13 +235,16 @@ public class RestCommunication : IKahunaCommunication
                         .WithSettings(o => o.HttpVersion = "2.0")
                         .PostStringAsync(payload, cancellationToken: cancellationToken)
                         .ReceiveJson<KahunaGetLockResponse>())
-                .ConfigureAwait(false);
+                        .ConfigureAwait(false);
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
 
             if (response.Type == LockResponseType.Got)
                 return new(response.Owner, response.Expires, response.FencingToken);
+            
+            if (++retries >= 5)
+                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
             
         } while (response.Type == LockResponseType.MustRetry);
         
@@ -247,7 +263,8 @@ public class RestCommunication : IKahunaCommunication
         };
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaSetKeyValueRequest);
-        
+
+        int retries = 0;
         KahunaSetKeyValueResponse? response;
         
         do
@@ -273,6 +290,9 @@ public class RestCommunication : IKahunaCommunication
             
             if (response.Type == KeyValueResponseType.NotSet)
                 return (false, response.Revision);
+            
+            if (++retries >= 5)
+                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
 
         } while (response.Type == KeyValueResponseType.MustRetry);
             
@@ -293,6 +313,7 @@ public class RestCommunication : IKahunaCommunication
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaSetKeyValueRequest);
         
+        int retries = 0;
         KahunaSetKeyValueResponse? response;
         
         do
@@ -318,6 +339,9 @@ public class RestCommunication : IKahunaCommunication
             
             if (response.Type == KeyValueResponseType.NotSet)
                 return (false, response.Revision);
+            
+            if (++retries >= 5)
+                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
 
         } while (response.Type == KeyValueResponseType.MustRetry);
             
@@ -338,6 +362,7 @@ public class RestCommunication : IKahunaCommunication
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaSetKeyValueRequest);
         
+        int retries = 0;
         KahunaSetKeyValueResponse? response;
         
         do
@@ -363,6 +388,9 @@ public class RestCommunication : IKahunaCommunication
             
             if (response.Type == KeyValueResponseType.NotSet)
                 return (false, response.Revision);
+            
+            if (++retries >= 5)
+                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
 
         } while (response.Type == KeyValueResponseType.MustRetry);
             
@@ -380,6 +408,7 @@ public class RestCommunication : IKahunaCommunication
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaGetKeyValueRequest);
         
+        int retries = 0;
         KahunaGetKeyValueResponse? response;
         
         do
@@ -405,6 +434,9 @@ public class RestCommunication : IKahunaCommunication
             
             if (response.Type == KeyValueResponseType.DoesNotExist)
                 return (false, null, response.Revision);
+            
+            if (++retries >= 5)
+                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
 
         } while (response.Type == KeyValueResponseType.MustRetry);
             
