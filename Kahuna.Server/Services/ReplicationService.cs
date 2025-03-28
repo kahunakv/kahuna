@@ -83,9 +83,9 @@ public sealed class ThreadStatsLogger : IDisposable
         ThreadPool.GetMaxThreads(out _maxWorkerThreadLevel, out _maxIoThreadLevel);
         ThreadPool.GetAvailableThreads(out int workerAvailable, out int ioAvailable);
 
-        Console.WriteLine("Thread statistics at startup: minimum worker:{0} io:{1}", _minWorkerThreadLevel, _minIoThreadLevel);
-        Console.WriteLine("Thread statistics at startup: maximum worker:{0} io:{1}", _maxWorkerThreadLevel, _maxIoThreadLevel);
-        Console.WriteLine("Thread statistics at startup: available worker:{0} io:{1}", workerAvailable, ioAvailable);
+        logger.LogInformation("Thread statistics at startup: minimum worker:{Workers} io:{IO}", _minWorkerThreadLevel, _minIoThreadLevel);
+        logger.LogInformation("Thread statistics at startup: maximum worker:{Workers} io:{IO}", _maxWorkerThreadLevel, _maxIoThreadLevel);
+        logger.LogInformation("Thread statistics at startup: available worker:{Workers} io:{IO}", workerAvailable, ioAvailable);
 
         _minWorkerThreadLevelRecovery = (_minWorkerThreadLevel * 3) / 4;
         _minIoThreadLevelRecovery = (_minIoThreadLevel * 3) / 4;

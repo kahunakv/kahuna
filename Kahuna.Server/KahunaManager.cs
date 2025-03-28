@@ -401,7 +401,7 @@ public sealed class KahunaManager : IKahuna
         return keyValues.ScanAllByPrefix(prefixKeyName, durability);
     }
 
-    public async Task<bool> OnReplicationReceived(RaftLog log)
+    public async Task<bool> OnReplicationReceived(int partitionId, RaftLog log)
     {
         await Task.WhenAll(locks.OnReplicationReceived(log), keyValues.OnReplicationReceived(log));
         return true;

@@ -55,7 +55,7 @@ public interface IKahuna
 
     public Task<KeyValueGetByPrefixResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability);
 
-    public Task<bool> OnReplicationReceived(RaftLog log);
+    public Task<bool> OnReplicationReceived(int partitionId, RaftLog log);
 
     public void OnReplicationError(RaftLog log);
 }
