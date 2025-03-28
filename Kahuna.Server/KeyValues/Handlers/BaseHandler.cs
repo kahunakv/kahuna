@@ -73,7 +73,7 @@ internal abstract class BaseHandler
 
         if (!result.Success)
         {
-            logger.LogWarning("Failed to replicate key/value {Key} Partition={Partition} Status={Status}", proposal.Key, partitionId, result.Status);
+            logger.LogWarning("Failed to replicate key/value {Key} Partition={Partition} Status={Status} Ticket={Ticket}", proposal.Key, partitionId, result.Status, result.TicketId);
             
             return false;
         }

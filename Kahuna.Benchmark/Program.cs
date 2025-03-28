@@ -8,7 +8,7 @@ using Kahuna.Shared.Locks;
 
 Console.WriteLine("Kahuna Benchmark");
 
-const int numberOfTasks = 10;
+const int numberOfTasks = 250;
 const int MaxTokens = 100_000;
 
 List<string> tokens = new(MaxTokens);
@@ -40,10 +40,9 @@ for (int j = 0; j < 25; j++)
 
     for (int i = 0; i < numberOfTasks; i++)
     {
-        //tasks.Add(SetKeyConcurrently(locks));
-        //tasks.Add(GetKeyConcurrently(locks));
-        
-        tasks.Add(ExecuteTxConcurrently(kahunaScript));
+        tasks.Add(SetKeyConcurrently(locks));
+        tasks.Add(GetKeyConcurrently(locks));
+        //tasks.Add(ExecuteTxConcurrently(kahunaScript));
     }
 
     await Task.WhenAll(tasks);

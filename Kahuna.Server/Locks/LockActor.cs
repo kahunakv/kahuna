@@ -335,7 +335,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 
         if (!result.Success)
         {
-            logger.LogWarning("Failed to replicate lock {Resource} Partition={Partition} Status={Status}", proposal.Resource, partitionId, result.Status);
+            logger.LogWarning("Failed to replicate lock {Resource} Partition={Partition} Status={Status} Ticket={Ticket}", proposal.Resource, partitionId, result.Status, result.TicketId);
             
             return false;
         }
