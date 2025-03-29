@@ -20,6 +20,8 @@ public class RocksDbPersistence : IPersistence
     
     private readonly ColumnFamilyHandle? columnFamilyLocks;
     
+    private readonly WriteBatchWithIndex keysWriteIndex;
+    
     private readonly string path;
     
     private readonly string dbRevision;
@@ -30,7 +32,7 @@ public class RocksDbPersistence : IPersistence
         this.dbRevision = dbRevision;
 
         string fullPath = $"{path}/{dbRevision}";
-        
+
         DbOptions dbOptions = new DbOptions()
             .SetCreateIfMissing(true)
             .SetCreateMissingColumnFamilies(true)
@@ -46,6 +48,8 @@ public class RocksDbPersistence : IPersistence
         
         columnFamilyKeys = db.GetColumnFamily("kv");
         columnFamilyLocks = db.GetColumnFamily("locks");
+
+        keysWriteIndex = new();
     }
 
     public bool StoreLocks(List<PersistenceRequestItem> items)
@@ -65,7 +69,7 @@ public class RocksDbPersistence : IPersistence
             if (item.Value != null)
                 kvm.Owner = UnsafeByteOperations.UnsafeWrap(item.Value);
 
-            batch.Put(Encoding.UTF8.GetBytes(item.Key), Serialize(kvm), cf: columnFamilyLocks);
+            batch.Put(Encoding.UTF8.GetBytes(item.Key), Serialize(kvm), cf: columnFamilyLocks); 
         }
         
         db.Write(batch, DefaultWriteOptions);

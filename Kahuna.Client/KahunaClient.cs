@@ -13,6 +13,9 @@ using Kahuna.Shared.Locks;
 using Kommander.Diagnostics;
 using Microsoft.Extensions.Logging;
 
+// ReSharper disable ConvertToAutoProperty
+// ReSharper disable ConvertToAutoPropertyWhenPossible
+
 namespace Kahuna.Client;
 
 /// <summary>
@@ -26,40 +29,50 @@ public class KahunaClient
 
     private readonly IKahunaCommunication communication;
 
+    private readonly bool upgradeUrls = false;
+
     private int currentServer;
+    
+    internal IKahunaCommunication Communication => communication;
+    
+    internal bool UpgradeUrls => upgradeUrls;
     
     /// <summary>
     /// Constructor
     /// </summary>
-    /// <param name="url"></param>
-    /// <param name="logger"></param>
-    /// <param name="communication"></param>
-    public KahunaClient(string url, ILogger<KahunaClient>? logger = null, IKahunaCommunication? communication = null)
+    /// <param name="url">Kahuna's server endpoint</param>
+    /// <param name="logger">Logger</param>
+    /// <param name="communication">An instance of one of the built-in communicators or a custom one</param>
+    /// <param name="communication">Wheter the client must try to upgrade the ref objects to point directly to leaders</param>
+    public KahunaClient(string url, ILogger<KahunaClient>? logger = null, IKahunaCommunication? communication = null, bool upgradeUrls = false)
     {
         this.urls = [url];
         this.logger = logger;
         this.communication = communication ?? new GrpcCommunication(logger);
+        this.upgradeUrls = upgradeUrls;
     }
     
     /// <summary>
     /// Constructor
     /// </summary>
-    /// <param name="urls"></param>
-    /// <param name="logger"></param>
-    /// <param name="communication"></param>
-    public KahunaClient(string[] urls, ILogger<KahunaClient>? logger = null, IKahunaCommunication? communication = null)
+    /// <param name="url">Kahuna's server endpoints</param>
+    /// <param name="logger">Logger</param>
+    /// <param name="communication">An instance of one of the built-in communicators or a custom one</param>
+    /// <param name="communication">Wheter the client must try to upgrade the ref objects to point directly to leaders</param>
+    public KahunaClient(string[] urls, ILogger<KahunaClient>? logger = null, IKahunaCommunication? communication = null, bool upgradeUrls = false)
     {
         this.urls = urls;
         this.logger = logger;
         this.communication = (communication ?? new GrpcCommunication(logger));
+        this.upgradeUrls = upgradeUrls;
     }
     
-    private async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string resource, byte[] owner, TimeSpan expiryTime, LockDurability durability, CancellationToken cancellationToken = default)
+    private async Task<(KahunaLockAcquireResult, long, string?)> TryAcquireLock(string resource, byte[] owner, TimeSpan expiryTime, LockDurability durability, CancellationToken cancellationToken = default)
     {
         return await communication.TryAcquireLock(GetRoundRobinUrl(), resource, owner, (int)expiryTime.TotalMilliseconds, durability, cancellationToken).ConfigureAwait(false);
     }
     
-    private async Task<(KahunaLockAcquireResult, byte[]?, LockDurability, long)> PeriodicallyTryAcquireLock(
+    private async Task<KahunaLock> PeriodicallyTryAcquireLock(
         string resource, 
         TimeSpan expiryTime, 
         TimeSpan wait, 
@@ -73,11 +86,12 @@ public class KahunaClient
         ValueStopwatch stopWatch = ValueStopwatch.StartNew();
         
         long fencingToken = -1;
+        string? servedFrom = null;
         KahunaLockAcquireResult result = KahunaLockAcquireResult.Error;
 
         while (stopWatch.GetElapsedTime() < wait)
         {
-            (result, fencingToken) = await TryAcquireLock(resource, owner, expiryTime, durability, cancellationToken).ConfigureAwait(false);
+            (result, fencingToken, servedFrom) = await TryAcquireLock(resource, owner, expiryTime, durability, cancellationToken).ConfigureAwait(false);
 
             if (result != KahunaLockAcquireResult.Success)
             {
@@ -85,10 +99,10 @@ public class KahunaClient
                 continue;
             }
 
-            return (result, owner, durability, fencingToken);
+            return new(this, resource, result, owner, durability, fencingToken, servedFrom);
         }
 
-        return (result, null, durability, fencingToken);
+        return new(this, resource, result, null, durability, fencingToken, servedFrom);
     }
     
     /// <summary>
@@ -98,22 +112,13 @@ public class KahunaClient
     /// <param name="expiryTime"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    private async Task<(KahunaLockAcquireResult, byte[]?, LockDurability, long)> SingleTimeTryAcquireLock(string resource, TimeSpan expiryTime, LockDurability durability, CancellationToken cancellationToken = default)
+    private async Task<KahunaLock> SingleTimeTryAcquireLock(string resource, TimeSpan expiryTime, LockDurability durability, CancellationToken cancellationToken = default)
     {
-        try
-        {
-            byte[] owner = Encoding.UTF8.GetBytes(Guid.NewGuid().ToString("N"));
+        byte[] owner = Encoding.UTF8.GetBytes(Guid.NewGuid().ToString("N"));
 
-            (KahunaLockAcquireResult result, long fencingToken) = await TryAcquireLock(resource, owner, expiryTime, durability, cancellationToken).ConfigureAwait(false);
+        (KahunaLockAcquireResult result, long fencingToken, string? servedFrom) = await TryAcquireLock(resource, owner, expiryTime, durability, cancellationToken).ConfigureAwait(false);
 
-            return (result, owner, durability, fencingToken);
-        }
-        catch (Exception ex)
-        {
-            logger?.LogError("Error locking lock instance: {Message}", ex.Message);
-
-            return (KahunaLockAcquireResult.Error, null, durability, -1);
-        }
+        return new(this, resource, result, owner, durability, fencingToken, servedFrom);
     }
     
     /// <summary>
@@ -149,12 +154,12 @@ public class KahunaClient
     public async Task<KahunaLock> GetOrCreateLock(string resource, TimeSpan expiry, TimeSpan wait, TimeSpan retry, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {        
         if (wait == TimeSpan.Zero)
-            return new(this, resource, await SingleTimeTryAcquireLock(resource, expiry, durability, cancellationToken).ConfigureAwait(false));
+            return await SingleTimeTryAcquireLock(resource, expiry, durability, cancellationToken).ConfigureAwait(false);
         
         if (retry == TimeSpan.Zero)
             throw new KahunaException("Retry cannot be zero", LockResponseType.InvalidInput);
         
-        return new(this, resource, await PeriodicallyTryAcquireLock(resource, expiry, wait, retry, durability, cancellationToken).ConfigureAwait(false));
+        return await PeriodicallyTryAcquireLock(resource, expiry, wait, retry, durability, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -167,7 +172,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<KahunaLock> GetOrCreateLock(string resource, TimeSpan expiry, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        return new(this, resource, await SingleTimeTryAcquireLock(resource, expiry, durability, cancellationToken).ConfigureAwait(false));
+        return await SingleTimeTryAcquireLock(resource, expiry, durability, cancellationToken).ConfigureAwait(false);
     }
     
     /// <summary>

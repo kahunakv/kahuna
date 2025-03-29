@@ -16,7 +16,7 @@ namespace Kahuna.Client;
 /// </summary>
 public sealed class KahunaLock : IAsyncDisposable
 {
-    private readonly KahunaClient locks;
+    private readonly KahunaClient client;
 
     private readonly KahunaLockAcquireResult result;
 
@@ -27,6 +27,8 @@ public sealed class KahunaLock : IAsyncDisposable
     private readonly byte[]? owner;
 
     private readonly LockDurability durability;
+    
+    private readonly string? servedFrom;
 
     private bool disposed;
 
@@ -39,17 +41,30 @@ public sealed class KahunaLock : IAsyncDisposable
     /// <summary>
     /// Constructor
     /// </summary>
-    /// <param name="locks"></param>
+    /// <param name="client"></param>
     /// <param name="resource"></param>
-    /// <param name="lockInfo"></param>
-    public KahunaLock(KahunaClient locks, string resource, (KahunaLockAcquireResult result, byte[]? owner, LockDurability durability, long fencingToken) lockInfo)
+    /// <param name="result"></param>
+    /// <param name="owner"></param>
+    /// <param name="durability"></param>
+    /// <param name="fencingToken"></param>
+    /// <param name="servedFrom"></param>
+    public KahunaLock(
+        KahunaClient client, 
+        string resource, 
+        KahunaLockAcquireResult result, 
+        byte[]? owner, 
+        LockDurability durability, 
+        long fencingToken, 
+        string? servedFrom
+    )
     {
-        this.locks = locks;
+        this.client = client;
         this.resource = resource;
-        this.result = lockInfo.result;
-        this.owner = lockInfo.owner;
-        this.durability = lockInfo.durability;
-        this.fencingToken = lockInfo.fencingToken;
+        this.result = result;
+        this.owner = owner;
+        this.servedFrom = servedFrom;
+        this.durability = durability;
+        this.fencingToken = fencingToken;
     }
     
     /// <summary>
@@ -65,7 +80,10 @@ public sealed class KahunaLock : IAsyncDisposable
         if (!IsAcquired || owner is null)
             throw new KahunaException("Lock was not acquired", LockResponseType.Errored);
 
-        return await locks.TryExtend(resource, owner, duration, durability, cancellationToken);
+        if (string.IsNullOrEmpty(servedFrom) || !client.UpgradeUrls)
+            return await client.TryExtend(resource, owner, duration, durability, cancellationToken);
+        
+        return await client.Communication.TryExtend(servedFrom, resource, owner, (int)duration.TotalMilliseconds, durability, cancellationToken);
     }
     
     /// <summary>
@@ -81,7 +99,10 @@ public sealed class KahunaLock : IAsyncDisposable
         if (!IsAcquired || owner is null)
             throw new KahunaException("Lock was not acquired", LockResponseType.Errored);
 
-        return await locks.TryExtend(resource, owner, durationMs, durability, cancellationToken);
+        if (string.IsNullOrEmpty(servedFrom) || !client.UpgradeUrls)
+            return await client.TryExtend(resource, owner, durationMs, durability, cancellationToken);
+        
+        return await client.Communication.TryExtend(servedFrom, resource, owner, durationMs, durability, cancellationToken);
     }
     
     /// <summary>
@@ -89,9 +110,12 @@ public sealed class KahunaLock : IAsyncDisposable
     /// </summary>
     /// <returns></returns>
     /// <exception cref="KahunaException"></exception>
-    public async Task<KahunaLockInfo?> GetInfo()
+    public async Task<KahunaLockInfo?> GetInfo(CancellationToken cancellationToken = default)
     {
-        return await locks.GetLockInfo(resource, durability);
+        if (string.IsNullOrEmpty(servedFrom) || !client.UpgradeUrls)
+            return await client.GetLockInfo(resource, durability, cancellationToken);
+        
+        return await client.Communication.Get(servedFrom, resource, durability, cancellationToken);
     }
 
     /// <summary>
@@ -104,7 +128,15 @@ public sealed class KahunaLock : IAsyncDisposable
         GC.SuppressFinalize(this);
 
         if (IsAcquired && owner is not null)
-            await locks.Unlock(resource, owner, durability);
+        {
+            if (string.IsNullOrEmpty(servedFrom) || !client.UpgradeUrls)
+            {
+                await client.Unlock(resource, owner, durability);
+                return;
+            }
+
+            await client.Communication.TryUnlock(servedFrom, resource, owner, durability, CancellationToken.None);
+        }
     }
 
     ~KahunaLock()

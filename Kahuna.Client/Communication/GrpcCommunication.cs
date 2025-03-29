@@ -28,7 +28,7 @@ public class GrpcCommunication : IKahunaCommunication
         this.logger = logger;
     }
     
-    public async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string url, string resource, byte[] owner, int expiryTime, LockDurability durability, CancellationToken cancellationToken)
+    public async Task<(KahunaLockAcquireResult, long, string?)> TryAcquireLock(string url, string resource, byte[] owner, int expiryTime, LockDurability durability, CancellationToken cancellationToken)
     {
         GrpcTryLockRequest request = new()
         {
@@ -53,10 +53,10 @@ public class GrpcCommunication : IKahunaCommunication
                 throw new KahunaException("Response is null", LockResponseType.Errored);
 
             if (response.Type == GrpcLockResponseType.LockResponseTypeLocked)
-                return (KahunaLockAcquireResult.Success, response.FencingToken);
+                return (KahunaLockAcquireResult.Success, response.FencingToken, response.ServedFrom);
             
             if (response.Type == GrpcLockResponseType.LockResponseTypeBusy)
-                return (KahunaLockAcquireResult.Conflicted, -1);
+                return (KahunaLockAcquireResult.Conflicted, -1, null);
             
             if (++retries >= 5)
                 throw new KahunaException("Retries exhausted.", LockResponseType.Errored);

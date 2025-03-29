@@ -23,10 +23,11 @@ public class TestLocks
     public async Task TestValidateAcquireSingleLock(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability
+        [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability,
+        [CombinatorialValues(true, false)] bool upgradeUrls
     )
     {
-        KahunaClient client = GetClientByType(communicationType, clientType);
+        KahunaClient client = GetClientByType(communicationType, clientType, upgradeUrls);
         
         string lockName = GetRandomLockName();
 
@@ -40,10 +41,11 @@ public class TestLocks
     public async Task TestLockAcquisitionAndExpiresWithMilliseconds(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability
+        [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability,
+        [CombinatorialValues(true, false)] bool upgradeUrls
     ) 
     {
-        KahunaClient client = GetClientByType(communicationType, clientType);
+        KahunaClient client = GetClientByType(communicationType, clientType, upgradeUrls);
         
         string lockName = GetRandomLockName();
 
@@ -70,10 +72,11 @@ public class TestLocks
     public async Task TestValidateAcquireLockExpiresWithTimeSpan(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability
+        [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability,
+        [CombinatorialValues(true, false)] bool upgradeUrls
     ) 
     {
-        KahunaClient client = GetClientByType(communicationType, clientType);
+        KahunaClient client = GetClientByType(communicationType, clientType, upgradeUrls);
         
         string lockName = GetRandomLockName();
 
@@ -92,10 +95,11 @@ public class TestLocks
     public async Task TestValidateAcquireLockExpires4(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability
+        [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability,
+        [CombinatorialValues(true, false)] bool upgradeUrls
     ) 
     {
-        KahunaClient client = GetClientByType(communicationType, clientType);
+        KahunaClient client = GetClientByType(communicationType, clientType, upgradeUrls);
         
         string lockName = GetRandomLockName();
 
@@ -122,10 +126,11 @@ public class TestLocks
     public async Task TestValidateAcquireLockExpiresRace(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability
+        [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability,
+        [CombinatorialValues(true, false)] bool upgradeUrls
     ) 
     {
-        KahunaClient client = GetClientByType(communicationType, clientType);
+        KahunaClient client = GetClientByType(communicationType, clientType, upgradeUrls);
         
         List<Task> tasks = new(50);
 
@@ -161,10 +166,11 @@ public class TestLocks
     public async Task TestValidateAcquireSameLockExpiresRace(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability
+        [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability,
+        [CombinatorialValues(true, false)] bool upgradeUrls
     ) 
     {
-        KahunaClient client = GetClientByType(communicationType, clientType);
+        KahunaClient client = GetClientByType(communicationType, clientType, upgradeUrls);
         
         string lockName = GetRandomLockName();
         
@@ -180,12 +186,17 @@ public class TestLocks
     
     private async Task AcquireSameLockConcurrently(string lockName, KahunaClient client, LockDurability durability)
     {
+        using CancellationTokenSource cts = new();
+        
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
+        
         await using KahunaLock kLock = await client.GetOrCreateLock(
             lockName, 
             expiry: TimeSpan.FromSeconds(10), 
             wait: TimeSpan.FromSeconds(11),
             retry: TimeSpan.FromMilliseconds(500),
-            durability: durability
+            durability: durability,
+            cancellationToken: cts.Token
         );
         
         if (!kLock.IsAcquired)
@@ -198,10 +209,11 @@ public class TestLocks
     public async Task TestValidateAcquireAndExtendLock(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability
+        [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability,
+        [CombinatorialValues(true, false)] bool upgradeUrls
     ) 
     {
-        KahunaClient client = GetClientByType(communicationType, clientType);
+        KahunaClient client = GetClientByType(communicationType, clientType, upgradeUrls);
         
         string lockName = GetRandomLockName();
 
@@ -237,10 +249,11 @@ public class TestLocks
     public async Task TestAdquireLockAndGetInfo(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
-        [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability
+        [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability,
+        [CombinatorialValues(true, false)] bool upgradeUrls
     ) 
     {
-        KahunaClient client = GetClientByType(communicationType, clientType);
+        KahunaClient client = GetClientByType(communicationType, clientType, upgradeUrls);
         
         string lockName = GetRandomLockName();
 
@@ -253,7 +266,7 @@ public class TestLocks
         Assert.True(extended);
         Assert.Equal(kLock.FencingToken, fencingToken);
 
-        KahunaLockInfo? lockInfo = await kLock.GetInfo();
+        KahunaLockInfo? lockInfo = await kLock.GetInfo(TestContext.Current.CancellationToken);
         Assert.NotNull(lockInfo);
         
         Assert.Equal(lockInfo.Owner, kLock.Owner);
@@ -263,7 +276,7 @@ public class TestLocks
         Assert.True(extended);
         Assert.Equal(kLock.FencingToken, fencingToken);
         
-        lockInfo = await kLock.GetInfo();
+        lockInfo = await kLock.GetInfo(TestContext.Current.CancellationToken);
         Assert.NotNull(lockInfo);
         
         Assert.Equal(lockInfo.Owner, kLock.Owner);
@@ -272,12 +285,12 @@ public class TestLocks
         //Assert.Equal(lockInfo.Expires > DateTime.UtcNow, true);
     }
     
-    private KahunaClient GetClientByType(KahunaCommunicationType communicationType, KahunaClientType clientType)
+    private KahunaClient GetClientByType(KahunaCommunicationType communicationType, KahunaClientType clientType, bool _)
     {
         return clientType switch
         {
-            KahunaClientType.Single => new(url, null, GetCommunicationByType(communicationType)),
-            KahunaClientType.Pool => new(urls, null, GetCommunicationByType(communicationType)),
+            KahunaClientType.Single => new(url, null, GetCommunicationByType(communicationType), false),
+            KahunaClientType.Pool => new(urls, null, GetCommunicationByType(communicationType), false),
             _ => throw new ArgumentOutOfRangeException(nameof(clientType), clientType, null)
         };
     }

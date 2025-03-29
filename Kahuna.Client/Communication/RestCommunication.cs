@@ -73,7 +73,7 @@ public class RestCommunication : IKahunaCommunication
         };
     }
     
-    public async Task<(KahunaLockAcquireResult, long)> TryAcquireLock(string url, string resource, byte[] owner, int expiryTime, LockDurability durability, CancellationToken cancellationToken)
+    public async Task<(KahunaLockAcquireResult, long, string?)> TryAcquireLock(string url, string resource, byte[] owner, int expiryTime, LockDurability durability, CancellationToken cancellationToken)
     {
         KahunaLockRequest request = new()
         {
@@ -106,10 +106,10 @@ public class RestCommunication : IKahunaCommunication
                 throw new KahunaException("Response is null", LockResponseType.Errored);
 
             if (response.Type == LockResponseType.Locked)
-                return (KahunaLockAcquireResult.Success, response.FencingToken);
+                return (KahunaLockAcquireResult.Success, response.FencingToken, response.ServedFrom);
             
             if (response.Type == LockResponseType.Busy)
-                return (KahunaLockAcquireResult.Conflicted, response.FencingToken);
+                return (KahunaLockAcquireResult.Conflicted, response.FencingToken, response.ServedFrom);
             
             if (++retries >= 5)
                 throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
