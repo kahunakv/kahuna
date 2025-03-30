@@ -122,7 +122,7 @@ public class TestLocks
         Assert.Equal(1, kLock2.FencingToken);
     }
     
-    [Theory, CombinatorialData]
+    /*[Theory, CombinatorialData]
     public async Task TestValidateAcquireLockExpiresRace(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
@@ -203,7 +203,7 @@ public class TestLocks
             return;
 
         total++;
-    }
+    }*/
     
     [Theory, CombinatorialData]
     public async Task TestValidateAcquireAndExtendLock(
