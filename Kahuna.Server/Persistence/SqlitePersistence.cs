@@ -28,7 +28,7 @@ public class SqlitePersistence : IPersistence
     
     private (ReaderWriterLock readerWriterLock, SqliteConnection connection) TryOpenDatabase(string resource)
     {
-        int shard = (int)HashUtils.ConsistentHash(resource, MaxShards);
+        int shard = (int)HashUtils.StaticHash(resource, MaxShards);
         
         return TryOpenDatabaseByShard(shard);
     }
