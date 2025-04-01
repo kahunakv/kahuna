@@ -78,12 +78,15 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcUnlockResponse? response;
         
+        GrpcChannel channel = GetSharedChannel(url);
+        
+        Locker.LockerClient client = new(channel);
+        
         do
         {
-            GrpcChannel channel = GetSharedChannel(url);
-        
-            Locker.LockerClient client = new(channel);
-        
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
+            
             response = await client.UnlockAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
             if (response is null)
@@ -116,11 +119,14 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcExtendLockResponse? response;
         
+        GrpcChannel channel = GetSharedChannel(url);
+        
+        Locker.LockerClient client = new(channel);
+        
         do
         {
-            GrpcChannel channel = GetSharedChannel(url);
-        
-            Locker.LockerClient client = new(channel);
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
         
             response = await client.TryExtendLockAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
@@ -149,11 +155,14 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcGetLockResponse? response;
         
+        GrpcChannel channel = GetSharedChannel(url);
+        
+        Locker.LockerClient client = new(channel);
+        
         do
         {
-            GrpcChannel channel = GetSharedChannel(url);
-        
-            Locker.LockerClient client = new(channel);
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
         
             response = await client.GetLockAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
@@ -185,11 +194,14 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcTrySetKeyValueResponse? response;
         
+        GrpcChannel channel = GetSharedChannel(url);
+        
+        KeyValuer.KeyValuerClient client = new(channel);
+        
         do
         {
-            GrpcChannel channel = GetSharedChannel(url);
-        
-            KeyValuer.KeyValuerClient client = new(channel);
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
         
             response = await client.TrySetKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
@@ -225,11 +237,14 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcTrySetKeyValueResponse? response;
         
+        GrpcChannel channel = GetSharedChannel(url);
+        
+        KeyValuer.KeyValuerClient client = new(channel);
+        
         do
         {
-            GrpcChannel channel = GetSharedChannel(url);
-        
-            KeyValuer.KeyValuerClient client = new(channel);
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
         
             response = await client.TrySetKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
@@ -265,11 +280,14 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcTrySetKeyValueResponse? response;
         
+        GrpcChannel channel = GetSharedChannel(url);
+        
+        KeyValuer.KeyValuerClient client = new(channel);
+        
         do
         {
-            GrpcChannel channel = GetSharedChannel(url);
-        
-            KeyValuer.KeyValuerClient client = new(channel);
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
         
             response = await client.TrySetKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
@@ -305,11 +323,14 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcTryGetKeyValueResponse? response;
         
+        GrpcChannel channel = GetSharedChannel(url);
+        
+        KeyValuer.KeyValuerClient client = new(channel);
+        
         do
         {
-            GrpcChannel channel = GetSharedChannel(url);
-        
-            KeyValuer.KeyValuerClient client = new(channel);
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
         
             response = await client.TryGetKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
@@ -348,11 +369,14 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcTryExistsKeyValueResponse? response;
         
+        GrpcChannel channel = GetSharedChannel(url);
+        
+        KeyValuer.KeyValuerClient client = new(channel);
+        
         do
         {
-            GrpcChannel channel = GetSharedChannel(url);
-        
-            KeyValuer.KeyValuerClient client = new(channel);
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
         
             response = await client.TryExistsKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
@@ -390,11 +414,14 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcTryDeleteKeyValueResponse? response;
         
+        GrpcChannel channel = GetSharedChannel(url);
+        
+        KeyValuer.KeyValuerClient client = new(channel);
+        
         do
         {
-            GrpcChannel channel = GetSharedChannel(url);
-        
-            KeyValuer.KeyValuerClient client = new(channel);
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
         
             response = await client.TryDeleteKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
@@ -433,11 +460,14 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcTryExtendKeyValueResponse? response;
         
+        GrpcChannel channel = GetSharedChannel(url);
+        
+        KeyValuer.KeyValuerClient client = new(channel);
+        
         do
         {
-            GrpcChannel channel = GetSharedChannel(url);
-        
-            KeyValuer.KeyValuerClient client = new(channel);
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
         
             response = await client.TryExtendKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
@@ -480,11 +510,14 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcTryExecuteTransactionResponse? response;
         
+        GrpcChannel channel = GetSharedChannel(url);
+        
+        KeyValuer.KeyValuerClient client = new(channel);
+        
         do
         {
-            GrpcChannel channel = GetSharedChannel(url);
-        
-            KeyValuer.KeyValuerClient client = new(channel);
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
         
             response = await client.TryExecuteTransactionAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
@@ -527,11 +560,14 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcScanAllByPrefixResponse? response;
         
+        GrpcChannel channel = GetSharedChannel(url);
+        
+        KeyValuer.KeyValuerClient client = new(channel);
+        
         do
         {
-            GrpcChannel channel = GetSharedChannel(url);
-        
-            KeyValuer.KeyValuerClient client = new(channel);
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
         
             response = await client.ScanAllByPrefixAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
@@ -555,10 +591,8 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to scan key/value by prefix: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
 
-    private static RepeatedField<GrpcKeyValueParameter> GetTransactionParameters(List<KeyValueParameter> parameters)
+    private static IEnumerable<GrpcKeyValueParameter> GetTransactionParameters(List<KeyValueParameter> parameters)
     {
-        RepeatedField<GrpcKeyValueParameter> grpcParameters = new();
-        
         foreach (KeyValueParameter parameter in parameters)
         {
             GrpcKeyValueParameter grpcParameter = new()
@@ -569,10 +603,8 @@ public class GrpcCommunication : IKahunaCommunication
             if (parameter.Value is not null)
                 grpcParameter.Value = parameter.Value;
             
-            grpcParameters.Add(grpcParameter);
+            yield return grpcParameter;
         }
-        
-        return grpcParameters;
     }
 
     private static GrpcChannel GetSharedChannel(string url)

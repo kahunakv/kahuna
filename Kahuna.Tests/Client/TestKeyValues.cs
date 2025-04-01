@@ -728,6 +728,25 @@ public class TestKeyValues
     }
     
     [Theory, CombinatorialData]
+    public async Task TestSingleSetValueAndDeleteWithRefObject(
+        [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
+        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+        
+        string keyName = GetRandomKeyName();
+
+        KahunaKeyValue result = await client.SetKeyValue(keyName, "some-value", 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
+        
+        result = await result.Delete(cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(result.Success);
+    }
+    
+    [Theory, CombinatorialData]
     public async Task TestSingleSetValueAndExists(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 

@@ -41,4 +41,34 @@ public class KahunaKeyValue
     {
         return Value is null ? null : Encoding.UTF8.GetString(Value);
     }
+    
+    /// <summary>
+    /// Try to extend the expiration of the key by the specified duration.
+    /// Returns true if the key expiration was successfully extended, false otherwise. 
+    /// </summary>
+    /// <param name="duration"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    /// <exception cref="KahunaException"></exception>
+    public async Task<KahunaKeyValue> Extend(TimeSpan duration, CancellationToken cancellationToken = default)
+    {
+        //if (string.IsNullOrEmpty(servedFrom) || !client.UpgradeUrls)
+        return await client.ExtendKeyValue(key, duration, durability, cancellationToken);
+        
+        //return await client.Communication.TryExtend(servedFrom, resource, owner, (int)duration.TotalMilliseconds, durability, cancellationToken);
+    }
+    
+    /// <summary>
+    /// Try to delete the key
+    /// </summary>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    /// <exception cref="KahunaException"></exception>
+    public async Task<KahunaKeyValue> Delete(CancellationToken cancellationToken = default)
+    {
+        //if (string.IsNullOrEmpty(servedFrom) || !client.UpgradeUrls)
+            return await client.DeleteKeyValue(key, durability, cancellationToken);
+        
+        //return await client.Communication.TryExtend(servedFrom, resource, owner, (int)duration.TotalMilliseconds, durability, cancellationToken);
+    }
 }

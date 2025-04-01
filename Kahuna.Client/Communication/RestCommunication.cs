@@ -90,6 +90,9 @@ public class RestCommunication : IKahunaCommunication
         
         do
         {
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
+            
             AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
         
             response = await retryPolicy.ExecuteAsync(() =>
@@ -135,6 +138,9 @@ public class RestCommunication : IKahunaCommunication
         
         do
         {
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
+            
             AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
         
             response = await retryPolicy.ExecuteAsync(() => 
@@ -182,6 +188,9 @@ public class RestCommunication : IKahunaCommunication
         
         do
         {
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
+            
             AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
             
             response = await retryPolicy.ExecuteAsync(() => 
@@ -224,6 +233,9 @@ public class RestCommunication : IKahunaCommunication
 
         do
         {
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
+            
             AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
 
             response = await retryPolicy.ExecuteAsync(() =>
@@ -269,6 +281,9 @@ public class RestCommunication : IKahunaCommunication
         
         do
         {
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
+            
             AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
         
             response = await retryPolicy.ExecuteAsync(() =>
@@ -318,6 +333,9 @@ public class RestCommunication : IKahunaCommunication
         
         do
         {
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
+            
             AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
         
             response = await retryPolicy.ExecuteAsync(() =>
@@ -367,6 +385,9 @@ public class RestCommunication : IKahunaCommunication
         
         do
         {
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
+            
             AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
         
             response = await retryPolicy.ExecuteAsync(() =>
@@ -413,6 +434,9 @@ public class RestCommunication : IKahunaCommunication
         
         do
         {
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
+            
             AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
         
             response = await retryPolicy.ExecuteAsync(() =>
@@ -458,6 +482,9 @@ public class RestCommunication : IKahunaCommunication
         
         do
         {
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
+            
             AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
         
             response = await retryPolicy.ExecuteAsync(() =>
@@ -499,6 +526,9 @@ public class RestCommunication : IKahunaCommunication
         
         do
         {
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
+            
             AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
         
             response = await retryPolicy.ExecuteAsync(() =>
@@ -541,6 +571,9 @@ public class RestCommunication : IKahunaCommunication
         
         do
         {
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
+            
             AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
         
             response = await retryPolicy.ExecuteAsync(() =>
@@ -584,6 +617,9 @@ public class RestCommunication : IKahunaCommunication
         
         do
         {
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
+            
             AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
         
             response = await retryPolicy.ExecuteAsync(() =>

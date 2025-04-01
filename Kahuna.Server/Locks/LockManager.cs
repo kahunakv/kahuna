@@ -93,7 +93,7 @@ public sealed class LockManager
         List<IActorRefStruct<LockActor, LockRequest, LockResponse>> persistentInstances = new(configuration.LocksWorkers);
 
         for (int i = 0; i < configuration.LocksWorkers; i++)
-            persistentInstances.Add(actorSystem.SpawnStruct<LockActor, LockRequest, LockResponse>("consistent-lock-" + i, backgroundWriter, persistence, logger));
+            persistentInstances.Add(actorSystem.SpawnStruct<LockActor, LockRequest, LockResponse>("persistent-lock-" + i, backgroundWriter, persistence, logger));
         
         return actorSystem.CreateConsistentHashRouterStruct(persistentInstances);
     }

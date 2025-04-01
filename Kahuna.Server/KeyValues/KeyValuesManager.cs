@@ -100,10 +100,10 @@ public sealed class KeyValuesManager
         KahunaConfiguration configuration
     )
     {
-        logger.LogDebug("Starting {Workers} consistent key/value workers", configuration.KeyValuesWorkers);
+        logger.LogDebug("Starting {Workers} persistent key/value workers", configuration.KeyValuesWorkers);
 
         for (int i = 0; i < configuration.KeyValuesWorkers; i++)
-            persistentInstances.Add(actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>("consistent-keyvalue-" + i, backgroundWriter, persistence, logger));
+            persistentInstances.Add(actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>("persistent-keyvalue-" + i, backgroundWriter, persistence, logger));
         
         return actorSystem.CreateConsistentHashRouter(persistentInstances);
     }
