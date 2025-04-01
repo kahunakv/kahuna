@@ -117,7 +117,7 @@ public sealed class LockManager
 
             HLCTimestamp eventTime = new(lockMessage.TimeLogical, lockMessage.TimeCounter);
 
-            await raft.HybridLogicalClock.ReceiveEvent(eventTime);
+            raft.HybridLogicalClock.ReceiveEvent(eventTime);
 
             switch ((LockRequestType)lockMessage.Type)
             {

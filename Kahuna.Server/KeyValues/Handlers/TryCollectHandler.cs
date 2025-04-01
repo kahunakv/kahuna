@@ -21,14 +21,14 @@ internal sealed class TryCollectHandler : BaseHandler
 
     }
 
-    public async Task Execute()
+    public void Execute()
     {
         if (keyValuesStore.Count < 2000)
             return;
         
         int number = 0;
         TimeSpan range = TimeSpan.FromMinutes(30);
-        HLCTimestamp currentTime = await raft.HybridLogicalClock.TrySendOrLocalEvent();
+        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
 
         foreach (KeyValuePair<string, KeyValueContext> key in keyValuesStore)
         {

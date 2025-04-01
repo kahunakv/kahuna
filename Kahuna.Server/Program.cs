@@ -47,7 +47,7 @@ builder.Services.AddSingleton<IRaft>(services =>
         NodeId = opts.RaftNodeId,
         Host = opts.RaftHost,
         Port = opts.RaftPort,
-        MaxPartitions = opts.InitialClusterPartitions,
+        InitialPartitions = opts.InitialClusterPartitions,
         ReadIOThreads = 8,
         WriteIOThreads = 8
     };

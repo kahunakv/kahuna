@@ -407,7 +407,7 @@ public sealed class KahunaManager : IKahuna
         return true;
     }
 
-    public void OnReplicationError(RaftLog log)
+    public void OnReplicationError(int partitionId, RaftLog log)
     {
         locks.OnReplicationError(log);
         keyValues.OnReplicationError(log);
