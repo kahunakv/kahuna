@@ -9,7 +9,7 @@ namespace RadLine
     {
         private readonly Dictionary<string, Style> _words;
         
-        private readonly Dictionary<string, Style> _regexes;
+        private readonly Dictionary<string, (Regex, Style)> _regexes;
 
         public WordHighlighter(StringComparer? comparer = null)
         {
@@ -25,16 +25,16 @@ namespace RadLine
         
         public WordHighlighter AddRegex(string regex, Style style)
         {
-            _regexes[regex] = style;
+            _regexes[regex] = (new Regex(regex, RegexOptions.Compiled), style);
             return this;
         }
 
         Style? IHighlighter.Highlight(string token)
         {
-            foreach (KeyValuePair<string, Style> regex in _regexes)
+            foreach (KeyValuePair<string, (Regex regex, Style styleRegex)> kv in _regexes)
             {
-                if (Regex.IsMatch(token, regex.Key))
-                    return regex.Value;
+                if (kv.Value.regex.IsMatch(token))
+                    return kv.Value.styleRegex;
             }
             
             _words.TryGetValue(token, out Style? style);

@@ -114,7 +114,7 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
     string[] regexes =
     [
         @"(?<number>\b\d+(\.\d+)?\b)",
-        "(?<singlequote>'(?:\\\\'|[^'])*')",
+        @"(?<singlequote>'(?:\\'|[^'])*')",
         "(?<doublequote>\"(?:\\\\\"|[^\"])*\")"
     ];
 

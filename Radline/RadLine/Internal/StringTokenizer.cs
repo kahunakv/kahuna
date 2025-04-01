@@ -6,12 +6,16 @@ namespace RadLine
     {
         public static IEnumerable<string> Tokenize(string text)
         {
+            bool isOpen = false;
             string buffer = string.Empty;
-            
+
             foreach (char character in text)
             {
-                if (char.IsLetterOrDigit(character) || character == '\"' || character == '"')
+                if (char.IsLetterOrDigit(character) || character == '\"' || character == '\'' || isOpen)
                 {
+                    if (character == '\"' || character == '\'')
+                        isOpen = !isOpen;
+
                     buffer += character;
                 }
                 else

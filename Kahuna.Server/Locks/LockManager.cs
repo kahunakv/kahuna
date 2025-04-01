@@ -105,6 +105,8 @@ public sealed class LockManager
     /// <returns></returns>
     public async Task<bool> OnReplicationReceived(RaftLog log)
     {
+        await Task.CompletedTask;
+        
         if (log.LogData is null || log.LogData.Length == 0)
             return true;
         
