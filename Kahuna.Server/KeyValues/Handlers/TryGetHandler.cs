@@ -44,7 +44,7 @@ internal sealed class TryGetHandler : BaseHandler
         if (context?.WriteIntent != null && context.WriteIntent.TransactionId != message.TransactionId)
             return new(KeyValueResponseType.MustRetry, 0);
 
-        HLCTimestamp currentTime = await raft.HybridLogicalClock.TrySendOrLocalEvent();
+        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
 
         if (message.TransactionId != HLCTimestamp.Zero)
         {

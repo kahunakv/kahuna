@@ -24,7 +24,7 @@ internal sealed class TrySetHandler : BaseHandler
     public async Task<KeyValueResponse> Execute(KeyValueRequest message)
     {
         bool exists = true;
-        HLCTimestamp currentTime = await raft.HybridLogicalClock.TrySendOrLocalEvent();
+        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
 
         if (!keyValuesStore.TryGetValue(message.Key, out KeyValueContext? context))
         {

@@ -33,7 +33,7 @@ internal sealed class TryExtendHandler : BaseHandler
         if (context.WriteIntent is not null)
             return new(KeyValueResponseType.MustRetry, 0);
         
-        HLCTimestamp currentTime = await raft.HybridLogicalClock.TrySendOrLocalEvent();
+        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
         
         if (context.Expires != HLCTimestamp.Zero && context.Expires - currentTime < TimeSpan.Zero)
             return new(KeyValueResponseType.DoesNotExist, context.Revision);

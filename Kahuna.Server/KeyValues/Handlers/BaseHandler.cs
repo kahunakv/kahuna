@@ -107,7 +107,7 @@ internal abstract class BaseHandler
                 context = await raft.ReadThreadPool.EnqueueTask(() => persistence.GetKeyValue(key));
                 if (context is not null)
                 {
-                    context.LastUsed = await raft.HybridLogicalClock.TrySendOrLocalEvent();
+                    context.LastUsed = raft.HybridLogicalClock.TrySendOrLocalEvent();
                     keyValuesStore.Add(key, context);
                     return context;
                 }

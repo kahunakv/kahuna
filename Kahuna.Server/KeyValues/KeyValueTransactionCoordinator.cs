@@ -567,7 +567,7 @@ public sealed class KeyValueTransactionCoordinator
         cts.CancelAfter(TimeSpan.FromMilliseconds(timeout));
         
         // Need HLC timestamp for the transaction id
-        HLCTimestamp transactionId = await raft.HybridLogicalClock.SendOrLocalEvent();
+        HLCTimestamp transactionId = raft.HybridLogicalClock.SendOrLocalEvent();
         
         KeyValueTransactionContext context = new()
         {

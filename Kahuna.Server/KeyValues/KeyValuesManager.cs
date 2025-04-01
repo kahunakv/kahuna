@@ -115,6 +115,8 @@ public sealed class KeyValuesManager
     /// <returns></returns>
     public async Task<bool> OnReplicationReceived(RaftLog log)
     {
+        await Task.CompletedTask;
+        
         if (log.LogData is null || log.LogData.Length == 0)
             return true;
 
@@ -127,7 +129,7 @@ public sealed class KeyValuesManager
 
             HLCTimestamp eventTime = new(keyValueMessage.TimeLogical, keyValueMessage.TimeCounter);
 
-            await raft.HybridLogicalClock.ReceiveEvent(eventTime);
+            raft.HybridLogicalClock.ReceiveEvent(eventTime);
 
             switch ((KeyValueRequestType)keyValueMessage.Type)
             {
@@ -835,7 +837,7 @@ public sealed class KeyValuesManager
     /// <exception cref="KahunaServerException"></exception>
     public async Task<KeyValueGetByPrefixResult> ScanByPrefix(string prefixKeyName, KeyValueDurability durability)
     {
-        HLCTimestamp currentTime = await raft.HybridLogicalClock.TrySendOrLocalEvent();
+        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
         
         KeyValueRequest request = new(
             KeyValueRequestType.ScanByPrefix,

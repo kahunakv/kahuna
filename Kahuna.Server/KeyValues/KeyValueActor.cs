@@ -111,7 +111,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
             );
 
             if ((operations++) % 1000 == 0)
-                await Collect();
+                Collect();
 
             return message.Type switch
             {
@@ -257,8 +257,8 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         return tryRollbackMutationsHandler.Execute(message);
     }
 
-    private Task Collect()
+    private void Collect()
     {
-        return tryCollectHandler.Execute();
+        tryCollectHandler.Execute();
     }
 }
