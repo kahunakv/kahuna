@@ -4,6 +4,7 @@ using Nixie;
 using Nixie.Routers;
 
 using Kommander;
+using Polly.Contrib.WaitAndRetry;
 
 namespace Kahuna.Server.Persistence;
 
@@ -12,6 +13,12 @@ namespace Kahuna.Server.Persistence;
  */
 public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 {
+    private const int WriteRetries = 5;
+    
+    private const int MaxBatchSize = 500;
+    
+    private const int MaxPacketSize = 1024 * 512;
+    
     private readonly IRaft raft;
 
     private readonly IPersistence persistence;
@@ -25,6 +32,10 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     private readonly HashSet<int> partitionIds = [];
     
     private readonly Stopwatch stopwatch = Stopwatch.StartNew();
+    
+    private List<PersistenceRequestItem>? pendingLockItems;
+    
+    private List<PersistenceRequestItem>? pendingKeyValuesItems;
     
     private bool pendingCheckpoint = true;
     
@@ -90,39 +101,70 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     {
         if (dirtyLocks.Count == 0)
             return;
-        
+
         stopwatch.Restart();
-                
-        List<PersistenceRequestItem> items = [];
-                
-        while (dirtyLocks.TryDequeue(out BackgroundWriteRequest? lockRequest))
+        
+        List<PersistenceRequestItem> items;
+
+        if (pendingLockItems != null)
+            items = pendingLockItems;
+        else
         {
-            if (lockRequest.PartitionId >= 0)
-                partitionIds.Add(lockRequest.PartitionId);
+            items = [];
             
-            items.Add(new(
-                lockRequest.Key, 
-                lockRequest.Value, 
-                lockRequest.Revision, 
-                lockRequest.Expires.L, 
-                lockRequest.Expires.C, 
-                lockRequest.State
-            ));
+            long size = 0;
+            int counter = 0;
+
+            while (dirtyLocks.TryDequeue(out BackgroundWriteRequest? lockRequest))
+            {
+                if (lockRequest.PartitionId >= 0)
+                    partitionIds.Add(lockRequest.PartitionId);
+
+                items.Add(new(
+                    lockRequest.Key,
+                    lockRequest.Value,
+                    lockRequest.Revision,
+                    lockRequest.Expires.L,
+                    lockRequest.Expires.C,
+                    lockRequest.State
+                ));
+
+                if (lockRequest.Value is not null)
+                    size += lockRequest.Value.Length;
+                
+                if (++counter >= MaxBatchSize || size >= MaxPacketSize)
+                    break;
+            }
         }
 
-        bool success = await raft.WriteThreadPool.EnqueueTask(() => persistence.StoreLocks(items));
-        
-        if (!success)
+        IEnumerable<TimeSpan> backoffDelays = Backoff.DecorrelatedJitterBackoffV2(
+            medianFirstRetryDelay: TimeSpan.FromMilliseconds(1000),
+            retryCount: WriteRetries
+        );
+
+        foreach (TimeSpan timeSpan in backoffDelays)
         {
-            logger.LogError("Coundn't store batch of {Count} locks", items.Count);
+            bool success = await raft.WriteThreadPool.EnqueueTask(() => persistence.StoreLocks(items));
+            if (!success)
+            {
+                logger.LogWarning("Coundn't store batch of {Count} locks. Waiting...", items.Count);
+
+                await Task.Delay(timeSpan);
+                continue;
+            }
+
+            logger.LogDebug("Successfully stored batch of {Count} locks in {Elapsed}ms", items.Count, stopwatch.ElapsedMilliseconds);
+            
+            pendingCheckpoint = true;
+            pendingLockItems = null;
             return;
         }
+
+        pendingLockItems = items;
         
-        logger.LogDebug("Successfully stored batch of {Count} locks in {Elapsed}ms", items.Count, stopwatch.ElapsedMilliseconds);
-        
-        pendingCheckpoint = true;
+        logger.LogError("Coundn't store batch of {Count} locks", items.Count);
     }
-    
+
     private async ValueTask FlushKeyValues()
     {
         if (dirtyKeyValues.Count == 0)
@@ -130,33 +172,64 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         
         stopwatch.Restart();
 
-        List<PersistenceRequestItem> items = [];
-                
-        while (dirtyKeyValues.TryDequeue(out BackgroundWriteRequest? keyValueRequest))
+        List<PersistenceRequestItem> items;
+
+        if (pendingKeyValuesItems != null)
+            items = pendingKeyValuesItems;
+        else
         {
-            if (keyValueRequest.PartitionId >= 0)
-                partitionIds.Add(keyValueRequest.PartitionId);
+            items = [];
             
-            items.Add(new(
-                keyValueRequest.Key, 
-                keyValueRequest.Value, 
-                keyValueRequest.Revision, 
-                keyValueRequest.Expires.L, 
-                keyValueRequest.Expires.C, 
-                keyValueRequest.State
-            ));
+            long size = 0;
+            int counter = 0;
+
+            while (dirtyKeyValues.TryDequeue(out BackgroundWriteRequest? keyValueRequest))
+            {
+                if (keyValueRequest.PartitionId >= 0)
+                    partitionIds.Add(keyValueRequest.PartitionId);
+
+                items.Add(new(
+                    keyValueRequest.Key,
+                    keyValueRequest.Value,
+                    keyValueRequest.Revision,
+                    keyValueRequest.Expires.L,
+                    keyValueRequest.Expires.C,
+                    keyValueRequest.State
+                ));
+                
+                if (keyValueRequest.Value is not null)
+                    size += keyValueRequest.Value.Length;
+                
+                if (++counter >= MaxBatchSize || size >= MaxPacketSize)
+                    break;
+            }
         }
+
+        IEnumerable<TimeSpan> backoffDelays = Backoff.DecorrelatedJitterBackoffV2(
+            medianFirstRetryDelay: TimeSpan.FromMilliseconds(1000),
+            retryCount: WriteRetries
+        );
         
-        bool success = await raft.WriteThreadPool.EnqueueTask(() => persistence.StoreKeyValues(items));
-        
-        if (!success)
+        foreach (TimeSpan timeSpan in backoffDelays)
         {
-            logger.LogError("Coundn't store batch of {Count} key-values", items.Count);
+            bool success = await raft.WriteThreadPool.EnqueueTask(() => persistence.StoreKeyValues(items));
+            if (!success)
+            {
+                logger.LogWarning("Coundn't store batch of {Count} key-values. Waiting...", items.Count);
+                
+                await Task.Delay(timeSpan);
+                continue;
+            }
+
+            logger.LogDebug("Successfully stored batch of {Count} key-values in {Elapsed}ms", items.Count, stopwatch.ElapsedMilliseconds);
+            
+            pendingCheckpoint = true;
+            pendingKeyValuesItems = null;
             return;
         }
         
-        logger.LogDebug("Successfully stored batch of {Count} key-values in {Elapsed}ms", items.Count, stopwatch.ElapsedMilliseconds);
+        pendingKeyValuesItems = items;
         
-        pendingCheckpoint = true;
+        logger.LogError("Coundn't store batch of {Count} key-values", items.Count);
     }
 }

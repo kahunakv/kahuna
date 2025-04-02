@@ -1,10 +1,10 @@
 
 using System.Text;
-using Grpc.Core;
 using Kommander;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.ScriptParser;
 using Kahuna.Shared.KeyValue;
+using Kommander.Support;
 using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues;
@@ -47,6 +47,8 @@ namespace Kahuna.Server.KeyValues;
 /// </summary>
 public sealed class KeyValueTransactionCoordinator
 {
+    private const int LockMaxDegreeOfParallelism = 5;
+    
     private readonly KeyValuesManager manager;
 
     private readonly KahunaConfiguration configuration;
@@ -154,6 +156,10 @@ public sealed class KeyValueTransactionCoordinator
         {
             return new() { Type = KeyValueResponseType.Errored, Reason = ex.Message + " at line " + ex.Line };
         }
+        catch (KahunaAbortedException ex)
+        {
+            return new() { Type = KeyValueResponseType.Aborted, Reason = ex.Message };
+        }
         catch (TaskCanceledException)
         {
             return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
@@ -196,8 +202,11 @@ public sealed class KeyValueTransactionCoordinator
 
         if (context.Locking == KeyValueTransactionLocking.Optimistic)
         {
-            context.LocksAcquired ??= [];
-            context.LocksAcquired.Add((keyName, durability));
+            lock (context.LockSync)
+            {
+                context.LocksAcquired ??= [];
+                context.LocksAcquired.Add((keyName, durability));
+            }
         }
 
         int expiresMs = 0;
@@ -291,8 +300,11 @@ public sealed class KeyValueTransactionCoordinator
 
         if (context.Locking == KeyValueTransactionLocking.Optimistic)
         {
-            context.LocksAcquired ??= [];
-            context.LocksAcquired.Add((keyName, durability));
+            lock (context.LockSync)
+            {
+                context.LocksAcquired ??= [];
+                context.LocksAcquired.Add((keyName, durability));
+            }
         }
 
         (KeyValueResponseType type, long revision) = await manager.LocateAndTryDeleteKeyValue(
@@ -341,8 +353,11 @@ public sealed class KeyValueTransactionCoordinator
         
         if (context.Locking == KeyValueTransactionLocking.Optimistic)
         {
-            context.LocksAcquired ??= [];
-            context.LocksAcquired.Add((keyName, durability));
+            lock (context.LockSync)
+            {
+                context.LocksAcquired ??= [];
+                context.LocksAcquired.Add((keyName, durability));
+            }
         }
         
         int expiresMs = 0;
@@ -397,8 +412,11 @@ public sealed class KeyValueTransactionCoordinator
         
         if (context.Locking == KeyValueTransactionLocking.Optimistic)
         {
-            context.LocksAcquired ??= [];
-            context.LocksAcquired.Add((keyName, durability));
+            lock (context.LockSync)
+            {
+                context.LocksAcquired ??= [];
+                context.LocksAcquired.Add((keyName, durability));
+            }
         }
         
         long compareRevision = -1;
@@ -462,8 +480,11 @@ public sealed class KeyValueTransactionCoordinator
         
         if (context.Locking == KeyValueTransactionLocking.Optimistic)
         {
-            context.LocksAcquired ??= [];
-            context.LocksAcquired.Add((keyName, durability));
+            lock (context.LockSync)
+            {
+                context.LocksAcquired ??= [];
+                context.LocksAcquired.Add((keyName, durability));
+            }
         }
         
         long compareRevision = -1;
@@ -587,28 +608,36 @@ public sealed class KeyValueTransactionCoordinator
 
         try
         {
-            List<Task<(KeyValueResponseType, string, KeyValueDurability)>> acquireLocksTasks = new(ephemeralLocksToAcquire.Count + linearizableLocksToAcquire.Count);
-
             // Step 1: Acquire locks in advance for pessimistic locking
             if (locking == KeyValueTransactionLocking.Pessimistic)
             {
-                foreach (string key in linearizableLocksToAcquire)
-                    acquireLocksTasks.Add(manager.LocateAndTryAcquireExclusiveLock(transactionId, key, 5050, KeyValueDurability.Persistent, cts.Token));
-
-                foreach (string key in ephemeralLocksToAcquire)
-                    acquireLocksTasks.Add(manager.LocateAndTryAcquireExclusiveLock(transactionId, key, 5050, KeyValueDurability.Ephemeral, cts.Token));
-
-                (KeyValueResponseType, string, KeyValueDurability)[] acquireResponses = await Task.WhenAll(acquireLocksTasks);
-
-                if (acquireResponses.Any(r => r.Item1 != KeyValueResponseType.Locked))
+                context.LocksAcquired = [];
+                
+                await linearizableLocksToAcquire.ForEachAsync(LockMaxDegreeOfParallelism, async key =>
                 {
-                    foreach ((KeyValueResponseType, string, KeyValueDurability) proposalResponse in acquireResponses)
-                        Console.WriteLine("{0} {1}", proposalResponse.Item2, proposalResponse.Item1);
+                    (KeyValueResponseType response, string _lockedKey, KeyValueDurability _durability) = await manager.LocateAndTryAcquireExclusiveLock(transactionId, key, 5050, KeyValueDurability.Persistent, cts.Token);
+                    
+                    if (response == KeyValueResponseType.Locked)
+                    {
+                        lock (context.LockSync) context.LocksAcquired.Add((_lockedKey, _durability));
+                        return;
+                    }
 
-                    return new() { Type = KeyValueResponseType.Aborted, Reason = "Failed to acquire locks" }; 
-                }
+                    throw new KahunaAbortedException("Failed to acquire locks");
+                });
+                
+                await ephemeralLocksToAcquire.ForEachAsync(LockMaxDegreeOfParallelism, async key =>
+                {
+                    (KeyValueResponseType response, string _lockedKey, KeyValueDurability _durability) = await manager.LocateAndTryAcquireExclusiveLock(transactionId, key, 5050, KeyValueDurability.Ephemeral, cts.Token);
 
-                context.LocksAcquired = acquireResponses.Select(r => (r.Item2, r.Item3)).ToList();
+                    if (response == KeyValueResponseType.Locked)
+                    {
+                        lock (context.LockSync) context.LocksAcquired.Add((_lockedKey, _durability));
+                        return;
+                    }
+
+                    throw new KahunaAbortedException("Failed to acquire locks");
+                });
             }
 
             // Step 2: Execute transaction
@@ -630,6 +659,10 @@ public sealed class KeyValueTransactionCoordinator
         {
             return new() { Type = KeyValueResponseType.Errored, Reason = ex.Message + " at line " + ex.Line };
         }
+        catch (KahunaAbortedException ex)
+        {
+            return new() { Type = KeyValueResponseType.Aborted, Reason = ex.Message };
+        }
         catch (TaskCanceledException)
         {
             return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
@@ -646,13 +679,11 @@ public sealed class KeyValueTransactionCoordinator
         {
             if (context.LocksAcquired is not null && context.LocksAcquired.Count > 0)
             {
-                List<Task<(KeyValueResponseType, string)>> releaseLocksTasks = new(ephemeralLocksToAcquire.Count + linearizableLocksToAcquire.Count);
-
                 // Final Step: Release locks
-                foreach ((string key, KeyValueDurability durability) in context.LocksAcquired) 
-                    releaseLocksTasks.Add(manager.LocateAndTryReleaseExclusiveLock(transactionId, key, durability, cts.Token));
-
-                await Task.WhenAll(releaseLocksTasks);
+                await context.LocksAcquired.ForEachAsync(LockMaxDegreeOfParallelism, async ((string key, KeyValueDurability durability) p) =>
+                {
+                    await manager.LocateAndTryReleaseExclusiveLock(transactionId, p.key, p.durability, cts.Token);
+                });
             }
         }
     }
@@ -702,10 +733,37 @@ public sealed class KeyValueTransactionCoordinator
     {
         if (context.LocksAcquired is null || context.ModifiedKeys is null)
             return;
-        
-        List<Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> proposalTasks = new(context.LocksAcquired.Count);
 
         // Step 3: Prepare mutations
+        
+        object syncObject = new();
+        List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> proposalResponses = [];
+        
+        await context.ModifiedKeys.ForEachAsync(LockMaxDegreeOfParallelism, async ((string key, KeyValueDurability durability) p) =>
+        {
+            (KeyValueResponseType response, HLCTimestamp ticketId, string _lockedKey, KeyValueDurability _durability) = await manager.LocateAndTryPrepareMutations(context.TransactionId, p.key, p.durability, cancellationToken);
+            
+            lock (syncObject)
+                proposalResponses.Add((response, ticketId, _lockedKey, _durability));
+            
+        });
+        
+        if (proposalResponses.Any(r => r.Item1 != KeyValueResponseType.Prepared))
+        {
+            foreach ((KeyValueResponseType, HLCTimestamp, string, KeyValueDurability) proposalResponse in proposalResponses)
+            {
+                if (proposalResponse.Item1 == KeyValueResponseType.Prepared)
+                    await manager.LocateAndTryRollbackMutations(context.TransactionId, proposalResponse.Item3, proposalResponse.Item2, proposalResponse.Item4, cancellationToken);
+                
+                Console.WriteLine("{0} {1}", proposalResponse.Item3, proposalResponse.Item1);
+            }
+
+            context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Couldn't prepare mutations" };
+            return;
+        }
+        
+        /*List<Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> proposalTasks = new(context.LocksAcquired.Count);
+        
         foreach ((string key, KeyValueDurability durability) in context.ModifiedKeys)
             proposalTasks.Add(manager.LocateAndTryPrepareMutations(context.TransactionId, key, durability, cancellationToken));
 
@@ -723,7 +781,7 @@ public sealed class KeyValueTransactionCoordinator
 
             context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Couldn't prepare mutations" };
             return;
-        }
+        }*/
 
         List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> mutationsPrepared = proposalResponses.Select(r => (r.Item3, r.Item2, r.Item4)).ToList();
 

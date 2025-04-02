@@ -1,16 +1,11 @@
 
-using System.Diagnostics;
 using Nixie;
-using Google.Protobuf;
-using Kahuna.Server.KeyValues.Handlers;
 using Kommander;
-using Kommander.Time;
-using Kommander.Data;
+using System.Diagnostics;
 
 using Kahuna.Server.Persistence;
-using Kahuna.Server.Replication;
 using Kahuna.Shared.KeyValue;
-using Kahuna.Server.Replication.Protos;
+using Kahuna.Server.KeyValues.Handlers;
 
 namespace Kahuna.Server.KeyValues;
 
@@ -21,13 +16,15 @@ namespace Kahuna.Server.KeyValues;
 /// </summary>
 public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
 {
+    private const int CollectThreshold = 1000;
+    
     private readonly IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext;
     
     private readonly Dictionary<string, KeyValueContext> keyValuesStore = new();
 
     private readonly ILogger<IKahuna> logger;
 
-    private uint operations;
+    private int operations = CollectThreshold;
 
     private readonly TrySetHandler trySetHandler;
     
@@ -110,8 +107,11 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 message.Durability
             );
 
-            if ((operations++) % 1000 == 0)
+            if (--operations == 0)
+            {
                 Collect();
+                operations = CollectThreshold;
+            }
 
             return message.Type switch
             {

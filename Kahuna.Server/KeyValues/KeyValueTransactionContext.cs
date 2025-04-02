@@ -1,4 +1,5 @@
 
+using System.Collections.Concurrent;
 using Kahuna.Server.ScriptParser;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
@@ -20,6 +21,8 @@ public sealed class KeyValueTransactionContext
     public KeyValueTransactionAction Action { get; set; }
     
     public KeyValueExecutionStatus Status { get; set; } = KeyValueExecutionStatus.Continue;
+    
+    public object LockSync { get; } = new();
     
     public List<(string, KeyValueDurability)>? LocksAcquired { get; set; }
     

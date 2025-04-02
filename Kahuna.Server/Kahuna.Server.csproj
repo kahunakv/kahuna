@@ -16,6 +16,7 @@
   <PackageReference Include="Grpc.AspNetCore.Server.Reflection" Version="2.67.0" />
   <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.3" />
   <PackageReference Include="CommandLineParser" Version="2.9.1" />
+  <PackageReference Include="Polly.Contrib.WaitAndRetry" Version="1.1.1" />
   <PackageReference Include="YaccLexTools" Version="1.2.3" />
 </ItemGroup>
 

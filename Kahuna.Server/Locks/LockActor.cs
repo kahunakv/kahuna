@@ -1,9 +1,10 @@
 
-using System.Diagnostics;
 using Nixie;
 using Kommander;
 using Kommander.Time;
 using Google.Protobuf;
+using System.Diagnostics;
+
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
@@ -17,6 +18,8 @@ namespace Kahuna.Server.Locks;
 /// </summary>
 public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 {
+    private const int CollectThreshold = 1000;
+    
     private readonly IActorContextStruct<LockActor, LockRequest, LockResponse> actorContext;
 
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
@@ -33,7 +36,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     
     private readonly Stopwatch stopwatch = Stopwatch.StartNew();
 
-    private uint operations;
+    private int operations = CollectThreshold;
 
     /// <summary>
     /// Constructor
@@ -77,9 +80,12 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
                 message.ExpiresMs,
                 message.Durability
             );
-
-            if ((operations++) % 1000 == 0)
+            
+            if (--operations == 0)
+            {
                 Collect();
+                operations = CollectThreshold;
+            }
 
             return message.Type switch
             {
