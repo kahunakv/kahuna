@@ -22,15 +22,6 @@ jobs:
             8.0.x
             9.0.x
       - name: Run Kahuna Server
-        run: (cd scripts && chmod +x ./run-server.sh && ./run-server.sh)
-      - name: Install dotCover
-        run: dotnet tool install JetBrains.dotCover.GlobalTool -g
+        run: (cd scripts && chmod +x ./run-server.sh && ./run-server.sh)      
       - name: Run Tests
-        run: (cd Kahuna.Tests && dotnet dotcover test --dcOutput=KahunaCoverageReport.html --dcReportType=HTML --dcFilters="-:assembly=xunit.v3.common;-:assembly=xunit.v3.core;-:assembly=xunit.v3.runner.inproc.console;-:assembly=xunit.v3.assert")
-      - name: Archive code coverage results
-        uses: actions/upload-artifact@v4
-        with:
-          name: code-coverage-report
-          path: |
-            Kahuna.Tests/KahunaCoverageReport
-            Kahuna.Tests/KahunaCoverageReport.html
+        run: (cd Kahuna.Tests && dotnet test -l "console;verbosity=detailed")      
