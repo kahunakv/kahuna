@@ -27,16 +27,10 @@ public sealed class ReplicationService : BackgroundService //, IDisposable
         if (raft.Configuration.Host == "*")
             return;
         
+        raft.OnLogRestored += kahuna.OnLogRestored;
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
         raft.OnReplicationError += kahuna.OnReplicationError;
         
         await raft.JoinCluster();
-        
-        while (true)
-        {
-            await raft.UpdateNodes();
-
-            await Task.Delay(3000, stoppingToken);
-        }
     }
 }

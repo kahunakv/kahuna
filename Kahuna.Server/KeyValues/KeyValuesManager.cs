@@ -107,6 +107,148 @@ public sealed class KeyValuesManager
         
         return actorSystem.CreateConsistentHashRouter(persistentInstances);
     }
+    
+    /// <summary>
+    /// Receives replication messages once they're committed to the Raft log.
+    /// </summary>
+    /// <param name="log"></param>
+    /// <returns></returns>
+    public async Task<bool> OnLogRestored(RaftLog log)
+    {
+        await Task.CompletedTask;
+        
+        if (log.LogData is null || log.LogData.Length == 0)
+            return true;
+
+        if (log.LogType != ReplicationTypes.KeyValues)
+            return true;
+        
+        try
+        {
+            KeyValueMessage keyValueMessage = ReplicationSerializer.UnserializeKeyValueMessage(log.LogData);
+
+            HLCTimestamp eventTime = new(keyValueMessage.TimeLogical, keyValueMessage.TimeCounter);
+
+            raft.HybridLogicalClock.ReceiveEvent(eventTime);
+
+            switch ((KeyValueRequestType)keyValueMessage.Type)
+            {
+                case KeyValueRequestType.TrySet:
+                {
+                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
+                        PersistenceRequestType.StoreKeyValue,
+                        [new(
+                            keyValueMessage.Key,
+                            keyValueMessage.Value?.ToByteArray(),
+                            keyValueMessage.Revision,
+                            keyValueMessage.ExpireLogical,
+                            keyValueMessage.ExpireCounter,
+                            (int)KeyValueState.Set
+                        )]
+                    ));
+                    
+                    if (response is null)
+                        return false;
+
+                    if (response.Type == PersistenceResponseType.Success)
+                        logger.LogDebug("Replicated key/value set {Key} {Revision} to {Node}", keyValueMessage.Key, keyValueMessage.Revision, raft.GetLocalNodeId());*/
+
+                    backgroundWriter.Send(new(
+                        BackgroundWriteType.QueueStoreKeyValue,
+                        -1,
+                        keyValueMessage.Key,
+                        keyValueMessage.Value?.ToByteArray(),
+                        keyValueMessage.Revision,
+                        new(keyValueMessage.ExpireLogical, keyValueMessage.ExpireCounter),
+                        (int)KeyValueState.Set
+                    ));
+
+                    return true;
+                }
+
+                case KeyValueRequestType.TryDelete:
+                {
+                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
+                        PersistenceRequestType.StoreKeyValue,
+                        [new(
+                            keyValueMessage.Key,
+                            keyValueMessage.Value?.ToByteArray(),
+                            keyValueMessage.Revision,
+                            keyValueMessage.ExpireLogical,
+                            keyValueMessage.ExpireCounter,
+                            (int)KeyValueState.Deleted
+                        )]
+                    ));
+                    
+                    if (response is null)
+                        return false;
+
+                    if (response.Type == PersistenceResponseType.Success)
+                        logger.LogDebug("Replicated key/value delete {Key} {Revision} to {Node}", keyValueMessage.Key, keyValueMessage.Revision, raft.GetLocalNodeId());*/
+                    
+                    backgroundWriter.Send(new(
+                        BackgroundWriteType.QueueStoreKeyValue,
+                        -1,
+                        keyValueMessage.Key,
+                        keyValueMessage.Value?.ToByteArray(),
+                        keyValueMessage.Revision,
+                        new(keyValueMessage.ExpireLogical, keyValueMessage.ExpireCounter),
+                        (int)KeyValueState.Deleted
+                    ));
+
+                    return true;
+                }
+
+                case KeyValueRequestType.TryExtend:
+                {
+                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
+                        PersistenceRequestType.StoreKeyValue,
+                        [new(
+                            keyValueMessage.Key,
+                            keyValueMessage.Value?.ToByteArray(),
+                            keyValueMessage.Revision,
+                            keyValueMessage.ExpireLogical,
+                            keyValueMessage.ExpireCounter,
+                            (int)KeyValueState.Set
+                        )]
+                    ));
+
+                    if (response is null)
+                        return false;
+
+                    if (response.Type == PersistenceResponseType.Success)
+                        logger.LogDebug("Replicated key/value extend {Key} {Revision} to {Node}", keyValueMessage.Key, keyValueMessage.Revision, raft.GetLocalNodeId());*/
+                    
+                    backgroundWriter.Send(new(
+                        BackgroundWriteType.QueueStoreKeyValue,
+                        -1,
+                        keyValueMessage.Key,
+                        keyValueMessage.Value?.ToByteArray(),
+                        keyValueMessage.Revision,
+                        new(keyValueMessage.ExpireLogical, keyValueMessage.ExpireCounter),
+                        (int)KeyValueState.Set
+                    ));
+
+                    return true;
+                }
+
+                case KeyValueRequestType.TryGet:
+                case KeyValueRequestType.TryExists:
+                    break;
+
+                default:
+                    logger.LogError("Unknown replication message type: {Type}", keyValueMessage.Type);
+                    break;
+            }
+        } 
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error processing replication message");
+            return false;
+        }
+
+        return true;
+    }
 
     /// <summary>
     /// Receives replication messages once they're committed to the Raft log.

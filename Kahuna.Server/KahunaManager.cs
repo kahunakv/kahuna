@@ -400,6 +400,12 @@ public sealed class KahunaManager : IKahuna
     {
         return keyValues.ScanAllByPrefix(prefixKeyName, durability);
     }
+    
+    public async Task<bool> OnLogRestored(int partitionId, RaftLog log)
+    {
+        await Task.WhenAll(locks.OnLogRestored(log), keyValues.OnLogRestored(log));
+        return true;
+    }
 
     public async Task<bool> OnReplicationReceived(int partitionId, RaftLog log)
     {

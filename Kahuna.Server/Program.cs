@@ -41,6 +41,8 @@ builder.Services.AddSingleton<IRaft>(services =>
 {
     if (string.IsNullOrEmpty(opts.RaftNodeId))
         opts.RaftNodeId = Environment.MachineName;
+
+    ILogger<IRaft> logger = services.GetRequiredService<ILogger<IRaft>>();
     
     RaftConfiguration configuration = new()
     {
@@ -54,8 +56,8 @@ builder.Services.AddSingleton<IRaft>(services =>
 
     IWAL walAdapter = opts.WalStorage switch
     {
-        "rocksdb" => new RocksDbWAL(path: opts.WalPath, revision: opts.WalRevision),
-        "sqlite" => new SqliteWAL(path: opts.WalPath, revision: opts.WalRevision),
+        "rocksdb" => new RocksDbWAL(path: opts.WalPath, revision: opts.WalRevision, logger),
+        "sqlite" => new SqliteWAL(path: opts.WalPath, revision: opts.WalRevision, logger),
         _ => throw new KahunaServerException("Invalid WAL storage")
     };
     
@@ -66,7 +68,7 @@ builder.Services.AddSingleton<IRaft>(services =>
         walAdapter,
         new GrpcCommunication(),
         new HybridLogicalClock(),
-        services.GetRequiredService<ILogger<IRaft>>()
+        logger
     );
 });
 

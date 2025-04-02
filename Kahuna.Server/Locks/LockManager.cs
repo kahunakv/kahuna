@@ -97,6 +97,151 @@ public sealed class LockManager
         
         return actorSystem.CreateConsistentHashRouterStruct(persistentInstances);
     }
+    
+    /// <summary>
+    /// Receives replication messages once they're committed to the Raft log.
+    /// </summary>
+    /// <param name="log"></param>
+    /// <returns></returns>
+    public async Task<bool> OnLogRestored(RaftLog log)
+    {
+        await Task.CompletedTask;
+        
+        if (log.LogData is null || log.LogData.Length == 0)
+            return true;
+        
+        if (log.LogType != ReplicationTypes.Locks)
+            return true;
+        
+        try
+        {
+            LockMessage lockMessage = ReplicationSerializer.UnserializeLockMessage(log.LogData);
+
+            HLCTimestamp eventTime = new(lockMessage.TimeLogical, lockMessage.TimeCounter);
+
+            raft.HybridLogicalClock.ReceiveEvent(eventTime);
+
+            switch ((LockRequestType)lockMessage.Type)
+            {
+                case LockRequestType.TryLock:
+                {
+                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
+                        PersistenceRequestType.StoreLock,
+                        [
+                            new(
+                                lockMessage.Resource,
+                                lockMessage.Owner?.ToByteArray(),
+                                lockMessage.FencingToken,
+                                lockMessage.ExpireLogical,
+                                lockMessage.ExpireCounter,
+                                (int)LockState.Locked
+                            )
+                        ]
+                    ));
+                    
+                    if (response is null)
+                        return false;
+
+                    return response.Type == PersistenceResponseType.Success;*/
+                    
+                    backgroundWriter.Send(new(
+                        BackgroundWriteType.QueueStoreLock,
+                        -1,
+                        lockMessage.Resource,
+                        lockMessage.Owner?.ToByteArray(),
+                        lockMessage.FencingToken,
+                        new(lockMessage.ExpireLogical, lockMessage.ExpireCounter),
+                        (int)LockState.Locked
+                    ));
+
+                    return true;
+                }
+
+                case LockRequestType.TryUnlock:
+                {
+                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
+                        PersistenceRequestType.StoreLock,
+                        [
+                            new(
+                                lockMessage.Resource,
+                                lockMessage.Owner?.ToByteArray(),
+                                lockMessage.FencingToken,
+                                lockMessage.ExpireLogical,
+                                lockMessage.ExpireCounter,
+                                (int)LockState.Unlocked
+                            )
+                        ]
+                    ));
+                    
+                    if (response is null)
+                        return false;
+
+                    return response.Type == PersistenceResponseType.Success;*/
+                    
+                    backgroundWriter.Send(new(
+                        BackgroundWriteType.QueueStoreLock,
+                        -1,
+                        lockMessage.Resource,
+                        lockMessage.Owner?.ToByteArray(),
+                        lockMessage.FencingToken,
+                        new(lockMessage.ExpireLogical, lockMessage.ExpireCounter),
+                        (int)LockState.Unlocked
+                    ));
+                    
+                    return true;
+                }
+
+                case LockRequestType.TryExtendLock:
+                {
+                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
+                        PersistenceRequestType.StoreLock,
+                        [
+                            new(
+                                lockMessage.Resource,
+                                lockMessage.Owner?.ToByteArray(),
+                                lockMessage.FencingToken,
+                                lockMessage.ExpireLogical,
+                                lockMessage.ExpireCounter,
+                                (int)LockState.Locked
+                            )
+                        ]
+                    ));
+
+                    if (response is null)
+                        return false;
+
+                    return response.Type == PersistenceResponseType.Success;*/
+                    
+                    backgroundWriter.Send(new(
+                        BackgroundWriteType.QueueStoreLock,
+                        -1,
+                        lockMessage.Resource,
+                        lockMessage.Owner?.ToByteArray(),
+                        lockMessage.FencingToken,
+                        new(lockMessage.ExpireLogical, lockMessage.ExpireCounter),
+                        (int)LockState.Unlocked
+                    ));
+
+                    return true;
+                }
+
+                case LockRequestType.Get:
+                    break;
+
+                default:
+                    logger.LogError("Unknown replication message type: {Type}", lockMessage.Type);
+                    break;
+            }
+        } 
+        catch (Exception ex)
+        {
+            logger.LogError("{Type}: {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+
+            return false;
+        }
+
+        return true;
+    }
 
     /// <summary>
     /// Receives replication messages once they're committed to the Raft log.

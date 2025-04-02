@@ -54,6 +54,8 @@ public interface IKahuna
     public Task<KeyValueGetByPrefixResult> ScanByPrefix(string prefixKeyName, KeyValueDurability durability);
 
     public Task<KeyValueGetByPrefixResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability);
+    
+    public Task<bool> OnLogRestored(int partitionId, RaftLog log);
 
     public Task<bool> OnReplicationReceived(int partitionId, RaftLog log);
 
