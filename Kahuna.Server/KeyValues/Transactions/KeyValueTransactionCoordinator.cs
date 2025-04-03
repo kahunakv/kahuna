@@ -45,7 +45,7 @@ namespace Kahuna.Server.KeyValues;
 /// Rollback Mechanisms: In case a transaction cannot proceed (e.g., due to conflicts or node failures), Kahuna has
 /// mechanisms to clean up by rolling back any prewritten changes, thereby ensuring the system remains in a consistent state.
 /// </summary>
-public sealed class KeyValueTransactionCoordinator
+internal sealed class KeyValueTransactionCoordinator
 {
     private const int LockMaxDegreeOfParallelism = 5;
     
@@ -548,7 +548,7 @@ public sealed class KeyValueTransactionCoordinator
     /// <exception cref="KahunaScriptException"></exception>
     private async Task<KeyValueTransactionResult> ExecuteTransaction(NodeAst ast, NodeAst? optionsAst, List<KeyValueParameter>? parameters, bool autoCommit)
     {
-        long timeout = configuration.DefaultTransactionTimeout;
+        int timeout = configuration.DefaultTransactionTimeout;
         using CancellationTokenSource cts = new();
         KeyValueTransactionLocking locking = KeyValueTransactionLocking.Pessimistic;
         
@@ -580,7 +580,7 @@ public sealed class KeyValueTransactionCoordinator
             
             if (options.TryGetValue("timeout", out optionValue))
             {
-                if (!long.TryParse(optionValue, out timeout))
+                if (!int.TryParse(optionValue, out timeout))
                     throw new KahunaScriptException("Invalid timeout option: " + timeout, optionsAst.yyline);
             }
         }
@@ -600,45 +600,17 @@ public sealed class KeyValueTransactionCoordinator
         };
         
         HashSet<string> ephemeralLocksToAcquire = [];
-        HashSet<string> linearizableLocksToAcquire = [];
+        HashSet<string> persistentLocksToAcquire = [];
 
         // Acquire all locks in advance for pessimistic locking
         if (locking == KeyValueTransactionLocking.Pessimistic)
-            GetLocksToAcquire(context, ast, ephemeralLocksToAcquire, linearizableLocksToAcquire);
+            GetLocksToAcquire(context, ast, ephemeralLocksToAcquire, persistentLocksToAcquire);
 
         try
         {
             // Step 1: Acquire locks in advance for pessimistic locking
             if (locking == KeyValueTransactionLocking.Pessimistic)
-            {
-                context.LocksAcquired = [];
-                
-                await linearizableLocksToAcquire.ForEachAsync(LockMaxDegreeOfParallelism, async key =>
-                {
-                    (KeyValueResponseType response, string _lockedKey, KeyValueDurability _durability) = await manager.LocateAndTryAcquireExclusiveLock(transactionId, key, 5050, KeyValueDurability.Persistent, cts.Token);
-                    
-                    if (response == KeyValueResponseType.Locked)
-                    {
-                        lock (context.LockSync) context.LocksAcquired.Add((_lockedKey, _durability));
-                        return;
-                    }
-
-                    throw new KahunaAbortedException("Failed to acquire locks");
-                });
-                
-                await ephemeralLocksToAcquire.ForEachAsync(LockMaxDegreeOfParallelism, async key =>
-                {
-                    (KeyValueResponseType response, string _lockedKey, KeyValueDurability _durability) = await manager.LocateAndTryAcquireExclusiveLock(transactionId, key, 5050, KeyValueDurability.Ephemeral, cts.Token);
-
-                    if (response == KeyValueResponseType.Locked)
-                    {
-                        lock (context.LockSync) context.LocksAcquired.Add((_lockedKey, _durability));
-                        return;
-                    }
-
-                    throw new KahunaAbortedException("Failed to acquire locks");
-                });
-            }
+                await AcquireLocksPessimistically(context, ephemeralLocksToAcquire, persistentLocksToAcquire, timeout, cts.Token);
 
             // Step 2: Execute transaction
             await ExecuteTransactionInternal(context, ast, cts.Token);
@@ -685,6 +657,50 @@ public sealed class KeyValueTransactionCoordinator
                     await manager.LocateAndTryReleaseExclusiveLock(transactionId, p.key, p.durability, cts.Token);
                 });
             }
+        }
+    }
+
+    /// <summary>
+    /// Generates a plan to acquire all locks needed for the transaction.
+    /// </summary>
+    /// <param name="context"></param>
+    /// <param name="ephemeralLocksToAcquire"></param>
+    /// <param name="persistentLocksToAcquire"></param>
+    /// <param name="timeout"></param>
+    /// <param name="ctsToken"></param>
+    /// <exception cref="KahunaAbortedException"></exception>
+    private async Task AcquireLocksPessimistically(KeyValueTransactionContext context, HashSet<string> ephemeralLocksToAcquire, HashSet<string> persistentLocksToAcquire, int timeout, CancellationToken ctsToken)
+    {
+        int numberLocks = ephemeralLocksToAcquire.Count + persistentLocksToAcquire.Count;
+
+        if (numberLocks == 0)
+            return;
+        
+        context.LocksAcquired = [];
+                
+        List<(string, int, KeyValueDurability)> keysToLock = new(numberLocks);
+
+        foreach (string kv in ephemeralLocksToAcquire)
+            keysToLock.Add((kv, timeout + 10, KeyValueDurability.Ephemeral));
+
+        foreach (string kv in persistentLocksToAcquire)
+            keysToLock.Add((kv, timeout + 10, KeyValueDurability.Persistent));
+
+        List<(KeyValueResponseType, string, KeyValueDurability)> lockResponses = await manager.LocateAndTryAcquireManyExclusiveLocks(context.TransactionId, keysToLock, ctsToken);
+
+        lock (context.LockSync)
+        {
+            foreach ((KeyValueResponseType response, string keyName, KeyValueDurability durability) in lockResponses)
+            {
+                if (response == KeyValueResponseType.Locked)
+                    context.LocksAcquired.Add((keyName, durability));
+            }
+        }
+
+        foreach ((KeyValueResponseType response, string keyName, KeyValueDurability durability) in lockResponses)
+        {
+            if (response != KeyValueResponseType.Locked)
+                throw new KahunaAbortedException("Failed to acquire lock: " + keyName + " " + durability);
         }
     }
 
@@ -735,7 +751,6 @@ public sealed class KeyValueTransactionCoordinator
             return;
 
         // Step 3: Prepare mutations
-        
         object syncObject = new();
         List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> proposalResponses = [];
         
@@ -1009,10 +1024,10 @@ public sealed class KeyValueTransactionCoordinator
     /// <param name="context"></param>
     /// <param name="ast"></param>
     /// <param name="ephemeralLocks"></param>
-    /// <param name="linearizableLocks"></param>
+    /// <param name="persistentLocks"></param>
     /// <exception cref="KahunaScriptException"></exception>
     /// <exception cref="ArgumentOutOfRangeException"></exception>
-    private static void GetLocksToAcquire(KeyValueTransactionContext context, NodeAst ast, HashSet<string> ephemeralLocks, HashSet<string> linearizableLocks)
+    private static void GetLocksToAcquire(KeyValueTransactionContext context, NodeAst ast, HashSet<string> ephemeralLocks, HashSet<string> persistentLocks)
     {
         while (true)
         {
@@ -1023,7 +1038,7 @@ public sealed class KeyValueTransactionCoordinator
                 case NodeType.StmtList:
                 {
                     if (ast.leftAst is not null) 
-                        GetLocksToAcquire(context, ast.leftAst, ephemeralLocks, linearizableLocks);
+                        GetLocksToAcquire(context, ast.leftAst, ephemeralLocks, persistentLocks);
 
                     if (ast.rightAst is not null)
                     {
@@ -1036,16 +1051,16 @@ public sealed class KeyValueTransactionCoordinator
                 
                 case NodeType.Begin:
                     if (ast.leftAst is not null) 
-                        GetLocksToAcquire(context, ast.leftAst, ephemeralLocks, linearizableLocks);
+                        GetLocksToAcquire(context, ast.leftAst, ephemeralLocks, persistentLocks);
                     break;
                 
                 case NodeType.If:
                 {
                     if (ast.rightAst is not null) 
-                        GetLocksToAcquire(context, ast.rightAst, ephemeralLocks, linearizableLocks);
+                        GetLocksToAcquire(context, ast.rightAst, ephemeralLocks, persistentLocks);
                     
                     if (ast.extendedOne is not null) 
-                        GetLocksToAcquire(context, ast.extendedOne, ephemeralLocks, linearizableLocks);
+                        GetLocksToAcquire(context, ast.extendedOne, ephemeralLocks, persistentLocks);
 
                     break;
                 }
@@ -1054,7 +1069,7 @@ public sealed class KeyValueTransactionCoordinator
                     if (ast.leftAst is null)
                         throw new KahunaScriptException("Invalid SET expression", ast.yyline);
                     
-                    linearizableLocks.Add(GetKeyName(context, ast.leftAst));
+                    persistentLocks.Add(GetKeyName(context, ast.leftAst));
                     break;
                     
                 case NodeType.Eset:
@@ -1069,7 +1084,7 @@ public sealed class KeyValueTransactionCoordinator
                         throw new KahunaScriptException("Invalid SET expression", ast.yyline);
                     
                     if (ast.extendedOne is null) // make sure if isn't querying a revision
-                        linearizableLocks.Add(GetKeyName(context, ast.leftAst));
+                        persistentLocks.Add(GetKeyName(context, ast.leftAst));
                     break;
                     
                 case NodeType.Eget:
@@ -1084,7 +1099,7 @@ public sealed class KeyValueTransactionCoordinator
                     if (ast.leftAst is null)
                         throw new KahunaScriptException("Invalid EXTEND expression", ast.yyline);
                     
-                    linearizableLocks.Add(GetKeyName(context, ast.leftAst));
+                    persistentLocks.Add(GetKeyName(context, ast.leftAst));
                     break;
                     
                 case NodeType.Eextend:
@@ -1098,7 +1113,7 @@ public sealed class KeyValueTransactionCoordinator
                     if (ast.leftAst is null)
                         throw new KahunaScriptException("Invalid DELETE expression", ast.yyline);
                     
-                    linearizableLocks.Add(GetKeyName(context, ast.leftAst));
+                    persistentLocks.Add(GetKeyName(context, ast.leftAst));
                     break;
                 
                 case NodeType.Edelete:
@@ -1137,10 +1152,15 @@ public sealed class KeyValueTransactionCoordinator
                 case NodeType.Commit:
                 case NodeType.Return:
                 case NodeType.Sleep:
+                case NodeType.Placeholder:
+                case NodeType.Exists:
+                case NodeType.Eexists:
+                case NodeType.BeginOptionList:
+                case NodeType.BeginOption:
                     break;
                 
                 default:
-                    throw new ArgumentOutOfRangeException();
+                    throw new NotImplementedException();
             }
 
             break;

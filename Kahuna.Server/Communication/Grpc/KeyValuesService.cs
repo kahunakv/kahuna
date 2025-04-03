@@ -260,6 +260,48 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
     }
     
     /// <summary>
+    /// Receives requests for the key/value "AcquireManyExclusiveLocks" service 
+    /// </summary>
+    /// <param name="request"></param>
+    /// <param name="context"></param>
+    /// <returns></returns>
+    public override async Task<GrpcTryAcquireManyExclusiveLocksResponse> TryAcquireManyExclusiveLocks(GrpcTryAcquireManyExclusiveLocksRequest request, ServerCallContext context)
+    {
+        List<(KeyValueResponseType, string, KeyValueDurability)> responses = await keyValues.LocateAndTryAcquireManyExclusiveLocks(
+            new(request.TransactionIdPhysical, request.TransactionIdCounter), 
+            GetRequestLocksItems(request.Items), 
+            context.CancellationToken
+        );
+
+        GrpcTryAcquireManyExclusiveLocksResponse response = new();
+        
+        response.Items.Add(GetResponseLocksItems(responses));
+
+        return response;
+    }
+
+    private static List<(string key, int expiresMs, KeyValueDurability durability)> GetRequestLocksItems(RepeatedField<GrpcTryAcquireManyExclusiveLocksRequestItem> items)
+    {
+        List<(string key, int expiresMs, KeyValueDurability durability)> rItems = new(items.Count);
+        
+        foreach (GrpcTryAcquireManyExclusiveLocksRequestItem item in items)
+            rItems.Add((item.Key, item.ExpiresMs, (KeyValueDurability)item.Durability));
+        
+        return rItems;
+    }
+    
+    private static IEnumerable<GrpcTryAcquireManyExclusiveLocksResponseItem> GetResponseLocksItems(List<(KeyValueResponseType, string, KeyValueDurability)> responses)
+    {
+        foreach ((KeyValueResponseType response, string key, KeyValueDurability durability) in responses)
+            yield return new()
+            {
+                Type = (GrpcKeyValueResponseType)response,
+                Key = key,
+                Durability = (GrpcKeyValueDurability)durability
+            };
+    }
+
+    /// <summary>
     /// Receives requests for the key/value "ReleaseExclusiveLock" service 
     /// </summary>
     /// <param name="request"></param>

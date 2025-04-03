@@ -386,39 +386,61 @@ internal sealed class KeyValueLocator
                 acquisitionPlan[leader] = [key];
         }
         
+        Lock lockSync = new();
+        List<Task> tasks = new(acquisitionPlan.Count);
         List<(KeyValueResponseType, string, KeyValueDurability)> responses = [];
         
-        foreach ((string? leader, List<(string key, int expiresMs, KeyValueDurability durability)>? xkeys) in acquisitionPlan)
-        {
-            if (leader == localNode)
-            {
-                List<(KeyValueResponseType type, string key, KeyValueDurability durability)> acquireResponses = await manager.TryAcquireManyExclusiveLock(transactionId, xkeys);
+        // Requests to nodes are sent in parallel
+        foreach ((string leader, List<(string key, int expiresMs, KeyValueDurability durability)>? xkeys) in acquisitionPlan)
+            tasks.Add(TryAcquireNodeExclusiveLocks(transactionId, leader, localNode, xkeys, lockSync, responses, cancelationToken));
+        
+        await Task.WhenAll(tasks);
 
+        return responses;
+    }
+
+    private async Task TryAcquireNodeExclusiveLocks(
+        HLCTimestamp transactionId, 
+        string leader, 
+        string localNode, 
+        List<(string key, int expiresMs, KeyValueDurability durability)> xkeys,
+        Lock lockSync,
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses,
+        CancellationToken cancelationToken
+    )
+    {
+        if (leader == localNode)
+        {
+            List<(KeyValueResponseType type, string key, KeyValueDurability durability)> acquireResponses = await manager.TryAcquireManyExclusiveLock(transactionId, xkeys);
+
+            lock (lockSync)
+            {
                 foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) item in acquireResponses)
                     responses.Add((item.type, item.key, item.durability));
-                
-                continue;
             }
-            
-            GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
-            
-            KeyValuer.KeyValuerClient client = new(channel);
-            
-            GrpcTryAcquireManyExclusiveLocksRequest request = new()
-            {
-                TransactionIdPhysical = transactionId.L,
-                TransactionIdCounter = transactionId.C
-            };
-            
-            request.Items.Add(GetRequestItems(xkeys));
-            
-            GrpcTryAcquireManyExclusiveLocksResponse? remoteResponse = await client.TryAcquireManyExclusiveLocksAsync(request, cancellationToken: cancelationToken);
 
+            return;
+        }
+            
+        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
+            
+        KeyValuer.KeyValuerClient client = new(channel);
+            
+        GrpcTryAcquireManyExclusiveLocksRequest request = new()
+        {
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C
+        };
+            
+        request.Items.Add(GetRequestItems(xkeys));
+            
+        GrpcTryAcquireManyExclusiveLocksResponse? remoteResponse = await client.TryAcquireManyExclusiveLocksAsync(request, cancellationToken: cancelationToken);
+
+        lock (lockSync)
+        {
             foreach (GrpcTryAcquireManyExclusiveLocksResponseItem item in remoteResponse.Items)
                 responses.Add(((KeyValueResponseType)item.Type, item.Key, (KeyValueDurability)item.Durability));
         }
-
-        return responses;
     }
 
     private static IEnumerable<GrpcTryAcquireManyExclusiveLocksRequestItem> GetRequestItems(List<(string key, int expiresMs, KeyValueDurability durability)> xkeys)

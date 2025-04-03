@@ -23,7 +23,7 @@ public sealed class KeyValueTransactionContext
     
     public KeyValueExecutionStatus Status { get; set; } = KeyValueExecutionStatus.Continue;
     
-    public object LockSync { get; } = new();
+    public Lock LockSync { get; } = new();
     
     public List<(string, KeyValueDurability)>? LocksAcquired { get; set; }
     

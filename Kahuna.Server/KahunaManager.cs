@@ -221,6 +221,18 @@ public sealed class KahunaManager : IKahuna
     }
 
     /// <summary>
+    /// Locates the leader node for the given key and executes the TryAcquireExclusiveLock request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="keys"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public Task<List<(KeyValueResponseType, string, KeyValueDurability)>> LocateAndTryAcquireManyExclusiveLocks(HLCTimestamp transactionId, List<(string key, int expiresMs, KeyValueDurability durability)> keys, CancellationToken cancelationToken)
+    {
+        return keyValues.LocateAndTryAcquireManyExclusiveLocks(transactionId, keys, cancelationToken);
+    }
+
+    /// <summary>
     /// Locates the leader node for the given key and executes the TryReleaseExclusiveLock request.
     /// </summary>
     /// <param name="transactionId"></param>

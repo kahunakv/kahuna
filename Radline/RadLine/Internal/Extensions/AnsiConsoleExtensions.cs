@@ -25,10 +25,10 @@ namespace RadLine
                 _console.Cursor.Hide();
             }
 
-            ~CursorHider()
-            {
-                throw new InvalidOperationException("CursorHider: Dispose was never called");
-            }
+            //~CursorHider()
+            //{
+            //    throw new InvalidOperationException("CursorHider: Dispose was never called");
+            //}
 
             public void Dispose()
             {

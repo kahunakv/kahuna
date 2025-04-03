@@ -18,7 +18,7 @@ namespace RadLine
         private readonly InputBuffer _input;
 
         public KeyBindings KeyBindings { get; }
-        public bool MultiLine { get; init; } = false;
+        public bool MultiLine { get; init; }
         public string Text { get; init; } = string.Empty;
 
         public ILineEditorPrompt Prompt { get; init; } = new LineEditorPrompt("[yellow]>[/]");
@@ -268,10 +268,10 @@ namespace RadLine
             }
         }
 
-        private bool SetContent(LineEditorState state, IList<LineBuffer>? lines)
+        private bool SetContent(LineEditorState state, LineBuffer[]? lines)
         {
             // Nothing to set?
-            if (lines == null || lines.Count == 0)
+            if (lines == null || lines.Length == 0)
             {
                 return false;
             }
@@ -289,7 +289,7 @@ namespace RadLine
             builder.Append("\u001b[?25l");
 
             // Add all the lines
-            foreach (var line in lines)
+            foreach (LineBuffer line in lines)
             {
                 state.AddLine(line.Content);
             }

@@ -39,6 +39,6 @@ public readonly struct LockRequest : IConsistentHashable
 
     public int GetHash()
     {
-        return (int)xxHash32.ComputeHash(Resource ?? "");
+        return (int)xxHash64.ComputeHash(Resource ?? "");
     }
 }

@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using CommandLine;
@@ -16,6 +15,7 @@ using Spectre.Console;
 using Kahuna.Client;
 using Kahuna.Shared.KeyValue;
 using Kommander.Diagnostics;
+using Kahuna.Control;
 
 ParserResult<Options> optsResult = Parser.Default.ParseArguments<Options>(args);
 
@@ -448,29 +448,3 @@ async Task LoadAndRunScript(string commandTrim)
     }
 }
 
-public sealed class MyLineNumberPrompt : ILineEditorPrompt
-{
-    private readonly Style _style;
-
-    public MyLineNumberPrompt(Style? style = null)
-    {
-        _style = style ?? new Style(foreground: Color.Yellow, background: Color.Blue);
-    }
-
-    public (Markup Markup, int Margin) GetPrompt(ILineEditorState state, int line)
-    {
-        return (new Markup("kahuna-cli> ", _style), 1);
-    }
-}
-
-public sealed class Options
-{
-    [Option('c', "connection-source", Required = false, HelpText = "Set the connection string")]
-    public string? ConnectionSource { get; set; }
-    
-    [Option("set", Required = false, HelpText = "Executes a 'set' command")]
-    public string? Set { get; set; }
-    
-    [Option("value", Required = false, HelpText = "Establish the parameter 'value'")]
-    public string? Value { get; set; }
-}

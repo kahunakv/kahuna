@@ -7,14 +7,19 @@ namespace RadLine
     internal sealed class LineEditorState : ILineEditorState
     {
         private readonly List<LineBuffer> _lines;
+        
         private int _lineIndex;
 
         public ILineEditorPrompt Prompt { get; }
 
         public int LineIndex => _lineIndex;
+        
         public int LineCount => _lines.Count;
+        
         public bool IsFirstLine => _lineIndex == 0;
+        
         public bool IsLastLine => _lineIndex == _lines.Count - 1;
+        
         public LineBuffer Buffer => _lines[_lineIndex];
 
         public bool IsEmpty => string.IsNullOrWhiteSpace(Text.TrimEnd('\r', '\n'));
@@ -28,16 +33,12 @@ namespace RadLine
             Prompt = prompt ?? throw new ArgumentNullException(nameof(prompt));
 
             // Add all lines
-            foreach (var line in text.NormalizeNewLines().Split(new[] { '\n' }))
-            {
+            foreach (string line in text.NormalizeNewLines().Split(['\n']))
                 _lines.Add(new LineBuffer(line));
-            }
 
             // No lines?
             if (_lines.Count == 0)
-            {
                 _lines.Add(new LineBuffer());
-            }
         }
 
         public LineBuffer GetBufferAt(int line)
@@ -53,14 +54,10 @@ namespace RadLine
         public bool SetContent(IList<LineBuffer> buffers, int lineIndex)
         {
             if (buffers is null)
-            {
                 throw new ArgumentNullException(nameof(buffers));
-            }
 
             if (buffers.Count == 0)
-            {
                 return false;
-            }
 
             _lines.Clear();
             _lines.AddRange(buffers);

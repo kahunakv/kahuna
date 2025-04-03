@@ -599,6 +599,9 @@ public sealed class KeyValuesManager
             }
 
             responses.Add((response.Type, key.key, key.durability));
+
+            if (response.Type != KeyValueResponseType.Locked)
+                break;
         }
 
         return responses;

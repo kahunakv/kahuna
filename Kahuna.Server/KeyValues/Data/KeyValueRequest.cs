@@ -70,6 +70,6 @@ public sealed class KeyValueRequest : IConsistentHashable
 
     public int GetHash()
     {
-        return (int)xxHash32.ComputeHash(Key ?? "");
+        return (int)xxHash64.ComputeHash(Key);
     }
 }

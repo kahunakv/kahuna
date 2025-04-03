@@ -6,20 +6,18 @@ namespace RadLine
 {
     internal sealed class LineEditorHistory : ILineEditorHistory
     {
-        private readonly LinkedList<LineBuffer[]> _history;
+        private readonly LinkedList<LineBuffer[]> _history = [];
+        
         private LinkedListNode<LineBuffer[]>? _current;
+        
         private LineBuffer[]? _intermediate;
+        
         private bool _showIntermediate;
 
         public int Count => _history.Count;
         public LineBuffer[]? Current =>
             _showIntermediate && _intermediate != null
                 ? _intermediate : _current?.Value;
-
-        public LineEditorHistory()
-        {
-            _history = new LinkedList<LineBuffer[]>();
-        }
 
         public void Add(string text)
         {
@@ -28,12 +26,11 @@ namespace RadLine
                 throw new ArgumentNullException(nameof(text));
             }
 
-            var lines = text.NormalizeNewLines().Split(new[] { '\n' });
-            var buffers = new LineBuffer[lines.Length];
-            for (var index = 0; index < lines.Length; index++)
-            {
+            string[] lines = text.NormalizeNewLines().Split(['\n']);
+            LineBuffer[] buffers = new LineBuffer[lines.Length];
+            
+            for (int index = 0; index < lines.Length; index++)
                 buffers[index] = new LineBuffer(lines[index]);
-            }
 
             _history.AddLast(buffers);
         }
