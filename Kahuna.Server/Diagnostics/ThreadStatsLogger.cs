@@ -11,13 +11,13 @@ public sealed class ThreadStatsLogger : IDisposable
 
     private const double SAMPLE_RATE_MILLISECONDS = 30000;
     
-    private bool _workerThreadWarned = false;
+    private bool _workerThreadWarned;
     
-    private bool _ioThreadWarned = false;
+    private bool _ioThreadWarned;
     
-    private bool _minWorkerThreadLevelWarned = false;
+    private bool _minWorkerThreadLevelWarned;
     
-    private bool _minIoThreadLevelWarned = false;
+    private bool _minIoThreadLevelWarned;
 
     private readonly int _maxWorkerThreadLevel;
     

@@ -8,7 +8,7 @@ using Kahuna.Server.KeyValues;
 
 namespace Kahuna.Server.Persistence;
 
-public class RocksDbPersistence : IPersistence
+public class RocksDbPersistence : IPersistence, IDisposable
 {
     private const string CurrentMarker = "~CURRENT";
     
@@ -216,5 +216,12 @@ public class RocksDbPersistence : IPersistence
     {
         using MemoryStream memoryStream = new(serializedData);
         return RocksDbKeyValueMessage.Parser.ParseFrom(memoryStream);
+    }
+
+    public void Dispose()
+    {
+        GC.SuppressFinalize(this);
+        
+        db.Dispose();
     }
 }

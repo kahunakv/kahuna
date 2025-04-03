@@ -46,6 +46,7 @@ internal sealed class TryGetHandler : BaseHandler
 
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
 
+        // TransactionId is provided so we keep a MVCC entry for it
         if (message.TransactionId != HLCTimestamp.Zero)
         {
             if (context is null)

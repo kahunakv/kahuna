@@ -14,10 +14,10 @@ internal static class CastToLongFunction
 
         return argument.Type switch
         {
-            KeyValueExpressionType.Bool => new() { Type = KeyValueExpressionType.Long, LongValue = argument.BoolValue ? 1 : 0 },
-            KeyValueExpressionType.Long => new() { Type = KeyValueExpressionType.Long, LongValue = argument.LongValue },
-            KeyValueExpressionType.Double => new() { Type = KeyValueExpressionType.Long, LongValue = (long)argument.DoubleValue },
-            KeyValueExpressionType.String => new() { Type = KeyValueExpressionType.Long, LongValue = TryCastString(ast, argument)  },
+            KeyValueExpressionType.BoolType => new() { Type = KeyValueExpressionType.LongType, LongValue = argument.BoolValue ? 1 : 0 },
+            KeyValueExpressionType.LongType => new() { Type = KeyValueExpressionType.LongType, LongValue = argument.LongValue },
+            KeyValueExpressionType.DoubleType => new() { Type = KeyValueExpressionType.LongType, LongValue = (long)argument.DoubleValue },
+            KeyValueExpressionType.StringType => new() { Type = KeyValueExpressionType.LongType, LongValue = TryCastString(ast, argument)  },
             _ => throw new KahunaScriptException($"Cannot cast {argument.Type} to int", ast.yyline)
         };
     }

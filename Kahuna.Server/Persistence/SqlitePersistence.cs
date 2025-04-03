@@ -8,7 +8,7 @@ using Microsoft.Data.Sqlite;
 
 namespace Kahuna.Server.Persistence;
 
-public class SqlitePersistence : IPersistence
+public class SqlitePersistence : IPersistence, IDisposable
 {
     private const int MaxShards = 8;
     
@@ -386,5 +386,26 @@ public class SqlitePersistence : IPersistence
                 readerWriterLock.ReleaseReaderLock();
             }
         }
+    }
+
+    public void Dispose()
+    {
+        foreach (KeyValuePair<int, (ReaderWriterLock, SqliteConnection)> conn in connections)
+        {
+            try
+            {
+                conn.Value.Item1.AcquireWriterLock(TimeSpan.FromSeconds(5));
+
+                conn.Value.Item2.Dispose();
+            }
+            finally
+            {
+                conn.Value.Item1.ReleaseWriterLock();
+            }
+        }
+
+        GC.SuppressFinalize(this);
+        
+        semaphore.Release();
     }
 }

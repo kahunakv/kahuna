@@ -353,7 +353,87 @@ internal sealed class KeyValueLocator
     }
     
     /// <summary>
-    /// Locates the leader node for the given key and executes the TryAcquireExclusiveLock request.
+    /// Locates the leader node for the given keys and executes the TryAcquireManyExclusiveLocks request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="keys"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public async Task<List<(KeyValueResponseType, string, KeyValueDurability)>> LocateAndTryAcquireManyExclusiveLocks(
+        HLCTimestamp transactionId, 
+        List<(string key, int expiresMs, KeyValueDurability durability)> keys, 
+        CancellationToken cancelationToken
+    )
+    {
+        string localNode = raft.GetLocalEndpoint();
+        
+        Dictionary<string, List<(string key, int expiresMs, KeyValueDurability durability)>> acquisitionPlan = [];
+
+        foreach ((string key, int expiresMs, KeyValueDurability durability) key in keys)
+        {
+            if (string.IsNullOrEmpty(key.key))
+                return [(KeyValueResponseType.InvalidInput, key.key, key.durability)];
+
+            int partitionId = raft.GetPartitionKey(key.key);
+            string leader = await raft.WaitForLeader(partitionId, cancelationToken);
+            
+            if (leader != localNode)
+                logger.LogDebug("ACQUIRE-LOCK-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
+            
+            if (acquisitionPlan.TryGetValue(leader, out List<(string key, int expiresMs, KeyValueDurability durability)>? list))
+                list.Add(key);
+            else
+                acquisitionPlan[leader] = [key];
+        }
+        
+        List<(KeyValueResponseType, string, KeyValueDurability)> responses = [];
+        
+        foreach ((string? leader, List<(string key, int expiresMs, KeyValueDurability durability)>? xkeys) in acquisitionPlan)
+        {
+            if (leader == localNode)
+            {
+                List<(KeyValueResponseType type, string key, KeyValueDurability durability)> acquireResponses = await manager.TryAcquireManyExclusiveLock(transactionId, xkeys);
+
+                foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) item in acquireResponses)
+                    responses.Add((item.type, item.key, item.durability));
+                
+                continue;
+            }
+            
+            GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
+            
+            KeyValuer.KeyValuerClient client = new(channel);
+            
+            GrpcTryAcquireManyExclusiveLocksRequest request = new()
+            {
+                TransactionIdPhysical = transactionId.L,
+                TransactionIdCounter = transactionId.C
+            };
+            
+            request.Items.Add(GetRequestItems(xkeys));
+            
+            GrpcTryAcquireManyExclusiveLocksResponse? remoteResponse = await client.TryAcquireManyExclusiveLocksAsync(request, cancellationToken: cancelationToken);
+
+            foreach (GrpcTryAcquireManyExclusiveLocksResponseItem item in remoteResponse.Items)
+                responses.Add(((KeyValueResponseType)item.Type, item.Key, (KeyValueDurability)item.Durability));
+        }
+
+        return responses;
+    }
+
+    private static IEnumerable<GrpcTryAcquireManyExclusiveLocksRequestItem> GetRequestItems(List<(string key, int expiresMs, KeyValueDurability durability)> xkeys)
+    {
+        foreach ((string key, int expiresMs, KeyValueDurability durability) key in xkeys)
+            yield return new()
+            {
+                Key = key.key,
+                ExpiresMs = key.expiresMs,
+                Durability = (GrpcKeyValueDurability)key.durability
+            };
+    }
+
+    /// <summary>
+    /// Locates the leader node for the given key and executes the TryReleaseExclusiveLock request.
     /// </summary>
     /// <param name="transactionId"></param>
     /// <param name="key"></param>

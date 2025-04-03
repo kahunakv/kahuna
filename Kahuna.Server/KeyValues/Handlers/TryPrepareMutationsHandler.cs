@@ -83,11 +83,11 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             return new(KeyValueResponseType.Prepared);
 
         // in optimistic concurrency, we create the write intent if it doesn't exist
-        // this is to ensure that the assigned transaction will gain the race
+        // this is to ensure that the assigned transaction will win the race
         context.WriteIntent ??= new()
         {
             TransactionId = message.TransactionId,
-            Expires = message.TransactionId + TimeSpan.FromMilliseconds(5000)
+            Expires = message.TransactionId + 5000
         };
         
         if (message.Durability != KeyValueDurability.Persistent)

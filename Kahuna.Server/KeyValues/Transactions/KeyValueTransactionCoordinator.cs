@@ -30,7 +30,7 @@ namespace Kahuna.Server.KeyValues;
 /// - Prewrite Phase: When a transaction starts, Kahuna’s transaction coordinator selects a lock for the transaction.
 ///  All writes are first “prewritten.” In this phase, locks are set on the involved keys and tentative data versions are written.
 /// This ensures that the transaction can later be committed atomically.
-/// -Commit Phase: Once all prewrites succeed, the coordinator commits the transaction by first committing the primary key
+/// - Commit Phase: Once all prewrites succeed, the coordinator commits the transaction by first committing the primary key
 /// and then informing other nodes to commit their corresponding secondary keys. If any node reports an issue during prewrite,
 /// the transaction is rolled back to maintain atomicity.
 ///
@@ -108,10 +108,10 @@ public sealed class KeyValueTransactionCoordinator
 
                 case NodeType.StmtList:
                 case NodeType.Let:
-                case NodeType.Integer:
-                case NodeType.String:
-                case NodeType.Float:
-                case NodeType.Boolean:
+                case NodeType.IntegerType:
+                case NodeType.StringType:
+                case NodeType.FloatType:
+                case NodeType.BooleanType:
                 case NodeType.Identifier:
                 case NodeType.If:
                 case NodeType.Equals:
@@ -441,7 +441,7 @@ public sealed class KeyValueTransactionCoordinator
         if (readOnlyContext is null)
         {
             if (ast.rightAst is not null)
-                context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new() { Type = KeyValueExpressionType.Null });
+                context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new() { Type = KeyValueExpressionType.NullType });
             
             return new()
             {
@@ -453,7 +453,7 @@ public sealed class KeyValueTransactionCoordinator
         if (ast.rightAst is not null)
             context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new()
             {
-                Type = KeyValueExpressionType.String, 
+                Type = KeyValueExpressionType.StringType, 
                 StrValue = Encoding.UTF8.GetString(readOnlyContext.Value ?? []),
                 Revision = readOnlyContext.Revision
             });
@@ -509,7 +509,7 @@ public sealed class KeyValueTransactionCoordinator
         if (readOnlyContext is null)
         {
             if (ast.rightAst is not null)
-                context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new() { Type = KeyValueExpressionType.Null });
+                context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new() { Type = KeyValueExpressionType.NullType });
             
             return new()
             {
@@ -521,7 +521,7 @@ public sealed class KeyValueTransactionCoordinator
         if (ast.rightAst is not null)
             context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new()
             {
-                Type = KeyValueExpressionType.Bool, 
+                Type = KeyValueExpressionType.BoolType, 
                 BoolValue = type == KeyValueResponseType.Exists,
                 Revision = readOnlyContext.Revision
             });
@@ -902,10 +902,10 @@ public sealed class KeyValueTransactionCoordinator
                 case NodeType.Begin:
                     throw new KahunaScriptException("Nested transactions are not supported", ast.yyline);
                 
-                case NodeType.Integer:
-                case NodeType.String:
-                case NodeType.Float:
-                case NodeType.Boolean:
+                case NodeType.IntegerType:
+                case NodeType.StringType:
+                case NodeType.FloatType:
+                case NodeType.BooleanType:
                 case NodeType.Identifier:
                 case NodeType.Equals:
                 case NodeType.NotEquals:
@@ -952,7 +952,7 @@ public sealed class KeyValueTransactionCoordinator
         
         KeyValueExpressionResult expressionResult = KeyValueTransactionExpression.Eval(context, ast.leftAst);
         
-        if (expressionResult is { Type: KeyValueExpressionType.Bool, BoolValue: true })
+        if (expressionResult is { Type: KeyValueExpressionType.BoolType, BoolValue: true })
         {
             if (ast.rightAst is not null) 
                 await ExecuteTransactionInternal(context, ast.rightAst, cancellationToken);
@@ -1108,10 +1108,10 @@ public sealed class KeyValueTransactionCoordinator
                     ephemeralLocks.Add(GetKeyName(context, ast.leftAst));
                     break;
                 
-                case NodeType.Integer:
-                case NodeType.String:
-                case NodeType.Float:
-                case NodeType.Boolean:
+                case NodeType.IntegerType:
+                case NodeType.StringType:
+                case NodeType.FloatType:
+                case NodeType.BooleanType:
                 case NodeType.Identifier:
                 case NodeType.Let:
                 case NodeType.Equals:

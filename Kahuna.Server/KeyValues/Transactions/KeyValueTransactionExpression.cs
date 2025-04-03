@@ -14,20 +14,20 @@ public static class KeyValueTransactionExpression
             case NodeType.Identifier:
                 return context.GetVariable(ast, ast.yytext!);
             
-            case NodeType.Integer:
-                return new() { Type = KeyValueExpressionType.Long, LongValue = long.Parse(ast.yytext!) };
+            case NodeType.IntegerType:
+                return new() { Type = KeyValueExpressionType.LongType, LongValue = long.Parse(ast.yytext!) };
             
-            case NodeType.String:
-                return new() { Type = KeyValueExpressionType.String, StrValue = ast.yytext! };
+            case NodeType.StringType:
+                return new() { Type = KeyValueExpressionType.StringType, StrValue = ast.yytext! };
             
-            case NodeType.Float:
-                return new() { Type = KeyValueExpressionType.String, DoubleValue = double.Parse(ast.yytext!) };
+            case NodeType.FloatType:
+                return new() { Type = KeyValueExpressionType.StringType, DoubleValue = double.Parse(ast.yytext!) };
             
-            case NodeType.Boolean:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = ast.yytext! == "true" };
+            case NodeType.BooleanType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = ast.yytext! == "true" };
             
             case NodeType.Placeholder:
-                return new() { Type = KeyValueExpressionType.String, StrValue = "some value" };
+                return new() { Type = KeyValueExpressionType.StringType, StrValue = "some value" };
             
             case NodeType.Equals:
                 return EvalEquals(context, ast, "==");
@@ -41,19 +41,19 @@ public static class KeyValueTransactionExpression
             case NodeType.LessThanEquals:
             {
                 KeyValueExpressionResult result = EvalGreaterThan(context, ast, "<=");
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = !result.BoolValue };
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = !result.BoolValue };
             }
             
             case NodeType.GreaterThanEquals:
             {
                 KeyValueExpressionResult result = EvalLessThan(context, ast, ">=");
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = !result.BoolValue };
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = !result.BoolValue };
             }
             
             case NodeType.NotEquals:
             {
                 KeyValueExpressionResult result = EvalEquals(context, ast, "!=");
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = !result.BoolValue };
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = !result.BoolValue };
             }
             
             case NodeType.Add:
@@ -97,6 +97,8 @@ public static class KeyValueTransactionExpression
             case NodeType.ArgumentList:
             case NodeType.Delete:
             case NodeType.Edelete:
+            case NodeType.Exists:
+            case NodeType.Eexists:
                 break;
 
             case NodeType.Let:
@@ -109,7 +111,7 @@ public static class KeyValueTransactionExpression
                 throw new NotImplementedException();
         }
 
-        return new() { Type = KeyValueExpressionType.Null };
+        return new() { Type = KeyValueExpressionType.NullType };
     }
 
     private static KeyValueExpressionResult EvalFuncCall(KeyValueTransactionContext context, NodeAst ast)
@@ -177,48 +179,47 @@ public static class KeyValueTransactionExpression
 
         switch (left.Type)
         {
-            case KeyValueExpressionType.Null when right.Type == KeyValueExpressionType.Null:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = true };
+            case KeyValueExpressionType.NullType when right.Type == KeyValueExpressionType.NullType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = true };
             
-            case KeyValueExpressionType.Null when right.Type != KeyValueExpressionType.Null:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = false };
+            case KeyValueExpressionType.NullType when right.Type != KeyValueExpressionType.NullType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = false };
             
-            case KeyValueExpressionType.Bool when right.Type == KeyValueExpressionType.Bool:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.BoolValue == right.BoolValue };
+            case KeyValueExpressionType.BoolType when right.Type == KeyValueExpressionType.BoolType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.BoolValue == right.BoolValue };
             
-            case KeyValueExpressionType.String when right.Type == KeyValueExpressionType.String:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.StrValue == right.StrValue };
+            case KeyValueExpressionType.StringType when right.Type == KeyValueExpressionType.StringType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.StrValue == right.StrValue };
             
-            case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Long:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.LongValue == right.LongValue };
+            case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.LongType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.LongValue == right.LongValue };
             
-            case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Double:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = Math.Abs(left.DoubleValue - right.DoubleValue) < 0.01 };
+            case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.DoubleType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = Math.Abs(left.DoubleValue - right.DoubleValue) < 0.01 };
             
-            case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Double:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = Math.Abs(left.LongValue - right.DoubleValue) < 0.01 };
+            case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.DoubleType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = Math.Abs(left.LongValue - right.DoubleValue) < 0.01 };
             
-            case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Long:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = Math.Abs(left.DoubleValue - right.LongValue) < 0.01 };
+            case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.LongType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = Math.Abs(left.DoubleValue - right.LongValue) < 0.01 };
             
-            case KeyValueExpressionType.Bytes when right.Type == KeyValueExpressionType.String:
+            case KeyValueExpressionType.BytesType when right.Type == KeyValueExpressionType.StringType:
                 byte[] rightBytes = right.StrValue is not null ? Encoding.UTF8.GetBytes(right.StrValue) : [];
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = ((ReadOnlySpan<byte>)left.BytesValue).SequenceEqual(rightBytes) };
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = ((ReadOnlySpan<byte>)left.BytesValue).SequenceEqual(rightBytes) };
             
-            case KeyValueExpressionType.String when right.Type == KeyValueExpressionType.Bytes:
+            case KeyValueExpressionType.StringType when right.Type == KeyValueExpressionType.BytesType:
                 byte[] leftBytes = left.StrValue is not null ? Encoding.UTF8.GetBytes(left.StrValue) : [];
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = ((ReadOnlySpan<byte>)right.BytesValue).SequenceEqual(leftBytes) };
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = ((ReadOnlySpan<byte>)right.BytesValue).SequenceEqual(leftBytes) };
             
-            case KeyValueExpressionType.Bytes when right.Type == KeyValueExpressionType.Bytes:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = ((ReadOnlySpan<byte>)left.BytesValue).SequenceEqual(right.BytesValue) };
+            case KeyValueExpressionType.BytesType when right.Type == KeyValueExpressionType.BytesType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = ((ReadOnlySpan<byte>)left.BytesValue).SequenceEqual(right.BytesValue) };
 
             default:
                 throw new KahunaScriptException($"Invalid operands: {left.Type} {operatorType} {right.Type}", ast.yyline);
         }
     }
 
-    private static KeyValueExpressionResult EvalGreaterThan(KeyValueTransactionContext context, NodeAst ast,
-        string operatorType)
+    private static KeyValueExpressionResult EvalGreaterThan(KeyValueTransactionContext context, NodeAst ast, string operatorType)
     {
         if (ast.leftAst is null)
             throw new KahunaScriptException("Invalid left expression", ast.yyline);
@@ -231,17 +232,17 @@ public static class KeyValueTransactionExpression
 
         switch (left.Type)
         {
-            case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Long:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.LongValue > right.LongValue };
+            case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.LongType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.LongValue > right.LongValue };
 
-            case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Long:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.DoubleValue > right.LongValue };
+            case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.LongType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.DoubleValue > right.LongValue };
 
-            case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Double:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.LongValue > right.DoubleValue };
+            case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.DoubleType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.LongValue > right.DoubleValue };
 
-            case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Double:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.DoubleValue > right.DoubleValue };
+            case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.DoubleType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.DoubleValue > right.DoubleValue };
 
             default:
                 throw new KahunaScriptException($"Invalid operands: {left.Type} {operatorType} {right.Type}", ast.yyline);
@@ -261,17 +262,17 @@ public static class KeyValueTransactionExpression
         
             switch (left.Type)
             {
-                case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Long:
-                    return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.LongValue < right.LongValue };
+                case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.LongType:
+                    return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.LongValue < right.LongValue };
             
-                case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Long:
-                    return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.DoubleValue < right.LongValue };
+                case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.LongType:
+                    return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.DoubleValue < right.LongValue };
             
-                case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Double:
-                    return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.LongValue < right.DoubleValue };
+                case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.DoubleType:
+                    return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.LongValue < right.DoubleValue };
             
-                case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Double:
-                    return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.DoubleValue < right.DoubleValue };
+                case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.DoubleType:
+                    return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.DoubleValue < right.DoubleValue };
                 
                 default:
                     throw new KahunaScriptException($"Invalid operands: {left.Type} {operatorType} {right.Type}", ast.yyline);
@@ -291,17 +292,17 @@ public static class KeyValueTransactionExpression
         
         switch (left.Type)
         {
-            case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Long:
-                return new() { Type = KeyValueExpressionType.Long, LongValue = left.LongValue + right.LongValue };
+            case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.LongType:
+                return new() { Type = KeyValueExpressionType.LongType, LongValue = left.LongValue + right.LongValue };
             
-            case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Long:
-                return new() { Type = KeyValueExpressionType.Double, DoubleValue = left.DoubleValue + right.LongValue };
+            case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.LongType:
+                return new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = left.DoubleValue + right.LongValue };
             
-            case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Double:
-                return new() { Type = KeyValueExpressionType.Double, DoubleValue = left.LongValue + right.DoubleValue };
+            case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.DoubleType:
+                return new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = left.LongValue + right.DoubleValue };
             
-            case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Double:
-                return new() { Type = KeyValueExpressionType.Double, DoubleValue = left.DoubleValue + right.DoubleValue };
+            case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.DoubleType:
+                return new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = left.DoubleValue + right.DoubleValue };
                 
             default:
                 throw new KahunaScriptException("Invalid operands: " + left.Type + " + " + right.Type, ast.yyline);
@@ -321,17 +322,17 @@ public static class KeyValueTransactionExpression
         
         switch (left.Type)
         {
-            case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Long:
-                return new() { Type = KeyValueExpressionType.Long, LongValue = left.LongValue - right.LongValue };
+            case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.LongType:
+                return new() { Type = KeyValueExpressionType.LongType, LongValue = left.LongValue - right.LongValue };
             
-            case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Long:
-                return new() { Type = KeyValueExpressionType.Double, DoubleValue = left.DoubleValue - right.LongValue };
+            case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.LongType:
+                return new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = left.DoubleValue - right.LongValue };
             
-            case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Double:
-                return new() { Type = KeyValueExpressionType.Double, DoubleValue = left.LongValue - right.DoubleValue };
+            case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.DoubleType:
+                return new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = left.LongValue - right.DoubleValue };
             
-            case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Double:
-                return new() { Type = KeyValueExpressionType.Double, DoubleValue = left.DoubleValue - right.DoubleValue };
+            case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.DoubleType:
+                return new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = left.DoubleValue - right.DoubleValue };
                 
             default:
                 throw new KahunaScriptException("Invalid operands: " + left.Type + " - " + right.Type, ast.yyline);
@@ -351,17 +352,17 @@ public static class KeyValueTransactionExpression
         
         switch (left.Type)
         {
-            case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Long:
-                return new() { Type = KeyValueExpressionType.Long, LongValue = left.LongValue * right.LongValue };
+            case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.LongType:
+                return new() { Type = KeyValueExpressionType.LongType, LongValue = left.LongValue * right.LongValue };
             
-            case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Long:
-                return new() { Type = KeyValueExpressionType.Double, DoubleValue = left.DoubleValue * right.LongValue };
+            case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.LongType:
+                return new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = left.DoubleValue * right.LongValue };
             
-            case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Double:
-                return new() { Type = KeyValueExpressionType.Double, DoubleValue = left.LongValue * right.DoubleValue };
+            case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.DoubleType:
+                return new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = left.LongValue * right.DoubleValue };
             
-            case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Double:
-                return new() { Type = KeyValueExpressionType.Double, DoubleValue = left.DoubleValue * right.DoubleValue };
+            case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.DoubleType:
+                return new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = left.DoubleValue * right.DoubleValue };
                 
             default:
                 throw new KahunaScriptException("Invalid operands: " + left.Type + " * " + right.Type, ast.yyline);
@@ -381,17 +382,17 @@ public static class KeyValueTransactionExpression
         
         switch (left.Type)
         {
-            case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Long:
-                return new() { Type = KeyValueExpressionType.Long, LongValue = left.LongValue / right.LongValue };
+            case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.LongType:
+                return new() { Type = KeyValueExpressionType.LongType, LongValue = left.LongValue / right.LongValue };
             
-            case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Long:
-                return new() { Type = KeyValueExpressionType.Double, DoubleValue = left.DoubleValue / right.LongValue };
+            case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.LongType:
+                return new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = left.DoubleValue / right.LongValue };
             
-            case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Double:
-                return new() { Type = KeyValueExpressionType.Double, DoubleValue = left.LongValue / right.DoubleValue };
+            case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.DoubleType:
+                return new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = left.LongValue / right.DoubleValue };
             
-            case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Double:
-                return new() { Type = KeyValueExpressionType.Double, DoubleValue = left.DoubleValue / right.DoubleValue };
+            case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.DoubleType:
+                return new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = left.DoubleValue / right.DoubleValue };
                 
             default:
                 throw new KahunaScriptException("Invalid operands: " + left.Type + " / " + right.Type, ast.yyline);
@@ -411,20 +412,20 @@ public static class KeyValueTransactionExpression
         
         switch (left.Type)
         {
-            case KeyValueExpressionType.Bool when right.Type == KeyValueExpressionType.Bool:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.BoolValue && right.BoolValue };
+            case KeyValueExpressionType.BoolType when right.Type == KeyValueExpressionType.BoolType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.BoolValue && right.BoolValue };
             
-            case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Long:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.LongValue != 0 && right.LongValue != 0 };
+            case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.LongType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.LongValue != 0 && right.LongValue != 0 };
             
-            case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Long:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.DoubleValue != 0 && right.LongValue != 0 };
+            case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.LongType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.DoubleValue != 0 && right.LongValue != 0 };
             
-            case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Double:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.LongValue != 0 && right.DoubleValue != 0 };
+            case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.DoubleType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.LongValue != 0 && right.DoubleValue != 0 };
             
-            case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Double:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.DoubleValue != 0 && right.DoubleValue != 0 };
+            case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.DoubleType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.DoubleValue != 0 && right.DoubleValue != 0 };
                 
             default:
                 throw new KahunaScriptException("Invalid operands: " + left.Type + " and " + right.Type, ast.yyline);
@@ -444,20 +445,20 @@ public static class KeyValueTransactionExpression
         
         switch (left.Type)
         {
-            case KeyValueExpressionType.Bool when right.Type == KeyValueExpressionType.Bool:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.BoolValue || right.BoolValue };
+            case KeyValueExpressionType.BoolType when right.Type == KeyValueExpressionType.BoolType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.BoolValue || right.BoolValue };
             
-            case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Long:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.LongValue != 0 || right.LongValue != 0 };
+            case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.LongType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.LongValue != 0 || right.LongValue != 0 };
             
-            case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Long:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.DoubleValue != 0 || right.LongValue != 0 };
+            case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.LongType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.DoubleValue != 0 || right.LongValue != 0 };
             
-            case KeyValueExpressionType.Long when right.Type == KeyValueExpressionType.Double:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.LongValue != 0 || right.DoubleValue != 0 };
+            case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.DoubleType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.LongValue != 0 || right.DoubleValue != 0 };
             
-            case KeyValueExpressionType.Double when right.Type == KeyValueExpressionType.Double:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.DoubleValue != 0 || right.DoubleValue != 0 };
+            case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.DoubleType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.DoubleValue != 0 || right.DoubleValue != 0 };
                 
             default:
                 throw new KahunaScriptException("Invalid operands: " + left.Type + " or " + right.Type, ast.yyline);
@@ -473,14 +474,14 @@ public static class KeyValueTransactionExpression
         
         switch (left.Type)
         {
-            case KeyValueExpressionType.Bool:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.BoolValue };
+            case KeyValueExpressionType.BoolType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.BoolValue };
             
-            case KeyValueExpressionType.Long:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.LongValue != 0 };
+            case KeyValueExpressionType.LongType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.LongValue != 0 };
             
-            case KeyValueExpressionType.Double:
-                return new() { Type = KeyValueExpressionType.Bool, BoolValue = left.DoubleValue != 0 };
+            case KeyValueExpressionType.DoubleType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.DoubleValue != 0 };
                 
             default:
                 throw new KahunaScriptException("Invalid operands: not(" + left.Type + ")", ast.yyline);

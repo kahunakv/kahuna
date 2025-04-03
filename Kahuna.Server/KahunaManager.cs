@@ -335,36 +335,36 @@ public sealed class KahunaManager : IKahuna
     /// Returns a value and its context by the specified key
     /// </summary>
     /// <param name="transactionId"></param>
-    /// <param name="keyName"></param>
+    /// <param name="key"></param>
     /// <param name="revision"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
     public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryGetValue(
         HLCTimestamp transactionId, 
-        string keyName, 
+        string key, 
         long revision, 
         KeyValueDurability durability
     )
     {
-        return keyValues.TryGetValue(transactionId, keyName, revision, durability);
+        return keyValues.TryGetValue(transactionId, key, revision, durability);
     }
     
     /// <summary>
     /// Checks if a key exists and its context (without the value)
     /// </summary>
     /// <param name="transactionId"></param>
-    /// <param name="keyName"></param>
+    /// <param name="key"></param>
     /// <param name="revision"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
     public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryExistsValue(
         HLCTimestamp transactionId, 
-        string keyName, 
+        string key, 
         long revision, 
         KeyValueDurability durability
     )
     {
-        return keyValues.TryExistsValue(transactionId, keyName, revision, durability);
+        return keyValues.TryExistsValue(transactionId, key, revision, durability);
     }
     
     /// <summary>

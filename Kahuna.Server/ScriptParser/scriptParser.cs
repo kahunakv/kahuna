@@ -14,7 +14,7 @@ namespace Kahuna.Server.ScriptParser;
 /// <summary>
 /// Entrypoint for the Script Parser
 /// </summary>
-internal partial class scriptParser
+internal sealed partial class scriptParser
 {
     private static readonly ConcurrentDictionary<string, NodeAst> _cache = new();
     

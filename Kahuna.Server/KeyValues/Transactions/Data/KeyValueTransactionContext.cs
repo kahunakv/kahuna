@@ -1,8 +1,9 @@
 
-using System.Collections.Concurrent;
+// ReSharper disable UnassignedGetOnlyAutoProperty
+
+using Kommander.Time;
 using Kahuna.Server.ScriptParser;
 using Kahuna.Shared.KeyValue;
-using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues;
 
@@ -12,9 +13,9 @@ namespace Kahuna.Server.KeyValues;
 /// </summary>
 public sealed class KeyValueTransactionContext
 {
-    public HLCTimestamp TransactionId { get; set; }
+    public HLCTimestamp TransactionId { get; init; }
     
-    public KeyValueTransactionLocking Locking { get; set; }
+    public KeyValueTransactionLocking Locking { get; init; }
     
     public KeyValueTransactionResult? Result { get; set; }
 
@@ -28,7 +29,7 @@ public sealed class KeyValueTransactionContext
     
     public List<(string, KeyValueDurability)>? ModifiedKeys { get; set; }
     
-    public List<KeyValueParameter>? Parameters { get; set; }
+    public List<KeyValueParameter>? Parameters { get; init; }
 
     private Dictionary<string , KeyValueExpressionResult>? Variables { get; set; }
 

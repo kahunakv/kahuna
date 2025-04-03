@@ -1,4 +1,6 @@
 
+#pragma warning disable CA1051
+
 namespace Kahuna.Server.ScriptParser;
 
 public sealed class NodeAst
@@ -53,3 +55,5 @@ public sealed class NodeAst
         //	Console.WriteLine("{0}: {1}", nodeType, yytext);
     }
 }
+
+#pragma warning restore CA1051

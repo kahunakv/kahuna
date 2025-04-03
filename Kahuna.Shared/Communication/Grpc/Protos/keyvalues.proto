@@ -8,6 +8,7 @@ service KeyValuer {
   rpc TryExistsKeyValue (GrpcTryExistsKeyValueRequest) returns (GrpcTryExistsKeyValueResponse);
   rpc TryExecuteTransaction (GrpcTryExecuteTransactionRequest) returns (GrpcTryExecuteTransactionResponse);
   rpc TryAcquireExclusiveLock (GrpcTryAcquireExclusiveLockRequest) returns (GrpcTryAcquireExclusiveLockResponse);
+  rpc TryAcquireManyExclusiveLocks (GrpcTryAcquireManyExclusiveLocksRequest) returns (GrpcTryAcquireManyExclusiveLocksResponse);
   rpc TryReleaseExclusiveLock (GrpcTryReleaseExclusiveLockRequest) returns (GrpcTryReleaseExclusiveLockResponse);
   rpc TryPrepareMutations (GrpcTryPrepareMutationsRequest) returns (GrpcTryPrepareMutationsResponse);
   rpc TryCommitMutations (GrpcTryCommitMutationsRequest) returns (GrpcTryCommitMutationsResponse);
@@ -126,6 +127,29 @@ message GrpcTryAcquireExclusiveLockRequest {
 message GrpcTryAcquireExclusiveLockResponse {
   optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
+}
+
+message GrpcTryAcquireManyExclusiveLocksRequest {
+  int64 TransactionIdPhysical = 1;
+  uint32 TransactionIdCounter = 2;
+  repeated GrpcTryAcquireManyExclusiveLocksRequestItem Items = 3;
+}
+
+message GrpcTryAcquireManyExclusiveLocksResponse {
+  optional string ServedFrom = 1;
+  repeated GrpcTryAcquireManyExclusiveLocksResponseItem Items = 2;
+}
+
+message GrpcTryAcquireManyExclusiveLocksRequestItem {
+  string Key = 1;
+  int32 ExpiresMs = 2;
+  GrpcKeyValueDurability Durability = 3;
+}
+
+message GrpcTryAcquireManyExclusiveLocksResponseItem {
+  GrpcKeyValueResponseType Type = 1;
+  string Key = 2;
+  GrpcKeyValueDurability Durability = 3;
 }
 
 message GrpcTryReleaseExclusiveLockRequest {

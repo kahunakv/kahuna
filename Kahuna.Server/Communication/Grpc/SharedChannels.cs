@@ -6,7 +6,7 @@ using Kahuna.Server.Configuration;
 
 namespace Kahuna.Communication.Grpc;
 
-public class SharedChannels
+internal static class SharedChannels
 {
     private static readonly ConcurrentDictionary<string, GrpcChannel> channels = new();
     

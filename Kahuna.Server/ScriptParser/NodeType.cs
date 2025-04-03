@@ -3,10 +3,10 @@ namespace Kahuna.Server.ScriptParser;
 
 public enum NodeType
 {
-    Integer,
-    String,
-    Float,
-    Boolean,
+    IntegerType,
+    StringType,
+    FloatType,
+    BooleanType,
     Identifier,
     Placeholder,
     StmtList,

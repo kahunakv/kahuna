@@ -37,6 +37,10 @@ public sealed class KeyValuesManager
     private readonly List<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> ephemeralInstances = [];
     
     private readonly List<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> persistentInstances = [];
+
+    private readonly KeyValueRestorer restorer;
+
+    private readonly KeyValueReplicator replicator;
     
     /// <summary>
     /// Constructor
@@ -68,6 +72,9 @@ public sealed class KeyValuesManager
 
         txCoordinator = new(this, configuration, raft, logger);
         locator = new(this, configuration, raft, logger);
+
+        restorer = new(backgroundWriter, raft, logger);
+        replicator = new(backgroundWriter, raft, logger);
     }
 
     /// <summary>
@@ -113,141 +120,9 @@ public sealed class KeyValuesManager
     /// </summary>
     /// <param name="log"></param>
     /// <returns></returns>
-    public async Task<bool> OnLogRestored(RaftLog log)
+    public Task<bool> OnLogRestored(RaftLog log)
     {
-        await Task.CompletedTask;
-        
-        if (log.LogData is null || log.LogData.Length == 0)
-            return true;
-
-        if (log.LogType != ReplicationTypes.KeyValues)
-            return true;
-        
-        try
-        {
-            KeyValueMessage keyValueMessage = ReplicationSerializer.UnserializeKeyValueMessage(log.LogData);
-
-            HLCTimestamp eventTime = new(keyValueMessage.TimeLogical, keyValueMessage.TimeCounter);
-
-            raft.HybridLogicalClock.ReceiveEvent(eventTime);
-
-            switch ((KeyValueRequestType)keyValueMessage.Type)
-            {
-                case KeyValueRequestType.TrySet:
-                {
-                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
-                        PersistenceRequestType.StoreKeyValue,
-                        [new(
-                            keyValueMessage.Key,
-                            keyValueMessage.Value?.ToByteArray(),
-                            keyValueMessage.Revision,
-                            keyValueMessage.ExpireLogical,
-                            keyValueMessage.ExpireCounter,
-                            (int)KeyValueState.Set
-                        )]
-                    ));
-                    
-                    if (response is null)
-                        return false;
-
-                    if (response.Type == PersistenceResponseType.Success)
-                        logger.LogDebug("Replicated key/value set {Key} {Revision} to {Node}", keyValueMessage.Key, keyValueMessage.Revision, raft.GetLocalNodeId());*/
-
-                    backgroundWriter.Send(new(
-                        BackgroundWriteType.QueueStoreKeyValue,
-                        -1,
-                        keyValueMessage.Key,
-                        keyValueMessage.Value?.ToByteArray(),
-                        keyValueMessage.Revision,
-                        new(keyValueMessage.ExpireLogical, keyValueMessage.ExpireCounter),
-                        (int)KeyValueState.Set
-                    ));
-
-                    return true;
-                }
-
-                case KeyValueRequestType.TryDelete:
-                {
-                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
-                        PersistenceRequestType.StoreKeyValue,
-                        [new(
-                            keyValueMessage.Key,
-                            keyValueMessage.Value?.ToByteArray(),
-                            keyValueMessage.Revision,
-                            keyValueMessage.ExpireLogical,
-                            keyValueMessage.ExpireCounter,
-                            (int)KeyValueState.Deleted
-                        )]
-                    ));
-                    
-                    if (response is null)
-                        return false;
-
-                    if (response.Type == PersistenceResponseType.Success)
-                        logger.LogDebug("Replicated key/value delete {Key} {Revision} to {Node}", keyValueMessage.Key, keyValueMessage.Revision, raft.GetLocalNodeId());*/
-                    
-                    backgroundWriter.Send(new(
-                        BackgroundWriteType.QueueStoreKeyValue,
-                        -1,
-                        keyValueMessage.Key,
-                        keyValueMessage.Value?.ToByteArray(),
-                        keyValueMessage.Revision,
-                        new(keyValueMessage.ExpireLogical, keyValueMessage.ExpireCounter),
-                        (int)KeyValueState.Deleted
-                    ));
-
-                    return true;
-                }
-
-                case KeyValueRequestType.TryExtend:
-                {
-                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
-                        PersistenceRequestType.StoreKeyValue,
-                        [new(
-                            keyValueMessage.Key,
-                            keyValueMessage.Value?.ToByteArray(),
-                            keyValueMessage.Revision,
-                            keyValueMessage.ExpireLogical,
-                            keyValueMessage.ExpireCounter,
-                            (int)KeyValueState.Set
-                        )]
-                    ));
-
-                    if (response is null)
-                        return false;
-
-                    if (response.Type == PersistenceResponseType.Success)
-                        logger.LogDebug("Replicated key/value extend {Key} {Revision} to {Node}", keyValueMessage.Key, keyValueMessage.Revision, raft.GetLocalNodeId());*/
-                    
-                    backgroundWriter.Send(new(
-                        BackgroundWriteType.QueueStoreKeyValue,
-                        -1,
-                        keyValueMessage.Key,
-                        keyValueMessage.Value?.ToByteArray(),
-                        keyValueMessage.Revision,
-                        new(keyValueMessage.ExpireLogical, keyValueMessage.ExpireCounter),
-                        (int)KeyValueState.Set
-                    ));
-
-                    return true;
-                }
-
-                case KeyValueRequestType.TryGet:
-                case KeyValueRequestType.TryExists:
-                    break;
-
-                default:
-                    logger.LogError("Unknown replication message type: {Type}", keyValueMessage.Type);
-                    break;
-            }
-        } 
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Error processing replication message");
-            return false;
-        }
-
-        return true;
+        return Task.FromResult(log.LogType != ReplicationTypes.KeyValues || restorer.Restore(log));
     }
 
     /// <summary>
@@ -255,141 +130,9 @@ public sealed class KeyValuesManager
     /// </summary>
     /// <param name="log"></param>
     /// <returns></returns>
-    public async Task<bool> OnReplicationReceived(RaftLog log)
+    public Task<bool> OnReplicationReceived(RaftLog log)
     {
-        await Task.CompletedTask;
-        
-        if (log.LogData is null || log.LogData.Length == 0)
-            return true;
-
-        if (log.LogType != ReplicationTypes.KeyValues)
-            return true;
-        
-        try
-        {
-            KeyValueMessage keyValueMessage = ReplicationSerializer.UnserializeKeyValueMessage(log.LogData);
-
-            HLCTimestamp eventTime = new(keyValueMessage.TimeLogical, keyValueMessage.TimeCounter);
-
-            raft.HybridLogicalClock.ReceiveEvent(eventTime);
-
-            switch ((KeyValueRequestType)keyValueMessage.Type)
-            {
-                case KeyValueRequestType.TrySet:
-                {
-                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
-                        PersistenceRequestType.StoreKeyValue,
-                        [new(
-                            keyValueMessage.Key,
-                            keyValueMessage.Value?.ToByteArray(),
-                            keyValueMessage.Revision,
-                            keyValueMessage.ExpireLogical,
-                            keyValueMessage.ExpireCounter,
-                            (int)KeyValueState.Set
-                        )]
-                    ));
-                    
-                    if (response is null)
-                        return false;
-
-                    if (response.Type == PersistenceResponseType.Success)
-                        logger.LogDebug("Replicated key/value set {Key} {Revision} to {Node}", keyValueMessage.Key, keyValueMessage.Revision, raft.GetLocalNodeId());*/
-
-                    backgroundWriter.Send(new(
-                        BackgroundWriteType.QueueStoreKeyValue,
-                        -1,
-                        keyValueMessage.Key,
-                        keyValueMessage.Value?.ToByteArray(),
-                        keyValueMessage.Revision,
-                        new(keyValueMessage.ExpireLogical, keyValueMessage.ExpireCounter),
-                        (int)KeyValueState.Set
-                    ));
-
-                    return true;
-                }
-
-                case KeyValueRequestType.TryDelete:
-                {
-                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
-                        PersistenceRequestType.StoreKeyValue,
-                        [new(
-                            keyValueMessage.Key,
-                            keyValueMessage.Value?.ToByteArray(),
-                            keyValueMessage.Revision,
-                            keyValueMessage.ExpireLogical,
-                            keyValueMessage.ExpireCounter,
-                            (int)KeyValueState.Deleted
-                        )]
-                    ));
-                    
-                    if (response is null)
-                        return false;
-
-                    if (response.Type == PersistenceResponseType.Success)
-                        logger.LogDebug("Replicated key/value delete {Key} {Revision} to {Node}", keyValueMessage.Key, keyValueMessage.Revision, raft.GetLocalNodeId());*/
-                    
-                    backgroundWriter.Send(new(
-                        BackgroundWriteType.QueueStoreKeyValue,
-                        -1,
-                        keyValueMessage.Key,
-                        keyValueMessage.Value?.ToByteArray(),
-                        keyValueMessage.Revision,
-                        new(keyValueMessage.ExpireLogical, keyValueMessage.ExpireCounter),
-                        (int)KeyValueState.Deleted
-                    ));
-
-                    return true;
-                }
-
-                case KeyValueRequestType.TryExtend:
-                {
-                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
-                        PersistenceRequestType.StoreKeyValue,
-                        [new(
-                            keyValueMessage.Key,
-                            keyValueMessage.Value?.ToByteArray(),
-                            keyValueMessage.Revision,
-                            keyValueMessage.ExpireLogical,
-                            keyValueMessage.ExpireCounter,
-                            (int)KeyValueState.Set
-                        )]
-                    ));
-
-                    if (response is null)
-                        return false;
-
-                    if (response.Type == PersistenceResponseType.Success)
-                        logger.LogDebug("Replicated key/value extend {Key} {Revision} to {Node}", keyValueMessage.Key, keyValueMessage.Revision, raft.GetLocalNodeId());*/
-                    
-                    backgroundWriter.Send(new(
-                        BackgroundWriteType.QueueStoreKeyValue,
-                        -1,
-                        keyValueMessage.Key,
-                        keyValueMessage.Value?.ToByteArray(),
-                        keyValueMessage.Revision,
-                        new(keyValueMessage.ExpireLogical, keyValueMessage.ExpireCounter),
-                        (int)KeyValueState.Set
-                    ));
-
-                    return true;
-                }
-
-                case KeyValueRequestType.TryGet:
-                case KeyValueRequestType.TryExists:
-                    break;
-
-                default:
-                    logger.LogError("Unknown replication message type: {Type}", keyValueMessage.Type);
-                    break;
-            }
-        } 
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Error processing replication message");
-            return false;
-        }
-
-        return true;
+        return Task.FromResult(log.LogType != ReplicationTypes.KeyValues || replicator.Replicate(log));
     }
 
     /// <summary>
@@ -414,7 +157,7 @@ public sealed class KeyValuesManager
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, long)> LocateAndTrySetKeyValue(
+    public Task<(KeyValueResponseType, long)> LocateAndTrySetKeyValue(
         HLCTimestamp transactionId,
         string key,
         byte[]? value,
@@ -426,7 +169,7 @@ public sealed class KeyValuesManager
         CancellationToken cancellationToken
     )
     {
-        return await locator.LocateAndTrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, cancellationToken);
+        return locator.LocateAndTrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, cancellationToken);
     }
 
     /// <summary>
@@ -438,7 +181,7 @@ public sealed class KeyValuesManager
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryGetValue(
+    public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryGetValue(
         HLCTimestamp transactionId, 
         string key,
         long revision, 
@@ -446,7 +189,7 @@ public sealed class KeyValuesManager
         CancellationToken cancellationToken
     )
     {
-        return await locator.LocateAndTryGetValue(transactionId, key, revision, durability, cancellationToken);
+        return locator.LocateAndTryGetValue(transactionId, key, revision, durability, cancellationToken);
     }
     
     /// <summary>
@@ -458,7 +201,7 @@ public sealed class KeyValuesManager
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryExistsValue(
+    public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryExistsValue(
         HLCTimestamp transactionId, 
         string key,
         long revision, 
@@ -466,7 +209,7 @@ public sealed class KeyValuesManager
         CancellationToken cancellationToken
     )
     {
-        return await locator.LocateAndTryExistsValue(transactionId, key, revision, durability, cancellationToken);
+        return locator.LocateAndTryExistsValue(transactionId, key, revision, durability, cancellationToken);
     }
     
     /// <summary>
@@ -477,9 +220,9 @@ public sealed class KeyValuesManager
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, long)> LocateAndTryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken)
+    public Task<(KeyValueResponseType, long)> LocateAndTryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        return await locator.LocateAndTryDeleteKeyValue(transactionId, key, durability, cancellationToken);
+        return locator.LocateAndTryDeleteKeyValue(transactionId, key, durability, cancellationToken);
     }
     
     /// <summary>
@@ -491,9 +234,9 @@ public sealed class KeyValuesManager
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, long)> LocateAndTryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+    public Task<(KeyValueResponseType, long)> LocateAndTryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        return await locator.LocateAndTryExtendKeyValue(transactionId, key, expiresMs, durability, cancellationToken);
+        return locator.LocateAndTryExtendKeyValue(transactionId, key, expiresMs, durability, cancellationToken);
     }
     
     /// <summary>
@@ -505,9 +248,21 @@ public sealed class KeyValuesManager
     /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, string, KeyValueDurability)> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancelationToken)
+    public Task<(KeyValueResponseType, string, KeyValueDurability)> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancelationToken)
     {
-        return await locator.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, durability, cancelationToken);
+        return locator.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, durability, cancelationToken);
+    }
+    
+    /// <summary>
+    /// Locates the leader node for the given keys and executes the TryAcquireManyExclusiveLocks request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="keys"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public Task<List<(KeyValueResponseType, string, KeyValueDurability)>> LocateAndTryAcquireManyExclusiveLocks(HLCTimestamp transactionId, List<(string key, int expiresMs, KeyValueDurability durability)> keys, CancellationToken cancelationToken)
+    {
+        return locator.LocateAndTryAcquireManyExclusiveLocks(transactionId, keys, cancelationToken);
     }
     
     /// <summary>
@@ -519,9 +274,9 @@ public sealed class KeyValuesManager
     /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, string)> LocateAndTryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancelationToken)
+    public Task<(KeyValueResponseType, string)> LocateAndTryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancelationToken)
     {
-        return await locator.LocateAndTryReleaseExclusiveLock(transactionId, key, durability, cancelationToken);
+        return locator.LocateAndTryReleaseExclusiveLock(transactionId, key, durability, cancelationToken);
     }
     
     /// <summary>
@@ -533,9 +288,9 @@ public sealed class KeyValuesManager
     /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> LocateAndTryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancelationToken)
+    public Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> LocateAndTryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancelationToken)
     {
-        return await locator.LocateAndTryPrepareMutations(transactionId, key, durability, cancelationToken);
+        return locator.LocateAndTryPrepareMutations(transactionId, key, durability, cancelationToken);
     }
     
     /// <summary>
@@ -547,9 +302,9 @@ public sealed class KeyValuesManager
     /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, long)> LocateAndTryCommitMutations(HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancelationToken)
+    public Task<(KeyValueResponseType, long)> LocateAndTryCommitMutations(HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancelationToken)
     {
-        return await locator.LocateAndTryCommitMutations(transactionId, key, ticketId, durability, cancelationToken);
+        return locator.LocateAndTryCommitMutations(transactionId, key, ticketId, durability, cancelationToken);
     }
     
     /// <summary>
@@ -561,9 +316,9 @@ public sealed class KeyValuesManager
     /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, long)> LocateAndTryRollbackMutations(HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancelationToken)
+    public Task<(KeyValueResponseType, long)> LocateAndTryRollbackMutations(HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancelationToken)
     {
-        return await locator.LocateAndTryRollbackMutations(transactionId, key, ticketId, durability, cancelationToken);
+        return locator.LocateAndTryRollbackMutations(transactionId, key, ticketId, durability, cancelationToken);
     }
 
     /// <summary>
@@ -806,6 +561,50 @@ public sealed class KeyValuesManager
     }
     
     /// <summary>
+    /// Passes a TryAcquireExclusiveLock request to the key/value actor for the given keys.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="keys"></param>
+    /// <returns></returns>
+    public async Task<List<(KeyValueResponseType, string, KeyValueDurability)>> TryAcquireManyExclusiveLock(HLCTimestamp transactionId, List<(string key, int expiresMs, KeyValueDurability durability)> keys)
+    {
+        List<(KeyValueResponseType, string, KeyValueDurability)> responses = new(keys.Count);
+        
+        foreach ((string key, int expiresMs, KeyValueDurability durability) key in keys)
+        {
+            KeyValueRequest request = new(
+                KeyValueRequestType.TryAcquireExclusiveLock,
+                transactionId,
+                key.key,
+                null,
+                null,
+                -1,
+                KeyValueFlags.None,
+                key.expiresMs,
+                HLCTimestamp.Zero,
+                key.durability
+            );
+
+            KeyValueResponse? response;
+
+            if (key.durability == KeyValueDurability.Ephemeral)
+                response = await ephemeralKeyValuesRouter.Ask(request);
+            else
+                response = await persistentKeyValuesRouter.Ask(request);
+
+            if (response is null)
+            {
+                responses.Add((KeyValueResponseType.Errored, key.key, key.durability));
+                continue;
+            }
+
+            responses.Add((response.Type, key.key, key.durability));
+        }
+
+        return responses;
+    }
+    
+    /// <summary>
     /// Passes a TryAcquireExclusiveLock request to the key/value actor for the given keyValue name.
     /// </summary>
     /// <param name="transactionId"></param>
@@ -954,9 +753,9 @@ public sealed class KeyValuesManager
     /// <param name="hash"></param>
     /// <param name="parameters"></param>
     /// <returns></returns>
-    public async Task<KeyValueTransactionResult> TryExecuteTx(byte[] script, string? hash, List<KeyValueParameter>? parameters)
+    public Task<KeyValueTransactionResult> TryExecuteTx(byte[] script, string? hash, List<KeyValueParameter>? parameters)
     {
-        return await txCoordinator.TryExecuteTx(script, hash, parameters);
+        return txCoordinator.TryExecuteTx(script, hash, parameters);
     }
 
     /// <summary>
@@ -965,9 +764,9 @@ public sealed class KeyValuesManager
     /// <param name="prefixKeyName"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KeyValueGetByPrefixResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability)
+    public Task<KeyValueGetByPrefixResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability)
     {
-        return await locator.ScanAllByPrefix(prefixKeyName, durability);
+        return locator.ScanAllByPrefix(prefixKeyName, durability);
     }
 
     /// <summary>

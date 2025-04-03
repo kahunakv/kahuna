@@ -692,19 +692,19 @@ internal partial class scriptParser: ShiftReduceParser<ValueType, LexLocation>
 { CurrentSemanticValue.n = new(NodeType.Placeholder, null, null, null, null, null, null, CurrentSemanticValue.s, ValueStack[ValueStack.Depth-1].l); }
         break;
       case 106: // int -> TDIGIT
-{ CurrentSemanticValue.n = new(NodeType.Integer, null, null, null, null, null, null, CurrentSemanticValue.s, ValueStack[ValueStack.Depth-1].l); }
+{ CurrentSemanticValue.n = new(NodeType.IntegerType, null, null, null, null, null, null, CurrentSemanticValue.s, ValueStack[ValueStack.Depth-1].l); }
         break;
       case 107: // float -> TFLOAT
-{ CurrentSemanticValue.n = new(NodeType.Float, null, null, null, null, null, null, CurrentSemanticValue.s, ValueStack[ValueStack.Depth-1].l); }
+{ CurrentSemanticValue.n = new(NodeType.FloatType, null, null, null, null, null, null, CurrentSemanticValue.s, ValueStack[ValueStack.Depth-1].l); }
         break;
       case 108: // boolean -> TTRUE
-{ CurrentSemanticValue.n = new(NodeType.Boolean, null, null, null, null, null, null, "true", ValueStack[ValueStack.Depth-1].l); }
+{ CurrentSemanticValue.n = new(NodeType.BooleanType, null, null, null, null, null, null, "true", ValueStack[ValueStack.Depth-1].l); }
         break;
       case 109: // boolean -> TFALSE
-{ CurrentSemanticValue.n = new(NodeType.Boolean, null, null, null, null, null, null, "false", ValueStack[ValueStack.Depth-1].l); }
+{ CurrentSemanticValue.n = new(NodeType.BooleanType, null, null, null, null, null, null, "false", ValueStack[ValueStack.Depth-1].l); }
         break;
       case 110: // string -> TSTRING
-{ CurrentSemanticValue.n = new(NodeType.String, null, null, null, null, null, null, CurrentSemanticValue.s, ValueStack[ValueStack.Depth-1].l); }
+{ CurrentSemanticValue.n = new(NodeType.StringType, null, null, null, null, null, null, CurrentSemanticValue.s, ValueStack[ValueStack.Depth-1].l); }
         break;
     }
 #pragma warning restore 162, 1522

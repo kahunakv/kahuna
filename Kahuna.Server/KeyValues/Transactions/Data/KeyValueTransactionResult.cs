@@ -23,7 +23,7 @@ public sealed class KeyValueTransactionResult
     {
         return new KeyValueExpressionResult()
         {
-            Type = KeyValueExpressionType.String,
+            Type = KeyValueExpressionType.StringType,
             StrValue = Value is not null ? Encoding.UTF8.GetString(Value) : null,
         };
     }
