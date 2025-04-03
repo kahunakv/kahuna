@@ -3,7 +3,7 @@ using System.Text;
 using Kommander.Time;
 using Kahuna.Shared.KeyValue;
 
-namespace Kahuna.Server.KeyValues;
+namespace Kahuna.Server.KeyValues.Transactions.Data;
 
 public sealed class KeyValueTransactionResult
 {

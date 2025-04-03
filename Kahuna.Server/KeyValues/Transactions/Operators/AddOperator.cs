@@ -1,5 +1,5 @@
 
-namespace Kahuna.Server.KeyValues.Operators;
+namespace Kahuna.Server.KeyValues.Transactions.Operators;
 
 public class AddOperator
 {

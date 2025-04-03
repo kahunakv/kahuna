@@ -1,7 +1,8 @@
 
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.ScriptParser;
 
-namespace Kahuna.Server.KeyValues.Functions;
+namespace Kahuna.Server.KeyValues.Transactions.Functions;
 
 internal static class GetLengthFunction
 {

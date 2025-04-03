@@ -8,6 +8,7 @@ using Kommander.Time;
 
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Locks;
 using Kahuna.Server.Persistence;
 using Kahuna.Shared.KeyValue;
@@ -256,6 +257,18 @@ public sealed class KahunaManager : IKahuna
     public Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> LocateAndTryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancelationToken)
     {
         return keyValues.LocateAndTryPrepareMutations(transactionId, key, durability, cancelationToken);
+    }
+
+    /// <summary>
+    /// Locates the leader node for the given key and executes the TryPrepareManyMutations request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="keys"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public Task<List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> LocateAndTryPrepareManyMutations(HLCTimestamp transactionId, List<(string key, KeyValueDurability durability)> keys, CancellationToken cancelationToken)
+    {
+        return keyValues.LocateAndTryPrepareManyMutations(transactionId, keys, cancelationToken);
     }
 
     /// <summary>

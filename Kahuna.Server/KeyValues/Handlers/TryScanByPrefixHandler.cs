@@ -24,17 +24,15 @@ internal sealed class TryScanByPrefixHandler : BaseHandler
     {
         List<(string, ReadOnlyKeyValueContext)> items = [];
         
-        foreach (KeyValuePair<string, KeyValueContext> keyValue in keyValuesStore)
+        foreach ((string? key, KeyValueContext? keyValueContext) in keyValuesStore)
         {
-            if (!keyValue.Key.StartsWith(message.Key))
+            if (!key.StartsWith(message.Key))
                 continue;
 
-            if (keyValue.Value.Expires != HLCTimestamp.Zero && keyValue.Value.Expires - message.TransactionId < TimeSpan.Zero)
+            if (keyValueContext.Expires != HLCTimestamp.Zero && keyValueContext.Expires - message.TransactionId < TimeSpan.Zero)
                 continue;
 
-            KeyValueContext keyValueContext = keyValue.Value;
-            
-            items.Add((keyValue.Key, new(keyValueContext.Value, keyValueContext.Revision, keyValueContext.Expires)));
+            items.Add((key, new(keyValueContext.Value, keyValueContext.Revision, keyValueContext.Expires)));
         }
         
         return Task.FromResult<KeyValueResponse>(new(KeyValueResponseType.Get, items));

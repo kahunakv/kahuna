@@ -7,6 +7,8 @@ using Kommander.Data;
 using Kommander.Time;
 
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues.Transactions;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
@@ -14,7 +16,7 @@ using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues;
 
-public sealed class KeyValuesManager
+internal sealed class KeyValuesManager
 {
     private readonly ActorSystem actorSystem;
 
@@ -291,6 +293,18 @@ public sealed class KeyValuesManager
     public Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> LocateAndTryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancelationToken)
     {
         return locator.LocateAndTryPrepareMutations(transactionId, key, durability, cancelationToken);
+    }
+    
+    /// <summary>
+    /// Locates the leader node for the given keys and executes many TryPrepareMutations requests.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="keys"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public Task<List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> LocateAndTryPrepareManyMutations(HLCTimestamp transactionId, List<(string key, KeyValueDurability durability)> keys, CancellationToken cancelationToken)
+    {
+        return locator.LocateAndTryPrepareManyMutations(transactionId, keys, cancelationToken);
     }
     
     /// <summary>
@@ -675,6 +689,51 @@ public sealed class KeyValuesManager
             return (KeyValueResponseType.Errored, HLCTimestamp.Zero, key, durability);
         
         return (response.Type, response.Ticket, key, durability);
+    }
+    
+    /// <summary>
+    /// Passes a TryPrepare request to the key/value actor for the given keys.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="durability"></param>
+    /// <returns></returns>
+    public async Task<List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> TryPrepareManyMutations(HLCTimestamp transactionId, List<(string key, KeyValueDurability durability)> keys)
+    {
+        List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> responses = new(keys.Count);
+        
+        foreach ((string key, KeyValueDurability durability) key in keys)
+        {
+            KeyValueRequest request = new(
+                KeyValueRequestType.TryPrepareMutations,
+                transactionId,
+                key.key,
+                null,
+                null,
+                -1,
+                KeyValueFlags.None,
+                0,
+                HLCTimestamp.Zero,
+                key.durability
+            );
+
+            KeyValueResponse? response;
+
+            if (key.durability == KeyValueDurability.Ephemeral)
+                response = await ephemeralKeyValuesRouter.Ask(request);
+            else
+                response = await persistentKeyValuesRouter.Ask(request);
+
+            if (response is null)
+                return [(KeyValueResponseType.Errored, HLCTimestamp.Zero, key.key, key.durability)];
+
+            responses.Add((response.Type, response.Ticket, key.key, key.durability));
+
+            if (response.Type != KeyValueResponseType.Prepared) // Early abort if a key wasn't successfully prepared for commits
+                return responses;
+        }
+
+        return responses;
     }
     
     /// <summary>

@@ -1,13 +1,15 @@
 
-using System.Text;
 using Kommander;
+using Kommander.Time;
+using Kommander.Support.Parallelization;
+
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues.Transactions.Commands;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.ScriptParser;
 using Kahuna.Shared.KeyValue;
-using Kommander.Support;
-using Kommander.Time;
 
-namespace Kahuna.Server.KeyValues;
+namespace Kahuna.Server.KeyValues.Transactions;
 
 /// <summary>
 /// This class is responsible for coordinating multi-key transactions across multiple nodes in a distributed manner.
@@ -57,6 +59,13 @@ internal sealed class KeyValueTransactionCoordinator
 
     private readonly ILogger<IKahuna> logger;
     
+    /// <summary>
+    /// Constructor
+    /// </summary>
+    /// <param name="manager"></param>
+    /// <param name="configuration"></param>
+    /// <param name="raft"></param>
+    /// <param name="logger"></param>
     public KeyValueTransactionCoordinator(KeyValuesManager manager, KahunaConfiguration configuration, IRaft raft, ILogger<IKahuna> logger)
     {
         this.manager = manager;
@@ -65,43 +74,51 @@ internal sealed class KeyValueTransactionCoordinator
         this.logger = logger;
     }
 
+    /// <summary>
+    /// Executes a single or multi-command transaction in an atomic manner
+    /// </summary>
+    /// <param name="script"></param>
+    /// <param name="hash"></param>
+    /// <param name="parameters"></param>
+    /// <returns></returns>
+    /// <exception cref="KahunaScriptException"></exception>
     public async Task<KeyValueTransactionResult> TryExecuteTx(byte[] script, string? hash, List<KeyValueParameter>? parameters)
     {
         try
         {
-            NodeAst ast = ScriptParserProcessor.Parse(script, hash);
+            NodeAst ast = ScriptParserProcessor.Parse(script, hash, logger);
 
             switch (ast.nodeType)
             {
                 case NodeType.Set:
-                    return await ExecuteSet(GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
+                    return await SetCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
 
                 case NodeType.Get:
-                    return await ExecuteGet(GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
+                    return await GetCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
                 
                 case NodeType.Exists:
-                    return await ExecuteExists(GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
+                    return await ExistsCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
 
                 case NodeType.Delete:
-                    return await ExecuteDelete(GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
+                    return await DeleteCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
 
                 case NodeType.Extend:
-                    return await ExecuteExtend(GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
+                    return await ExtendCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
 
                 case NodeType.Eset:
-                    return await ExecuteSet(GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
+                    return await SetCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
 
                 case NodeType.Eget:
-                    return await ExecuteGet(GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
+                    return await GetCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
                 
                 case NodeType.Eexists:
-                    return await ExecuteExists(GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
+                    return await ExistsCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
 
                 case NodeType.Edelete:
-                    return await ExecuteDelete(GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
+                    return await DeleteCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
 
                 case NodeType.Eextend:
-                    return await ExecuteExtend(GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
+                    return await ExtendCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
 
                 case NodeType.Begin:
                     return await ExecuteTransaction(ast.leftAst!, ast.rightAst, parameters, false);
@@ -176,6 +193,11 @@ internal sealed class KeyValueTransactionCoordinator
         }
     }
 
+    /// <summary>
+    /// Returns a temporary transaction context for executing a single command.
+    /// </summary>
+    /// <param name="parameters"></param>
+    /// <returns></returns>
     private static KeyValueTransactionContext GetTempTransactionContext(List<KeyValueParameter>? parameters)
     {
         return new()
@@ -183,356 +205,8 @@ internal sealed class KeyValueTransactionCoordinator
             TransactionId = HLCTimestamp.Zero,
             Locking = KeyValueTransactionLocking.Pessimistic,
             Action = KeyValueTransactionAction.Commit,
+            AsyncRelease = true,
             Parameters = parameters
-        };
-    }
-
-    private async Task<KeyValueTransactionResult> ExecuteSet(KeyValueTransactionContext context, NodeAst ast, KeyValueDurability durability, CancellationToken cancellationToken)
-    {
-        if (ast.leftAst is null)
-            throw new KahunaScriptException("Invalid key", ast.yyline);
-        
-        if (ast.leftAst.yytext is null)
-            throw new KahunaScriptException("Invalid key", ast.yyline);
-        
-        if (ast.rightAst is null)
-            throw new KahunaScriptException("Invalid value", ast.yyline);
-        
-        string keyName = GetKeyName(context, ast.leftAst);
-
-        if (context.Locking == KeyValueTransactionLocking.Optimistic)
-        {
-            lock (context.LockSync)
-            {
-                context.LocksAcquired ??= [];
-                context.LocksAcquired.Add((keyName, durability));
-            }
-        }
-
-        int expiresMs = 0;
-        
-        if (ast.extendedOne is not null)
-            expiresMs = int.Parse(ast.extendedOne.yytext!);
-
-        KeyValueFlags flags = KeyValueFlags.Set;
-
-        if (ast.extendedTwo is not null)
-        {
-            if (ast.extendedTwo.nodeType == NodeType.SetNotExists)
-                flags = KeyValueFlags.SetIfNotExists;
-            
-            if (ast.extendedTwo.nodeType == NodeType.SetExists)
-                flags = KeyValueFlags.SetIfExists;
-        }
-        
-        long compareRevision = 0;
-        byte[]? compareValue = null;
-
-        if (ast.extendedThree is not null)
-        {
-            if (ast.extendedThree.leftAst is null)
-                throw new KahunaScriptException("Invalid SET cmp/cmprev", ast.yyline);
-
-            if (ast.extendedThree.nodeType == NodeType.SetCmp)
-            {
-                flags = KeyValueFlags.SetIfEqualToValue;
-                compareValue = KeyValueTransactionExpression.Eval(context, ast.extendedThree.leftAst).ToBytes();
-            }
-            
-            if (ast.extendedThree.nodeType == NodeType.SetCmpRev)
-            {
-                flags = KeyValueFlags.SetIfEqualToRevision;
-                compareRevision = KeyValueTransactionExpression.Eval(context, ast.extendedThree.leftAst).ToLong();
-            }
-        }
-        
-        KeyValueTransactionResult result = KeyValueTransactionExpression.Eval(context, ast.rightAst).ToTransactionResult();
-        
-        (KeyValueResponseType type, long revision) = await manager.LocateAndTrySetKeyValue(
-            context.TransactionId,
-            key: keyName,
-            value: result.Value,
-            compareValue,
-            compareRevision,
-            flags,
-            expiresMs,
-            durability,
-            cancellationToken
-        );
-
-        if (type == KeyValueResponseType.Set)
-        {
-            context.ModifiedKeys ??= [];
-            context.ModifiedKeys.Add((keyName, durability));
-        }
-        else
-        {
-            if (type is KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry)
-            {
-                context.Action = KeyValueTransactionAction.Abort;
-                context.Status = KeyValueExecutionStatus.Stop;
-            }    
-        }
-
-        context.Result = new()
-        {
-            Type = type,
-            Revision = revision
-        };
-
-        return new()
-        {
-            ServedFrom = "",
-            Type = type,
-            Revision = revision
-        };
-    }
-    
-    private async Task<KeyValueTransactionResult> ExecuteDelete(KeyValueTransactionContext context, NodeAst ast, KeyValueDurability durability, CancellationToken cancellationToken)
-    {
-        if (ast.leftAst is null)
-            throw new KahunaScriptException("Invalid key", ast.yyline);
-        
-        if (ast.leftAst.yytext is null)
-            throw new KahunaScriptException("Invalid key", ast.yyline);
-
-        string keyName = GetKeyName(context, ast.leftAst);
-
-        if (context.Locking == KeyValueTransactionLocking.Optimistic)
-        {
-            lock (context.LockSync)
-            {
-                context.LocksAcquired ??= [];
-                context.LocksAcquired.Add((keyName, durability));
-            }
-        }
-
-        (KeyValueResponseType type, long revision) = await manager.LocateAndTryDeleteKeyValue(
-            context.TransactionId,
-            key: keyName,
-            durability,
-            cancellationToken
-        );
-        
-        switch (type)
-        {
-            case KeyValueResponseType.Deleted:
-                context.ModifiedKeys ??= [];
-                context.ModifiedKeys.Add((keyName, durability));
-                break;
-            
-            case KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry:
-                context.Action = KeyValueTransactionAction.Abort;
-                context.Status = KeyValueExecutionStatus.Stop;
-                break;
-        }
-        
-        context.Result = new()
-        {
-            Type = type,
-            Revision = revision
-        };
-
-        return new()
-        {
-            ServedFrom = "",
-            Type = type,
-            Revision = revision
-        };
-    }
-    
-    private async Task<KeyValueTransactionResult> ExecuteExtend(KeyValueTransactionContext context, NodeAst ast, KeyValueDurability durability, CancellationToken cancellationToken)
-    {
-        if (ast.leftAst is null)
-            throw new KahunaScriptException("Invalid key", ast.yyline);
-        
-        if (ast.leftAst.yytext is null)
-            throw new KahunaScriptException("Invalid key", ast.yyline);
-        
-        string keyName = GetKeyName(context, ast.leftAst);
-        
-        if (context.Locking == KeyValueTransactionLocking.Optimistic)
-        {
-            lock (context.LockSync)
-            {
-                context.LocksAcquired ??= [];
-                context.LocksAcquired.Add((keyName, durability));
-            }
-        }
-        
-        int expiresMs = 0;
-        
-        if (ast.rightAst is not null)
-            expiresMs = int.Parse(ast.rightAst.yytext!);
-        
-        (KeyValueResponseType type, long revision) = await manager.LocateAndTryExtendKeyValue(
-            context.TransactionId,
-            key: keyName,
-            expiresMs: expiresMs,
-            durability,
-            cancellationToken
-        );
-        
-        switch (type)
-        {
-            case KeyValueResponseType.Extended:
-                context.ModifiedKeys ??= [];
-                context.ModifiedKeys.Add((keyName, durability));
-                break;
-            
-            case KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry:
-                context.Action = KeyValueTransactionAction.Abort;
-                context.Status = KeyValueExecutionStatus.Stop;
-                break;
-        }
-        
-        context.Result = new()
-        {
-            Type = type,
-            Revision = revision
-        };
-
-        return new()
-        {
-            ServedFrom = "",
-            Type = type,
-            Revision = revision
-        };
-    }
-    
-    private async Task<KeyValueTransactionResult> ExecuteGet(KeyValueTransactionContext context, NodeAst ast, KeyValueDurability durability, CancellationToken cancellationToken)
-    {
-        if (ast.leftAst is null)
-            throw new KahunaScriptException("Invalid key", ast.yyline);
-        
-        if (ast.leftAst.yytext is null)
-            throw new KahunaScriptException("Invalid key", ast.yyline);
-        
-        string keyName = GetKeyName(context, ast.leftAst);
-        
-        if (context.Locking == KeyValueTransactionLocking.Optimistic)
-        {
-            lock (context.LockSync)
-            {
-                context.LocksAcquired ??= [];
-                context.LocksAcquired.Add((keyName, durability));
-            }
-        }
-        
-        long compareRevision = -1;
-        
-        if (ast.extendedOne is not null)
-            compareRevision = int.Parse(ast.extendedOne.yytext!);
-        
-        (KeyValueResponseType type, ReadOnlyKeyValueContext? readOnlyContext) = await manager.LocateAndTryGetValue(
-            context.TransactionId,
-            keyName,
-            compareRevision,
-            durability,
-            cancellationToken
-        );
-        
-        if (type is KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry)
-        {
-            context.Action = KeyValueTransactionAction.Abort;
-            context.Status = KeyValueExecutionStatus.Stop;
-        }
-
-        if (readOnlyContext is null)
-        {
-            if (ast.rightAst is not null)
-                context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new() { Type = KeyValueExpressionType.NullType });
-            
-            return new()
-            {
-                ServedFrom = "",
-                Type = type
-            };
-        }
-        
-        if (ast.rightAst is not null)
-            context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new()
-            {
-                Type = KeyValueExpressionType.StringType, 
-                StrValue = Encoding.UTF8.GetString(readOnlyContext.Value ?? []),
-                Revision = readOnlyContext.Revision
-            });
-            
-        return new()
-        {
-            ServedFrom = "",
-            Type = type,
-            Value = readOnlyContext.Value,
-            Revision = readOnlyContext.Revision,
-            Expires = readOnlyContext.Expires
-        };
-    }
-    
-    private async Task<KeyValueTransactionResult> ExecuteExists(KeyValueTransactionContext context, NodeAst ast, KeyValueDurability durability, CancellationToken cancellationToken)
-    {
-        if (ast.leftAst is null)
-            throw new KahunaScriptException("Invalid key", ast.yyline);
-        
-        if (ast.leftAst.yytext is null)
-            throw new KahunaScriptException("Invalid key", ast.yyline);
-        
-        string keyName = GetKeyName(context, ast.leftAst);
-        
-        if (context.Locking == KeyValueTransactionLocking.Optimistic)
-        {
-            lock (context.LockSync)
-            {
-                context.LocksAcquired ??= [];
-                context.LocksAcquired.Add((keyName, durability));
-            }
-        }
-        
-        long compareRevision = -1;
-        
-        if (ast.extendedOne is not null)
-            compareRevision = int.Parse(ast.extendedOne.yytext!);
-        
-        (KeyValueResponseType type, ReadOnlyKeyValueContext? readOnlyContext) = await manager.LocateAndTryExistsValue(
-            context.TransactionId,
-            keyName,
-            compareRevision,
-            durability,
-            cancellationToken
-        );
-        
-        if (type is KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry)
-        {
-            context.Action = KeyValueTransactionAction.Abort;
-            context.Status = KeyValueExecutionStatus.Stop;
-        }
-
-        if (readOnlyContext is null)
-        {
-            if (ast.rightAst is not null)
-                context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new() { Type = KeyValueExpressionType.NullType });
-            
-            return new()
-            {
-                ServedFrom = "",
-                Type = type
-            };
-        }
-        
-        if (ast.rightAst is not null)
-            context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new()
-            {
-                Type = KeyValueExpressionType.BoolType, 
-                BoolValue = type == KeyValueResponseType.Exists,
-                Revision = readOnlyContext.Revision
-            });
-            
-        return new()
-        {
-            ServedFrom = "",
-            Type = type,
-            Value = readOnlyContext.Value,
-            Revision = readOnlyContext.Revision,
-            Expires = readOnlyContext.Expires
         };
     }
 
@@ -548,8 +222,8 @@ internal sealed class KeyValueTransactionCoordinator
     /// <exception cref="KahunaScriptException"></exception>
     private async Task<KeyValueTransactionResult> ExecuteTransaction(NodeAst ast, NodeAst? optionsAst, List<KeyValueParameter>? parameters, bool autoCommit)
     {
+        bool asyncRelease = true;
         int timeout = configuration.DefaultTransactionTimeout;
-        using CancellationTokenSource cts = new();
         KeyValueTransactionLocking locking = KeyValueTransactionLocking.Pessimistic;
         
         if (optionsAst?.nodeType is NodeType.BeginOptionList or NodeType.BeginOption)
@@ -574,7 +248,21 @@ internal sealed class KeyValueTransactionCoordinator
                 {
                     "true" => true,
                     "false" => false,
+                    "yes" => true,
+                    "no" => false,
                     _ => throw new KahunaScriptException("Unsupported autoCommit option: " + optionValue, optionsAst.yyline)
+                };
+            }
+            
+            if (options.TryGetValue("asyncRelease", out optionValue))
+            {
+                asyncRelease = optionValue switch
+                {
+                    "true" => true,
+                    "false" => false,
+                    "yes" => true,
+                    "no" => false,
+                    _ => throw new KahunaScriptException("Unsupported asyncRelease option: " + optionValue, optionsAst.yyline)
                 };
             }
             
@@ -584,6 +272,8 @@ internal sealed class KeyValueTransactionCoordinator
                     throw new KahunaScriptException("Invalid timeout option: " + timeout, optionsAst.yyline);
             }
         }
+        
+        using CancellationTokenSource cts = new();
         
         cts.CancelAfter(TimeSpan.FromMilliseconds(timeout));
         
@@ -595,6 +285,7 @@ internal sealed class KeyValueTransactionCoordinator
             TransactionId = transactionId,
             Locking = locking,
             Action = autoCommit ? KeyValueTransactionAction.Commit : KeyValueTransactionAction.Abort,
+            AsyncRelease = asyncRelease,
             Result = new() { Type = KeyValueResponseType.Aborted },
             Parameters = parameters
         };
@@ -604,7 +295,7 @@ internal sealed class KeyValueTransactionCoordinator
 
         // Acquire all locks in advance for pessimistic locking
         if (locking == KeyValueTransactionLocking.Pessimistic)
-            GetLocksToAcquire(context, ast, ephemeralLocksToAcquire, persistentLocksToAcquire);
+            KeyValueLockHelper.GetLocksToAcquire(context, ast, ephemeralLocksToAcquire, persistentLocksToAcquire);
 
         try
         {
@@ -649,19 +340,17 @@ internal sealed class KeyValueTransactionCoordinator
         }
         finally
         {
-            if (context.LocksAcquired is not null && context.LocksAcquired.Count > 0)
-            {
-                // Final Step: Release locks
-                await context.LocksAcquired.ForEachAsync(LockMaxDegreeOfParallelism, async ((string key, KeyValueDurability durability) p) =>
-                {
-                    await manager.LocateAndTryReleaseExclusiveLock(transactionId, p.key, p.durability, cts.Token);
-                });
-            }
+            // Final Step: Release locks
+            if (context.AsyncRelease)
+                _ = ReleaseAcquiredLocks(context);
+            else
+                await ReleaseAcquiredLocks(context);
         }
     }
 
     /// <summary>
     /// Generates a plan to acquire all locks needed for the transaction.
+    /// Pessimistic transactions acquire all locks in advance to avoid deadlocks and prevent any external modifications to the keys
     /// </summary>
     /// <param name="context"></param>
     /// <param name="ephemeralLocksToAcquire"></param>
@@ -677,6 +366,31 @@ internal sealed class KeyValueTransactionCoordinator
             return;
         
         context.LocksAcquired = [];
+
+        if (numberLocks == 1)
+        {
+            if (ephemeralLocksToAcquire.Count > 0)
+            {
+                (KeyValueResponseType acquireResponse, string keyName, KeyValueDurability durability) = await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, ephemeralLocksToAcquire.First(), timeout + 10, KeyValueDurability.Ephemeral, ctsToken);
+                
+                if (acquireResponse != KeyValueResponseType.Locked) 
+                    throw new KahunaAbortedException("Failed to acquire lock: " + keyName + " " + durability);
+
+                context.LocksAcquired.Add((keyName, durability));
+                return;
+            }
+            
+            if (persistentLocksToAcquire.Count > 0)
+            {
+                (KeyValueResponseType acquireResponse, string keyName, KeyValueDurability durability) = await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, persistentLocksToAcquire.First(), timeout + 10, KeyValueDurability.Persistent, ctsToken);
+                
+                if (acquireResponse != KeyValueResponseType.Locked) 
+                    throw new KahunaAbortedException("Failed to acquire lock: " + keyName + " " + durability);
+
+                context.LocksAcquired.Add((keyName, durability));
+                return;
+            }
+        }
                 
         List<(string, int, KeyValueDurability)> keysToLock = new(numberLocks);
 
@@ -687,14 +401,11 @@ internal sealed class KeyValueTransactionCoordinator
             keysToLock.Add((kv, timeout + 10, KeyValueDurability.Persistent));
 
         List<(KeyValueResponseType, string, KeyValueDurability)> lockResponses = await manager.LocateAndTryAcquireManyExclusiveLocks(context.TransactionId, keysToLock, ctsToken);
-
-        lock (context.LockSync)
+        
+        foreach ((KeyValueResponseType response, string keyName, KeyValueDurability durability) in lockResponses)
         {
-            foreach ((KeyValueResponseType response, string keyName, KeyValueDurability durability) in lockResponses)
-            {
-                if (response == KeyValueResponseType.Locked)
-                    context.LocksAcquired.Add((keyName, durability));
-            }
+            if (response == KeyValueResponseType.Locked)
+                context.LocksAcquired.Add((keyName, durability));
         }
 
         foreach ((KeyValueResponseType response, string keyName, KeyValueDurability durability) in lockResponses)
@@ -704,6 +415,34 @@ internal sealed class KeyValueTransactionCoordinator
         }
     }
 
+    /// <summary>
+    /// Releases any acquired locks during the transaction execution.
+    /// </summary>
+    /// <param name="context"></param>
+    private async Task ReleaseAcquiredLocks(KeyValueTransactionContext context)
+    {
+        try
+        {
+            if (context.LocksAcquired is null || context.LocksAcquired.Count > 0)
+                return;
+            
+            await context.LocksAcquired.ForEachAsync(LockMaxDegreeOfParallelism, async ((string key, KeyValueDurability durability) p) =>
+            {
+                await manager.LocateAndTryReleaseExclusiveLock(context.TransactionId, p.key, p.durability, CancellationToken.None);
+            });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError("ReleaseAcquiredLocks: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+        }
+    }
+
+    /// <summary>
+    /// Reads all passed transaction options as a dictionary
+    /// </summary>
+    /// <param name="ast"></param>
+    /// <param name="options"></param>
+    /// <exception cref="KahunaScriptException"></exception>
     private static void GetTransactionOptions(NodeAst ast, Dictionary<string, string> options)
     {
         while (true)
@@ -745,60 +484,24 @@ internal sealed class KeyValueTransactionCoordinator
         }
     }
 
+    /// <summary>
+    /// Executes the 2PC protocol for the transaction.
+    /// </summary>
+    /// <param name="context"></param>
+    /// <param name="cancellationToken"></param>
     private async Task TwoPhaseCommit(KeyValueTransactionContext context, CancellationToken cancellationToken)
     {
-        if (context.LocksAcquired is null || context.ModifiedKeys is null)
+        if (context.LocksAcquired is null || context.ModifiedKeys is null || context.ModifiedKeys.Count == 0)
             return;
 
         // Step 3: Prepare mutations
-        object syncObject = new();
-        List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> proposalResponses = [];
+        (bool success, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>? mutationsPrepared) = await PrepareMutations(context, cancellationToken);
         
-        await context.ModifiedKeys.ForEachAsync(LockMaxDegreeOfParallelism, async ((string key, KeyValueDurability durability) p) =>
-        {
-            (KeyValueResponseType response, HLCTimestamp ticketId, string _lockedKey, KeyValueDurability _durability) = await manager.LocateAndTryPrepareMutations(context.TransactionId, p.key, p.durability, cancellationToken);
-            
-            lock (syncObject)
-                proposalResponses.Add((response, ticketId, _lockedKey, _durability));
-            
-        });
-        
-        if (proposalResponses.Any(r => r.Item1 != KeyValueResponseType.Prepared))
-        {
-            foreach ((KeyValueResponseType, HLCTimestamp, string, KeyValueDurability) proposalResponse in proposalResponses)
-            {
-                if (proposalResponse.Item1 == KeyValueResponseType.Prepared)
-                    await manager.LocateAndTryRollbackMutations(context.TransactionId, proposalResponse.Item3, proposalResponse.Item2, proposalResponse.Item4, cancellationToken);
-                
-                Console.WriteLine("{0} {1}", proposalResponse.Item3, proposalResponse.Item1);
-            }
-
-            context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Couldn't prepare mutations" };
+        if (!success)
             return;
-        }
-        
-        /*List<Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> proposalTasks = new(context.LocksAcquired.Count);
-        
-        foreach ((string key, KeyValueDurability durability) in context.ModifiedKeys)
-            proposalTasks.Add(manager.LocateAndTryPrepareMutations(context.TransactionId, key, durability, cancellationToken));
 
-        (KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)[] proposalResponses = await Task.WhenAll(proposalTasks);
-
-        if (proposalResponses.Any(r => r.Item1 != KeyValueResponseType.Prepared))
-        {
-            foreach ((KeyValueResponseType, HLCTimestamp, string, KeyValueDurability) proposalResponse in proposalResponses)
-            {
-                if (proposalResponse.Item1 == KeyValueResponseType.Prepared)
-                    await manager.LocateAndTryRollbackMutations(context.TransactionId, proposalResponse.Item3, proposalResponse.Item2, proposalResponse.Item4, cancellationToken);
-                
-                Console.WriteLine("{0} {1}", proposalResponse.Item3, proposalResponse.Item1);
-            }
-
-            context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Couldn't prepare mutations" };
+        if (mutationsPrepared is null)
             return;
-        }*/
-
-        List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> mutationsPrepared = proposalResponses.Select(r => (r.Item3, r.Item2, r.Item4)).ToList();
 
         List<Task<(KeyValueResponseType, long)>> commitTasks = new(context.LocksAcquired.Count);
 
@@ -809,6 +512,60 @@ internal sealed class KeyValueTransactionCoordinator
         await Task.WhenAll(commitTasks);
     }
 
+    /// <summary>
+    /// Executes a plan to prepare all the mutations for the modified keys in the transaction.
+    /// If any of the modified keys cannot be "prepared", the transaction is aborted.
+    /// </summary>
+    /// <param name="context"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    private async Task<(bool, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>?)> PrepareMutations(KeyValueTransactionContext context, CancellationToken cancellationToken)
+    {
+        if (context.LocksAcquired is null || context.ModifiedKeys is null || context.ModifiedKeys.Count == 0)
+            return (false, null);
+        
+        if (context.ModifiedKeys.Count == 1)
+        {
+            (string key, KeyValueDurability durability) = context.ModifiedKeys.First();
+            
+            (KeyValueResponseType type, HLCTimestamp ticketId, string _, KeyValueDurability _) = await manager.LocateAndTryPrepareMutations(context.TransactionId, key, durability, cancellationToken);
+
+            if (type != KeyValueResponseType.Prepared)
+            {
+                context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Couldn't prepare mutations" };
+                return (false, null);
+            }
+
+            return (true, [(key, ticketId, durability)]);
+        }
+        
+        List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> proposalResponses = await manager.LocateAndTryPrepareManyMutations(context.TransactionId, context.ModifiedKeys, cancellationToken);
+    
+        if (proposalResponses.Any(r => r.Item1 != KeyValueResponseType.Prepared))
+        {
+            foreach ((KeyValueResponseType, HLCTimestamp, string, KeyValueDurability) proposalResponse in proposalResponses)
+            {
+                if (proposalResponse.Item1 == KeyValueResponseType.Prepared)
+                    await manager.LocateAndTryRollbackMutations(context.TransactionId, proposalResponse.Item3, proposalResponse.Item2, proposalResponse.Item4, cancellationToken);
+
+                Console.WriteLine("{0} {1}", proposalResponse.Item3, proposalResponse.Item1);
+            }
+
+            context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Couldn't prepare mutations" };
+            return (false, null);
+        }
+
+        return (true, proposalResponses.Select(r => (r.Item3, r.Item2, r.Item4)).ToList());
+    }
+
+    /// <summary>
+    /// Internal method to execute the transaction AST recursively.
+    /// </summary>
+    /// <param name="context"></param>
+    /// <param name="ast"></param>
+    /// <param name="cancellationToken"></param>
+    /// <exception cref="KahunaScriptException"></exception>
+    /// <exception cref="NotImplementedException"></exception>
     private async Task ExecuteTransactionInternal(KeyValueTransactionContext context, NodeAst ast, CancellationToken cancellationToken)
     {
         while (true)
@@ -843,56 +600,56 @@ internal sealed class KeyValueTransactionCoordinator
                 
                 case NodeType.Let:
                 {
-                    ExecuteLet(context, ast);
+                    LetCommand.Execute(context, ast);
                     break;
                 }
                 
                 case NodeType.Set:
-                    await ExecuteSet(context, ast, KeyValueDurability.Persistent, cancellationToken);
+                    await SetCommand.Execute(manager, context, ast, KeyValueDurability.Persistent, cancellationToken);
                     break;
                 
                 case NodeType.Delete:
-                    await ExecuteDelete(context, ast, KeyValueDurability.Persistent, cancellationToken);
+                    await DeleteCommand.Execute(manager, context, ast, KeyValueDurability.Persistent, cancellationToken);
                     break;
                 
                 case NodeType.Extend:
-                    await ExecuteExtend(context, ast, KeyValueDurability.Persistent, cancellationToken);
+                    await ExtendCommand.Execute(manager, context, ast, KeyValueDurability.Persistent, cancellationToken);
                     break;
 
                 case NodeType.Get:
                 {
-                    context.Result = await ExecuteGet(context, ast, KeyValueDurability.Persistent, cancellationToken);
+                    context.Result = await GetCommand.Execute(manager, context, ast, KeyValueDurability.Persistent, cancellationToken);
                     break;
                 }
                 
                 case NodeType.Exists:
                 {
-                    context.Result = await ExecuteExists(context, ast, KeyValueDurability.Persistent, cancellationToken);
+                    context.Result = await ExistsCommand.Execute(manager, context, ast, KeyValueDurability.Persistent, cancellationToken);
                     break;
                 }
                 
                 case NodeType.Eset:
-                    await ExecuteSet(context, ast, KeyValueDurability.Ephemeral, cancellationToken);
+                    await SetCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
 
                 case NodeType.Eget:
                 {
-                    context.Result = await ExecuteGet(context, ast, KeyValueDurability.Ephemeral, cancellationToken);
+                    context.Result = await GetCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
                 }
                 
                 case NodeType.Eexists:
                 {
-                    context.Result = await ExecuteExists(context, ast, KeyValueDurability.Ephemeral, cancellationToken);
+                    context.Result = await ExistsCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
                 }
                 
                 case NodeType.Edelete:
-                    await ExecuteDelete(context, ast, KeyValueDurability.Ephemeral, cancellationToken);
+                    await DeleteCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
                 
                 case NodeType.Eextend:
-                    await ExecuteExtend(context, ast, KeyValueDurability.Ephemeral, cancellationToken);
+                    await ExtendCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
                 
                 case NodeType.Commit:
@@ -911,7 +668,7 @@ internal sealed class KeyValueTransactionCoordinator
                     break;
                 
                 case NodeType.Sleep:
-                    await ExecuteSleep(ast, cancellationToken);
+                    await SleepCommand.Execute(ast, cancellationToken);
                     break;
                 
                 case NodeType.Begin:
@@ -977,193 +734,5 @@ internal sealed class KeyValueTransactionCoordinator
         
         if (ast.extendedOne is not null) 
             await ExecuteTransactionInternal(context, ast.extendedOne, cancellationToken);
-    }
-
-    private static void ExecuteLet(KeyValueTransactionContext context, NodeAst ast)
-    {
-        if (ast.leftAst is null)
-            throw new KahunaScriptException("Invalid LET expression", ast.yyline);
-        
-        if (ast.rightAst is null)
-            throw new KahunaScriptException("Invalid LET expression", ast.yyline);
-        
-        KeyValueExpressionResult result = KeyValueTransactionExpression.Eval(context, ast.rightAst);
-        
-        context.Result = result.ToTransactionResult();
-        
-        context.SetVariable(ast.leftAst, ast.leftAst.yytext!, result);
-    }
-    
-    private static async Task ExecuteSleep(NodeAst ast, CancellationToken cancellationToken)
-    {
-        if (ast.leftAst is null)
-            throw new KahunaScriptException("Invalid SLEEP duration", ast.yyline);
-                    
-        if (!long.TryParse(ast.leftAst.yytext, out long duration))
-            throw new KahunaScriptException($"Invalid SLEEP duration {duration}", ast.yyline);
-                    
-        if (duration is < 0 or > 300000)
-            throw new KahunaScriptException($"Invalid SLEEP duration {duration}", ast.yyline);
-                    
-        await Task.Delay(TimeSpan.FromMilliseconds(duration), cancellationToken);
-    }
-
-    private static string GetKeyName(KeyValueTransactionContext context, NodeAst ast)
-    {
-        return ast.nodeType switch
-        {
-            NodeType.Identifier => ast.yytext!,
-            NodeType.Placeholder => context.GetParameter(ast),
-            _ => throw new KahunaScriptException($"Invalid key name type {ast.nodeType}", ast.yyline)
-        };
-    }
-
-    /// <summary>
-    /// Obtains that must be acquired to start the transaction
-    /// </summary>
-    /// <param name="context"></param>
-    /// <param name="ast"></param>
-    /// <param name="ephemeralLocks"></param>
-    /// <param name="persistentLocks"></param>
-    /// <exception cref="KahunaScriptException"></exception>
-    /// <exception cref="ArgumentOutOfRangeException"></exception>
-    private static void GetLocksToAcquire(KeyValueTransactionContext context, NodeAst ast, HashSet<string> ephemeralLocks, HashSet<string> persistentLocks)
-    {
-        while (true)
-        {
-            //Console.WriteLine("AST={0}", ast.nodeType);
-            
-            switch (ast.nodeType)
-            {
-                case NodeType.StmtList:
-                {
-                    if (ast.leftAst is not null) 
-                        GetLocksToAcquire(context, ast.leftAst, ephemeralLocks, persistentLocks);
-
-                    if (ast.rightAst is not null)
-                    {
-                        ast = ast.rightAst!;
-                        continue;
-                    }
-
-                    break;
-                }
-                
-                case NodeType.Begin:
-                    if (ast.leftAst is not null) 
-                        GetLocksToAcquire(context, ast.leftAst, ephemeralLocks, persistentLocks);
-                    break;
-                
-                case NodeType.If:
-                {
-                    if (ast.rightAst is not null) 
-                        GetLocksToAcquire(context, ast.rightAst, ephemeralLocks, persistentLocks);
-                    
-                    if (ast.extendedOne is not null) 
-                        GetLocksToAcquire(context, ast.extendedOne, ephemeralLocks, persistentLocks);
-
-                    break;
-                }
-                
-                case NodeType.Set:
-                    if (ast.leftAst is null)
-                        throw new KahunaScriptException("Invalid SET expression", ast.yyline);
-                    
-                    persistentLocks.Add(GetKeyName(context, ast.leftAst));
-                    break;
-                    
-                case NodeType.Eset:
-                    if (ast.leftAst is null)
-                        throw new KahunaScriptException("Invalid SET expression", ast.yyline);
-                    
-                    ephemeralLocks.Add(GetKeyName(context, ast.leftAst));
-                    break;
-                
-                case NodeType.Get:
-                    if (ast.leftAst is null)
-                        throw new KahunaScriptException("Invalid SET expression", ast.yyline);
-                    
-                    if (ast.extendedOne is null) // make sure if isn't querying a revision
-                        persistentLocks.Add(GetKeyName(context, ast.leftAst));
-                    break;
-                    
-                case NodeType.Eget:
-                    if (ast.leftAst is null)
-                        throw new KahunaScriptException("Invalid GET expression", ast.yyline);
-                    
-                    if (ast.extendedOne is null) // make sure if isn't querying a revision
-                        ephemeralLocks.Add(GetKeyName(context, ast.leftAst));
-                    break;
-                
-                case NodeType.Extend:
-                    if (ast.leftAst is null)
-                        throw new KahunaScriptException("Invalid EXTEND expression", ast.yyline);
-                    
-                    persistentLocks.Add(GetKeyName(context, ast.leftAst));
-                    break;
-                    
-                case NodeType.Eextend:
-                    if (ast.leftAst is null)
-                        throw new KahunaScriptException("Invalid EXTEND expression", ast.yyline);
-                    
-                    ephemeralLocks.Add(GetKeyName(context, ast.leftAst));
-                    break;
-                
-                case NodeType.Delete:
-                    if (ast.leftAst is null)
-                        throw new KahunaScriptException("Invalid DELETE expression", ast.yyline);
-                    
-                    persistentLocks.Add(GetKeyName(context, ast.leftAst));
-                    break;
-                
-                case NodeType.Edelete:
-                    if (ast.leftAst is null)
-                        throw new KahunaScriptException("Invalid DELETE expression", ast.yyline);
-                    
-                    ephemeralLocks.Add(GetKeyName(context, ast.leftAst));
-                    break;
-                
-                case NodeType.IntegerType:
-                case NodeType.StringType:
-                case NodeType.FloatType:
-                case NodeType.BooleanType:
-                case NodeType.Identifier:
-                case NodeType.Let:
-                case NodeType.Equals:
-                case NodeType.NotEquals:
-                case NodeType.LessThan:
-                case NodeType.GreaterThan:
-                case NodeType.LessThanEquals:
-                case NodeType.GreaterThanEquals:
-                case NodeType.And:
-                case NodeType.Or:
-                case NodeType.Not:
-                case NodeType.Add:
-                case NodeType.Subtract:
-                case NodeType.Mult:
-                case NodeType.Div:
-                case NodeType.FuncCall:
-                case NodeType.ArgumentList:
-                case NodeType.SetNotExists:
-                case NodeType.SetExists:
-                case NodeType.SetCmp:
-                case NodeType.SetCmpRev:
-                case NodeType.Rollback:
-                case NodeType.Commit:
-                case NodeType.Return:
-                case NodeType.Sleep:
-                case NodeType.Placeholder:
-                case NodeType.Exists:
-                case NodeType.Eexists:
-                case NodeType.BeginOptionList:
-                case NodeType.BeginOption:
-                    break;
-                
-                default:
-                    throw new NotImplementedException();
-            }
-
-            break;
-        }
     }
 }

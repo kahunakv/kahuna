@@ -11,6 +11,7 @@ service KeyValuer {
   rpc TryAcquireManyExclusiveLocks (GrpcTryAcquireManyExclusiveLocksRequest) returns (GrpcTryAcquireManyExclusiveLocksResponse);
   rpc TryReleaseExclusiveLock (GrpcTryReleaseExclusiveLockRequest) returns (GrpcTryReleaseExclusiveLockResponse);
   rpc TryPrepareMutations (GrpcTryPrepareMutationsRequest) returns (GrpcTryPrepareMutationsResponse);
+  rpc TryPrepareManyMutations (GrpcTryPrepareManyMutationsRequest) returns (GrpcTryPrepareManyMutationsResponse);
   rpc TryCommitMutations (GrpcTryCommitMutationsRequest) returns (GrpcTryCommitMutationsResponse);
   rpc TryRollbackMutations (GrpcTryRollbackMutationsRequest) returns (GrpcTryRollbackMutationsResponse);
   rpc ScanByPrefix (GrpcScanByPrefixRequest) returns (GrpcScanByPrefixResponse);
@@ -176,6 +177,30 @@ message GrpcTryPrepareMutationsResponse {
   GrpcKeyValueResponseType Type = 2;
   int64 ProposalTicketPhysical = 3;
   uint32 ProposalTicketCounter = 4;
+}
+
+message GrpcTryPrepareManyMutationsRequest {
+  int64 TransactionIdPhysical = 1;
+  uint32 TransactionIdCounter = 2;
+  repeated GrpcTryPrepareManyMutationsRequestItem Items = 3;
+}
+
+message GrpcTryPrepareManyMutationsRequestItem {
+  string Key = 1;
+  GrpcKeyValueDurability Durability = 2;
+}
+
+message GrpcTryPrepareManyMutationsResponse {
+  optional string ServedFrom = 1;
+  repeated GrpcTryPrepareManyMutationsResponseItem Items = 3;
+}
+
+message GrpcTryPrepareManyMutationsResponseItem {
+  GrpcKeyValueResponseType Type = 1;
+  string Key = 2;
+  GrpcKeyValueDurability Durability = 3;
+  int64 ProposalTicketPhysical = 4;
+  uint32 ProposalTicketCounter = 5;
 }
 
 message GrpcTryCommitMutationsRequest {

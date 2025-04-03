@@ -3,6 +3,7 @@ using System.Text.Json;
 using Flurl;
 using Flurl.Http;
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Kommander;

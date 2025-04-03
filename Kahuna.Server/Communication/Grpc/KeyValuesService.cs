@@ -13,6 +13,7 @@ using Google.Protobuf.Collections;
 using Grpc.Core;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Communication.Grpc;
@@ -357,6 +358,50 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         };
     }
     
+    /// <summary>
+    /// Receives requests for the key/value "PrepareManyMutations" service 
+    /// </summary>
+    /// <param name="request"></param>
+    /// <param name="context"></param>
+    /// <returns></returns>
+    public override async Task<GrpcTryPrepareManyMutationsResponse> TryPrepareManyMutations(GrpcTryPrepareManyMutationsRequest request, ServerCallContext context)
+    {
+        List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> responses = await keyValues.LocateAndTryPrepareManyMutations(
+            new(request.TransactionIdPhysical, request.TransactionIdCounter), 
+            GetRequestPrepareItems(request.Items), 
+            context.CancellationToken
+        );
+
+        var response = new GrpcTryPrepareManyMutationsResponse();
+        
+        response.Items.Add(GetResponsePrepareItems(responses));
+
+        return response;
+    }
+
+    private static List<(string key, KeyValueDurability durability)> GetRequestPrepareItems(RepeatedField<GrpcTryPrepareManyMutationsRequestItem> requestItems)
+    {
+        List<(string key, KeyValueDurability durability)> rItems = new(requestItems.Count);
+        
+        foreach (GrpcTryPrepareManyMutationsRequestItem item in requestItems)
+            rItems.Add((item.Key, (KeyValueDurability)item.Durability));
+
+        return rItems;
+    }
+    
+    private static IEnumerable<GrpcTryPrepareManyMutationsResponseItem> GetResponsePrepareItems(List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> responses)
+    {
+        foreach ((KeyValueResponseType type, HLCTimestamp ticketId, string key, KeyValueDurability durability) in responses)
+            yield return new()
+            {
+                Type = (GrpcKeyValueResponseType)type,
+                ProposalTicketPhysical = ticketId.L, 
+                ProposalTicketCounter = ticketId.C, 
+                Key = key,
+                Durability = (GrpcKeyValueDurability)durability
+            };
+    }
+
     /// <summary>
     /// Receives requests for the key/value "CommitMutations" service 
     /// </summary>

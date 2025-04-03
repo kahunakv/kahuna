@@ -16,16 +16,29 @@ namespace Kahuna.Server.ScriptParser;
 /// </summary>
 internal sealed partial class scriptParser
 {
-    private static readonly ConcurrentDictionary<string, NodeAst> _cache = new();
+    private static readonly ConcurrentDictionary<string, ScriptCacheEntry> _cache = new();
     
-    public scriptParser() : base(null) { }
+    private readonly ILogger<IKahuna> logger;
 
+    public scriptParser(ILogger<IKahuna> logger) : base(null)
+    {
+        this.logger = logger;
+    }
+
+    /// <summary>
+    /// Parses or retrieves a script from the global cache
+    /// </summary>
+    /// <param name="inputBuffer"></param>
+    /// <param name="hash"></param>
+    /// <returns></returns>
+    /// <exception cref="KahunaScriptException"></exception>
     public NodeAst Parse(byte[] inputBuffer, string? hash)
     {
-        if (!string.IsNullOrEmpty(hash) && _cache.TryGetValue(hash, out NodeAst? cached))
+        if (!string.IsNullOrEmpty(hash) && _cache.TryGetValue(hash, out ScriptCacheEntry? cached))
         {
-            Console.WriteLine("Retrieved from cache {0}", hash);
-            return cached;
+            logger.LogDebug("Retrieved script from cache {Hash}", hash);
+            
+            return cached.Ast;
         }
 
         MemoryStream stream = new(inputBuffer);
@@ -42,8 +55,9 @@ internal sealed partial class scriptParser
 
         if (!string.IsNullOrEmpty(hash))
         {
-            Console.WriteLine("Added to cache {0}", hash);
-            _cache.TryAdd(hash, root);
+            logger.LogDebug("Added script to cache {Hash}", hash);
+            
+            _cache.TryAdd(hash, new(hash, root, DateTime.UtcNow.AddMinutes(10)));
         }
 
         return root;

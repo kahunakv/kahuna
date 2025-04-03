@@ -1,9 +1,10 @@
 
 using System.Text;
-using Kahuna.Server.KeyValues.Functions;
+using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.KeyValues.Transactions.Functions;
 using Kahuna.Server.ScriptParser;
 
-namespace Kahuna.Server.KeyValues;
+namespace Kahuna.Server.KeyValues.Transactions;
 
 public static class KeyValueTransactionExpression
 {

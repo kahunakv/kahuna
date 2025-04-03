@@ -1,5 +1,5 @@
 
-begin (locking=optimistic)
+begin (locking=pessimistic)
  set	pp1	1000
  set	pp2	2000
  set	pp3	3000

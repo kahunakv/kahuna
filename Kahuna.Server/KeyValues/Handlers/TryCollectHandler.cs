@@ -53,5 +53,8 @@ internal sealed class TryCollectHandler : BaseHandler
         }
         
         keysToEvict.Clear();
+        
+        // Ensure that the store has enough capacity for future writes
+        keyValuesStore.EnsureCapacity(keyValuesStore.Count + 16);
     }
 }

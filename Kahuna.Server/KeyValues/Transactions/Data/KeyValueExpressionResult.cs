@@ -3,7 +3,7 @@ using System.Globalization;
 using System.Text;
 using Kahuna.Shared.KeyValue;
 
-namespace Kahuna.Server.KeyValues;
+namespace Kahuna.Server.KeyValues.Transactions.Data;
 
 public class KeyValueExpressionResult
 {

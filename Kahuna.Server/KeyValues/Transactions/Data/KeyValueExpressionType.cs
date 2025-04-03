@@ -1,5 +1,5 @@
 
-namespace Kahuna.Server.KeyValues;
+namespace Kahuna.Server.KeyValues.Transactions.Data;
 
 public enum KeyValueExpressionType
 {

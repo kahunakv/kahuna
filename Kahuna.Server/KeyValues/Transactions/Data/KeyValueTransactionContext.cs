@@ -5,7 +5,7 @@ using Kommander.Time;
 using Kahuna.Server.ScriptParser;
 using Kahuna.Shared.KeyValue;
 
-namespace Kahuna.Server.KeyValues;
+namespace Kahuna.Server.KeyValues.Transactions.Data;
 
 /// <summary>
 /// Represents the context of a transaction.
@@ -21,9 +21,9 @@ public sealed class KeyValueTransactionContext
 
     public KeyValueTransactionAction Action { get; set; }
     
-    public KeyValueExecutionStatus Status { get; set; } = KeyValueExecutionStatus.Continue;
+    public bool AsyncRelease { get; set; }
     
-    public Lock LockSync { get; } = new();
+    public KeyValueExecutionStatus Status { get; set; } = KeyValueExecutionStatus.Continue;
     
     public List<(string, KeyValueDurability)>? LocksAcquired { get; set; }
     

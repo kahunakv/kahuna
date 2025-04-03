@@ -1,7 +1,6 @@
 
 using System.Collections.Concurrent;
 using Google.Protobuf;
-using Google.Protobuf.Collections;
 using Grpc.Net.Client;
 
 using Kahuna.Communication.Grpc;
@@ -9,6 +8,7 @@ using Kahuna.Server.Configuration;
 using Kahuna.Shared.KeyValue;
 
 using Kommander;
+using Kommander.Support.Collections;
 using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues;
@@ -377,9 +377,6 @@ internal sealed class KeyValueLocator
             int partitionId = raft.GetPartitionKey(key.key);
             string leader = await raft.WaitForLeader(partitionId, cancelationToken);
             
-            if (leader != localNode)
-                logger.LogDebug("ACQUIRE-LOCK-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
-            
             if (acquisitionPlan.TryGetValue(leader, out List<(string key, int expiresMs, KeyValueDurability durability)>? list))
                 list.Add(key);
             else
@@ -409,6 +406,8 @@ internal sealed class KeyValueLocator
         CancellationToken cancelationToken
     )
     {
+        logger.LogDebug("ACQUIRE-LOCK-KEYVALUE Redirect {Number} lock acquisitions to node {Leader}", xkeys.Count, leader);
+        
         if (leader == localNode)
         {
             List<(KeyValueResponseType type, string key, KeyValueDurability durability)> acquireResponses = await manager.TryAcquireManyExclusiveLock(transactionId, xkeys);
@@ -432,7 +431,7 @@ internal sealed class KeyValueLocator
             TransactionIdCounter = transactionId.C
         };
             
-        request.Items.Add(GetRequestItems(xkeys));
+        request.Items.Add(GetAcquireLockRequestItems(xkeys));
             
         GrpcTryAcquireManyExclusiveLocksResponse? remoteResponse = await client.TryAcquireManyExclusiveLocksAsync(request, cancellationToken: cancelationToken);
 
@@ -443,7 +442,7 @@ internal sealed class KeyValueLocator
         }
     }
 
-    private static IEnumerable<GrpcTryAcquireManyExclusiveLocksRequestItem> GetRequestItems(List<(string key, int expiresMs, KeyValueDurability durability)> xkeys)
+    private static IEnumerable<GrpcTryAcquireManyExclusiveLocksRequestItem> GetAcquireLockRequestItems(List<(string key, int expiresMs, KeyValueDurability durability)> xkeys)
     {
         foreach ((string key, int expiresMs, KeyValueDurability durability) key in xkeys)
             yield return new()
@@ -538,6 +537,106 @@ internal sealed class KeyValueLocator
         remoteResponse.ServedFrom = $"https://{leader}";
         
         return ((KeyValueResponseType)remoteResponse.Type, new(remoteResponse.ProposalTicketPhysical, remoteResponse.ProposalTicketCounter), key, durability);
+    }
+    
+    /// <summary>
+    /// Locates the leader node for the given keys and executes the TryPrepareManyMutations request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="keys"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public async Task<List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> LocateAndTryPrepareManyMutations(
+        HLCTimestamp transactionId, 
+        List<(string key, KeyValueDurability durability)> keys, 
+        CancellationToken cancelationToken
+    )
+    {
+        string localNode = raft.GetLocalEndpoint();
+        
+        Dictionary<string, List<(string key, KeyValueDurability durability)>> acquisitionPlan = [];
+
+        foreach ((string key, KeyValueDurability durability) key in keys)
+        {
+            if (string.IsNullOrEmpty(key.key))
+                return [(KeyValueResponseType.InvalidInput, HLCTimestamp.Zero, key.key, key.durability)];
+
+            int partitionId = raft.GetPartitionKey(key.key);
+            string leader = await raft.WaitForLeader(partitionId, cancelationToken);
+            
+            if (acquisitionPlan.TryGetValue(leader, out List<(string key, KeyValueDurability durability)>? list))
+                list.Add(key);
+            else
+                acquisitionPlan[leader] = [key];
+        }
+        
+        Lock lockSync = new();
+        List<Task> tasks = new(acquisitionPlan.Count);
+        List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> responses = [];
+        
+        // Requests to nodes are sent in parallel
+        foreach ((string leader, List<(string key, KeyValueDurability durability)>? xkeys) in acquisitionPlan)
+            tasks.Add(TryPrepareManyMutations(transactionId, leader, localNode, xkeys, lockSync, responses, cancelationToken));
+        
+        await Task.WhenAll(tasks);
+
+        return responses;
+    }
+
+    private async Task TryPrepareManyMutations(
+        HLCTimestamp transactionId, 
+        string leader, 
+        string localNode, 
+        List<(string key, KeyValueDurability durability)> xkeys,
+        Lock lockSync,
+        List<(KeyValueResponseType type, HLCTimestamp, string key, KeyValueDurability durability)> responses,
+        CancellationToken cancelationToken
+    )
+    {
+        logger.LogDebug("PREPARE-KEYVALUE Redirect {Number} prepare mutations to node {Leader}", xkeys.Count, leader);
+        
+        if (leader == localNode)
+        {
+            List<(KeyValueResponseType type, HLCTimestamp ticketId, string key, KeyValueDurability durability)> prepareResponses = await manager.TryPrepareManyMutations(transactionId, xkeys);
+
+            lock (lockSync)
+            {
+                foreach ((KeyValueResponseType type, HLCTimestamp ticketId, string key, KeyValueDurability durability) item in prepareResponses)
+                    responses.Add((item.type, item.ticketId, item.key, item.durability));
+            }
+
+            return;
+        }
+            
+        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
+            
+        KeyValuer.KeyValuerClient client = new(channel);
+            
+        GrpcTryPrepareManyMutationsRequest request = new()
+        {
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C
+        };
+            
+        request.Items.Add(GetPrepareRequestItems(xkeys));
+            
+        GrpcTryPrepareManyMutationsResponse? remoteResponse = await client.TryPrepareManyMutationsAsync(request, cancellationToken: cancelationToken);
+
+        lock (lockSync)
+        {
+            foreach (GrpcTryPrepareManyMutationsResponseItem item in remoteResponse.Items)
+                responses.Add(((KeyValueResponseType)item.Type, new(item.ProposalTicketPhysical, item.ProposalTicketCounter), item.Key, (KeyValueDurability)item.Durability));
+        }
+    }
+
+    private static IEnumerable<GrpcTryPrepareManyMutationsRequestItem> GetPrepareRequestItems(List<(string key, KeyValueDurability durability)> xkeys)
+    {
+        foreach ((string key, KeyValueDurability durability) key in xkeys)
+            yield return new()
+            {
+                Key = key.key,
+                Durability = (GrpcKeyValueDurability)key.durability
+            };
     }
     
     /// <summary>
