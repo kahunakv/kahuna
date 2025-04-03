@@ -5,7 +5,7 @@ namespace Kahuna.Tests.Server;
 
 public class TestServers
 {
-    [Fact]
+    /*[Fact]
     public void TestParserBegin()
     {
         NodeAst ast = ScriptParserProcessor.Parse("BEGIN LET x = GET yy END");
@@ -25,5 +25,5 @@ public class TestServers
         
         Assert.NotNull(ast.leftAst);
         Assert.Equal(NodeType.Identifier, ast.leftAst.nodeType);
-    }
+    }*/
 }

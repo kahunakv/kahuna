@@ -29,7 +29,7 @@ public class KahunaClient
 
     private readonly IKahunaCommunication communication;
 
-    private readonly bool upgradeUrls = false;
+    private readonly bool upgradeUrls;
 
     private int currentServer;
     

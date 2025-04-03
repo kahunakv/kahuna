@@ -423,7 +423,7 @@ internal sealed class KeyValueTransactionCoordinator
     {
         try
         {
-            if (context.LocksAcquired is null || context.LocksAcquired.Count > 0)
+            if (context.LocksAcquired is null || context.LocksAcquired.Count == 0)
                 return;
             
             await context.LocksAcquired.ForEachAsync(LockMaxDegreeOfParallelism, async ((string key, KeyValueDurability durability) p) =>
