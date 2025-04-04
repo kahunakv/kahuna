@@ -508,13 +508,7 @@ internal sealed class KeyValueTransactionCoordinator
         if (mutationsPrepared is null)
             return;
 
-        List<Task<(KeyValueResponseType, long)>> commitTasks = new(context.LocksAcquired.Count);
-
-        // Step 4: Commit mutations
-        foreach ((string key, HLCTimestamp ticketId, KeyValueDurability durability) in mutationsPrepared)
-            commitTasks.Add(manager.LocateAndTryCommitMutations(context.TransactionId, key, ticketId, durability, cancellationToken));
-
-        await Task.WhenAll(commitTasks);
+        await CommitMutations(context, mutationsPrepared);
     }
 
     /// <summary>
@@ -561,6 +555,37 @@ internal sealed class KeyValueTransactionCoordinator
         }
 
         return (true, proposalResponses.Select(r => (r.Item3, r.Item2, r.Item4)).ToList());
+    }
+    
+    /// <summary>
+    /// Send the commit request to all involved nodes.
+    /// </summary>
+    /// <param name="context"></param>
+    /// <param name="mutationsPrepared"></param>
+    private async Task CommitMutations(KeyValueTransactionContext context, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> mutationsPrepared)
+    {
+        if (mutationsPrepared.Count == 0)
+            return;
+
+        if (mutationsPrepared.Count == 1)
+        {
+            (string key, HLCTimestamp ticketId, KeyValueDurability durability) = mutationsPrepared.First();
+            
+            (KeyValueResponseType response, long commitIndex) = await manager.LocateAndTryCommitMutations(context.TransactionId, key, ticketId, durability, CancellationToken.None);
+            
+            if (response != KeyValueResponseType.Committed)
+                logger.LogWarning("CommitMutations: {Type} {Key} {TicketId}", response, key, ticketId);
+            
+            return;
+        }
+        
+        List<(KeyValueResponseType, string, long, KeyValueDurability)> responses = await manager.LocateAndTryCommitManyMutations(context.TransactionId, mutationsPrepared, CancellationToken.None);
+        
+        foreach ((KeyValueResponseType response, string key, long commitIndex, KeyValueDurability durability) in responses)
+        {
+            if (response != KeyValueResponseType.Committed)
+                logger.LogWarning("CommitMutations {Type} {Key} {TicketId} {Durability}", response, key, commitIndex, durability);
+        }
     }
 
     /// <summary>

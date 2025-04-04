@@ -414,7 +414,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
             context.CancellationToken
         );
 
-        var response = new GrpcTryPrepareManyMutationsResponse();
+        GrpcTryPrepareManyMutationsResponse response = new();
         
         response.Items.Add(GetResponsePrepareItems(responses));
 
@@ -471,6 +471,49 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
             Type = (GrpcKeyValueResponseType)type,
             ProposalIndex = commitIndex
         };
+    }
+    
+    /// <summary>
+    /// Receives requests for the key/value "CommitManyMutations" service 
+    /// </summary>
+    /// <param name="request"></param>
+    /// <param name="context"></param>
+    /// <returns></returns>
+    public override async Task<GrpcTryCommitManyMutationsResponse> TryCommitManyMutations(GrpcTryCommitManyMutationsRequest request, ServerCallContext context)
+    {
+        List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> responses = await keyValues.LocateAndTryCommitManyMutations(
+            new(request.TransactionIdPhysical, request.TransactionIdCounter), 
+            GetRequestCommitItems(request.Items), 
+            context.CancellationToken
+        );
+
+        GrpcTryCommitManyMutationsResponse response = new();
+        
+        response.Items.Add(GetResponseCommitItems(responses));
+
+        return response;
+    }
+
+    private static List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> GetRequestCommitItems(RepeatedField<GrpcTryCommitManyMutationsRequestItem> requestItems)
+    {
+        List<(string key, HLCTimestamp proposalTicketId, KeyValueDurability durability)> rItems = new(requestItems.Count);
+        
+        foreach (GrpcTryCommitManyMutationsRequestItem item in requestItems)
+            rItems.Add((item.Key, new(item.ProposalTicketPhysical, item.ProposalTicketCounter), (KeyValueDurability)item.Durability));
+
+        return rItems;
+    }
+    
+    private static IEnumerable<GrpcTryCommitManyMutationsResponseItem> GetResponseCommitItems(List<(KeyValueResponseType, string, long, KeyValueDurability)> responses)
+    {
+        foreach ((KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability) in responses)
+            yield return new()
+            {
+                Type = (GrpcKeyValueResponseType)type,
+                Key = key,
+                ProposalIndex = proposalIndex,
+                Durability = (GrpcKeyValueDurability)durability
+            };
     }
     
     /// <summary>

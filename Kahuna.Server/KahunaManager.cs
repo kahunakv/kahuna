@@ -295,6 +295,18 @@ public sealed class KahunaManager : IKahuna
     {
         return keyValues.LocateAndTryCommitMutations(transactionId, key, ticketId, durability, cancelationToken);
     }
+
+    /// <summary>
+    /// Locates the leader node for the given keys and executes the TryCommitMutations request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="keys"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public Task<List<(KeyValueResponseType, string, long, KeyValueDurability)>> LocateAndTryCommitManyMutations(HLCTimestamp transactionId, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> keys, CancellationToken cancelationToken)
+    {
+        return keyValues.LocateAndTryCommitManyMutations(transactionId, keys, cancelationToken);
+    }
     
     /// <summary>
     /// Locates the leader node for the given key and executes the TryRollbackMutations request.

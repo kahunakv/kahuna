@@ -787,6 +787,108 @@ internal sealed class KeyValueLocator
     }
     
     /// <summary>
+    /// Locates the leader node for the given keys and executes the TryCommitManyMutations request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="keys"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public async Task<List<(KeyValueResponseType, string, long, KeyValueDurability)>> LocateAndTryCommitManyMutations(
+        HLCTimestamp transactionId, 
+        List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> keys, 
+        CancellationToken cancelationToken
+    )
+    {
+        string localNode = raft.GetLocalEndpoint();
+        
+        Dictionary<string, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>> acquisitionPlan = [];
+
+        foreach ((string key, HLCTimestamp ticketId, KeyValueDurability durability) key in keys)
+        {
+            if (string.IsNullOrEmpty(key.key))
+                return [(KeyValueResponseType.InvalidInput, key.key, 0, key.durability)];
+
+            int partitionId = raft.GetPartitionKey(key.key);
+            string leader = await raft.WaitForLeader(partitionId, cancelationToken);
+            
+            if (acquisitionPlan.TryGetValue(leader, out List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>? list))
+                list.Add(key);
+            else
+                acquisitionPlan[leader] = [key];
+        }
+        
+        Lock lockSync = new();
+        List<Task> tasks = new(acquisitionPlan.Count);
+        List<(KeyValueResponseType, string, long, KeyValueDurability)> responses = [];
+        
+        // Requests to nodes are sent in parallel
+        foreach ((string leader, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>? xkeys) in acquisitionPlan)
+            tasks.Add(TryCommitManyMutations(transactionId, leader, localNode, xkeys, lockSync, responses, cancelationToken));
+        
+        await Task.WhenAll(tasks);
+
+        return responses;
+    }
+
+    private async Task TryCommitManyMutations(
+        HLCTimestamp transactionId, 
+        string leader, 
+        string localNode, 
+        List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys,
+        Lock lockSync,
+        List<(KeyValueResponseType, string, long, KeyValueDurability)> responses,
+        CancellationToken cancelationToken
+    )
+    {
+        logger.LogDebug("COMMIT-KEYVALUE Redirect {Number} Commit mutations to node {Leader}", xkeys.Count, leader);
+        
+        if (leader == localNode)
+        {
+            List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> commitResponses = await manager.TryCommitManyMutations(transactionId, xkeys);
+
+            lock (lockSync)
+            {
+                foreach ((KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability) item in commitResponses)
+                    responses.Add((item.type, item.key, item.proposalIndex, item.durability));
+            }
+
+            return;
+        }
+            
+        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
+            
+        KeyValuer.KeyValuerClient client = new(channel);
+            
+        GrpcTryCommitManyMutationsRequest request = new()
+        {
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C
+        };
+            
+        request.Items.Add(GetCommitRequestItems(xkeys));
+            
+        GrpcTryCommitManyMutationsResponse? remoteResponse = await client.TryCommitManyMutationsAsync(request, cancellationToken: cancelationToken);
+
+        lock (lockSync)
+        {
+            foreach (GrpcTryCommitManyMutationsResponseItem item in remoteResponse.Items)
+                responses.Add(((KeyValueResponseType)item.Type, item.Key, item.ProposalIndex, (KeyValueDurability)item.Durability));
+        }
+    }
+
+    private static IEnumerable<GrpcTryCommitManyMutationsRequestItem> GetCommitRequestItems(List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys)
+    {
+        foreach ((string key, HLCTimestamp ticketId, KeyValueDurability durability) key in xkeys)
+            yield return new()
+            {
+                Key = key.key,
+                ProposalTicketPhysical = key.ticketId.L,
+                ProposalTicketCounter = key.ticketId.C,
+                Durability = (GrpcKeyValueDurability)key.durability
+            };
+    }
+    
+    /// <summary>
     /// Locates the leader node for the given key and executes the TryRollbackMutations request.
     /// </summary>
     /// <param name="transactionId"></param>

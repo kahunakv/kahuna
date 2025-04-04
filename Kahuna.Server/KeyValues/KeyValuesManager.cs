@@ -332,6 +332,18 @@ internal sealed class KeyValuesManager
     {
         return locator.LocateAndTryCommitMutations(transactionId, key, ticketId, durability, cancelationToken);
     }
+
+    /// <summary>
+    /// Locates the leader node for the given keys and executes the TryCommitMutations request. 
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="keys"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public Task<List<(KeyValueResponseType, string, long, KeyValueDurability)>> LocateAndTryCommitManyMutations(HLCTimestamp transactionId, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> keys, CancellationToken cancelationToken)
+    {
+        return locator.LocateAndTryCommitManyMutations(transactionId, keys, cancelationToken);
+    }
     
     /// <summary>
     /// Locates the leader node for the given key and executes the TryRollbackMutations request.
@@ -826,6 +838,49 @@ internal sealed class KeyValuesManager
             return (KeyValueResponseType.Errored, -1);
         
         return (response.Type, response.Revision);
+    }
+    
+    /// <summary>
+    /// Passes many TryCommit requests to the key/value actor for the given keyValue name.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="proposalTicketId"></param>
+    /// <param name="durability"></param>
+    /// <returns></returns>
+    public async Task<List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)>> TryCommitManyMutations(HLCTimestamp transactionId, List<(string key, HLCTimestamp proposalTicketId, KeyValueDurability durability)> keys)
+    {
+        List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> responses = new(keys.Count);
+        
+        foreach ((string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) key in keys)
+        {
+            KeyValueRequest request = new(
+                KeyValueRequestType.TryCommitMutations,
+                transactionId,
+                key.key,
+                null,
+                null,
+                -1,
+                KeyValueFlags.None,
+                0,
+                key.proposalTicketId,
+                key.durability
+            );
+
+            KeyValueResponse? response;
+
+            if (key.durability == KeyValueDurability.Ephemeral)
+                response = await ephemeralKeyValuesRouter.Ask(request);
+            else
+                response = await persistentKeyValuesRouter.Ask(request);
+
+            if (response is null)
+                return [(KeyValueResponseType.Errored, key.key, -1, key.durability)];
+
+            responses.Add((response.Type, key.key, response.Revision, key.durability));
+        }
+
+        return responses;
     }
     
     /// <summary>

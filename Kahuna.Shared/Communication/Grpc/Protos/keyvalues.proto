@@ -14,6 +14,7 @@ service KeyValuer {
   rpc TryPrepareMutations (GrpcTryPrepareMutationsRequest) returns (GrpcTryPrepareMutationsResponse);
   rpc TryPrepareManyMutations (GrpcTryPrepareManyMutationsRequest) returns (GrpcTryPrepareManyMutationsResponse);
   rpc TryCommitMutations (GrpcTryCommitMutationsRequest) returns (GrpcTryCommitMutationsResponse);
+  rpc TryCommitManyMutations (GrpcTryCommitManyMutationsRequest) returns (GrpcTryCommitManyMutationsResponse);
   rpc TryRollbackMutations (GrpcTryRollbackMutationsRequest) returns (GrpcTryRollbackMutationsResponse);
   rpc ScanByPrefix (GrpcScanByPrefixRequest) returns (GrpcScanByPrefixResponse);
   rpc ScanAllByPrefix (GrpcScanAllByPrefixRequest) returns (GrpcScanAllByPrefixResponse);
@@ -242,6 +243,31 @@ message GrpcTryCommitMutationsResponse {
   optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
   int64 ProposalIndex = 3;
+}
+
+message GrpcTryCommitManyMutationsRequest {
+  int64 TransactionIdPhysical = 1;
+  uint32 TransactionIdCounter = 2;
+  repeated GrpcTryCommitManyMutationsRequestItem Items = 3;
+}
+
+message GrpcTryCommitManyMutationsRequestItem {
+  string Key = 1;
+  int64 ProposalTicketPhysical = 2;
+  uint32 ProposalTicketCounter = 3;
+  GrpcKeyValueDurability Durability = 4;
+}
+
+message GrpcTryCommitManyMutationsResponse {
+  optional string ServedFrom = 1;
+  repeated GrpcTryCommitManyMutationsResponseItem Items = 3;
+}
+
+message GrpcTryCommitManyMutationsResponseItem {
+  GrpcKeyValueResponseType Type = 1;
+  string Key = 2;
+  GrpcKeyValueDurability Durability = 3;
+  int64 ProposalIndex = 4;
 }
 
 message GrpcTryRollbackMutationsRequest {
