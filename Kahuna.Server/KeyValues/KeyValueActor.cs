@@ -34,6 +34,8 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
 
     private readonly TryGetHandler tryGetHandler;
     
+    private readonly TryGetByPrefixHandler tryGetByPrefixHandler;
+    
     private readonly TryScanByPrefixHandler tryScanByPrefixHandler;
     
     private readonly TryExistsHandler tryExistsHandler;
@@ -74,6 +76,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         tryDeleteHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
         tryGetHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
         tryScanByPrefixHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
+        tryGetByPrefixHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
         tryExistsHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
         tryAdquireExclusiveLockHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
         tryReleaseExclusiveLockHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
@@ -195,6 +198,16 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private Task<KeyValueResponse> ScanByPrefix(KeyValueRequest message)
     {
         return tryScanByPrefixHandler.Execute(message);
+    }
+    
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
+    private Task<KeyValueResponse> GetByPrefix(KeyValueRequest message)
+    {
+        return tryGetByPrefixHandler.Execute(message);
     }
     
     /// <summary>

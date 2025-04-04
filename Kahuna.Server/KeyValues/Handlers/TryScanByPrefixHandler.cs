@@ -29,10 +29,13 @@ internal sealed class TryScanByPrefixHandler : BaseHandler
             if (!key.StartsWith(message.Key))
                 continue;
 
+            if (keyValueContext.State != KeyValueState.Set)
+                continue;
+
             if (keyValueContext.Expires != HLCTimestamp.Zero && keyValueContext.Expires - message.TransactionId < TimeSpan.Zero)
                 continue;
 
-            items.Add((key, new(keyValueContext.Value, keyValueContext.Revision, keyValueContext.Expires)));
+            items.Add((key, new(keyValueContext.Value, keyValueContext.Revision, keyValueContext.Expires, keyValueContext.State)));
         }
         
         return Task.FromResult<KeyValueResponse>(new(KeyValueResponseType.Get, items));

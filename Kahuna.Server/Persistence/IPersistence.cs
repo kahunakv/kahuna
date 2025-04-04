@@ -16,5 +16,5 @@ public interface IPersistence
     
     public KeyValueContext? GetKeyValueRevision(string keyName, long revision);
 
-    public IEnumerable<(string, ReadOnlyKeyValueContext)> GetKeyValueByPrefix(string prefixKeyName);
+    public List<(string, ReadOnlyKeyValueContext)> GetKeyValueByPrefix(string prefixKeyName);
 }

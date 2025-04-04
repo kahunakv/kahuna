@@ -28,7 +28,7 @@ public class SqlitePersistence : IPersistence, IDisposable
     
     private (ReaderWriterLock readerWriterLock, SqliteConnection connection) TryOpenDatabase(string resource)
     {
-        int shard = (int)HashUtils.StaticHash(resource, MaxShards);
+        int shard = (int)HashUtils.InversePrefixedHash(resource, '/', MaxShards);
         
         return TryOpenDatabaseByShard(shard);
     }
@@ -354,38 +354,40 @@ public class SqlitePersistence : IPersistence, IDisposable
         return null;
     }
     
-    public IEnumerable<(string, ReadOnlyKeyValueContext)> GetKeyValueByPrefix(string prefixKeyName)
+    public List<(string, ReadOnlyKeyValueContext)> GetKeyValueByPrefix(string prefixKeyName)
     {
-        for (int i = 0; i < MaxShards; i++)
+        List<(string, ReadOnlyKeyValueContext)> results = [];
+        
+        (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabase(prefixKeyName);
+        
+        try
         {
-            (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(i);
+            readerWriterLock.AcquireReaderLock(TimeSpan.FromSeconds(5));
 
-            try
-            {
-                readerWriterLock.AcquireReaderLock(TimeSpan.FromSeconds(5));
+            const string query = "SELECT key, value, revision, expiresLogical, expiresCounter, state FROM keys WHERE key LIKE @key";
+            using SqliteCommand command = new(query, connection);
 
-                const string query = "SELECT key, value, revision, expiresLogical, expiresCounter, state FROM keys WHERE key LIKE @key";
-                using SqliteCommand command = new(query, connection);
+            command.Parameters.AddWithValue("@key", prefixKeyName + "%");
 
-                command.Parameters.AddWithValue("@key", prefixKeyName + "%");
+            using SqliteDataReader reader = command.ExecuteReader();
 
-                using SqliteDataReader reader = command.ExecuteReader();
-
-                while (reader.Read())
-                    yield return (reader.IsDBNull(0) ? "" : reader.GetString(0), new(
-                        value: reader.IsDBNull(1) ? null : (byte[])reader[1],
-                        revision: reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                        expires: new(
-                            reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                            reader.IsDBNull(4) ? 0 : (uint)reader.GetInt64(4)
-                        )
-                    ));
-            }
-            finally
-            {
-                readerWriterLock.ReleaseReaderLock();
-            }
+            while (reader.Read())
+                results.Add((reader.IsDBNull(0) ? "" : reader.GetString(0), new(
+                    value: reader.IsDBNull(1) ? null : (byte[])reader[1],
+                    revision: reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                    expires: new(
+                        reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                        reader.IsDBNull(4) ? 0 : (uint)reader.GetInt64(4)
+                    ),
+                    state: reader.IsDBNull(5) ? KeyValueState.Undefined : (KeyValueState)reader.GetInt32(5)
+                )));
         }
+        finally
+        {
+            readerWriterLock.ReleaseReaderLock();
+        }
+
+        return results;
     }
 
     public void Dispose()

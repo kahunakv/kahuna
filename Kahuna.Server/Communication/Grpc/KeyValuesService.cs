@@ -330,6 +330,48 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
     }
     
     /// <summary>
+    /// Receives requests for the key/value "ReleaseManyExclusiveLocks" service 
+    /// </summary>
+    /// <param name="request"></param>
+    /// <param name="context"></param>
+    /// <returns></returns>
+    public override async Task<GrpcTryReleaseManyExclusiveLocksResponse> TryReleaseManyExclusiveLocks(GrpcTryReleaseManyExclusiveLocksRequest request, ServerCallContext context)
+    {
+        List<(KeyValueResponseType, string, KeyValueDurability)> responses = await keyValues.LocateAndTryReleaseManyExclusiveLocks(
+            new(request.TransactionIdPhysical, request.TransactionIdCounter), 
+            GetRequestReleaseItems(request.Items), 
+            context.CancellationToken
+        );
+
+        GrpcTryReleaseManyExclusiveLocksResponse response = new();
+        
+        response.Items.Add(GetResponseReleaseItems(responses));
+
+        return response;
+    }
+
+    private static List<(string key, KeyValueDurability durability)> GetRequestReleaseItems(RepeatedField<GrpcTryReleaseManyExclusiveLocksRequestItem> items)
+    {
+        List<(string key, KeyValueDurability durability)> rItems = new(items.Count);
+        
+        foreach (GrpcTryReleaseManyExclusiveLocksRequestItem item in items)
+            rItems.Add((item.Key, (KeyValueDurability)item.Durability));
+        
+        return rItems;
+    }
+    
+    private static IEnumerable<GrpcTryReleaseManyExclusiveLocksResponseItem> GetResponseReleaseItems(List<(KeyValueResponseType, string, KeyValueDurability)> responses)
+    {
+        foreach ((KeyValueResponseType response, string key, KeyValueDurability durability) in responses)
+            yield return new()
+            {
+                Type = (GrpcKeyValueResponseType)response,
+                Key = key,
+                Durability = (GrpcKeyValueDurability)durability
+            };
+    }
+    
+    /// <summary>
     /// Receives requests for the key/value "PrepareMutations" service 
     /// </summary>
     /// <param name="request"></param>
@@ -513,6 +555,32 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         KeyValueGetByPrefixResult result = await keyValues.ScanByPrefix(request.PrefixKey, (KeyValueDurability) request.Durability);
 
         GrpcScanByPrefixResponse response = new()
+        {
+            Type = GrpcKeyValueResponseType.TypeGot,
+        };
+        
+        response.Items.Add(GetKeyValueItems(result.Items));
+        
+        return response;
+    }
+    
+    /// <summary>
+    /// Returns key/value pairs by prefix
+    /// </summary>
+    /// <param name="request"></param>
+    /// <param name="context"></param>
+    /// <returns></returns>
+    public override async Task<GrpcGetByPrefixResponse> GetByPrefix(GrpcGetByPrefixRequest request, ServerCallContext context)
+    {
+        if (request.PrefixKey is null)
+            return new()
+            {
+                Type = GrpcKeyValueResponseType.TypeInvalidInput
+            };
+            
+        KeyValueGetByPrefixResult result = await keyValues.GetByPrefix(request.PrefixKey, (KeyValueDurability) request.Durability);
+
+        GrpcGetByPrefixResponse response = new()
         {
             Type = GrpcKeyValueResponseType.TypeGot,
         };

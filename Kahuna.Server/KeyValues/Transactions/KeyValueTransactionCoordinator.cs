@@ -1,7 +1,7 @@
 
 using Kommander;
 using Kommander.Time;
-using Kommander.Support.Parallelization;
+//using Kommander.Support.Parallelization;
 
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Transactions.Commands;
@@ -394,11 +394,11 @@ internal sealed class KeyValueTransactionCoordinator
                 
         List<(string, int, KeyValueDurability)> keysToLock = new(numberLocks);
 
-        foreach (string kv in ephemeralLocksToAcquire)
-            keysToLock.Add((kv, timeout + 10, KeyValueDurability.Ephemeral));
+        foreach (string key in ephemeralLocksToAcquire)
+            keysToLock.Add((key, timeout + 10, KeyValueDurability.Ephemeral));
 
-        foreach (string kv in persistentLocksToAcquire)
-            keysToLock.Add((kv, timeout + 10, KeyValueDurability.Persistent));
+        foreach (string key in persistentLocksToAcquire)
+            keysToLock.Add((key, timeout + 10, KeyValueDurability.Persistent));
 
         List<(KeyValueResponseType, string, KeyValueDurability)> lockResponses = await manager.LocateAndTryAcquireManyExclusiveLocks(context.TransactionId, keysToLock, ctsToken);
         
@@ -426,10 +426,15 @@ internal sealed class KeyValueTransactionCoordinator
             if (context.LocksAcquired is null || context.LocksAcquired.Count == 0)
                 return;
             
-            await context.LocksAcquired.ForEachAsync(LockMaxDegreeOfParallelism, async ((string key, KeyValueDurability durability) p) =>
+            if (context.LocksAcquired.Count == 1)
             {
-                await manager.LocateAndTryReleaseExclusiveLock(context.TransactionId, p.key, p.durability, CancellationToken.None);
-            });
+                (string lockKey, KeyValueDurability durability) = context.LocksAcquired.First();
+                
+                await manager.LocateAndTryReleaseExclusiveLock(context.TransactionId, lockKey, durability, CancellationToken.None);
+                return;
+            }
+            
+            await manager.LocateAndTryReleaseManyExclusiveLocks(context.TransactionId, context.LocksAcquired, CancellationToken.None);
         }
         catch (Exception ex)
         {

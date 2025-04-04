@@ -91,20 +91,31 @@ internal abstract class BaseHandler
 
         return result.Success;
     }
-    
+
     /// <summary>
     /// Returns an existing KeyValueContext from memory or retrieves it from the persistence layer
     /// </summary>
     /// <param name="key"></param>
     /// <param name="durability"></param>
+    /// <param name="readKeyValueContext"></param>
     /// <returns></returns>
-    protected async ValueTask<KeyValueContext?> GetKeyValueContext(string key, KeyValueDurability durability)
+    protected async ValueTask<KeyValueContext?> GetKeyValueContext(string key, KeyValueDurability durability, ReadOnlyKeyValueContext? readKeyValueContext = null)
     {
         if (!keyValuesStore.TryGetValue(key, out KeyValueContext? context))
         {
             if (durability == KeyValueDurability.Persistent)
             {
-                context = await raft.ReadThreadPool.EnqueueTask(() => persistence.GetKeyValue(key));
+                if (readKeyValueContext is null)
+                    context = await raft.ReadThreadPool.EnqueueTask(() => persistence.GetKeyValue(key));
+                else
+                    context = new()
+                    {
+                        Value = readKeyValueContext.Value,
+                        Revision = readKeyValueContext.Revision,
+                        Expires = readKeyValueContext.Expires,
+                        State = readKeyValueContext.State
+                    };
+                
                 if (context is not null)
                 {
                     context.LastUsed = raft.HybridLogicalClock.TrySendOrLocalEvent();

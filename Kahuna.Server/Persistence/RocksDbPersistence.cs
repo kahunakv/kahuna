@@ -162,8 +162,10 @@ public class RocksDbPersistence : IPersistence, IDisposable
         return context;
     }
 
-    public IEnumerable<(string, ReadOnlyKeyValueContext)> GetKeyValueByPrefix(string prefixKeyName)
+    public List<(string, ReadOnlyKeyValueContext)> GetKeyValueByPrefix(string prefixKeyName)
     {
+        List<(string, ReadOnlyKeyValueContext)> result = [];
+        
         byte[] prefixBytes = Encoding.UTF8.GetBytes(prefixKeyName);
         
         using Iterator? iterator = db.NewIterator(cf: columnFamilyKeys);
@@ -173,10 +175,10 @@ public class RocksDbPersistence : IPersistence, IDisposable
         {
             string key = Encoding.UTF8.GetString(iterator.Key());
             
-            if (!key.StartsWith(prefixKeyName)) 
+            if (!key.StartsWith(prefixKeyName, StringComparison.Ordinal)) 
                 break; // Stop when we leave the prefix range
             
-            if (!key.EndsWith(CurrentMarker))
+            if (!key.EndsWith(CurrentMarker, StringComparison.Ordinal))
             {
                 iterator.Next();
                 continue;
@@ -186,10 +188,17 @@ public class RocksDbPersistence : IPersistence, IDisposable
             
             RocksDbKeyValueMessage message = UnserializeKeyValueMessage(iterator.Value());
 
-            yield return (keyWithoutMarker, new(message.Value?.ToByteArray(), message.Revision, new(message.ExpiresPhysical, message.ExpiresCounter)));
+            result.Add((keyWithoutMarker, new(
+                message.Value?.ToByteArray(), 
+                message.Revision, 
+                new(message.ExpiresPhysical, message.ExpiresCounter),
+                (KeyValueState)message.State
+            )));
 
             iterator.Next();
         }
+
+        return result;
     }
 
     private static byte[] Serialize(RocksDbLockMessage message)

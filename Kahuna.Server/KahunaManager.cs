@@ -245,6 +245,18 @@ public sealed class KahunaManager : IKahuna
     {
         return keyValues.LocateAndTryReleaseExclusiveLock(transactionId, key, durability, cancelationToken);
     }
+    
+    /// <summary>
+    /// Locates the leader node for the given keysx and executes the TryReleaseExclusiveLock request. 
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="keys"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public Task<List<(KeyValueResponseType, string, KeyValueDurability)>> LocateAndTryReleaseManyExclusiveLocks(HLCTimestamp transactionId, List<(string key, KeyValueDurability durability)> keys, CancellationToken cancelationToken)
+    {
+        return keyValues.LocateAndTryReleaseManyExclusiveLocks(transactionId, keys, cancelationToken);
+    }
 
     /// <summary>
     /// Locates the leader node for the given key and executes the TryPrepareMutations request.
@@ -413,6 +425,17 @@ public sealed class KahunaManager : IKahuna
     public Task<KeyValueGetByPrefixResult> ScanByPrefix(string prefixKeyName, KeyValueDurability durability)
     {
         return keyValues.ScanByPrefix(prefixKeyName, durability);
+    }
+    
+    /// <summary>
+    /// Gets the key/value pairs by prefix from the current node in the cluster
+    /// </summary>
+    /// <param name="prefixKeyName"></param>
+    /// <param name="durability"></param>
+    /// <returns></returns>
+    public Task<KeyValueGetByPrefixResult> GetByPrefix(string prefixKeyName, KeyValueDurability durability)
+    {
+        return keyValues.GetByPrefix(prefixKeyName, durability);
     }
     
     /// <summary>

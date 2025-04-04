@@ -13,5 +13,6 @@ public enum KeyValueRequestType
     TryPrepareMutations,
     TryCommitMutations,
     TryRollbackMutations,
-    ScanByPrefix
+    ScanByPrefix,
+    GetByPrefix
 }

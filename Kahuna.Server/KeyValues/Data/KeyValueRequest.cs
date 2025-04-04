@@ -1,5 +1,6 @@
 
 using Kahuna.Shared.KeyValue;
+using Kommander;
 using Kommander.Time;
 using Nixie.Routers;
 using Standart.Hash.xxHash;
@@ -70,6 +71,6 @@ public sealed class KeyValueRequest : IConsistentHashable
 
     public int GetHash()
     {
-        return (int)xxHash64.ComputeHash(Key);
+        return (int)HashUtils.InversePrefixedStaticHash(Key, '/');
     }
 }

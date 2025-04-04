@@ -282,6 +282,18 @@ internal sealed class KeyValuesManager
     }
     
     /// <summary>
+    /// Locates the leader node for the given keys and executes the TryReleaseManyExclusiveLocks requests
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="keys"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public Task<List<(KeyValueResponseType, string, KeyValueDurability)>> LocateAndTryReleaseManyExclusiveLocks(HLCTimestamp transactionId, List<(string key, KeyValueDurability durability)> keys, CancellationToken cancelationToken)
+    {
+        return locator.LocateAndTryReleaseManyExclusiveLocks(transactionId, keys, cancelationToken);
+    }
+    
+    /// <summary>
     /// Locates the leader node for the given key and executes the TryPrepareMutations request.
     /// </summary>
     /// <param name="transactionId"></param>
@@ -580,7 +592,7 @@ internal sealed class KeyValuesManager
     /// <param name="transactionId"></param>
     /// <param name="keys"></param>
     /// <returns></returns>
-    public async Task<List<(KeyValueResponseType, string, KeyValueDurability)>> TryAcquireManyExclusiveLock(HLCTimestamp transactionId, List<(string key, int expiresMs, KeyValueDurability durability)> keys)
+    public async Task<List<(KeyValueResponseType, string, KeyValueDurability)>> TryAcquireManyExclusiveLocks(HLCTimestamp transactionId, List<(string key, int expiresMs, KeyValueDurability durability)> keys)
     {
         List<(KeyValueResponseType, string, KeyValueDurability)> responses = new(keys.Count);
         
@@ -654,6 +666,50 @@ internal sealed class KeyValuesManager
             return (KeyValueResponseType.Errored, key);
         
         return (response.Type, key);
+    }
+    
+    /// <summary>
+    /// Passes a TryAcquireExclusiveLock request to the key/value actor for the given keys.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="keys"></param>
+    /// <returns></returns>
+    public async Task<List<(KeyValueResponseType, string, KeyValueDurability)>> TryReleaseManyExclusiveLocks(HLCTimestamp transactionId, List<(string key, KeyValueDurability durability)> keys)
+    {
+        List<(KeyValueResponseType, string, KeyValueDurability)> responses = new(keys.Count);
+        
+        foreach ((string key, KeyValueDurability durability) key in keys)
+        {
+            KeyValueRequest request = new(
+                KeyValueRequestType.TryReleaseExclusiveLock,
+                transactionId,
+                key.key,
+                null,
+                null,
+                -1,
+                KeyValueFlags.None,
+                0,
+                HLCTimestamp.Zero,
+                key.durability
+            );
+
+            KeyValueResponse? response;
+
+            if (key.durability == KeyValueDurability.Ephemeral)
+                response = await ephemeralKeyValuesRouter.Ask(request);
+            else
+                response = await persistentKeyValuesRouter.Ask(request);
+
+            if (response is null)
+            {
+                responses.Add((KeyValueResponseType.Errored, key.key, key.durability));
+                continue;
+            }
+
+            responses.Add((response.Type, key.key, key.durability));
+        }
+
+        return responses;
     }
     
     /// <summary>
@@ -896,5 +952,45 @@ internal sealed class KeyValuesManager
         }
 
         throw new KahunaServerException("Unknown durability");
+    }
+
+    /// <summary>
+    /// Scans the current node and returns key/value pairs by prefix 
+    /// </summary>
+    /// <param name="prefixKeyName"></param>
+    /// <param name="durability"></param>
+    /// <returns></returns>
+    /// <exception cref="KahunaServerException"></exception>
+    public async Task<KeyValueGetByPrefixResult> GetByPrefix(string prefixKeyName, KeyValueDurability durability)
+    {
+        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
+
+        KeyValueRequest request = new(
+            KeyValueRequestType.GetByPrefix,
+            currentTime,
+            prefixKeyName,
+            null,
+            null,
+            -1,
+            KeyValueFlags.None,
+            0,
+            HLCTimestamp.Zero,
+            durability
+        );
+        
+        KeyValueResponse? response;
+        
+        if (durability == KeyValueDurability.Ephemeral)
+            response = await ephemeralKeyValuesRouter.Ask(request);
+        else
+            response = await persistentKeyValuesRouter.Ask(request);
+
+        if (response is null)
+            return new([]);
+        
+        if (response is { Type: KeyValueResponseType.Get, Items: not null })
+            return new(response.Items); 
+        
+        return new([]);
     }
 }

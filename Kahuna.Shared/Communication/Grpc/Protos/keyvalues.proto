@@ -10,12 +10,14 @@ service KeyValuer {
   rpc TryAcquireExclusiveLock (GrpcTryAcquireExclusiveLockRequest) returns (GrpcTryAcquireExclusiveLockResponse);
   rpc TryAcquireManyExclusiveLocks (GrpcTryAcquireManyExclusiveLocksRequest) returns (GrpcTryAcquireManyExclusiveLocksResponse);
   rpc TryReleaseExclusiveLock (GrpcTryReleaseExclusiveLockRequest) returns (GrpcTryReleaseExclusiveLockResponse);
+  rpc TryReleaseManyExclusiveLocks (GrpcTryReleaseManyExclusiveLocksRequest) returns (GrpcTryReleaseManyExclusiveLocksResponse);
   rpc TryPrepareMutations (GrpcTryPrepareMutationsRequest) returns (GrpcTryPrepareMutationsResponse);
   rpc TryPrepareManyMutations (GrpcTryPrepareManyMutationsRequest) returns (GrpcTryPrepareManyMutationsResponse);
   rpc TryCommitMutations (GrpcTryCommitMutationsRequest) returns (GrpcTryCommitMutationsResponse);
   rpc TryRollbackMutations (GrpcTryRollbackMutationsRequest) returns (GrpcTryRollbackMutationsResponse);
   rpc ScanByPrefix (GrpcScanByPrefixRequest) returns (GrpcScanByPrefixResponse);
   rpc ScanAllByPrefix (GrpcScanAllByPrefixRequest) returns (GrpcScanAllByPrefixResponse);
+  rpc GetByPrefix (GrpcGetByPrefixRequest) returns (GrpcGetByPrefixResponse);
 }
 
 message GrpcTrySetKeyValueRequest {
@@ -78,6 +80,7 @@ message GrpcTryGetKeyValueResponse {
   int64 Revision = 4;
   int64 ExpiresPhysical = 5;
   uint32 ExpiresCounter = 6;
+  GrpcKeyValueState State = 7;
 }
 
 message GrpcTryExistsKeyValueRequest {
@@ -94,6 +97,7 @@ message GrpcTryExistsKeyValueResponse {
   int64 Revision = 3;
   int64 ExpiresPhysical = 4;
   uint32 ExpiresCounter = 5;
+  GrpcKeyValueState State = 6;
 }
 
 message GrpcTryExecuteTransactionRequest {
@@ -148,6 +152,28 @@ message GrpcTryAcquireManyExclusiveLocksRequestItem {
 }
 
 message GrpcTryAcquireManyExclusiveLocksResponseItem {
+  GrpcKeyValueResponseType Type = 1;
+  string Key = 2;
+  GrpcKeyValueDurability Durability = 3;
+}
+
+message GrpcTryReleaseManyExclusiveLocksRequest {
+  int64 TransactionIdPhysical = 1;
+  uint32 TransactionIdCounter = 2;
+  repeated GrpcTryReleaseManyExclusiveLocksRequestItem Items = 3;
+}
+
+message GrpcTryReleaseManyExclusiveLocksResponse {
+  optional string ServedFrom = 1;
+  repeated GrpcTryReleaseManyExclusiveLocksResponseItem Items = 2;
+}
+
+message GrpcTryReleaseManyExclusiveLocksRequestItem {
+  string Key = 1;
+  GrpcKeyValueDurability Durability = 2;
+}
+
+message GrpcTryReleaseManyExclusiveLocksResponseItem {
   GrpcKeyValueResponseType Type = 1;
   string Key = 2;
   GrpcKeyValueDurability Durability = 3;
@@ -244,6 +270,17 @@ message GrpcScanByPrefixResponse {
   repeated GrpcKeyValueByPrefixItemResponse Items = 3;
 }
 
+message GrpcGetByPrefixRequest {
+  string PrefixKey = 1;
+  GrpcKeyValueDurability Durability = 2;
+}
+
+message GrpcGetByPrefixResponse {
+  optional string ServedFrom = 1;
+  GrpcKeyValueResponseType Type = 2;
+  repeated GrpcKeyValueByPrefixItemResponse Items = 3;
+}
+
 message GrpcScanAllByPrefixRequest {
   string PrefixKey = 1;
   GrpcKeyValueDurability Durability = 2;
@@ -260,6 +297,7 @@ message GrpcKeyValueByPrefixItemResponse {
   int64 Revision = 3;
   int64 ExpiresPhysical = 4;
   uint32 ExpiresCounter = 5;
+  GrpcKeyValueState State = 6;
 }
 
 enum GrpcKeyValueFlags {
@@ -294,4 +332,10 @@ enum GrpcKeyValueResponseType {
 enum GrpcKeyValueDurability {
   EPHEMERAL = 0;
   PERSISTENT = 1;
+}
+
+enum GrpcKeyValueState {
+  STATE_UNDEFINED = 0;
+  STATE_SET= 1;
+  STATE_DELETED = 2;
 }

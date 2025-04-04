@@ -8,7 +8,6 @@ using Kahuna.Server.Configuration;
 using Kahuna.Shared.KeyValue;
 
 using Kommander;
-using Kommander.Support.Collections;
 using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues;
@@ -249,7 +248,8 @@ internal sealed class KeyValueLocator
         return ((KeyValueResponseType)remoteResponse.Type, new(
             remoteResponse.Value?.ToByteArray(),
             remoteResponse.Revision,
-            new(remoteResponse.ExpiresPhysical, remoteResponse.ExpiresCounter)
+            new(remoteResponse.ExpiresPhysical, remoteResponse.ExpiresCounter),
+            (KeyValueState)remoteResponse.State
         ));
     }
     
@@ -303,7 +303,8 @@ internal sealed class KeyValueLocator
         return ((KeyValueResponseType)remoteResponse.Type, new(
             null,
             remoteResponse.Revision,
-            new(remoteResponse.ExpiresPhysical, remoteResponse.ExpiresCounter)
+            new(remoteResponse.ExpiresPhysical, remoteResponse.ExpiresCounter),
+            (KeyValueState)remoteResponse.State
         ));
     }
     
@@ -410,7 +411,7 @@ internal sealed class KeyValueLocator
         
         if (leader == localNode)
         {
-            List<(KeyValueResponseType type, string key, KeyValueDurability durability)> acquireResponses = await manager.TryAcquireManyExclusiveLock(transactionId, xkeys);
+            List<(KeyValueResponseType type, string key, KeyValueDurability durability)> acquireResponses = await manager.TryAcquireManyExclusiveLocks(transactionId, xkeys);
 
             lock (lockSync)
             {
@@ -494,6 +495,106 @@ internal sealed class KeyValueLocator
         remoteResponse.ServedFrom = $"https://{leader}";
         
         return ((KeyValueResponseType)remoteResponse.Type, key);
+    }
+    
+    /// <summary>
+    /// Locates the leader node for the given keys and executes the TryReleaseManyExclusiveLocks request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="keys"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public async Task<List<(KeyValueResponseType, string, KeyValueDurability)>> LocateAndTryReleaseManyExclusiveLocks(
+        HLCTimestamp transactionId, 
+        List<(string key, KeyValueDurability durability)> keys, 
+        CancellationToken cancelationToken
+    )
+    {
+        string localNode = raft.GetLocalEndpoint();
+        
+        Dictionary<string, List<(string key, KeyValueDurability durability)>> acquisitionPlan = [];
+
+        foreach ((string key, KeyValueDurability durability) key in keys)
+        {
+            if (string.IsNullOrEmpty(key.key))
+                return [(KeyValueResponseType.InvalidInput, key.key, key.durability)];
+
+            int partitionId = raft.GetPartitionKey(key.key);
+            string leader = await raft.WaitForLeader(partitionId, cancelationToken);
+            
+            if (acquisitionPlan.TryGetValue(leader, out List<(string key, KeyValueDurability durability)>? list))
+                list.Add(key);
+            else
+                acquisitionPlan[leader] = [key];
+        }
+        
+        Lock lockSync = new();
+        List<Task> tasks = new(acquisitionPlan.Count);
+        List<(KeyValueResponseType, string, KeyValueDurability)> responses = [];
+        
+        // Requests to nodes are sent in parallel
+        foreach ((string leader, List<(string key, KeyValueDurability durability)>? xkeys) in acquisitionPlan)
+            tasks.Add(TryReleaseNodeExclusiveLocks(transactionId, leader, localNode, xkeys, lockSync, responses, cancelationToken));
+        
+        await Task.WhenAll(tasks);
+
+        return responses;
+    }
+    
+    private async Task TryReleaseNodeExclusiveLocks(
+        HLCTimestamp transactionId, 
+        string leader, 
+        string localNode, 
+        List<(string key, KeyValueDurability durability)> xkeys,
+        Lock lockSync,
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses,
+        CancellationToken cancelationToken
+    )
+    {
+        logger.LogDebug("RELEASE-LOCK-KEYVALUE Redirect {Number} release lock acquisitions to node {Leader}", xkeys.Count, leader);
+        
+        if (leader == localNode)
+        {
+            List<(KeyValueResponseType type, string key, KeyValueDurability durability)> acquireResponses = await manager.TryReleaseManyExclusiveLocks(transactionId, xkeys);
+
+            lock (lockSync)
+            {
+                foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) item in acquireResponses)
+                    responses.Add((item.type, item.key, item.durability));
+            }
+
+            return;
+        }
+            
+        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
+            
+        KeyValuer.KeyValuerClient client = new(channel);
+            
+        GrpcTryReleaseManyExclusiveLocksRequest request = new()
+        {
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C
+        };
+            
+        request.Items.Add(GetReleaseLockRequestItems(xkeys));
+            
+        GrpcTryReleaseManyExclusiveLocksResponse? remoteResponse = await client.TryReleaseManyExclusiveLocksAsync(request, cancellationToken: cancelationToken);
+
+        lock (lockSync)
+        {
+            foreach (GrpcTryReleaseManyExclusiveLocksResponseItem item in remoteResponse.Items)
+                responses.Add(((KeyValueResponseType)item.Type, item.Key, (KeyValueDurability)item.Durability));
+        }
+    }
+
+    private static IEnumerable<GrpcTryReleaseManyExclusiveLocksRequestItem> GetReleaseLockRequestItems(List<(string key, KeyValueDurability durability)> xkeys)
+    {
+        foreach ((string key, KeyValueDurability durability) key in xkeys)
+            yield return new()
+            {
+                Key = key.key,
+                Durability = (GrpcKeyValueDurability)key.durability
+            };
     }
     
     /// <summary>
@@ -784,7 +885,8 @@ internal sealed class KeyValueLocator
         return (item.Key, new(
             item.Value?.ToByteArray(),
             item.Revision,
-            new(item.ExpiresPhysical, item.ExpiresCounter)
+            new(item.ExpiresPhysical, item.ExpiresCounter),
+            (KeyValueState)item.State
         ));
     }
 }
