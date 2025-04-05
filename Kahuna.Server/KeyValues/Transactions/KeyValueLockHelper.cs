@@ -141,6 +141,7 @@ internal sealed class KeyValueLockHelper : BaseCommand
                 case NodeType.Commit:
                 case NodeType.Return:
                 case NodeType.Sleep:
+                case NodeType.Throw:
                 case NodeType.Placeholder:
                 case NodeType.Exists:
                 case NodeType.Eexists:

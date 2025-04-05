@@ -1,7 +1,6 @@
 
 using Kommander;
 using Kommander.Time;
-//using Kommander.Support.Parallelization;
 
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Transactions.Commands;
@@ -148,6 +147,7 @@ internal sealed class KeyValueTransactionCoordinator
                 case NodeType.ArgumentList:
                 case NodeType.Return:
                 case NodeType.Sleep:
+                case NodeType.Throw:
                 case NodeType.Placeholder:
                 case NodeType.BeginOptionList:
                 case NodeType.BeginOption:
@@ -532,6 +532,9 @@ internal sealed class KeyValueTransactionCoordinator
             if (type != KeyValueResponseType.Prepared)
             {
                 context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Couldn't prepare mutations" };
+                
+                logger.LogWarning("Couldn't propose {Key} {Response}", key, type);
+                
                 return (false, null);
             }
 
@@ -547,7 +550,7 @@ internal sealed class KeyValueTransactionCoordinator
                 if (proposalResponse.Item1 == KeyValueResponseType.Prepared)
                     await manager.LocateAndTryRollbackMutations(context.TransactionId, proposalResponse.Item3, proposalResponse.Item2, proposalResponse.Item4, cancellationToken);
 
-                Console.WriteLine("{0} {1}", proposalResponse.Item3, proposalResponse.Item1);
+                logger.LogWarning("Couldn't propose {Key} {Response}", proposalResponse.Item3, proposalResponse.Item1);
             }
 
             context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Couldn't prepare mutations" };
@@ -571,7 +574,7 @@ internal sealed class KeyValueTransactionCoordinator
         {
             (string key, HLCTimestamp ticketId, KeyValueDurability durability) = mutationsPrepared.First();
             
-            (KeyValueResponseType response, long commitIndex) = await manager.LocateAndTryCommitMutations(context.TransactionId, key, ticketId, durability, CancellationToken.None);
+            (KeyValueResponseType response, long _) = await manager.LocateAndTryCommitMutations(context.TransactionId, key, ticketId, durability, CancellationToken.None);
             
             if (response != KeyValueResponseType.Committed)
                 logger.LogWarning("CommitMutations: {Type} {Key} {TicketId}", response, key, ticketId);
@@ -699,6 +702,10 @@ internal sealed class KeyValueTransactionCoordinator
                 
                 case NodeType.Sleep:
                     await SleepCommand.Execute(ast, cancellationToken);
+                    break;
+                
+                case NodeType.Throw:
+                    ThrowCommand.Execute(context, ast, cancellationToken);
                     break;
                 
                 case NodeType.Begin:
