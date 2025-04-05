@@ -66,7 +66,8 @@ internal sealed class GetCommand : BaseCommand
             {
                 Type = KeyValueExpressionType.StringType, 
                 StrValue = Encoding.UTF8.GetString(readOnlyContext.Value ?? []),
-                Revision = readOnlyContext.Revision
+                Revision = readOnlyContext.Revision,
+                Expires = readOnlyContext.Expires.L
             });
             
         return new()

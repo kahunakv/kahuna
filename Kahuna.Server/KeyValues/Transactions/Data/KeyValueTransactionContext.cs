@@ -11,7 +11,7 @@ namespace Kahuna.Server.KeyValues.Transactions.Data;
 /// Represents the context of a transaction.
 /// It includes all the necessary information to execute a transaction.
 /// </summary>
-public sealed class KeyValueTransactionContext
+internal sealed class KeyValueTransactionContext
 {
     public HLCTimestamp TransactionId { get; init; }
     
@@ -35,8 +35,6 @@ public sealed class KeyValueTransactionContext
 
     public KeyValueExpressionResult GetVariable(NodeAst ast, string varName)
     {
-        //Console.WriteLine("Get variable {0}", varName);
-        
         if (Variables is null)
             throw new KahunaScriptException("Undefined variable: " + varName, ast.yyline);
         
@@ -48,8 +46,6 @@ public sealed class KeyValueTransactionContext
     
     public void SetVariable(NodeAst ast, string varName, KeyValueExpressionResult value)
     {
-        //Console.WriteLine("Set variable {0} {1}", varName, value.ToString());
-        
         Variables ??= new();
         
         Variables[varName] = value;

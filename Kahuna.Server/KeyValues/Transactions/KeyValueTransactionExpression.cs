@@ -22,13 +22,17 @@ internal static class KeyValueTransactionExpression
                 return new() { Type = KeyValueExpressionType.StringType, StrValue = ast.yytext! };
             
             case NodeType.FloatType:
-                return new() { Type = KeyValueExpressionType.StringType, DoubleValue = double.Parse(ast.yytext!) };
+                Console.WriteLine(ast.yytext!);
+                return new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = double.Parse(ast.yytext!) };
             
             case NodeType.BooleanType:
                 return new() { Type = KeyValueExpressionType.BoolType, BoolValue = ast.yytext! == "true" };
             
             case NodeType.Placeholder:
-                return new() { Type = KeyValueExpressionType.StringType, StrValue = "some value" };
+                return new() { Type = KeyValueExpressionType.StringType, StrValue = context.GetParameter(ast) };
+            
+            case NodeType.NullType:
+                return new() { Type = KeyValueExpressionType.NullType };
             
             case NodeType.Equals:
                 return EqualsOperator.Eval(context, ast, "==");
@@ -80,6 +84,12 @@ internal static class KeyValueTransactionExpression
             
             case NodeType.Not:
                 return NotOperator.Eval(context, ast);
+            
+            case NodeType.NotSet:
+                return NotSetOperator.Eval(context, ast);
+            
+            case NodeType.NotFound:
+                return NotFoundOperator.Eval(context, ast);
             
             case NodeType.StmtList:
             case NodeType.Set:

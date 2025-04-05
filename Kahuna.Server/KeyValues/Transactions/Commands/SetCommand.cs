@@ -41,11 +41,12 @@ internal sealed class SetCommand : BaseCommand
 
         if (ast.extendedTwo is not null)
         {
-            if (ast.extendedTwo.nodeType == NodeType.SetNotExists)
-                flags = KeyValueFlags.SetIfNotExists;
-            
-            if (ast.extendedTwo.nodeType == NodeType.SetExists)
-                flags = KeyValueFlags.SetIfExists;
+            flags = ast.extendedTwo.nodeType switch
+            {
+                NodeType.SetNotExists => KeyValueFlags.SetIfNotExists,
+                NodeType.SetExists => KeyValueFlags.SetIfExists,
+                _ => flags
+            };
         }
         
         long compareRevision = 0;
@@ -56,16 +57,17 @@ internal sealed class SetCommand : BaseCommand
             if (ast.extendedThree.leftAst is null)
                 throw new KahunaScriptException("Invalid SET cmp/cmprev", ast.yyline);
 
-            if (ast.extendedThree.nodeType == NodeType.SetCmp)
+            switch (ast.extendedThree.nodeType)
             {
-                flags = KeyValueFlags.SetIfEqualToValue;
-                compareValue = KeyValueTransactionExpression.Eval(context, ast.extendedThree.leftAst).ToBytes();
-            }
-            
-            if (ast.extendedThree.nodeType == NodeType.SetCmpRev)
-            {
-                flags = KeyValueFlags.SetIfEqualToRevision;
-                compareRevision = KeyValueTransactionExpression.Eval(context, ast.extendedThree.leftAst).ToLong();
+                case NodeType.SetCmp:
+                    flags = KeyValueFlags.SetIfEqualToValue;
+                    compareValue = KeyValueTransactionExpression.Eval(context, ast.extendedThree.leftAst).ToBytes();
+                    break;
+                
+                case NodeType.SetCmpRev:
+                    flags = KeyValueFlags.SetIfEqualToRevision;
+                    compareRevision = KeyValueTransactionExpression.Eval(context, ast.extendedThree.leftAst).ToLong();
+                    break;
             }
         }
         
@@ -83,18 +85,17 @@ internal sealed class SetCommand : BaseCommand
             cancellationToken
         );
 
-        if (type == KeyValueResponseType.Set)
+        switch (type)
         {
-            context.ModifiedKeys ??= [];
-            context.ModifiedKeys.Add((keyName, durability));
-        }
-        else
-        {
-            if (type is KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry)
-            {
+            case KeyValueResponseType.Set:
+                context.ModifiedKeys ??= [];
+                context.ModifiedKeys.Add((keyName, durability));
+                break;
+            
+            case KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry:
                 context.Action = KeyValueTransactionAction.Abort;
                 context.Status = KeyValueExecutionStatus.Stop;
-            }    
+                break;
         }
 
         context.Result = new()

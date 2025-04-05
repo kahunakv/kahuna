@@ -21,7 +21,7 @@ public sealed class KeyValueTransactionResult
 
     public KeyValueExpressionResult ToExpressionResult()
     {
-        return new KeyValueExpressionResult()
+        return new()
         {
             Type = KeyValueExpressionType.StringType,
             StrValue = Value is not null ? Encoding.UTF8.GetString(Value) : null,

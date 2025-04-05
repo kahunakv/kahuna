@@ -124,6 +124,7 @@ internal sealed class KeyValueTransactionCoordinator
 
                 case NodeType.StmtList:
                 case NodeType.Let:
+                case NodeType.NullType:
                 case NodeType.IntegerType:
                 case NodeType.StringType:
                 case NodeType.FloatType:

@@ -25,8 +25,8 @@
 %token LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV LBRACE RBRACE
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS  
 %token TBEGIN TROLLBACK TCOMMIT TLET TSET TGET TESET TEGET TDELETE TEDELETE TEXTEND TEEXTEND TEXISTS TEEXISTS
-%token TIF TELSE TTHEN TEND TNX TXX TEX TCMP TCMPREV TTHROW TFOUND
-%token TRETURN TSLEEP TDIGIT TFLOAT TSTRING TIDENTIFIER TESCIDENTIFIER TPLACEHOLDER TTRUE TFALSE TAT
+%token TIF TELSE TTHEN TEND TNX TXX TEX TCMP TCMPREV TTHROW TFOUND 
+%token TRETURN TSLEEP TDIGIT TFLOAT TSTRING TIDENTIFIER TESCIDENTIFIER TPLACEHOLDER TTRUE TFALSE TNULL TAT
 
 %%
 
@@ -175,6 +175,7 @@ expression : expression TEQUALS expression { $$.n = new(NodeType.Equals, $1.n, $
            | float { $$.n = $1.n; $$.l = $1.l; }
            | string { $$.n = $1.n; $$.l = $1.l; }
            | boolean { $$.n = $1.n; $$.l = $1.l; }
+           | null { $$.n = $1.n; $$.l = $1.l; }
            ;
            
 fcall_expr : identifier LPAREN RPAREN { $$.n = new(NodeType.FuncCall, $1.n, null, null, null, null, null, null, $1.l); }
@@ -193,6 +194,7 @@ simple_expr : identifier { $$.n = $1.n; $$.l = $1.l; }
             | float { $$.n = $1.n; $$.l = $1.l; }
             | string { $$.n = $1.n; $$.l = $1.l; }
             | boolean { $$.n = $1.n; $$.l = $1.l; }
+            | null { $$.n = $1.n; $$.l = $1.l; }
             | placeholder { $$.n = $1.n; $$.l = $1.l; }
             ;            
            
@@ -214,5 +216,8 @@ boolean : TTRUE { $$.n = new(NodeType.BooleanType, null, null, null, null, null,
 
 string : TSTRING { $$.n = new(NodeType.StringType, null, null, null, null, null, null, $$.s, $1.l); }
        ;
+       
+null : TNULL { $$.n = new(NodeType.NullType, null, null, null, null, null, null, null, $1.l); }
+     ;
 
 %%

@@ -85,17 +85,23 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "to_double",
         "to_float",
         "to_boolean",
+        "to_bool",
         "to_string",
         "to_str",
         "is_int",
+        "is_integer",
         "is_long",
         "is_double",
         "is_float",
         "is_boolean",
+        "is_bool",
         "is_string",
         "is_str",
+        "is_null",
         "revision",
+        "rev",
         "length",
+        "expires",
     ];
 
     string[] commands =
@@ -376,7 +382,7 @@ async Task RunCommand(string commandTrim)
     switch (result.Type)
     {
         case KeyValueResponseType.Get:
-            AnsiConsole.MarkupLine("r{0} [cyan]{1}[/] {2}ms\n", result.Revision, Markup.Escape(Encoding.UTF8.GetString(result.Value ?? [])), stopwatch.GetElapsedMilliseconds());
+            AnsiConsole.MarkupLine("r{0} [cyan]{1}[/] {2}ms\n", result.Revision, Markup.Escape(GetHumanValue(result)), stopwatch.GetElapsedMilliseconds());
             break;
         
         case KeyValueResponseType.DoesNotExist:
@@ -448,5 +454,17 @@ async Task LoadAndRunScript(string commandTrim)
     {
         AnsiConsole.MarkupLine("[red]{0}[/]: {1}\n", Markup.Escape(ex.GetType().Name), Markup.Escape(ex.Message));
     }
+}
+
+static string GetHumanValue(KahunaKeyValueTransactionResult result)
+{
+    if (result.Value is null) 
+        return "(null)";
+
+    string str = Encoding.UTF8.GetString(result.Value);
+    if (string.IsNullOrEmpty(str)) 
+        return "(empty str)";
+
+    return str;
 }
 

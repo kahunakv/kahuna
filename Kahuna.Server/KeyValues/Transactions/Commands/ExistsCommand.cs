@@ -65,7 +65,8 @@ internal sealed class ExistsCommand : BaseCommand
             {
                 Type = KeyValueExpressionType.BoolType, 
                 BoolValue = type == KeyValueResponseType.Exists,
-                Revision = readOnlyContext.Revision
+                Revision = readOnlyContext.Revision,
+                Expires = readOnlyContext.Expires.L
             });
             
         return new()
