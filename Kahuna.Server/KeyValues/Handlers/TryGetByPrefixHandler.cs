@@ -1,5 +1,6 @@
 
 using Kahuna.Server.Persistence;
+using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
 using Kommander;
 using Kommander.Time;
@@ -12,10 +13,10 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
     public TryGetByPrefixHandler(
         Dictionary<string, KeyValueContext> keyValuesStore,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        IPersistence persistence,
+        IPersistenceBackend persistenceBackend,
         IRaft raft,
         ILogger<IKahuna> logger
-    ) : base(keyValuesStore, backgroundWriter, persistence, raft, logger)
+    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger)
     {
 
     }
@@ -52,7 +53,7 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
         List<(string, ReadOnlyKeyValueContext)> items = [];
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
 
-        List<(string, ReadOnlyKeyValueContext)> itemsFromDisk = await raft.ReadThreadPool.EnqueueTask(() => persistence.GetKeyValueByPrefix(message.Key));
+        List<(string, ReadOnlyKeyValueContext)> itemsFromDisk = await raft.ReadThreadPool.EnqueueTask(() => PersistenceBackend.GetKeyValueByPrefix(message.Key));
         
         foreach ((string key, ReadOnlyKeyValueContext readOnlyKeyValueContext) in itemsFromDisk)
         {

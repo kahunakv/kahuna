@@ -8,6 +8,7 @@ using Kommander.Time;
 
 using Kahuna.Server.Configuration;
 using Kahuna.Server.Persistence;
+using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
 using Kahuna.Shared.Locks;
@@ -36,14 +37,14 @@ public sealed class LockManager
     /// </summary>
     /// <param name="actorSystem"></param>
     /// <param name="raft"></param>
-    /// <param name="persistence"></param>
+    /// <param name="persistenceBackend"></param>
     /// <param name="backgroundWriter"></param>
     /// <param name="configuration"></param>
     /// <param name="logger"></param>
     public LockManager(
         ActorSystem actorSystem, 
         IRaft raft, 
-        IPersistence persistence, 
+        IPersistenceBackend persistenceBackend, 
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         KahunaConfiguration configuration, 
         ILogger<IKahuna> logger
@@ -54,26 +55,26 @@ public sealed class LockManager
         this.backgroundWriter = backgroundWriter;
         this.logger = logger;
         
-        ephemeralLocksRouter = GetEphemeralRouter(persistence, configuration);
-        persistentLocksRouter = GetPersistentRouter(persistence, configuration);
+        ephemeralLocksRouter = GetEphemeralRouter(persistenceBackend, configuration);
+        persistentLocksRouter = GetPersistentRouter(persistenceBackend, configuration);
     }
 
     /// <summary>
     /// Creates the ephemeral locks router
     /// </summary>
     /// <param name="backgroundWriter"></param>
-    /// <param name="persistence"></param>
+    /// <param name="persistenceBackend"></param>
     /// <param name="workers"></param>
     /// <returns></returns>
     private IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> GetEphemeralRouter(
-        IPersistence persistence, 
+        IPersistenceBackend persistenceBackend, 
         KahunaConfiguration configuration
     )
     {
         List<IActorRefStruct<LockActor, LockRequest, LockResponse>> ephemeralInstances = new(configuration.LocksWorkers);
 
         for (int i = 0; i < configuration.LocksWorkers; i++)
-            ephemeralInstances.Add(actorSystem.SpawnStruct<LockActor, LockRequest, LockResponse>("ephemeral-lock-" + i, backgroundWriter, persistence, logger));
+            ephemeralInstances.Add(actorSystem.SpawnStruct<LockActor, LockRequest, LockResponse>("ephemeral-lock-" + i, backgroundWriter, persistenceBackend, raft, logger));
 
         return actorSystem.CreateConsistentHashRouterStruct(ephemeralInstances);
     }
@@ -82,18 +83,18 @@ public sealed class LockManager
     /// Creates the consistent locks router
     /// </summary>
     /// <param name="backgroundWriter"></param>
-    /// <param name="persistence"></param>
+    /// <param name="persistenceBackend"></param>
     /// <param name="workers"></param>
     /// <returns></returns>
     private IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> GetPersistentRouter(
-        IPersistence persistence, 
+        IPersistenceBackend persistenceBackend, 
         KahunaConfiguration configuration
     )
     {
         List<IActorRefStruct<LockActor, LockRequest, LockResponse>> persistentInstances = new(configuration.LocksWorkers);
 
         for (int i = 0; i < configuration.LocksWorkers; i++)
-            persistentInstances.Add(actorSystem.SpawnStruct<LockActor, LockRequest, LockResponse>("persistent-lock-" + i, backgroundWriter, persistence, logger));
+            persistentInstances.Add(actorSystem.SpawnStruct<LockActor, LockRequest, LockResponse>("persistent-lock-" + i, backgroundWriter, persistenceBackend, raft, logger));
         
         return actorSystem.CreateConsistentHashRouterStruct(persistentInstances);
     }

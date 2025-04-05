@@ -1,6 +1,4 @@
 
-using Kahuna.Server.ScriptParser;
-
 namespace Kahuna.Tests.Server;
 
 public class TestServers
@@ -26,4 +24,6 @@ public class TestServers
         Assert.NotNull(ast.leftAst);
         Assert.Equal(NodeType.Identifier, ast.leftAst.nodeType);
     }*/
+    
+    
 }

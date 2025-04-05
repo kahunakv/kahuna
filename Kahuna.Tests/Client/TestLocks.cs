@@ -12,7 +12,7 @@ public class TestLocks
 
     private readonly string[] urls = ["https://localhost:8082", "https://localhost:8084", "https://localhost:8086"];
     
-    private int total;
+    //private int total;
 
     private static string GetRandomLockName()
     {
@@ -22,7 +22,7 @@ public class TestLocks
     [Theory, CombinatorialData]
     public async Task TestValidateAcquireSingleLock(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability,
         [CombinatorialValues(true, false)] bool upgradeUrls
     )
@@ -40,7 +40,7 @@ public class TestLocks
     [Theory, CombinatorialData]
     public async Task TestLockAcquisitionAndExpiresWithMilliseconds(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability,
         [CombinatorialValues(true, false)] bool upgradeUrls
     ) 
@@ -71,7 +71,7 @@ public class TestLocks
     [Theory, CombinatorialData]
     public async Task TestValidateAcquireLockExpiresWithTimeSpan(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability,
         [CombinatorialValues(true, false)] bool upgradeUrls
     ) 
@@ -94,7 +94,7 @@ public class TestLocks
     [Theory, CombinatorialData]
     public async Task TestValidateAcquireLockExpires4(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability,
         [CombinatorialValues(true, false)] bool upgradeUrls
     ) 
@@ -208,7 +208,7 @@ public class TestLocks
     [Theory, CombinatorialData]
     public async Task TestValidateAcquireAndExtendLock(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability,
         [CombinatorialValues(true, false)] bool upgradeUrls
     ) 
@@ -248,7 +248,7 @@ public class TestLocks
     [Theory, CombinatorialData]
     public async Task TestAdquireLockAndGetInfo(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability,
         [CombinatorialValues(true, false)] bool upgradeUrls
     ) 
@@ -289,8 +289,8 @@ public class TestLocks
     {
         return clientType switch
         {
-            KahunaClientType.Single => new(url, null, GetCommunicationByType(communicationType), false),
-            KahunaClientType.Pool => new(urls, null, GetCommunicationByType(communicationType), false),
+            KahunaClientType.SingleEndpoint => new(url, null, GetCommunicationByType(communicationType), false),
+            KahunaClientType.PoolOfEndpoints => new(urls, null, GetCommunicationByType(communicationType), false),
             _ => throw new ArgumentOutOfRangeException(nameof(clientType), clientType, null)
         };
     }

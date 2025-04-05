@@ -4,6 +4,7 @@ using Nixie;
 using Kommander;
 using Kommander.Time;
 using Kahuna.Server.Persistence;
+using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
 using Kahuna.Shared.KeyValue;
@@ -15,10 +16,10 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
     public TryPrepareMutationsHandler(
         Dictionary<string, KeyValueContext> keyValuesStore,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        IPersistence persistence,
+        IPersistenceBackend persistenceBackend,
         IRaft raft,
         ILogger<IKahuna> logger
-    ) : base(keyValuesStore, backgroundWriter, persistence, raft, logger)
+    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger)
     {
 
     }

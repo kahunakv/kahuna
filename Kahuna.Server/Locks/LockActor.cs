@@ -6,6 +6,7 @@ using Google.Protobuf;
 using System.Diagnostics;
 
 using Kahuna.Server.Persistence;
+using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
 using Kahuna.Shared.Locks;
@@ -24,7 +25,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
 
-    private readonly IPersistence persistence;
+    private readonly IPersistenceBackend persistenceBackend;
 
     private readonly IRaft raft;
 
@@ -47,14 +48,14 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     public LockActor(
         IActorContextStruct<LockActor, LockRequest, LockResponse> actorContext,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        IPersistence persistence,
+        IPersistenceBackend persistenceBackend,
         IRaft raft, 
         ILogger<IKahuna> logger
     )
     {
         this.actorContext = actorContext;
         this.backgroundWriter = backgroundWriter;
-        this.persistence = persistence;
+        this.persistenceBackend = persistenceBackend;
         this.raft = raft;
         this.logger = logger;
     }
@@ -130,7 +131,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
 
             /// Try to retrieve lock context from persistence
             if (message.Durability == LockDurability.Persistent)
-                newContext = await raft.ReadThreadPool.EnqueueTask(() => persistence.GetLock(message.Resource));
+                newContext = await raft.ReadThreadPool.EnqueueTask(() => persistenceBackend.GetLock(message.Resource));
 
             newContext ??= new() { FencingToken = -1 };
             
@@ -288,7 +289,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         {
             if (durability == LockDurability.Persistent)
             {
-                context = await raft.ReadThreadPool.EnqueueTask(() => persistence.GetLock(resource));
+                context = await raft.ReadThreadPool.EnqueueTask(() => persistenceBackend.GetLock(resource));
                 if (context is not null)
                 {
                     context.LastUsed = raft.HybridLogicalClock.TrySendOrLocalEvent();

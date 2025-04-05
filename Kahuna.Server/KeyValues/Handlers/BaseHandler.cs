@@ -1,6 +1,7 @@
 
 using Google.Protobuf;
 using Kahuna.Server.Persistence;
+using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
 using Kahuna.Shared.KeyValue;
@@ -16,7 +17,7 @@ internal abstract class BaseHandler
     
     protected readonly IRaft raft;
 
-    protected readonly IPersistence persistence;
+    protected readonly IPersistenceBackend PersistenceBackend;
 
     protected readonly Dictionary<string, KeyValueContext> keyValuesStore;
 
@@ -25,14 +26,14 @@ internal abstract class BaseHandler
     protected BaseHandler(
         Dictionary<string, KeyValueContext> keyValuesStore,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        IPersistence persistence,
+        IPersistenceBackend persistenceBackend,
         IRaft raft,
         ILogger<IKahuna> logger
     )
     {
         this.backgroundWriter = backgroundWriter;
         this.raft = raft;
-        this.persistence = persistence;
+        this.PersistenceBackend = persistenceBackend;
         this.keyValuesStore = keyValuesStore;
         this.logger = logger;
     }
@@ -106,7 +107,7 @@ internal abstract class BaseHandler
             if (durability == KeyValueDurability.Persistent)
             {
                 if (readKeyValueContext is null)
-                    context = await raft.ReadThreadPool.EnqueueTask(() => persistence.GetKeyValue(key));
+                    context = await raft.ReadThreadPool.EnqueueTask(() => PersistenceBackend.GetKeyValue(key));
                 else
                     context = new()
                     {

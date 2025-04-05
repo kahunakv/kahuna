@@ -50,8 +50,8 @@ builder.Services.AddSingleton<IRaft>(services =>
         Host = opts.RaftHost,
         Port = opts.RaftPort,
         InitialPartitions = opts.InitialClusterPartitions,
-        ReadIOThreads = 8,
-        WriteIOThreads = 8
+        ReadIOThreads = opts.ReadIOThreads,
+        WriteIOThreads = opts.WriteIOThreads
     };
 
     IWAL walAdapter = opts.WalStorage switch
@@ -73,8 +73,6 @@ builder.Services.AddSingleton<IRaft>(services =>
 });
 
 builder.Services.AddSingleton<ActorSystem>(services => new(services, services.GetRequiredService<ILogger<IRaft>>()));
-builder.Services.AddSingleton<LockManager>();
-builder.Services.AddSingleton<KeyValuesManager>();
 builder.Services.AddSingleton<IKahuna, KahunaManager>();
 builder.Services.AddHostedService<ReplicationService>();
 
@@ -115,8 +113,9 @@ builder.WebHost.ConfigureKestrel(options =>
     }
 });
 
-ThreadPool.SetMinThreads(1024, 512);
+ThreadPool.SetMinThreads(256, 128);
     
+// @todo Review certificate validation
 FlurlHttp.Clients.WithDefaults(x => x.ConfigureInnerHandler(ih => ih.ServerCertificateCustomValidationCallback = (a, b, c, d) => true));
 
 builder.Services.AddSingleton(ConfigurationValidator.Validate(opts));

@@ -1,9 +1,8 @@
 
-using System.Diagnostics;
 using Nixie;
-using Nixie.Routers;
-
 using Kommander;
+using System.Diagnostics;
+using Kahuna.Server.Persistence.Backend;
 using Polly.Contrib.WaitAndRetry;
 
 namespace Kahuna.Server.Persistence;
@@ -21,7 +20,7 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     
     private readonly IRaft raft;
 
-    private readonly IPersistence persistence;
+    private readonly IPersistenceBackend persistenceBackend;
 
     private readonly ILogger<IKahuna> logger;
     
@@ -42,12 +41,12 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     public BackgroundWriterActor(
         IActorContext<BackgroundWriterActor, BackgroundWriteRequest> context,
         IRaft raft,
-        IPersistence persistence,
+        IPersistenceBackend persistenceBackend,
         ILogger<IKahuna> logger
     )
     {
         this.raft = raft;
-        this.persistence = persistence;
+        this.persistenceBackend = persistenceBackend;
         this.logger = logger;
         
         context.ActorSystem.StartPeriodicTimer(
@@ -78,7 +77,7 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 break;
             
             default:
-                throw new ArgumentOutOfRangeException();
+                throw new NotImplementedException();
         }
     }
 
@@ -144,7 +143,7 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
         foreach (TimeSpan timeSpan in backoffDelays)
         {
-            bool success = await raft.WriteThreadPool.EnqueueTask(() => persistence.StoreLocks(items));
+            bool success = await raft.WriteThreadPool.EnqueueTask(() => persistenceBackend.StoreLocks(items));
             if (!success)
             {
                 logger.LogWarning("Coundn't store batch of {Count} locks. Waiting...", items.Count);
@@ -212,7 +211,7 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         
         foreach (TimeSpan timeSpan in backoffDelays)
         {
-            bool success = await raft.WriteThreadPool.EnqueueTask(() => persistence.StoreKeyValues(items));
+            bool success = await raft.WriteThreadPool.EnqueueTask(() => persistenceBackend.StoreKeyValues(items));
             if (!success)
             {
                 logger.LogWarning("Coundn't store batch of {Count} key-values. Waiting...", items.Count);

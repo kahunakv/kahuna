@@ -2,6 +2,7 @@
 using Nixie;
 using Kommander;
 using Kahuna.Server.Persistence;
+using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 
@@ -12,10 +13,10 @@ internal sealed class TryAdquireExclusiveLockHandler : BaseHandler
     public TryAdquireExclusiveLockHandler(
         Dictionary<string, KeyValueContext> keyValuesStore,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        IPersistence persistence,
+        IPersistenceBackend persistenceBackend,
         IRaft raft,
         ILogger<IKahuna> logger
-    ) : base(keyValuesStore, backgroundWriter, persistence, raft, logger)
+    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger)
     {
 
     }
@@ -33,7 +34,7 @@ internal sealed class TryAdquireExclusiveLockHandler : BaseHandler
 
             /// Try to retrieve KeyValue context from persistence
             if (message.Durability == KeyValueDurability.Persistent)
-                newContext = await raft.ReadThreadPool.EnqueueTask(() => persistence.GetKeyValue(message.Key));
+                newContext = await raft.ReadThreadPool.EnqueueTask(() => PersistenceBackend.GetKeyValue(message.Key));
 
             newContext ??= new() { State = KeyValueState.Undefined, Revision = -1 };
             

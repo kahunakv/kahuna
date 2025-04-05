@@ -1,5 +1,6 @@
 
 using Kahuna.Server.Persistence;
+using Kahuna.Server.Persistence.Backend;
 using Kommander;
 using Kommander.Time;
 using Nixie;
@@ -13,10 +14,10 @@ internal sealed class TryCollectHandler : BaseHandler
     public TryCollectHandler(
         Dictionary<string, KeyValueContext> keyValuesStore,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        IPersistence persistence,
+        IPersistenceBackend persistenceBackend,
         IRaft raft,
         ILogger<IKahuna> logger
-    ) : base(keyValuesStore, backgroundWriter, persistence, raft, logger)
+    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger)
     {
 
     }

@@ -2,6 +2,7 @@
 using Nixie;
 using Kommander;
 using Kahuna.Server.Persistence;
+using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 
@@ -12,10 +13,10 @@ internal sealed class TryExistsHandler : BaseHandler
     public TryExistsHandler(
         Dictionary<string, KeyValueContext> keyValuesStore,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        IPersistence persistence,
+        IPersistenceBackend persistenceBackend,
         IRaft raft,
         ILogger<IKahuna> logger
-    ) : base(keyValuesStore, backgroundWriter, persistence, raft, logger)
+    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger)
     {
 
     }
@@ -30,7 +31,7 @@ internal sealed class TryExistsHandler : BaseHandler
         {
             if (message.Durability == KeyValueDurability.Persistent)
             {
-                KeyValueContext? revisionContext = await raft.ReadThreadPool.EnqueueTask(() => persistence.GetKeyValueRevision(message.Key, message.CompareRevision));
+                KeyValueContext? revisionContext = await raft.ReadThreadPool.EnqueueTask(() => PersistenceBackend.GetKeyValueRevision(message.Key, message.CompareRevision));
                 if (revisionContext is null)
                     return KeyValueStaticResponses.DoesNotExistContextResponse;
 

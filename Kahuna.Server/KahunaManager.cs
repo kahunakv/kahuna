@@ -11,6 +11,7 @@ using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Locks;
 using Kahuna.Server.Persistence;
+using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 
@@ -38,17 +39,17 @@ public sealed class KahunaManager : IKahuna
     {
         this.actorSystem = actorSystem;
         
-        IPersistence persistence = GetPersistence(configuration);
+        IPersistenceBackend persistenceBackend = GetPersistence(configuration);
         
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter = actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
             "background-writer", 
             raft, 
-            persistence, 
+            persistenceBackend, 
             logger
         );
         
-        this.locks = new(actorSystem, raft, persistence, backgroundWriter, configuration, logger);
-        this.keyValues = new(actorSystem, raft, persistence, backgroundWriter, configuration, logger);
+        this.locks = new(actorSystem, raft, persistenceBackend, backgroundWriter, configuration, logger);
+        this.keyValues = new(actorSystem, raft, persistenceBackend, backgroundWriter, configuration, logger);
     }
     
     /// <summary>
@@ -57,12 +58,13 @@ public sealed class KahunaManager : IKahuna
     /// <param name="configuration"></param>
     /// <returns></returns>
     /// <exception cref="KahunaServerException"></exception>
-    private static IPersistence GetPersistence(KahunaConfiguration configuration)
+    private static IPersistenceBackend GetPersistence(KahunaConfiguration configuration)
     {
         return configuration.Storage switch
         {
-            "rocksdb" => new RocksDbPersistence(configuration.StoragePath, configuration.StorageRevision),
-            "sqlite" => new SqlitePersistence(configuration.StoragePath, configuration.StorageRevision),
+            "rocksdb" => new RocksDbPersistenceBackend(configuration.StoragePath, configuration.StorageRevision),
+            "sqlite" => new SqlitePersistenceBackend(configuration.StoragePath, configuration.StorageRevision),
+            "memory" => new SqlitePersistenceBackend(configuration.StoragePath, configuration.StorageRevision),
             _ => throw new KahunaServerException("Invalid storage type: " + configuration.Storage)
         };
     }

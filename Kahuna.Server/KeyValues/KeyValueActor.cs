@@ -6,6 +6,7 @@ using System.Diagnostics;
 using Kahuna.Server.Persistence;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Server.KeyValues.Handlers;
+using Kahuna.Server.Persistence.Backend;
 
 namespace Kahuna.Server.KeyValues;
 
@@ -63,7 +64,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     public KeyValueActor(
         IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        IPersistence persistence,
+        IPersistenceBackend persistenceBackend,
         IRaft raft,
         ILogger<IKahuna> logger
     )
@@ -71,19 +72,19 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         this.actorContext = actorContext;
         this.logger = logger;
 
-        trySetHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
-        tryExtendHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
-        tryDeleteHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
-        tryGetHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
-        tryScanByPrefixHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
-        tryGetByPrefixHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
-        tryExistsHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
-        tryAdquireExclusiveLockHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
-        tryReleaseExclusiveLockHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
-        tryPrepareMutationsHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
-        tryCommitMutationsHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
-        tryRollbackMutationsHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
-        tryCollectHandler = new(keyValuesStore, backgroundWriter, persistence, raft, logger);
+        trySetHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
+        tryExtendHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
+        tryDeleteHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
+        tryGetHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
+        tryScanByPrefixHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
+        tryGetByPrefixHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
+        tryExistsHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
+        tryAdquireExclusiveLockHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
+        tryReleaseExclusiveLockHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
+        tryPrepareMutationsHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
+        tryCommitMutationsHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
+        tryRollbackMutationsHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
+        tryCollectHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
     }
 
     /// <summary>

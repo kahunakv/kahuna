@@ -12,10 +12,7 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kahuna.Shared", "Kahuna.Sha
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kahuna.Control", "Kahuna.Control\Kahuna.Control.csproj", "{7A1087A9-99B1-410D-8CF0-288A7BE146AE}"
 EndProject
-Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{83174277-16F6-4B6C-9A2F-80205C285105}"
-	ProjectSection(SolutionItems) = preProject
-		BACKLOG.txt = BACKLOG.txt
-	EndProjectSection
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{83174277-16F6-4B6C-9A2F-80205C285105}"	
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{7685AB31-E32D-4B81-84B4-47492A849D31}"
 EndProject

@@ -61,4 +61,10 @@ public sealed class KahunaCommandLineOptions
     
     [Option("default-transaction-timeout", Required = false, HelpText = "Default transaction timeout in milliseconds", Default = 5000)]
     public int DefaultTransactionTimeout { get; set; } = 5000;
+    
+    [Option("read-io-threads", Required = false, HelpText = "Read I/O threads", Default = 8)]
+    public int ReadIOThreads { get; set; } = 8;
+    
+    [Option("write-io-threads", Required = false, HelpText = "Write I/O threads", Default = 8)]
+    public int WriteIOThreads { get; set; } = 8;
 }

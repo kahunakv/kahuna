@@ -2,9 +2,9 @@
 using Kahuna.Server.Locks;
 using Kahuna.Server.KeyValues;
 
-namespace Kahuna.Server.Persistence;
+namespace Kahuna.Server.Persistence.Backend;
 
-public interface IPersistence
+public interface IPersistenceBackend
 {
     public bool StoreLocks(List<PersistenceRequestItem> items);
 

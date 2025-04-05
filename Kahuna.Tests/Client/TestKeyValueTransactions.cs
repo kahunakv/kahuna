@@ -14,7 +14,7 @@ public class TestKeyValueTransactions
     [Theory, CombinatorialData]
     public async Task TestBasicSet(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType,
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
@@ -31,7 +31,7 @@ public class TestKeyValueTransactions
     [Theory, CombinatorialData]
     public async Task TestSetPlaceholder(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType,
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
@@ -49,7 +49,7 @@ public class TestKeyValueTransactions
     [Theory, CombinatorialData]
     public async Task TestBasicGet(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType,
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
@@ -70,7 +70,7 @@ public class TestKeyValueTransactions
     [Theory, CombinatorialData]
     public async Task TestBasicExtend(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType,
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
@@ -91,7 +91,7 @@ public class TestKeyValueTransactions
     [Theory, CombinatorialData]
     public async Task TestBasicExists(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType,
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
@@ -118,7 +118,7 @@ public class TestKeyValueTransactions
     [Theory, CombinatorialData]
     public async Task TestBasicDelete(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType,
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
@@ -145,7 +145,7 @@ public class TestKeyValueTransactions
     [Theory, CombinatorialData]
     public async Task TestSnapshotIsolationConflict(
         [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType,
-        [CombinatorialValues(KahunaClientType.Single)] KahunaClientType clientType
+        [CombinatorialValues(KahunaClientType.SingleEndpoint)] KahunaClientType clientType
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
@@ -217,7 +217,7 @@ public class TestKeyValueTransactions
     [Theory, CombinatorialData]
     public async Task TestSerializableConflict(
         [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType,
-        [CombinatorialValues(KahunaClientType.Single)] KahunaClientType clientType
+        [CombinatorialValues(KahunaClientType.SingleEndpoint)] KahunaClientType clientType
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
@@ -275,8 +275,8 @@ public class TestKeyValueTransactions
     {
         return clientType switch
         {
-            KahunaClientType.Single => new(url, null, GetCommunicationByType(communicationType)),
-            KahunaClientType.Pool => new(urls, null, GetCommunicationByType(communicationType)),
+            KahunaClientType.SingleEndpoint => new(url, null, GetCommunicationByType(communicationType)),
+            KahunaClientType.PoolOfEndpoints => new(urls, null, GetCommunicationByType(communicationType)),
             _ => throw new ArgumentOutOfRangeException(nameof(clientType), clientType, null)
         };
     }

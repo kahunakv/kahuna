@@ -6,9 +6,9 @@ using RocksDbSharp;
 using Google.Protobuf;
 using Kahuna.Server.KeyValues;
 
-namespace Kahuna.Server.Persistence;
+namespace Kahuna.Server.Persistence.Backend;
 
-public class RocksDbPersistence : IPersistence, IDisposable
+public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
 {
     private const string CurrentMarker = "~CURRENT";
     
@@ -26,7 +26,7 @@ public class RocksDbPersistence : IPersistence, IDisposable
     
     private readonly string dbRevision;
     
-    public RocksDbPersistence(string path = ".", string dbRevision = "v1")
+    public RocksDbPersistenceBackend(string path = ".", string dbRevision = "v1")
     {
         this.path = path;
         this.dbRevision = dbRevision;

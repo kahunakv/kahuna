@@ -16,7 +16,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestEmptyKey(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -34,7 +34,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestSingleSetValue(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -57,7 +57,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestSingleSetBytes(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -80,7 +80,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestSingleSetValueExpiresTimeSpan(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -103,7 +103,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestSingleSetBytesExpiresTimeSpan(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -126,7 +126,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestSingleSetValueTwice(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -160,7 +160,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestSingleSetValueIfNotExists(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -184,7 +184,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestSingleSetValueIfNotExistsTwice(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -220,7 +220,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestSingleSetValueIfExists(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -244,7 +244,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestSingleSetValueIfExistsTwice(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -280,7 +280,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestSingleSetValueIfOrNotExists(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -328,7 +328,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestSingleSetAndGetValue(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -361,7 +361,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestSingleSetAndGetValueTwice(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -413,7 +413,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestSingleSetValueIfNotExistsAndGetValue(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -448,7 +448,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestSingleSetAndGetValueExpires(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -490,7 +490,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestSingleSetAndGetValueExpires2(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -545,7 +545,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestSingleSetAndGetValueExpiresMultiple(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -616,7 +616,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestSingleSetAndGetValueShortExpires(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -638,7 +638,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestSingleSetValueAndExtend(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -664,7 +664,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestSingleSetValueAndExtendTimeSpan(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -690,7 +690,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestSingleSetValueAndDelete(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -730,7 +730,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestSingleSetValueAndDeleteWithRefObject(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -749,7 +749,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestSingleSetValueAndExists(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -775,7 +775,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestSingleSetValueAndDeleteAndSetIfExists(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -813,7 +813,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestCompareValueAndSetKeyValue(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -839,7 +839,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestCompareUnknownValueAndSetKeyValue(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -865,7 +865,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestCompareRevisionAndSetKeyValue(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -895,7 +895,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestCompareUnknownRevisionAndSetKeyValue(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -925,7 +925,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestSingleSetValueAndGetRevision(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -984,7 +984,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestScanAllByPrefix(
         [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -1013,7 +1013,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestScanAllByExactPrefix(
         [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -1034,7 +1034,7 @@ public class TestKeyValues
     [Theory, CombinatorialData]
     public async Task TestGetByPrefix(
         [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -1066,8 +1066,8 @@ public class TestKeyValues
     {
         return clientType switch
         {
-            KahunaClientType.Single => new(url, null, GetCommunicationByType(communicationType)),
-            KahunaClientType.Pool => new(urls, null, GetCommunicationByType(communicationType)),
+            KahunaClientType.SingleEndpoint => new(url, null, GetCommunicationByType(communicationType)),
+            KahunaClientType.PoolOfEndpoints => new(urls, null, GetCommunicationByType(communicationType)),
             _ => throw new ArgumentOutOfRangeException(nameof(clientType), clientType, null)
         };
     }

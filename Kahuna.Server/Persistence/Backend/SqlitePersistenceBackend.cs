@@ -1,14 +1,13 @@
 
 using DotNext.Threading;
-using DotNext.Threading.Tasks;
 using Kahuna.Server.Locks;
 using Kommander;
 using Kahuna.Server.KeyValues;
 using Microsoft.Data.Sqlite;
 
-namespace Kahuna.Server.Persistence;
+namespace Kahuna.Server.Persistence.Backend;
 
-public class SqlitePersistence : IPersistence, IDisposable
+public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
 {
     private const int MaxShards = 8;
     
@@ -20,7 +19,7 @@ public class SqlitePersistence : IPersistence, IDisposable
     
     private readonly string dbRevision;
     
-    public SqlitePersistence(string path = ".", string dbRevision = "v1")
+    public SqlitePersistenceBackend(string path = ".", string dbRevision = "v1")
     {
         this.path = path;
         this.dbRevision = dbRevision;
