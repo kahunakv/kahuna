@@ -2,12 +2,13 @@
 using Google.Protobuf;
 using Grpc.Core;
 using Grpc.Net.Client;
+using Kahuna.Communication.Common.Grpc;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.Locks;
 using Kahuna.Shared.Locks;
 using Kommander;
 
-namespace Kahuna.Communication.Grpc;
+namespace Kahuna.Communication.External.Grpc;
 
 public class LocksService : Locker.LockerBase
 {
@@ -47,35 +48,14 @@ public class LocksService : Locker.LockerBase
                 Type = GrpcLockResponseType.LockResponseTypeInvalidInput
             };
         
-        int partitionId = raft.GetPartitionKey(request.Resource);
+        var response = await locks.LocateAndTryLock(request.Resource, request.Owner, request.ExpiresMs, context.CancellationToken);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, context.CancellationToken))
+        return new GrpcTryLockResponse()
         {
-            (LockResponseType response, long fencingToken) = await locks.TryLock(request.Resource, request.Owner?.ToByteArray() ?? [], request.ExpiresMs, (LockDurability)request.Durability);
-
-            return new()
-            {
-                Type = (GrpcLockResponseType)response,
-                FencingToken = fencingToken
-            };
-        }
-            
-        string leader = await raft.WaitForLeader(partitionId, context.CancellationToken);
-        if (leader == raft.GetLocalEndpoint())
-            return new()
-            {
-                Type = GrpcLockResponseType.LockResponseTypeMustRetry
-            };
-        
-        logger.LogDebug("LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.Resource, partitionId, leader);
-        
-        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
-        
-        Locker.LockerClient client = new(channel);
-        
-        GrpcTryLockResponse? remoteResponse = await client.TryLockAsync(request);
-        remoteResponse.ServedFrom = $"https://{leader}";
-        return remoteResponse;
+            Type = (GrpcLockResponseType)response.Item1,
+            FencingToken = response.Item2,
+            ServedFrom = ""
+        };
     }
     
     public override async Task<GrpcExtendLockResponse> TryExtendLock(GrpcExtendLockRequest request, ServerCallContext context)

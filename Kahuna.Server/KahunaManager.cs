@@ -1,4 +1,5 @@
 
+using Kahuna.Server.Communication.Internode;
 using Nixie;
 using Nixie.Routers;
 
@@ -35,7 +36,7 @@ public sealed class KahunaManager : IKahuna
     /// <param name="raft"></param>
     /// <param name="configuration"></param>
     /// <param name="logger"></param>
-    public KahunaManager(ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, ILogger<IKahuna> logger)
+    public KahunaManager(ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, IInterNodeCommunication interNodeCommunication, ILogger<IKahuna> logger)
     {
         this.actorSystem = actorSystem;
         
@@ -48,8 +49,8 @@ public sealed class KahunaManager : IKahuna
             logger
         );
         
-        this.locks = new(actorSystem, raft, persistenceBackend, backgroundWriter, configuration, logger);
-        this.keyValues = new(actorSystem, raft, persistenceBackend, backgroundWriter, configuration, logger);
+        this.locks = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);
+        this.keyValues = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);
     }
     
     /// <summary>

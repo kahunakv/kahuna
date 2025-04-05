@@ -1,4 +1,5 @@
 
+using Kahuna.Server.Communication.Internode;
 using Nixie;
 using Nixie.Routers;
 
@@ -57,6 +58,7 @@ internal sealed class KeyValuesManager
     public KeyValuesManager(
         ActorSystem actorSystem, 
         IRaft raft, 
+        IInterNodeCommunication interNodeCommunication,
         IPersistenceBackend persistenceBackend, 
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         KahunaConfiguration configuration, 
@@ -74,7 +76,7 @@ internal sealed class KeyValuesManager
         persistentKeyValuesRouter = GetConsistentRouter(configuration);
 
         txCoordinator = new(this, configuration, raft, logger);
-        locator = new(this, configuration, raft, logger);
+        locator = new(this, configuration, raft, interNodeCommunication, logger);
 
         restorer = new(backgroundWriter, raft, logger);
         replicator = new(backgroundWriter, raft, logger);

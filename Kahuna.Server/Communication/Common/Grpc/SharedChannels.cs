@@ -4,7 +4,7 @@ using System.Collections.Concurrent;
 using System.Net.Security;
 using Kahuna.Server.Configuration;
 
-namespace Kahuna.Communication.Grpc;
+namespace Kahuna.Communication.Common.Grpc;
 
 internal static class SharedChannels
 {

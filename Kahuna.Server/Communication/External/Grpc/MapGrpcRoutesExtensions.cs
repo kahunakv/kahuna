@@ -1,5 +1,5 @@
 
-namespace Kahuna.Communication.Grpc;
+namespace Kahuna.Communication.External.Grpc;
 
 public static class MapGrpcRoutesExtensions
 {

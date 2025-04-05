@@ -11,7 +11,7 @@ using Kahuna.Shared.Locks;
 
 using System.Text.Json;
 
-namespace Kahuna.Communication.Rest;
+namespace Kahuna.Communication.External.Rest;
 
 public static class LocksHandlers
 {
@@ -182,9 +182,9 @@ public static class LocksHandlers
                     return new()
                     {
                         Type = response, 
-                        Owner = context?.Owner, 
-                        Expires = context?.Expires ?? HLCTimestamp.Zero,
-                        FencingToken = context?.FencingToken ?? 0
+                        Owner = context.Owner, 
+                        Expires = context.Expires,
+                        FencingToken = context.FencingToken
                     };
 
                 return new() { Type = response };

@@ -6,25 +6,19 @@
  * file that was distributed with this source code.
  */
 
-using Kommander;
 using Kommander.Time;
 using Google.Protobuf;
 using Google.Protobuf.Collections;
 using Grpc.Core;
-using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 
-namespace Kahuna.Communication.Grpc;
+namespace Kahuna.Communication.External.Grpc;
 
 public class KeyValuesService : KeyValuer.KeyValuerBase
 {
     private readonly IKahuna keyValues;
-
-    private readonly KahunaConfiguration configuration;
-
-    private readonly IRaft raft; 
     
     private readonly ILogger<IKahuna> logger;
     
@@ -35,11 +29,9 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
     /// <param name="configuration"></param>
     /// <param name="raft"></param>
     /// <param name="logger"></param>
-    public KeyValuesService(IKahuna keyValues, KahunaConfiguration configuration, IRaft raft, ILogger<IKahuna> logger)
+    public KeyValuesService(IKahuna keyValues, ILogger<IKahuna> logger)
     {
         this.keyValues = keyValues;
-        this.configuration = configuration;
-        this.raft = raft;
         this.logger = logger;
     }
     

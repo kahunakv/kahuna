@@ -1,4 +1,5 @@
 
+using Kahuna.Server.Communication.Internode;
 using Nixie;
 using Nixie.Routers;
 
@@ -44,6 +45,7 @@ public sealed class LockManager
     public LockManager(
         ActorSystem actorSystem, 
         IRaft raft, 
+        IInterNodeCommunication interNodeCommunication,
         IPersistenceBackend persistenceBackend, 
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         KahunaConfiguration configuration, 
@@ -396,6 +398,11 @@ public sealed class LockManager
     public void OnReplicationError(RaftLog log)
     {
         logger.LogError("Replication error: #{Id} {Type}", log.Id, log.LogType);
+    }
+
+    public async Task<(LockResponseType, long)> LocateAndTryLock(string resource, byte[] owner, int expiresMs, LockDurability durability, CancellationToken cancellationToken)
+    {
+        
     }
 
     /// <summary>

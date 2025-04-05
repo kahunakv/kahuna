@@ -5,19 +5,17 @@ using CommandLine;
 using Flurl.Http;
 
 using Kahuna;
-using Kahuna.Communication.Grpc;
-using Kahuna.Communication.Rest;
-using Kahuna.Server.Configuration;
-using Kahuna.Server.KeyValues;
-using Kahuna.Server.Locks;
 using Kahuna.Services;
+using Kahuna.Server.Configuration;
+using Kahuna.Communication.External.Grpc;
+using Kahuna.Communication.External.Rest;
 
 using Kommander;
-using Kommander.Communication.Grpc;
-using Kommander.Communication.Rest;
-using Kommander.Discovery;
 using Kommander.Time;
 using Kommander.WAL;
+using Kommander.Discovery;
+using Kommander.Communication.Grpc;
+using Kommander.Communication.Rest;
 
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 

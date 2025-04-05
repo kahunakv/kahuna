@@ -1,5 +1,5 @@
 
-namespace Kahuna.Communication.Rest;
+namespace Kahuna.Communication.External.Rest;
 
 public static class MapRoutesExtensions
 {

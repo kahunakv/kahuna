@@ -12,7 +12,7 @@ namespace Kahuna.Tests.Server;
 
 public abstract class BaseCluster
 {
-    protected static (IRaft, IKahuna) GetNode1(InMemoryCommunication communication, string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger)
+    private static (IRaft, IKahuna) GetNode1(InMemoryCommunication communication, string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger)
     {
         IWAL wal = GetWAL(walStorage, raftLogger);
         
@@ -60,7 +60,7 @@ public abstract class BaseCluster
         return (raft, kahuna);
     }
     
-    protected static (IRaft, IKahuna) GetNode2(InMemoryCommunication communication, string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger)
+    private static (IRaft, IKahuna) GetNode2(InMemoryCommunication communication, string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger)
     {
         IWAL wal = GetWAL(walStorage, raftLogger);
         
@@ -108,7 +108,7 @@ public abstract class BaseCluster
         return (raft, kahuna);
     }
     
-    protected static (IRaft, IKahuna) GetNode3(InMemoryCommunication communication, string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger)
+    private static (IRaft, IKahuna) GetNode3(InMemoryCommunication communication, string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger)
     {
         IWAL wal = GetWAL(walStorage, raftLogger);
         
@@ -140,7 +140,7 @@ public abstract class BaseCluster
             HttpsCertificatePassword = "",
             LocksWorkers = 8,
             BackgroundWriterWorkers = 1,
-            Storage = "sqlite",
+            Storage = "memory",
             StoragePath = "/tmp",
             StorageRevision = Guid.NewGuid().ToString(),
             DefaultTransactionTimeout = 5000,
@@ -156,7 +156,20 @@ public abstract class BaseCluster
         return (raft, kahuna);
     }
     
-    protected static async Task WaitForClusterToAssemble(InMemoryCommunication communication, int partitions, IRaft raft1, IRaft raft2, IRaft raft3)
+    protected static async Task<(IRaft, IRaft, IRaft, IKahuna, IKahuna, IKahuna)> AssembleThreNodeCluster(string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger)
+    {
+        InMemoryCommunication communication = new();
+        
+        (IRaft raft1, IKahuna kahuna1) = GetNode1(communication, walStorage, partitions, raftLogger, kahunaLogger);
+        (IRaft raft2, IKahuna kahuna2) = GetNode2(communication, walStorage, partitions, raftLogger, kahunaLogger);
+        (IRaft raft3, IKahuna kahuna3) = GetNode3(communication, walStorage, partitions, raftLogger, kahunaLogger);
+        
+        await WaitForClusterToAssemble(communication, partitions, raft1, raft2, raft3);
+        
+        return (raft1, raft2, raft3, kahuna1, kahuna2, kahuna3);
+    }
+    
+    private static async Task WaitForClusterToAssemble(InMemoryCommunication communication, int partitions, IRaft raft1, IRaft raft2, IRaft raft3)
     {
         communication.SetNodes(new()
         {

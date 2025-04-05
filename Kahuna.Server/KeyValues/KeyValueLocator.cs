@@ -4,7 +4,8 @@ using Google.Protobuf;
 using Google.Protobuf.Collections;
 using Grpc.Net.Client;
 
-using Kahuna.Communication.Grpc;
+using Kahuna.Communication.Common.Grpc;
+using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
 using Kahuna.Shared.KeyValue;
 
@@ -20,14 +21,25 @@ internal sealed class KeyValueLocator
     private readonly KahunaConfiguration configuration;
     
     private readonly IRaft raft;
+    
+    private readonly IInterNodeCommunication interNodeCommunication;
 
     private readonly ILogger<IKahuna> logger;
     
-    public KeyValueLocator(KeyValuesManager manager, KahunaConfiguration configuration, IRaft raft, ILogger<IKahuna> logger)
+    /// <summary>
+    /// Constructor
+    /// </summary>
+    /// <param name="manager"></param>
+    /// <param name="configuration"></param>
+    /// <param name="raft"></param>
+    /// <param name="interNodeCommunication"></param>
+    /// <param name="logger"></param>
+    public KeyValueLocator(KeyValuesManager manager, KahunaConfiguration configuration, IRaft raft, IInterNodeCommunication interNodeCommunication, ILogger<IKahuna> logger)
     {
         this.manager = manager;
         this.configuration = configuration;
         this.raft = raft;
+        this.interNodeCommunication = interNodeCommunication;
         this.logger = logger;
     }
 

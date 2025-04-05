@@ -8,13 +8,13 @@ using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Kommander;
 
-namespace Kahuna.Communication.Rest;
+namespace Kahuna.Communication.External.Rest;
 
 public static class KeyValuesHandlers
 {
     public static void MapKeyValueRoutes(WebApplication app)
     {
-        app.MapPost("/v1/kv/try-set", async (KahunaSetKeyValueRequest request, IKahuna keyValues, IRaft raft, ILogger<IKahuna> logger, CancellationToken cancellationToken) =>
+        app.MapPost("/v1/kv/try-set", async (KahunaSetKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
             if (string.IsNullOrEmpty(request.Key))
                 return new() { Type = KeyValueResponseType.InvalidInput };
