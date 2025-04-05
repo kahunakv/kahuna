@@ -5,13 +5,13 @@ using Nixie.Routers;
 using Kommander;
 using Kommander.Data;
 using Kommander.Time;
+using Kommander.Support.Parallelization;
 
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Replication;
-using Kahuna.Server.Replication.Protos;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues;
@@ -768,9 +768,10 @@ internal sealed class KeyValuesManager
     /// <returns></returns>
     public async Task<List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> TryPrepareManyMutations(HLCTimestamp transactionId, List<(string key, KeyValueDurability durability)> keys)
     {
+        Lock sync = new();
         List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> responses = new(keys.Count);
-        
-        foreach ((string key, KeyValueDurability durability) key in keys)
+
+        await keys.ForEachAsync(5, async ((string key, KeyValueDurability durability) key) =>
         {
             KeyValueRequest request = new(
                 KeyValueRequestType.TryPrepareMutations,
@@ -793,13 +794,13 @@ internal sealed class KeyValuesManager
                 response = await persistentKeyValuesRouter.Ask(request);
 
             if (response is null)
-                return [(KeyValueResponseType.Errored, HLCTimestamp.Zero, key.key, key.durability)];
+                return;
 
-            responses.Add((response.Type, response.Ticket, key.key, key.durability));
-
-            if (response.Type != KeyValueResponseType.Prepared) // Early abort if a key wasn't successfully prepared for commits
-                return responses;
-        }
+            lock (sync)
+                responses.Add((response.Type, response.Ticket, key.key, key.durability));
+            
+            //(string key, KeyValueDurability durability)
+        });
 
         return responses;
     }
@@ -850,9 +851,10 @@ internal sealed class KeyValuesManager
     /// <returns></returns>
     public async Task<List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)>> TryCommitManyMutations(HLCTimestamp transactionId, List<(string key, HLCTimestamp proposalTicketId, KeyValueDurability durability)> keys)
     {
+        Lock sync = new();
         List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> responses = new(keys.Count);
-        
-        foreach ((string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) key in keys)
+
+        await keys.ForEachAsync(5, async ((string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) key) =>
         {
             KeyValueRequest request = new(
                 KeyValueRequestType.TryCommitMutations,
@@ -875,10 +877,11 @@ internal sealed class KeyValuesManager
                 response = await persistentKeyValuesRouter.Ask(request);
 
             if (response is null)
-                return [(KeyValueResponseType.Errored, key.key, -1, key.durability)];
+                return;
 
-            responses.Add((response.Type, key.key, response.Revision, key.durability));
-        }
+            lock (sync)
+                responses.Add((response.Type, key.key, response.Revision, key.durability));
+        });
 
         return responses;
     }

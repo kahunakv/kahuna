@@ -326,7 +326,7 @@ static Task<KahunaClient> GetConnection(Options opts)
     else
         connectionPool = connectionString.Split(",", StringSplitOptions.RemoveEmptyEntries).ToArray();
 
-    return Task.FromResult(new KahunaClient(connectionPool, null, new Kahuna.Client.Communication.RestCommunication(null)));
+    return Task.FromResult(new KahunaClient(connectionPool, null, new Kahuna.Client.Communication.GrpcCommunication(null)));
 }
 
 static async Task<List<string>> GetHistory(string historyPath)
