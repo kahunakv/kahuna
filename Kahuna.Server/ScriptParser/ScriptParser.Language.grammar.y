@@ -25,7 +25,7 @@
 %token LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV LBRACE RBRACE
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS  
 %token TBEGIN TROLLBACK TCOMMIT TLET TSET TGET TESET TEGET TDELETE TEDELETE TEXTEND TEEXTEND TEXISTS TEEXISTS
-%token TIF TELSE TTHEN TEND TNX TXX TEX TCMP TCMPREV
+%token TIF TELSE TTHEN TEND TNX TXX TEX TCMP TCMPREV TTHROW
 %token TRETURN TSLEEP TDIGIT TFLOAT TSTRING TIDENTIFIER TESCIDENTIFIER TPLACEHOLDER TTRUE TFALSE TAT
 
 %%
@@ -51,6 +51,7 @@ stmt    : set_stmt { $$.n = $1.n; $$.l = $1.l; }
         | rollback_stmt { $$.n = $1.n; $$.l = $1.l; }
         | return_stmt { $$.n = $1.n; $$.l = $1.l; }
         | sleep_stmt { $$.n = $1.n; $$.l = $1.l; }
+        | throw_stmt { $$.n = $1.n; $$.l = $1.l; }
         ;
 
 set_stmt : TSET key_name expression { $$.n = new(NodeType.Set, $2.n, $3.n, null, null, null, null, null, $1.l); }         
@@ -147,6 +148,9 @@ return_stmt : TRETURN expression { $$.n = new(NodeType.Return, $2.n, null, null,
             
 sleep_stmt : TSLEEP int { $$.n = new(NodeType.Sleep, $2.n, null, null, null, null, null, null, $1.l); }
            ;
+           
+throw_stmt : TTHROW expression { $$.n = new(NodeType.Throw, $2.n, null, null, null, null, null, null, $1.l); }   
+           ;        
          
 expression : expression TEQUALS expression { $$.n = new(NodeType.Equals, $1.n, $3.n, null, null, null, null, null, $1.l); }
            | expression TNOTEQUALS expression { $$.n = new(NodeType.NotEquals, $1.n, $3.n, null, null, null, null, null, $1.l); }
@@ -196,17 +200,17 @@ identifier : TIDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, nul
 placeholder : TPLACEHOLDER { $$.n = new(NodeType.Placeholder, null, null, null, null, null, null, $$.s, $1.l); }
            ;           
 
-int : TDIGIT { $$.n = new(NodeType.Integer, null, null, null, null, null, null, $$.s, $1.l); }
+int : TDIGIT { $$.n = new(NodeType.IntegerType, null, null, null, null, null, null, $$.s, $1.l); }
     ;
     
-float : TFLOAT { $$.n = new(NodeType.Float, null, null, null, null, null, null, $$.s, $1.l); }
+float : TFLOAT { $$.n = new(NodeType.FloatType, null, null, null, null, null, null, $$.s, $1.l); }
       ;  
       
-boolean : TTRUE { $$.n = new(NodeType.Boolean, null, null, null, null, null, null, "true", $1.l); }
-        | TFALSE { $$.n = new(NodeType.Boolean, null, null, null, null, null, null, "false", $1.l); }
+boolean : TTRUE { $$.n = new(NodeType.BooleanType, null, null, null, null, null, null, "true", $1.l); }
+        | TFALSE { $$.n = new(NodeType.BooleanType, null, null, null, null, null, null, "false", $1.l); }
         ;     
 
-string : TSTRING { $$.n = new(NodeType.String, null, null, null, null, null, null, $$.s, $1.l); }
+string : TSTRING { $$.n = new(NodeType.StringType, null, null, null, null, null, null, $$.s, $1.l); }
        ;
 
 %%

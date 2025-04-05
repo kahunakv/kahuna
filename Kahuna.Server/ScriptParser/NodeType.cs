@@ -47,5 +47,6 @@ public enum NodeType
     Rollback,
     Commit,
     Return,
-    Sleep
+    Sleep,
+    Throw
 }

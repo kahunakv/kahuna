@@ -70,6 +70,8 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "commit",
         "return",
         "sleep",
+        "throw",
+        "found",
         // locks
         "lock",
         "extend-lock",

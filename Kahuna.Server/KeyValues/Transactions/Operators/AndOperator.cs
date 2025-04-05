@@ -1,10 +1,9 @@
-
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.ScriptParser;
 
 namespace Kahuna.Server.KeyValues.Transactions.Operators;
 
-internal static class AddOperator
+internal static class AndOperator
 {
     public static KeyValueExpressionResult Eval(KeyValueTransactionContext context, NodeAst ast)
     {
@@ -19,20 +18,23 @@ internal static class AddOperator
         
         switch (left.Type)
         {
+            case KeyValueExpressionType.BoolType when right.Type == KeyValueExpressionType.BoolType:
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.BoolValue && right.BoolValue };
+            
             case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.LongType:
-                return new() { Type = KeyValueExpressionType.LongType, LongValue = left.LongValue + right.LongValue };
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.LongValue != 0 && right.LongValue != 0 };
             
             case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.LongType:
-                return new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = left.DoubleValue + right.LongValue };
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.DoubleValue != 0 && right.LongValue != 0 };
             
             case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.DoubleType:
-                return new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = left.LongValue + right.DoubleValue };
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.LongValue != 0 && right.DoubleValue != 0 };
             
             case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.DoubleType:
-                return new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = left.DoubleValue + right.DoubleValue };
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.DoubleValue != 0 && right.DoubleValue != 0 };
                 
             default:
-                throw new KahunaScriptException("Invalid operands: " + left.Type + " + " + right.Type, ast.yyline);
+                throw new KahunaScriptException("Invalid operands: " + left.Type + " and " + right.Type, ast.yyline);
         }
     }
 }
