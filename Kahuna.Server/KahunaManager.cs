@@ -322,6 +322,18 @@ public sealed class KahunaManager : IKahuna
     }
 
     /// <summary>
+    /// Locates the leader node for the given key and executes the GetByPrefix request.
+    /// </summary>
+    /// <param name="prefixedKey"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public Task<KeyValueGetByPrefixResult> LocateAndGetByPrefix(string prefixedKey, KeyValueDurability durability, CancellationToken cancelationToken)
+    {
+        return keyValues.LocateAndGetByPrefix(prefixedKey, durability, cancelationToken);
+    }
+
+    /// <summary>
     /// Set key to hold the string value. If key already holds a value, it is overwritten
     /// </summary>
     /// <param name="key"></param>

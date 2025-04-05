@@ -31,13 +31,14 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
     private async Task<KeyValueResponse> GetByPrefixEphemeral(KeyValueRequest message)
     {
         List<(string, ReadOnlyKeyValueContext)> items = [];
+        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
         
-        foreach ((string? key, KeyValueContext? _) in keyValuesStore)
+        foreach ((string key, KeyValueContext? _) in keyValuesStore)
         {
             if (!key.StartsWith(message.Key, StringComparison.Ordinal))
                 continue;
 
-            KeyValueResponse response = await Get(message.TransactionId, message.Key, message.Durability);
+            KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability);
 
             if (response is { Type: KeyValueResponseType.Get, Context: not null })
                 items.Add((key, response.Context));
@@ -49,12 +50,13 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
     private async Task<KeyValueResponse> GetByPrefixPersistent(KeyValueRequest message)
     {
         List<(string, ReadOnlyKeyValueContext)> items = [];
+        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
 
         List<(string, ReadOnlyKeyValueContext)> itemsFromDisk = await raft.ReadThreadPool.EnqueueTask(() => persistence.GetKeyValueByPrefix(message.Key));
         
         foreach ((string key, ReadOnlyKeyValueContext readOnlyKeyValueContext) in itemsFromDisk)
         {
-            KeyValueResponse response = await Get(message.TransactionId, message.Key, message.Durability, readOnlyKeyValueContext);
+            KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability, readOnlyKeyValueContext);
 
             if (response is { Type: KeyValueResponseType.Get, Context: not null })
                 items.Add((key, response.Context));
@@ -63,7 +65,7 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
         return new(KeyValueResponseType.Get, items);
     }
 
-    private async Task<KeyValueResponse> Get(HLCTimestamp transactionId, string key, KeyValueDurability durability, ReadOnlyKeyValueContext? keyValueContext = null)
+    private async Task<KeyValueResponse> Get(HLCTimestamp currentTime, HLCTimestamp transactionId, string key, KeyValueDurability durability, ReadOnlyKeyValueContext? keyValueContext = null)
     {
         KeyValueContext? context = await GetKeyValueContext(key, durability, keyValueContext);
 
@@ -71,8 +73,6 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
         
         if (context?.WriteIntent != null && context.WriteIntent.TransactionId != transactionId)
             return new(KeyValueResponseType.MustRetry, 0);
-
-        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
 
         // TransactionId is provided so we keep a MVCC entry for it
         if (transactionId != HLCTimestamp.Zero)
@@ -109,16 +109,16 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
 
             return new(KeyValueResponseType.Get, readOnlyKeyValueContext);
         }
-        
+
         if (context is null)
             return KeyValueStaticResponses.DoesNotExistContextResponse;
-        
+
         if (context.State == KeyValueState.Deleted)
             return KeyValueStaticResponses.DoesNotExistContextResponse;
 
         if (context.Expires != HLCTimestamp.Zero && context.Expires - currentTime < TimeSpan.Zero)
             return KeyValueStaticResponses.DoesNotExistContextResponse;
-        
+
         context.LastUsed = currentTime;
 
         readOnlyKeyValueContext = new(context.Value, context.Revision, context.Expires, context.State);

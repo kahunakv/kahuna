@@ -923,6 +923,65 @@ public class TestKeyValues
     }
     
     [Theory, CombinatorialData]
+    public async Task TestSingleSetValueAndGetRevision(
+        [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
+        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+        
+        string keyName = GetRandomKeyName();
+
+        KahunaKeyValue result = await client.SetKeyValue(
+            keyName, 
+            "some-value", 
+            0, 
+            flags: KeyValueFlags.Set, 
+            durability: durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
+        
+        result = await client.SetKeyValue(
+            keyName, 
+            "some-value-2", 
+            0, 
+            flags: KeyValueFlags.Set, 
+            durability: durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
+        Assert.True(result.Success);
+        Assert.Equal(1, result.Revision);
+        
+        result = await client.GetKeyValue(
+            keyName, 
+            durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
+        Assert.True(result.Success);
+        Assert.Equal(1, result.Revision);
+        Assert.Equal("some-value-2", result.ValueAsString());
+
+        await Task.Delay(1000, TestContext.Current.CancellationToken);
+        
+        result = await client.GetKeyValueRevision(
+            keyName, 
+            0,
+            durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
+        Assert.Equal("some-value", result.ValueAsString());
+    }
+    
+    [Theory, CombinatorialData]
     public async Task TestScanAllByPrefix(
         [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
@@ -970,6 +1029,37 @@ public class TestKeyValues
         Assert.True(success);
         
         Assert.Single(items);
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestGetByPrefix(
+        [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType, 
+        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+        
+        string prefix = GetRandomKeyName();
+
+        KahunaKeyValue result = await client.SetKeyValue(prefix + "/" + GetRandomKeyName(), "some-value", 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
+        
+        result = await client.SetKeyValue(prefix + "/" + GetRandomKeyName(), "some-value", 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
+        
+        result = await client.SetKeyValue(prefix + "/" + GetRandomKeyName(), "some-value", 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(result.Success);
+        Assert.Equal(0, result.Revision);
+
+        await Task.Delay(1000, cancellationToken: TestContext.Current.CancellationToken);
+        
+        (bool success, List<string> items) = await client.GetByPrefix(prefix, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(success);
+        
+        Assert.Equal(3, items.Count);
     }
     
     private KahunaClient GetClientByType(KahunaCommunicationType communicationType, KahunaClientType clientType)

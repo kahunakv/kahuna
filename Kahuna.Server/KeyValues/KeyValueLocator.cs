@@ -1,6 +1,7 @@
 
 using System.Collections.Concurrent;
 using Google.Protobuf;
+using Google.Protobuf.Collections;
 using Grpc.Net.Client;
 
 using Kahuna.Communication.Grpc;
@@ -932,6 +933,56 @@ internal sealed class KeyValueLocator
         remoteResponse.ServedFrom = $"https://{leader}";
         
         return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.ProposalIndex);
+    }
+
+    public async Task<KeyValueGetByPrefixResult> LocateAndGetByPrefix(string prefixedKey, KeyValueDurability durability, CancellationToken cancelationToken)
+    {
+        if (string.IsNullOrEmpty(prefixedKey))
+            return new([]);
+        
+        int partitionId = raft.GetPartitionKey(prefixedKey);
+
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
+            return await manager.GetByPrefix(prefixedKey, durability);
+            
+        string leader = await raft.WaitForLeader(partitionId, cancelationToken);
+        if (leader == raft.GetLocalEndpoint())
+            return new([]);
+        
+        logger.LogDebug("GETPREFIX-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", prefixedKey, partitionId, leader);
+        
+        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
+        
+        KeyValuer.KeyValuerClient client = new(channel);
+        
+        GrpcGetByPrefixRequest request = new()
+        {
+            PrefixKey = prefixedKey,
+            Durability = (GrpcKeyValueDurability)durability,
+        };
+        
+        GrpcGetByPrefixResponse? remoteResponse = await client.GetByPrefixAsync(request, cancellationToken: cancelationToken);
+        
+        remoteResponse.ServedFrom = $"https://{leader}";
+        
+        return new(GetReadOnlyItem(remoteResponse.Items));
+    }
+
+    private static List<(string, ReadOnlyKeyValueContext)> GetReadOnlyItem(RepeatedField<GrpcKeyValueByPrefixItemResponse> remoteResponseItems)
+    {
+        List<(string, ReadOnlyKeyValueContext)> responses = new(remoteResponseItems.Count);
+        
+        foreach (GrpcKeyValueByPrefixItemResponse? kv in remoteResponseItems)
+        {
+            responses.Add((kv.Key, new(
+                kv.Value?.ToByteArray(), 
+                kv.Revision, 
+                new(kv.ExpiresPhysical, kv.ExpiresCounter),
+                (KeyValueState)kv.State
+            )));
+        }
+
+        return responses;
     }
 
     /// <summary>

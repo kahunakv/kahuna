@@ -279,7 +279,7 @@ public class KahunaClient
     {
         (bool success, long revision) = await communication.TrySetKeyValue(GetRoundRobinUrl(), key, value, expiryTime, flags, durability, cancellationToken).ConfigureAwait(false);
         
-        return new(this, key, success, revision, durability);
+        return new(this, key, success, value, revision, durability);
     }
     
     /// <summary>
@@ -292,9 +292,11 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<KahunaKeyValue> SetKeyValue(string key, string value, int expiryTime = 0, KeyValueFlags flags = KeyValueFlags.Set, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, long revision) = await communication.TrySetKeyValue(GetRoundRobinUrl(), key, Encoding.UTF8.GetBytes(value), expiryTime, flags, durability, cancellationToken).ConfigureAwait(false);
+        byte[] valueBytes = Encoding.UTF8.GetBytes(value);
         
-        return new(this, key, success, revision, durability);
+        (bool success, long revision) = await communication.TrySetKeyValue(GetRoundRobinUrl(), key, valueBytes, expiryTime, flags, durability, cancellationToken).ConfigureAwait(false);
+        
+        return new(this, key, success, valueBytes, revision, durability);
     }
     
     /// <summary>
@@ -307,9 +309,11 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<KahunaKeyValue> SetKeyValue(string key, string value, TimeSpan expiryTime, KeyValueFlags flags = KeyValueFlags.Set, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, long revision) = await communication.TrySetKeyValue(GetRoundRobinUrl(), key, Encoding.UTF8.GetBytes(value), (int)expiryTime.TotalMilliseconds, flags, durability, cancellationToken).ConfigureAwait(false);
+        byte[] valueBytes = Encoding.UTF8.GetBytes(value);
         
-        return new(this, key, success, revision, durability);
+        (bool success, long revision) = await communication.TrySetKeyValue(GetRoundRobinUrl(), key, valueBytes, (int)expiryTime.TotalMilliseconds, flags, durability, cancellationToken).ConfigureAwait(false);
+        
+        return new(this, key, success, valueBytes, revision, durability);
     }
     
     /// <summary>
@@ -325,7 +329,7 @@ public class KahunaClient
     {
         (bool success, long revision) = await communication.TryCompareValueAndSetKeyValue(GetRoundRobinUrl(), key, value, compareValue, expiryTime, durability, cancellationToken).ConfigureAwait(false);
         
-        return new(this, key, success, revision, durability);
+        return new(this, key, success, value, revision, durability);
     }
     
     /// <summary>
@@ -339,17 +343,19 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<KahunaKeyValue> TryCompareValueAndSetKeyValue(string key, string value, string compareValue, int expiryTime = 0, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
+        byte[] valueBytes = Encoding.UTF8.GetBytes(value);
+        
         (bool success, long revision) = await communication.TryCompareValueAndSetKeyValue(
             GetRoundRobinUrl(), 
             key, 
-            Encoding.UTF8.GetBytes(value), 
+            valueBytes, 
             Encoding.UTF8.GetBytes(compareValue), 
             expiryTime, 
             durability,
             cancellationToken
         ).ConfigureAwait(false);
         
-        return new(this, key, success, revision, durability);
+        return new(this, key, success, valueBytes, revision, durability);
     }
     
     /// <summary>
@@ -373,7 +379,7 @@ public class KahunaClient
             cancellationToken
         ).ConfigureAwait(false);
         
-        return new(this, key, success, revision, durability);
+        return new(this, key, success, value, revision, durability);
     }
     
     /// <summary>
@@ -387,17 +393,19 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<KahunaKeyValue> TryCompareRevisionAndSetKeyValue(string key, string value, long compareRevision, int expiryTime = 0, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
+        byte[] valueBytes = Encoding.UTF8.GetBytes(value);
+        
         (bool success, long revision) = await communication.TryCompareRevisionAndSetKeyValue(
             GetRoundRobinUrl(), 
             key, 
-            Encoding.UTF8.GetBytes(value), 
+            valueBytes, 
             compareRevision, 
             expiryTime, 
             durability,
             cancellationToken
         ).ConfigureAwait(false);
         
-        return new(this, key, success, revision, durability);
+        return new(this, key, success, valueBytes, revision, durability);
     }
     
     /// <summary>
@@ -472,6 +480,7 @@ public class KahunaClient
     /// <param name="key"></param>
     /// <param name="expiresMs"></param>
     /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public async Task<KahunaKeyValue> ExtendKeyValue(string key, int expiresMs, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
@@ -486,6 +495,7 @@ public class KahunaClient
     /// <param name="key"></param>
     /// <param name="expiresMs"></param>
     /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public async Task<KahunaKeyValue> ExtendKeyValue(string key, TimeSpan expiresMs, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
@@ -497,10 +507,12 @@ public class KahunaClient
     /// <summary>
     /// Executes a script on the key-value store
     /// Scripts are executed as all or nothing transactions
-    /// if one command fails the entire transaction is aborted
+    /// if one command fails the entire transaction is aborted 
     /// </summary>
     /// <param name="script"></param>
     /// <param name="hash"></param>
+    /// <param name="parameters"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public async Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransaction(string script, string? hash = null, List<KeyValueParameter>? parameters = null, CancellationToken cancellationToken = default)
     {
@@ -515,10 +527,23 @@ public class KahunaClient
     /// <param name="script"></param>
     /// <param name="hash"></param>
     /// <param name="parameters"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public async Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransaction(byte[] script, string? hash = null, List<KeyValueParameter>? parameters = null, CancellationToken cancellationToken = default)
     {
         return await communication.TryExecuteKeyValueTransaction(GetRoundRobinUrl(), script, hash, parameters, cancellationToken).ConfigureAwait(false);
+    }
+    
+    /// <summary>
+    /// Get keys with a specific prefix
+    /// </summary>
+    /// <param name="prefixKey"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public async Task<(bool, List<string>)> GetByPrefix(string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken = default)
+    {
+        return await communication.GetByPrefix(GetRoundRobinUrl(), prefixKey, durability, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

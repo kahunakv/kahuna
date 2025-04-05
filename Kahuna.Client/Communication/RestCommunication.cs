@@ -176,8 +176,8 @@ public class RestCommunication : IKahunaCommunication
         KahunaLockRequest request = new()
         {
             Resource = resource, 
-            Owner = owner, 
-            ExpiresMs = expiryTime, 
+            Owner = owner,
+            ExpiresMs = expiryTime,
             Durability = durability
         };
         
@@ -661,6 +661,11 @@ public class RestCommunication : IKahunaCommunication
             throw new KahunaException("Transaction aborted", response.Type);
 
         throw new KahunaException("Failed to execute key/value transaction:" + response.Type, response.Type);
+    }
+    
+    public Task<(bool, List<string>)> GetByPrefix(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        throw new NotImplementedException();
     }
 
     public Task<(bool, List<string>)> ScanAllByPrefix(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)

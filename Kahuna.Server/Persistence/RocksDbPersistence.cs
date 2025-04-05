@@ -139,6 +139,7 @@ public class RocksDbPersistence : IPersistence, IDisposable
             Value = message.Value?.ToByteArray(),
             Revision = message.Revision,
             Expires = new(message.ExpiresPhysical, message.ExpiresCounter),
+            State = (KeyValueState)message.State,
         };
 
         return context;
@@ -157,6 +158,7 @@ public class RocksDbPersistence : IPersistence, IDisposable
             Value = message.Value?.ToByteArray(),
             Revision = message.Revision,
             Expires = new(message.ExpiresPhysical, message.ExpiresCounter),
+            State = (KeyValueState)message.State,
         };
 
         return context;

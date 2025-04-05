@@ -360,6 +360,18 @@ internal sealed class KeyValuesManager
     }
 
     /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="prefixedKey"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public Task<KeyValueGetByPrefixResult> LocateAndGetByPrefix(string prefixedKey, KeyValueDurability durability, CancellationToken cancelationToken)
+    {
+        return locator.LocateAndGetByPrefix(prefixedKey, durability, cancelationToken);
+    }
+
+    /// <summary>
     /// Passes a TrySet request to the keyValueer actor for the given keyValue name.
     /// </summary>
     /// <param name="key"></param>
@@ -1021,11 +1033,9 @@ internal sealed class KeyValuesManager
     /// <exception cref="KahunaServerException"></exception>
     public async Task<KeyValueGetByPrefixResult> GetByPrefix(string prefixKeyName, KeyValueDurability durability)
     {
-        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
-
         KeyValueRequest request = new(
             KeyValueRequestType.GetByPrefix,
-            currentTime,
+            HLCTimestamp.Zero,
             prefixKeyName,
             null,
             null,

@@ -99,13 +99,14 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         try
         {
             logger.LogDebug(
-                "KeyValueActor Message: {Actor} {Type} Key={Key} {Value} Expires={ExpiresMs} Flags={Flags} TxId={TransactionId} {Consistency}",
+                "KeyValueActor Message: {Actor} {Type} Key={Key} {Value} Expires={ExpiresMs} Flags={Flags} Revision={Revision} TxId={TransactionId} {Consistency}",
                 actorContext.Self.Runner.Name,
                 message.Type,
                 message.Key,
                 message.Value?.Length,
                 message.ExpiresMs,
                 message.Flags,
+                message.CompareRevision,
                 message.TransactionId,
                 message.Durability
             );
@@ -128,6 +129,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.TryPrepareMutations => await TryPrepareMutations(message),
                 KeyValueRequestType.TryCommitMutations => await TryCommitMutations(message),
                 KeyValueRequestType.TryRollbackMutations => await TryRollbackMutations(message),
+                KeyValueRequestType.GetByPrefix => await GetByPrefix(message),
                 KeyValueRequestType.ScanByPrefix => await ScanByPrefix(message),
                 _ => new(KeyValueResponseType.Errored)
             };

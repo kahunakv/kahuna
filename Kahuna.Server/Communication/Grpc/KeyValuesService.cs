@@ -621,7 +621,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
             
-        KeyValueGetByPrefixResult result = await keyValues.GetByPrefix(request.PrefixKey, (KeyValueDurability) request.Durability);
+        KeyValueGetByPrefixResult result = await keyValues.LocateAndGetByPrefix(request.PrefixKey, (KeyValueDurability)request.Durability, context.CancellationToken);
 
         GrpcGetByPrefixResponse response = new()
         {
