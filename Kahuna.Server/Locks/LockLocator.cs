@@ -67,13 +67,5 @@ internal sealed class LockLocator
         logger.LogDebug("LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", resource, partitionId, leader);
 
         return await interNodeCommunication.TryLock(leader, resource, owner, expiresMs, durability, cancellationToken);
-
-        /*GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
-
-        Locker.LockerClient client = new(channel);
-
-        GrpcTryLockResponse? remoteResponse = await client.TryLockAsync(request);
-        remoteResponse.ServedFrom = $"https://{leader}";
-        return remoteResponse;*/
     }
 }

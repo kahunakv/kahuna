@@ -1,5 +1,4 @@
 
-using Kahuna.Server.Communication.Internode;
 using Nixie;
 using Nixie.Routers;
 
@@ -7,12 +6,13 @@ using Kommander;
 using Kommander.Data;
 using Kommander.Time;
 
+using Kahuna.Shared.Locks;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
-using Kahuna.Shared.Locks;
+using Kahuna.Server.Communication.Internode;
 
 namespace Kahuna.Server.Locks;
 
@@ -32,6 +32,8 @@ public sealed class LockManager
     private readonly IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> ephemeralLocksRouter;
     
     private readonly IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> persistentLocksRouter;
+
+    private readonly LockLocator locator;
     
     /// <summary>
     /// Constructor
@@ -56,6 +58,8 @@ public sealed class LockManager
         this.raft = raft;
         this.backgroundWriter = backgroundWriter;
         this.logger = logger;
+        
+        locator = new(this, configuration, raft, interNodeCommunication, logger);
         
         ephemeralLocksRouter = GetEphemeralRouter(persistenceBackend, configuration);
         persistentLocksRouter = GetPersistentRouter(persistenceBackend, configuration);
@@ -400,9 +404,9 @@ public sealed class LockManager
         logger.LogError("Replication error: #{Id} {Type}", log.Id, log.LogType);
     }
 
-    public async Task<(LockResponseType, long)> LocateAndTryLock(string resource, byte[] owner, int expiresMs, LockDurability durability, CancellationToken cancellationToken)
+    public Task<(LockResponseType, long)> LocateAndTryLock(string resource, byte[] owner, int expiresMs, LockDurability durability, CancellationToken cancellationToken)
     {
-        
+        return locator.LocateAndTryLock(resource, owner, expiresMs, durability, cancellationToken);
     }
 
     /// <summary>
