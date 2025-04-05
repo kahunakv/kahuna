@@ -145,6 +145,8 @@ internal sealed class KeyValueTransactionCoordinator
                 case NodeType.Div:
                 case NodeType.FuncCall:
                 case NodeType.ArgumentList:
+                case NodeType.NotFound:
+                case NodeType.NotSet:
                 case NodeType.Return:
                 case NodeType.Sleep:
                 case NodeType.Throw:

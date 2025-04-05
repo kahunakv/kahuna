@@ -33,6 +33,7 @@ TEExists        (E|e)(E|e)(X|x)(I|i)(S|s)(T|t)(S|s)
 TTrue           (T|t)(R|r)(U|u)(E|e)
 TFalse          (F|f)(A|a)(L|l)(S|s)(E|e)
 TThrow          (T|t)(H|h)(R|r)(O|o)(W|w)
+TFound          (F|f)(O|o)(U|u)(N|n)(D|d)
 TAtWord         (A|a)(T|t)
 TNotWord        (N|n)(O|o)(T|t)
 LParen          \(
@@ -157,6 +158,8 @@ TAnd            &&
 {TSleep} { yylval.l = yyline; return (int)Token.TSLEEP; }
 
 {TThrow} { yylval.l = yyline; return (int)Token.TTHROW; }
+
+{TFound} { yylval.l = yyline; return (int)Token.TFOUND; }
 
 {TEquals} { yylval.l = yyline; return (int)Token.TEQUALS; }
 

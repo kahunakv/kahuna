@@ -37,6 +37,8 @@ public enum NodeType
     Div,
     FuncCall,
     ArgumentList,
+    NotSet,
+    NotFound,
     SetNotExists,
     SetExists,
     SetCmp,
@@ -48,5 +50,5 @@ public enum NodeType
     Commit,
     Return,
     Sleep,
-    Throw
+    Throw,
 }

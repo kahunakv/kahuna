@@ -25,7 +25,7 @@
 %token LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV LBRACE RBRACE
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS  
 %token TBEGIN TROLLBACK TCOMMIT TLET TSET TGET TESET TEGET TDELETE TEDELETE TEXTEND TEEXTEND TEXISTS TEEXISTS
-%token TIF TELSE TTHEN TEND TNX TXX TEX TCMP TCMPREV TTHROW
+%token TIF TELSE TTHEN TEND TNX TXX TEX TCMP TCMPREV TTHROW TFOUND
 %token TRETURN TSLEEP TDIGIT TFLOAT TSTRING TIDENTIFIER TESCIDENTIFIER TPLACEHOLDER TTRUE TFALSE TAT
 
 %%
@@ -165,6 +165,8 @@ expression : expression TEQUALS expression { $$.n = new(NodeType.Equals, $1.n, $
            | expression TMULT expression { $$.n = new(NodeType.Mult, $1.n, $3.n, null, null, null, null, null, $1.l); }
            | expression TDIV expression { $$.n = new(NodeType.Div, $1.n, $3.n, null, null, null, null, null, $1.l); }
            | TNOT expression { $$.n = new(NodeType.Not, $2.n, null, null, null, null, null, null, $1.l); }
+           | TNOT TSET { $$.n = new(NodeType.NotSet, null, null, null, null, null, null, null, $1.l); }
+           | TNOT TFOUND { $$.n = new(NodeType.NotFound, null, null, null, null, null, null, null, $1.l); }
            | LPAREN expression RPAREN { $$.n = $2.n; $$.l = $2.l; }           
            | fcall_expr { $$.n = $1.n; $$.l = $1.l; } 
            | identifier { $$.n = $1.n; $$.l = $1.l; }
