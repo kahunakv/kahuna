@@ -483,6 +483,16 @@ public sealed class KahunaManager : IKahuna
     {
         return keyValues.TryExistsValue(transactionId, key, revision, durability);
     }
+
+    public Task<(KeyValueResponseType, string, KeyValueDurability)> TryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability)
+    {
+        return keyValues.TryAcquireExclusiveLock(transactionId, key, expiresMs, durability);
+    }
+    
+    public Task<(KeyValueResponseType, string)> TryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueDurability durability)
+    {
+        return keyValues.TryReleaseExclusiveLock(transactionId, key, durability);
+    }
     
     /// <summary>
     /// Executes a key/value transaction

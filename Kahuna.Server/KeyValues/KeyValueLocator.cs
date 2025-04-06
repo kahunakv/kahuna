@@ -1,16 +1,15 @@
 
-using System.Collections.Concurrent;
-using Google.Protobuf;
-using Google.Protobuf.Collections;
+using Kommander;
+using Kommander.Time;
+
 using Grpc.Net.Client;
+using System.Collections.Concurrent;
+using Google.Protobuf.Collections;
 
 using Kahuna.Communication.Common.Grpc;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
 using Kahuna.Shared.KeyValue;
-
-using Kommander;
-using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues;
 
@@ -133,42 +132,25 @@ internal sealed class KeyValueLocator
     /// <param name="key"></param>
     /// <param name="expiresMs"></param>
     /// <param name="durability"></param>
-    /// <param name="cancelationToken"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, long)> LocateAndTryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, long)> LocateAndTryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(key))
             return (KeyValueResponseType.InvalidInput, 0);
         
         int partitionId = raft.GetPartitionKey(key);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryExtendKeyValue(transactionId, key, expiresMs, durability);
             
-        string leader = await raft.WaitForLeader(partitionId, cancelationToken);
+        string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
             return (KeyValueResponseType.MustRetry, 0);
         
         logger.LogDebug("EXTEND-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
-        
-        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
-        
-        GrpcTryExtendKeyValueRequest request = new()
-        {
-            TransactionIdPhysical = transactionId.L,
-            TransactionIdCounter = transactionId.C,
-            Key = key,
-            ExpiresMs = expiresMs,
-            Durability = (GrpcKeyValueDurability)durability,
-        };
-        
-        GrpcTryExtendKeyValueResponse? remoteResponse = await client.TryExtendKeyValueAsync(request, cancellationToken: cancelationToken);
-        
-        remoteResponse.ServedFrom = $"https://{leader}";
-        
-        return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.Revision);
+
+        return await interNodeCommunication.TryExtendKeyValue(leader, transactionId, key, expiresMs, durability, cancellationToken);
     }
     
     /// <summary>
@@ -201,29 +183,7 @@ internal sealed class KeyValueLocator
         
         logger.LogDebug("GET-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
         
-        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
-        
-        GrpcTryGetKeyValueRequest request = new()
-        {
-            TransactionIdPhysical = transactionId.L,
-            TransactionIdCounter = transactionId.C,
-            Key = key,
-            Revision = revision,
-            Durability = (GrpcKeyValueDurability) durability,
-        };
-        
-        GrpcTryGetKeyValueResponse? remoteResponse = await client.TryGetKeyValueAsync(request, cancellationToken: cancellationToken);
-        
-        remoteResponse.ServedFrom = $"https://{leader}";
-        
-        return ((KeyValueResponseType)remoteResponse.Type, new(
-            remoteResponse.Value?.ToByteArray(),
-            remoteResponse.Revision,
-            new(remoteResponse.ExpiresPhysical, remoteResponse.ExpiresCounter),
-            (KeyValueState)remoteResponse.State
-        ));
+        return await interNodeCommunication.TryGetValue(leader, transactionId, key, revision, durability, cancellationToken);
     }
     
     /// <summary>
@@ -256,29 +216,7 @@ internal sealed class KeyValueLocator
         
         logger.LogDebug("EXISTS-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
         
-        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
-        
-        GrpcTryExistsKeyValueRequest request = new()
-        {
-            TransactionIdPhysical = transactionId.L,
-            TransactionIdCounter = transactionId.C,
-            Key = key,
-            Revision = revision,
-            Durability = (GrpcKeyValueDurability) durability,
-        };
-        
-        GrpcTryExistsKeyValueResponse? remoteResponse = await client.TryExistsKeyValueAsync(request, cancellationToken: cancellationToken);
-        
-        remoteResponse.ServedFrom = $"https://{leader}";
-        
-        return ((KeyValueResponseType)remoteResponse.Type, new(
-            null,
-            remoteResponse.Revision,
-            new(remoteResponse.ExpiresPhysical, remoteResponse.ExpiresCounter),
-            (KeyValueState)remoteResponse.State
-        ));
+        return await interNodeCommunication.TryExistsValue(leader, transactionId, key, revision, durability, cancellationToken);
     }
     
     /// <summary>
@@ -306,24 +244,7 @@ internal sealed class KeyValueLocator
         
         logger.LogDebug("ACQUIRE-LOCK-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
         
-        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
-        
-        GrpcTryAcquireExclusiveLockRequest request = new()
-        {
-            TransactionIdPhysical = transactionId.L,
-            TransactionIdCounter = transactionId.C,
-            Key = key,
-            ExpiresMs = expiresMs,
-            Durability = (GrpcKeyValueDurability)durability,
-        };
-        
-        GrpcTryAcquireExclusiveLockResponse? remoteResponse = await client.TryAcquireExclusiveLockAsync(request, cancellationToken: cancelationToken);
-        
-        remoteResponse.ServedFrom = $"https://{leader}";
-        
-        return ((KeyValueResponseType)remoteResponse.Type, key, durability);
+        return await interNodeCommunication.TryAcquireExclusiveLock(leader, transactionId, key, expiresMs, durability, cancelationToken);
     }
     
     /// <summary>
@@ -377,7 +298,7 @@ internal sealed class KeyValueLocator
         List<(string key, int expiresMs, KeyValueDurability durability)> xkeys,
         Lock lockSync,
         List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses,
-        CancellationToken cancelationToken
+        CancellationToken cancellationToken
     )
     {
         logger.LogDebug("ACQUIRE-LOCK-KEYVALUE Redirect {Number} lock acquisitions to node {Leader}", xkeys.Count, leader);
@@ -395,36 +316,7 @@ internal sealed class KeyValueLocator
             return;
         }
             
-        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
-            
-        KeyValuer.KeyValuerClient client = new(channel);
-            
-        GrpcTryAcquireManyExclusiveLocksRequest request = new()
-        {
-            TransactionIdPhysical = transactionId.L,
-            TransactionIdCounter = transactionId.C
-        };
-            
-        request.Items.Add(GetAcquireLockRequestItems(xkeys));
-            
-        GrpcTryAcquireManyExclusiveLocksResponse? remoteResponse = await client.TryAcquireManyExclusiveLocksAsync(request, cancellationToken: cancelationToken);
-
-        lock (lockSync)
-        {
-            foreach (GrpcTryAcquireManyExclusiveLocksResponseItem item in remoteResponse.Items)
-                responses.Add(((KeyValueResponseType)item.Type, item.Key, (KeyValueDurability)item.Durability));
-        }
-    }
-
-    private static IEnumerable<GrpcTryAcquireManyExclusiveLocksRequestItem> GetAcquireLockRequestItems(List<(string key, int expiresMs, KeyValueDurability durability)> xkeys)
-    {
-        foreach ((string key, int expiresMs, KeyValueDurability durability) key in xkeys)
-            yield return new()
-            {
-                Key = key.key,
-                ExpiresMs = key.expiresMs,
-                Durability = (GrpcKeyValueDurability)key.durability
-            };
+        await interNodeCommunication.TryAcquireNodeExclusiveLocks(leader, transactionId, xkeys, lockSync, responses, cancellationToken);
     }
 
     /// <summary>
@@ -433,41 +325,25 @@ internal sealed class KeyValueLocator
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
     /// <param name="durability"></param>
-    /// <param name="cancelationToken"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, string)> LocateAndTryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, string)> LocateAndTryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(key))
             return (KeyValueResponseType.InvalidInput, key);
         
         int partitionId = raft.GetPartitionKey(key);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryReleaseExclusiveLock(transactionId, key, durability);
             
-        string leader = await raft.WaitForLeader(partitionId, cancelationToken);
+        string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
             return (KeyValueResponseType.MustRetry, key);
         
         logger.LogDebug("RELEASE-LOCK-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
         
-        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
-        
-        GrpcTryReleaseExclusiveLockRequest request = new()
-        {
-            TransactionIdPhysical = transactionId.L,
-            TransactionIdCounter = transactionId.C,
-            Key = key,
-            Durability = (GrpcKeyValueDurability)durability,
-        };
-        
-        GrpcTryReleaseExclusiveLockResponse? remoteResponse = await client.TryReleaseExclusiveLockAsync(request, cancellationToken: cancelationToken);
-        
-        remoteResponse.ServedFrom = $"https://{leader}";
-        
-        return ((KeyValueResponseType)remoteResponse.Type, key);
+        return await interNodeCommunication.TryReleaseExclusiveLock(leader, transactionId, key, durability, cancellationToken);
     }
     
     /// <summary>
@@ -539,35 +415,7 @@ internal sealed class KeyValueLocator
             return;
         }
             
-        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
-            
-        KeyValuer.KeyValuerClient client = new(channel);
-            
-        GrpcTryReleaseManyExclusiveLocksRequest request = new()
-        {
-            TransactionIdPhysical = transactionId.L,
-            TransactionIdCounter = transactionId.C
-        };
-            
-        request.Items.Add(GetReleaseLockRequestItems(xkeys));
-            
-        GrpcTryReleaseManyExclusiveLocksResponse? remoteResponse = await client.TryReleaseManyExclusiveLocksAsync(request, cancellationToken: cancelationToken);
-
-        lock (lockSync)
-        {
-            foreach (GrpcTryReleaseManyExclusiveLocksResponseItem item in remoteResponse.Items)
-                responses.Add(((KeyValueResponseType)item.Type, item.Key, (KeyValueDurability)item.Durability));
-        }
-    }
-
-    private static IEnumerable<GrpcTryReleaseManyExclusiveLocksRequestItem> GetReleaseLockRequestItems(List<(string key, KeyValueDurability durability)> xkeys)
-    {
-        foreach ((string key, KeyValueDurability durability) key in xkeys)
-            yield return new()
-            {
-                Key = key.key,
-                Durability = (GrpcKeyValueDurability)key.durability
-            };
+        await interNodeCommunication.TryReleaseNodeExclusiveLocks(leader, transactionId, xkeys, lockSync, responses, cancelationToken);
     }
     
     /// <summary>
@@ -594,23 +442,7 @@ internal sealed class KeyValueLocator
         
         logger.LogDebug("PREPARE-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
         
-        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
-        
-        GrpcTryPrepareMutationsRequest request = new()
-        {
-            TransactionIdPhysical = transactionId.L,
-            TransactionIdCounter = transactionId.C,
-            Key = key,
-            Durability = (GrpcKeyValueDurability)durability,
-        };
-        
-        GrpcTryPrepareMutationsResponse? remoteResponse = await client.TryPrepareMutationsAsync(request, cancellationToken: cancelationToken);
-        
-        remoteResponse.ServedFrom = $"https://{leader}";
-        
-        return ((KeyValueResponseType)remoteResponse.Type, new(remoteResponse.ProposalTicketPhysical, remoteResponse.ProposalTicketCounter), key, durability);
+        return await interNodeCommunication.TryPrepareMutations(leader, transactionId, key, durability, cancelationToken);
     }
     
     /// <summary>
@@ -650,21 +482,21 @@ internal sealed class KeyValueLocator
         
         // Requests to nodes are sent in parallel
         foreach ((string leader, List<(string key, KeyValueDurability durability)>? xkeys) in acquisitionPlan)
-            tasks.Add(TryPrepareManyMutations(transactionId, leader, localNode, xkeys, lockSync, responses, cancelationToken));
+            tasks.Add(TryPrepareNodeMutations(transactionId, leader, localNode, xkeys, lockSync, responses, cancelationToken));
         
         await Task.WhenAll(tasks);
 
         return responses;
     }
 
-    private async Task TryPrepareManyMutations(
+    private async Task TryPrepareNodeMutations(
         HLCTimestamp transactionId, 
         string leader, 
         string localNode, 
         List<(string key, KeyValueDurability durability)> xkeys,
         Lock lockSync,
         List<(KeyValueResponseType type, HLCTimestamp, string key, KeyValueDurability durability)> responses,
-        CancellationToken cancelationToken
+        CancellationToken cancellationToken
     )
     {
         logger.LogDebug("PREPARE-KEYVALUE Redirect {Number} prepare mutations to node {Leader}", xkeys.Count, leader);
@@ -682,35 +514,7 @@ internal sealed class KeyValueLocator
             return;
         }
             
-        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
-            
-        KeyValuer.KeyValuerClient client = new(channel);
-            
-        GrpcTryPrepareManyMutationsRequest request = new()
-        {
-            TransactionIdPhysical = transactionId.L,
-            TransactionIdCounter = transactionId.C
-        };
-            
-        request.Items.Add(GetPrepareRequestItems(xkeys));
-            
-        GrpcTryPrepareManyMutationsResponse? remoteResponse = await client.TryPrepareManyMutationsAsync(request, cancellationToken: cancelationToken);
-
-        lock (lockSync)
-        {
-            foreach (GrpcTryPrepareManyMutationsResponseItem item in remoteResponse.Items)
-                responses.Add(((KeyValueResponseType)item.Type, new(item.ProposalTicketPhysical, item.ProposalTicketCounter), item.Key, (KeyValueDurability)item.Durability));
-        }
-    }
-
-    private static IEnumerable<GrpcTryPrepareManyMutationsRequestItem> GetPrepareRequestItems(List<(string key, KeyValueDurability durability)> xkeys)
-    {
-        foreach ((string key, KeyValueDurability durability) key in xkeys)
-            yield return new()
-            {
-                Key = key.key,
-                Durability = (GrpcKeyValueDurability)key.durability
-            };
+        await interNodeCommunication.TryPrepareNodeMutations(leader, transactionId, xkeys, lockSync, responses, cancellationToken);
     }
     
     /// <summary>
@@ -738,25 +542,7 @@ internal sealed class KeyValueLocator
         
         logger.LogDebug("COMMIT-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
         
-        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
-        
-        GrpcTryCommitMutationsRequest request = new()
-        {
-            TransactionIdPhysical = transactionId.L,
-            TransactionIdCounter = transactionId.C,
-            Key = key,
-            ProposalTicketPhysical = ticketId.L,
-            ProposalTicketCounter = ticketId.C,
-            Durability = (GrpcKeyValueDurability)durability,
-        };
-        
-        GrpcTryCommitMutationsResponse? remoteResponse = await client.TryCommitMutationsAsync(request, cancellationToken: cancelationToken);
-        
-        remoteResponse.ServedFrom = $"https://{leader}";
-        
-        return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.ProposalIndex);
+        return await interNodeCommunication.TryCommitMutations(leader, transactionId, key, ticketId, durability, cancelationToken);
     }
     
     /// <summary>

@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using Kahuna.Server.KeyValues;
 using Kahuna.Server.Locks;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
@@ -60,5 +62,116 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.TryDeleteKeyValue(transactionId, key, durability);
         
         throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public async Task<(KeyValueResponseType, long)> TryExtendKeyValue(string node, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancelationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+            return await kahunaNode.TryExtendKeyValue(transactionId, key, expiresMs, durability);
+        
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryGetValue(string node, HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+            return await kahunaNode.TryGetValue(transactionId, key, revision, durability);
+        
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryExistsValue(string node, HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+            return await kahunaNode.TryExistsValue(transactionId, key, revision, durability);
+        
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public async Task<(KeyValueResponseType, string, KeyValueDurability)> TryAcquireExclusiveLock(string node, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancelationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+            return await kahunaNode.TryAcquireExclusiveLock(transactionId, key, expiresMs, durability);
+        
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public async Task TryAcquireNodeExclusiveLocks(string node, HLCTimestamp transactionId, List<(string key, int expiresMs, KeyValueDurability durability)> xkeys, Lock lockSync, List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses, CancellationToken cancelationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            ConcurrentBag<(KeyValueResponseType type, string key, KeyValueDurability durability)> bag = [];
+            
+            foreach ((string key, int expiresMs, KeyValueDurability durability) in xkeys)
+                bag.Add(await kahunaNode.TryAcquireExclusiveLock(transactionId, key, expiresMs, durability));
+
+            AddToAcquireLockResponses(bag, lockSync, responses);
+            return;
+        }
+        
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    private static void AddToAcquireLockResponses(ConcurrentBag<(KeyValueResponseType type, string key, KeyValueDurability durability)> bag, Lock lockSync, List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses)
+    {
+        foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) in bag)
+        {
+            lock (lockSync)
+                responses.Add((type, key, durability));
+        }
+    }
+
+    public async Task<(KeyValueResponseType, string)> TryReleaseExclusiveLock(string node, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancelationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+            return await kahunaNode.TryReleaseExclusiveLock(transactionId, key, durability);
+        
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public async Task TryReleaseNodeExclusiveLocks(string node, HLCTimestamp transactionId, List<(string key, KeyValueDurability durability)> xkeys, Lock lockSync, List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses, CancellationToken cancellationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            ConcurrentBag<(KeyValueResponseType type, string key, KeyValueDurability durability)> bag = [];
+
+            foreach ((string key, KeyValueDurability durability) in xkeys)
+            {
+                (KeyValueResponseType type, string _) = await kahunaNode.TryReleaseExclusiveLock(transactionId, key, durability);
+                bag.Add((type, key, durability));
+            }
+
+            AddToReleaseLockResponses(bag, lockSync, responses);
+            return;
+        }
+        
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+    
+    private static void AddToReleaseLockResponses(ConcurrentBag<(KeyValueResponseType type, string key, KeyValueDurability durability)> bag, Lock lockSync, List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses)
+    {
+        foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) in bag)
+        {
+            lock (lockSync)
+                responses.Add((type, key, durability));
+        }
+    }
+
+    public Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> TryPrepareMutations(string node, HLCTimestamp transactionId, string key, KeyValueDurability durability,
+        CancellationToken cancellationToken)
+    {
+        throw new NotImplementedException();
+    }
+
+    public Task TryPrepareNodeMutations(string node, HLCTimestamp transactionId, List<(string key, KeyValueDurability durability)> xkeys, Lock lockSync, List<(KeyValueResponseType type, HLCTimestamp, string key, KeyValueDurability durability)> responses,
+        CancellationToken cancellationToken)
+    {
+        throw new NotImplementedException();
+    }
+
+    public Task<(KeyValueResponseType, long)> TryCommitMutations(string node, HLCTimestamp transactionId, string key, HLCTimestamp ticketId,
+        KeyValueDurability durability, CancellationToken cancelationToken)
+    {
+        throw new NotImplementedException();
     }
 }
