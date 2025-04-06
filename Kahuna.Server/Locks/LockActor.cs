@@ -212,7 +212,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         context.Expires = proposal.Expires;
         context.LastUsed = proposal.LastUsed;
 
-        return new(LockResponseType.Extended);
+        return new(LockResponseType.Extended, context.FencingToken);
     }
 
     /// <summary>

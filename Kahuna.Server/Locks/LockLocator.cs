@@ -13,7 +13,7 @@ internal sealed class LockLocator
     private readonly KahunaConfiguration configuration;
 
     private readonly IRaft raft;
-    
+
     private readonly IInterNodeCommunication interNodeCommunication;
 
     private readonly ILogger<IKahuna> logger;
@@ -34,7 +34,7 @@ internal sealed class LockLocator
         this.interNodeCommunication = interNodeCommunication;
         this.logger = logger;
     }
-    
+
     /// <summary>
     /// Locates the leader node for the given key and passes a TryLock request to the locker actor for the given lock name.
     /// </summary>
@@ -48,27 +48,27 @@ internal sealed class LockLocator
     {
         if (string.IsNullOrEmpty(resource))
             return (LockResponseType.InvalidInput, 0);
-        
-        if (string.IsNullOrEmpty(resource))
+
+        if (owner.Length == 0)
             return (LockResponseType.InvalidInput, 0);
-        
+
         if (expiresMs <= 0)
             return (LockResponseType.InvalidInput, 0);
-        
+
         int partitionId = raft.GetPartitionKey(resource);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryLock(resource, owner, expiresMs, durability);
-            
+
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
             return (LockResponseType.MustRetry, 0);
-        
+
         logger.LogDebug("LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", resource, partitionId, leader);
 
         return await interNodeCommunication.TryLock(leader, resource, owner, expiresMs, durability, cancellationToken);
     }
-    
+
     /// <summary>
     /// Locates the leader node for the given key and passes a TryLock request to the locker actor for the given lock name.
     /// </summary>
@@ -82,27 +82,27 @@ internal sealed class LockLocator
     {
         if (string.IsNullOrEmpty(resource))
             return (LockResponseType.InvalidInput, 0);
-        
-        if (string.IsNullOrEmpty(resource))
+
+        if (owner.Length == 0)
             return (LockResponseType.InvalidInput, 0);
-        
+
         if (expiresMs <= 0)
             return (LockResponseType.InvalidInput, 0);
-        
+
         int partitionId = raft.GetPartitionKey(resource);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryExtendLock(resource, owner, expiresMs, durability);
-            
+
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
             return (LockResponseType.MustRetry, 0);
-        
+
         logger.LogDebug("EXTEND-LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", resource, partitionId, leader);
 
         return await interNodeCommunication.TryExtendLock(leader, resource, owner, expiresMs, durability, cancellationToken);
     }
-    
+
     /// <summary>
     /// Locates the leader node for the given key and passes a TryUnlock request to the locker actor for the given lock name.
     /// </summary>
@@ -116,19 +116,19 @@ internal sealed class LockLocator
     {
         if (string.IsNullOrEmpty(resource))
             return LockResponseType.InvalidInput;
-        
+
         if (owner.Length == 0)
             return LockResponseType.InvalidInput;
-                
+
         int partitionId = raft.GetPartitionKey(resource);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryUnlock(resource, owner, durability);
-            
+
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
             return LockResponseType.MustRetry;
-        
+
         logger.LogDebug("EXTEND-LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", resource, partitionId, leader);
 
         return await interNodeCommunication.TryUnlock(leader, resource, owner, durability, cancellationToken);
@@ -145,16 +145,16 @@ internal sealed class LockLocator
     {
         if (string.IsNullOrEmpty(resource))
             return (LockResponseType.InvalidInput, null);
-        
+
         int partitionId = raft.GetPartitionKey(resource);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.GetLock(resource, durability);
-            
+
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
             return (LockResponseType.MustRetry, null);
-        
+
         logger.LogDebug("GET-LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", resource, partitionId, leader);
 
         return await interNodeCommunication.GetLock(leader, resource, durability, cancellationToken);
