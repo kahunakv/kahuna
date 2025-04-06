@@ -9,7 +9,7 @@ using Kahuna.Services;
 using Kahuna.Server.Configuration;
 using Kahuna.Communication.External.Grpc;
 using Kahuna.Communication.External.Rest;
-
+using Kahuna.Server.Communication.Internode;
 using Kommander;
 using Kommander.Time;
 using Kommander.WAL;
@@ -72,6 +72,7 @@ builder.Services.AddSingleton<IRaft>(services =>
 
 builder.Services.AddSingleton<ActorSystem>(services => new(services, services.GetRequiredService<ILogger<IRaft>>()));
 builder.Services.AddSingleton<IKahuna, KahunaManager>();
+builder.Services.AddSingleton<IInterNodeCommunication, GrpcInterNodeCommunication>();
 builder.Services.AddHostedService<ReplicationService>();
 
 builder.Services.AddGrpc();

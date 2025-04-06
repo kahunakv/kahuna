@@ -1,4 +1,5 @@
 
+using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
 using Kommander;
 using Kommander.Communication.Memory;
@@ -12,7 +13,7 @@ namespace Kahuna.Tests.Server;
 
 public abstract class BaseCluster
 {
-    private static (IRaft, IKahuna) GetNode1(InMemoryCommunication communication, string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger)
+    private static (IRaft, IKahuna) GetNode1(MemoryInterNodeCommmunication interNodeCommmunication, InMemoryCommunication communication, string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger)
     {
         IWAL wal = GetWAL(walStorage, raftLogger);
         
@@ -51,7 +52,7 @@ public abstract class BaseCluster
         };
 
         // ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, ILogger<IKahuna> logger
-        KahunaManager kahuna = new(actorSystem, raft, configuration, kahunaLogger);
+        KahunaManager kahuna = new(actorSystem, raft, configuration, interNodeCommmunication, kahunaLogger);
         
         raft.OnLogRestored += kahuna.OnLogRestored;
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
@@ -60,7 +61,7 @@ public abstract class BaseCluster
         return (raft, kahuna);
     }
     
-    private static (IRaft, IKahuna) GetNode2(InMemoryCommunication communication, string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger)
+    private static (IRaft, IKahuna) GetNode2(MemoryInterNodeCommmunication interNodeCommmunication, InMemoryCommunication communication, string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger)
     {
         IWAL wal = GetWAL(walStorage, raftLogger);
         
@@ -99,7 +100,7 @@ public abstract class BaseCluster
         };
 
         // ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, ILogger<IKahuna> logger
-        KahunaManager kahuna = new(actorSystem, raft, configuration, kahunaLogger);
+        KahunaManager kahuna = new(actorSystem, raft, configuration, interNodeCommmunication, kahunaLogger);
         
         raft.OnLogRestored += kahuna.OnLogRestored;
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
@@ -108,7 +109,7 @@ public abstract class BaseCluster
         return (raft, kahuna);
     }
     
-    private static (IRaft, IKahuna) GetNode3(InMemoryCommunication communication, string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger)
+    private static (IRaft, IKahuna) GetNode3(MemoryInterNodeCommmunication interNodeCommmunication, InMemoryCommunication communication, string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger)
     {
         IWAL wal = GetWAL(walStorage, raftLogger);
         
@@ -147,7 +148,7 @@ public abstract class BaseCluster
         };
 
         // ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, ILogger<IKahuna> logger
-        KahunaManager kahuna = new(actorSystem, raft, configuration, kahunaLogger);
+        KahunaManager kahuna = new(actorSystem, raft, configuration, interNodeCommmunication, kahunaLogger);
         
         raft.OnLogRestored += kahuna.OnLogRestored;
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
@@ -158,19 +159,37 @@ public abstract class BaseCluster
     
     protected static async Task<(IRaft, IRaft, IRaft, IKahuna, IKahuna, IKahuna)> AssembleThreNodeCluster(string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger)
     {
-        InMemoryCommunication communication = new();
+        InMemoryCommunication raftCommunication = new();
+        MemoryInterNodeCommmunication interNodeCommmunication = new();
         
-        (IRaft raft1, IKahuna kahuna1) = GetNode1(communication, walStorage, partitions, raftLogger, kahunaLogger);
-        (IRaft raft2, IKahuna kahuna2) = GetNode2(communication, walStorage, partitions, raftLogger, kahunaLogger);
-        (IRaft raft3, IKahuna kahuna3) = GetNode3(communication, walStorage, partitions, raftLogger, kahunaLogger);
+        (IRaft raft1, IKahuna kahuna1) = GetNode1(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger);
+        (IRaft raft2, IKahuna kahuna2) = GetNode2(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger);
+        (IRaft raft3, IKahuna kahuna3) = GetNode3(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger);
         
-        await WaitForClusterToAssemble(communication, partitions, raft1, raft2, raft3);
+        await WaitForClusterToAssemble(interNodeCommmunication, raftCommunication, partitions, raft1, raft2, raft3, kahuna1, kahuna2, kahuna3);
         
         return (raft1, raft2, raft3, kahuna1, kahuna2, kahuna3);
     }
     
-    private static async Task WaitForClusterToAssemble(InMemoryCommunication communication, int partitions, IRaft raft1, IRaft raft2, IRaft raft3)
+    private static async Task WaitForClusterToAssemble(
+        MemoryInterNodeCommmunication interNodeCommmunication, 
+        InMemoryCommunication communication, 
+        int partitions, 
+        IRaft raft1, 
+        IRaft raft2, 
+        IRaft raft3,
+        IKahuna kahuna1,
+        IKahuna kahuna2,
+        IKahuna kahuna3
+    )
     {
+        interNodeCommmunication.SetNodes(new()
+        {
+            { "localhost:8001", kahuna1 }, 
+            { "localhost:8002", kahuna2 },
+            { "localhost:8003", kahuna3 }
+        });
+        
         communication.SetNodes(new()
         {
             { "localhost:8001", raft1 }, 
@@ -178,7 +197,7 @@ public abstract class BaseCluster
             { "localhost:8003", raft3 }
         });
         
-        await Task.WhenAll([raft1.JoinCluster(), raft2.JoinCluster(), raft3.JoinCluster()]);
+        await Task.WhenAll(raft1.JoinCluster(), raft2.JoinCluster(), raft3.JoinCluster());
 
         for (int i = 1; i <= partitions; i++)
         {

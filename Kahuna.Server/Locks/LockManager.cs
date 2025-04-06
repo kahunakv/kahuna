@@ -404,9 +404,45 @@ public sealed class LockManager
         logger.LogError("Replication error: #{Id} {Type}", log.Id, log.LogType);
     }
 
+    /// <summary>
+    /// Locates the leader node for the given key and passes a TryLock request to the locker actor for the given lock name.
+    /// </summary>
+    /// <param name="resource"></param>
+    /// <param name="owner"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
     public Task<(LockResponseType, long)> LocateAndTryLock(string resource, byte[] owner, int expiresMs, LockDurability durability, CancellationToken cancellationToken)
     {
         return locator.LocateAndTryLock(resource, owner, expiresMs, durability, cancellationToken);
+    }
+    
+    /// <summary>
+    /// Locates the leader node for the given key and passes a TryExtend request to the locker actor for the given lock name.
+    /// </summary>
+    /// <param name="resource"></param>
+    /// <param name="owner"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public Task<(LockResponseType, long)> LocateAndTryExtendLock(string resource, byte[] owner, int expiresMs, LockDurability durability, CancellationToken cancellationToken)
+    {
+        return locator.LocateAndTryExtendLock(resource, owner, expiresMs, durability, cancellationToken);
+    }
+
+    /// <summary>
+    /// Locates the leader node for the given key and passes a TryUnlock request to the locker actor for the given lock name.
+    /// </summary>
+    /// <param name="resource"></param>
+    /// <param name="owner"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public Task<LockResponseType> LocateAndTryUnlock(string resource, byte[] owner, LockDurability durability, CancellationToken cancellationToken)
+    {
+        return locator.LocateAndTryUnlock(resource, owner, durability, cancellationToken);
     }
 
     /// <summary>

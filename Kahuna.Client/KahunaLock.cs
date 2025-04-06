@@ -81,9 +81,9 @@ public sealed class KahunaLock : IAsyncDisposable
             throw new KahunaException("Lock was not acquired", LockResponseType.Errored);
 
         if (string.IsNullOrEmpty(servedFrom) || !client.UpgradeUrls)
-            return await client.TryExtend(resource, owner, duration, durability, cancellationToken);
+            return await client.TryExtendLock(resource, owner, duration, durability, cancellationToken);
         
-        return await client.Communication.TryExtend(servedFrom, resource, owner, (int)duration.TotalMilliseconds, durability, cancellationToken);
+        return await client.Communication.TryExtendLock(servedFrom, resource, owner, (int)duration.TotalMilliseconds, durability, cancellationToken);
     }
     
     /// <summary>
@@ -100,9 +100,9 @@ public sealed class KahunaLock : IAsyncDisposable
             throw new KahunaException("Lock was not acquired", LockResponseType.Errored);
 
         if (string.IsNullOrEmpty(servedFrom) || !client.UpgradeUrls)
-            return await client.TryExtend(resource, owner, durationMs, durability, cancellationToken);
+            return await client.TryExtendLock(resource, owner, durationMs, durability, cancellationToken);
         
-        return await client.Communication.TryExtend(servedFrom, resource, owner, durationMs, durability, cancellationToken);
+        return await client.Communication.TryExtendLock(servedFrom, resource, owner, durationMs, durability, cancellationToken);
     }
     
     /// <summary>

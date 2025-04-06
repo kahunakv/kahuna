@@ -17,9 +17,33 @@ public static class LocksHandlers
 {
     public static void MapLocksRoutes(WebApplication app)
     {
-        app.MapPost("/v1/locks/try-lock", async (KahunaLockRequest request, IKahuna locks, IRaft raft, ILogger<IKahuna> logger, CancellationToken cancellationToken) =>
+        app.MapPost("/v1/locks/try-lock", async (KahunaLockRequest request, IKahuna locks, CancellationToken cancellationToken) =>
         {
             if (string.IsNullOrEmpty(request.Resource))
+                return new() { Type = LockResponseType.InvalidInput };
+        
+            if (request.Owner is null)
+                return new() { Type = LockResponseType.InvalidInput };
+        
+            if (request.ExpiresMs <= 0)
+                return new() { Type = LockResponseType.InvalidInput };
+        
+            (LockResponseType response, long fencingToken)  = await locks.LocateAndTryLock(
+                request.Resource, 
+                request.Owner, 
+                request.ExpiresMs, 
+                request.Durability, 
+                cancellationToken
+            );
+
+            return new KahunaLockResponse
+            {
+                Type = response,
+                FencingToken = fencingToken,
+                ServedFrom = ""
+            };
+            
+            /*if (string.IsNullOrEmpty(request.Resource))
                 return new() { Type = LockResponseType.Errored };
 
             if (request.Owner is null)
@@ -65,12 +89,36 @@ public static class LocksHandlers
                 logger.LogError("{Node}: {Name}\n{Message}", leader, ex.GetType().Name, ex.Message);
                 
                 return new() { Type = LockResponseType.Errored };
-            }
+            }*/
         });
 
-        app.MapPost("/v1/locks/try-extend", async (KahunaLockRequest request, IKahuna locks, IRaft raft, ILogger<IKahuna> logger, CancellationToken cancellationToken) =>
+        app.MapPost("/v1/locks/try-extend", async (KahunaLockRequest request, IKahuna locks, CancellationToken cancellationToken) =>
         {
             if (string.IsNullOrEmpty(request.Resource))
+                return new() { Type = LockResponseType.InvalidInput };
+        
+            if (request.Owner is null)
+                return new() { Type = LockResponseType.InvalidInput };
+        
+            if (request.ExpiresMs <= 0)
+                return new() { Type = LockResponseType.InvalidInput };
+        
+            (LockResponseType response, long fencingToken)  = await locks.LocateAndTryExtendLock(
+                request.Resource, 
+                request.Owner, 
+                request.ExpiresMs, 
+                request.Durability, 
+                cancellationToken
+            );
+
+            return new KahunaLockResponse
+            {
+                Type = response,
+                FencingToken = fencingToken,
+                ServedFrom = ""
+            };
+            
+            /*if (string.IsNullOrEmpty(request.Resource))
                 return new() { Type = LockResponseType.InvalidInput };
 
             if (request.Owner is null)
@@ -116,7 +164,7 @@ public static class LocksHandlers
                 logger.LogError("{Node}: {Name}\n{Message}", leader, ex.GetType().Name, ex.Message);
                 
                 return new() { Type = LockResponseType.Errored };
-            }
+            }*/
         });
 
         app.MapPost("/v1/locks/try-unlock", async (KahunaLockRequest request, IKahuna locks, IRaft raft, ILogger<IKahuna> logger, CancellationToken cancellationToken) =>

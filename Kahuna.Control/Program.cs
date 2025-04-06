@@ -167,7 +167,7 @@ Console.CancelKeyPress += delegate
 
     foreach (KeyValuePair<string, KahunaLock> kvp in locks)
     {
-        AnsiConsole.MarkupLine("[yellow]Disposing lock {0}...[/]", kvp.Value.Owner);
+        AnsiConsole.MarkupLine("[yellow]Disposing lock {0}...[/]", Encoding.UTF8.GetString(kvp.Value.Owner));
 
         kvp.Value.DisposeAsync().Wait();
     }
@@ -302,13 +302,13 @@ while (true)
                 (bool success, long fencingToken) = await kahunaLock.TryExtend(int.Parse(parts[2]));
 
                 if (success)
-                    AnsiConsole.MarkupLine("[cyan]got {0} rev:{1}[/]", Markup.Escape(Encoding.UTF8.GetString(kahunaLock.Owner)), fencingToken);
+                    AnsiConsole.MarkupLine("[cyan]extended {0} rev:{1}[/]\n", Markup.Escape(Encoding.UTF8.GetString(kahunaLock.Owner)), fencingToken);
                 else
-                    AnsiConsole.MarkupLine("[yellow]not acquired[/]");
+                    AnsiConsole.MarkupLine("[yellow]not acquired[/]\n");
             }
             else
             {
-                AnsiConsole.MarkupLine("[yellow]not acquired[/]");
+                AnsiConsole.MarkupLine("[yellow]not acquired[/]\n");
             }
             
             continue;

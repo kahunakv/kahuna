@@ -71,6 +71,47 @@ public sealed class KahunaManager : IKahuna
     }
     
     /// <summary>
+    /// Locates the leader node for the given key and passes a TryLock request to the locker actor for the given lock name.
+    /// </summary>
+    /// <param name="resource"></param>
+    /// <param name="owner"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public Task<(LockResponseType, long)> LocateAndTryLock(string resource, byte[] owner, int expiresMs, LockDurability durability, CancellationToken cancellationToken)
+    {
+        return locks.LocateAndTryLock(resource, owner, expiresMs, durability, cancellationToken);
+    }
+
+    /// <summary>
+    /// Locates the leader node for the given key and passes a TryExtendLock request to the locker actor for the given lock name.
+    /// </summary>
+    /// <param name="resource"></param>
+    /// <param name="owner"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public Task<(LockResponseType, long)> LocateAndTryExtendLock(string resource, byte[] owner, int expiresMs, LockDurability durability, CancellationToken cancellationToken)
+    {
+        return locks.LocateAndTryExtendLock(resource, owner, expiresMs, durability, cancellationToken);
+    }
+
+    /// <summary>
+    /// Locates the leader node for the given key and passes a TryUnlock request to the locker actor for the given lock name.
+    /// </summary>
+    /// <param name="resource"></param>
+    /// <param name="owner"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public Task<LockResponseType> LocateAndTryUnlock(string resource, byte[] owner, LockDurability durability,CancellationToken cancellationToken)
+    {
+        return locks.LocateAndTryUnlock(resource, owner, durability, cancellationToken);
+    }
+    
+    /// <summary>
     /// Passes a TryLock request to the locker actor for the given lock name. 
     /// </summary>
     /// <param name="resource"></param>

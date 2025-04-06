@@ -35,4 +35,43 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         return ((LockResponseType)remoteResponse.Type, remoteResponse.FencingToken);
     }
+
+    public async Task<(LockResponseType, long)> TryExtendLock(string node, string resource, byte[] owner, int expiresMs, LockDurability durability, CancellationToken cancellationToken)
+    {
+        GrpcExtendLockRequest request = new()
+        {
+            Resource = resource,
+            Owner = UnsafeByteOperations.UnsafeWrap(owner),
+            ExpiresMs = expiresMs,
+            Durability = (GrpcLockDurability)durability
+        };
+        
+        GrpcChannel channel = SharedChannels.GetChannel(node, configuration);
+        
+        Locker.LockerClient client = new(channel);
+        
+        GrpcExtendLockResponse? remoteResponse = await client.TryExtendLockAsync(request, cancellationToken: cancellationToken);
+        remoteResponse.ServedFrom = $"https://{node}";
+        
+        return ((LockResponseType)remoteResponse.Type, remoteResponse.FencingToken);
+    }
+
+    public async Task<LockResponseType> TryUnlock(string node, string resource, byte[] owner, LockDurability durability,CancellationToken cancellationToken)
+    {
+        GrpcUnlockRequest request = new()
+        {
+            Resource = resource,
+            Owner = UnsafeByteOperations.UnsafeWrap(owner),           
+            Durability = (GrpcLockDurability)durability
+        };
+        
+        GrpcChannel channel = SharedChannels.GetChannel(node, configuration);
+        
+        Locker.LockerClient client = new(channel);
+        
+        GrpcUnlockResponse? remoteResponse = await client.UnlockAsync(request, cancellationToken: cancellationToken);
+        remoteResponse.ServedFrom = $"https://{node}";
+        
+        return (LockResponseType)remoteResponse.Type;
+    }
 }

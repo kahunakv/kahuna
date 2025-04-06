@@ -17,7 +17,7 @@ public interface IKahunaCommunication
 
      Task<bool> TryUnlock(string url, string resource, byte[] owner, LockDurability durability, CancellationToken cancellationToken);
 
-     Task<(bool, long)> TryExtend(string url, string resource, byte[] owner, int expiryTime, LockDurability durability, CancellationToken cancellationToken);
+     Task<(bool, long)> TryExtendLock(string url, string resource, byte[] owner, int expiryTime, LockDurability durability, CancellationToken cancellationToken);
 
      Task<KahunaLockInfo?> Get(string url, string resource, LockDurability durability, CancellationToken cancellationToken);
 

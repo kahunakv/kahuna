@@ -106,7 +106,7 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to unlock: " + response.Type, (LockResponseType)response.Type);
     }
     
-    public async Task<(bool, long)> TryExtend(string url, string resource, byte[] owner, int expiryTime, LockDurability durability, CancellationToken cancellationToken)
+    public async Task<(bool, long)> TryExtendLock(string url, string resource, byte[] owner, int expiryTime, LockDurability durability, CancellationToken cancellationToken)
     {
         GrpcExtendLockRequest request = new()
         {

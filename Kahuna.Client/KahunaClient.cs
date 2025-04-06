@@ -185,9 +185,9 @@ public class KahunaClient
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<(bool, long)> TryExtend(string resource, byte[] owner, TimeSpan duration, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
+    public async Task<(bool, long)> TryExtendLock(string resource, byte[] owner, TimeSpan duration, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        return await communication.TryExtend(GetRoundRobinUrl(), resource, owner, (int)duration.TotalMilliseconds, durability, cancellationToken).ConfigureAwait(false);
+        return await communication.TryExtendLock(GetRoundRobinUrl(), resource, owner, (int)duration.TotalMilliseconds, durability, cancellationToken).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -199,9 +199,9 @@ public class KahunaClient
     /// <param name="durationMs"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(bool, long)> TryExtend(string resource, byte[] owner, int durationMs, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
+    public async Task<(bool, long)> TryExtendLock(string resource, byte[] owner, int durationMs, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        return await communication.TryExtend(GetRoundRobinUrl(), resource, owner, durationMs, durability, cancellationToken).ConfigureAwait(false);
+        return await communication.TryExtendLock(GetRoundRobinUrl(), resource, owner, durationMs, durability, cancellationToken).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -213,9 +213,9 @@ public class KahunaClient
     /// <param name="durationMs"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(bool, long)> TryExtend(string resource, string owner, int durationMs, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
+    public async Task<(bool, long)> TryExtendLock(string resource, string owner, int durationMs, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        return await communication.TryExtend(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), durationMs, durability, cancellationToken).ConfigureAwait(false);
+        return await communication.TryExtendLock(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), durationMs, durability, cancellationToken).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -227,9 +227,9 @@ public class KahunaClient
     /// <param name="durationMs"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(bool, long)> TryExtend(string resource, string owner, TimeSpan duration, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
+    public async Task<(bool, long)> TryExtendLock(string resource, string owner, TimeSpan duration, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        return await communication.TryExtend(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), (int)duration.TotalMilliseconds, durability, cancellationToken).ConfigureAwait(false);
+        return await communication.TryExtendLock(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), (int)duration.TotalMilliseconds, durability, cancellationToken).ConfigureAwait(false);
     }
     
     /// <summary>

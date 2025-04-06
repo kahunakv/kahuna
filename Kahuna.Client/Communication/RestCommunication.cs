@@ -171,7 +171,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to unlock: " + response.Type, response.Type);
     }
     
-    public async Task<(bool, long)> TryExtend(string url, string resource, byte[] owner, int expiryTime, LockDurability durability, CancellationToken cancellationToken)
+    public async Task<(bool, long)> TryExtendLock(string url, string resource, byte[] owner, int expiryTime, LockDurability durability, CancellationToken cancellationToken)
     {
         KahunaLockRequest request = new()
         {

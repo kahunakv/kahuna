@@ -19,7 +19,7 @@ public class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
             if (locks.TryGetValue(item.Key, out LockContext? lockContext))
             {
                 lockContext.Owner = item.Value;
-                lockContext.Expires = new HLCTimestamp(item.ExpiresPhysical, item.ExpiresCounter);
+                lockContext.Expires = new(item.ExpiresPhysical, item.ExpiresCounter);
                 lockContext.FencingToken = item.Revision;
                 lockContext.State = (LockState)item.State;
             }
