@@ -1,5 +1,6 @@
 
 using System.Text;
+using Kahuna.Server.Locks;
 using Kommander;
 using Kahuna.Shared.Locks;
 using Microsoft.Extensions.Logging;
@@ -52,6 +53,10 @@ public class TestLocks : BaseCluster
         (response, fencingToken) = await kahuna1.LocateAndTryLock(lockName, owner, 10000, durability, TestContext.Current.CancellationToken);
         Assert.Equal(LockResponseType.Locked, response);
         Assert.Equal(1, fencingToken);
+        
+        (response, ReadOnlyLockContext? lockContext) = await kahuna1.LocateAndGetLock(lockName, durability, TestContext.Current.CancellationToken);
+        Assert.Equal(LockResponseType.Got, response);
+        Assert.NotNull(lockContext);
         
         await node1.LeaveCluster(true);
         await node2.LeaveCluster(true);

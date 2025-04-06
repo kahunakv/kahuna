@@ -103,7 +103,7 @@ public static class LocksHandlers
             if (request.ExpiresMs <= 0)
                 return new() { Type = LockResponseType.InvalidInput };
         
-            (LockResponseType response, long fencingToken)  = await locks.LocateAndTryExtendLock(
+            (LockResponseType response, long fencingToken) = await locks.LocateAndTryExtendLock(
                 request.Resource, 
                 request.Owner, 
                 request.ExpiresMs, 
@@ -167,7 +167,7 @@ public static class LocksHandlers
             }*/
         });
 
-        app.MapPost("/v1/locks/try-unlock", async (KahunaLockRequest request, IKahuna locks, IRaft raft, ILogger<IKahuna> logger, CancellationToken cancellationToken) =>
+        app.MapPost("/v1/locks/try-unlock", async (KahunaLockRequest request, IKahuna locks, CancellationToken cancellationToken) =>
         {
             if (string.IsNullOrEmpty(request.Resource))
                 return new() { Type = LockResponseType.InvalidInput };
@@ -175,7 +175,20 @@ public static class LocksHandlers
             if (request.Owner is null)
                 return new() { Type = LockResponseType.InvalidInput };
             
-            int partitionId = raft.GetPartitionKey(request.Resource);
+            LockResponseType response = await locks.LocateAndTryUnlock(
+                request.Resource, 
+                request.Owner, 
+                request.Durability, 
+                cancellationToken
+            );
+
+            return new KahunaLockResponse()
+            {
+                Type = response,
+                ServedFrom = ""
+            };
+            
+            /*int partitionId = raft.GetPartitionKey(request.Resource);
 
             if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             {
@@ -212,15 +225,36 @@ public static class LocksHandlers
                 logger.LogError("{Node}: {Name}\n{Message}", leader, ex.GetType().Name, ex.Message);
                 
                 return new() { Type = LockResponseType.Errored };
-            }
+            }*/
         });
 
         app.MapPost("/v1/locks/get-info", async (KahunaGetLockRequest request, IKahuna locks, IRaft raft, ILogger<IKahuna> logger, CancellationToken cancellationToken) =>
         {
-            if (string.IsNullOrEmpty(request.LockName))
+            if (string.IsNullOrEmpty(request.Resource))
                 return new() { Type = LockResponseType.InvalidInput };
             
-            int partitionId = raft.GetPartitionKey(request.LockName);
+            (LockResponseType type, ReadOnlyLockContext? lockContext) = await locks.LocateAndGetLock(
+                request.Resource, 
+                request.Durability, 
+                cancellationToken
+            );
+        
+            if (type != LockResponseType.Got)
+                return new()
+                {
+                    Type = type
+                };
+
+            return new KahunaGetLockResponse()
+            {
+                Type = type,
+                Owner = lockContext?.Owner,
+                FencingToken = lockContext?.FencingToken ?? 0,
+                Expires = new(lockContext?.Expires.L ?? 0, lockContext?.Expires.C ?? 0),
+                ServedFrom = ""
+            };
+            
+            /*int partitionId = raft.GetPartitionKey(request.LockName);
 
             if (!raft.Joined || await raft.AmILeader(partitionId, CancellationToken.None))
             {
@@ -266,7 +300,7 @@ public static class LocksHandlers
                 logger.LogError("{Node}: {Name}\n{Message}", leader, ex.GetType().Name, ex.Message);
                     
                 return new() { Type = LockResponseType.Errored };
-            }
+            }*/
         });
     }
 }

@@ -1,0 +1,161 @@
+using Kahuna.Server.Persistence;
+using Kahuna.Server.Replication;
+using Kahuna.Server.Replication.Protos;
+using Kahuna.Shared.Locks;
+using Kommander;
+using Kommander.Data;
+using Kommander.Time;
+using Nixie;
+
+namespace Kahuna.Server.Locks;
+
+internal sealed class LockReplicator
+{
+    private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
+
+    private readonly IRaft raft;
+
+    private readonly ILogger<IKahuna> logger;
+
+    public LockReplicator(IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, IRaft raft, ILogger<IKahuna> logger)
+    {
+        this.backgroundWriter = backgroundWriter;
+        this.raft = raft;
+        this.logger = logger;
+    }
+
+    public bool Replicate(RaftLog log)
+    {
+        if (log.LogData is null || log.LogData.Length == 0)
+            return true;
+        
+        try
+        {
+            LockMessage lockMessage = ReplicationSerializer.UnserializeLockMessage(log.LogData);
+
+            HLCTimestamp eventTime = new(lockMessage.TimeLogical, lockMessage.TimeCounter);
+
+            raft.HybridLogicalClock.ReceiveEvent(eventTime);
+
+            switch ((LockRequestType)lockMessage.Type)
+            {
+                case LockRequestType.TryLock:
+                {
+                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
+                        PersistenceRequestType.StoreLock,
+                        [
+                            new(
+                                lockMessage.Resource,
+                                lockMessage.Owner?.ToByteArray(),
+                                lockMessage.FencingToken,
+                                lockMessage.ExpireLogical,
+                                lockMessage.ExpireCounter,
+                                (int)LockState.Locked
+                            )
+                        ]
+                    ));
+                    
+                    if (response is null)
+                        return false;
+
+                    return response.Type == PersistenceResponseType.Success;*/
+                    
+                    backgroundWriter.Send(new(
+                        BackgroundWriteType.QueueStoreLock,
+                        -1,
+                        lockMessage.Resource,
+                        lockMessage.Owner?.ToByteArray(),
+                        lockMessage.FencingToken,
+                        new(lockMessage.ExpireLogical, lockMessage.ExpireCounter),
+                        (int)LockState.Locked
+                    ));
+
+                    return true;
+                }
+
+                case LockRequestType.TryUnlock:
+                {
+                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
+                        PersistenceRequestType.StoreLock,
+                        [
+                            new(
+                                lockMessage.Resource,
+                                lockMessage.Owner?.ToByteArray(),
+                                lockMessage.FencingToken,
+                                lockMessage.ExpireLogical,
+                                lockMessage.ExpireCounter,
+                                (int)LockState.Unlocked
+                            )
+                        ]
+                    ));
+                    
+                    if (response is null)
+                        return false;
+
+                    return response.Type == PersistenceResponseType.Success;*/
+                    
+                    backgroundWriter.Send(new(
+                        BackgroundWriteType.QueueStoreLock,
+                        -1,
+                        lockMessage.Resource,
+                        lockMessage.Owner?.ToByteArray(),
+                        lockMessage.FencingToken,
+                        new(lockMessage.ExpireLogical, lockMessage.ExpireCounter),
+                        (int)LockState.Unlocked
+                    ));
+                    
+                    return true;
+                }
+
+                case LockRequestType.TryExtendLock:
+                {
+                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
+                        PersistenceRequestType.StoreLock,
+                        [
+                            new(
+                                lockMessage.Resource,
+                                lockMessage.Owner?.ToByteArray(),
+                                lockMessage.FencingToken,
+                                lockMessage.ExpireLogical,
+                                lockMessage.ExpireCounter,
+                                (int)LockState.Locked
+                            )
+                        ]
+                    ));
+
+                    if (response is null)
+                        return false;
+
+                    return response.Type == PersistenceResponseType.Success;*/
+                    
+                    backgroundWriter.Send(new(
+                        BackgroundWriteType.QueueStoreLock,
+                        -1,
+                        lockMessage.Resource,
+                        lockMessage.Owner?.ToByteArray(),
+                        lockMessage.FencingToken,
+                        new(lockMessage.ExpireLogical, lockMessage.ExpireCounter),
+                        (int)LockState.Locked
+                    ));
+
+                    return true;
+                }
+
+                case LockRequestType.Get:
+                    break;
+
+                default:
+                    logger.LogError("Unknown replication message type: {Type}", lockMessage.Type);
+                    break;
+            }
+        } 
+        catch (Exception ex)
+        {
+            logger.LogError("{Type}: {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+
+            return false;
+        }
+
+        return true;
+    }
+}

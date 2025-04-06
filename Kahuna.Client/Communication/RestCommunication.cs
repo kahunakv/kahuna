@@ -222,7 +222,7 @@ public class RestCommunication : IKahunaCommunication
     {
         KahunaGetLockRequest request = new()
         {
-            LockName = resource, 
+            Resource = resource, 
             Durability = durability
         };
         

@@ -110,6 +110,18 @@ public sealed class KahunaManager : IKahuna
     {
         return locks.LocateAndTryUnlock(resource, owner, durability, cancellationToken);
     }
+
+    /// <summary>
+    /// Locates the leader node for the given key and passes a TryGetLock request to the locker actor for the given lock name.
+    /// </summary>
+    /// <param name="resource"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public Task<(LockResponseType, ReadOnlyLockContext?)> LocateAndGetLock(string resource, LockDurability durability, CancellationToken cancellationToken)
+    {
+        return locks.LocateAndGetLock(resource, durability, cancellationToken);
+    }
     
     /// <summary>
     /// Passes a TryLock request to the locker actor for the given lock name. 
@@ -138,7 +150,7 @@ public sealed class KahunaManager : IKahuna
     }
 
     /// <summary>
-    /// 
+    /// Passes a TryUnlock request to the locker actor for the given lock name.
     /// </summary>
     /// <param name="resource"></param>
     /// <param name="owner"></param>
@@ -150,7 +162,7 @@ public sealed class KahunaManager : IKahuna
     }
 
     /// <summary>
-    /// Tries Unlocking the lock with the given name and id.
+    /// Returns information about the lock for the given resource.
     /// </summary>
     /// <param name="resource"></param>
     /// <param name="durability"></param>
