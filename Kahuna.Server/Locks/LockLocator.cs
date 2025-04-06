@@ -49,7 +49,7 @@ internal sealed class LockLocator
         if (string.IsNullOrEmpty(resource))
             return (LockResponseType.InvalidInput, 0);
         
-        if (string.IsNullOrEmpty(resource))
+        if (owner.Length == 0)
             return (LockResponseType.InvalidInput, 0);
         
         if (expiresMs <= 0)
@@ -83,7 +83,7 @@ internal sealed class LockLocator
         if (string.IsNullOrEmpty(resource))
             return (LockResponseType.InvalidInput, 0);
         
-        if (string.IsNullOrEmpty(resource))
+        if (owner.Length == 0)
             return (LockResponseType.InvalidInput, 0);
         
         if (expiresMs <= 0)
@@ -118,7 +118,7 @@ internal sealed class LockLocator
             return LockResponseType.InvalidInput;
         
         if (string.IsNullOrEmpty(resource))
-            return LockResponseType.InvalidInput;
+            return LockResponseType.InvalidInput;        
                 
         int partitionId = raft.GetPartitionKey(resource);
 
