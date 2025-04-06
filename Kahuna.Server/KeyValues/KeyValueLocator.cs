@@ -96,31 +96,7 @@ internal sealed class KeyValueLocator
         
         logger.LogDebug("SET-KEYVALUE Redirect {Key} to leader partition {Partition} at {Leader}", key, partitionId, leader);
         
-        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
-
-        GrpcTrySetKeyValueRequest request = new()
-        {
-            TransactionIdPhysical = transactionId.L,
-            TransactionIdCounter = transactionId.C,
-            Key = key,
-            CompareRevision = compareRevision,
-            Flags = (GrpcKeyValueFlags) flags,
-            ExpiresMs = expiresMs,
-            Durability = (GrpcKeyValueDurability) durability,
-        };
-        
-        if (value is not null)
-            request.Value = UnsafeByteOperations.UnsafeWrap(value);
-        
-        if (compareValue is not null)
-            request.CompareValue = UnsafeByteOperations.UnsafeWrap(compareValue);
-        
-        GrpcTrySetKeyValueResponse? remoteResponse = await client.TrySetKeyValueAsync(request, cancellationToken: cancellationToken);
-        remoteResponse.ServedFrom = $"https://{leader}";
-        
-        return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.Revision);
+        return await interNodeCommunication.TrySetKeyValue(leader, transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, cancellationToken);
     }
     
     /// <summary>
@@ -129,41 +105,25 @@ internal sealed class KeyValueLocator
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
     /// <param name="durability"></param>
-    /// <param name="cancelationToken"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, long)> LocateAndTryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, long)> LocateAndTryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(key))
             return (KeyValueResponseType.InvalidInput, 0);
         
         int partitionId = raft.GetPartitionKey(key);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryDeleteKeyValue(transactionId, key, durability);
             
-        string leader = await raft.WaitForLeader(partitionId, cancelationToken);
+        string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
             return (KeyValueResponseType.MustRetry, 0);
         
         logger.LogDebug("DELETE-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
         
-        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
-        
-        GrpcTryDeleteKeyValueRequest request = new()
-        {
-            TransactionIdPhysical = transactionId.L,
-            TransactionIdCounter = transactionId.C,
-            Key = key,
-            Durability = (GrpcKeyValueDurability)durability,
-        };
-        
-        GrpcTryDeleteKeyValueResponse? remoteResponse = await client.TryDeleteKeyValueAsync(request, cancellationToken: cancelationToken);
-        
-        remoteResponse.ServedFrom = $"https://{leader}";
-        
-        return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.Revision);
+        return await interNodeCommunication.TryDeleteKeyValue(leader, transactionId, key, durability, cancellationToken);
     }
     
     /// <summary>

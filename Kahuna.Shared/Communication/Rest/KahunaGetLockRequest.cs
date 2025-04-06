@@ -6,8 +6,8 @@ namespace Kahuna.Shared.Communication.Rest;
 
 public sealed class KahunaGetLockRequest
 {
-    [JsonPropertyName("lockName")]
-    public string? LockName { get; set; }
+    [JsonPropertyName("resource")]
+    public string? Resource { get; set; }
     
     [JsonPropertyName("durability")]
     public LockDurability Durability { get; set; }

@@ -84,7 +84,7 @@ public class LocksService : Locker.LockerBase
                 Type = GrpcLockResponseType.LockResponseTypeInvalidInput
             };
         
-        (LockResponseType response, long fencingToken)  = await locks.LocateAndTryExtendLock(
+        (LockResponseType response, long fencingToken) = await locks.LocateAndTryExtendLock(
             request.Resource, 
             request.Owner?.ToByteArray()!, 
             request.ExpiresMs, 
@@ -114,34 +114,18 @@ public class LocksService : Locker.LockerBase
                 Type = GrpcLockResponseType.LockResponseTypeInvalidInput
             };
         
-        int partitionId = raft.GetPartitionKey(request.Resource);
+        LockResponseType response = await locks.LocateAndTryUnlock(
+            request.Resource, 
+            request.Owner?.ToByteArray()!, 
+            (LockDurability)request.Durability, 
+            context.CancellationToken
+        );
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, context.CancellationToken))
+        return new()
         {
-            LockResponseType response = await locks.TryUnlock(request.Resource, request.Owner?.ToByteArray() ?? [], (LockDurability)request.Durability);
-
-            return new()
-            {
-                Type = (GrpcLockResponseType)response
-            };
-        }
-            
-        string leader = await raft.WaitForLeader(partitionId, context.CancellationToken);
-        if (leader == raft.GetLocalEndpoint())
-            return new()
-            {
-                Type = GrpcLockResponseType.LockResponseTypeMustRetry
-            };
-        
-        logger.LogDebug("UNLOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.Resource, partitionId, leader);
-        
-        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
-        
-        Locker.LockerClient client = new(channel);
-        
-        GrpcUnlockResponse? remoteResponse = await client.UnlockAsync(request);
-        remoteResponse.ServedFrom = $"https://{leader}";
-        return remoteResponse;
+            Type = (GrpcLockResponseType)response,
+            ServedFrom = ""
+        };
     }
     
     public override async Task<GrpcGetLockResponse> GetLock(GrpcGetLockRequest request, ServerCallContext context)
@@ -152,43 +136,26 @@ public class LocksService : Locker.LockerBase
                 Type = GrpcLockResponseType.LockResponseTypeInvalidInput
             };
         
-        int partitionId = raft.GetPartitionKey(request.Resource);
+        (LockResponseType type, ReadOnlyLockContext? lockContext) = await locks.LocateAndGetLock(
+            request.Resource, 
+            (LockDurability)request.Durability, 
+            context.CancellationToken
+        );
+        
+        if (type != LockResponseType.Got)
+            return new()
+            {
+                Type = (GrpcLockResponseType)type
+            };
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, context.CancellationToken))
+        return new()
         {
-            (LockResponseType type, ReadOnlyLockContext? lockContext) = await locks.GetLock(request.Resource, (LockDurability)request.Durability);
-            if (type != LockResponseType.Got)
-                return new()
-                {
-                    Type = (GrpcLockResponseType)type
-                };
-
-            return new()
-            {
-                ServedFrom = "",
-                Type = (GrpcLockResponseType)type,
-                Owner = lockContext?.Owner is not null ? UnsafeByteOperations.UnsafeWrap(lockContext.Owner) : null,
-                FencingToken = lockContext?.FencingToken ?? 0,
-                ExpiresPhysical = lockContext?.Expires.L ?? 0,
-                ExpiresCounter = lockContext?.Expires.C ?? 0,
-            };
-        }
-            
-        string leader = await raft.WaitForLeader(partitionId, context.CancellationToken);
-        if (leader == raft.GetLocalEndpoint())
-            return new()
-            {
-                Type = GrpcLockResponseType.LockResponseTypeMustRetry
-            };
-        
-        logger.LogDebug("GET-LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", request.Resource, partitionId, leader);
-        
-        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
-        
-        Locker.LockerClient client = new(channel);
-        
-        GrpcGetLockResponse? remoteResponse = await client.GetLockAsync(request);
-        remoteResponse.ServedFrom = $"https://{leader}";
-        return remoteResponse;
+            Type = (GrpcLockResponseType)type,
+            Owner = lockContext?.Owner is not null ? UnsafeByteOperations.UnsafeWrap(lockContext.Owner) : null,
+            FencingToken = lockContext?.FencingToken ?? 0,
+            ExpiresPhysical = lockContext?.Expires.L ?? 0,
+            ExpiresCounter = lockContext?.Expires.C ?? 0,
+            ServedFrom = ""
+        };
     }
 }
