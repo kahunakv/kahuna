@@ -45,11 +45,13 @@ internal static class EqualsOperator
                 return new() { Type = KeyValueExpressionType.BoolType, BoolValue = Math.Abs(left.DoubleValue - right.LongValue) < 0.01 };
             
             case KeyValueExpressionType.BytesType when right.Type == KeyValueExpressionType.StringType:
-                byte[] rightBytes = right.StrValue is not null ? Encoding.UTF8.GetBytes(right.StrValue) : [];
+                Span<byte> rightBytes = stackalloc byte[Encoding.UTF8.GetByteCount(right.StrValue ?? "")];
+                Encoding.UTF8.GetBytes(left.StrValue.AsSpan(), rightBytes);
                 return new() { Type = KeyValueExpressionType.BoolType, BoolValue = ((ReadOnlySpan<byte>)left.BytesValue).SequenceEqual(rightBytes) };
             
             case KeyValueExpressionType.StringType when right.Type == KeyValueExpressionType.BytesType:
-                byte[] leftBytes = left.StrValue is not null ? Encoding.UTF8.GetBytes(left.StrValue) : [];
+                Span<byte> leftBytes = stackalloc byte[Encoding.UTF8.GetByteCount(left.StrValue ?? "")];
+                Encoding.UTF8.GetBytes(left.StrValue.AsSpan(), leftBytes);
                 return new() { Type = KeyValueExpressionType.BoolType, BoolValue = ((ReadOnlySpan<byte>)right.BytesValue).SequenceEqual(leftBytes) };
             
             case KeyValueExpressionType.BytesType when right.Type == KeyValueExpressionType.BytesType:

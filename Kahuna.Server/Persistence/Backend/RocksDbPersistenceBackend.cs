@@ -5,12 +5,17 @@ using Kahuna.Persistence.Protos;
 using RocksDbSharp;
 using Google.Protobuf;
 using Kahuna.Server.KeyValues;
+using Microsoft.IO;
 
 namespace Kahuna.Server.Persistence.Backend;
 
 public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
 {
+    private const int MaxMessageSize = 1024;
+    
     private const string CurrentMarker = "~CURRENT";
+    
+    private static readonly RecyclableMemoryStreamManager manager = new();
     
     private static readonly WriteOptions DefaultWriteOptions = new WriteOptions().SetSync(true);
     
@@ -19,8 +24,6 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
     private readonly ColumnFamilyHandle? columnFamilyKeys;
     
     private readonly ColumnFamilyHandle? columnFamilyLocks;
-    
-    private readonly WriteBatchWithIndex keysWriteIndex;
     
     private readonly string path;
     
@@ -48,8 +51,6 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
         
         columnFamilyKeys = db.GetColumnFamily("kv");
         columnFamilyLocks = db.GetColumnFamily("locks");
-
-        keysWriteIndex = new();
     }
 
     public bool StoreLocks(List<PersistenceRequestItem> items)
@@ -110,7 +111,10 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
 
     public LockContext? GetLock(string resource)
     {
-        byte[]? value = db.Get(Encoding.UTF8.GetBytes(resource), cf: columnFamilyLocks);
+        Span<byte> buffer = stackalloc byte[Encoding.UTF8.GetByteCount(resource)];
+        Encoding.UTF8.GetBytes(resource.AsSpan(), buffer);
+        
+        byte[]? value = db.Get(buffer, cf: columnFamilyLocks);
         if (value is null)
             return null;
 
@@ -128,7 +132,12 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
 
     public KeyValueContext? GetKeyValue(string keyName)
     {
-        byte[]? value = db.Get(Encoding.UTF8.GetBytes(keyName + CurrentMarker), cf: columnFamilyKeys);
+        string currentKey = keyName + CurrentMarker;
+        
+        Span<byte> buffer = stackalloc byte[Encoding.UTF8.GetByteCount(currentKey)];
+        Encoding.UTF8.GetBytes(currentKey.AsSpan(), buffer);
+        
+        byte[]? value = db.Get(buffer, cf: columnFamilyKeys);
         if (value is null)
             return null;
 
@@ -147,7 +156,12 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
 
     public KeyValueContext? GetKeyValueRevision(string keyName, long revision)
     {
-        byte[]? value = db.Get(Encoding.UTF8.GetBytes(string.Concat(keyName, "~", revision)), cf: columnFamilyKeys);
+        string keyRevision = string.Concat(keyName, "~", revision);
+        
+        Span<byte> buffer = stackalloc byte[Encoding.UTF8.GetByteCount(keyRevision)];
+        Encoding.UTF8.GetBytes(keyRevision.AsSpan(), buffer);
+        
+        byte[]? value = db.Get(Encoding.UTF8.GetBytes(keyRevision), cf: columnFamilyKeys);
         if (value is null)
             return null;
 
@@ -168,10 +182,11 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
     {
         List<(string, ReadOnlyKeyValueContext)> result = [];
         
-        byte[] prefixBytes = Encoding.UTF8.GetBytes(prefixKeyName);
+        Span<byte> buffer = stackalloc byte[Encoding.UTF8.GetByteCount(prefixKeyName)];
+        Encoding.UTF8.GetBytes(prefixKeyName.AsSpan(), buffer);
         
         using Iterator? iterator = db.NewIterator(cf: columnFamilyKeys);
-        iterator.Seek(prefixBytes);
+        iterator.Seek(buffer);
 
         while (iterator.Valid())
         {
@@ -205,27 +220,53 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
 
     private static byte[] Serialize(RocksDbLockMessage message)
     {
-        using MemoryStream memoryStream = new();
+        if (!message.Owner.IsEmpty && message.Owner.Length >= MaxMessageSize)
+        {
+            using RecyclableMemoryStream recyclableMemoryStream = manager.GetStream();
+            message.WriteTo((Stream)recyclableMemoryStream);
+            return recyclableMemoryStream.ToArray();    
+        }
+        
+        using MemoryStream memoryStream = manager.GetStream();
         message.WriteTo(memoryStream);
         return memoryStream.ToArray();
     }
     
     private static byte[] Serialize(RocksDbKeyValueMessage message)
     {
-        using MemoryStream memoryStream = new();
+        if (!message.Value.IsEmpty && message.Value.Length >= MaxMessageSize)
+        {
+            using RecyclableMemoryStream recyclableMemoryStream = manager.GetStream();
+            message.WriteTo((Stream)recyclableMemoryStream);
+            return recyclableMemoryStream.ToArray();
+        }
+        
+        using MemoryStream memoryStream = manager.GetStream();
         message.WriteTo(memoryStream);
         return memoryStream.ToArray();
     }
 
-    private static RocksDbLockMessage UnserializeLockMessage(byte[] serializedData)
+    private static RocksDbLockMessage UnserializeLockMessage(ReadOnlySpan<byte> serializedData)
     {
-        using MemoryStream memoryStream = new(serializedData);
+        if (serializedData.Length >= MaxMessageSize)
+        {
+            using RecyclableMemoryStream recycledMemoryStream = manager.GetStream(serializedData);
+            return RocksDbLockMessage.Parser.ParseFrom(recycledMemoryStream);
+        }
+        
+        using RecyclableMemoryStream memoryStream = manager.GetStream(serializedData);
         return RocksDbLockMessage.Parser.ParseFrom(memoryStream);
     }
     
-    private static RocksDbKeyValueMessage UnserializeKeyValueMessage(byte[] serializedData)
+    private static RocksDbKeyValueMessage UnserializeKeyValueMessage(ReadOnlySpan<byte> serializedData)
     {
-        using MemoryStream memoryStream = new(serializedData);
+        if (serializedData.Length >= MaxMessageSize)
+        {
+            using RecyclableMemoryStream recycledMemoryStream = manager.GetStream(serializedData);
+            return RocksDbKeyValueMessage.Parser.ParseFrom(recycledMemoryStream);
+        }
+        
+        using MemoryStream memoryStream = manager.GetStream(serializedData);
         return RocksDbKeyValueMessage.Parser.ParseFrom(memoryStream);
     }
 

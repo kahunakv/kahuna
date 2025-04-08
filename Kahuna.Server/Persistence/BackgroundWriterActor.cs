@@ -8,7 +8,8 @@ using Polly.Contrib.WaitAndRetry;
 namespace Kahuna.Server.Persistence;
 
 /*
- * Writes dirty locks/key-values from memory to disk in batches before they are forced out by backend processes.
+ * Writes dirty locks/key-values from memory to disk in batches
+ * before they are forced out by backend processes.
  */
 public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 {
