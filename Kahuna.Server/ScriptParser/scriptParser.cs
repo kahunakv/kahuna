@@ -8,6 +8,8 @@
 
 using System.Collections.Concurrent;
 using System.Text;
+using Kahuna.Server.Configuration;
+using Microsoft.IO;
 
 namespace Kahuna.Server.ScriptParser;
 
@@ -16,12 +18,22 @@ namespace Kahuna.Server.ScriptParser;
 /// </summary>
 internal sealed partial class scriptParser
 {
-    private static readonly ConcurrentDictionary<string, ScriptCacheEntry> _cache = new();
-    
-    private readonly ILogger<IKahuna> logger;
+    private static readonly RecyclableMemoryStreamManager manager = new();
 
-    public scriptParser(ILogger<IKahuna> logger) : base(null)
+    private readonly KahunaConfiguration configuration;
+
+    private readonly ILogger<IKahuna> logger;
+    
+    public static ConcurrentDictionary<string, ScriptCacheEntry> Cache { get; } = new();
+
+    /// <summary>
+    /// Constructor
+    /// </summary>
+    /// <param name="configuration"></param>
+    /// <param name="logger"></param>
+    public scriptParser(KahunaConfiguration configuration, ILogger<IKahuna> logger) : base(null)
     {
+        this.configuration = configuration;
         this.logger = logger;
     }
 
@@ -32,16 +44,19 @@ internal sealed partial class scriptParser
     /// <param name="hash"></param>
     /// <returns></returns>
     /// <exception cref="KahunaScriptException"></exception>
-    public NodeAst Parse(byte[] inputBuffer, string? hash)
+    public NodeAst Parse(ReadOnlySpan<byte> inputBuffer, string? hash)
     {
-        if (!string.IsNullOrEmpty(hash) && _cache.TryGetValue(hash, out ScriptCacheEntry? cached))
+        if (!string.IsNullOrEmpty(hash) && Cache.TryGetValue(hash, out ScriptCacheEntry? cached))
         {
+            cached.Expiration = DateTime.UtcNow + configuration.ScriptCacheExpiration;
+            
             logger.LogDebug("Retrieved script from cache {Hash}", hash);
             
             return cached.Ast;
         }
-
-        MemoryStream stream = new(inputBuffer);
+        
+        using RecyclableMemoryStream stream = manager.GetStream(inputBuffer); 
+        
         scriptScanner scanner = new(stream);
 
         Scanner = scanner;
@@ -57,7 +72,7 @@ internal sealed partial class scriptParser
         {
             logger.LogDebug("Added script to cache {Hash}", hash);
             
-            _cache.TryAdd(hash, new(hash, root, DateTime.UtcNow.AddMinutes(10)));
+            Cache.TryAdd(hash, new(hash, root, DateTime.UtcNow + configuration.ScriptCacheExpiration));
         }
 
         return root;
