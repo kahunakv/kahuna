@@ -121,7 +121,7 @@ internal sealed class KeyValuesManager
     }
     
     /// <summary>
-    /// Receives replication messages once they're committed to the Raft log.
+    /// Receives restore messages that haven't been checkpointed yet.
     /// </summary>
     /// <param name="log"></param>
     /// <returns></returns>

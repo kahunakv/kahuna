@@ -25,9 +25,9 @@ internal sealed class KeyValueTransactionContext
     
     public KeyValueExecutionStatus Status { get; set; } = KeyValueExecutionStatus.Continue;
     
-    public List<(string, KeyValueDurability)>? LocksAcquired { get; set; }
+    public HashSet<(string, KeyValueDurability)>? LocksAcquired { get; set; }
     
-    public List<(string, KeyValueDurability)>? ModifiedKeys { get; set; }
+    public HashSet<(string, KeyValueDurability)>? ModifiedKeys { get; set; }
     
     public List<KeyValueParameter>? Parameters { get; init; }
 

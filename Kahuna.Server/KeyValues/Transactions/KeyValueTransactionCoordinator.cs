@@ -435,7 +435,7 @@ internal sealed class KeyValueTransactionCoordinator
                 return;
             }
             
-            await manager.LocateAndTryReleaseManyExclusiveLocks(context.TransactionId, context.LocksAcquired, CancellationToken.None);
+            await manager.LocateAndTryReleaseManyExclusiveLocks(context.TransactionId, context.LocksAcquired.ToList(), CancellationToken.None);
         }
         catch (Exception ex)
         {
@@ -542,7 +542,7 @@ internal sealed class KeyValueTransactionCoordinator
             return (true, [(key, ticketId, durability)]);
         }
         
-        List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> proposalResponses = await manager.LocateAndTryPrepareManyMutations(context.TransactionId, context.ModifiedKeys, cancellationToken);
+        List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> proposalResponses = await manager.LocateAndTryPrepareManyMutations(context.TransactionId, context.ModifiedKeys.ToList(), cancellationToken);
     
         if (proposalResponses.Any(r => r.Item1 != KeyValueResponseType.Prepared))
         {

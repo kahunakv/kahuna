@@ -113,18 +113,13 @@ public sealed class LockManager
     }
     
     /// <summary>
-    /// Receives replication messages once they're committed to the Raft log.
+    /// Receives restore messages that haven't been checkpointed yet.
     /// </summary>
     /// <param name="log"></param>
     /// <returns></returns>
-    public async Task<bool> OnLogRestored(RaftLog log)
+    public Task<bool> OnLogRestored(RaftLog log)
     {
-        await Task.CompletedTask;
-        
-        if (log.LogType != ReplicationTypes.Locks)
-            return true;
-        
-        return restorer.Restore(log);
+        return Task.FromResult(log.LogType != ReplicationTypes.Locks || restorer.Restore(log));
     }
 
     /// <summary>
@@ -132,14 +127,9 @@ public sealed class LockManager
     /// </summary>
     /// <param name="log"></param>
     /// <returns></returns>
-    public async Task<bool> OnReplicationReceived(RaftLog log)
+    public Task<bool> OnReplicationReceived(RaftLog log)
     {
-        await Task.CompletedTask;
-        
-        if (log.LogType != ReplicationTypes.Locks)
-            return true;
-
-        return replicator.Replicate(log);
+        return Task.FromResult(log.LogType != ReplicationTypes.Locks || replicator.Replicate(log));
     }
 
     /// <summary>
