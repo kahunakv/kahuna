@@ -44,11 +44,13 @@ public abstract class BaseCluster
             HttpsCertificate = "",
             HttpsCertificatePassword = "",
             LocksWorkers = 8,
+            KeyValuesWorkers = 8,
             BackgroundWriterWorkers = 1,
-            Storage = "sqlite",
+            Storage = "memory",
             StoragePath = "/tmp",
             StorageRevision = Guid.NewGuid().ToString(),
             DefaultTransactionTimeout = 5000,
+            ScriptCacheExpiration = TimeSpan.FromMinutes(1),
         };
 
         // ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, ILogger<IKahuna> logger
@@ -92,11 +94,13 @@ public abstract class BaseCluster
             HttpsCertificate = "",
             HttpsCertificatePassword = "",
             LocksWorkers = 8,
+            KeyValuesWorkers = 8,
             BackgroundWriterWorkers = 1,
-            Storage = "sqlite",
+            Storage = "memory",
             StoragePath = "/tmp",
             StorageRevision = Guid.NewGuid().ToString(),
             DefaultTransactionTimeout = 5000,
+            ScriptCacheExpiration = TimeSpan.FromMinutes(1),
         };
 
         // ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, ILogger<IKahuna> logger
@@ -140,11 +144,13 @@ public abstract class BaseCluster
             HttpsCertificate = "",
             HttpsCertificatePassword = "",
             LocksWorkers = 8,
+            KeyValuesWorkers = 8,
             BackgroundWriterWorkers = 1,
             Storage = "memory",
             StoragePath = "/tmp",
             StorageRevision = Guid.NewGuid().ToString(),
             DefaultTransactionTimeout = 5000,
+            ScriptCacheExpiration = TimeSpan.FromMinutes(1),
         };
 
         // ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, ILogger<IKahuna> logger

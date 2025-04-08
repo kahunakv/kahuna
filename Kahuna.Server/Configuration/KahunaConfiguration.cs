@@ -21,5 +21,7 @@ public sealed class KahunaConfiguration
     
     public string StorageRevision { get; set; } = "";
     
+    public TimeSpan ScriptCacheExpiration { get; set; }
+    
     public int DefaultTransactionTimeout { get; set; }
 }

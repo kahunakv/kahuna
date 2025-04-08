@@ -143,8 +143,15 @@ internal sealed class KeyValueReplicator
 
                 case KeyValueRequestType.TryGet:
                 case KeyValueRequestType.TryExists:
+                case KeyValueRequestType.TryAcquireExclusiveLock:
+                case KeyValueRequestType.TryReleaseExclusiveLock:
+                case KeyValueRequestType.TryPrepareMutations:
+                case KeyValueRequestType.TryCommitMutations:
+                case KeyValueRequestType.TryRollbackMutations:
+                case KeyValueRequestType.ScanByPrefix:
+                case KeyValueRequestType.GetByPrefix:
                     break;
-
+                
                 default:
                     logger.LogError("KeyValueReplicator: Unknown replication message type: {Type}", keyValueMessage.Type);
                     break;

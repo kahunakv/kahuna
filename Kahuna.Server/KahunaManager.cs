@@ -13,6 +13,7 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Locks;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
+using Kahuna.Server.ScriptParser;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 
@@ -28,6 +29,8 @@ public sealed class KahunaManager : IKahuna
     private readonly LockManager locks;
 
     private readonly KeyValuesManager keyValues;
+
+    private readonly IActorRef<ScriptParserEvicterActor, ScriptParserEvicterRequest> scriptParserEvicter;
     
     /// <summary>
     /// Constructor
@@ -48,6 +51,8 @@ public sealed class KahunaManager : IKahuna
             persistenceBackend, 
             logger
         );
+
+        scriptParserEvicter = actorSystem.Spawn<ScriptParserEvicterActor, ScriptParserEvicterRequest>("script-parser-evicter", logger);
         
         this.locks = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);
         this.keyValues = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);
@@ -492,6 +497,16 @@ public sealed class KahunaManager : IKahuna
     public Task<(KeyValueResponseType, string)> TryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueDurability durability)
     {
         return keyValues.TryReleaseExclusiveLock(transactionId, key, durability);
+    }
+
+    public Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> TryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueDurability durability)
+    {
+        return keyValues.TryPrepareMutations(transactionId, key, durability);
+    }
+
+    public Task<(KeyValueResponseType, long)> TryCommitMutations(HLCTimestamp transactionId, string key, HLCTimestamp proposalTicketId, KeyValueDurability durability)
+    {
+        return keyValues.TryCommitMutations(transactionId, key, proposalTicketId, durability);
     }
     
     /// <summary>

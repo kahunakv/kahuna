@@ -48,8 +48,6 @@ namespace Kahuna.Server.KeyValues.Transactions;
 /// </summary>
 internal sealed class KeyValueTransactionCoordinator
 {
-    private const int LockMaxDegreeOfParallelism = 5;
-    
     private readonly KeyValuesManager manager;
 
     private readonly KahunaConfiguration configuration;
@@ -85,7 +83,7 @@ internal sealed class KeyValueTransactionCoordinator
     {
         try
         {
-            NodeAst ast = ScriptParserProcessor.Parse(script, hash, logger);
+            NodeAst ast = ScriptParserProcessor.Parse(script, hash, configuration, logger);
 
             switch (ast.nodeType)
             {
@@ -225,7 +223,7 @@ internal sealed class KeyValueTransactionCoordinator
     /// <exception cref="KahunaScriptException"></exception>
     private async Task<KeyValueTransactionResult> ExecuteTransaction(NodeAst ast, NodeAst? optionsAst, List<KeyValueParameter>? parameters, bool autoCommit)
     {
-        bool asyncRelease = true;
+        bool asyncRelease = false;
         int timeout = configuration.DefaultTransactionTimeout;
         KeyValueTransactionLocking locking = KeyValueTransactionLocking.Pessimistic;
         

@@ -12,6 +12,13 @@ public class TestKeyValues
     private const string url = "https://localhost:8082";
 
     private readonly string[] urls = ["https://localhost:8082", "https://localhost:8084", "https://localhost:8086"];
+
+    private readonly ITestOutputHelper outputHelper;
+
+    public TestKeyValues(ITestOutputHelper outputHelper)
+    {
+        this.outputHelper = outputHelper;
+    }
     
     [Theory, CombinatorialData]
     public async Task TestEmptyKey(
@@ -926,7 +933,7 @@ public class TestKeyValues
     public async Task TestSingleSetValueAndGetRevision(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
-        [CombinatorialValues(KeyValueDurability.Persistent)] KeyValueDurability durability
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
         KahunaClient client = GetClientByType(communicationType, clientType);
@@ -967,7 +974,7 @@ public class TestKeyValues
         Assert.Equal(1, result.Revision);
         Assert.Equal("some-value-2", result.ValueAsString());
 
-        await Task.Delay(1000, TestContext.Current.CancellationToken);
+        //await Task.Delay(1000, TestContext.Current.CancellationToken);
         
         result = await client.GetKeyValueRevision(
             keyName, 
@@ -979,6 +986,29 @@ public class TestKeyValues
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         Assert.Equal("some-value", result.ValueAsString());
+        
+        result = await client.SetKeyValue(
+            keyName, 
+            "some-value-3", 
+            0, 
+            flags: KeyValueFlags.Set, 
+            durability: durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
+        Assert.True(result.Success);
+        Assert.Equal(2, result.Revision);
+        
+        result = await client.GetKeyValueRevision(
+            keyName, 
+            1,
+            durability,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
+        Assert.True(result.Success);
+        Assert.Equal(1, result.Revision);
+        Assert.Equal("some-value-2", result.ValueAsString());
     }
     
     [Theory, CombinatorialData]
@@ -1058,8 +1088,31 @@ public class TestKeyValues
         
         (bool success, List<string> items) = await client.GetByPrefix(prefix, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(success);
-        
+
+        foreach (string item in items)
+        {
+            outputHelper.WriteLine(item);
+            Assert.StartsWith(prefix, item);
+        }
+
         Assert.Equal(3, items.Count);
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestGetByPrefixUnknown(
+        [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+        
+        string prefix = GetRandomKeyName();
+        
+        (bool success, List<string> items) = await client.GetByPrefix(prefix, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(success);
+
+        Assert.Empty(items);
     }
     
     private KahunaClient GetClientByType(KahunaCommunicationType communicationType, KahunaClientType clientType)

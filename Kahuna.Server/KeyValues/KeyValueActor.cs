@@ -132,7 +132,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.TryRollbackMutations => await TryRollbackMutations(message),
                 KeyValueRequestType.GetByPrefix => await GetByPrefix(message),
                 KeyValueRequestType.ScanByPrefix => await ScanByPrefix(message),
-                _ => new(KeyValueResponseType.Errored)
+                _ => KeyValueStaticResponses.ErroredResponse
             };
         }
         catch (Exception ex)
@@ -150,7 +150,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
             );
         }
 
-        return new(KeyValueResponseType.Errored);
+        return KeyValueStaticResponses.ErroredResponse;
     }
 
     /// <summary>
@@ -194,7 +194,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     }
 
     /// <summary>
-    /// 
+    /// Scan the actor for keys that match the given prefix
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
@@ -204,7 +204,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     }
     
     /// <summary>
-    /// 
+    /// Returns keys that start with the given prefix in a consistent way
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
