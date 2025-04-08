@@ -39,6 +39,13 @@ internal sealed class TryScanByPrefixHandler : BaseHandler
             items.Add((key, new(keyValueContext.Value, keyValueContext.Revision, keyValueContext.Expires, keyValueContext.State)));
         }
         
+        items.Sort(EnsureLexicographicalOrder);
+        
         return Task.FromResult<KeyValueResponse>(new(KeyValueResponseType.Get, items));
+    }
+    
+    private static int EnsureLexicographicalOrder((string, ReadOnlyKeyValueContext) x, (string, ReadOnlyKeyValueContext) y)
+    {
+        return string.Compare(x.Item1, y.Item1, StringComparison.Ordinal);
     }
 }

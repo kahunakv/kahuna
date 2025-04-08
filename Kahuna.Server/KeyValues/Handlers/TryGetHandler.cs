@@ -30,6 +30,16 @@ internal sealed class TryGetHandler : BaseHandler
         // Revision is provided so we need to fetch a specific revision from storage
         if (message.CompareRevision > -1)
         {
+            if (context is not null && context.Revision == message.CompareRevision)
+                return new(KeyValueResponseType.Get, new ReadOnlyKeyValueContext(context.Value, message.CompareRevision, HLCTimestamp.Zero, KeyValueState.Set));
+            
+            if (context?.Revisions != null)
+            {
+                if (context.Revisions.TryGetValue(message.CompareRevision, out byte[]? revisionValue))
+                    return new(KeyValueResponseType.Get, new ReadOnlyKeyValueContext(revisionValue, message.CompareRevision, HLCTimestamp.Zero, KeyValueState.Set));
+            }
+            
+            // Fallback to disk
             if (message.Durability == KeyValueDurability.Persistent)
             {
                 KeyValueContext? revisionContext = await raft.ReadThreadPool.EnqueueTask(() => PersistenceBackend.GetKeyValueRevision(message.Key, message.CompareRevision));

@@ -176,6 +176,9 @@ internal sealed class TrySetHandler : BaseHandler
                 return KeyValueStaticResponses.ErroredResponse;
         }
         
+        context.Revisions ??= new();
+        context.Revisions.Add(context.Revision, context.Value);
+        
         context.Value = proposal.Value;
         context.Revision = proposal.Revision;
         context.Expires = proposal.Expires;

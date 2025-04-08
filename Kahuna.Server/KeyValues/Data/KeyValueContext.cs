@@ -29,9 +29,14 @@ public sealed class KeyValueContext
     public HLCTimestamp LastUsed { get; set; }
 
     /// <summary>
-    /// 
+    /// Represents a potential write intent to modify the key
     /// </summary>
     public KeyValueWriteIntent? WriteIntent { get; set; }
+    
+    /// <summary>
+    /// Represents recently accessed revisions
+    /// </summary>
+    public Dictionary<long, byte[]?>? Revisions { get; set; }
     
     /// <summary>
     /// Multiversion Concurrency Control (MVCC) values per TransactionId

@@ -44,10 +44,15 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
             if (response is { Type: KeyValueResponseType.Get, Context: not null })
                 items.Add((key, response.Context));
         }
+
+        items.Sort(EnsureLexicographicalOrder);
+        
+        //foreach (var item in items)
+        //    Console.WriteLine($"{item.Item1}");
         
         return new(KeyValueResponseType.Get, items);
     }
-    
+
     private async Task<KeyValueResponse> GetByPrefixPersistent(KeyValueRequest message)
     {
         List<(string, ReadOnlyKeyValueContext)> items = [];
@@ -62,6 +67,11 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
             if (response is { Type: KeyValueResponseType.Get, Context: not null })
                 items.Add((key, response.Context));
         }
+        
+        items.Sort(EnsureLexicographicalOrder);
+        
+        //foreach (var item in items)
+        //    Console.WriteLine($"{item.Item1}");
         
         return new(KeyValueResponseType.Get, items);
     }
@@ -126,4 +136,9 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
 
         return new(KeyValueResponseType.Get, readOnlyKeyValueContext);
     } 
+    
+    private static int EnsureLexicographicalOrder((string, ReadOnlyKeyValueContext) x, (string, ReadOnlyKeyValueContext) y)
+    {
+        return string.Compare(x.Item1, y.Item1, StringComparison.Ordinal);
+    }
 }

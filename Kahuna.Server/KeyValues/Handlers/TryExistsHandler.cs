@@ -29,6 +29,16 @@ internal sealed class TryExistsHandler : BaseHandler
         
         if (message.CompareRevision > -1)
         {
+            if (context is not null && context.Revision == message.CompareRevision)
+                return new(KeyValueResponseType.Exists, new ReadOnlyKeyValueContext(null, message.CompareRevision, HLCTimestamp.Zero, KeyValueState.Set));
+            
+            if (context?.Revisions != null)
+            {
+                if (context.Revisions.ContainsKey(message.CompareRevision))
+                    return new(KeyValueResponseType.Exists, new ReadOnlyKeyValueContext(null, message.CompareRevision, HLCTimestamp.Zero, KeyValueState.Set));
+            }
+            
+            // Fallback to disk
             if (message.Durability == KeyValueDurability.Persistent)
             {
                 KeyValueContext? revisionContext = await raft.ReadThreadPool.EnqueueTask(() => PersistenceBackend.GetKeyValueRevision(message.Key, message.CompareRevision));
