@@ -424,4 +424,39 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.ProposalIndex);
     }
+
+    public async Task TryCommitNodeMutations(string node, HLCTimestamp transactionId, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys, Lock lockSync, List<(KeyValueResponseType type, string key, long, KeyValueDurability durability)> responses, CancellationToken cancellationToken)
+    {
+        GrpcChannel channel = SharedChannels.GetChannel(node, configuration);
+            
+        KeyValuer.KeyValuerClient client = new(channel);
+            
+        GrpcTryCommitManyMutationsRequest request = new()
+        {
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C
+        };
+            
+        request.Items.Add(GetCommitRequestItems(xkeys));
+            
+        GrpcTryCommitManyMutationsResponse? remoteResponse = await client.TryCommitManyMutationsAsync(request, cancellationToken: cancellationToken);
+
+        lock (lockSync)
+        {
+            foreach (GrpcTryCommitManyMutationsResponseItem item in remoteResponse.Items)
+                responses.Add(((KeyValueResponseType)item.Type, item.Key, item.ProposalIndex, (KeyValueDurability)item.Durability));
+        }
+    }
+    
+    private static IEnumerable<GrpcTryCommitManyMutationsRequestItem> GetCommitRequestItems(List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys)
+    {
+        foreach ((string key, HLCTimestamp ticketId, KeyValueDurability durability) key in xkeys)
+            yield return new()
+            {
+                Key = key.key,
+                ProposalTicketPhysical = key.ticketId.L,
+                ProposalTicketCounter = key.ticketId.C,
+                Durability = (GrpcKeyValueDurability)key.durability
+            };
+    }
 }

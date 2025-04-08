@@ -653,6 +653,7 @@ public class GrpcCommunication : IKahunaCommunication
     {
         if (!channels.TryGetValue(url, out GrpcChannel? channel))
         {
+            // @todo fix SSL validation
             SslClientAuthenticationOptions sslOptions = new()
             {
                 RemoteCertificateValidationCallback = delegate { return true; }

@@ -157,20 +157,29 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         }
     }
 
-    public Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> TryPrepareMutations(string node, HLCTimestamp transactionId, string key, KeyValueDurability durability,
-        CancellationToken cancellationToken)
+    public async Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> TryPrepareMutations(string node, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+            return await kahunaNode.TryPrepareMutations(transactionId, key, durability);
+        
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public Task TryPrepareNodeMutations(string node, HLCTimestamp transactionId, List<(string key, KeyValueDurability durability)> xkeys, Lock lockSync, List<(KeyValueResponseType type, HLCTimestamp, string key, KeyValueDurability durability)> responses, CancellationToken cancellationToken)
     {
         throw new NotImplementedException();
     }
 
-    public Task TryPrepareNodeMutations(string node, HLCTimestamp transactionId, List<(string key, KeyValueDurability durability)> xkeys, Lock lockSync, List<(KeyValueResponseType type, HLCTimestamp, string key, KeyValueDurability durability)> responses,
-        CancellationToken cancellationToken)
+    public async Task<(KeyValueResponseType, long)> TryCommitMutations(string node, HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancelationToken)
     {
-        throw new NotImplementedException();
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+            return await kahunaNode.TryCommitMutations(transactionId, key, ticketId, durability);
+        
+        throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    public Task<(KeyValueResponseType, long)> TryCommitMutations(string node, HLCTimestamp transactionId, string key, HLCTimestamp ticketId,
-        KeyValueDurability durability, CancellationToken cancelationToken)
+    public Task TryCommitNodeMutations(string node, HLCTimestamp transactionId, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys, Lock lockSync, List<(KeyValueResponseType type, string key, long, KeyValueDurability durability)> responses,
+        CancellationToken cancellationToken)
     {
         throw new NotImplementedException();
     }
