@@ -1,4 +1,5 @@
 
+using System.Runtime.InteropServices;
 using Google.Protobuf;
 using Grpc.Core;
 using Grpc.Net.Client;
@@ -48,9 +49,16 @@ public class LocksService : Locker.LockerBase
                 Type = GrpcLockResponseType.LockResponseTypeInvalidInput
             };
         
+        byte[] owner;
+
+        if (MemoryMarshal.TryGetArray(request.Owner.Memory, out ArraySegment<byte> segment))
+            owner = segment.Array ?? request.Owner.ToByteArray();
+        else
+            owner = request.Owner.ToByteArray();
+        
         (LockResponseType response, long fencingToken)  = await locks.LocateAndTryLock(
             request.Resource, 
-            request.Owner?.ToByteArray()!, 
+            owner, 
             request.ExpiresMs, 
             (LockDurability) request.Durability, 
             context.CancellationToken
@@ -84,9 +92,16 @@ public class LocksService : Locker.LockerBase
                 Type = GrpcLockResponseType.LockResponseTypeInvalidInput
             };
         
+        byte[] owner;
+
+        if (MemoryMarshal.TryGetArray(request.Owner.Memory, out ArraySegment<byte> segment))
+            owner = segment.Array ?? request.Owner.ToByteArray();
+        else
+            owner = request.Owner.ToByteArray();
+        
         (LockResponseType response, long fencingToken) = await locks.LocateAndTryExtendLock(
             request.Resource, 
-            request.Owner?.ToByteArray()!, 
+            owner, 
             request.ExpiresMs, 
             (LockDurability)request.Durability, 
             context.CancellationToken
@@ -114,9 +129,16 @@ public class LocksService : Locker.LockerBase
                 Type = GrpcLockResponseType.LockResponseTypeInvalidInput
             };
         
+        byte[] owner;
+
+        if (MemoryMarshal.TryGetArray(request.Owner.Memory, out ArraySegment<byte> segment))
+            owner = segment.Array ?? request.Owner.ToByteArray();
+        else
+            owner = request.Owner.ToByteArray();
+        
         LockResponseType response = await locks.LocateAndTryUnlock(
             request.Resource, 
-            request.Owner?.ToByteArray()!, 
+            owner, 
             (LockDurability)request.Durability, 
             context.CancellationToken
         );

@@ -1,4 +1,5 @@
 
+using System.Runtime.InteropServices;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
@@ -61,11 +62,18 @@ internal sealed class LockRestorer
 
                     return response.Type == PersistenceResponseType.Success;*/
                     
+                    byte[] owner;
+
+                    if (MemoryMarshal.TryGetArray(lockMessage.Owner.Memory, out ArraySegment<byte> segment))
+                        owner = segment.Array ?? lockMessage.Owner.ToByteArray();
+                    else
+                        owner = lockMessage.Owner.ToByteArray();
+                    
                     backgroundWriter.Send(new(
                         BackgroundWriteType.QueueStoreLock,
                         -1,
                         lockMessage.Resource,
-                        lockMessage.Owner?.ToByteArray(),
+                        owner,
                         lockMessage.FencingToken,
                         new(lockMessage.ExpireLogical, lockMessage.ExpireCounter),
                         new(lockMessage.LastUsedLogical, lockMessage.LastUsedCounter),
@@ -97,11 +105,18 @@ internal sealed class LockRestorer
 
                     return response.Type == PersistenceResponseType.Success;*/
                     
+                    byte[] owner;
+
+                    if (MemoryMarshal.TryGetArray(lockMessage.Owner.Memory, out ArraySegment<byte> segment))
+                        owner = segment.Array ?? lockMessage.Owner.ToByteArray();
+                    else
+                        owner = lockMessage.Owner.ToByteArray();
+                    
                     backgroundWriter.Send(new(
                         BackgroundWriteType.QueueStoreLock,
                         -1,
                         lockMessage.Resource,
-                        lockMessage.Owner?.ToByteArray(),
+                        owner,
                         lockMessage.FencingToken,
                         new(lockMessage.ExpireLogical, lockMessage.ExpireCounter),
                         new(lockMessage.LastUsedLogical, lockMessage.LastUsedCounter),
@@ -133,11 +148,18 @@ internal sealed class LockRestorer
 
                     return response.Type == PersistenceResponseType.Success;*/
                     
+                    byte[] owner;
+
+                    if (MemoryMarshal.TryGetArray(lockMessage.Owner.Memory, out ArraySegment<byte> segment))
+                        owner = segment.Array ?? lockMessage.Owner.ToByteArray();
+                    else
+                        owner = lockMessage.Owner.ToByteArray();
+                    
                     backgroundWriter.Send(new(
                         BackgroundWriteType.QueueStoreLock,
                         -1,
                         lockMessage.Resource,
-                        lockMessage.Owner?.ToByteArray(),
+                        owner,
                         lockMessage.FencingToken,
                         new(lockMessage.ExpireLogical, lockMessage.ExpireCounter),
                         new(lockMessage.LastUsedLogical, lockMessage.LastUsedCounter),

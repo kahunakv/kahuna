@@ -47,7 +47,7 @@ public class TestKeyValues : BaseCluster
         string keyName = GetRandomLockName();
 
         byte[] valueA = Encoding.UTF8.GetBytes(GetRandomLockName());
-        byte[] ownerB = Encoding.UTF8.GetBytes(GetRandomLockName());
+        // byte[] ownerB = Encoding.UTF8.GetBytes(GetRandomLockName());
 
         (KeyValueResponseType response, long revision, _) = await kahuna1.LocateAndTrySetKeyValue(HLCTimestamp.Zero, keyName, valueA, null, -1, KeyValueFlags.Set, 0, durability, TestContext.Current.CancellationToken);
         Assert.Equal(KeyValueResponseType.Set, response);
