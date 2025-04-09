@@ -108,7 +108,14 @@ internal sealed class TryExistsHandler : BaseHandler
             if (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
                 return KeyValueStaticResponses.DoesNotExistContextResponse;
             
-            readOnlyKeyValueContext = new(null, entry.Revision, entry.Expires, entry.LastUsed, entry.LastModified, entry.State);
+            readOnlyKeyValueContext = new(
+                null, 
+                entry.Revision, 
+                entry.Expires, 
+                entry.LastUsed, 
+                entry.LastModified, 
+                entry.State
+            );
 
             return new(KeyValueResponseType.Exists, readOnlyKeyValueContext);
         }
@@ -124,7 +131,14 @@ internal sealed class TryExistsHandler : BaseHandler
         
         context.LastUsed = currentTime;
 
-        readOnlyKeyValueContext = new(null, context.Revision, context.Expires, context.LastUsed, context.LastModified, context.State);
+        readOnlyKeyValueContext = new(
+            null, 
+            context.Revision, 
+            context.Expires, 
+            context.LastUsed, 
+            context.LastModified, 
+            context.State
+        );
 
         return new(KeyValueResponseType.Exists, readOnlyKeyValueContext);
     }

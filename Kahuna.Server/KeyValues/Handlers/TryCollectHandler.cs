@@ -24,7 +24,7 @@ internal sealed class TryCollectHandler : BaseHandler
 
     public void Execute()
     {
-        if (keyValuesStore.Count < 2000)
+        if (keyValuesStore.Count < 200)
             return;
         
         int number = 0;

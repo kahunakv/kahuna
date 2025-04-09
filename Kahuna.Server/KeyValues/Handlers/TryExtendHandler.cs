@@ -28,7 +28,7 @@ internal sealed class TryExtendHandler : BaseHandler
         if (context is null)
             return KeyValueStaticResponses.DoesNotExistResponse;
         
-        if (context.WriteIntent is not null)
+        if (context.WriteIntent is not null && context.WriteIntent.TransactionId != message.TransactionId)
             return new(KeyValueResponseType.MustRetry, 0);
         
         HLCTimestamp currentTime;

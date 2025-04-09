@@ -115,7 +115,7 @@ public class TestKeyValueScripts : BaseCluster
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
-        await Task.Delay(1000, TestContext.Current.CancellationToken);
+        await Task.Delay(1100, TestContext.Current.CancellationToken);
         
         resp = await kahuna3.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.DoesNotExist, resp.Type);   
@@ -134,7 +134,7 @@ public class TestKeyValueScripts : BaseCluster
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
-        await Task.Delay(1000, TestContext.Current.CancellationToken);
+        await Task.Delay(1100, TestContext.Current.CancellationToken);
         
         resp = await kahuna3.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.DoesNotExist, resp.Type);   
@@ -169,7 +169,7 @@ public class TestKeyValueScripts : BaseCluster
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Extended, resp.Type);        
         
-        await Task.Delay(1000, TestContext.Current.CancellationToken);
+        await Task.Delay(1100, TestContext.Current.CancellationToken);
         
         script = "GET pp";
         
@@ -437,6 +437,181 @@ public class TestKeyValueScripts : BaseCluster
           """;
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("hello world"u8.ToArray(), resp.Value);
+        
+        await node1.LeaveCluster(true);
+        await node2.LeaveCluster(true);
+        await node3.LeaveCluster(true);
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestSetGetSetRollbackScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        // Persistent tests
+        string script = """
+        SET pp 'hello world'                      
+        GET pp
+        """;
+
+        KeyValueTransactionResult resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("hello world"u8.ToArray(), resp.Value);
+        
+        script = """
+         BEGIN 
+          SET pp 'another world'
+          ROLLBACK
+         END
+         """;
+        
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Aborted, resp.Type);
+        
+        script = "GET pp";
+
+        resp = await kahuna3.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("hello world"u8.ToArray(), resp.Value);
+        
+        await node1.LeaveCluster(true);
+        await node2.LeaveCluster(true);
+        await node3.LeaveCluster(true);
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestSetGetDeleteRollbackScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        // Persistent tests
+        string script = """
+        SET pp 'hello world'                      
+        GET pp
+        """;
+
+        KeyValueTransactionResult resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("hello world"u8.ToArray(), resp.Value);
+        
+        script = """
+         BEGIN 
+          DELETE pp
+          ROLLBACK
+         END
+         """;
+        
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Aborted, resp.Type);
+        
+        script = "GET pp";
+
+        resp = await kahuna3.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("hello world"u8.ToArray(), resp.Value);
+        
+        script = """
+         ESET pp 'hello world'                      
+         EGET pp
+         """;
+
+        resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("hello world"u8.ToArray(), resp.Value);
+        
+        script = """
+         BEGIN 
+          EDELETE pp
+          ROLLBACK
+         END
+         """;
+        
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Aborted, resp.Type);
+        
+        script = "EGET pp";
+
+        resp = await kahuna3.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("hello world"u8.ToArray(), resp.Value);
+        
+        await node1.LeaveCluster(true);
+        await node2.LeaveCluster(true);
+        await node3.LeaveCluster(true);
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestSetGetExtendRollbackScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        // Persistent tests
+        string script = """
+        SET pp 'hello world'                      
+        GET pp
+        """;
+
+        KeyValueTransactionResult resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("hello world"u8.ToArray(), resp.Value);
+        
+        script = """
+         BEGIN 
+          EXTEND pp 500
+          ROLLBACK
+         END
+         """;
+        
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Aborted, resp.Type);
+        
+        await Task.Delay(1000, TestContext.Current.CancellationToken);
+        
+        script = "GET pp";
+
+        resp = await kahuna3.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("hello world"u8.ToArray(), resp.Value);
+        
+        script = """
+         ESET pp 'hello world'                      
+         EGET pp
+         """;
+
+        resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("hello world"u8.ToArray(), resp.Value);
+        
+        script = """
+         BEGIN 
+          EEXTEND pp 500
+          ROLLBACK
+         END
+         """;
+        
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Aborted, resp.Type);
+        
+        await Task.Delay(1000, TestContext.Current.CancellationToken);
+        
+        script = "EGET pp";
+
+        resp = await kahuna3.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
