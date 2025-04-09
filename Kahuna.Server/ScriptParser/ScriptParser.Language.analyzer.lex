@@ -67,6 +67,7 @@ TMult           \*
 TMinus          \-
 TDiv            /
 TComma          ,
+TDoubleEquals   ==
 TEquals         =
 TNotEquals      <>
 TNotEquals2     !=
@@ -165,6 +166,8 @@ TAnd            &&
 {TNull} { yylval.l = yyline; return (int)Token.TNULL; }
 
 {TEquals} { yylval.l = yyline; return (int)Token.TEQUALS; }
+
+{TDoubleEquals} { yylval.l = yyline; return (int)Token.TDOUBLEEQUALS; }
 
 {TGreater} { yylval.l = yyline; return (int)Token.TGREATERTHAN; }
 

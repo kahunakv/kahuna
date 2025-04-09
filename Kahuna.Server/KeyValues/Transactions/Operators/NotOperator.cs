@@ -15,14 +15,17 @@ internal static class NotOperator
         switch (left.Type)
         {
             case KeyValueExpressionType.BoolType:
-                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.BoolValue };
+                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = !left.BoolValue };
             
             case KeyValueExpressionType.LongType:
                 return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.LongValue != 0 };
             
             case KeyValueExpressionType.DoubleType:
                 return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.DoubleValue != 0 };
-                
+
+            case KeyValueExpressionType.NullType:
+            case KeyValueExpressionType.StringType:
+            case KeyValueExpressionType.BytesType:
             default:
                 throw new KahunaScriptException("Invalid operands: not(" + left.Type + ")", ast.yyline);
         }

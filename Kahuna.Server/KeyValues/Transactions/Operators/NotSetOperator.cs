@@ -8,9 +8,9 @@ internal static class NotSetOperator
 {
     public static KeyValueExpressionResult Eval(KeyValueTransactionContext context, NodeAst ast)
     {
-        if (context.Result is null)
+        if (context.ModifiedResult is null)
             throw new KahunaScriptException("Invalid NOT SET expression", ast.yyline);
         
-        return new() { Type = KeyValueExpressionType.BoolType, BoolValue = context.Result.Type != KeyValueResponseType.Set };
+        return new() { Type = KeyValueExpressionType.BoolType, BoolValue = context.ModifiedResult.Type != KeyValueResponseType.Set };
     }
 }

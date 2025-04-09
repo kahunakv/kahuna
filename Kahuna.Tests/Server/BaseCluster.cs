@@ -25,7 +25,9 @@ public abstract class BaseCluster
             Host = "localhost",
             Port = 8001,
             InitialPartitions = partitions,
-            CompactEveryOperations = 100,
+            StartElectionTimeout = 1500,
+            EndElectionTimeout = 2500,
+            CompactEveryOperations = 1000,
             CompactNumberEntries = 50
         };
         
@@ -75,7 +77,9 @@ public abstract class BaseCluster
             Host = "localhost",
             Port = 8002,
             InitialPartitions = partitions,
-            CompactEveryOperations = 100,
+            StartElectionTimeout = 1500,
+            EndElectionTimeout = 2500,
+            CompactEveryOperations = 1000,
             CompactNumberEntries = 50
         };
         
@@ -125,7 +129,9 @@ public abstract class BaseCluster
             Host = "localhost",
             Port = 8003,
             InitialPartitions = partitions,
-            CompactEveryOperations = 100,
+            StartElectionTimeout = 1500,
+            EndElectionTimeout = 2500,
+            CompactEveryOperations = 1000,            
             CompactNumberEntries = 50
         };
         
@@ -217,6 +223,15 @@ public abstract class BaseCluster
                 await Task.Delay(100, cancellationToken: TestContext.Current.CancellationToken);
             }
         }
+    }
+
+    protected static async Task LeaveCluster(IRaft raft1, IRaft raft2, IRaft raft3)
+    {
+        await Task.WhenAll(
+            raft1.LeaveCluster(disposeActorSystem: true), 
+            raft2.LeaveCluster(disposeActorSystem: true),
+            raft3.LeaveCluster(disposeActorSystem: true)
+        );
     }
 
     private static IWAL GetWAL(string walStorage, ILogger<IRaft> logger)

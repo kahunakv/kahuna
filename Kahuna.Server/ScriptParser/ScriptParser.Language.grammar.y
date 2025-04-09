@@ -16,14 +16,14 @@
 %left TOR
 %left TAND
 %left TLIKE TILIKE
-%left TEQUALS TNOTEQUALS
+%left TEQUALS TNOTEQUALS TDOUBLEEQUALS
 %left TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS
 %left TADD TMINUS
 %left TMULT TDIV
 %right TNOT
 
 %token LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV LBRACE RBRACE
-%token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS  
+%token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TDOUBLEQUALS
 %token TBEGIN TROLLBACK TCOMMIT TLET TSET TGET TESET TEGET TDELETE TEDELETE TEXTEND TEEXTEND TEXISTS TEEXISTS
 %token TIF TELSE TTHEN TEND TNX TXX TEX TCMP TCMPREV TTHROW TFOUND 
 %token TRETURN TSLEEP TDIGIT TFLOAT TSTRING TIDENTIFIER TESCIDENTIFIER TPLACEHOLDER TTRUE TFALSE TNULL TAT
@@ -153,6 +153,7 @@ throw_stmt : TTHROW expression { $$.n = new(NodeType.Throw, $2.n, null, null, nu
            ;        
          
 expression : expression TEQUALS expression { $$.n = new(NodeType.Equals, $1.n, $3.n, null, null, null, null, null, $1.l); }
+           | expression TDOUBLEEQUALS expression { $$.n = new(NodeType.Equals, $1.n, $3.n, null, null, null, null, null, $1.l); }
            | expression TNOTEQUALS expression { $$.n = new(NodeType.NotEquals, $1.n, $3.n, null, null, null, null, null, $1.l); }
            | expression TLESSTHAN expression { $$.n = new(NodeType.LessThan, $1.n, $3.n, null, null, null, null, null, $1.l); }
            | expression TGREATERTHAN expression { $$.n = new(NodeType.GreaterThan, $1.n, $3.n, null, null, null, null, null, $1.l); }
