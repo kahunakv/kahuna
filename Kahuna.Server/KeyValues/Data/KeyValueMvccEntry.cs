@@ -11,7 +11,7 @@ public sealed class KeyValueMvccEntry
     public byte[]? Value { get; set; }
     
     /// <summary>
-    /// HLC timestamp when the lock will expire
+    /// HLC timestamp when the key/value will expire
     /// </summary>
     public HLCTimestamp Expires { get; set; }
     
@@ -24,6 +24,11 @@ public sealed class KeyValueMvccEntry
     /// HLC timestamp of the last time the key/value was used (read or written)
     /// </summary>
     public HLCTimestamp LastUsed { get; set; }
+    
+    /// <summary>
+    /// HLC timestamp of the last time the key/value was modified
+    /// </summary>
+    public HLCTimestamp LastModified { get; set; }
     
     /// <summary>
     /// State of the key

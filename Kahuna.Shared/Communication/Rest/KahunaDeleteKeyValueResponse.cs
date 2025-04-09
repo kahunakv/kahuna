@@ -15,4 +15,7 @@ public sealed class KahunaDeleteKeyValueResponse
     
     [JsonPropertyName("revision")]
     public long Revision { get; set; }
+    
+    [JsonPropertyName("lastModified")]
+    public HLCTimestamp LastModified { get; set; }
 }

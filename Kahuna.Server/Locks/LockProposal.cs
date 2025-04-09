@@ -15,6 +15,8 @@ public readonly struct LockProposal
     
     public HLCTimestamp LastUsed { get; }
     
+    public HLCTimestamp LastModified { get; }
+    
     public LockState State { get; }
     
     public LockProposal(
@@ -23,6 +25,7 @@ public readonly struct LockProposal
         long fencingToken,
         HLCTimestamp expires, 
         HLCTimestamp lastUsed,
+        HLCTimestamp lastModified,
         LockState state
     )
     {
@@ -31,6 +34,7 @@ public readonly struct LockProposal
         FencingToken = fencingToken;
         Expires = expires;
         LastUsed = lastUsed;
+        LastModified = lastModified;
         State = state;
     }
 }

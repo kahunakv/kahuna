@@ -36,7 +36,7 @@ internal sealed class KeyValueReplicator
         {
             KeyValueMessage keyValueMessage = ReplicationSerializer.UnserializeKeyValueMessage(log.LogData);
 
-            HLCTimestamp eventTime = new(keyValueMessage.TimeLogical, keyValueMessage.TimeCounter);
+            HLCTimestamp eventTime = new(keyValueMessage.TimePhysical, keyValueMessage.TimeCounter);
 
             raft.HybridLogicalClock.ReceiveEvent(eventTime);
 
@@ -68,7 +68,9 @@ internal sealed class KeyValueReplicator
                         keyValueMessage.Key,
                         keyValueMessage.Value?.ToByteArray(),
                         keyValueMessage.Revision,
-                        new(keyValueMessage.ExpireLogical, keyValueMessage.ExpireCounter),
+                        new(keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
+                        new(keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
+                        new(keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
                         (int)KeyValueState.Set
                     ));
 
@@ -101,7 +103,9 @@ internal sealed class KeyValueReplicator
                         keyValueMessage.Key,
                         keyValueMessage.Value?.ToByteArray(),
                         keyValueMessage.Revision,
-                        new(keyValueMessage.ExpireLogical, keyValueMessage.ExpireCounter),
+                        new(keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
+                        new(keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
+                        new(keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
                         (int)KeyValueState.Deleted
                     ));
 
@@ -134,7 +138,9 @@ internal sealed class KeyValueReplicator
                         keyValueMessage.Key,
                         keyValueMessage.Value?.ToByteArray(),
                         keyValueMessage.Revision,
-                        new(keyValueMessage.ExpireLogical, keyValueMessage.ExpireCounter),
+                        new(keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
+                        new(keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
+                        new(keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
                         (int)KeyValueState.Set
                     ));
 

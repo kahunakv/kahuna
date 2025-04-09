@@ -4,7 +4,7 @@ using Kommander.Time;
 namespace Kahuna.Server.Persistence;
 
 /// <summary>
-/// Represents a lock background write request.
+/// Represents a background write request.
 /// </summary>
 public sealed class BackgroundWriteRequest
 {
@@ -20,6 +20,10 @@ public sealed class BackgroundWriteRequest
     
     public HLCTimestamp Expires { get; }
     
+    public HLCTimestamp LastUsed { get; }
+    
+    public HLCTimestamp LastModified { get; }
+    
     public int State { get; }
     
     public BackgroundWriteRequest(
@@ -29,6 +33,8 @@ public sealed class BackgroundWriteRequest
         byte[]? value, 
         long revision, 
         HLCTimestamp expires, 
+        HLCTimestamp lastUsed,
+        HLCTimestamp lastModified,
         int state
     )
     {
@@ -38,6 +44,8 @@ public sealed class BackgroundWriteRequest
         Value = value;
         Revision = revision;
         Expires = expires;
+        LastUsed = lastUsed;
+        LastModified = lastModified;
         State = state;
     }
     

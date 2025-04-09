@@ -2,6 +2,7 @@
 using Kahuna.Shared.KeyValue;
 using Kahuna.Server.ScriptParser;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Transactions.Commands;
 
@@ -34,7 +35,7 @@ internal sealed class ExtendCommand : BaseCommand
         if (ast.rightAst is not null)
             expiresMs = int.Parse(ast.rightAst.yytext!);
         
-        (KeyValueResponseType type, long revision) = await manager.LocateAndTryExtendKeyValue(
+        (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = await manager.LocateAndTryExtendKeyValue(
             context.TransactionId,
             key: keyName,
             expiresMs: expiresMs,
@@ -58,7 +59,15 @@ internal sealed class ExtendCommand : BaseCommand
         context.Result = new()
         {
             Type = type,
-            Revision = revision
+            Revision = revision,
+            LastModified = lastModified,
+        };
+        
+        context.ModifiedResult = new()
+        {
+            Type = type,
+            Revision = revision,
+            LastModified = lastModified
         };
 
         return new()

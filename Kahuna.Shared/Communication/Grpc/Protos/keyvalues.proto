@@ -37,6 +37,8 @@ message GrpcTrySetKeyValueResponse {
   optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
   int64 Revision = 3;
+  int64 LastModifiedPhysical = 4;
+  uint32 LastModifiedCounter = 5;
 }
 
 message GrpcTryExtendKeyValueRequest {
@@ -51,6 +53,8 @@ message GrpcTryExtendKeyValueResponse {
   optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
   int64 Revision = 3;
+  int64 LastModifiedPhysical = 4;
+  uint32 LastModifiedCounter = 5;
 }
 
 message GrpcTryDeleteKeyValueRequest {
@@ -64,6 +68,8 @@ message GrpcTryDeleteKeyValueResponse {
   optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
   int64 Revision = 3;
+  int64 LastModifiedPhysical = 4;
+  uint32 LastModifiedCounter = 5;
 }
 
 message GrpcTryGetKeyValueRequest {
@@ -81,7 +87,11 @@ message GrpcTryGetKeyValueResponse {
   int64 Revision = 4;
   int64 ExpiresPhysical = 5;
   uint32 ExpiresCounter = 6;
-  GrpcKeyValueState State = 7;
+  int64 LastUsedPhysical = 7;
+  uint32 LastUsedCounter = 8;
+  int64 LastModifiedPhysical = 9;
+  uint32 LastModifiedCounter = 10;
+  GrpcKeyValueState State = 11;
 }
 
 message GrpcTryExistsKeyValueRequest {
@@ -98,7 +108,11 @@ message GrpcTryExistsKeyValueResponse {
   int64 Revision = 3;
   int64 ExpiresPhysical = 4;
   uint32 ExpiresCounter = 5;
-  GrpcKeyValueState State = 6;
+  int64 LastUsedPhysical = 6;
+  uint32 LastUsedCounter = 7;
+  int64 LastModifiedPhysical = 8;
+  uint32 LastModifiedCounter = 9;
+  GrpcKeyValueState State = 10;
 }
 
 message GrpcTryExecuteTransactionRequest {
@@ -119,7 +133,9 @@ message GrpcTryExecuteTransactionResponse {
   int64 Revision = 4;
   int64 ExpiresPhysical = 5;
   uint32 ExpiresCounter = 6;
-  optional string Reason = 7;
+  int64 LastModifiedPhysical = 7;
+  uint32 LastModifiedCounter = 8;
+  optional string Reason = 9;
 }
 
 message GrpcTryAcquireExclusiveLockRequest {
@@ -195,8 +211,10 @@ message GrpcTryReleaseExclusiveLockResponse {
 message GrpcTryPrepareMutationsRequest {
   int64 TransactionIdPhysical = 1;
   uint32 TransactionIdCounter = 2;
-  string Key = 3;
-  GrpcKeyValueDurability Durability = 4;
+  int64 CommitIdPhysical = 3;
+  uint32 CommitIdCounter = 4;
+  string Key = 5;
+  GrpcKeyValueDurability Durability = 6;
 }
 
 message GrpcTryPrepareMutationsResponse {
@@ -209,7 +227,9 @@ message GrpcTryPrepareMutationsResponse {
 message GrpcTryPrepareManyMutationsRequest {
   int64 TransactionIdPhysical = 1;
   uint32 TransactionIdCounter = 2;
-  repeated GrpcTryPrepareManyMutationsRequestItem Items = 3;
+  int64 CommitIdPhysical = 3;
+  uint32 CommitIdCounter = 4;
+  repeated GrpcTryPrepareManyMutationsRequestItem Items = 5;
 }
 
 message GrpcTryPrepareManyMutationsRequestItem {
@@ -321,9 +341,13 @@ message GrpcKeyValueByPrefixItemResponse {
   string Key = 1;
   optional bytes Value = 2;
   int64 Revision = 3;
-  int64 ExpiresPhysical = 4;
-  uint32 ExpiresCounter = 5;
-  GrpcKeyValueState State = 6;
+  int64 ExpiresPhysical = 5;
+  uint32 ExpiresCounter = 6;
+  int64 LastUsedPhysical = 7;
+  uint32 LastUsedCounter = 8;
+  int64 LastModifiedPhysical = 9;
+  uint32 LastModifiedCounter = 10;
+  GrpcKeyValueState State = 11;
 }
 
 enum GrpcKeyValueFlags {

@@ -36,7 +36,7 @@ internal sealed class KeyValueRestorer
         {
             KeyValueMessage keyValueMessage = ReplicationSerializer.UnserializeKeyValueMessage(log.LogData);
 
-            HLCTimestamp eventTime = new(keyValueMessage.TimeLogical, keyValueMessage.TimeCounter);
+            HLCTimestamp eventTime = new(keyValueMessage.TimePhysical, keyValueMessage.TimeCounter);
 
             raft.HybridLogicalClock.ReceiveEvent(eventTime);
 
@@ -68,7 +68,9 @@ internal sealed class KeyValueRestorer
                         keyValueMessage.Key,
                         keyValueMessage.Value?.ToByteArray(),
                         keyValueMessage.Revision,
-                        new(keyValueMessage.ExpireLogical, keyValueMessage.ExpireCounter),
+                        new(keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
+                        new(keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
+                        new(keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
                         (int)KeyValueState.Set
                     ));
 
@@ -101,7 +103,9 @@ internal sealed class KeyValueRestorer
                         keyValueMessage.Key,
                         keyValueMessage.Value?.ToByteArray(),
                         keyValueMessage.Revision,
-                        new(keyValueMessage.ExpireLogical, keyValueMessage.ExpireCounter),
+                        new(keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
+                        new(keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
+                        new(keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
                         (int)KeyValueState.Deleted
                     ));
 
@@ -134,7 +138,9 @@ internal sealed class KeyValueRestorer
                         keyValueMessage.Key,
                         keyValueMessage.Value?.ToByteArray(),
                         keyValueMessage.Revision,
-                        new(keyValueMessage.ExpireLogical, keyValueMessage.ExpireCounter),
+                        new(keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
+                        new(keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
+                        new(keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
                         (int)KeyValueState.Set
                     ));
 
@@ -143,8 +149,15 @@ internal sealed class KeyValueRestorer
 
                 case KeyValueRequestType.TryGet:
                 case KeyValueRequestType.TryExists:
+                case KeyValueRequestType.TryAcquireExclusiveLock:
+                case KeyValueRequestType.TryReleaseExclusiveLock:
+                case KeyValueRequestType.TryPrepareMutations:
+                case KeyValueRequestType.TryCommitMutations:
+                case KeyValueRequestType.TryRollbackMutations:
+                case KeyValueRequestType.ScanByPrefix:
+                case KeyValueRequestType.GetByPrefix:
                     break;
-
+                
                 default:
                     logger.LogError("KeyValueRestorer: Unknown restore message type: {Type}", keyValueMessage.Type);
                     break;

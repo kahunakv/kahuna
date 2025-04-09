@@ -16,7 +16,14 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         this.nodes = nodes;
     }
     
-    public async Task<(LockResponseType, long)> TryLock(string node, string resource, byte[] owner, int expiresMs, LockDurability durability, CancellationToken cancellationToken)
+    public async Task<(LockResponseType, long)> TryLock(
+        string node, 
+        string resource, 
+        byte[] owner, 
+        int expiresMs, 
+        LockDurability durability, 
+        CancellationToken cancellationToken
+    )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
             return await kahunaNode.TryLock(resource, owner, expiresMs, durability);
@@ -24,7 +31,14 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    public async Task<(LockResponseType, long)> TryExtendLock(string node, string resource, byte[] owner, int expiresMs, LockDurability durability, CancellationToken cancellationToken)
+    public async Task<(LockResponseType, long)> TryExtendLock(
+        string node, 
+        string resource, 
+        byte[] owner, 
+        int expiresMs, 
+        LockDurability durability, 
+        CancellationToken cancellationToken
+    )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
             return await kahunaNode.TryExtendLock(resource, owner, expiresMs, durability);
@@ -32,7 +46,13 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
     
-    public async Task<LockResponseType> TryUnlock(string node, string resource, byte[] owner, LockDurability durability, CancellationToken cancellationToken)
+    public async Task<LockResponseType> TryUnlock(
+        string node, 
+        string resource, 
+        byte[] owner, 
+        LockDurability durability, 
+        CancellationToken cancellationToken
+    )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
             return await kahunaNode.TryUnlock(resource, owner, durability);
@@ -40,7 +60,12 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
     
-    public async Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(string node, string resource, LockDurability durability, CancellationToken cancellationToken)
+    public async Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(
+        string node, 
+        string resource, 
+        LockDurability durability, 
+        CancellationToken cancellationToken
+    )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
             return await kahunaNode.GetLock(resource, durability);
@@ -48,7 +73,18 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    public async Task<(KeyValueResponseType, long)> TrySetKeyValue(string node, HLCTimestamp transactionId, string key, byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValue(
+        string node, 
+        HLCTimestamp transactionId,
+        string key, 
+        byte[]? value, 
+        byte[]? compareValue, 
+        long compareRevision, 
+        KeyValueFlags flags, 
+        int expiresMs, 
+        KeyValueDurability durability, 
+        CancellationToken cancellationToken
+    )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
             return await kahunaNode.TrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability);
@@ -56,7 +92,13 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    public async Task<(KeyValueResponseType, long)> TryDeleteKeyValue(string node, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, long, HLCTimestamp)> TryDeleteKeyValue(
+        string node, 
+        HLCTimestamp transactionId, 
+        string key, 
+        KeyValueDurability durability, 
+        CancellationToken cancelationToken
+    )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
             return await kahunaNode.TryDeleteKeyValue(transactionId, key, durability);
@@ -64,7 +106,14 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    public async Task<(KeyValueResponseType, long)> TryExtendKeyValue(string node, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, long, HLCTimestamp)> TryExtendKeyValue(
+        string node, 
+        HLCTimestamp transactionId, 
+        string key, 
+        int expiresMs, 
+        KeyValueDurability durability, 
+        CancellationToken cancelationToken
+    )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
             return await kahunaNode.TryExtendKeyValue(transactionId, key, expiresMs, durability);
@@ -72,7 +121,14 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryGetValue(string node, HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryGetValue(
+        string node, 
+        HLCTimestamp transactionId, 
+        string key, 
+        long revision, 
+        KeyValueDurability durability, 
+        CancellationToken cancellationToken
+    )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
             return await kahunaNode.TryGetValue(transactionId, key, revision, durability);
@@ -80,7 +136,14 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryExistsValue(string node, HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryExistsValue(
+        string node, 
+        HLCTimestamp transactionId, 
+        string key, 
+        long revision, 
+        KeyValueDurability durability, 
+        CancellationToken cancellationToken
+    )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
             return await kahunaNode.TryExistsValue(transactionId, key, revision, durability);
@@ -88,7 +151,14 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    public async Task<(KeyValueResponseType, string, KeyValueDurability)> TryAcquireExclusiveLock(string node, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, string, KeyValueDurability)> TryAcquireExclusiveLock(
+        string node, 
+        HLCTimestamp transactionId, 
+        string key, 
+        int expiresMs, 
+        KeyValueDurability durability, 
+        CancellationToken cancelationToken
+    )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
             return await kahunaNode.TryAcquireExclusiveLock(transactionId, key, expiresMs, durability);
@@ -96,7 +166,14 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    public async Task TryAcquireNodeExclusiveLocks(string node, HLCTimestamp transactionId, List<(string key, int expiresMs, KeyValueDurability durability)> xkeys, Lock lockSync, List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses, CancellationToken cancelationToken)
+    public async Task TryAcquireNodeExclusiveLocks(
+        string node, 
+        HLCTimestamp transactionId, 
+        List<(string key, int expiresMs, KeyValueDurability durability)> xkeys, 
+        Lock lockSync, 
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses, 
+        CancellationToken cancelationToken
+    )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
         {
@@ -112,7 +189,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    private static void AddToAcquireLockResponses(ConcurrentBag<(KeyValueResponseType type, string key, KeyValueDurability durability)> bag, Lock lockSync, List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses)
+    private static void AddToAcquireLockResponses(
+        ConcurrentBag<(KeyValueResponseType type, string key, KeyValueDurability durability)> bag, 
+        Lock lockSync, 
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses
+    )
     {
         foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) in bag)
         {
@@ -121,7 +202,13 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         }
     }
 
-    public async Task<(KeyValueResponseType, string)> TryReleaseExclusiveLock(string node, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, string)> TryReleaseExclusiveLock(
+        string node, 
+        HLCTimestamp transactionId, 
+        string key, 
+        KeyValueDurability durability,
+        CancellationToken cancelationToken
+    )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
             return await kahunaNode.TryReleaseExclusiveLock(transactionId, key, durability);
@@ -129,7 +216,14 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    public async Task TryReleaseNodeExclusiveLocks(string node, HLCTimestamp transactionId, List<(string key, KeyValueDurability durability)> xkeys, Lock lockSync, List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses, CancellationToken cancellationToken)
+    public async Task TryReleaseNodeExclusiveLocks(
+        string node, 
+        HLCTimestamp transactionId, 
+        List<(string key, KeyValueDurability durability)> xkeys, 
+        Lock lockSync, 
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses, 
+        CancellationToken cancellationToken
+    )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
         {
@@ -157,20 +251,56 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         }
     }
 
-    public async Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> TryPrepareMutations(string node, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> TryPrepareMutations(
+        string node, 
+        HLCTimestamp transactionId, 
+        HLCTimestamp commitId,
+        string key, 
+        KeyValueDurability durability, 
+        CancellationToken cancellationToken
+    )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.TryPrepareMutations(transactionId, key, durability);
+            return await kahunaNode.TryPrepareMutations(transactionId, commitId, key, durability);
         
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    public Task TryPrepareNodeMutations(string node, HLCTimestamp transactionId, List<(string key, KeyValueDurability durability)> xkeys, Lock lockSync, List<(KeyValueResponseType type, HLCTimestamp, string key, KeyValueDurability durability)> responses, CancellationToken cancellationToken)
+    public async Task TryPrepareNodeMutations(
+        string node, 
+        HLCTimestamp transactionId,
+        HLCTimestamp commitId,
+        List<(string key, KeyValueDurability durability)> xkeys, 
+        Lock lockSync, 
+        List<(KeyValueResponseType type, HLCTimestamp, string key, KeyValueDurability durability)> responses, 
+        CancellationToken cancellationToken
+    )
     {
-        throw new NotImplementedException();
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            ConcurrentBag<(KeyValueResponseType type, HLCTimestamp proposalId, string key, KeyValueDurability durability)> bag = [];
+
+            foreach ((string key, KeyValueDurability durability) in xkeys)
+            {
+                (KeyValueResponseType type, HLCTimestamp proposalId, string _, KeyValueDurability _) = await kahunaNode.TryPrepareMutations(transactionId, commitId, key, durability);
+                bag.Add((type, proposalId, key, durability));
+            }
+
+            //AddToPrepareMutationsResponses(bag, lockSync, responses);
+            return;
+        }
+        
+        throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    public async Task<(KeyValueResponseType, long)> TryCommitMutations(string node, HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, long)> TryCommitMutations(
+        string node, 
+        HLCTimestamp transactionId, 
+        string key, 
+        HLCTimestamp ticketId, 
+        KeyValueDurability durability, 
+        CancellationToken cancelationToken
+    )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
             return await kahunaNode.TryCommitMutations(transactionId, key, ticketId, durability);
@@ -178,8 +308,14 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    public Task TryCommitNodeMutations(string node, HLCTimestamp transactionId, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys, Lock lockSync, List<(KeyValueResponseType type, string key, long, KeyValueDurability durability)> responses,
-        CancellationToken cancellationToken)
+    public Task TryCommitNodeMutations(
+        string node, 
+        HLCTimestamp transactionId, 
+        List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys, 
+        Lock lockSync, 
+        List<(KeyValueResponseType type, string key, long, KeyValueDurability durability)> responses,
+        CancellationToken cancellationToken
+    )
     {
         throw new NotImplementedException();
     }

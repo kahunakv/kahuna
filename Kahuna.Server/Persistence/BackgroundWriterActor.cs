@@ -126,6 +126,10 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                     lockRequest.Revision,
                     lockRequest.Expires.L,
                     lockRequest.Expires.C,
+                    lockRequest.LastUsed.L,
+                    lockRequest.LastUsed.C,
+                    lockRequest.LastModified.L,
+                    lockRequest.LastModified.C,
                     lockRequest.State
                 ));
 
@@ -194,6 +198,10 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                     keyValueRequest.Revision,
                     keyValueRequest.Expires.L,
                     keyValueRequest.Expires.C,
+                    keyValueRequest.LastUsed.L,
+                    keyValueRequest.LastUsed.C,
+                    keyValueRequest.LastModified.L,
+                    keyValueRequest.LastModified.C,
                     keyValueRequest.State
                 ));
                 

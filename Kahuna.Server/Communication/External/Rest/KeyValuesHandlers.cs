@@ -7,6 +7,7 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Kommander;
+using Kommander.Time;
 
 namespace Kahuna.Communication.External.Rest;
 
@@ -25,7 +26,7 @@ public static class KeyValuesHandlers
             if (request.ExpiresMs < 0)
                 return new() { Type = KeyValueResponseType.InvalidInput };
             
-            (KeyValueResponseType response, long revision) = await keyValues.LocateAndTrySetKeyValue(
+            (KeyValueResponseType response, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTrySetKeyValue(
                 request.TransactionId,
                 request.Key, 
                 request.Value,
@@ -40,37 +41,53 @@ public static class KeyValuesHandlers
             return new KahunaSetKeyValueResponse
             {
                 Type = response,
-                Revision = revision
+                Revision = revision,
+                LastModified = lastModified,
             };
         });
 
-        app.MapPost("/v1/kv/try-extend", async (KahunaExtendKeyValueRequest request, IKahuna keyValues, IRaft raft, ILogger<IKahuna> logger, CancellationToken cancellationToken) =>
+        app.MapPost("/v1/kv/try-extend", async (KahunaExtendKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
             if (string.IsNullOrEmpty(request.Key))
                 return new() { Type = KeyValueResponseType.InvalidInput };
             
             if (request.ExpiresMs <= 0)
                 return new() { Type = KeyValueResponseType.InvalidInput };
-            
-            int partitionId = raft.GetPartitionKey(request.Key);
-            
+
+            (KeyValueResponseType response, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTryExtendKeyValue(
+                request.TransactionId, 
+                request.Key,
+                request.ExpiresMs,
+                request.Durability,
+                cancellationToken
+            );
+
+            return new KahunaExtendKeyValueResponse
+            {
+                Type = response,
+                Revision = revision,
+                LastModified = lastModified
+            };
+
+            /*int partitionId = raft.GetPartitionKey(request.Key);
+
             if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             {
-                (KeyValueResponseType response, long revision) = await keyValues.TryExtendKeyValue(request.TransactionId, request.Key, request.ExpiresMs, request.Durability);
+                (KeyValueResponseType response, long revision, HLCTimestamp lastModified) = await keyValues.TryExtendKeyValue(request.TransactionId, request.Key, request.ExpiresMs, request.Durability);
 
-                return new() { Type = response, Revision = revision };    
+                return new() { Type = response, Revision = revision, LastModified = lastModified };
             }
-            
+
             string leader = await raft.WaitForLeader(partitionId, cancellationToken);
             if (leader == raft.GetLocalEndpoint())
                 return new() { Type = KeyValueResponseType.MustRetry };
-            
+
             logger.LogDebug("EXTEND-KEYVALUE Redirect {LockName} to leader partition {Partition} at {Leader}", request.Key, partitionId, leader);
-            
+
             try
             {
                 string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaExtendKeyValueRequest);
-                
+
                 KahunaExtendKeyValueResponse? response = await $"https://{leader}"
                     .AppendPathSegments("v1/kv/try-extend")
                     .WithHeader("Accept", "application/json")
@@ -78,7 +95,7 @@ public static class KeyValuesHandlers
                     .WithSettings(o => o.HttpVersion = "2.0")
                     .PostStringAsync(payload, cancellationToken: cancellationToken)
                     .ReceiveJson<KahunaExtendKeyValueResponse>();
-                
+
                 if (response is not null)
                     response.ServedFrom = $"https://{leader}";
 
@@ -87,17 +104,31 @@ public static class KeyValuesHandlers
             catch (Exception ex)
             {
                 logger.LogError("{Node}: {Name}\n{Message}", leader, ex.GetType().Name, ex.Message);
-                
+
                 return new() { Type = KeyValueResponseType.Errored };
-            }
+            }*/
         });
 
-        app.MapPost("/v1/kv/try-delete", async (KahunaDeleteKeyValueRequest request, IKahuna keyValues, IRaft raft, ILogger<IKahuna> logger, CancellationToken cancellationToken) =>
+        app.MapPost("/v1/kv/try-delete", async (KahunaDeleteKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
             if (string.IsNullOrEmpty(request.Key))
                 return new() { Type = KeyValueResponseType.InvalidInput };
             
-            int partitionId = raft.GetPartitionKey(request.Key);
+            (KeyValueResponseType response, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTryDeleteKeyValue(
+                request.TransactionId, 
+                request.Key,
+                request.Durability,
+                cancellationToken
+            );
+
+            return new KahunaDeleteKeyValueResponse
+            {
+                Type = response,
+                Revision = revision,
+                LastModified = lastModified
+            };
+            
+            /*int partitionId = raft.GetPartitionKey(request.Key);
 
             if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             {
@@ -134,7 +165,7 @@ public static class KeyValuesHandlers
                 logger.LogError("{Node}: {Name}\n{Message}", leader, ex.GetType().Name, ex.Message);
                 
                 return new() { Type = KeyValueResponseType.Errored };
-            }
+            }*/
         });
 
         app.MapPost("/v1/kv/try-get", async (KahunaGetKeyValueRequest request, IKahuna keyValues, IRaft raft, ILogger<IKahuna> logger, CancellationToken cancellationToken) =>
@@ -179,7 +210,7 @@ public static class KeyValuesHandlers
             };
         });
         
-        app.MapPost("/v1/kv/try-exists", async (KahunaExistsKeyValueRequest request, IKahuna keyValues, IRaft raft, ILogger<IKahuna> logger, CancellationToken cancellationToken) =>
+        app.MapPost("/v1/kv/try-exists", async (KahunaExistsKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
             if (string.IsNullOrEmpty(request.Key))
                 return new()

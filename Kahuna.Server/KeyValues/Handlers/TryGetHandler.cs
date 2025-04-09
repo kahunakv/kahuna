@@ -31,12 +31,26 @@ internal sealed class TryGetHandler : BaseHandler
         if (message.CompareRevision > -1)
         {
             if (context is not null && context.Revision == message.CompareRevision)
-                return new(KeyValueResponseType.Get, new ReadOnlyKeyValueContext(context.Value, message.CompareRevision, HLCTimestamp.Zero, KeyValueState.Set));
+                return new(KeyValueResponseType.Get, new ReadOnlyKeyValueContext(
+                    context.Value, 
+                    message.CompareRevision, 
+                    HLCTimestamp.Zero,
+                    HLCTimestamp.Zero,
+                    HLCTimestamp.Zero,
+                    KeyValueState.Set
+                ));
             
             if (context?.Revisions != null)
             {
                 if (context.Revisions.TryGetValue(message.CompareRevision, out byte[]? revisionValue))
-                    return new(KeyValueResponseType.Get, new ReadOnlyKeyValueContext(revisionValue, message.CompareRevision, HLCTimestamp.Zero, KeyValueState.Set));
+                    return new(KeyValueResponseType.Get, new ReadOnlyKeyValueContext(
+                        revisionValue, 
+                        message.CompareRevision, 
+                        HLCTimestamp.Zero,
+                        HLCTimestamp.Zero,
+                        HLCTimestamp.Zero,
+                        KeyValueState.Set
+                    ));
             }
             
             // Fallback to disk
@@ -46,7 +60,14 @@ internal sealed class TryGetHandler : BaseHandler
                 if (revisionContext is null)
                     return KeyValueStaticResponses.DoesNotExistContextResponse;
 
-                return new(KeyValueResponseType.Get, new ReadOnlyKeyValueContext(revisionContext.Value, message.CompareRevision, HLCTimestamp.Zero, KeyValueState.Set));
+                return new(KeyValueResponseType.Get, new ReadOnlyKeyValueContext(
+                    revisionContext.Value, 
+                    message.CompareRevision, 
+                    HLCTimestamp.Zero,
+                    HLCTimestamp.Zero,
+                    HLCTimestamp.Zero,
+                    KeyValueState.Set
+                ));
             }
             
             return KeyValueStaticResponses.DoesNotExistContextResponse; 
@@ -76,6 +97,7 @@ internal sealed class TryGetHandler : BaseHandler
                     Revision = context.Revision, 
                     Expires = context.Expires, 
                     LastUsed = context.LastUsed,
+                    LastModified = context.LastModified,
                     State = context.State
                 };
 
@@ -88,7 +110,7 @@ internal sealed class TryGetHandler : BaseHandler
             if (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
                 return KeyValueStaticResponses.DoesNotExistContextResponse;
             
-            readOnlyKeyValueContext = new(entry.Value, entry.Revision, entry.Expires, entry.State);
+            readOnlyKeyValueContext = new(entry.Value, entry.Revision, entry.Expires, entry.LastUsed, entry.LastModified, entry.State);
 
             return new(KeyValueResponseType.Get, readOnlyKeyValueContext);
         }
@@ -104,7 +126,14 @@ internal sealed class TryGetHandler : BaseHandler
         
         context.LastUsed = currentTime;
 
-        readOnlyKeyValueContext = new(context.Value, context.Revision, context.Expires, context.State);
+        readOnlyKeyValueContext = new(
+            context.Value, 
+            context.Revision, 
+            context.Expires, 
+            context.LastUsed, 
+            context.LastModified, 
+            context.State
+        );
 
         return new(KeyValueResponseType.Get, readOnlyKeyValueContext);
     }

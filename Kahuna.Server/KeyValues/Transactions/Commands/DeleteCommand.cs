@@ -2,6 +2,7 @@
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.ScriptParser;
 using Kahuna.Shared.KeyValue;
+using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Transactions.Commands;
 
@@ -29,7 +30,7 @@ internal sealed class DeleteCommand : BaseCommand
             context.LocksAcquired.Add((keyName, durability));
         }
 
-        (KeyValueResponseType type, long revision) = await manager.LocateAndTryDeleteKeyValue(
+        (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = await manager.LocateAndTryDeleteKeyValue(
             context.TransactionId,
             key: keyName,
             durability,
@@ -52,7 +53,15 @@ internal sealed class DeleteCommand : BaseCommand
         context.Result = new()
         {
             Type = type,
-            Revision = revision
+            Revision = revision,
+            LastModified = lastModified
+        };
+        
+        context.ModifiedResult = new()
+        {
+            Type = type,
+            Revision = revision,
+            LastModified = lastModified
         };
 
         return new()

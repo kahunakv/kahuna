@@ -33,7 +33,13 @@ internal sealed class KeyValueLocator
     /// <param name="raft"></param>
     /// <param name="interNodeCommunication"></param>
     /// <param name="logger"></param>
-    public KeyValueLocator(KeyValuesManager manager, KahunaConfiguration configuration, IRaft raft, IInterNodeCommunication interNodeCommunication, ILogger<IKahuna> logger)
+    public KeyValueLocator(
+        KeyValuesManager manager, 
+        KahunaConfiguration configuration, 
+        IRaft raft, 
+        IInterNodeCommunication interNodeCommunication, 
+        ILogger<IKahuna> logger
+    )
     {
         this.manager = manager;
         this.configuration = configuration;
@@ -55,7 +61,7 @@ internal sealed class KeyValueLocator
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, long)> LocateAndTrySetKeyValue(
+    public async Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTrySetKeyValue(
         HLCTimestamp transactionId,
         string key,
         byte[]? value,
@@ -68,10 +74,10 @@ internal sealed class KeyValueLocator
     )
     {
         if (string.IsNullOrEmpty(key))
-            return (KeyValueResponseType.InvalidInput, 0);
+            return (KeyValueResponseType.InvalidInput, 0, HLCTimestamp.Zero);
         
         if (expiresMs < 0)
-            return (KeyValueResponseType.InvalidInput, 0);
+            return (KeyValueResponseType.InvalidInput, 0, HLCTimestamp.Zero);
         
         int partitionId = raft.GetPartitionKey(key);
 
@@ -91,11 +97,22 @@ internal sealed class KeyValueLocator
             
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
-            return (KeyValueResponseType.MustRetry, 0);
+            return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
         
         logger.LogDebug("SET-KEYVALUE Redirect {Key} to leader partition {Partition} at {Leader}", key, partitionId, leader);
         
-        return await interNodeCommunication.TrySetKeyValue(leader, transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, cancellationToken);
+        return await interNodeCommunication.TrySetKeyValue(
+            leader,
+            transactionId, 
+            key, 
+            value, 
+            compareValue, 
+            compareRevision, 
+            flags, 
+            expiresMs, 
+            durability, 
+            cancellationToken
+        );
     }
     
     /// <summary>
@@ -106,10 +123,15 @@ internal sealed class KeyValueLocator
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, long)> LocateAndTryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryDeleteKeyValue(
+        HLCTimestamp transactionId, 
+        string key, 
+        KeyValueDurability durability, 
+        CancellationToken cancellationToken
+    )
     {
         if (string.IsNullOrEmpty(key))
-            return (KeyValueResponseType.InvalidInput, 0);
+            return (KeyValueResponseType.InvalidInput, 0, HLCTimestamp.Zero);
         
         int partitionId = raft.GetPartitionKey(key);
 
@@ -118,7 +140,7 @@ internal sealed class KeyValueLocator
             
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
-            return (KeyValueResponseType.MustRetry, 0);
+            return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
         
         logger.LogDebug("DELETE-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
         
@@ -134,10 +156,10 @@ internal sealed class KeyValueLocator
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, long)> LocateAndTryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(key))
-            return (KeyValueResponseType.InvalidInput, 0);
+            return (KeyValueResponseType.InvalidInput, 0, HLCTimestamp.Zero);
         
         int partitionId = raft.GetPartitionKey(key);
 
@@ -146,7 +168,7 @@ internal sealed class KeyValueLocator
             
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
-            return (KeyValueResponseType.MustRetry, 0);
+            return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
         
         logger.LogDebug("EXTEND-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
 
@@ -422,11 +444,18 @@ internal sealed class KeyValueLocator
     /// Locates the leader node for the given key and executes the TryPrepareMutations request.
     /// </summary>
     /// <param name="transactionId"></param>
+    /// <param name="commitId"></param>
     /// <param name="key"></param>
     /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> LocateAndTryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> LocateAndTryPrepareMutations(
+        HLCTimestamp transactionId, 
+        HLCTimestamp commitId, 
+        string key, 
+        KeyValueDurability durability, 
+        CancellationToken cancelationToken
+    )
     {
         if (string.IsNullOrEmpty(key))
             return (KeyValueResponseType.InvalidInput, HLCTimestamp.Zero, key, durability);
@@ -434,7 +463,7 @@ internal sealed class KeyValueLocator
         int partitionId = raft.GetPartitionKey(key);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
-            return await manager.TryPrepareMutations(transactionId, key, durability);
+            return await manager.TryPrepareMutations(transactionId, commitId, key, durability);
             
         string leader = await raft.WaitForLeader(partitionId, cancelationToken);
         if (leader == raft.GetLocalEndpoint())
@@ -442,18 +471,20 @@ internal sealed class KeyValueLocator
         
         logger.LogDebug("PREPARE-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
         
-        return await interNodeCommunication.TryPrepareMutations(leader, transactionId, key, durability, cancelationToken);
+        return await interNodeCommunication.TryPrepareMutations(leader, transactionId, commitId, key, durability, cancelationToken);
     }
     
     /// <summary>
     /// Locates the leader node for the given keys and executes the TryPrepareManyMutations request.
     /// </summary>
     /// <param name="transactionId"></param>
+    /// <param name="commitId"></param> 
     /// <param name="keys"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
     public async Task<List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> LocateAndTryPrepareManyMutations(
-        HLCTimestamp transactionId, 
+        HLCTimestamp transactionId,
+        HLCTimestamp commitId,
         List<(string key, KeyValueDurability durability)> keys, 
         CancellationToken cancelationToken
     )
@@ -482,7 +513,7 @@ internal sealed class KeyValueLocator
         
         // Requests to nodes are sent in parallel
         foreach ((string leader, List<(string key, KeyValueDurability durability)>? xkeys) in acquisitionPlan)
-            tasks.Add(TryPrepareNodeMutations(transactionId, leader, localNode, xkeys, lockSync, responses, cancelationToken));
+            tasks.Add(TryPrepareNodeMutations(transactionId, commitId, leader, localNode, xkeys, lockSync, responses, cancelationToken));
         
         await Task.WhenAll(tasks);
 
@@ -490,7 +521,8 @@ internal sealed class KeyValueLocator
     }
 
     private async Task TryPrepareNodeMutations(
-        HLCTimestamp transactionId, 
+        HLCTimestamp transactionId,
+        HLCTimestamp commitId,
         string leader, 
         string localNode, 
         List<(string key, KeyValueDurability durability)> xkeys,
@@ -503,7 +535,7 @@ internal sealed class KeyValueLocator
         
         if (leader == localNode)
         {
-            List<(KeyValueResponseType type, HLCTimestamp ticketId, string key, KeyValueDurability durability)> prepareResponses = await manager.TryPrepareManyMutations(transactionId, xkeys);
+            List<(KeyValueResponseType type, HLCTimestamp ticketId, string key, KeyValueDurability durability)> prepareResponses = await manager.TryPrepareManyMutations(transactionId, commitId, xkeys);
 
             lock (lockSync)
             {
@@ -514,7 +546,7 @@ internal sealed class KeyValueLocator
             return;
         }
             
-        await interNodeCommunication.TryPrepareNodeMutations(leader, transactionId, xkeys, lockSync, responses, cancellationToken);
+        await interNodeCommunication.TryPrepareNodeMutations(leader, transactionId, commitId, xkeys, lockSync, responses, cancellationToken);
     }
     
     /// <summary>
@@ -706,6 +738,8 @@ internal sealed class KeyValueLocator
                 kv.Value?.ToByteArray(), 
                 kv.Revision, 
                 new(kv.ExpiresPhysical, kv.ExpiresCounter),
+                new(kv.LastUsedPhysical, kv.LastUsedCounter),
+                new(kv.LastModifiedPhysical, kv.LastModifiedCounter),
                 (KeyValueState)kv.State
             )));
         }
@@ -767,6 +801,8 @@ internal sealed class KeyValueLocator
             item.Value?.ToByteArray(),
             item.Revision,
             new(item.ExpiresPhysical, item.ExpiresCounter),
+            new(item.LastUsedPhysical, item.LastUsedCounter),
+            new(item.LastModifiedPhysical, item.LastModifiedCounter),
             (KeyValueState)item.State
         ));
     }

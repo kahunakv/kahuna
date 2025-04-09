@@ -57,9 +57,13 @@ internal abstract class BaseHandler
             Type = (int)type,
             Key = proposal.Key,
             Revision = proposal.Revision,
-            ExpireLogical = proposal.Expires.L,
+            ExpirePhysical = proposal.Expires.L,
             ExpireCounter = proposal.Expires.C,
-            TimeLogical = currentTime.L,
+            LastUsedPhysical = proposal.LastUsed.L,
+            LastUsedCounter = proposal.LastUsed.C,
+            LastModifiedPhysical = proposal.LastModified.L,
+            LastModifiedCounter = proposal.LastModified.C,
+            TimePhysical = currentTime.L,
             TimeCounter = currentTime.C
         };
         
@@ -87,6 +91,8 @@ internal abstract class BaseHandler
             proposal.Value,
             proposal.Revision,
             proposal.Expires,
+            proposal.LastUsed,
+            proposal.LastModified,
             (int)proposal.State
         ));
 
@@ -114,6 +120,8 @@ internal abstract class BaseHandler
                         Value = readKeyValueContext.Value,
                         Revision = readKeyValueContext.Revision,
                         Expires = readKeyValueContext.Expires,
+                        LastUsed = readKeyValueContext.LastUsed,
+                        LastModified = readKeyValueContext.LastModified,
                         State = readKeyValueContext.State
                     };
                 

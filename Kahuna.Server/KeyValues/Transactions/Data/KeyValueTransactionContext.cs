@@ -18,6 +18,8 @@ internal sealed class KeyValueTransactionContext
     public KeyValueTransactionLocking Locking { get; init; }
     
     public KeyValueTransactionResult? Result { get; set; }
+    
+    public KeyValueTransactionResult? ModifiedResult { get; set; }
 
     public KeyValueTransactionAction Action { get; set; }
     

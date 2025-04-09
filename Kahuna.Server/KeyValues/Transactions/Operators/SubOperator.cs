@@ -30,6 +30,18 @@ internal sealed class SubOperator
             
             case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.DoubleType:
                 return new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = left.DoubleValue - right.DoubleValue };
+            
+            case KeyValueExpressionType.StringType when right.Type == KeyValueExpressionType.DoubleType:
+                if (!double.TryParse(left.StrValue, out double leftDouble))
+                    throw new KahunaScriptException("Invalid operands: " + left.Type + " + " + right.Type, ast.yyline);
+                
+                return new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = leftDouble - right.DoubleValue };
+            
+            case KeyValueExpressionType.StringType when right.Type == KeyValueExpressionType.LongType:
+                if (!long.TryParse(left.StrValue, out long leftLong))
+                    throw new KahunaScriptException("Invalid operands: " + left.Type + " + " + right.Type, ast.yyline);
+                
+                return new() { Type = KeyValueExpressionType.LongType, LongValue = leftLong - right.LongValue };
                 
             default:
                 throw new KahunaScriptException("Invalid operands: " + left.Type + " - " + right.Type, ast.yyline);

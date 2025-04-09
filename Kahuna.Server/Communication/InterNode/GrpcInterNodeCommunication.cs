@@ -105,7 +105,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         );
     }
 
-    public async Task<(KeyValueResponseType, long)> TrySetKeyValue(string node, HLCTimestamp transactionId, string key, byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValue(string node, HLCTimestamp transactionId, string key, byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcChannel channel = SharedChannels.GetChannel(node, configuration);
         
@@ -131,10 +131,10 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcTrySetKeyValueResponse? remoteResponse = await client.TrySetKeyValueAsync(request, cancellationToken: cancellationToken);
         remoteResponse.ServedFrom = $"https://{node}";
         
-        return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.Revision);
+        return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.Revision, new(remoteResponse.LastModifiedPhysical, remoteResponse.LastModifiedCounter));
     }
 
-    public async Task<(KeyValueResponseType, long)> TryDeleteKeyValue(string node, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, long, HLCTimestamp)> TryDeleteKeyValue(string node, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancelationToken)
     {
         GrpcChannel channel = SharedChannels.GetChannel(node, configuration);
         
@@ -152,10 +152,10 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         remoteResponse.ServedFrom = $"https://{node}";
         
-        return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.Revision);
+        return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.Revision, new(remoteResponse.LastModifiedPhysical, remoteResponse.LastModifiedCounter));
     }
 
-    public async Task<(KeyValueResponseType, long)> TryExtendKeyValue(string node, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, long, HLCTimestamp)> TryExtendKeyValue(string node, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancelationToken)
     {
         GrpcChannel channel = SharedChannels.GetChannel(node, configuration);
         
@@ -174,7 +174,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         remoteResponse.ServedFrom = $"https://{node}";
         
-        return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.Revision);
+        return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.Revision, new(remoteResponse.LastModifiedPhysical, remoteResponse.LastModifiedCounter));
     }
 
     public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryGetValue(string node, HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken)
@@ -200,6 +200,8 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             remoteResponse.Value?.ToByteArray(),
             remoteResponse.Revision,
             new(remoteResponse.ExpiresPhysical, remoteResponse.ExpiresCounter),
+            new(remoteResponse.LastUsedPhysical, remoteResponse.LastUsedCounter),
+            new(remoteResponse.LastModifiedPhysical, remoteResponse.LastModifiedCounter),
             (KeyValueState)remoteResponse.State
         ));
     }
@@ -227,6 +229,8 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             null,
             remoteResponse.Revision,
             new(remoteResponse.ExpiresPhysical, remoteResponse.ExpiresCounter),
+            new(remoteResponse.LastUsedPhysical, remoteResponse.LastUsedCounter),
+            new(remoteResponse.LastModifiedPhysical, remoteResponse.LastModifiedCounter),
             (KeyValueState)remoteResponse.State
         ));
     }
@@ -348,7 +352,13 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             };
     }
     
-    public async Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> TryPrepareMutations(string node, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> TryPrepareMutations(
+        string node, HLCTimestamp transactionId, 
+        HLCTimestamp commitId, 
+        string key, 
+        KeyValueDurability durability, 
+        CancellationToken cancellationToken
+    )
     {
         GrpcChannel channel = SharedChannels.GetChannel(node, configuration);
         
@@ -358,18 +368,33 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         {
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
+            CommitIdPhysical = commitId.L,
+            CommitIdCounter = commitId.C,
             Key = key,
-            Durability = (GrpcKeyValueDurability)durability,
+            Durability = (GrpcKeyValueDurability)durability
         };
         
         GrpcTryPrepareMutationsResponse? remoteResponse = await client.TryPrepareMutationsAsync(request, cancellationToken: cancellationToken);
         
         remoteResponse.ServedFrom = $"https://{node}";
         
-        return ((KeyValueResponseType)remoteResponse.Type, new(remoteResponse.ProposalTicketPhysical, remoteResponse.ProposalTicketCounter), key, durability);
+        return (
+            (KeyValueResponseType)remoteResponse.Type, 
+            new(remoteResponse.ProposalTicketPhysical, remoteResponse.ProposalTicketCounter), 
+            key, 
+            durability
+        );
     }
 
-    public async Task TryPrepareNodeMutations(string node, HLCTimestamp transactionId, List<(string key, KeyValueDurability durability)> xkeys, Lock lockSync, List<(KeyValueResponseType type, HLCTimestamp, string key, KeyValueDurability durability)> responses, CancellationToken cancellationToken)
+    public async Task TryPrepareNodeMutations(
+        string node, 
+        HLCTimestamp transactionId,
+        HLCTimestamp commitId,
+        List<(string key, KeyValueDurability durability)> xkeys, 
+        Lock lockSync, 
+        List<(KeyValueResponseType type, HLCTimestamp, string key, KeyValueDurability durability)> responses, 
+        CancellationToken cancellationToken
+    )
     {
         GrpcChannel channel = SharedChannels.GetChannel(node, configuration);
             
@@ -378,7 +403,9 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcTryPrepareManyMutationsRequest request = new()
         {
             TransactionIdPhysical = transactionId.L,
-            TransactionIdCounter = transactionId.C
+            TransactionIdCounter = transactionId.C,
+            CommitIdPhysical = commitId.L,
+            CommitIdCounter = commitId.C,
         };
             
         request.Items.Add(GetPrepareRequestItems(xkeys));

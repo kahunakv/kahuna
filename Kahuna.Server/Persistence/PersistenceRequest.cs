@@ -16,6 +16,14 @@ public sealed class PersistenceRequestItem
     
     public uint ExpiresCounter { get; }
     
+    public long LastUsedPhysical { get; }
+    
+    public uint LastUsedCounter { get; }
+    
+    public long LastModifiedPhysical { get; }
+    
+    public uint LastModifiedCounter { get; }
+    
     public int State { get; }
     
     public PersistenceRequestItem(
@@ -23,7 +31,11 @@ public sealed class PersistenceRequestItem
         byte[]? value, 
         long revision, 
         long expiresPhysical,
-        uint expiresCounter, 
+        uint expiresCounter,
+        long lastUsedPhysical,
+        uint lastUsedCounter,
+        long lastModifiedPhysical,
+        uint lastModifiedCounter,
         int state
     )
     {
@@ -32,19 +44,10 @@ public sealed class PersistenceRequestItem
         Revision = revision;
         ExpiresPhysical = expiresPhysical;
         ExpiresCounter = expiresCounter;
+        LastUsedPhysical = lastUsedPhysical;
+        LastUsedCounter = lastUsedCounter;
+        LastModifiedPhysical = lastModifiedPhysical;
+        LastModifiedCounter = lastModifiedCounter;
         State = state;
-    }
-}
-
-public sealed class PersistenceRequest
-{
-    public PersistenceRequestType Type { get; }
-    
-    public List<PersistenceRequestItem> Items { get; }
-    
-    public PersistenceRequest(PersistenceRequestType type, List<PersistenceRequestItem> items)
-    {
-        Type = type;
-        Items = items;
     }
 }

@@ -162,7 +162,7 @@ internal sealed class KeyValuesManager
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, long)> LocateAndTrySetKeyValue(
+    public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTrySetKeyValue(
         HLCTimestamp transactionId,
         string key,
         byte[]? value,
@@ -225,7 +225,7 @@ internal sealed class KeyValuesManager
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, long)> LocateAndTryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken)
+    public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         return locator.LocateAndTryDeleteKeyValue(transactionId, key, durability, cancellationToken);
     }
@@ -239,7 +239,7 @@ internal sealed class KeyValuesManager
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, long)> LocateAndTryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+    public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         return locator.LocateAndTryExtendKeyValue(transactionId, key, expiresMs, durability, cancellationToken);
     }
@@ -300,26 +300,38 @@ internal sealed class KeyValuesManager
     /// Locates the leader node for the given key and executes the TryPrepareMutations request.
     /// </summary>
     /// <param name="transactionId"></param>
+    /// <param name="commitId"></param>
     /// <param name="key"></param>
-    /// <param name="expiresMs"></param>
     /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> LocateAndTryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancelationToken)
+    public Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> LocateAndTryPrepareMutations(
+        HLCTimestamp transactionId, 
+        HLCTimestamp commitId, 
+        string key, 
+        KeyValueDurability durability, 
+        CancellationToken cancelationToken
+    )
     {
-        return locator.LocateAndTryPrepareMutations(transactionId, key, durability, cancelationToken);
+        return locator.LocateAndTryPrepareMutations(transactionId, commitId, key, durability, cancelationToken);
     }
     
     /// <summary>
     /// Locates the leader node for the given keys and executes many TryPrepareMutations requests.
     /// </summary>
     /// <param name="transactionId"></param>
+    /// <param name="commitId"></param> 
     /// <param name="keys"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public Task<List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> LocateAndTryPrepareManyMutations(HLCTimestamp transactionId, List<(string key, KeyValueDurability durability)> keys, CancellationToken cancelationToken)
+    public Task<List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> LocateAndTryPrepareManyMutations(
+        HLCTimestamp transactionId,
+        HLCTimestamp commitId,
+        List<(string key, KeyValueDurability durability)> keys, 
+        CancellationToken cancelationToken
+    )
     {
-        return locator.LocateAndTryPrepareManyMutations(transactionId, keys, cancelationToken);
+        return locator.LocateAndTryPrepareManyMutations(transactionId, commitId, keys, cancelationToken);
     }
     
     /// <summary>
@@ -385,7 +397,7 @@ internal sealed class KeyValuesManager
     /// <param name="expiresMs"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, long)> TrySetKeyValue(
+    public async Task<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValue(
         HLCTimestamp transactionId,
         string key, 
         byte[]? value, 
@@ -399,6 +411,7 @@ internal sealed class KeyValuesManager
         KeyValueRequest request = new(
             KeyValueRequestType.TrySet, 
             transactionId,
+            HLCTimestamp.Zero,
             key, 
             value, 
             compareValue,
@@ -417,9 +430,9 @@ internal sealed class KeyValuesManager
             response = await persistentKeyValuesRouter.Ask(request);
         
         if (response is null)
-            return (KeyValueResponseType.Errored, -1);
+            return (KeyValueResponseType.Errored, -1, HLCTimestamp.Zero);
         
-        return (response.Type, response.Revision);
+        return (response.Type, response.Revision, response.Ticket);
     }
     
     /// <summary>
@@ -429,7 +442,7 @@ internal sealed class KeyValuesManager
     /// <param name="expiresMs"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, long)> TryExtendKeyValue(
+    public async Task<(KeyValueResponseType, long, HLCTimestamp)> TryExtendKeyValue(
         HLCTimestamp transactionId,
         string key, 
         int expiresMs, 
@@ -439,6 +452,7 @@ internal sealed class KeyValuesManager
         KeyValueRequest request = new(
             KeyValueRequestType.TryExtend,
             transactionId,
+            HLCTimestamp.Zero,
             key, 
             null, 
             null,
@@ -457,9 +471,9 @@ internal sealed class KeyValuesManager
             response = await persistentKeyValuesRouter.Ask(request);
         
         if (response is null)
-            return (KeyValueResponseType.Errored, -1);
+            return (KeyValueResponseType.Errored, -1, HLCTimestamp.Zero);
         
-        return (response.Type, response.Revision);
+        return (response.Type, response.Revision, response.Ticket);
     }
 
     /// <summary>
@@ -469,11 +483,12 @@ internal sealed class KeyValuesManager
     /// <param name="key"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, long)> TryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueDurability durability)
+    public async Task<(KeyValueResponseType, long, HLCTimestamp)> TryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueDurability durability)
     {
         KeyValueRequest request = new(
             KeyValueRequestType.TryDelete, 
             transactionId,
+            HLCTimestamp.Zero,
             key, 
             null, 
             null,
@@ -492,9 +507,9 @@ internal sealed class KeyValuesManager
             response = await persistentKeyValuesRouter.Ask(request);
         
         if (response is null)
-            return (KeyValueResponseType.Errored, -1);
+            return (KeyValueResponseType.Errored, -1, HLCTimestamp.Zero);
         
-        return (response.Type, response.Revision);
+        return (response.Type, response.Revision, response.Ticket);
     }
     
     /// <summary>
@@ -514,6 +529,7 @@ internal sealed class KeyValuesManager
         KeyValueRequest request = new(
             KeyValueRequestType.TryGet, 
             transactionId, 
+            HLCTimestamp.Zero,
             key, 
             null, 
             null,
@@ -554,6 +570,7 @@ internal sealed class KeyValuesManager
         KeyValueRequest request = new(
             KeyValueRequestType.TryExists, 
             transactionId, 
+            HLCTimestamp.Zero,
             key, 
             null, 
             null,
@@ -590,6 +607,7 @@ internal sealed class KeyValuesManager
         KeyValueRequest request = new(
             KeyValueRequestType.TryAcquireExclusiveLock, 
             transactionId, 
+            HLCTimestamp.Zero,
             key, 
             null, 
             null,
@@ -628,6 +646,7 @@ internal sealed class KeyValuesManager
             KeyValueRequest request = new(
                 KeyValueRequestType.TryAcquireExclusiveLock,
                 transactionId,
+                HLCTimestamp.Zero,
                 key.key,
                 null,
                 null,
@@ -672,6 +691,7 @@ internal sealed class KeyValuesManager
         KeyValueRequest request = new(
             KeyValueRequestType.TryReleaseExclusiveLock, 
             transactionId, 
+            HLCTimestamp.Zero,
             key, 
             null, 
             null,
@@ -710,6 +730,7 @@ internal sealed class KeyValuesManager
             KeyValueRequest request = new(
                 KeyValueRequestType.TryReleaseExclusiveLock,
                 transactionId,
+                HLCTimestamp.Zero,
                 key.key,
                 null,
                 null,
@@ -743,14 +764,16 @@ internal sealed class KeyValuesManager
     /// Passes a TryPrepare request to the key/value actor for the given keyValue name.
     /// </summary>
     /// <param name="transactionId"></param>
+    /// <param name="commitId"></param>
     /// <param name="key"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> TryPrepareMutations(HLCTimestamp transactionId, string key, KeyValueDurability durability)
+    public async Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> TryPrepareMutations(HLCTimestamp transactionId, HLCTimestamp commitId, string key, KeyValueDurability durability)
     {
         KeyValueRequest request = new(
             KeyValueRequestType.TryPrepareMutations, 
             transactionId, 
+            commitId,
             key, 
             null, 
             null,
@@ -781,7 +804,11 @@ internal sealed class KeyValuesManager
     /// <param name="key"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> TryPrepareManyMutations(HLCTimestamp transactionId, List<(string key, KeyValueDurability durability)> keys)
+    public async Task<List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> TryPrepareManyMutations(
+        HLCTimestamp transactionId,
+        HLCTimestamp commitId,
+        List<(string key, KeyValueDurability durability)> keys
+    )
     {
         Lock sync = new();
         List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> responses = new(keys.Count);
@@ -791,6 +818,7 @@ internal sealed class KeyValuesManager
             KeyValueRequest request = new(
                 KeyValueRequestType.TryPrepareMutations,
                 transactionId,
+                commitId,
                 key.key,
                 null,
                 null,
@@ -833,6 +861,7 @@ internal sealed class KeyValuesManager
         KeyValueRequest request = new(
             KeyValueRequestType.TryCommitMutations, 
             transactionId, 
+            HLCTimestamp.Zero,
             key, 
             null, 
             null,
@@ -874,6 +903,7 @@ internal sealed class KeyValuesManager
             KeyValueRequest request = new(
                 KeyValueRequestType.TryCommitMutations,
                 transactionId,
+                HLCTimestamp.Zero,
                 key.key,
                 null,
                 null,
@@ -914,6 +944,7 @@ internal sealed class KeyValuesManager
         KeyValueRequest request = new(
             KeyValueRequestType.TryRollbackMutations, 
             transactionId, 
+            HLCTimestamp.Zero,
             key, 
             null, 
             null,
@@ -974,6 +1005,7 @@ internal sealed class KeyValuesManager
         KeyValueRequest request = new(
             KeyValueRequestType.ScanByPrefix,
             currentTime,
+            HLCTimestamp.Zero,
             prefixKeyName,
             null,
             null,
@@ -1038,6 +1070,7 @@ internal sealed class KeyValuesManager
     {
         KeyValueRequest request = new(
             KeyValueRequestType.GetByPrefix,
+            HLCTimestamp.Zero,
             HLCTimestamp.Zero,
             prefixKeyName,
             null,

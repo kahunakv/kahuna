@@ -17,6 +17,8 @@ public sealed class KeyValueTransactionResult
     
     public HLCTimestamp Expires { get; set; }
     
+    public HLCTimestamp LastModified { get; set; }
+    
     public string? Reason { get; set; } 
 
     public KeyValueExpressionResult ToExpressionResult()

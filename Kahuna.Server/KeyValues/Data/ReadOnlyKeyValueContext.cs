@@ -11,13 +11,19 @@ public sealed class ReadOnlyKeyValueContext
     
     public HLCTimestamp Expires { get; }
     
+    public HLCTimestamp LastUsed { get; }
+    
+    public HLCTimestamp LastModified { get; }
+    
     public KeyValueState State { get; }
     
-    public ReadOnlyKeyValueContext(byte[]? value, long revision, HLCTimestamp expires, KeyValueState state)
+    public ReadOnlyKeyValueContext(byte[]? value, long revision, HLCTimestamp expires, HLCTimestamp lastUsed, HLCTimestamp lastModified, KeyValueState state)
     {
         Value = value;
         Revision = revision;
         Expires = expires;
+        LastUsed = lastUsed;
+        LastModified = lastModified;
         State = state;
     }
 }

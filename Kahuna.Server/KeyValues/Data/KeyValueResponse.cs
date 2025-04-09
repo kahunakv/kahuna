@@ -27,6 +27,13 @@ public sealed class KeyValueResponse
         Revision = revision;
     }
     
+    public KeyValueResponse(KeyValueResponseType type, long revision, HLCTimestamp lastModified)
+    {
+        Type = type;
+        Revision = revision;
+        Ticket = lastModified;
+    }
+    
     public KeyValueResponse(KeyValueResponseType type, HLCTimestamp ticket)
     {
         Type = type;

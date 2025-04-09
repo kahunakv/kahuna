@@ -30,7 +30,12 @@ internal sealed class TryDeleteHandler : BaseHandler
         if (context.WriteIntent is not null && context.WriteIntent.TransactionId != message.TransactionId)
             return new(KeyValueResponseType.MustRetry, 0);
         
-        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
+        HLCTimestamp currentTime;
+        
+        if (message.TransactionId == HLCTimestamp.Zero)
+            currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
+        else
+            currentTime = raft.HybridLogicalClock.ReceiveEvent(message.TransactionId);
         
         // Temporarily store the value in the MVCC entry if the transaction ID is set
         if (message.TransactionId != HLCTimestamp.Zero)
@@ -45,6 +50,7 @@ internal sealed class TryDeleteHandler : BaseHandler
                     Revision = context.Revision, 
                     Expires = context.Expires, 
                     LastUsed = context.LastUsed,
+                    LastModified = context.LastModified,
                     State = context.State
                 };
                 
@@ -55,8 +61,9 @@ internal sealed class TryDeleteHandler : BaseHandler
                 return new(KeyValueResponseType.DoesNotExist, entry.Revision);
             
             entry.State = KeyValueState.Deleted;
+            entry.LastModified = currentTime;
             
-            return new(KeyValueResponseType.Deleted, entry.Revision);
+            return new(KeyValueResponseType.Deleted, entry.Revision, entry.LastModified);
         }
         
         if (context.State == KeyValueState.Deleted)
@@ -67,6 +74,7 @@ internal sealed class TryDeleteHandler : BaseHandler
             null,
             context.Revision,
             context.Expires,
+            currentTime,
             currentTime,
             KeyValueState.Deleted
         );
@@ -80,8 +88,9 @@ internal sealed class TryDeleteHandler : BaseHandler
         
         context.Value = proposal.Value;
         context.LastUsed = proposal.LastUsed;
+        context.LastModified = proposal.LastModified;
         context.State = proposal.State;
         
-        return new(KeyValueResponseType.Deleted, context.Revision);
+        return new(KeyValueResponseType.Deleted, context.Revision, context.LastModified);
     }
 }

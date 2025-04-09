@@ -157,6 +157,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             context.FencingToken + 1,
             currentTime + message.ExpiresMs,
             currentTime,
+            currentTime,
             LockState.Locked
         );
 
@@ -199,6 +200,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             context.FencingToken,
             currentTime + message.ExpiresMs,
             currentTime,
+            currentTime,
             context.State
         );
 
@@ -236,6 +238,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             null,
             context.FencingToken,
             context.Expires,
+            currentTime,
             currentTime,
             LockState.Unlocked
         );
@@ -327,6 +330,10 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             FencingToken = proposal.FencingToken,
             ExpireLogical = proposal.Expires.L,
             ExpireCounter = proposal.Expires.C,
+            LastUsedLogical = proposal.LastUsed.L,
+            LastUsedCounter = proposal.LastUsed.C,
+            LastModifiedLogical = proposal.LastModified.L,
+            LastModifiedCounter = proposal.LastModified.C,
             TimeLogical = currentTime.L,
             TimeCounter = currentTime.C
         };
@@ -354,6 +361,8 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
             proposal.Owner, 
             proposal.FencingToken,
             proposal.Expires,
+            proposal.LastUsed,
+            proposal.LastModified,
             (int)proposal.State
         ));
 

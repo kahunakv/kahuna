@@ -29,6 +29,11 @@ public sealed class LockContext
     public HLCTimestamp LastUsed { get; set; }
     
     /// <summary>
+    /// HLC timestamp of the last time the lock was used
+    /// </summary>
+    public HLCTimestamp LastModified { get; set; }
+    
+    /// <summary>
     /// Current state of the key
     /// </summary>
     public LockState State { get; set; } = LockState.Locked;

@@ -25,7 +25,12 @@ internal sealed class TrySetHandler : BaseHandler
     public async Task<KeyValueResponse> Execute(KeyValueRequest message)
     {
         bool exists = true;
-        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
+        HLCTimestamp currentTime;
+        
+        if (message.TransactionId == HLCTimestamp.Zero)
+            currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
+        else
+            currentTime = raft.HybridLogicalClock.ReceiveEvent(message.TransactionId);
 
         if (!keyValuesStore.TryGetValue(message.Key, out KeyValueContext? context))
         {
@@ -93,6 +98,7 @@ internal sealed class TrySetHandler : BaseHandler
                     Revision = context.Revision, 
                     Expires = context.Expires, 
                     LastUsed = context.LastUsed,
+                    LastModified = context.LastModified,
                     State = context.State
                 };
                 
@@ -118,7 +124,7 @@ internal sealed class TrySetHandler : BaseHandler
                 case KeyValueFlags.SetIfNotExists when exists:
                 case KeyValueFlags.SetIfEqualToValue when exists && !((ReadOnlySpan<byte>)entry.Value).SequenceEqual(message.CompareValue):
                 case KeyValueFlags.SetIfEqualToRevision when exists && entry.Revision != message.CompareRevision:
-                    return new(KeyValueResponseType.NotSet, entry.Revision);
+                    return new(KeyValueResponseType.NotSet, entry.Revision, entry.LastModified);
 
                 case KeyValueFlags.None:
                 case KeyValueFlags.Set:
@@ -130,9 +136,10 @@ internal sealed class TrySetHandler : BaseHandler
             entry.Expires = newExpires;
             entry.Revision++;
             entry.LastUsed = currentTime;
+            entry.LastModified = currentTime;
             entry.State = KeyValueState.Set;
             
-            return new(KeyValueResponseType.Set, context.Revision);
+            return new(KeyValueResponseType.Set, context.Revision, currentTime);
         }
         
         /*if (message.CompareValue is not null)
@@ -166,6 +173,7 @@ internal sealed class TrySetHandler : BaseHandler
             context.Revision + 1,
             newExpires,
             currentTime,
+            currentTime,
             KeyValueState.Set
         );
 
@@ -183,6 +191,7 @@ internal sealed class TrySetHandler : BaseHandler
         context.Revision = proposal.Revision;
         context.Expires = proposal.Expires;
         context.LastUsed = proposal.LastUsed;
+        context.LastModified = proposal.LastModified;
         context.State = proposal.State;
 
         return new(KeyValueResponseType.Set, context.Revision);

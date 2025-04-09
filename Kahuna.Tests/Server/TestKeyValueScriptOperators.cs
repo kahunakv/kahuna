@@ -262,16 +262,30 @@ public class TestKeyValueScriptOperators : BaseCluster
         Assert.Equal(0, resp.Revision);
         Assert.Equal("100"u8.ToArray(), resp.Value);
         
+        // Explicit conversion
         script = """
         LET current_pp = GET pp
-        SET pp current_pp + 1                             
+        LET current_pp_num = to_int(current_pp)
+        SET pp current_pp_num + 1
         GET pp
         """;
 
-        resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(1, resp.Revision);
         Assert.Equal("101"u8.ToArray(), resp.Value);
+        
+        // Implicit conversion
+        script = """
+         LET current_pp = GET pp
+         SET pp current_pp + 1
+         GET pp
+         """;
+
+        resp = await kahuna3.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(2, resp.Revision);
+        Assert.Equal("102"u8.ToArray(), resp.Value);
         
         script = """
           ESET pp 100
@@ -282,6 +296,113 @@ public class TestKeyValueScriptOperators : BaseCluster
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("100"u8.ToArray(), resp.Value);
+        
+        // Explicit conversion
+        script = """
+         LET current_pp = EGET pp
+         LET current_pp_num = to_int(current_pp)
+         ESET pp current_pp_num + 1
+         EGET pp
+         """;
+
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(1, resp.Revision);
+        Assert.Equal("101"u8.ToArray(), resp.Value);
+        
+        // Implicit conversion
+        script = """
+         LET current_pp = EGET pp
+         ESET pp current_pp + 1
+         EGET pp
+         """;
+
+        resp = await kahuna3.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(2, resp.Revision);
+        Assert.Equal("102"u8.ToArray(), resp.Value);
+        
+        await node1.LeaveCluster(true);
+        await node2.LeaveCluster(true);
+        await node3.LeaveCluster(true);
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestSetGetDecrementScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        // Persistent tests
+        string script = """
+        SET pp 100                                               
+        GET pp
+        """;
+
+        KeyValueTransactionResult resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("100"u8.ToArray(), resp.Value);
+        
+        // Explicit conversion
+        script = """
+        LET current_pp = GET pp
+        LET current_pp_num = to_int(current_pp)
+        SET pp current_pp_num - 1
+        GET pp
+        """;
+
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(1, resp.Revision);
+        Assert.Equal("99"u8.ToArray(), resp.Value);
+        
+        // Implicit conversion
+        script = """
+         LET current_pp = GET pp
+         SET pp current_pp - 1
+         GET pp
+         """;
+
+        resp = await kahuna3.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(2, resp.Revision);
+        Assert.Equal("98"u8.ToArray(), resp.Value);
+        
+        script = """
+          ESET pp 100
+          EGET pp
+          """;
+
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("100"u8.ToArray(), resp.Value);
+        
+        // Explicit conversion
+        script = """
+         LET current_pp = EGET pp
+         LET current_pp_num = to_int(current_pp)
+         ESET pp current_pp_num - 1
+         EGET pp
+         """;
+
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(1, resp.Revision);
+        Assert.Equal("99"u8.ToArray(), resp.Value);
+        
+        // Implicit conversion
+        script = """
+         LET current_pp = EGET pp
+         ESET pp current_pp - 1
+         EGET pp
+         """;
+
+        resp = await kahuna3.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(2, resp.Revision);
+        Assert.Equal("98"u8.ToArray(), resp.Value);
         
         await node1.LeaveCluster(true);
         await node2.LeaveCluster(true);

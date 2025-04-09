@@ -378,6 +378,14 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
                         reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
                         reader.IsDBNull(4) ? 0 : (uint)reader.GetInt64(4)
                     ),
+                    lastUsed: new(
+                        reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                        reader.IsDBNull(4) ? 0 : (uint)reader.GetInt64(4)
+                    ),
+                    lastModified: new(
+                        reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                        reader.IsDBNull(4) ? 0 : (uint)reader.GetInt64(4)
+                    ),
                     state: reader.IsDBNull(5) ? KeyValueState.Undefined : (KeyValueState)reader.GetInt32(5)
                 )));
         }

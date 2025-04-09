@@ -172,18 +172,26 @@ internal sealed class KeyValueTransactionCoordinator
         }
         catch (KahunaScriptException ex)
         {
+            logger.LogDebug("KahunaScriptException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            
             return new() { Type = KeyValueResponseType.Errored, Reason = ex.Message + " at line " + ex.Line };
         }
         catch (KahunaAbortedException ex)
         {
+            logger.LogDebug("KahunaAbortedException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            
             return new() { Type = KeyValueResponseType.Aborted, Reason = ex.Message };
         }
-        catch (TaskCanceledException)
+        catch (TaskCanceledException ex)
         {
+            logger.LogDebug("TaskCanceledException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            
             return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException ex)
         {
+            logger.LogDebug("TaskCanceledException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            
             return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
         }
         catch (Exception ex)
@@ -321,22 +329,32 @@ internal sealed class KeyValueTransactionCoordinator
         }
         catch (KahunaScriptException ex)
         {
+            logger.LogDebug("KahunaScriptException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            
             return new() { Type = KeyValueResponseType.Errored, Reason = ex.Message + " at line " + ex.Line };
         }
         catch (KahunaAbortedException ex)
         {
+            logger.LogDebug("KahunaAbortedException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            
             return new() { Type = KeyValueResponseType.Aborted, Reason = ex.Message };
         }
-        catch (TaskCanceledException)
+        catch (TaskCanceledException ex)
         {
+            logger.LogDebug("TaskCanceledException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            
             return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException ex)
         {
+            logger.LogDebug("OperationCanceledException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            
             return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
         }
         catch (Exception ex)
         {
+            logger.LogDebug("OperationCanceledException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            
             return new() { Type = KeyValueResponseType.Errored, Reason = ex.GetType().Name + ": " + ex.Message };
         }
         finally
@@ -501,7 +519,10 @@ internal sealed class KeyValueTransactionCoordinator
             return;
 
         // Step 3: Prepare mutations
-        (bool success, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>? mutationsPrepared) = await PrepareMutations(context, cancellationToken);
+        (bool success, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>? mutationsPrepared) = await PrepareMutations(
+            context, 
+            cancellationToken
+        );
         
         if (!success)
             return;
@@ -519,16 +540,32 @@ internal sealed class KeyValueTransactionCoordinator
     /// <param name="context"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    private async Task<(bool, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>?)> PrepareMutations(KeyValueTransactionContext context, CancellationToken cancellationToken)
+    private async Task<(bool, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>?)> PrepareMutations(
+        KeyValueTransactionContext context, 
+        CancellationToken cancellationToken
+    )
     {
         if (context.LocksAcquired is null || context.ModifiedKeys is null || context.ModifiedKeys.Count == 0)
             return (false, null);
+        
+        HLCTimestamp highestModifiedTime = context.TransactionId;
+
+        if (context.ModifiedResult?.Type is KeyValueResponseType.Set or KeyValueResponseType.Extended or KeyValueResponseType.Deleted)
+            highestModifiedTime = context.ModifiedResult.LastModified;
+
+        // Request a new unique timestamp for the transaction
+        HLCTimestamp commitId = raft.HybridLogicalClock.ReceiveEvent(highestModifiedTime);
         
         if (context.ModifiedKeys.Count == 1)
         {
             (string key, KeyValueDurability durability) = context.ModifiedKeys.First();
             
-            (KeyValueResponseType type, HLCTimestamp ticketId, string _, KeyValueDurability _) = await manager.LocateAndTryPrepareMutations(context.TransactionId, key, durability, cancellationToken);
+            (KeyValueResponseType type, HLCTimestamp ticketId, string _, KeyValueDurability _) = await manager.LocateAndTryPrepareMutations(
+                context.TransactionId, 
+                commitId, 
+                key, durability, 
+                cancellationToken
+            );
 
             if (type != KeyValueResponseType.Prepared)
             {
@@ -542,7 +579,12 @@ internal sealed class KeyValueTransactionCoordinator
             return (true, [(key, ticketId, durability)]);
         }
         
-        List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> proposalResponses = await manager.LocateAndTryPrepareManyMutations(context.TransactionId, context.ModifiedKeys.ToList(), cancellationToken);
+        List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> proposalResponses = await manager.LocateAndTryPrepareManyMutations(
+            context.TransactionId, 
+            commitId, 
+            context.ModifiedKeys.ToList(), 
+            cancellationToken
+        );
     
         if (proposalResponses.Any(r => r.Item1 != KeyValueResponseType.Prepared))
         {

@@ -7,8 +7,12 @@ message RocksDbLockMessage {
   optional bytes owner = 2;
   int64 expiresPhysical = 3;
   uint32 expiresCounter = 4;
-  int64 fencingToken = 5;
-  int32 state = 6;
+  int64 lastUsedPhysical = 5;
+  uint32 lastUsedCounter = 6;
+  int64 lastModifiedPhysical = 7;
+  uint32 lastModifiedCounter = 8;
+  int64 fencingToken = 9;
+  int32 state = 10;
 }
 
 message RocksDbKeyValueMessage {
@@ -16,6 +20,10 @@ message RocksDbKeyValueMessage {
   optional bytes value = 2;
   int64 expiresPhysical = 3;
   uint32 expiresCounter = 4;
-  int64 revision = 5;
-  int32 state = 6;
+  int64 lastUsedPhysical = 5;
+  uint32 lastUsedCounter = 6;
+  int64 lastModifiedPhysical = 7;
+  uint32 lastModifiedCounter = 8;
+  int64 revision = 9;
+  int32 state = 10;
 }

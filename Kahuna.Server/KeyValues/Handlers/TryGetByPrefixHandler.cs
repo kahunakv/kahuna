@@ -104,6 +104,7 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
                     Revision = context.Revision, 
                     Expires = context.Expires, 
                     LastUsed = context.LastUsed,
+                    LastModified = context.LastModified,
                     State = context.State
                 };
 
@@ -116,7 +117,14 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
             if (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
                 return KeyValueStaticResponses.DoesNotExistContextResponse;
             
-            readOnlyKeyValueContext = new(entry.Value, entry.Revision, entry.Expires, context.State);
+            readOnlyKeyValueContext = new(
+                entry.Value, 
+                entry.Revision, 
+                entry.Expires, 
+                entry.LastUsed, 
+                entry.LastModified, 
+                context.State
+            );
 
             return new(KeyValueResponseType.Get, readOnlyKeyValueContext);
         }
@@ -132,7 +140,14 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
 
         context.LastUsed = currentTime;
 
-        readOnlyKeyValueContext = new(context.Value, context.Revision, context.Expires, context.State);
+        readOnlyKeyValueContext = new(
+            context.Value, 
+            context.Revision, 
+            context.Expires, 
+            context.LastUsed, 
+            context.LastModified, 
+            context.State
+        );
 
         return new(KeyValueResponseType.Get, readOnlyKeyValueContext);
     } 

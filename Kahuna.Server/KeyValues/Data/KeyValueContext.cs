@@ -14,7 +14,7 @@ public sealed class KeyValueContext
     public byte[]? Value { get; set; }
     
     /// <summary>
-    /// HLC timestamp when the lock will expire
+    /// HLC timestamp when the key/value will expire
     /// </summary>
     public HLCTimestamp Expires { get; set; }
     
@@ -24,9 +24,14 @@ public sealed class KeyValueContext
     public long Revision { get; set; }
     
     /// <summary>
-    /// HLC timestamp of the last time the lock was used
+    /// HLC timestamp of the last time the key/value was used
     /// </summary>
     public HLCTimestamp LastUsed { get; set; }
+    
+    /// <summary>
+    /// HLC timestamp of the last time the key was modified
+    /// </summary>
+    public HLCTimestamp LastModified { get; set; }
 
     /// <summary>
     /// Represents a potential write intent to modify the key

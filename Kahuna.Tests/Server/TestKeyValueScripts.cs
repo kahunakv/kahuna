@@ -444,5 +444,5 @@ public class TestKeyValueScripts : BaseCluster
         await node1.LeaveCluster(true);
         await node2.LeaveCluster(true);
         await node3.LeaveCluster(true);
-    }    
+    }
 }

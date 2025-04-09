@@ -16,6 +16,8 @@ public sealed class KeyValueRequest : IConsistentHashable
     
     public HLCTimestamp TransactionId { get; }
     
+    public HLCTimestamp CommitId { get; }
+    
     public string Key { get; }
     
     public byte[]? Value { get; }
@@ -37,6 +39,7 @@ public sealed class KeyValueRequest : IConsistentHashable
     /// </summary>
     /// <param name="type"></param>
     /// <param name="transactionId"></param>
+    /// <param name="commitId"></param> 
     /// <param name="key"></param>
     /// <param name="value"></param>
     /// <param name="compareValue"></param>
@@ -47,6 +50,7 @@ public sealed class KeyValueRequest : IConsistentHashable
     public KeyValueRequest(
         KeyValueRequestType type,
         HLCTimestamp transactionId,
+        HLCTimestamp commitId,
         string key, 
         byte[]? value,
         byte[]? compareValue,
@@ -59,6 +63,7 @@ public sealed class KeyValueRequest : IConsistentHashable
     {
         Type = type;
         TransactionId = transactionId;
+        CommitId = commitId;
         Key = key;
         Value = value;
         CompareValue = compareValue;

@@ -68,6 +68,8 @@ internal sealed class LockRestorer
                         lockMessage.Owner?.ToByteArray(),
                         lockMessage.FencingToken,
                         new(lockMessage.ExpireLogical, lockMessage.ExpireCounter),
+                        new(lockMessage.LastUsedLogical, lockMessage.LastUsedCounter),
+                        new(lockMessage.LastModifiedLogical, lockMessage.LastModifiedCounter),
                         (int)LockState.Locked
                     ));
 
@@ -102,6 +104,8 @@ internal sealed class LockRestorer
                         lockMessage.Owner?.ToByteArray(),
                         lockMessage.FencingToken,
                         new(lockMessage.ExpireLogical, lockMessage.ExpireCounter),
+                        new(lockMessage.LastUsedLogical, lockMessage.LastUsedCounter),
+                        new(lockMessage.LastModifiedLogical, lockMessage.LastModifiedCounter),
                         (int)LockState.Unlocked
                     ));
                     
@@ -136,6 +140,8 @@ internal sealed class LockRestorer
                         lockMessage.Owner?.ToByteArray(),
                         lockMessage.FencingToken,
                         new(lockMessage.ExpireLogical, lockMessage.ExpireCounter),
+                        new(lockMessage.LastUsedLogical, lockMessage.LastUsedCounter),
+                        new(lockMessage.LastModifiedLogical, lockMessage.LastModifiedCounter),
                         (int)LockState.Unlocked
                     ));
 

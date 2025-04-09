@@ -97,6 +97,8 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     {
         stopwatch.Restart();
 
+        KeyValueResponse? response = null;
+
         try
         {
             logger.LogDebug(
@@ -118,7 +120,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 operations = CollectThreshold;
             }
 
-            return message.Type switch
+            response = message.Type switch
             {
                 KeyValueRequestType.TrySet => await TrySet(message),
                 KeyValueRequestType.TryExtend => await TryExtend(message),
@@ -134,6 +136,8 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.ScanByPrefix => await ScanByPrefix(message),
                 _ => KeyValueStaticResponses.ErroredResponse
             };
+
+            return response;
         }
         catch (Exception ex)
         {
@@ -142,10 +146,11 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         finally
         {
             logger.LogDebug(
-                "KeyValueActor Took: {Actor} {Type} Key={Key} Time={Elasped}ms",
+                "KeyValueActor Took: {Actor} {Type} Key={Key} Response={Response} Time={Elasped}ms",
                 actorContext.Self.Runner.Name,
                 message.Type,
                 message.Key,
+                response?.Type,
                 stopwatch.ElapsedMilliseconds
             );
         }

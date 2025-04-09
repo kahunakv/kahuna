@@ -55,7 +55,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
         
-        (KeyValueResponseType response, long revision) = await keyValues.LocateAndTrySetKeyValue(
+        (KeyValueResponseType response, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTrySetKeyValue(
             new(request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key, 
             request.Value?.ToByteArray(),
@@ -70,7 +70,9 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         return new()
         {
             Type = (GrpcKeyValueResponseType)response,
-            Revision = revision
+            Revision = revision,
+            LastModifiedPhysical = lastModified.L,
+            LastModifiedCounter = lastModified.C
         };
     }
     
@@ -94,7 +96,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
         
-        (KeyValueResponseType type, long revision) = await keyValues.LocateAndTryExtendKeyValue(
+        (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTryExtendKeyValue(
             new(request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key, 
             request.ExpiresMs,
@@ -105,7 +107,9 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         return new()
         {
             Type = (GrpcKeyValueResponseType)type,
-            Revision = revision
+            Revision = revision,
+            LastModifiedPhysical = lastModified.L,
+            LastModifiedCounter = lastModified.C
         };
     }
     
@@ -123,7 +127,7 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
         
-        (KeyValueResponseType type, long revision) = await keyValues.LocateAndTryDeleteKeyValue(
+        (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTryDeleteKeyValue(
             new(request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key, 
             (KeyValueDurability)request.Durability, 
@@ -133,7 +137,9 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
         return new()
         {
             Type = (GrpcKeyValueResponseType)type,
-            Revision = revision
+            Revision = revision,
+            LastModifiedPhysical = lastModified.L,
+            LastModifiedCounter = lastModified.C
         };
     }
     
@@ -378,7 +384,8 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
             };
         
         (KeyValueResponseType type, HLCTimestamp proposalTicket, _, _) = await keyValues.LocateAndTryPrepareMutations(
-            new(request.TransactionIdPhysical, request.TransactionIdCounter), 
+            new(request.TransactionIdPhysical, request.TransactionIdCounter),
+            new(request.CommitIdPhysical, request.CommitIdCounter),
             request.Key, 
             (KeyValueDurability)request.Durability, 
             context.CancellationToken
@@ -401,7 +408,8 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
     public override async Task<GrpcTryPrepareManyMutationsResponse> TryPrepareManyMutations(GrpcTryPrepareManyMutationsRequest request, ServerCallContext context)
     {
         List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> responses = await keyValues.LocateAndTryPrepareManyMutations(
-            new(request.TransactionIdPhysical, request.TransactionIdCounter), 
+            new(request.TransactionIdPhysical, request.TransactionIdCounter),
+            new(request.CommitIdPhysical, request.CommitIdCounter),
             GetRequestPrepareItems(request.Items), 
             context.CancellationToken
         );

@@ -28,13 +28,51 @@ internal sealed class TryExtendHandler : BaseHandler
         if (context is null)
             return KeyValueStaticResponses.DoesNotExistResponse;
         
-        if (context.State == KeyValueState.Deleted)
-            return KeyValueStaticResponses.DoesNotExistResponse;
-        
         if (context.WriteIntent is not null)
             return new(KeyValueResponseType.MustRetry, 0);
         
-        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
+        HLCTimestamp currentTime;
+        
+        if (message.TransactionId == HLCTimestamp.Zero)
+            currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
+        else
+            currentTime = raft.HybridLogicalClock.ReceiveEvent(message.TransactionId);
+        
+        // Temporarily store the value in the MVCC entry if the transaction ID is set
+        if (message.TransactionId != HLCTimestamp.Zero)
+        {
+            context.MvccEntries ??= new();
+
+            if (!context.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? entry))
+            {
+                entry = new()
+                {
+                    Value = context.Value, 
+                    Revision = context.Revision, 
+                    Expires = context.Expires, 
+                    LastUsed = context.LastUsed,
+                    LastModified = context.LastModified,
+                    State = context.State
+                };
+                
+                context.MvccEntries.Add(message.TransactionId, entry);
+            }
+            
+            if (entry.State == KeyValueState.Deleted)
+                return new(KeyValueResponseType.DoesNotExist, entry.Revision);
+            
+            if (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
+                return new(KeyValueResponseType.DoesNotExist, context.Revision);
+            
+            entry.Expires = currentTime + message.ExpiresMs;
+            entry.LastUsed = currentTime;
+            entry.LastModified = currentTime;
+            
+            return new(KeyValueResponseType.Extended, entry.Revision, entry.LastModified);
+        }
+        
+        if (context.State == KeyValueState.Deleted)
+            return new(KeyValueResponseType.DoesNotExist, context.Revision);
         
         if (context.Expires != HLCTimestamp.Zero && context.Expires - currentTime < TimeSpan.Zero)
             return new(KeyValueResponseType.DoesNotExist, context.Revision);
@@ -44,6 +82,7 @@ internal sealed class TryExtendHandler : BaseHandler
             context.Value,
             context.Revision,
             currentTime + message.ExpiresMs,
+            currentTime,
             currentTime,
             context.State
         );
@@ -57,7 +96,8 @@ internal sealed class TryExtendHandler : BaseHandler
         
         context.Expires = proposal.Expires;
         context.LastUsed = proposal.LastUsed;
+        context.LastModified = proposal.LastModified;
 
-        return new(KeyValueResponseType.Extended, context.Revision);
+        return new(KeyValueResponseType.Extended, context.Revision, context.LastModified);
     }
 }

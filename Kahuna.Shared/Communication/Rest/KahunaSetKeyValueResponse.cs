@@ -1,6 +1,7 @@
 
 using System.Text.Json.Serialization;
 using Kahuna.Shared.KeyValue;
+using Kommander.Time;
 
 namespace Kahuna.Shared.Communication.Rest;
 
@@ -14,4 +15,7 @@ public sealed class KahunaSetKeyValueResponse
     
     [JsonPropertyName("revision")]
     public long Revision { get; set; }
+    
+    [JsonPropertyName("lastModified")]
+    public HLCTimestamp LastModified { get; set; }
 }

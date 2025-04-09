@@ -1,11 +1,13 @@
 
-using Kahuna.Server.Persistence;
-using Kahuna.Server.Persistence.Backend;
-using Kahuna.Shared.KeyValue;
+using Nixie;
+
 using Kommander;
 using Kommander.Data;
 using Kommander.Time;
-using Nixie;
+
+using Kahuna.Shared.KeyValue;
+using Kahuna.Server.Persistence;
+using Kahuna.Server.Persistence.Backend;
 
 namespace Kahuna.Server.KeyValues.Handlers;
 
@@ -74,6 +76,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             entry.Revision,
             entry.Expires,
             entry.LastUsed,
+            entry.LastModified,
             entry.State
         );
 
@@ -83,9 +86,10 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             context.Expires = proposal.Expires;
             context.Revision = proposal.Revision;
             context.LastUsed = proposal.LastUsed;
+            context.LastModified = proposal.LastModified;
             context.State = proposal.State;
             
-            return new(KeyValueResponseType.Committed);
+            return new(KeyValueResponseType.Committed, 0);
         }
         
         (bool success, long commitIndex) = await CommitKeyValueMessage(message.Key, message.ProposalTicketId);
@@ -94,7 +98,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         
         if (message.Durability == KeyValueDurability.Persistent)
         {
-            // Schedule save to be saved asynchronously in a background actor
+            // Schedule store to be processed asynchronously in a background actor
             backgroundWriter.Send(new(
                 BackgroundWriteType.QueueStoreKeyValue,
                 -1,
@@ -102,6 +106,8 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
                 proposal.Value,
                 proposal.Revision,
                 proposal.Expires,
+                proposal.LastUsed,
+                proposal.LastModified,
                 (int)proposal.State
             ));
         }
@@ -110,6 +116,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         context.Expires = proposal.Expires;
         context.Revision = proposal.Revision;
         context.LastUsed = proposal.LastUsed;
+        context.LastModified = proposal.LastModified;
         context.State = proposal.State;
         
         return new(KeyValueResponseType.Committed, commitIndex);

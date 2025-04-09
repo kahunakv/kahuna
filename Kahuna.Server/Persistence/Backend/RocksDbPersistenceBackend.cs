@@ -63,6 +63,10 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
             {
                 ExpiresPhysical = item.ExpiresPhysical,
                 ExpiresCounter = item.ExpiresCounter,
+                LastUsedPhysical = item.LastUsedPhysical,
+                LastUsedCounter = item.LastUsedCounter,
+                LastModifiedPhysical = item.LastModifiedPhysical,
+                LastModifiedCounter = item.LastModifiedCounter,
                 FencingToken = item.Revision,
                 State = item.State
             };
@@ -88,6 +92,10 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
             {
                 ExpiresPhysical = item.ExpiresPhysical,
                 ExpiresCounter = item.ExpiresCounter,
+                LastUsedPhysical = item.LastUsedPhysical,
+                LastUsedCounter = item.LastUsedCounter,
+                LastModifiedPhysical = item.LastModifiedPhysical,
+                LastModifiedCounter = item.LastModifiedCounter,
                 Revision = item.Revision,
                 State = item.State
             };
@@ -125,6 +133,8 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
             Owner = message.Owner?.ToByteArray(),
             FencingToken = message.FencingToken,
             Expires = new(message.ExpiresPhysical, message.ExpiresCounter),
+            LastUsed = new(message.LastUsedPhysical, message.LastUsedCounter),
+            LastModified = new(message.LastModifiedPhysical, message.LastModifiedCounter),
         };
 
         return context;
@@ -148,6 +158,8 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
             Value = message.Value?.ToByteArray(),
             Revision = message.Revision,
             Expires = new(message.ExpiresPhysical, message.ExpiresCounter),
+            LastUsed = new(message.LastUsedPhysical, message.LastUsedCounter),
+            LastModified = new(message.LastModifiedPhysical, message.LastModifiedCounter),
             State = (KeyValueState)message.State,
         };
 
@@ -172,6 +184,8 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
             Value = message.Value?.ToByteArray(),
             Revision = message.Revision,
             Expires = new(message.ExpiresPhysical, message.ExpiresCounter),
+            LastUsed = new(message.LastUsedPhysical, message.LastUsedCounter),
+            LastModified = new(message.LastModifiedPhysical, message.LastModifiedCounter),
             State = (KeyValueState)message.State,
         };
 
@@ -209,6 +223,8 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
                 message.Value?.ToByteArray(), 
                 message.Revision, 
                 new(message.ExpiresPhysical, message.ExpiresCounter),
+                new(message.LastUsedPhysical, message.LastUsedCounter),
+                new(message.LastModifiedPhysical, message.LastModifiedCounter),
                 (KeyValueState)message.State
             )));
 

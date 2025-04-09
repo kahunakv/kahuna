@@ -2,6 +2,7 @@
 using Kahuna.Shared.KeyValue;
 using Kahuna.Server.ScriptParser;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Transactions.Commands;
 
@@ -73,7 +74,7 @@ internal sealed class SetCommand : BaseCommand
         
         KeyValueTransactionResult result = KeyValueTransactionExpression.Eval(context, ast.rightAst).ToTransactionResult();
         
-        (KeyValueResponseType type, long revision) = await manager.LocateAndTrySetKeyValue(
+        (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = await manager.LocateAndTrySetKeyValue(
             context.TransactionId,
             key: keyName,
             value: result.Value,
@@ -101,7 +102,15 @@ internal sealed class SetCommand : BaseCommand
         context.Result = new()
         {
             Type = type,
-            Revision = revision
+            Revision = revision,
+            LastModified = lastModified
+        };
+        
+        context.ModifiedResult = new()
+        {
+            Type = type,
+            Revision = revision,
+            LastModified = lastModified
         };
 
         return new()

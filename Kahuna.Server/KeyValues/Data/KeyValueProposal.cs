@@ -15,6 +15,8 @@ public readonly struct KeyValueProposal
     
     public HLCTimestamp LastUsed { get; }
     
+    public HLCTimestamp LastModified { get; }
+    
     public KeyValueState State { get; }
     
     public KeyValueProposal(
@@ -23,6 +25,7 @@ public readonly struct KeyValueProposal
         long revision,
         HLCTimestamp expires, 
         HLCTimestamp lastUsed,
+        HLCTimestamp lastModified,
         KeyValueState state
     )
     {
@@ -31,6 +34,7 @@ public readonly struct KeyValueProposal
         Revision = revision;
         Expires = expires;
         LastUsed = lastUsed;
+        LastModified = lastModified;
         State = state;
     }
 }

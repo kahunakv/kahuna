@@ -21,6 +21,8 @@ public class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
                 lockContext.Owner = item.Value;
                 lockContext.Expires = new(item.ExpiresPhysical, item.ExpiresCounter);
                 lockContext.FencingToken = item.Revision;
+                lockContext.LastUsed = new(item.LastUsedPhysical, item.LastUsedCounter);
+                lockContext.LastModified = new(item.LastModifiedPhysical, item.LastModifiedCounter);
                 lockContext.State = (LockState)item.State;
             }
             else
@@ -30,6 +32,8 @@ public class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
                     Owner = item.Value,
                     FencingToken = item.Revision,
                     Expires = new(item.ExpiresPhysical, item.ExpiresCounter),
+                    LastUsed = new(item.LastUsedPhysical, item.LastUsedCounter),
+                    LastModified = new(item.LastModifiedPhysical, item.LastModifiedCounter),
                     State = (LockState)item.State
                 });
             }
@@ -47,6 +51,8 @@ public class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
                 keyValueContext.Value = item.Value;
                 keyValueContext.Expires = new(item.ExpiresPhysical, item.ExpiresCounter);
                 keyValueContext.Revision = item.Revision;
+                keyValueContext.LastUsed = new(item.LastUsedPhysical, item.LastUsedCounter);
+                keyValueContext.LastModified = new(item.LastModifiedPhysical, item.LastModifiedCounter);
                 keyValueContext.State = (KeyValueState)item.State;
             }
             else
@@ -56,6 +62,8 @@ public class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
                     Value = item.Value,
                     Revision = item.Revision,
                     Expires = new(item.ExpiresPhysical, item.ExpiresCounter),
+                    LastUsed = new(item.LastUsedPhysical, item.LastUsedCounter),
+                    LastModified = new(item.LastModifiedPhysical, item.LastModifiedCounter),
                     State = (KeyValueState)item.State
                 });
             }

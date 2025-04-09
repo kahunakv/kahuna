@@ -36,7 +36,14 @@ internal sealed class TryScanByPrefixHandler : BaseHandler
             if (keyValueContext.Expires != HLCTimestamp.Zero && keyValueContext.Expires - message.TransactionId < TimeSpan.Zero)
                 continue;
 
-            items.Add((key, new(keyValueContext.Value, keyValueContext.Revision, keyValueContext.Expires, keyValueContext.State)));
+            items.Add((key, new(
+                keyValueContext.Value, 
+                keyValueContext.Revision, 
+                keyValueContext.Expires, 
+                keyValueContext.LastUsed,
+                keyValueContext.LastModified,
+                keyValueContext.State
+            )));
         }
         
         items.Sort(EnsureLexicographicalOrder);

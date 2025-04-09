@@ -1,8 +1,10 @@
 
 using Google.Protobuf;
+
 using Nixie;
 using Kommander;
 using Kommander.Time;
+
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
@@ -29,6 +31,13 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         if (message.TransactionId == HLCTimestamp.Zero)
         {
             logger.LogWarning("Cannot prepare mutations for missing transaction id");
+            
+            return KeyValueStaticResponses.ErroredResponse;
+        }
+        
+        if (message.CommitId == HLCTimestamp.Zero)
+        {
+            logger.LogWarning("Cannot prepare mutations for missing commit id");
             
             return KeyValueStaticResponses.ErroredResponse;
         }
@@ -62,9 +71,9 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             return KeyValueStaticResponses.ErroredResponse;
         }
         
-        if (context.LastUsed.CompareTo(message.TransactionId) > 0)
+        if (context.LastModified.CompareTo(message.CommitId) > 0)
         {
-            logger.LogWarning("Transaction {TransactionId} conflicts with {ExistingTransactionId} [3]", message.TransactionId, context.LastUsed);
+            logger.LogWarning("Transaction CommitId={TransactionId} conflicts with LastModified={LastModified} [3]", message.CommitId, context.LastModified);
             
             return KeyValueStaticResponses.ErroredResponse;
         }
@@ -73,7 +82,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         {
             if (key.CompareTo(message.TransactionId) > 0)
             {
-                logger.LogWarning("Transaction {TransactionId} conflicts with {ExistingTransactionId} [4]", message.TransactionId, context.LastUsed);
+                logger.LogWarning("Transaction {TransactionId} conflicts with {ExistingTransactionId} [4]", message.TransactionId, key);
             
                 return KeyValueStaticResponses.ErroredResponse;
             }
@@ -100,6 +109,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             entry.Revision,
             entry.Expires,
             entry.LastUsed,
+            entry.LastModified,
             entry.State
         );
 
@@ -136,9 +146,13 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             Type = (int)type,
             Key = proposal.Key,
             Revision = proposal.Revision,
-            ExpireLogical = proposal.Expires.L,
+            ExpirePhysical = proposal.Expires.L,
             ExpireCounter = proposal.Expires.C,
-            TimeLogical = currentTime.L,
+            LastUsedPhysical = proposal.LastUsed.L,
+            LastUsedCounter = proposal.LastUsed.C,
+            LastModifiedPhysical = proposal.LastModified.L,
+            LastModifiedCounter = proposal.LastModified.C,
+            TimePhysical = currentTime.L,
             TimeCounter = currentTime.C
         };
         
