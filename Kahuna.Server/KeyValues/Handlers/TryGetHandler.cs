@@ -108,9 +108,16 @@ internal sealed class TryGetHandler : BaseHandler
                 return KeyValueStaticResponses.DoesNotExistContextResponse;
             
             if (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
-                return KeyValueStaticResponses.DoesNotExistContextResponse;
+                return KeyValueStaticResponses.DoesNotExistContextResponse;                      
             
-            readOnlyKeyValueContext = new(entry.Value, entry.Revision, entry.Expires, entry.LastUsed, entry.LastModified, entry.State);
+            readOnlyKeyValueContext = new(
+                entry.Value, 
+                entry.Revision, 
+                entry.Expires, 
+                entry.LastUsed, 
+                entry.LastModified, 
+                entry.State
+            );
 
             return new(KeyValueResponseType.Get, readOnlyKeyValueContext);
         }

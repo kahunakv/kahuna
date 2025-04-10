@@ -61,6 +61,8 @@ internal sealed class GetCommand : BaseCommand
             };
         }
         
+        Console.WriteLine(readOnlyContext.Revision);
+        
         if (ast.rightAst is not null)
             context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new()
             {

@@ -27,12 +27,12 @@ public sealed class KeyValueExpressionResult
     {
         return Type switch
         {
-            KeyValueExpressionType.NullType => new() { Type = KeyValueResponseType.Get, Value = [] },
-            KeyValueExpressionType.BoolType => new() { Type = KeyValueResponseType.Get, Value = BoolValue ? "true"u8.ToArray() : "false"u8.ToArray() },
-            KeyValueExpressionType.LongType => new() { Type = KeyValueResponseType.Get, Value = Encoding.UTF8.GetBytes(LongValue.ToString()) },
-            KeyValueExpressionType.DoubleType => new() { Type = KeyValueResponseType.Get, Value = Encoding.UTF8.GetBytes(DoubleValue.ToString(CultureInfo.InvariantCulture)) },
-            KeyValueExpressionType.StringType => new() { Type = KeyValueResponseType.Get, Value = StrValue is not null ? Encoding.UTF8.GetBytes(StrValue) : null },
-            KeyValueExpressionType.BytesType => new() { Type = KeyValueResponseType.Get, Value = BytesValue },
+            KeyValueExpressionType.NullType => new() { Type = KeyValueResponseType.Get, Value = [], Revision = Revision, Expires = new(Expires, 0) },
+            KeyValueExpressionType.BoolType => new() { Type = KeyValueResponseType.Get, Value = BoolValue ? "true"u8.ToArray() : "false"u8.ToArray(), Revision = Revision, Expires = new(Expires, 0) },
+            KeyValueExpressionType.LongType => new() { Type = KeyValueResponseType.Get, Value = Encoding.UTF8.GetBytes(LongValue.ToString()), Revision = Revision, Expires = new(Expires, 0) },
+            KeyValueExpressionType.DoubleType => new() { Type = KeyValueResponseType.Get, Value = Encoding.UTF8.GetBytes(DoubleValue.ToString(CultureInfo.InvariantCulture)), Revision = Revision, Expires = new(Expires, 0) },
+            KeyValueExpressionType.StringType => new() { Type = KeyValueResponseType.Get, Value = StrValue is not null ? Encoding.UTF8.GetBytes(StrValue) : null, Revision = Revision, Expires = new(Expires, 0) },
+            KeyValueExpressionType.BytesType => new() { Type = KeyValueResponseType.Get, Value = BytesValue, Revision = Revision, Expires = new(Expires, 0) },
             _ => throw new ArgumentOutOfRangeException()
         };
     }

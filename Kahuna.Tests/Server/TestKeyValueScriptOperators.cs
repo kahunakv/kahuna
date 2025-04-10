@@ -66,7 +66,7 @@ public class TestKeyValueScriptOperators : BaseCluster
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
         await LeaveCluster(node1, node2, node3);
-    }       
+    }
     
     [Theory, CombinatorialData]
     public async Task TestSetGetSameConditionalAndScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
@@ -981,6 +981,211 @@ public class TestKeyValueScriptOperators : BaseCluster
         Assert.Equal(0, resp.Revision);
         Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));               
         
+        await LeaveCluster(node1, node2, node3);
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestLessThanOperatorConversionScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        // Persistent tests
+        string script = "RETURN 100 < '100'";
+
+        KeyValueTransactionResult resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));        
+        
+        script = "RETURN '100.5' < 50";
+
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+        script = "RETURN 100.5 < '100.5'";
+
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+        script = "RETURN '50' < 100";
+
+        resp = await kahuna3.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+        script = "RETURN 50.5 < '100'";
+
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));               
+        
+        await LeaveCluster(node1, node2, node3);
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestSetGetSameConditionalNotSetScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna _) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        // Persistent tests
+        string script = """
+        SET pp 'hello world'    
+        IF NOT SET THEN 
+           RETURN false
+        END
+        RETURN true
+        """;
+
+        KeyValueTransactionResult resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+        script = """
+        ESET pp 'hello world'    
+        IF NOT SET THEN 
+           RETURN false
+        END
+        RETURN true
+        """;
+
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+        script = """
+        SET pp 'hello world'
+        LET x = GET pp    
+        IF NOT SET THEN 
+           RETURN false
+        END
+        RETURN true
+        """;
+
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+        script = """
+        ESET pp 'hello world'
+        LET x = GET pp    
+        IF NOT SET THEN 
+           RETURN false
+        END
+        RETURN true
+        """;
+
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+        script = """
+        SET pp 'hello world'
+        SET pp 'hello world 2' NX
+        LET x = GET pp    
+        IF NOT SET THEN 
+           RETURN false
+        END
+        RETURN true
+        """;
+
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+        script = """
+        ESET pp 'hello world'
+        ESET pp 'hello world 2' NX
+        LET x = GET pp    
+        IF NOT SET THEN 
+           RETURN false
+        END
+        RETURN true
+        """;
+
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+        await LeaveCluster(node1, node2, node3);
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestSetGetSameConditionalNotFoundScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna _) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        // Persistent tests
+        string script = """
+        SET pp 'hello world'
+        LET pv = GET pp
+        IF NOT FOUND THEN 
+           RETURN false
+        END
+        RETURN true
+        """;
+
+        KeyValueTransactionResult resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+        script = """
+        ESET pp 'hello world'
+        LET pv = EGET pp
+        IF NOT FOUND THEN 
+           RETURN false
+        END
+        RETURN true
+        """;
+
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+        script = """
+        SET pp 'hello world'
+        LET pv = GET ppn
+        IF NOT FOUND THEN 
+           RETURN false
+        END
+        RETURN true
+        """;
+
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+        script = """
+        ESET pp 'hello world'
+        LET pv = EGET ppn
+        IF NOT FOUND THEN 
+           RETURN false
+        END
+        RETURN true
+        """;
+
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
+                      
         await LeaveCluster(node1, node2, node3);
     }
 }

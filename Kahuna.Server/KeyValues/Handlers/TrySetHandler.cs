@@ -139,7 +139,7 @@ internal sealed class TrySetHandler : BaseHandler
             entry.LastModified = currentTime;
             entry.State = KeyValueState.Set;
             
-            return new(KeyValueResponseType.Set, context.Revision, currentTime);
+            return new(KeyValueResponseType.Set, entry.Revision, currentTime);
         }
         
         /*if (message.CompareValue is not null)

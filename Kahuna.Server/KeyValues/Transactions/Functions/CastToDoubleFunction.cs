@@ -15,7 +15,7 @@ internal static class CastToDoubleFunction
 
         return argument.Type switch
         {
-            KeyValueExpressionType.BoolType => new() { Type = KeyValueExpressionType.DoubleType, LongValue = argument.BoolValue ? 1 : 0 },
+            KeyValueExpressionType.BoolType => new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = argument.BoolValue ? 1 : 0 },
             KeyValueExpressionType.DoubleType => new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = argument.DoubleValue },
             KeyValueExpressionType.LongType => new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = argument.LongValue },
             KeyValueExpressionType.StringType => new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = TryCastString(ast, argument)  },

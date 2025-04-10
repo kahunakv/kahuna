@@ -18,7 +18,7 @@ internal static class CastToStrFunction
             KeyValueExpressionType.DoubleType => new() { Type = KeyValueExpressionType.StringType, StrValue = arguments[0].DoubleValue.ToString(CultureInfo.InvariantCulture) },
             KeyValueExpressionType.StringType => new() { Type = KeyValueExpressionType.StringType, StrValue = arguments[0].StrValue ?? "" },
             KeyValueExpressionType.NullType => new() { Type = KeyValueExpressionType.StringType, StrValue = arguments[0].StrValue ?? "" },
-            KeyValueExpressionType.BoolType => new() { Type = KeyValueExpressionType.StringType, StrValue = arguments[0].BoolValue.ToString() },
+            KeyValueExpressionType.BoolType => new() { Type = KeyValueExpressionType.StringType, StrValue = arguments[0].BoolValue.ToString().ToLowerInvariant() },
             _ => throw new KahunaScriptException($"Cannot cast {arguments[0].Type} to string", ast.yyline)
         };
     }

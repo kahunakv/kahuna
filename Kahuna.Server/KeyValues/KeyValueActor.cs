@@ -146,11 +146,12 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         finally
         {
             logger.LogDebug(
-                "KeyValueActor Took: {Actor} {Type} Key={Key} Response={Response} Time={Elasped}ms",
+                "KeyValueActor Took: {Actor} {Type} Key={Key} Response={Response} Revision={Revision} Time={Elasped}ms",
                 actorContext.Self.Runner.Name,
                 message.Type,
                 message.Key,
                 response?.Type,
+                response?.Revision,
                 stopwatch.ElapsedMilliseconds
             );
         }
