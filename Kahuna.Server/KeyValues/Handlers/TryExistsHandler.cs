@@ -123,7 +123,7 @@ internal sealed class TryExistsHandler : BaseHandler
         if (context is null)
             return KeyValueStaticResponses.DoesNotExistContextResponse;
         
-        if (context.State == KeyValueState.Deleted)
+        if (context.State is KeyValueState.Undefined or KeyValueState.Deleted)
             return KeyValueStaticResponses.DoesNotExistContextResponse;
 
         if (context.Expires != HLCTimestamp.Zero && context.Expires - currentTime < TimeSpan.Zero)

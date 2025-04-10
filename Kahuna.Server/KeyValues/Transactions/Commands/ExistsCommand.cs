@@ -75,7 +75,8 @@ internal sealed class ExistsCommand : BaseCommand
             Type = type,
             Value = readOnlyContext.Value,
             Revision = readOnlyContext.Revision,
-            Expires = readOnlyContext.Expires
+            Expires = readOnlyContext.Expires,
+            LastModified = readOnlyContext.LastModified
         };
     }
 }

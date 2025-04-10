@@ -52,6 +52,10 @@ public class TestKeyValues : BaseCluster
         (KeyValueResponseType response, long revision, _) = await kahuna1.LocateAndTrySetKeyValue(HLCTimestamp.Zero, keyName, valueA, null, -1, KeyValueFlags.Set, 0, durability, TestContext.Current.CancellationToken);
         Assert.Equal(KeyValueResponseType.Set, response);
         Assert.Equal(0, revision);
+        
+        //(KeyValueResponseType response, long revision, _) = await kahuna2.LocateAndTryGetKeyValue(HLCTimestamp.Zero, keyName, valueA, durability, TestContext.Current.CancellationToken);
+        //Assert.Equal(KeyValueResponseType.Set, response);
+        //Assert.Equal(0, revision);
 
         await node1.LeaveCluster(true);
         await node2.LeaveCluster(true);

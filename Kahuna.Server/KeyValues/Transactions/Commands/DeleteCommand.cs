@@ -50,13 +50,6 @@ internal sealed class DeleteCommand : BaseCommand
                 break;
         }
         
-        context.Result = new()
-        {
-            Type = type,
-            Revision = revision,
-            LastModified = lastModified
-        };
-        
         context.ModifiedResult = new()
         {
             Type = type,
@@ -68,7 +61,8 @@ internal sealed class DeleteCommand : BaseCommand
         {
             ServedFrom = "",
             Type = type,
-            Revision = revision
+            Revision = revision,
+            LastModified = lastModified
         };
     }
 }

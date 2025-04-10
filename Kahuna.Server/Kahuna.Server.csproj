@@ -23,7 +23,6 @@
 <ItemGroup>
   <Folder Include="Cluster\" />
   <Folder Include="Communication\External\" />
-  <Folder Include="Communication\Grpc\Internode\" />
 </ItemGroup>
 
   <ItemGroup>
