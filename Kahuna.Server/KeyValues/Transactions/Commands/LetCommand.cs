@@ -6,7 +6,7 @@ namespace Kahuna.Server.KeyValues.Transactions.Commands;
 
 internal sealed class LetCommand : BaseCommand
 {
-    public static void Execute(
+    public static KeyValueTransactionResult Execute(
         KeyValueTransactionContext context,
         NodeAst ast
     )
@@ -19,8 +19,8 @@ internal sealed class LetCommand : BaseCommand
         
         KeyValueExpressionResult result = KeyValueTransactionExpression.Eval(context, ast.rightAst);
         
-        context.Result = result.ToTransactionResult();
-        
         context.SetVariable(ast.leftAst, ast.leftAst.yytext!, result);
+
+        return result.ToTransactionResult();
     }
 }

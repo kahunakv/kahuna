@@ -56,13 +56,6 @@ internal sealed class ExtendCommand : BaseCommand
                 break;
         }
         
-        context.Result = new()
-        {
-            Type = type,
-            Revision = revision,
-            LastModified = lastModified,
-        };
-        
         context.ModifiedResult = new()
         {
             Type = type,
@@ -74,7 +67,8 @@ internal sealed class ExtendCommand : BaseCommand
         {
             ServedFrom = "",
             Type = type,
-            Revision = revision
+            Revision = revision,
+            LastModified = lastModified
         };
     }
 }

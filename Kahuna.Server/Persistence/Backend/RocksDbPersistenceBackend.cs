@@ -1,4 +1,5 @@
 
+using System.Runtime.InteropServices;
 using System.Text;
 using Kahuna.Server.Locks;
 using Kahuna.Persistence.Protos;
@@ -127,10 +128,17 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
             return null;
 
         RocksDbLockMessage message = UnserializeLockMessage(value);
+        
+        byte[]? owner;
+        
+        if (MemoryMarshal.TryGetArray(message.Owner.Memory, out ArraySegment<byte> segment))
+            owner = segment.Array;
+        else
+            owner = message.Owner.ToByteArray();
 
         LockContext context = new()
         {
-            Owner = message.Owner?.ToByteArray(),
+            Owner = owner,
             FencingToken = message.FencingToken,
             Expires = new(message.ExpiresPhysical, message.ExpiresCounter),
             LastUsed = new(message.LastUsedPhysical, message.LastUsedCounter),
@@ -152,10 +160,17 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
             return null;
 
         RocksDbKeyValueMessage message = UnserializeKeyValueMessage(value);
+        
+        byte[]? messageValue;
+        
+        if (MemoryMarshal.TryGetArray(message.Value.Memory, out ArraySegment<byte> segment))
+            messageValue = segment.Array;
+        else
+            messageValue = message.Value.ToByteArray();
 
         KeyValueContext context = new()
         {
-            Value = message.Value?.ToByteArray(),
+            Value = messageValue,
             Revision = message.Revision,
             Expires = new(message.ExpiresPhysical, message.ExpiresCounter),
             LastUsed = new(message.LastUsedPhysical, message.LastUsedCounter),
@@ -178,10 +193,17 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
             return null;
 
         RocksDbKeyValueMessage message = UnserializeKeyValueMessage(value);
+        
+        byte[]? messageValue;
+        
+        if (MemoryMarshal.TryGetArray(message.Value.Memory, out ArraySegment<byte> segment))
+            messageValue = segment.Array;
+        else
+            messageValue = message.Value.ToByteArray();
 
         KeyValueContext context = new()
         {
-            Value = message.Value?.ToByteArray(),
+            Value = messageValue,
             Revision = message.Revision,
             Expires = new(message.ExpiresPhysical, message.ExpiresCounter),
             LastUsed = new(message.LastUsedPhysical, message.LastUsedCounter),
@@ -218,9 +240,16 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
             string keyWithoutMarker = key[..^CurrentMarker.Length];
             
             RocksDbKeyValueMessage message = UnserializeKeyValueMessage(iterator.Value());
+            
+            byte[]? messageValue;
+            
+            if (MemoryMarshal.TryGetArray(message.Value.Memory, out ArraySegment<byte> segment))
+                messageValue = segment.Array;
+            else
+                messageValue = message.Value.ToByteArray();
 
             result.Add((keyWithoutMarker, new(
-                message.Value?.ToByteArray(), 
+                messageValue, 
                 message.Revision, 
                 new(message.ExpiresPhysical, message.ExpiresCounter),
                 new(message.LastUsedPhysical, message.LastUsedCounter),

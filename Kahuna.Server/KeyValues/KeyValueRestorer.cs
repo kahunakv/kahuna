@@ -1,4 +1,5 @@
 
+using System.Runtime.InteropServices;
 using Nixie;
 
 using Kommander;
@@ -61,12 +62,19 @@ internal sealed class KeyValueRestorer
 
                     if (response.Type == PersistenceResponseType.Success)
                         logger.LogDebug("Replicated key/value set {Key} {Revision} to {Node}", keyValueMessage.Key, keyValueMessage.Revision, raft.GetLocalNodeId());*/
+                    
+                    byte[]? messageValue;
+            
+                    if (MemoryMarshal.TryGetArray(keyValueMessage.Value.Memory, out ArraySegment<byte> segment))
+                        messageValue = segment.Array;
+                    else
+                        messageValue = keyValueMessage.Value.ToByteArray();
 
                     backgroundWriter.Send(new(
                         BackgroundWriteType.QueueStoreKeyValue,
                         -1,
                         keyValueMessage.Key,
-                        keyValueMessage.Value?.ToByteArray(),
+                        messageValue,
                         keyValueMessage.Revision,
                         new(keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
                         new(keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
@@ -97,11 +105,18 @@ internal sealed class KeyValueRestorer
                     if (response.Type == PersistenceResponseType.Success)
                         logger.LogDebug("Replicated key/value delete {Key} {Revision} to {Node}", keyValueMessage.Key, keyValueMessage.Revision, raft.GetLocalNodeId());*/
                     
+                    byte[]? messageValue;
+            
+                    if (MemoryMarshal.TryGetArray(keyValueMessage.Value.Memory, out ArraySegment<byte> segment))
+                        messageValue = segment.Array;
+                    else
+                        messageValue = keyValueMessage.Value.ToByteArray();
+                    
                     backgroundWriter.Send(new(
                         BackgroundWriteType.QueueStoreKeyValue,
                         -1,
                         keyValueMessage.Key,
-                        keyValueMessage.Value?.ToByteArray(),
+                        messageValue,
                         keyValueMessage.Revision,
                         new(keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
                         new(keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
@@ -132,11 +147,18 @@ internal sealed class KeyValueRestorer
                     if (response.Type == PersistenceResponseType.Success)
                         logger.LogDebug("Replicated key/value extend {Key} {Revision} to {Node}", keyValueMessage.Key, keyValueMessage.Revision, raft.GetLocalNodeId());*/
                     
+                    byte[]? messageValue;
+            
+                    if (MemoryMarshal.TryGetArray(keyValueMessage.Value.Memory, out ArraySegment<byte> segment))
+                        messageValue = segment.Array;
+                    else
+                        messageValue = keyValueMessage.Value.ToByteArray();
+                    
                     backgroundWriter.Send(new(
                         BackgroundWriteType.QueueStoreKeyValue,
                         -1,
                         keyValueMessage.Key,
-                        keyValueMessage.Value?.ToByteArray(),
+                        messageValue,
                         keyValueMessage.Revision,
                         new(keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
                         new(keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),

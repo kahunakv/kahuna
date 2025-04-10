@@ -4,6 +4,7 @@ using Kommander.Time;
 
 using Grpc.Net.Client;
 using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using Google.Protobuf.Collections;
 
 using Kahuna.Communication.Common.Grpc;
@@ -734,8 +735,15 @@ internal sealed class KeyValueLocator
         
         foreach (GrpcKeyValueByPrefixItemResponse? kv in remoteResponseItems)
         {
+            byte[]? value;
+            
+            if (MemoryMarshal.TryGetArray(kv.Value.Memory, out ArraySegment<byte> segment))
+                value = segment.Array;
+            else
+                value = kv.Value.ToByteArray();
+            
             responses.Add((kv.Key, new(
-                kv.Value?.ToByteArray(), 
+                value, 
                 kv.Revision, 
                 new(kv.ExpiresPhysical, kv.ExpiresCounter),
                 new(kv.LastUsedPhysical, kv.LastUsedCounter),
@@ -797,8 +805,15 @@ internal sealed class KeyValueLocator
 
     private static (string, ReadOnlyKeyValueContext) ScanByPrefixItems(GrpcKeyValueByPrefixItemResponse item)
     {
+        byte[]? value;
+            
+        if (MemoryMarshal.TryGetArray(item.Value.Memory, out ArraySegment<byte> segment))
+            value = segment.Array;
+        else
+            value = item.Value.ToByteArray();
+        
         return (item.Key, new(
-            item.Value?.ToByteArray(),
+            value,
             item.Revision,
             new(item.ExpiresPhysical, item.ExpiresCounter),
             new(item.LastUsedPhysical, item.LastUsedCounter),

@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Runtime.InteropServices;
 using Kommander.Time;
 using Google.Protobuf;
 using Google.Protobuf.Collections;
@@ -54,12 +55,26 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
             {
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
+
+        byte[]? value;
+        
+        if (MemoryMarshal.TryGetArray(request.Value.Memory, out ArraySegment<byte> segment))
+            value = segment.Array;
+        else
+            value = request.Value.ToByteArray();
+        
+        byte[]? compareValue;
+        
+        if (MemoryMarshal.TryGetArray(request.CompareValue.Memory, out segment))
+            compareValue = segment.Array;
+        else
+            compareValue = request.CompareValue.ToByteArray();
         
         (KeyValueResponseType response, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTrySetKeyValue(
             new(request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key, 
-            request.Value?.ToByteArray(),
-            request.CompareValue?.ToByteArray(),
+            value,
+            compareValue,
             request.CompareRevision,
             (KeyValueFlags)request.Flags,
             request.ExpiresMs, 

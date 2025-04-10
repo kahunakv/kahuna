@@ -278,7 +278,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
         {
-            ConcurrentBag<(KeyValueResponseType type, HLCTimestamp proposalId, string key, KeyValueDurability durability)> bag = [];
+            ConcurrentBag<(KeyValueResponseType type, HLCTimestamp, string key, KeyValueDurability durability)> bag = [];
 
             foreach ((string key, KeyValueDurability durability) in xkeys)
             {
@@ -286,11 +286,24 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
                 bag.Add((type, proposalId, key, durability));
             }
 
-            //AddToPrepareMutationsResponses(bag, lockSync, responses);
+            AddToPrepareMutationsResponses(bag, lockSync, responses);
             return;
         }
         
         throw new KahunaServerException($"The node {node} does not exist.");
+    }
+    
+    private static void AddToPrepareMutationsResponses(
+        ConcurrentBag<(KeyValueResponseType type, HLCTimestamp, string key, KeyValueDurability durability)> bag, 
+        Lock lockSync, 
+        List<(KeyValueResponseType type, HLCTimestamp, string key, KeyValueDurability durability)> responses
+    )
+    {
+        foreach ((KeyValueResponseType type, HLCTimestamp ticketId, string key, KeyValueDurability durability) in bag)
+        {
+            lock (lockSync)
+                responses.Add((type, ticketId, key, durability));
+        }
     }
 
     public async Task<(KeyValueResponseType, long)> TryCommitMutations(
@@ -308,7 +321,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    public Task TryCommitNodeMutations(
+    public async Task TryCommitNodeMutations(
         string node, 
         HLCTimestamp transactionId, 
         List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys, 
@@ -317,6 +330,33 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         CancellationToken cancellationToken
     )
     {
-        throw new NotImplementedException();
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            ConcurrentBag<(KeyValueResponseType, string, long, KeyValueDurability)> bag = [];
+
+            foreach ((string key, HLCTimestamp ticketId, KeyValueDurability durability) in xkeys)
+            {
+                (KeyValueResponseType type, long commitIndex) = await kahunaNode.TryCommitMutations(transactionId, key, ticketId, durability);
+                bag.Add((type, key, commitIndex, durability));
+            }
+
+            AddToCommitMutationsResponses(bag, lockSync, responses);
+            return;
+        }
+        
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+    
+    private static void AddToCommitMutationsResponses(
+        ConcurrentBag<(KeyValueResponseType, string, long, KeyValueDurability)> bag, 
+        Lock lockSync, 
+        List<(KeyValueResponseType type, string key, long, KeyValueDurability durability)> responses
+    )
+    {
+        foreach ((KeyValueResponseType type, string key, long commitIndex, KeyValueDurability durability) in bag)
+        {
+            lock (lockSync)
+                responses.Add((type, key, commitIndex, durability));
+        }
     }
 }

@@ -1,4 +1,5 @@
 
+using System.Runtime.InteropServices;
 using Google.Protobuf;
 using Grpc.Net.Client;
 using Kahuna.Communication.Common.Grpc;
@@ -95,10 +96,17 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         if (remoteResponse.Type != GrpcLockResponseType.LockResponseTypeGot)
             return ((LockResponseType)remoteResponse.Type, null);
+        
+        byte[]? owner;
+            
+        if (MemoryMarshal.TryGetArray(remoteResponse.Owner.Memory, out ArraySegment<byte> segment))
+            owner = segment.Array;
+        else
+            owner = remoteResponse.Owner.ToByteArray();
 
         return ((LockResponseType)remoteResponse.Type,
             new(
-                remoteResponse.Owner?.ToByteArray(), 
+                owner, 
                 remoteResponse.FencingToken,
                 new(remoteResponse.ExpiresPhysical, remoteResponse.ExpiresCounter)
             )
@@ -196,8 +204,15 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         remoteResponse.ServedFrom = $"https://{node}";
         
+        byte[]? value;
+            
+        if (MemoryMarshal.TryGetArray(remoteResponse.Value.Memory, out ArraySegment<byte> segment))
+            value = segment.Array;
+        else
+            value = remoteResponse.Value.ToByteArray();
+        
         return ((KeyValueResponseType)remoteResponse.Type, new(
-            remoteResponse.Value?.ToByteArray(),
+            value,
             remoteResponse.Revision,
             new(remoteResponse.ExpiresPhysical, remoteResponse.ExpiresCounter),
             new(remoteResponse.LastUsedPhysical, remoteResponse.LastUsedCounter),

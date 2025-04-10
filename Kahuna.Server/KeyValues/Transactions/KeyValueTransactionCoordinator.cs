@@ -676,20 +676,20 @@ internal sealed class KeyValueTransactionCoordinator
                 
                 case NodeType.Let:
                 {
-                    LetCommand.Execute(context, ast);
+                    context.Result = LetCommand.Execute(context, ast);
                     break;
                 }
                 
                 case NodeType.Set:
-                    await SetCommand.Execute(manager, context, ast, KeyValueDurability.Persistent, cancellationToken);
+                    context.Result = await SetCommand.Execute(manager, context, ast, KeyValueDurability.Persistent, cancellationToken);
                     break;
                 
                 case NodeType.Delete:
-                    await DeleteCommand.Execute(manager, context, ast, KeyValueDurability.Persistent, cancellationToken);
+                    context.Result = await DeleteCommand.Execute(manager, context, ast, KeyValueDurability.Persistent, cancellationToken);
                     break;
                 
                 case NodeType.Extend:
-                    await ExtendCommand.Execute(manager, context, ast, KeyValueDurability.Persistent, cancellationToken);
+                    context.Result = await ExtendCommand.Execute(manager, context, ast, KeyValueDurability.Persistent, cancellationToken);
                     break;
 
                 case NodeType.Get:
@@ -705,7 +705,7 @@ internal sealed class KeyValueTransactionCoordinator
                 }
                 
                 case NodeType.Eset:
-                    await SetCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
+                    context.Result = await SetCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
 
                 case NodeType.Eget:
@@ -721,11 +721,11 @@ internal sealed class KeyValueTransactionCoordinator
                 }
                 
                 case NodeType.Edelete:
-                    await DeleteCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
+                    context.Result = await DeleteCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
                 
                 case NodeType.Eextend:
-                    await ExtendCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
+                    context.Result = await ExtendCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
                 
                 case NodeType.Commit:

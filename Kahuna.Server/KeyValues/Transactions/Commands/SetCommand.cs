@@ -98,13 +98,6 @@ internal sealed class SetCommand : BaseCommand
                 context.Status = KeyValueExecutionStatus.Stop;
                 break;
         }
-
-        context.Result = new()
-        {
-            Type = type,
-            Revision = revision,
-            LastModified = lastModified
-        };
         
         context.ModifiedResult = new()
         {
@@ -117,7 +110,8 @@ internal sealed class SetCommand : BaseCommand
         {
             ServedFrom = "",
             Type = type,
-            Revision = revision
+            Revision = revision,
+            LastModified = lastModified
         };
     }
 }
