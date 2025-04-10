@@ -2,6 +2,7 @@
 using Kommander;
 using Kommander.Time;
 using System.Text;
+using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 using Microsoft.Extensions.Logging;
@@ -37,28 +38,31 @@ public class TestKeyValues : BaseCluster
         [CombinatorialValues("memory")] string storage,
         [CombinatorialValues(8, 16)] int partitions,
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
-        //[CombinatorialValues("memory")] string storage,
-        //[CombinatorialValues(16)] int partitions,
-        //[CombinatorialValues(LockDurability.Ephemeral)] LockDurability durability
     )
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) = await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
 
         string keyName = GetRandomLockName();
-
         byte[] valueA = Encoding.UTF8.GetBytes(GetRandomLockName());
-        // byte[] ownerB = Encoding.UTF8.GetBytes(GetRandomLockName());
 
         (KeyValueResponseType response, long revision, _) = await kahuna1.LocateAndTrySetKeyValue(HLCTimestamp.Zero, keyName, valueA, null, -1, KeyValueFlags.Set, 0, durability, TestContext.Current.CancellationToken);
         Assert.Equal(KeyValueResponseType.Set, response);
         Assert.Equal(0, revision);
         
-        //(KeyValueResponseType response, long revision, _) = await kahuna2.LocateAndTryGetKeyValue(HLCTimestamp.Zero, keyName, valueA, durability, TestContext.Current.CancellationToken);
-        //Assert.Equal(KeyValueResponseType.Set, response);
-        //Assert.Equal(0, revision);
+        (response, ReadOnlyKeyValueContext? readOnlyKeyValueContext) = await kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, keyName, -1, durability, TestContext.Current.CancellationToken);
+        Assert.Equal(KeyValueResponseType.Get, response);
+        Assert.NotNull(readOnlyKeyValueContext);
+        Assert.Equal(0, readOnlyKeyValueContext.Revision);
+        
+        (response, readOnlyKeyValueContext) = await kahuna3.LocateAndTryGetValue(HLCTimestamp.Zero, keyName, -1, durability, TestContext.Current.CancellationToken);
+        Assert.Equal(KeyValueResponseType.Get, response);
+        Assert.NotNull(readOnlyKeyValueContext);
+        Assert.Equal(0, readOnlyKeyValueContext.Revision);
+        
+        (response, revision, _) = await kahuna1.LocateAndTrySetKeyValue(HLCTimestamp.Zero, keyName, valueA, null, -1, KeyValueFlags.Set, 0, durability, TestContext.Current.CancellationToken);
+        Assert.Equal(KeyValueResponseType.Set, response);
+        Assert.Equal(1, revision);
 
-        await node1.LeaveCluster(true);
-        await node2.LeaveCluster(true);
-        await node3.LeaveCluster(true);
+        await LeaveCluster(node1, node2, node3);
     }
 }

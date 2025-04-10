@@ -635,7 +635,7 @@ public class TestKeyValueScripts : BaseCluster
 
         KeyValueTransactionResult resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Set, resp.Type);
-        Assert.Equal(-1, resp.Revision);        
+        Assert.Equal(0, resp.Revision);        
         
         script = "GET pp1";
 
@@ -658,7 +658,7 @@ public class TestKeyValueScripts : BaseCluster
         
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Set, resp.Type);
-        Assert.Equal(-1, resp.Revision);        
+        Assert.Equal(0, resp.Revision);        
         
         script = "EGET pp1";
 
@@ -690,7 +690,7 @@ public class TestKeyValueScripts : BaseCluster
 
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Set, resp.Type);
-        Assert.Equal(-1, resp.Revision);    
+        Assert.Equal(0, resp.Revision);    
         
         script = "GET pp3";
 
@@ -704,8 +704,36 @@ public class TestKeyValueScripts : BaseCluster
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.DoesNotExist, resp.Type);
         
-        await node1.LeaveCluster(true);
-        await node2.LeaveCluster(true);
-        await node3.LeaveCluster(true);
+        script = """
+         ESET pp1 'hello world 1' EX 1000
+         ESET pp2 'hello world 2' EX 1000
+
+         LET pp1v = EGET pp1
+         LET pp2v = EGET pp2 
+
+         IF pp1v = 'hello world 1' && pp2v = 'hello world 2' THEN
+             ESET pp3 'hello world 3' EX 1000
+         ELSE
+             ESET pp4 'hello world 4' EX 1000
+         END
+         """;
+
+        resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Set, resp.Type);
+        Assert.Equal(0, resp.Revision);    
+        
+        script = "EGET pp3";
+
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(0, resp.Revision);
+        Assert.Equal("hello world 3"u8.ToArray(), resp.Value);
+        
+        script = "EGET pp4";
+
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.DoesNotExist, resp.Type);
+        
+        await LeaveCluster(node1, node2, node3);
     }
 }
