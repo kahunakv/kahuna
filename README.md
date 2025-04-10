@@ -1,15 +1,13 @@
 # 🦎 Kahuna
 
-<img src="https://github.com/user-attachments/assets/efa5aa43-3fbd-4510-bbe7-a8595d2f3217" alt="kahuna" height=350">
+<img src="https://github.com/user-attachments/assets/d73a177f-5b9a-4e63-9b8d-9bcf067da002" height="350" alt="kahuna">
 
-Kahuna is an open-source solution designed to help developers to provide coordination for modern 
-distributed systems by integrating three critical functionalities: 
-**distributed locking, a distributed key/value store, and a distributed sequencer**. 
+Kahuna is an open-source solution designed to help developers coordinate modern distributed systems by integrating three 
+critical functionalities: **distributed locking, a distributed key/value store and a distributed sequencer.**
 
-By ensuring synchronized access to shared resources, efficient data storage and retrieval, 
-and globally ordered event sequencing, Kahuna offers a new approach 
-to managing distributed workloads. Built on a partitioned architecture coordinated via a **Raft Groups**, 
-it delivers **scalability, reliability, and simplicity**, making it a choice for 
+By enabling synchronized access to shared resources, efficient data storage and retrieval, and globally ordered event sequencing, 
+Kahuna offers a new approach to managing distributed workloads. Built on a partitioned architecture coordinated via **Raft Groups**, 
+it delivers scalability, reliability and simplicity, making it a great choice for 
 applications requiring strong consistency and high availability.
 
 ### **Distributed Locking**
