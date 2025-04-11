@@ -43,7 +43,7 @@ internal sealed class TrySetHandler : BaseHandler
                 newContext = await raft.ReadThreadPool.EnqueueTask(() => PersistenceBackend.GetKeyValue(message.Key));
                 if (newContext is not null)
                 {
-                    if (newContext.State == KeyValueState.Deleted)
+                    if (newContext.State is KeyValueState.Deleted or KeyValueState.Undefined)
                     {
                         newContext.Value = null;
                         exists = false;
@@ -64,15 +64,17 @@ internal sealed class TrySetHandler : BaseHandler
                 }
             }
 
-            newContext ??= new() { Revision = -1 };
+            newContext ??= new() { State = KeyValueState.Undefined, Revision = -1 };
             
             context = newContext;
+            
+            // logger.LogDebug("{0} {1}", context.State, context.Revision);
 
             keyValuesStore.Add(message.Key, newContext);
         }
         else
         {
-            if (context.State == KeyValueState.Deleted)
+            if (context.State is KeyValueState.Deleted or KeyValueState.Undefined)
             {
                 context.Value = null;
                 exists = false;
@@ -105,25 +107,29 @@ internal sealed class TrySetHandler : BaseHandler
                 context.MvccEntries.Add(message.TransactionId, entry);
             }
 
-            if (entry.State == KeyValueState.Deleted)
+            if (entry.State is KeyValueState.Deleted or KeyValueState.Undefined)
             {
                 entry.Value = null;
                 exists = false;
             }
-
-            if (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
+            else
             {
-                entry.State = KeyValueState.Deleted;
-                entry.Value = null;
-                exists = false;
+                if (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
+                {
+                    entry.State = KeyValueState.Deleted;
+                    entry.Value = null;
+                    exists = false;
+                }
             }
-
+            
+            // logger.LogDebug("Key={0} Flags={1} Rev={2} CmpRev={3}", message.Key, message.Flags, entry.Revision, message.CompareRevision);
+            
             switch (message.Flags)
             {
                 case KeyValueFlags.SetIfExists when !exists:
                 case KeyValueFlags.SetIfNotExists when exists:
-                case KeyValueFlags.SetIfEqualToValue when exists && !((ReadOnlySpan<byte>)entry.Value).SequenceEqual(message.CompareValue):
-                case KeyValueFlags.SetIfEqualToRevision when exists && entry.Revision != message.CompareRevision:
+                case KeyValueFlags.SetIfEqualToValue when !((ReadOnlySpan<byte>)entry.Value).SequenceEqual(message.CompareValue): // exists &&
+                case KeyValueFlags.SetIfEqualToRevision when entry.Revision != message.CompareRevision: // exists && 
                     return new(KeyValueResponseType.NotSet, entry.Revision, entry.LastModified);
 
                 case KeyValueFlags.None:
@@ -157,8 +163,8 @@ internal sealed class TrySetHandler : BaseHandler
         {
             case KeyValueFlags.SetIfExists when !exists:
             case KeyValueFlags.SetIfNotExists when exists:
-            case KeyValueFlags.SetIfEqualToValue when exists && !((ReadOnlySpan<byte>)context.Value).SequenceEqual(message.CompareValue):
-            case KeyValueFlags.SetIfEqualToRevision when exists && context.Revision != message.CompareRevision:
+            case KeyValueFlags.SetIfEqualToValue when !((ReadOnlySpan<byte>)context.Value).SequenceEqual(message.CompareValue): // exists && 
+            case KeyValueFlags.SetIfEqualToRevision when context.Revision != message.CompareRevision: // exists && 
                 return new(KeyValueResponseType.NotSet, context.Revision);
 
             case KeyValueFlags.None:

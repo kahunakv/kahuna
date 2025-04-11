@@ -10,7 +10,7 @@ internal static class GetRevisionFunction
     {
         if (arguments.Count != 1)
             throw new KahunaScriptException("Invalid number of arguments for 'revision' function", ast.yyline);
-
+        
         return new()
         {
             Type = KeyValueExpressionType.LongType, 
