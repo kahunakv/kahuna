@@ -1,11 +1,14 @@
 
 using System.Text;
+using System.Text.Json;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Client;
 
 public class KahunaKeyValue
 {
+    private static readonly JsonSerializerOptions DefaultJsonSerializerOptions = new() { WriteIndented = false };
+    
     private readonly KahunaClient client;
     
     private readonly string key;
@@ -70,5 +73,21 @@ public class KahunaKeyValue
             return await client.DeleteKeyValue(key, durability, cancellationToken);
         
         //return await client.Communication.TryExtend(servedFrom, resource, owner, (int)duration.TotalMilliseconds, durability, cancellationToken);
+    }
+
+    /// <summary>
+    /// Returns the current key/value state as a JSON string.
+    /// </summary>
+    /// <returns></returns>
+    public string ToJson()
+    {
+        return JsonSerializer.Serialize(new
+        {
+            key,
+            success = Success,
+            revision = Revision,
+            value = ValueAsString(),
+            durability = durability.ToString()
+        }, DefaultJsonSerializerOptions);
     }
 }

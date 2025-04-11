@@ -1,4 +1,6 @@
 
+// ReSharper disable ConvertToAutoProperty
+
 /**
  * This file is part of Kahuna
  *
@@ -6,8 +8,9 @@
  * file that was distributed with this source code.
  */
 
+using System.Text;
+using System.Text.Json;
 using Kahuna.Shared.Locks;
-// ReSharper disable ConvertToAutoProperty
 
 namespace Kahuna.Client;
 
@@ -16,6 +19,8 @@ namespace Kahuna.Client;
 /// </summary>
 public sealed class KahunaLock : IAsyncDisposable
 {
+    private static readonly JsonSerializerOptions DefaultJsonSerializerOptions = new() { WriteIndented = false };
+    
     private readonly KahunaClient client;
 
     private readonly KahunaLockAcquireResult result;
@@ -37,6 +42,8 @@ public sealed class KahunaLock : IAsyncDisposable
     public long FencingToken => fencingToken;
     
     public byte[] Owner => owner ?? throw new KahunaException("Lock was not acquired", LockResponseType.Errored);
+
+    public string? OwnerAsString => owner is not null ? Encoding.UTF8.GetString(owner) : "";
 
     /// <summary>
     /// Constructor
@@ -138,6 +145,18 @@ public sealed class KahunaLock : IAsyncDisposable
             await client.Communication.TryUnlock(servedFrom, resource, owner, durability, CancellationToken.None);
         }
     }
+    
+    public string? ToJson()
+    {
+        return JsonSerializer.Serialize(new
+        {
+            resource,
+            isAcquired = IsAcquired,
+            fencingToken = FencingToken,
+            owner = OwnerAsString
+            //durability = durability.ToString()
+        }, DefaultJsonSerializerOptions);
+    }
 
     ~KahunaLock()
     {
@@ -146,5 +165,5 @@ public sealed class KahunaLock : IAsyncDisposable
 
         if (!disposed)
             Console.WriteLine("Lock was not disposed: {0}", resource);
-    }
+    }    
 }

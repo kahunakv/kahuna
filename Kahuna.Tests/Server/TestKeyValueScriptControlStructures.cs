@@ -450,11 +450,11 @@ public class TestKeyValueScriptControlStructures : BaseCluster
 
         stopwatch.Restart();
 
-        script = "sleep 5050 return true";
+        script = "sleep 3050 return true";
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);        
-        Assert.True(stopwatch.ElapsedMilliseconds >= 5000);
+        Assert.True(stopwatch.ElapsedMilliseconds >= 3000);
         
         await LeaveCluster(node1, node2, node3);
     }
