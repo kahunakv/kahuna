@@ -418,7 +418,7 @@ public static class InteractiveConsole
             return;
         
         try
-        {    
+        {
             AnsiConsole.MarkupLine("[purple]{0}[/]", Markup.Escape(scriptText));
 
             await RunCommand(connection, scripts, history, scriptText);

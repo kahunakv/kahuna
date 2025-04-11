@@ -105,6 +105,8 @@ TAnd            &&
 
 {RBrace} { yylval.l = yyline; return (int)Token.RBRACE; }
 
+{TComma} { yylval.l = yyline; return (int)Token.TCOMMA; }
+
 {TLet} { yylval.l = yyline; return (int)Token.TLET; }
 
 {TGet} { yylval.l = yyline; return (int)Token.TGET; }

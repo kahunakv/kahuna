@@ -5,9 +5,45 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 namespace Kahuna.Server.KeyValues.Transactions.Functions;
 
 internal static class CallFunction
-{
-    public static KeyValueExpressionResult Eval(KeyValueTransactionContext context, NodeAst ast)
+{        
+    private static readonly Dictionary<string, Func<NodeAst, List<KeyValueExpressionResult>, KeyValueExpressionResult>> FunctionMap = new()
     {
+        { "abs", AbsFunction.Execute },
+        { "pow", PowFunction.Execute },
+        { "round", RoundFunction.Execute },
+        { "ceil", CeilFunction.Execute },
+        { "floor", FloorFunction.Execute },
+        { "min", MinFunction.Execute },
+        { "max", MaxFunction.Execute },
+        { "to_int", CastToLongFunction.Execute },
+        { "to_integer", CastToLongFunction.Execute },
+        { "to_long", CastToLongFunction.Execute },
+        { "to_number", CastToLongFunction.Execute },
+        { "is_int", IsLongFunction.Execute },
+        { "is_integer", IsLongFunction.Execute },
+        { "is_long", IsLongFunction.Execute },
+        { "to_float", CastToDoubleFunction.Execute },
+        { "to_double", CastToDoubleFunction.Execute },
+        { "is_float", IsDoubleFunction.Execute },
+        { "is_double", IsDoubleFunction.Execute },
+        { "to_str", CastToStrFunction.Execute },
+        { "to_string", CastToStrFunction.Execute },
+        { "is_str", IsStringFunction.Execute },
+        { "is_string", IsStringFunction.Execute },
+        { "to_bool", CastToBoolFunction.Execute },
+        { "to_boolean", CastToBoolFunction.Execute },
+        { "is_bool", IsBoolFunction.Execute },
+        { "is_boolean", IsBoolFunction.Execute },
+        { "is_null", IsNullFunction.Execute },
+        { "revision", GetRevisionFunction.Execute },
+        { "rev", GetRevisionFunction.Execute },
+        { "expires", GetExpiresFunction.Execute },
+        { "len", GetLengthFunction.Execute },
+        { "length", GetLengthFunction.Execute }
+    };
+    
+    public static KeyValueExpressionResult Eval(KeyValueTransactionContext context, NodeAst ast)
+    {        
         if (ast.leftAst is null)
             throw new KahunaScriptException("Invalid function expression", ast.yyline);
                 
@@ -20,23 +56,11 @@ internal static class CallFunction
         List<KeyValueExpressionResult> arguments = [];
         
         GetFuncCallArguments(context, ast.rightAst, arguments);
+        
+        if (FunctionMap.TryGetValue(ast.leftAst.yytext, out Func<NodeAst, List<KeyValueExpressionResult>, KeyValueExpressionResult>? function))        
+            return function(ast, arguments);
 
-        return ast.leftAst.yytext switch
-        {
-            "to_int" or "to_integer" or "to_long" or "to_number" => CastToLongFunction.Execute(ast, arguments),
-            "is_int" or "is_integer" or "is_long" => IsLongFunction.Execute(ast, arguments),
-            "to_float" or "to_double" => CastToDoubleFunction.Execute(ast, arguments),
-            "is_float" or "is_double" => IsDoubleFunction.Execute(ast, arguments),
-            "to_str" or "to_string" => CastToStrFunction.Execute(ast, arguments),
-            "is_str" or "is_string" => IsStringFunction.Execute(ast, arguments),
-            "to_bool" or "to_boolean" => CastToBoolFunction.Execute(ast, arguments),
-            "is_bool" or "is_boolean" => IsBoolFunction.Execute(ast, arguments),
-            "is_null" => IsNullFunction.Execute(ast, arguments),
-            "revision" or "rev" => GetRevisionFunction.Execute(ast, arguments),
-            "expires" => GetExpiresFunction.Execute(ast, arguments),
-            "len" or "length" => GetLengthFunction.Execute(ast, arguments),
-            _ => throw new KahunaScriptException($"Undefined function {ast.leftAst.yytext} expression", ast.yyline)
-        };
+        throw new KahunaScriptException($"Undefined function {ast.leftAst.yytext} expression", ast.yyline);
     }
 
     private static void GetFuncCallArguments(KeyValueTransactionContext context, NodeAst ast, List<KeyValueExpressionResult> arguments)

@@ -28,11 +28,6 @@ public class TestKeyValueScriptTransactions : BaseCluster
         kahunaLogger = loggerFactory.CreateLogger<IKahuna>();
     }
 
-    private static string GetRandomKey()
-    {
-        return Guid.NewGuid().ToString("N")[..10];
-    }
-
     [Theory, CombinatorialData]
     public async Task TestExecuteTxCommitRollbackScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
     {

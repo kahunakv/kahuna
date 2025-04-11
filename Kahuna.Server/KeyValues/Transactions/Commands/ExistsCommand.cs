@@ -2,6 +2,7 @@
 using Kahuna.Shared.KeyValue;
 using Kahuna.Server.ScriptParser;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Transactions.Commands;
 
@@ -56,7 +57,9 @@ internal sealed class ExistsCommand : BaseCommand
             return new()
             {
                 ServedFrom = "",
-                Type = type
+                Type = type,
+                Revision = -1,
+                Expires = HLCTimestamp.Zero
             };
         }
         
