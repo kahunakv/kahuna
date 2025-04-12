@@ -50,10 +50,15 @@ internal sealed class GetCommand : BaseCommand
             context.Status = KeyValueExecutionStatus.Stop;
         }
 
-        if (readOnlyContext is null)
+        if (type != KeyValueResponseType.Get || readOnlyContext is null)
         {
             if (ast.rightAst is not null)
-                context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new() { Type = KeyValueExpressionType.NullType });
+                context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new()
+                {
+                    Type = KeyValueExpressionType.NullType,
+                    Revision = -1,
+                    Expires = 0
+                });
             
             return new()
             {

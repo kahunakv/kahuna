@@ -25,4 +25,5 @@ Radline/RadLine/bin
 Kommander
 Nixie
 .idea
+.vscode
 Kahuna.Server/*.lst

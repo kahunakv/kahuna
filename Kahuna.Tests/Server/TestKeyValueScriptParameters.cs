@@ -70,9 +70,10 @@ public class TestKeyValueScriptParameters : BaseCluster
 
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, [new() { Key = "@leader_param", Value = "election/leader1" }]);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
-        
-        /*script = """
+        Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));     
+           
+        script = """
+         set @leader_param "node-A"
          let current_leader = get @leader_param
          if rev(current_leader) == 0 then  
             set @leader_param "node-A"
@@ -82,9 +83,8 @@ public class TestKeyValueScriptParameters : BaseCluster
          """;
 
         resp = await kahuna3.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, [new() { Key = "@leader_param", Value = "election/leader2" }]);
-        Assert.Equal(KeyValueResponseType.Set, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(KeyValueResponseType.Set, resp.Type);        
         
-        await LeaveCluster(node1, node2, node3);*/
+        await LeaveCluster(node1, node2, node3);
     }
 }
