@@ -31,8 +31,31 @@ internal sealed class TryCollectHandler : BaseHandler
         TimeSpan range = TimeSpan.FromMinutes(30);
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
 
+        // Step 1: Evict expired keys
         foreach (KeyValuePair<string, KeyValueContext> key in keyValuesStore)
         {
+            if (number >= 100)
+                break;
+            
+            if (key.Value.WriteIntent is not null)
+                continue;
+            
+            if (key.Value.Expires == HLCTimestamp.Zero)
+                continue;
+            
+            if ((key.Value.Expires - currentTime) > TimeSpan.Zero)
+                continue;
+            
+            keysToEvict.Add(key.Key);
+            number++;
+        }
+        
+        // Step 2: Evict keys that haven't been used in a while
+        foreach (KeyValuePair<string, KeyValueContext> key in keyValuesStore)
+        {
+            if (number >= 100)
+                break;
+            
             if (key.Value.WriteIntent is not null)
                 continue;
             
@@ -41,9 +64,6 @@ internal sealed class TryCollectHandler : BaseHandler
             
             keysToEvict.Add(key.Key);
             number++;
-            
-            if (number > 100)
-                break;
         }
 
         foreach (string key in keysToEvict)

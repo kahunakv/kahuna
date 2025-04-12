@@ -39,23 +39,22 @@ internal static class CallFunction
         { "rev", GetRevisionFunction.Execute },
         { "expires", GetExpiresFunction.Execute },
         { "len", GetLengthFunction.Execute },
-        { "length", GetLengthFunction.Execute }
+        { "length", GetLengthFunction.Execute },
+        { "current_time", CurrentTimeFunction.Execute }
     };
     
     public static KeyValueExpressionResult Eval(KeyValueTransactionContext context, NodeAst ast)
     {        
         if (ast.leftAst is null)
             throw new KahunaScriptException("Invalid function expression", ast.yyline);
-                
-        if (ast.rightAst is null)
-            throw new KahunaScriptException("Invalid function arguments expression", ast.yyline);
         
         if (string.IsNullOrEmpty(ast.leftAst.yytext))
             throw new KahunaScriptException("Invalid function name", ast.yyline);
         
         List<KeyValueExpressionResult> arguments = [];
-        
-        GetFuncCallArguments(context, ast.rightAst, arguments);
+                
+        if (ast.rightAst is not null)
+            GetFuncCallArguments(context, ast.rightAst, arguments);
         
         if (FunctionMap.TryGetValue(ast.leftAst.yytext, out Func<NodeAst, List<KeyValueExpressionResult>, KeyValueExpressionResult>? function))        
             return function(ast, arguments);
