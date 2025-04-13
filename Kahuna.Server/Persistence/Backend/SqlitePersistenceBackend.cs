@@ -461,8 +461,8 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
             readerWriterLock.AcquireReaderLock(TimeSpan.FromSeconds(5));
 
             const string query = """
-             SELECT value, expiresPhysical, expiresCounter, lastUsedPhysical, lastUsedCounter, 
-                    lastModifiedPhysical, lastModifiedCounter, revision, state                               
+             SELECT key, value, revision, expiresPhysical, expiresCounter, lastUsedPhysical, lastUsedCounter, 
+                    lastModifiedPhysical, lastModifiedCounter, state                               
              FROM keys
              WHERE key LIKE @key
              """;
@@ -482,14 +482,14 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
                         reader.IsDBNull(4) ? 0 : (uint)reader.GetInt64(4)
                     ),
                     lastUsed: new(
-                        reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                        reader.IsDBNull(4) ? 0 : (uint)reader.GetInt64(4)
+                        reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                        reader.IsDBNull(6) ? 0 : (uint)reader.GetInt64(6)
                     ),
                     lastModified: new(
-                        reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                        reader.IsDBNull(4) ? 0 : (uint)reader.GetInt64(4)
+                        reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
+                        reader.IsDBNull(8) ? 0 : (uint)reader.GetInt64(8)
                     ),
-                    state: reader.IsDBNull(5) ? KeyValueState.Undefined : (KeyValueState)reader.GetInt32(5)
+                    state: reader.IsDBNull(9) ? KeyValueState.Undefined : (KeyValueState)reader.GetInt32(9)
                 )));
         }
         finally

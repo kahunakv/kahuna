@@ -22,9 +22,9 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
     
     private readonly RocksDb db;
 
-    private readonly ColumnFamilyHandle? columnFamilyKeys;
+    private readonly ColumnFamilyHandle columnFamilyKeys;
     
-    private readonly ColumnFamilyHandle? columnFamilyLocks;
+    private readonly ColumnFamilyHandle columnFamilyLocks;
     
     private readonly string path;
     
@@ -74,13 +74,32 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
 
             if (item.Value != null)
                 kvm.Owner = UnsafeByteOperations.UnsafeWrap(item.Value);
-
-            batch.Put(Encoding.UTF8.GetBytes(item.Key), Serialize(kvm), cf: columnFamilyLocks); 
+            
+            PutLocksItems(batch, item, kvm, columnFamilyLocks);
         }
         
         db.Write(batch, DefaultWriteOptions);
 
         return true;
+    }
+    
+    private static void PutLocksItems(WriteBatch batch, PersistenceRequestItem item, RocksDbLockMessage kvm, ColumnFamilyHandle columnFamily)
+    {
+        byte[] serialized = Serialize(kvm);
+
+        string currentMarker = string.Concat(item.Key, CurrentMarker);
+        
+        Span<byte> index1 = stackalloc byte[Encoding.UTF8.GetByteCount(currentMarker)];
+        Encoding.UTF8.GetBytes(currentMarker.AsSpan(), index1);
+        
+        batch.Put(index1, serialized, cf: columnFamily);
+        
+        string keyRevision = string.Concat(item.Key, "~", item.Revision);
+        
+        Span<byte> index2 = stackalloc byte[Encoding.UTF8.GetByteCount(keyRevision)];
+        Encoding.UTF8.GetBytes(keyRevision.AsSpan(), index2);
+        
+        batch.Put(index2, serialized, cf: columnFamily);
     }
     
     public bool StoreKeyValues(List<PersistenceRequestItem> items)
@@ -103,19 +122,32 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
 
             if (item.Value is not null)
                 kvm.Value = UnsafeByteOperations.UnsafeWrap(item.Value);
-
-            byte[] serialized = Serialize(kvm);
-
-            byte[] index = Encoding.UTF8.GetBytes(string.Concat(item.Key, CurrentMarker));
-            batch.Put(index, serialized, cf: columnFamilyKeys);
-
-            index = Encoding.UTF8.GetBytes(string.Concat(item.Key, "~", item.Revision));
-            batch.Put(index, serialized, cf: columnFamilyKeys);
+            
+            PutStoreItems(batch, item, kvm, columnFamilyKeys);
         }
 
         db.Write(batch, DefaultWriteOptions);
 
         return true;
+    }
+
+    private static void PutStoreItems(WriteBatch batch, PersistenceRequestItem item, RocksDbKeyValueMessage kvm, ColumnFamilyHandle columnFamily)
+    {
+        byte[] serialized = Serialize(kvm);
+
+        string currentMarker = string.Concat(item.Key, CurrentMarker);
+        
+        Span<byte> index1 = stackalloc byte[Encoding.UTF8.GetByteCount(currentMarker)];
+        Encoding.UTF8.GetBytes(currentMarker.AsSpan(), index1);
+        
+        batch.Put(index1, serialized, cf: columnFamily);
+        
+        string keyRevision = string.Concat(item.Key, "~", item.Revision);
+        
+        Span<byte> index2 = stackalloc byte[Encoding.UTF8.GetByteCount(keyRevision)];
+        Encoding.UTF8.GetBytes(keyRevision.AsSpan(), index2);
+        
+        batch.Put(index2, serialized, cf: columnFamily);
     }
 
     public LockContext? GetLock(string resource)
@@ -188,7 +220,7 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
         Span<byte> buffer = stackalloc byte[Encoding.UTF8.GetByteCount(keyRevision)];
         Encoding.UTF8.GetBytes(keyRevision.AsSpan(), buffer);
         
-        byte[]? value = db.Get(Encoding.UTF8.GetBytes(keyRevision), cf: columnFamilyKeys);
+        byte[]? value = db.Get(buffer, cf: columnFamilyKeys);
         if (value is null)
             return null;
 
