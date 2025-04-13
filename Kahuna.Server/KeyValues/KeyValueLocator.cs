@@ -701,7 +701,7 @@ internal sealed class KeyValueLocator
         if (string.IsNullOrEmpty(prefixedKey))
             return new([]);
         
-        int partitionId = raft.GetPartitionKey(prefixedKey);
+        int partitionId = raft.GetPartitionKey(prefixedKey + "/");
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
             return await manager.GetByPrefix(prefixedKey, durability);
