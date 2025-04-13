@@ -10,6 +10,8 @@ internal sealed class ThrowCommand : BaseCommand
     {
         if (ast.leftAst is null)
             throw new KahunaScriptException("Invalid THROW expression", ast.yyline);
+        
+        context.Status = KeyValueExecutionStatus.Stop;
                     
         KeyValueExpressionResult result = KeyValueTransactionExpression.Eval(context, ast.leftAst);
         

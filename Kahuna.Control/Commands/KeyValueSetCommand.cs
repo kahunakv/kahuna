@@ -14,12 +14,12 @@ namespace Kahuna.Control.Commands;
 
 public static class KeyValueSetCommand
 {    
-    public static async Task Execute(KahunaClient connection, string optsSet, string? optsValue, string? format)
+    public static async Task Execute(KahunaClient connection, string optsSet, string? optsValue, int expires, string? format)
     {
         KahunaKeyValue result = await connection.SetKeyValue(
             optsSet, 
             Encoding.UTF8.GetBytes(optsValue!), 
-            0,
+            expires,
             KeyValueFlags.Set, 
             KeyValueDurability.Persistent, 
             CancellationToken.None

@@ -12,9 +12,9 @@ namespace Kahuna.Control.Commands;
 
 public static class LockCommand
 {    
-    public static async Task Execute(KahunaClient connection, string optsLock, string? format)
+    public static async Task Execute(KahunaClient connection, string optsLock, int optsExpires, string? format)
     {
-        KahunaLock result = await connection.GetOrCreateLock(optsLock, TimeSpan.FromMilliseconds(3000));
+        KahunaLock result = await connection.GetOrCreateLock(optsLock, optsExpires);
 
         if (format == "json")
             Console.WriteLine("{0}", result.ToJson());

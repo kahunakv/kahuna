@@ -9,7 +9,7 @@
         <ToolCommandName>kahuna-cli</ToolCommandName>
         <PackageOutputPath>./nupkg</PackageOutputPath>
         <PackageId>Kahuna.Control</PackageId>
-        <Version>0.0.3</Version>
+        <Version>0.0.4</Version>
         <Description>kahuna-cli is a command-line interface for interacting with Kahuna</Description>
         <Authors>Andres Gutierrez</Authors>
         <Company>Kahuna KV</Company>

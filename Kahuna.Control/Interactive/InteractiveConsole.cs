@@ -1,4 +1,6 @@
 
+using System.Diagnostics;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using DotNext.Threading.Tasks;
@@ -14,7 +16,10 @@ public static class InteractiveConsole
 {
     public static async Task Run(KahunaClient connection)
     {
-        AnsiConsole.MarkupLine("[green]Kahuna Shell 0.0.3 (alpha)[/]\n");
+        Assembly assembly = Assembly.GetExecutingAssembly();
+        FileVersionInfo fvi = FileVersionInfo.GetVersionInfo(assembly.Location);
+        
+        AnsiConsole.MarkupLine("[green]Kahuna Shell {0} (alpha)[/]\n", fvi.FileVersion!);
 
         string historyPath = string.Concat(Path.GetTempPath(), Path.PathSeparator, "kahuna.history.json");
         List<string> history = await GetHistory(historyPath);
@@ -243,7 +248,7 @@ public static class InteractiveConsole
                         await kahunaLock.DisposeAsync();
 
                         //if (success)
-                            AnsiConsole.MarkupLine("[cyan]unlocked[/]");
+                            AnsiConsole.MarkupLine("[cyan]unlocked[/]\n");
                         //else
                         //    AnsiConsole.MarkupLine("[yellow]not unlocked[/]");
                         
@@ -251,7 +256,7 @@ public static class InteractiveConsole
                     } 
                     else
                     {
-                        AnsiConsole.MarkupLine("[yellow]not acquired[/]");
+                        AnsiConsole.MarkupLine("[yellow]not acquired[/]\n");
                     }
                     
                     continue;
@@ -265,16 +270,16 @@ public static class InteractiveConsole
 
                     if (locks.TryGetValue(parts[1], out KahunaLock? kahunaLock))
                     {
-                        bool success = await connection.Unlock(parts[1], kahunaLock.Owner);
+                        KahunaLockInfo? info = await kahunaLock.GetInfo();
 
-                        if (success)
-                            AnsiConsole.MarkupLine("[cyan]got {0} rev:{1}[/]", Markup.Escape(Encoding.UTF8.GetString(kahunaLock.Owner)), kahunaLock.FencingToken);
+                        if (info is not null)
+                            AnsiConsole.MarkupLine("[cyan]f{0} {1}[/]\n", info.FencingToken, Markup.Escape(Encoding.UTF8.GetString(info.Owner ?? [])));
                         else
-                            AnsiConsole.MarkupLine("[yellow]not acquired[/]");
+                            AnsiConsole.MarkupLine("[yellow]not found[/]\n");
                     }
                     else
                     {
-                        AnsiConsole.MarkupLine("[yellow]not acquired[/]");
+                        AnsiConsole.MarkupLine("[yellow]not found[/]\n");
                     }
                     
                     continue;
@@ -291,7 +296,7 @@ public static class InteractiveConsole
                         (bool success, long fencingToken) = await kahunaLock.TryExtend(int.Parse(parts[2]));
 
                         if (success)
-                            AnsiConsole.MarkupLine("[cyan]extended {0} rev:{1}[/]\n", Markup.Escape(Encoding.UTF8.GetString(kahunaLock.Owner)), fencingToken);
+                            AnsiConsole.MarkupLine("[cyan]f{0} extended {1}[/]\n", fencingToken, Markup.Escape(Encoding.UTF8.GetString(kahunaLock.Owner)));
                         else
                             AnsiConsole.MarkupLine("[yellow]not acquired[/]\n");
                     }

@@ -21,23 +21,55 @@ KahunaClient connection = await GetConnection(opts);
 
 if (IsSingleCommand(opts))
 {
-    string? format = opts.Format;
-    
-    if (!string.IsNullOrEmpty(opts.Set))
+    try
     {
-        await KeyValueSetCommand.Execute(connection, opts.Set, opts.Value, format);
-        return;
+        string? format = opts.Format;
+
+        if (!string.IsNullOrEmpty(opts.Set))
+        {
+            await KeyValueSetCommand.Execute(connection, opts.Set, opts.Value, opts.Expires, format);
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(opts.Get))
+        {
+            await KeyValueGetCommand.Execute(connection, opts.Get, format);
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(opts.GetByPrefix))
+        {
+            await KeyValueGetByPrefixCommand.Execute(connection, opts.GetByPrefix, format);
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(opts.ScanByPrefix))
+        {
+            await KeyValueGetByPrefixCommand.Execute(connection, opts.ScanByPrefix, format);
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(opts.Lock))
+        {
+            await LockCommand.Execute(connection, opts.Lock, opts.Expires, format);
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(opts.ExtendLock))
+        {
+            await ExtendLockCommand.Execute(connection, opts.ExtendLock, opts.Owner!, opts.Expires, format);
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(opts.Unlock))
+        {
+            await UnlockCommand.Execute(connection, opts.Unlock, opts.Owner!, format);
+            return;
+        }
     }
-    
-    if (!string.IsNullOrEmpty(opts.Get))
+    catch (Exception ex)
     {
-        await KeyValueGetCommand.Execute(connection, opts.Get, format);
-        return;
-    }
-    
-    if (!string.IsNullOrEmpty(opts.Lock))
-    {
-        await LockCommand.Execute(connection, opts.Lock, format);
+        Console.WriteLine("{0}: {1}", ex.GetType().Name, ex.Message);
         return;
     }
 }
@@ -67,7 +99,16 @@ static bool IsSingleCommand(Options options)
     if (!string.IsNullOrEmpty(options.Get))
         return true;
     
+    if (!string.IsNullOrEmpty(options.GetByPrefix))
+        return true;
+    
+    if (!string.IsNullOrEmpty(options.ScanByPrefix))
+        return true;
+    
     if (!string.IsNullOrEmpty(options.Lock))
+        return true;
+    
+    if (!string.IsNullOrEmpty(options.Unlock))
         return true;
     
     if (!string.IsNullOrEmpty(options.ExtendLock))
