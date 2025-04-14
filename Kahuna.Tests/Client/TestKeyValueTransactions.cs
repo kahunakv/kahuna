@@ -285,7 +285,7 @@ public class TestKeyValueTransactions
     {
         return communicationType switch
         {
-            KahunaCommunicationType.Grpc => new GrpcCommunication(null),
+            KahunaCommunicationType.Grpc => new GrpcCommunication(null, null),
             KahunaCommunicationType.Rest => new RestCommunication(null),
             _ => throw new ArgumentOutOfRangeException(nameof(communicationType), communicationType, null)
         };

@@ -8,7 +8,7 @@ using Kahuna.Shared.Locks;
 
 Console.WriteLine("Kahuna Benchmark");
 
-const int numberOfTasks = 250;
+const int numberOfTasks = 500;
 const int MaxTokens = 100_000;
 
 List<string> tokens = new(MaxTokens);
@@ -40,8 +40,10 @@ for (int j = 0; j < 25; j++)
 
     for (int i = 0; i < numberOfTasks; i++)
     {
-        tasks.Add(SetKeyConcurrently(locks));
-        tasks.Add(GetKeyConcurrently(locks));
+        if (i % 2 == 0)
+            tasks.Add(SetKeyConcurrently(locks));
+        else
+            tasks.Add(GetKeyConcurrently(locks));
         //tasks.Add(ExecuteTxConcurrently(kahunaScript));
     }
 
@@ -58,12 +60,16 @@ async Task AdquireLockConcurrently(KahunaClient locksx)
 {
     try
     {
+        using CancellationTokenSource cts = new();
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
+
         string lockName = GetRandomLockNameFromList(tokens);
 
         await using KahunaLock kahunaLock = await locksx.GetOrCreateLock(
             lockName,
             expiry: TimeSpan.FromSeconds(5),
-            durability: LockDurability.Persistent
+            durability: LockDurability.Persistent,
+            cancellationToken: cts.Token
         );
 
         if (!kahunaLock.IsAcquired)
@@ -86,10 +92,19 @@ async Task SetKeyConcurrently(KahunaClient keyValues)
 {
     try
     {
+        using CancellationTokenSource cts = new();
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
+
         string key = GetRandomLockNameFromList(tokens);
         string value = GetRandomLockNameFromList(tokens);
 
-        KahunaKeyValue result = await keyValues.SetKeyValue(key, value, TimeSpan.FromHours(5), KeyValueFlags.Set, KeyValueDurability.Persistent);
+        KahunaKeyValue result = await keyValues.SetKeyValue(
+            key, value, 
+            TimeSpan.FromHours(5), 
+            KeyValueFlags.Set, 
+            KeyValueDurability.Persistent,
+            cancellationToken: cts.Token
+        );
 
         if (!result.Success)
             throw new KahunaException("Not set " + key, LockResponseType.Busy);

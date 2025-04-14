@@ -18,7 +18,7 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
     
     private static readonly RecyclableMemoryStreamManager manager = new();
     
-    private static readonly WriteOptions DefaultWriteOptions = new WriteOptions().SetSync(true);
+    private static readonly WriteOptions DefaultWriteOptions = new WriteOptions().SetSync(false);
     
     private readonly RocksDb db;
 

@@ -289,17 +289,17 @@ public class TestLocks
     {
         return clientType switch
         {
-            KahunaClientType.SingleEndpoint => new(url, null, GetCommunicationByType(communicationType), false),
-            KahunaClientType.PoolOfEndpoints => new(urls, null, GetCommunicationByType(communicationType), false),
+            KahunaClientType.SingleEndpoint => new(url, null, GetCommunicationByType(communicationType),null),
+            KahunaClientType.PoolOfEndpoints => new(urls, null, GetCommunicationByType(communicationType)),
             _ => throw new ArgumentOutOfRangeException(nameof(clientType), clientType, null)
         };
     }
 
-    private IKahunaCommunication GetCommunicationByType(KahunaCommunicationType communicationType)
+    private static IKahunaCommunication GetCommunicationByType(KahunaCommunicationType communicationType)
     {
         return communicationType switch
         {
-            KahunaCommunicationType.Grpc => new GrpcCommunication(null),
+            KahunaCommunicationType.Grpc => new GrpcCommunication(null, null),
             KahunaCommunicationType.Rest => new RestCommunication(null),
             _ => throw new ArgumentOutOfRangeException(nameof(communicationType), communicationType, null)
         };
