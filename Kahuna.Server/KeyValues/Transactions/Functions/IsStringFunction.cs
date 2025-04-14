@@ -13,6 +13,6 @@ internal static class IsStringFunction
         
         KeyValueExpressionResult argument = arguments[0];
 
-        return new() { Type = KeyValueExpressionType.BoolType, BoolValue = argument.Type == KeyValueExpressionType.StringType };
+        return new(argument.Type == KeyValueExpressionType.StringType);
     }
 }

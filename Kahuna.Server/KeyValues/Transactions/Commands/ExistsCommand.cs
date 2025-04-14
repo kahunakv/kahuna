@@ -52,7 +52,7 @@ internal sealed class ExistsCommand : BaseCommand
         if (readOnlyContext is null)
         {
             if (ast.rightAst is not null)
-                context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new() { Type = KeyValueExpressionType.NullType });
+                context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new(KeyValueExpressionType.NullType));
             
             return new()
             {
@@ -64,13 +64,11 @@ internal sealed class ExistsCommand : BaseCommand
         }
         
         if (ast.rightAst is not null)
-            context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new()
-            {
-                Type = KeyValueExpressionType.BoolType, 
-                BoolValue = type == KeyValueResponseType.Exists,
-                Revision = readOnlyContext.Revision,
-                Expires = readOnlyContext.Expires.L
-            });
+            context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new(
+                type == KeyValueResponseType.Exists, 
+                readOnlyContext.Revision, 
+                readOnlyContext.Expires.L
+            ));
             
         return new()
         {

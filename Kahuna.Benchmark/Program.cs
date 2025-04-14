@@ -8,7 +8,7 @@ using Kahuna.Shared.Locks;
 
 Console.WriteLine("Kahuna Benchmark");
 
-const int numberOfTasks = 250;
+const int numberOfTasks = 500;
 const int MaxTokens = 100_000;
 
 List<string> tokens = new(MaxTokens);
@@ -16,11 +16,12 @@ List<string> tokens = new(MaxTokens);
 for (int k = 0; k < MaxTokens; k++)
     tokens.Add(GetRandomLockName());
 
-KahunaClient locks = new(["https://localhost:8082", "https://localhost:8084", "https://localhost:8086"], null);
+KahunaClient locks1 = new(["https://localhost:8082", "https://localhost:8084", "https://localhost:8086"], null);
+KahunaClient locks2 = new(["https://localhost:8082", "https://localhost:8084", "https://localhost:8086"], null);
 
 const string myScript = """
-BEGIN 
- SET ppa 1000 NX 
+BEGIN
+ SET ppa 1000 NX
  LET x = GET ppa
  LET xn = to_int(x) + 1
  SET ppa xn
@@ -28,7 +29,7 @@ BEGIN
 END
 """;
 
-KahunaScript kahunaScript = locks.LoadScript(myScript);
+//KahunaScript kahunaScript = locks.LoadScript(myScript);
 
 List<Task> tasks = new(numberOfTasks * 2);
 
@@ -40,8 +41,8 @@ for (int j = 0; j < 25; j++)
 
     for (int i = 0; i < numberOfTasks; i++)
     {
-        tasks.Add(SetKeyConcurrently(locks));
-        tasks.Add(GetKeyConcurrently(locks));
+        tasks.Add(SetKeyConcurrently(locks1));
+        tasks.Add(GetKeyConcurrently(locks2));
         //tasks.Add(ExecuteTxConcurrently(kahunaScript));
     }
 
@@ -68,7 +69,7 @@ async Task AdquireLockConcurrently(KahunaClient locksx)
 
         if (!kahunaLock.IsAcquired)
             throw new KahunaException("Not acquired " + lockName, LockResponseType.Busy);
-        
+
         if (kahunaLock.FencingToken > 1)
             Console.WriteLine("Got repeated token " + kahunaLock.FencingToken);
     }
@@ -86,14 +87,17 @@ async Task SetKeyConcurrently(KahunaClient keyValues)
 {
     try
     {
+        using CancellationTokenSource src = new();
+        src.CancelAfter(TimeSpan.FromSeconds(10));
+
         string key = GetRandomLockNameFromList(tokens);
         string value = GetRandomLockNameFromList(tokens);
 
-        KahunaKeyValue result = await keyValues.SetKeyValue(key, value, TimeSpan.FromHours(5), KeyValueFlags.Set, KeyValueDurability.Persistent);
+        KahunaKeyValue result = await keyValues.SetKeyValue(key, value, TimeSpan.FromHours(5), KeyValueFlags.Set, KeyValueDurability.Persistent, src.Token);
 
         if (!result.Success)
             throw new KahunaException("Not set " + key, LockResponseType.Busy);
-        
+
         //if (revision > 1)
         //    Console.WriteLine("Got repeated revision " + revision);
     }
@@ -109,12 +113,16 @@ async Task SetKeyConcurrently(KahunaClient keyValues)
 
 async Task GetKeyConcurrently(KahunaClient keyValues)
 {
+
     try
     {
+        using CancellationTokenSource src = new();
+        src.CancelAfter(TimeSpan.FromSeconds(10));
+
         string key = GetRandomLockNameFromList(tokens);
 
-        KahunaKeyValue result = await keyValues.GetKeyValue(key, KeyValueDurability.Persistent);
-        
+        KahunaKeyValue result = await keyValues.GetKeyValue(key, KeyValueDurability.Persistent, src.Token);
+
         //if (revision > 1)
         //   Console.WriteLine("Got repeated revision " + revision);
     }

@@ -13,6 +13,6 @@ internal static class IsLongFunction
         
         KeyValueExpressionResult argument = arguments[0];
 
-        return new() { Type = KeyValueExpressionType.BoolType, BoolValue = argument.Type == KeyValueExpressionType.LongType };
+        return new(argument.Type == KeyValueExpressionType.LongType);
     }
 }

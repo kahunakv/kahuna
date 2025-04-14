@@ -15,8 +15,8 @@ internal static class CeilFunction
 
         return arg.Type switch
         {
-            KeyValueExpressionType.LongType => new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = Math.Ceiling((double)arg.LongValue) },
-            KeyValueExpressionType.DoubleType => new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = Math.Ceiling(arg.DoubleValue) },
+            KeyValueExpressionType.LongType => new(Math.Ceiling((double)arg.LongValue)),
+            KeyValueExpressionType.DoubleType => new(Math.Ceiling(arg.DoubleValue)),
             _ => throw new KahunaScriptException($"Cannot use 'ceil' function with argument {arg.Type}", ast.yyline)
         };
     }

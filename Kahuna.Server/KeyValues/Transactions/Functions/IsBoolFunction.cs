@@ -13,6 +13,6 @@ internal static class IsBoolFunction
         
         KeyValueExpressionResult argument = arguments[0];
 
-        return new() { Type = KeyValueExpressionType.BoolType, BoolValue = argument.Type == KeyValueExpressionType.BoolType };
+        return new(argument.Type == KeyValueExpressionType.BoolType);
     }
 }

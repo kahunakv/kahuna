@@ -11,6 +11,6 @@ internal static class CurrentTimeFunction
         if (arguments.Count != 0)
             throw new KahunaScriptException("Invalid number of arguments for 'current_time' function", ast.yyline);
 
-        return new() { Type = KeyValueExpressionType.LongType, LongValue = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
+        return new(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
     }
 }

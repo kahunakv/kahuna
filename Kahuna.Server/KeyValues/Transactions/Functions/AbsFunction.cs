@@ -15,8 +15,8 @@ internal static class AbsFunction
 
         return arg.Type switch
         {
-            KeyValueExpressionType.LongType => new() { Type = KeyValueExpressionType.LongType, LongValue = Math.Abs(arg.LongValue) },
-            KeyValueExpressionType.DoubleType => new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = Math.Abs(arg.DoubleValue) },
+            KeyValueExpressionType.LongType => new(Math.Abs(arg.LongValue)),
+            KeyValueExpressionType.DoubleType => new(Math.Abs(arg.DoubleValue)),
             _ => throw new KahunaScriptException($"Cannot use 'abs' function with argument {arg.Type}", ast.yyline)
         };
     }

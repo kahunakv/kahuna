@@ -15,13 +15,13 @@ internal static class NotOperator
         switch (left.Type)
         {
             case KeyValueExpressionType.BoolType:
-                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = !left.BoolValue };
+                return new(!left.BoolValue);
             
             case KeyValueExpressionType.LongType:
-                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.LongValue != 0 };
+                return new(left.LongValue != 0);
             
             case KeyValueExpressionType.DoubleType:
-                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.DoubleValue != 0 };
+                return new(left.DoubleValue != 0);
 
             case KeyValueExpressionType.NullType:
             case KeyValueExpressionType.StringType:

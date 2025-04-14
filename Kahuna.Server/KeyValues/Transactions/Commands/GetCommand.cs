@@ -53,12 +53,7 @@ internal sealed class GetCommand : BaseCommand
         if (type != KeyValueResponseType.Get || readOnlyContext is null)
         {
             if (ast.rightAst is not null)
-                context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new()
-                {
-                    Type = KeyValueExpressionType.NullType,
-                    Revision = -1,
-                    Expires = 0
-                });
+                context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new(KeyValueExpressionType.NullType));
             
             return new()
             {
@@ -70,13 +65,11 @@ internal sealed class GetCommand : BaseCommand
         }
         
         if (ast.rightAst is not null)
-            context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new()
-            {
-                Type = KeyValueExpressionType.StringType, 
-                StrValue = Encoding.UTF8.GetString(readOnlyContext.Value ?? []),
-                Revision = readOnlyContext.Revision,
-                Expires = readOnlyContext.Expires.L
-            });
+            context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new(
+                Encoding.UTF8.GetString(readOnlyContext.Value ?? []),
+                readOnlyContext.Revision,
+                readOnlyContext.Expires.L
+            ));
             
         return new()
         {

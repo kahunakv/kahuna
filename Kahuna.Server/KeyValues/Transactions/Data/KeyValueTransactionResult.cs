@@ -23,10 +23,6 @@ public sealed class KeyValueTransactionResult
 
     public KeyValueExpressionResult ToExpressionResult()
     {
-        return new()
-        {
-            Type = KeyValueExpressionType.StringType,
-            StrValue = Value is not null ? Encoding.UTF8.GetString(Value) : null,
-        };
+        return new(strValue: Value is not null ? Encoding.UTF8.GetString(Value) : null, -1, 0);
     }
 }

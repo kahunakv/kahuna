@@ -20,16 +20,16 @@ internal static class GreaterThanOperator
         switch (left.Type)
         {
             case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.LongType:
-                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.LongValue > right.LongValue };
+                return new(left.LongValue > right.LongValue);
 
             case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.LongType:
-                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.DoubleValue > right.LongValue };
+                return new(left.DoubleValue > right.LongValue);
 
             case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.DoubleType:
-                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.LongValue > right.DoubleValue };
+                return new(left.LongValue > right.DoubleValue);
 
             case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.DoubleType:
-                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.DoubleValue > right.DoubleValue };
+                return new(left.DoubleValue > right.DoubleValue);
             
             case KeyValueExpressionType.StringType when right.Type == KeyValueExpressionType.DoubleType:
             {
@@ -38,10 +38,10 @@ internal static class GreaterThanOperator
                     if (!double.TryParse(left.StrValue, out double leftDouble))                    
                         throw new KahunaScriptException($"Invalid operands: {left.Type} {operatorType} {right.Type}", ast.yyline);
                 
-                    return new() { Type = KeyValueExpressionType.BoolType, BoolValue = leftDouble > right.DoubleValue };
+                    return new(leftDouble > right.DoubleValue);
                 }
 
-                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = leftLong > right.DoubleValue };
+                return new(leftLong > right.DoubleValue);
             }
 
             case KeyValueExpressionType.StringType when right.Type == KeyValueExpressionType.LongType:
@@ -51,10 +51,10 @@ internal static class GreaterThanOperator
                     if (!double.TryParse(left.StrValue, out double leftDouble))                    
                         throw new KahunaScriptException($"Invalid operands: {left.Type} {operatorType} {right.Type}", ast.yyline);
                 
-                    return new() { Type = KeyValueExpressionType.BoolType, BoolValue = leftDouble > right.LongValue };
+                    return new(leftDouble > right.LongValue);
                 }
 
-                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = leftLong > right.LongValue };
+                return new(leftLong > right.LongValue);
             }
 
             case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.StringType:
@@ -64,10 +64,10 @@ internal static class GreaterThanOperator
                     if (!double.TryParse(right.StrValue, out double rightDouble))                    
                         throw new KahunaScriptException($"Invalid operands: {left.Type} {operatorType} {right.Type}", ast.yyline);
                     
-                    return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.LongValue > rightDouble };
+                    return new(left.LongValue > rightDouble);
                 }
 
-                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.LongValue > rightLong };
+                return new(left.LongValue > rightLong);
             }
             
             case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.StringType:
@@ -77,10 +77,10 @@ internal static class GreaterThanOperator
                     if (!double.TryParse(right.StrValue, out double rightDouble))                    
                         throw new KahunaScriptException($"Invalid operands: {left.Type} {operatorType} {right.Type}", ast.yyline);
                     
-                    return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.DoubleValue > rightDouble };
+                    return new(left.DoubleValue > rightDouble);
                 }
 
-                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.DoubleValue > rightLong };
+                return new(left.DoubleValue > rightLong);
             }
 
             default:

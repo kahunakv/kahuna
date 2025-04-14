@@ -15,7 +15,7 @@ internal static class GetLengthFunction
 
         return arg.Type switch
         {
-            KeyValueExpressionType.StringType => new() { Type = KeyValueExpressionType.LongType, LongValue = arg.StrValue?.Length ?? 0 },
+            KeyValueExpressionType.StringType => new(arg.StrValue?.Length ?? 0),
             _ => throw new KahunaScriptException($"Cannot use 'length' function on argument {arg.Type}", ast.yyline)
         };
     }

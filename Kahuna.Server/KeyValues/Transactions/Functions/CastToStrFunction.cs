@@ -14,11 +14,11 @@ internal static class CastToStrFunction
 
         return arguments[0].Type switch
         {
-            KeyValueExpressionType.LongType => new() { Type = KeyValueExpressionType.StringType, StrValue = arguments[0].LongValue.ToString() },
-            KeyValueExpressionType.DoubleType => new() { Type = KeyValueExpressionType.StringType, StrValue = arguments[0].DoubleValue.ToString(CultureInfo.InvariantCulture) },
-            KeyValueExpressionType.StringType => new() { Type = KeyValueExpressionType.StringType, StrValue = arguments[0].StrValue ?? "" },
-            KeyValueExpressionType.NullType => new() { Type = KeyValueExpressionType.StringType, StrValue = arguments[0].StrValue ?? "" },
-            KeyValueExpressionType.BoolType => new() { Type = KeyValueExpressionType.StringType, StrValue = arguments[0].BoolValue.ToString().ToLowerInvariant() },
+            KeyValueExpressionType.LongType => new(arguments[0].LongValue.ToString(), -1, 0),
+            KeyValueExpressionType.DoubleType => new(arguments[0].DoubleValue.ToString(CultureInfo.InvariantCulture), -1, 0),
+            KeyValueExpressionType.StringType => new(arguments[0].StrValue ?? "", -1, 0),
+            KeyValueExpressionType.NullType => new(arguments[0].StrValue ?? "", -1, 0),
+            KeyValueExpressionType.BoolType => new(arguments[0].BoolValue.ToString().ToLowerInvariant(), -1, 0),
             _ => throw new KahunaScriptException($"Cannot cast {arguments[0].Type} to string", ast.yyline)
         };
     }

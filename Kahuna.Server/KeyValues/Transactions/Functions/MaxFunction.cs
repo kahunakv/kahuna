@@ -23,16 +23,16 @@ internal static class MaxFunction
         return arg1.Type switch
         {
             KeyValueExpressionType.LongType when arg2.Type == KeyValueExpressionType.LongType => 
-                new() { Type = KeyValueExpressionType.LongType, LongValue = Math.Max(arg1.LongValue, arg2.LongValue) },
+                new(Math.Max(arg1.LongValue, arg2.LongValue)),
             
             KeyValueExpressionType.LongType when arg2.Type == KeyValueExpressionType.DoubleType => 
-                new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = Math.Max(arg1.LongValue, arg2.DoubleValue) },
+                new(Math.Max(arg1.LongValue, arg2.DoubleValue)),
             
             KeyValueExpressionType.DoubleType when arg2.Type == KeyValueExpressionType.LongType => 
-                new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = Math.Max(arg1.DoubleValue, arg2.LongValue) },
+                new(Math.Max(arg1.DoubleValue, arg2.LongValue)),
             
             KeyValueExpressionType.DoubleType when arg2.Type == KeyValueExpressionType.DoubleType => 
-                new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = Math.Max(arg1.DoubleValue, arg2.DoubleValue) },          
+                new(Math.Max(arg1.DoubleValue, arg2.DoubleValue)),          
             
             _ => 
                 throw new KahunaScriptException($"Cannot use 'max' function with argument {arg1.Type}", ast.yyline)

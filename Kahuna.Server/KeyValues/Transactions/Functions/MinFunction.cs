@@ -23,16 +23,16 @@ internal static class MinFunction
         return arg1.Type switch
         {
             KeyValueExpressionType.LongType when arg2.Type == KeyValueExpressionType.LongType => 
-                new() { Type = KeyValueExpressionType.LongType, LongValue = Math.Min(arg1.LongValue, arg2.LongValue) },
+                new(Math.Min(arg1.LongValue, arg2.LongValue)),
             
             KeyValueExpressionType.LongType when arg2.Type == KeyValueExpressionType.DoubleType => 
-                new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = Math.Min(arg1.LongValue, arg2.DoubleValue) },
+                new(Math.Min(arg1.LongValue, arg2.DoubleValue)),
             
             KeyValueExpressionType.DoubleType when arg2.Type == KeyValueExpressionType.LongType => 
-                new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = Math.Min(arg1.DoubleValue, arg2.LongValue) },
+                new(Math.Min(arg1.DoubleValue, arg2.LongValue)),
             
             KeyValueExpressionType.DoubleType when arg2.Type == KeyValueExpressionType.DoubleType => 
-                new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = Math.Min(arg1.DoubleValue, arg2.DoubleValue) },          
+                new(Math.Min(arg1.DoubleValue, arg2.DoubleValue)),          
             
             _ => 
                 throw new KahunaScriptException($"Cannot use 'min' function with argument {arg1.Type}", ast.yyline)

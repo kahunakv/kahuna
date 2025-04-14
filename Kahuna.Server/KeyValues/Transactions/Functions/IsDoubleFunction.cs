@@ -13,6 +13,6 @@ internal static class IsDoubleFunction
         
         KeyValueExpressionResult argument = arguments[0];
 
-        return new() { Type = KeyValueExpressionType.BoolType, BoolValue = argument.Type == KeyValueExpressionType.DoubleType };
+        return new(argument.Type == KeyValueExpressionType.DoubleType);
     }
 }

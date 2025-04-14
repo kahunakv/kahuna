@@ -26,10 +26,10 @@ internal static class RoundFunction
         return arg1.Type switch
         {
             KeyValueExpressionType.LongType when arg2.Type == KeyValueExpressionType.LongType => 
-                new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = Math.Round((double)arg1.LongValue, (int)arg2.LongValue) },
+                new(Math.Round((double)arg1.LongValue, (int)arg2.LongValue)),
                         
             KeyValueExpressionType.DoubleType when arg2.Type == KeyValueExpressionType.LongType => 
-                new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = Math.Round(arg1.DoubleValue, (int)arg2.LongValue) },
+                new(Math.Round(arg1.DoubleValue, (int)arg2.LongValue)),
                         
             _ => 
                 throw new KahunaScriptException($"Cannot use 'round' function with argument {arg1.Type}", ast.yyline)

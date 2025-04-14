@@ -15,8 +15,8 @@ internal static class FloorFunction
 
         return arg.Type switch
         {
-            KeyValueExpressionType.LongType => new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = Math.Floor((double)arg.LongValue) },
-            KeyValueExpressionType.DoubleType => new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = Math.Floor(arg.DoubleValue) },
+            KeyValueExpressionType.LongType => new(Math.Floor((double)arg.LongValue)),
+            KeyValueExpressionType.DoubleType => new(Math.Floor(arg.DoubleValue)),
             _ => throw new KahunaScriptException($"Cannot use 'floor' function with argument {arg.Type}", ast.yyline)
         };
     }

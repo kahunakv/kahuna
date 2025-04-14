@@ -19,19 +19,19 @@ internal static class OrOperator
         switch (left.Type)
         {
             case KeyValueExpressionType.BoolType when right.Type == KeyValueExpressionType.BoolType:
-                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.BoolValue || right.BoolValue };
+                return new(left.BoolValue || right.BoolValue);
             
             case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.LongType:
-                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.LongValue != 0 || right.LongValue != 0 };
+                return new(left.LongValue != 0 || right.LongValue != 0);
             
             case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.LongType:
-                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.DoubleValue != 0 || right.LongValue != 0 };
+                return new(left.DoubleValue != 0 || right.LongValue != 0);
             
             case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.DoubleType:
-                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.LongValue != 0 || right.DoubleValue != 0 };
+                return new(left.LongValue != 0 || right.DoubleValue != 0);
             
             case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.DoubleType:
-                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = left.DoubleValue != 0 || right.DoubleValue != 0 };
+                return new(left.DoubleValue != 0 || right.DoubleValue != 0);
                 
             default:
                 throw new KahunaScriptException("Invalid operands: " + left.Type + " or " + right.Type, ast.yyline);

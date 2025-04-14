@@ -16,23 +16,22 @@ internal static class KeyValueTransactionExpression
                 return context.GetVariable(ast, ast.yytext!);
             
             case NodeType.IntegerType:
-                return new() { Type = KeyValueExpressionType.LongType, LongValue = long.Parse(ast.yytext!) };
+                return new(long.Parse(ast.yytext!));
             
             case NodeType.StringType:
-                return new() { Type = KeyValueExpressionType.StringType, StrValue = ast.yytext! };
+                return new(ast.yytext!, -1, 0);
             
-            case NodeType.FloatType:
-                Console.WriteLine(ast.yytext!);
-                return new() { Type = KeyValueExpressionType.DoubleType, DoubleValue = double.Parse(ast.yytext!) };
+            case NodeType.FloatType:               
+                return new(double.Parse(ast.yytext!));
             
             case NodeType.BooleanType:
-                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = ast.yytext! == "true" };
+                return new(ast.yytext! == "true");
             
             case NodeType.Placeholder:
-                return new() { Type = KeyValueExpressionType.StringType, StrValue = context.GetParameter(ast) };
+                return new(context.GetParameter(ast), -1, 0);
             
             case NodeType.NullType:
-                return new() { Type = KeyValueExpressionType.NullType };
+                return new(KeyValueExpressionType.NullType);
             
             case NodeType.Equals:
                 return EqualsOperator.Eval(context, ast, "==");
@@ -46,19 +45,19 @@ internal static class KeyValueTransactionExpression
             case NodeType.LessThanEquals:
             {
                 KeyValueExpressionResult result = GreaterThanOperator.Eval(context, ast, "<=");
-                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = !result.BoolValue };
+                return new(!result.BoolValue);
             }
             
             case NodeType.GreaterThanEquals:
             {
                 KeyValueExpressionResult result = LessThanOperator.Eval(context, ast, ">=");
-                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = !result.BoolValue };
+                return new(!result.BoolValue);
             }
             
             case NodeType.NotEquals:
             {
                 KeyValueExpressionResult result = EqualsOperator.Eval(context, ast, "!=");
-                return new() { Type = KeyValueExpressionType.BoolType, BoolValue = !result.BoolValue };
+                return new(!result.BoolValue);
             }
             
             case NodeType.Add:
@@ -123,6 +122,6 @@ internal static class KeyValueTransactionExpression
                 throw new NotImplementedException();
         }
 
-        return new() { Type = KeyValueExpressionType.NullType };
+        return new(KeyValueExpressionType.NullType);
     }
 }

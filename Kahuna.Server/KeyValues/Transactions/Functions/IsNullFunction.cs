@@ -13,6 +13,6 @@ internal static class IsNullFunction
         
         KeyValueExpressionResult argument = arguments[0];
 
-        return new() { Type = KeyValueExpressionType.BoolType, BoolValue = argument.Type == KeyValueExpressionType.NullType };
+        return new(argument.Type == KeyValueExpressionType.NullType);
     }
 }

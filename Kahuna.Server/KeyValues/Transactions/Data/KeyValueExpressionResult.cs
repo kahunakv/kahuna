@@ -7,21 +7,60 @@ namespace Kahuna.Server.KeyValues.Transactions.Data;
 
 public sealed class KeyValueExpressionResult
 {
-    public KeyValueExpressionType Type { get; set; }
+    public KeyValueExpressionType Type { get; }
     
-    public bool BoolValue { get; set; }
+    public bool BoolValue { get; }
     
-    public string? StrValue { get; set; }
+    public string? StrValue { get; }
     
-    public long LongValue { get; set; }
+    public long LongValue { get;  }
     
-    public double DoubleValue { get; set; }
+    public double DoubleValue { get; }
     
     public byte[]? BytesValue { get; set; }
     
-    public long Revision { get; set; }
+    public long Revision { get; }
     
-    public long Expires { get; set; }
+    public long Expires { get; }
+    
+    public KeyValueExpressionResult(KeyValueExpressionType type)
+    {
+        Type = type;
+        Revision = -1;
+        Expires = 0;
+    }    
+    
+    public KeyValueExpressionResult(bool boolValue, long revision = -1, long expires = 0)
+    {
+        Type = KeyValueExpressionType.BoolType;
+        BoolValue = boolValue;
+        Revision = revision;
+        Expires = expires;
+    }
+    
+    public KeyValueExpressionResult(long longValue, long revision = -1, long expires = 0)
+    {
+        Type = KeyValueExpressionType.LongType;
+        LongValue = longValue;
+        Revision = revision;
+        Expires = expires;
+    }
+    
+    public KeyValueExpressionResult(double doubleValue, long revision = -1, long expires = 0)
+    {
+        Type = KeyValueExpressionType.DoubleType;
+        DoubleValue = doubleValue;
+        Revision = revision;
+        Expires = expires;
+    }
+    
+    public KeyValueExpressionResult(string? strValue, long revision = -1, long expires = 0)
+    {
+        Type = KeyValueExpressionType.StringType;
+        StrValue = strValue;
+        Revision = revision;
+        Expires = expires;
+    }
 
     public KeyValueTransactionResult ToTransactionResult()
     {
