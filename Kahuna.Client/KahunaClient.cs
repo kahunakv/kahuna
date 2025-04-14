@@ -29,13 +29,11 @@ public class KahunaClient
 
     private readonly IKahunaCommunication communication;
 
-    private readonly bool upgradeUrls;
-
     private int currentServer;
     
     internal IKahunaCommunication Communication => communication;
     
-    internal bool UpgradeUrls => upgradeUrls;
+    internal KahunaOptions Options { private set; get; }
     
     /// <summary>
     /// Constructor
@@ -43,13 +41,13 @@ public class KahunaClient
     /// <param name="url">Kahuna's server endpoint</param>
     /// <param name="logger">Logger</param>
     /// <param name="communication">An instance of one of the built-in communicators or a custom one</param>
-    /// <param name="communication">Wheter the client must try to upgrade the ref objects to point directly to leaders</param>
-    public KahunaClient(string url, ILogger<KahunaClient>? logger = null, IKahunaCommunication? communication = null, bool upgradeUrls = false)
+    /// <param name="options">Client options</param>
+    public KahunaClient(string url, ILogger<KahunaClient>? logger = null, IKahunaCommunication? communication = null, KahunaOptions? options = null)
     {
         this.urls = [url];
         this.logger = logger;
-        this.communication = communication ?? new GrpcCommunication(logger);
-        this.upgradeUrls = upgradeUrls;
+        this.Options = options ?? new();
+        this.communication = communication ?? new GrpcCommunication(Options, logger);
     }
     
     /// <summary>
@@ -58,13 +56,13 @@ public class KahunaClient
     /// <param name="url">Kahuna's server endpoints</param>
     /// <param name="logger">Logger</param>
     /// <param name="communication">An instance of one of the built-in communicators or a custom one</param>
-    /// <param name="communication">Wheter the client must try to upgrade the ref objects to point directly to leaders</param>
-    public KahunaClient(string[] urls, ILogger<KahunaClient>? logger = null, IKahunaCommunication? communication = null, bool upgradeUrls = false)
+    /// <param name="options">Wheter the client must try to upgrade the ref objects to point directly to leaders</param>
+    public KahunaClient(string[] urls, ILogger<KahunaClient>? logger = null, IKahunaCommunication? communication = null, KahunaOptions? options = null)
     {
         this.urls = urls;
         this.logger = logger;
-        this.communication = (communication ?? new GrpcCommunication(logger));
-        this.upgradeUrls = upgradeUrls;
+        this.communication = (communication ?? new GrpcCommunication(Options, logger));
+        this.Options = options ?? new();
     }
     
     private async Task<(KahunaLockAcquireResult, long, string?)> TryAcquireLock(string resource, byte[] owner, TimeSpan expiryTime, LockDurability durability, CancellationToken cancellationToken = default)

@@ -189,10 +189,13 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
         if (context is null || context.State == LockState.Unlocked)
             return new(LockResponseType.LockDoesNotExist);
 
+        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
+        
+        if (context.Expires - currentTime < TimeSpan.Zero)
+            return new(LockResponseType.LockDoesNotExist);
+        
         if (!((ReadOnlySpan<byte>)context.Owner).SequenceEqual(message.Owner))
             return new(LockResponseType.InvalidOwner);
-
-        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
 
         LockProposal proposal = new(
             message.Resource,

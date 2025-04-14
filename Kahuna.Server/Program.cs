@@ -58,6 +58,8 @@ builder.Services.AddSingleton<IRaft>(services =>
         "sqlite" => new SqliteWAL(path: opts.WalPath, revision: opts.WalRevision, logger),
         _ => throw new KahunaServerException("Invalid WAL storage")
     };
+
+    //IWAL walAdapter = new InMemoryWAL(logger);
     
     return new RaftManager(
         services.GetRequiredService<ActorSystem>(),

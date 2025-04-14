@@ -19,12 +19,15 @@ namespace Kahuna.Client.Communication;
 
 public class GrpcCommunication : IKahunaCommunication
 {
-    private static readonly ConcurrentDictionary<string, GrpcChannel> channels = new();
+    private static readonly ConcurrentDictionary<string, Lazy<List<GrpcChannel>>> channels = new();
+
+    private readonly KahunaOptions? options;
     
     private readonly ILogger? logger;
     
-    public GrpcCommunication(ILogger? logger)
+    public GrpcCommunication(KahunaOptions? options, ILogger? logger)
     {
+        this.options = options;
         this.logger = logger;
     }
     
@@ -651,31 +654,44 @@ public class GrpcCommunication : IKahunaCommunication
 
     private static GrpcChannel GetSharedChannel(string url)
     {
-        if (!channels.TryGetValue(url, out GrpcChannel? channel))
-        {
-            // @todo fix SSL validation
-            SslClientAuthenticationOptions sslOptions = new()
-            {
-                RemoteCertificateValidationCallback = delegate { return true; }
-            };
+        Lazy<List<GrpcChannel>> x = channels.GetOrAdd(url, GetSharedChannels);
+
+        List<GrpcChannel> s = x.Value;
         
-            SocketsHttpHandler handler = new()
-            {
-                SslOptions = sslOptions,
-                ConnectTimeout = TimeSpan.FromSeconds(10),
-                PooledConnectionIdleTimeout = Timeout.InfiniteTimeSpan,
-                KeepAlivePingDelay = TimeSpan.FromSeconds(30),
-                KeepAlivePingTimeout = TimeSpan.FromSeconds(10),
-                EnableMultipleHttp2Connections = true
-            };
-            
-            channel = GrpcChannel.ForAddress(url, new() { 
+        return s[Random.Shared.Next(0, s.Count)];
+    }
+
+    private static Lazy<List<GrpcChannel>> GetSharedChannels(string url)
+    {
+        return new(() => CreateSharedChannels(url));
+    }
+
+    private static List<GrpcChannel> CreateSharedChannels(string url)
+    {
+        SslClientAuthenticationOptions sslOptions = new()
+        {
+            RemoteCertificateValidationCallback = delegate { return true; }
+        };
+
+        SocketsHttpHandler handler = new()
+        {
+            SslOptions = sslOptions,
+            ConnectTimeout = TimeSpan.FromSeconds(10),
+            PooledConnectionIdleTimeout = Timeout.InfiniteTimeSpan,
+            KeepAlivePingDelay = TimeSpan.FromSeconds(30),
+            KeepAlivePingTimeout = TimeSpan.FromSeconds(10),
+            EnableMultipleHttp2Connections = true
+        };
+        
+        List<GrpcChannel> urlChannels = new(4);
+        
+        for (int i = 0; i < 4; i++)
+        {
+            urlChannels.Add(GrpcChannel.ForAddress(url, new() {
                 HttpHandler = handler
-            });
-                
-            channels.TryAdd(url, channel);
+            }));
         }
 
-        return channel;
+        return urlChannels;
     }
 }

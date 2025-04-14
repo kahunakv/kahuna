@@ -41,8 +41,10 @@ for (int j = 0; j < 25; j++)
 
     for (int i = 0; i < numberOfTasks; i++)
     {
-        tasks.Add(SetKeyConcurrently(locks1));
-        tasks.Add(GetKeyConcurrently(locks2));
+        if (i % 2 == 0)
+            tasks.Add(SetKeyConcurrently(locks));
+        else
+            tasks.Add(GetKeyConcurrently(locks));
         //tasks.Add(ExecuteTxConcurrently(kahunaScript));
     }
 
@@ -59,12 +61,16 @@ async Task AdquireLockConcurrently(KahunaClient locksx)
 {
     try
     {
+        using CancellationTokenSource cts = new();
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
+
         string lockName = GetRandomLockNameFromList(tokens);
 
         await using KahunaLock kahunaLock = await locksx.GetOrCreateLock(
             lockName,
             expiry: TimeSpan.FromSeconds(5),
-            durability: LockDurability.Persistent
+            durability: LockDurability.Persistent,
+            cancellationToken: cts.Token
         );
 
         if (!kahunaLock.IsAcquired)
@@ -87,13 +93,19 @@ async Task SetKeyConcurrently(KahunaClient keyValues)
 {
     try
     {
-        using CancellationTokenSource src = new();
-        src.CancelAfter(TimeSpan.FromSeconds(10));
+        using CancellationTokenSource cts = new();
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
 
         string key = GetRandomLockNameFromList(tokens);
         string value = GetRandomLockNameFromList(tokens);
 
-        KahunaKeyValue result = await keyValues.SetKeyValue(key, value, TimeSpan.FromHours(5), KeyValueFlags.Set, KeyValueDurability.Persistent, src.Token);
+        KahunaKeyValue result = await keyValues.SetKeyValue(
+            key, value,
+            TimeSpan.FromHours(5),
+            KeyValueFlags.Set,
+            KeyValueDurability.Persistent,
+            cancellationToken: cts.Token
+        );
 
         if (!result.Success)
             throw new KahunaException("Not set " + key, LockResponseType.Busy);
