@@ -309,13 +309,21 @@ public class KahunaClient
     {
         byte[] valueBytes = Encoding.UTF8.GetBytes(value);
         
-        (bool success, long revision) = await communication.TrySetKeyValue(GetRoundRobinUrl(), key, valueBytes, (int)expiryTime.TotalMilliseconds, flags, durability, cancellationToken).ConfigureAwait(false);
+        (bool success, long revision) = await communication.TrySetKeyValue(
+            GetRoundRobinUrl(), 
+            key, 
+            valueBytes, 
+            (int)expiryTime.TotalMilliseconds, 
+            flags, 
+            durability, 
+            cancellationToken
+        ).ConfigureAwait(false);
         
         return new(this, key, success, valueBytes, revision, durability);
     }
     
     /// <summary>
-    /// Compare Value and Set (CVAS) operation. Sets the value of a key if the current value is equal to the expected value
+    /// Compare-Value-And-Swap (CVAS) operation. Sets the value of a key if the current value is equal to the expected value
     /// </summary>
     /// <param name="key"></param>
     /// <param name="value"></param>
@@ -325,13 +333,21 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<KahunaKeyValue> TryCompareValueAndSetKeyValue(string key, byte[] value, byte[] compareValue, int expiryTime = 30000, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, long revision) = await communication.TryCompareValueAndSetKeyValue(GetRoundRobinUrl(), key, value, compareValue, expiryTime, durability, cancellationToken).ConfigureAwait(false);
+        (bool success, long revision) = await communication.TryCompareValueAndSetKeyValue(
+            GetRoundRobinUrl(), 
+            key, 
+            value, 
+            compareValue, 
+            expiryTime, 
+            durability, 
+            cancellationToken
+        ).ConfigureAwait(false);
         
         return new(this, key, success, value, revision, durability);
     }
     
     /// <summary>
-    /// Compare Value and Set (CVAS) operation. Sets the value of a key if the current value is equal to the expected value
+    /// Compare-Value-and-Swap (CVAS) operation. Sets the value of a key if the current value is equal to the expected value
     /// </summary>
     /// <param name="key"></param>
     /// <param name="value"></param>
@@ -357,7 +373,7 @@ public class KahunaClient
     }
     
     /// <summary>
-    /// Compare Revision and Set (CRAS) operation. Sets the value of a key if the current revision is equal to the expected value
+    /// Compare-Revision-And-Swap (CRAS) operation. Sets the value of a key if the current revision is equal to the expected value
     /// </summary>
     /// <param name="key"></param>
     /// <param name="value"></param>
@@ -381,7 +397,7 @@ public class KahunaClient
     }
     
     /// <summary>
-    /// Compare Revision and Set (CRAS) operation. Sets the value of a key if the current revision is equal to the expected value
+    /// Compare=Revision-and-Swap (CRAS) operation. Sets the value of a key if the current revision is equal to the expected value
     /// </summary>
     /// <param name="key"></param>
     /// <param name="value"></param>
@@ -427,7 +443,13 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<KahunaKeyValue> GetKeyValue(string key, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, byte[]? value, long revision) = await communication.TryGetKeyValue(GetRoundRobinUrl(), key, -1, durability, cancellationToken).ConfigureAwait(false);
+        (bool success, byte[]? value, long revision) = await communication.TryGetKeyValue(
+            GetRoundRobinUrl(), 
+            key, 
+            -1, 
+            durability, 
+            cancellationToken
+        ).ConfigureAwait(false);
         
         return new(this, key, success, value, revision, durability);
     }
@@ -440,7 +462,13 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<KahunaKeyValue> ExistsKeyValue(string key, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, long revision) = await communication.TryExistsKeyValue(GetRoundRobinUrl(), key, -1, durability, cancellationToken).ConfigureAwait(false);
+        (bool success, long revision) = await communication.TryExistsKeyValue(
+            GetRoundRobinUrl(), 
+            key, 
+            -1, 
+            durability, 
+            cancellationToken
+        ).ConfigureAwait(false);
         
         return new(this, key, success, revision, durability);
     }
@@ -454,7 +482,13 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<KahunaKeyValue> GetKeyValueRevision(string key, long revision, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, byte[]? value, long returnRevision) = await communication.TryGetKeyValue(GetRoundRobinUrl(), key, revision, durability, cancellationToken).ConfigureAwait(false);
+        (bool success, byte[]? value, long returnRevision) = await communication.TryGetKeyValue(
+            GetRoundRobinUrl(), 
+            key, 
+            revision, 
+            durability, 
+            cancellationToken
+        ).ConfigureAwait(false);
         
         return new(this, key, success, value, returnRevision, durability);
     }

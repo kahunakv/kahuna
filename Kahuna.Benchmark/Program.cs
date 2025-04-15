@@ -8,16 +8,15 @@ using Kahuna.Shared.Locks;
 
 Console.WriteLine("Kahuna Benchmark");
 
-const int numberOfTasks = 500;
-const int MaxTokens = 100_000;
+const int numberOfTasks = 350;
+const int MaxTokens = 10_000;
 
 List<string> tokens = new(MaxTokens);
 
 for (int k = 0; k < MaxTokens; k++)
     tokens.Add(GetRandomLockName());
 
-KahunaClient locks1 = new(["https://localhost:8082", "https://localhost:8084", "https://localhost:8086"], null);
-KahunaClient locks2 = new(["https://localhost:8082", "https://localhost:8084", "https://localhost:8086"], null);
+KahunaClient locks = new(["https://localhost:8082", "https://localhost:8084", "https://localhost:8086"], null);
 
 const string myScript = """
 BEGIN
@@ -31,11 +30,11 @@ END
 
 //KahunaScript kahunaScript = locks.LoadScript(myScript);
 
-List<Task> tasks = new(numberOfTasks * 2);
+List<Task> tasks = new(numberOfTasks);
 
 Stopwatch stopwatch = Stopwatch.StartNew();
 
-for (int j = 0; j < 25; j++)
+for (int j = 0; j < 3; j++)
 {
     tasks.Clear();
 
@@ -50,7 +49,10 @@ for (int j = 0; j < 25; j++)
 
     await Task.WhenAll(tasks);
 
-    Console.WriteLine($"[{j + 1}] Total time: " + stopwatch.Elapsed);
+    if (j <= 1)
+        Console.WriteLine($"Warm Up: " + stopwatch.Elapsed);
+    else
+        Console.WriteLine($"[{(j - 2) + 1}] Total time: " + stopwatch.Elapsed);
 
     stopwatch.Restart();
 }

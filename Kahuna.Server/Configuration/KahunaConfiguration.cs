@@ -11,7 +11,7 @@ public sealed class KahunaConfiguration
     
     public int LocksWorkers { get; set; }
     
-    public int KeyValuesWorkers { get; set; }
+    public int KeyValueWorkers { get; set; }
     
     public int BackgroundWriterWorkers { get; set; }
 

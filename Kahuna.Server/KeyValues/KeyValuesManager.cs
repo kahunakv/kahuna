@@ -93,9 +93,9 @@ internal sealed class KeyValuesManager
         KahunaConfiguration configuration
     )
     {
-        logger.LogDebug("Starting {Workers} ephemeral key/value workers", configuration.KeyValuesWorkers);
+        logger.LogDebug("Starting {Workers} ephemeral key/value workers", configuration.KeyValueWorkers);
 
-        for (int i = 0; i < configuration.KeyValuesWorkers; i++)
+        for (int i = 0; i < configuration.KeyValueWorkers; i++)
             ephemeralInstances.Add(actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>("ephemeral-keyvalue-" + i, backgroundWriter, persistenceBackend, raft, logger));
 
         return actorSystem.CreateConsistentHashRouter(ephemeralInstances);
@@ -112,9 +112,9 @@ internal sealed class KeyValuesManager
         KahunaConfiguration configuration
     )
     {
-        logger.LogDebug("Starting {Workers} persistent key/value workers", configuration.KeyValuesWorkers);
+        logger.LogDebug("Starting {Workers} persistent key/value workers", configuration.KeyValueWorkers);
 
-        for (int i = 0; i < configuration.KeyValuesWorkers; i++)
+        for (int i = 0; i < configuration.KeyValueWorkers; i++)
             persistentInstances.Add(actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>("persistent-keyvalue-" + i, backgroundWriter, persistenceBackend, raft, logger));
         
         return actorSystem.CreateConsistentHashRouter(persistentInstances);

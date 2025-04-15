@@ -13,6 +13,7 @@ public static class ConfigurationValidator
             HttpsCertificate = opts.HttpsCertificate,
             HttpsCertificatePassword = opts.HttpsCertificatePassword,
             LocksWorkers = opts.LocksWorkers,
+            KeyValueWorkers = opts.KeyValueWorkers,
             BackgroundWriterWorkers = opts.BackgroundWritersWorkers,
             Storage = opts.Storage,
             StoragePath = opts.StoragePath,
@@ -47,8 +48,8 @@ public static class ConfigurationValidator
         if (configuration.LocksWorkers <= 0)
             configuration.LocksWorkers = Math.Max(256, Environment.ProcessorCount * 4);
         
-        if (configuration.KeyValuesWorkers <= 0)
-            configuration.KeyValuesWorkers = Math.Max(256, Environment.ProcessorCount * 4);
+        if (configuration.KeyValueWorkers <= 0)
+            configuration.KeyValueWorkers = Math.Max(256, Environment.ProcessorCount * 4);
 
         if (configuration.BackgroundWriterWorkers <= 0)
             configuration.BackgroundWriterWorkers = 1;

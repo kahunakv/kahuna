@@ -2,8 +2,6 @@
 using System.Runtime.InteropServices;
 using Google.Protobuf;
 using Grpc.Core;
-using Grpc.Net.Client;
-using Kahuna.Communication.Common.Grpc;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.Locks;
 using Kahuna.Shared.Locks;
@@ -11,7 +9,7 @@ using Kommander;
 
 namespace Kahuna.Communication.External.Grpc;
 
-public class LocksService : Locker.LockerBase
+public sealed class LocksService : Locker.LockerBase
 {
     private readonly IKahuna locks;
 

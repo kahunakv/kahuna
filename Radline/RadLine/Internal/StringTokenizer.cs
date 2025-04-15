@@ -11,9 +11,9 @@ namespace RadLine
 
             foreach (char character in text)
             {
-                if (char.IsLetterOrDigit(character) || character == '_' || character == '\"' || character == '\'' || isOpen)
+                if (char.IsLetterOrDigit(character) || character == '_' || character == '\"' || character == '\'' || character == '`' || isOpen)
                 {
-                    if (character is '\"' or '\'')
+                    if (character is '\"' or '\'' or '`')
                         isOpen = !isOpen;
 
                     buffer += character;

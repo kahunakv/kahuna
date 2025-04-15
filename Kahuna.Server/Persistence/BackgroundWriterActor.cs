@@ -87,14 +87,16 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         if (dirtyLocks.Count > 0 || dirtyKeyValues.Count > 0)
             return;
         
-        if (pendingCheckpoint)
+        /*if (pendingCheckpoint)
         {
             foreach (int partitionId in partitionIds)
                 await raft.ReplicateCheckpoint(partitionId);
             
             partitionIds.Clear();
             pendingCheckpoint = false;
-        }
+        }*/
+
+        await Task.CompletedTask;
     }
 
     private async ValueTask FlushLocks()

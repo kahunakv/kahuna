@@ -1,14 +1,16 @@
 
-using System.Runtime.InteropServices;
+using Kommander.Time;
+using Kommander.Communication.Grpc;
+
 using Google.Protobuf;
 using Grpc.Net.Client;
-using Kahuna.Communication.Common.Grpc;
+using System.Runtime.InteropServices;
+
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.Locks;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
-using Kommander.Time;
 
 namespace Kahuna.Server.Communication.Internode;
 
@@ -31,7 +33,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcLockDurability)durability
         };
         
-        GrpcChannel channel = SharedChannels.GetChannel(node, configuration);
+        GrpcChannel channel = SharedChannels.GetChannel(node);
         
         Locker.LockerClient client = new(channel);
         
@@ -51,7 +53,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcLockDurability)durability
         };
         
-        GrpcChannel channel = SharedChannels.GetChannel(node, configuration);
+        GrpcChannel channel = SharedChannels.GetChannel(node);
         
         Locker.LockerClient client = new(channel);
         
@@ -70,7 +72,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcLockDurability)durability
         };
         
-        GrpcChannel channel = SharedChannels.GetChannel(node, configuration);
+        GrpcChannel channel = SharedChannels.GetChannel(node);
         
         Locker.LockerClient client = new(channel);
         
@@ -88,7 +90,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcLockDurability)durability
         };
         
-        GrpcChannel channel = SharedChannels.GetChannel(node, configuration);
+        GrpcChannel channel = SharedChannels.GetChannel(node);
         
         Locker.LockerClient client = new(channel);
         
@@ -115,7 +117,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
 
     public async Task<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValue(string node, HLCTimestamp transactionId, string key, byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node, configuration);
+        GrpcChannel channel = SharedChannels.GetChannel(node);
         
         KeyValuer.KeyValuerClient client = new(channel);
 
@@ -144,7 +146,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
 
     public async Task<(KeyValueResponseType, long, HLCTimestamp)> TryDeleteKeyValue(string node, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancelationToken)
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node, configuration);
+        GrpcChannel channel = SharedChannels.GetChannel(node);
         
         KeyValuer.KeyValuerClient client = new(channel);
         
@@ -165,7 +167,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
 
     public async Task<(KeyValueResponseType, long, HLCTimestamp)> TryExtendKeyValue(string node, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancelationToken)
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node, configuration);
+        GrpcChannel channel = SharedChannels.GetChannel(node);
         
         KeyValuer.KeyValuerClient client = new(channel);
         
@@ -187,7 +189,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
 
     public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryGetValue(string node, HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node, configuration);
+        GrpcChannel channel = SharedChannels.GetChannel(node);
         
         KeyValuer.KeyValuerClient client = new(channel);
         
@@ -223,7 +225,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
 
     public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryExistsValue(string node, HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node, configuration);
+        GrpcChannel channel = SharedChannels.GetChannel(node);
         
         KeyValuer.KeyValuerClient client = new(channel);
         
@@ -252,7 +254,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
 
     public async Task<(KeyValueResponseType, string, KeyValueDurability)> TryAcquireExclusiveLock(string node, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancelationToken)
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node, configuration);
+        GrpcChannel channel = SharedChannels.GetChannel(node);
         
         KeyValuer.KeyValuerClient client = new(channel);
         
@@ -281,7 +283,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         CancellationToken cancelationToken
     )
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node, configuration);
+        GrpcChannel channel = SharedChannels.GetChannel(node);
             
         KeyValuer.KeyValuerClient client = new(channel);
             
@@ -315,7 +317,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
 
     public async Task<(KeyValueResponseType, string)> TryReleaseExclusiveLock(string node, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancelationToken)
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node, configuration);
+        GrpcChannel channel = SharedChannels.GetChannel(node);
         
         KeyValuer.KeyValuerClient client = new(channel);
         
@@ -336,7 +338,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
 
     public async Task TryReleaseNodeExclusiveLocks(string node, HLCTimestamp transactionId, List<(string key, KeyValueDurability durability)> xkeys, Lock lockSync, List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses, CancellationToken cancellationToken)
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node, configuration);
+        GrpcChannel channel = SharedChannels.GetChannel(node);
             
         KeyValuer.KeyValuerClient client = new(channel);
             
@@ -375,7 +377,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         CancellationToken cancellationToken
     )
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node, configuration);
+        GrpcChannel channel = SharedChannels.GetChannel(node);
         
         KeyValuer.KeyValuerClient client = new(channel);
         
@@ -411,7 +413,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         CancellationToken cancellationToken
     )
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node, configuration);
+        GrpcChannel channel = SharedChannels.GetChannel(node);
             
         KeyValuer.KeyValuerClient client = new(channel);
             
@@ -446,7 +448,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
 
     public async Task<(KeyValueResponseType, long)> TryCommitMutations(string node, HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancelationToken)
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node, configuration);
+        GrpcChannel channel = SharedChannels.GetChannel(node);
         
         KeyValuer.KeyValuerClient client = new(channel);
         
@@ -469,7 +471,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
 
     public async Task TryCommitNodeMutations(string node, HLCTimestamp transactionId, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys, Lock lockSync, List<(KeyValueResponseType type, string key, long, KeyValueDurability durability)> responses, CancellationToken cancellationToken)
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node, configuration);
+        GrpcChannel channel = SharedChannels.GetChannel(node);
             
         KeyValuer.KeyValuerClient client = new(channel);
             

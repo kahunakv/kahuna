@@ -53,8 +53,11 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-port", Required = false, HelpText = "Port to bind incoming Raft consensus and replication requests", Default = 2070)]
     public int RaftPort { get; set; } = 2070;
     
-    [Option("locks-workers", Required = false, HelpText = "Number of ephemeral/consistent workers", Default = 128)]
+    [Option("locks-workers", Required = false, HelpText = "Number of lock ephemeral/consistent workers", Default = 128)]
     public int LocksWorkers { get; set; } = 128;
+    
+    [Option("keyvalue-workers", Required = false, HelpText = "Number of key/value ephemeral/consistent workers", Default = 128)]
+    public int KeyValueWorkers { get; set; } = 128;
     
     [Option("background-writer-workers", Required = false, HelpText = "Number of background writers workers", Default = 1)]
     public int BackgroundWritersWorkers { get; set; } = 1;
@@ -62,8 +65,8 @@ public sealed class KahunaCommandLineOptions
     [Option("default-transaction-timeout", Required = false, HelpText = "Default transaction timeout in milliseconds", Default = 5000)]
     public int DefaultTransactionTimeout { get; set; } = 5000;
     
-    [Option("read-io-threads", Required = false, HelpText = "Read I/O threads", Default = 8)]
-    public int ReadIOThreads { get; set; } = 8;
+    [Option("read-io-threads", Required = false, HelpText = "Read I/O threads", Default = 16)]
+    public int ReadIOThreads { get; set; } = 16;
     
     [Option("write-io-threads", Required = false, HelpText = "Write I/O threads", Default = 8)]
     public int WriteIOThreads { get; set; } = 8;

@@ -1,13 +1,14 @@
 
 using Kommander;
 using Kommander.Time;
+using Kommander.Communication.Grpc;
+using Kommander.Diagnostics;
 
 using Grpc.Net.Client;
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using Google.Protobuf.Collections;
 
-using Kahuna.Communication.Common.Grpc;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
 using Kahuna.Shared.KeyValue;
@@ -100,9 +101,9 @@ internal sealed class KeyValueLocator
         if (leader == raft.GetLocalEndpoint())
             return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
         
-        logger.LogDebug("SET-KEYVALUE Redirect {Key} to leader partition {Partition} at {Leader}", key, partitionId, leader);
+        ValueStopwatch stopwatch = ValueStopwatch.StartNew();              
         
-        return await interNodeCommunication.TrySetKeyValue(
+        (KeyValueResponseType, long, HLCTimestamp) x = await interNodeCommunication.TrySetKeyValue(
             leader,
             transactionId, 
             key, 
@@ -113,7 +114,11 @@ internal sealed class KeyValueLocator
             expiresMs, 
             durability, 
             cancellationToken
-        );
+        );               
+        
+        logger.LogDebug("SET-KEYVALUE Redirect {Key} to leader partition {Partition} at {Leader} Time={Elapsed}ms", key, partitionId, leader, stopwatch.GetElapsedMilliseconds());
+
+        return x;
     }
     
     /// <summary>
@@ -141,7 +146,7 @@ internal sealed class KeyValueLocator
             
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
-            return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+            return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);               
         
         logger.LogDebug("DELETE-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
         
@@ -169,7 +174,7 @@ internal sealed class KeyValueLocator
             
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
-            return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+            return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);               
         
         logger.LogDebug("EXTEND-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
 
@@ -203,10 +208,14 @@ internal sealed class KeyValueLocator
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
             return (KeyValueResponseType.MustRetry, null);
+
+        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
         
-        logger.LogDebug("GET-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
+        (KeyValueResponseType, ReadOnlyKeyValueContext?) x = await interNodeCommunication.TryGetValue(leader, transactionId, key, revision, durability, cancellationToken);
         
-        return await interNodeCommunication.TryGetValue(leader, transactionId, key, revision, durability, cancellationToken);
+        logger.LogDebug("GET-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader} Time={Elapsed}ms", key, partitionId, leader, stopwatch.GetElapsedMilliseconds());
+
+        return x;
     }
     
     /// <summary>
@@ -675,7 +684,7 @@ internal sealed class KeyValueLocator
         
         logger.LogDebug("ROLLBACK-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
         
-        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
+        GrpcChannel channel = SharedChannels.GetChannel(leader);
         
         KeyValuer.KeyValuerClient client = new(channel);
         
@@ -701,7 +710,7 @@ internal sealed class KeyValueLocator
         if (string.IsNullOrEmpty(prefixedKey))
             return new([]);
         
-        int partitionId = raft.GetPartitionKey(prefixedKey + "/");
+        int partitionId = raft.GetPrefixPartitionKey(prefixedKey);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
             return await manager.GetByPrefix(prefixedKey, durability);
@@ -712,7 +721,7 @@ internal sealed class KeyValueLocator
         
         logger.LogDebug("GETPREFIX-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", prefixedKey, partitionId, leader);
         
-        GrpcChannel channel = SharedChannels.GetChannel(leader, configuration);
+        GrpcChannel channel = SharedChannels.GetChannel(leader);
         
         KeyValuer.KeyValuerClient client = new(channel);
         
@@ -782,9 +791,9 @@ internal sealed class KeyValueLocator
         return items;
     }
 
-    private async Task NodeScanByPrefix(ConcurrentBag<(string, ReadOnlyKeyValueContext)> unionItems, RaftNode node, string prefixKeyName, KeyValueDurability durability)
-    {
-        GrpcChannel channel = SharedChannels.GetChannel(node.Endpoint, configuration);
+    private static async Task NodeScanByPrefix(ConcurrentBag<(string, ReadOnlyKeyValueContext)> unionItems, RaftNode node, string prefixKeyName, KeyValueDurability durability)
+    {                
+        GrpcChannel channel = SharedChannels.GetChannel(node.Endpoint);
             
         GrpcScanByPrefixRequest request = new()
         {
