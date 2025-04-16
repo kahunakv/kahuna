@@ -34,7 +34,7 @@ List<Task> tasks = new(numberOfTasks);
 
 Stopwatch stopwatch = Stopwatch.StartNew();
 
-for (int j = 0; j < 3; j++)
+for (int j = 0; j < 5; j++)
 {
     tasks.Clear();
 
