@@ -3,6 +3,7 @@ using Nixie;
 using Kommander;
 using System.Diagnostics;
 using Kahuna.Server.Persistence.Backend;
+using Kommander.Time;
 using Polly.Contrib.WaitAndRetry;
 
 namespace Kahuna.Server.Persistence;
@@ -29,7 +30,7 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     
     private readonly Queue<BackgroundWriteRequest> dirtyKeyValues = new();
     
-    private readonly HashSet<int> partitionIds = [];
+    private readonly Dictionary<int, DateTime> partitionIds = [];
     
     private readonly Stopwatch stopwatch = Stopwatch.StartNew();
     
@@ -86,17 +87,43 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     {
         if (dirtyLocks.Count > 0 || dirtyKeyValues.Count > 0)
             return;
-        
-        /*if (pendingCheckpoint)
-        {
-            foreach (int partitionId in partitionIds)
-                await raft.ReplicateCheckpoint(partitionId);
-            
-            partitionIds.Clear();
-            pendingCheckpoint = false;
-        }*/
 
-        await Task.CompletedTask;
+        if (!pendingCheckpoint)
+            return;
+        
+        HashSet<int> partitionsToRemove = [];
+        
+        DateTime currentTime = DateTime.UtcNow;
+        TimeSpan maxTime = TimeSpan.FromSeconds(30);
+
+        foreach (KeyValuePair<int, DateTime> kv in partitionIds)
+        {
+            if ((currentTime - kv.Value) < maxTime)
+                continue;
+
+            if (!await raft.AmILeader(kv.Key, CancellationToken.None))
+            {
+                logger.LogWarning("No longer leader to checkpoint partition #{PartitionId}", kv.Key);
+                
+                partitionsToRemove.Add(kv.Key);
+                continue;
+            }
+
+            RaftReplicationResult result = await raft.ReplicateCheckpoint(kv.Key);
+
+            if (result.Success)
+            {
+                logger.LogDebug("Successfully checkpointed partition #{PartitionId}", kv.Key);
+                
+                partitionsToRemove.Add(kv.Key);
+            }
+        }
+        
+        foreach (int partitionToRemove in partitionsToRemove)
+            partitionIds.Remove(partitionToRemove);
+        
+        if (partitionIds.Count == 0)
+            pendingCheckpoint = false;
     }
 
     private async ValueTask FlushLocks()
@@ -116,11 +143,20 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             
             long size = 0;
             int counter = 0;
+            DateTime timestamp = DateTime.UtcNow;
 
             while (dirtyLocks.TryDequeue(out BackgroundWriteRequest? lockRequest))
             {
                 if (lockRequest.PartitionId >= 0)
-                    partitionIds.Add(lockRequest.PartitionId);
+                {
+                    if (partitionIds.TryGetValue(lockRequest.PartitionId, out DateTime currentTimestamp))
+                    {
+                        if (timestamp >= currentTimestamp)
+                            partitionIds[lockRequest.PartitionId] = timestamp;
+                    }
+                    else
+                        partitionIds.Add(lockRequest.PartitionId, timestamp);
+                }
 
                 items.Add(new(
                     lockRequest.Key,
@@ -188,11 +224,21 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             
             long size = 0;
             int counter = 0;
+            
+            DateTime timestamp = DateTime.UtcNow;
 
             while (dirtyKeyValues.TryDequeue(out BackgroundWriteRequest? keyValueRequest))
             {
                 if (keyValueRequest.PartitionId >= 0)
-                    partitionIds.Add(keyValueRequest.PartitionId);
+                {
+                    if (partitionIds.TryGetValue(keyValueRequest.PartitionId, out DateTime currentTimestamp))
+                    {
+                        if (timestamp >= currentTimestamp)
+                            partitionIds[keyValueRequest.PartitionId] = timestamp;
+                    }
+                    else
+                        partitionIds.Add(keyValueRequest.PartitionId, timestamp);
+                }
 
                 items.Add(new(
                     keyValueRequest.Key,

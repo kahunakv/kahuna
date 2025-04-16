@@ -82,6 +82,9 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
 
         if (message.Durability != KeyValueDurability.Persistent)
         {
+            context.Revisions ??= new();
+            context.Revisions.Add(context.Revision, context.Value);
+            
             context.Value = proposal.Value;
             context.Expires = proposal.Expires;
             context.Revision = proposal.Revision;
@@ -111,6 +114,9 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
                 (int)proposal.State
             ));
         }
+        
+        context.Revisions ??= new();
+        context.Revisions.Add(context.Revision, context.Value);        
         
         context.Value = proposal.Value;
         context.Expires = proposal.Expires;
