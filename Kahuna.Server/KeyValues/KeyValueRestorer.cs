@@ -28,7 +28,7 @@ internal sealed class KeyValueRestorer
         this.logger = logger;
     }
 
-    public bool Restore(RaftLog log)
+    public bool Restore(int partitionId, RaftLog log)
     {
         if (log.LogData is null || log.LogData.Length == 0)
             return true;
@@ -36,10 +36,6 @@ internal sealed class KeyValueRestorer
         try
         {
             KeyValueMessage keyValueMessage = ReplicationSerializer.UnserializeKeyValueMessage(log.LogData);
-
-            HLCTimestamp eventTime = new(keyValueMessage.TimePhysical, keyValueMessage.TimeCounter);
-
-            raft.HybridLogicalClock.ReceiveEvent(eventTime);
 
             switch ((KeyValueRequestType)keyValueMessage.Type)
             {
@@ -72,7 +68,7 @@ internal sealed class KeyValueRestorer
 
                     backgroundWriter.Send(new(
                         BackgroundWriteType.QueueStoreKeyValue,
-                        -1,
+                        partitionId,
                         keyValueMessage.Key,
                         messageValue,
                         keyValueMessage.Revision,
@@ -114,7 +110,7 @@ internal sealed class KeyValueRestorer
                     
                     backgroundWriter.Send(new(
                         BackgroundWriteType.QueueStoreKeyValue,
-                        -1,
+                        partitionId,
                         keyValueMessage.Key,
                         messageValue,
                         keyValueMessage.Revision,
@@ -156,7 +152,7 @@ internal sealed class KeyValueRestorer
                     
                     backgroundWriter.Send(new(
                         BackgroundWriteType.QueueStoreKeyValue,
-                        -1,
+                        partitionId,
                         keyValueMessage.Key,
                         messageValue,
                         keyValueMessage.Revision,

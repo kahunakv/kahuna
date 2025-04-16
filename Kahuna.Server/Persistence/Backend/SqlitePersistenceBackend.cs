@@ -124,6 +124,21 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
     {
         try
         {
+            const string insert = """
+              INSERT INTO locks (resource, owner, expiresPhysical, expiresCounter, fencingToken, state) 
+              VALUES (@resource, @owner, @expiresPhysical, @expiresCounter, @fencingToken, @state) 
+              ON CONFLICT(resource) DO UPDATE SET 
+              owner=@owner, 
+              expiresPhysical=@expiresPhysical, 
+              expiresCounter=@expiresCounter,
+              lastUsedPhysical=@lastUsedPhysical, 
+              lastUsedCounter=@lastUsedCounter,
+              lastModifiedPhysical=@lastModifiedPhysical, 
+              lastModifiedCounter=@lastModifiedCounter,
+              fencingToken=@fencingToken, 
+              state=@state;
+              """;
+            
             foreach (PersistenceRequestItem item in items)
             {
                 (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabase(item.Key);
@@ -131,21 +146,6 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
                 try
                 {
                     readerWriterLock.AcquireWriterLock(TimeSpan.FromSeconds(5));
-
-                    const string insert = """
-                      INSERT INTO locks (resource, owner, expiresPhysical, expiresCounter, fencingToken, state) 
-                      VALUES (@resource, @owner, @expiresPhysical, @expiresCounter, @fencingToken, @state) 
-                      ON CONFLICT(resource) DO UPDATE SET 
-                      owner=@owner, 
-                      expiresPhysical=@expiresPhysical, 
-                      expiresCounter=@expiresCounter,
-                      lastUsedPhysical=@lastUsedPhysical, 
-                      lastUsedCounter=@lastUsedCounter,
-                      lastModifiedPhysical=@lastModifiedPhysical, 
-                      lastModifiedCounter=@lastModifiedCounter,
-                      fencingToken=@fencingToken, 
-                      state=@state;
-                      """;
 
                     using SqliteCommand command = new(insert, connection);
 
@@ -166,14 +166,14 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
                     command.Parameters.AddWithValue("@state", item.State);
 
                     command.ExecuteNonQuery();
-
-                    return true;
                 }
                 finally
                 {
                     readerWriterLock.ReleaseWriterLock();
                 }
             }
+            
+            return true;
         }
         catch (Exception ex)
         {
@@ -192,6 +192,37 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
     {
         try
         {
+            const string insertKeys = """
+              INSERT INTO keys (key, revision, value, expiresPhysical, expiresCounter, lastUsedPhysical, lastUsedCounter, lastModifiedPhysical, lastModifiedCounter, state) 
+              VALUES (@key, @revision, @value, @expiresPhysical, @expiresCounter, @lastUsedPhysical, @lastUsedCounter, @lastModifiedPhysical, @lastModifiedCounter, @state) 
+              ON CONFLICT(key) DO UPDATE SET
+              revision=@revision,
+              value=@value, 
+              expiresPhysical=@expiresPhysical, 
+              expiresCounter=@expiresCounter,
+              lastUsedPhysical=@lastUsedPhysical, 
+              lastUsedCounter=@lastUsedCounter,
+              lastModifiedPhysical=@lastModifiedPhysical, 
+              lastModifiedCounter=@lastModifiedCounter, 
+              state=@state;
+              """;
+                    
+            const string insertKeyRevisions = """
+              INSERT INTO keys_revisions (key, revision, value, expiresPhysical, expiresCounter, lastUsedPhysical, lastUsedCounter, lastModifiedPhysical, lastModifiedCounter, state) 
+              VALUES (@key, @revision, @value, @expiresPhysical, @expiresCounter, @lastUsedPhysical, @lastUsedCounter, @lastModifiedPhysical, @lastModifiedCounter, @state) 
+              ON CONFLICT(key, revision) DO UPDATE SET 
+              value=@value, 
+              expiresPhysical=@expiresPhysical, 
+              expiresCounter=@expiresCounter,
+              lastUsedPhysical=@lastUsedPhysical, 
+              lastUsedCounter=@lastUsedCounter,
+              lastModifiedPhysical=@lastModifiedPhysical, 
+              lastModifiedCounter=@lastModifiedCounter, 
+              state=@state;
+              """;
+            
+            Console.WriteLine("{0}", System.Text.Json.JsonSerializer.Serialize(items));
+            
             foreach (PersistenceRequestItem item in items)
             {
                 (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabase(item.Key);
@@ -199,35 +230,6 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
                 try
                 {
                     readerWriterLock.AcquireWriterLock(TimeSpan.FromSeconds(5));
-
-                    const string insertKeys = """
-                      INSERT INTO keys (key, revision, value, expiresPhysical, expiresCounter, lastUsedPhysical, lastUsedCounter, lastModifiedPhysical, lastModifiedCounter, state) 
-                      VALUES (@key, @revision, @value, @expiresPhysical, @expiresCounter, @lastUsedPhysical, @lastUsedCounter, @lastModifiedPhysical, @lastModifiedCounter, @state) 
-                      ON CONFLICT(key) DO UPDATE SET
-                      revision=@revision,
-                      value=@value, 
-                      expiresPhysical=@expiresPhysical, 
-                      expiresCounter=@expiresCounter,
-                      lastUsedPhysical=@lastUsedPhysical, 
-                      lastUsedCounter=@lastUsedCounter,
-                      lastModifiedPhysical=@lastModifiedPhysical, 
-                      lastModifiedCounter=@lastModifiedCounter, 
-                      state=@state;
-                      """;
-                    
-                    const string insertKeyRevisions = """
-                      INSERT INTO keys_revisions (key, revision, value, expiresPhysical, expiresCounter, lastUsedPhysical, lastUsedCounter, lastModifiedPhysical, lastModifiedCounter, state) 
-                      VALUES (@key, @revision, @value, @expiresPhysical, @expiresCounter, @lastUsedPhysical, @lastUsedCounter, @lastModifiedPhysical, @lastModifiedCounter, @state) 
-                      ON CONFLICT(key, revision) DO UPDATE SET 
-                      value=@value, 
-                      expiresPhysical=@expiresPhysical, 
-                      expiresCounter=@expiresCounter,
-                      lastUsedPhysical=@lastUsedPhysical, 
-                      lastUsedCounter=@lastUsedCounter,
-                      lastModifiedPhysical=@lastModifiedPhysical, 
-                      lastModifiedCounter=@lastModifiedCounter, 
-                      state=@state;
-                      """;
 
                     using SqliteTransaction transaction = connection.BeginTransaction();
 
@@ -278,8 +280,6 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
                         command2.ExecuteNonQuery();
 
                         transaction.Commit();
-
-                        return true;
                     }
                     catch
                     {
@@ -292,6 +292,8 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
                     readerWriterLock.ReleaseWriterLock();
                 }
             }
+            
+            return true;
         }
         catch (Exception ex)
         {

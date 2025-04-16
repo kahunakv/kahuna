@@ -25,7 +25,7 @@ internal sealed class LockReplicator
         this.logger = logger;
     }
 
-    public bool Replicate(RaftLog log)
+    public bool Replicate(int partitionId, RaftLog log)
     {
         if (log.LogData is null || log.LogData.Length == 0)
             return true;
@@ -33,10 +33,6 @@ internal sealed class LockReplicator
         try
         {
             LockMessage lockMessage = ReplicationSerializer.UnserializeLockMessage(log.LogData);
-
-            HLCTimestamp eventTime = new(lockMessage.TimeLogical, lockMessage.TimeCounter);
-
-            raft.HybridLogicalClock.ReceiveEvent(eventTime);
 
             switch ((LockRequestType)lockMessage.Type)
             {
@@ -70,7 +66,7 @@ internal sealed class LockReplicator
                     
                     backgroundWriter.Send(new(
                         BackgroundWriteType.QueueStoreLock,
-                        -1,
+                        partitionId,
                         lockMessage.Resource,
                         owner,
                         lockMessage.FencingToken,
@@ -113,7 +109,7 @@ internal sealed class LockReplicator
                     
                     backgroundWriter.Send(new(
                         BackgroundWriteType.QueueStoreLock,
-                        -1,
+                        partitionId,
                         lockMessage.Resource,
                         owner,
                         lockMessage.FencingToken,
@@ -156,7 +152,7 @@ internal sealed class LockReplicator
                     
                     backgroundWriter.Send(new(
                         BackgroundWriteType.QueueStoreLock,
-                        -1,
+                        partitionId,
                         lockMessage.Resource,
                         owner,
                         lockMessage.FencingToken,

@@ -99,22 +99,6 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         if (!success)
             return KeyValueStaticResponses.ErroredResponse;
         
-        if (message.Durability == KeyValueDurability.Persistent)
-        {
-            // Schedule store to be processed asynchronously in a background actor
-            backgroundWriter.Send(new(
-                BackgroundWriteType.QueueStoreKeyValue,
-                -1,
-                proposal.Key,
-                proposal.Value,
-                proposal.Revision,
-                proposal.Expires,
-                proposal.LastUsed,
-                proposal.LastModified,
-                (int)proposal.State
-            ));
-        }
-        
         context.Revisions ??= new();
         context.Revisions.Add(context.Revision, context.Value);        
         
