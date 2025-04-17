@@ -43,7 +43,7 @@ Check the [documentation](https://kahunakv.github.io/) for more information on a
 
 ## Architecture
 
-<img src="https://github.com/user-attachments/assets/c2bf6c5e-f918-44de-a394-99921642f706" height="350">
+<img src="https://github.com/user-attachments/assets/b60b213c-d12d-48a5-ba22-38fe99d2a590" height="350">
 
 ### Distributed Storage Engine
 
