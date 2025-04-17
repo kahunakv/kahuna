@@ -29,7 +29,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         if (message.TransactionId == HLCTimestamp.Zero)
         {
             logger.LogWarning("Cannot commit mutations for missing transaction id");
-            
+
             return KeyValueStaticResponses.ErroredResponse;
         }
 
@@ -38,35 +38,35 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         if (context is null)
         {
             logger.LogWarning("Key/Value context is missing for {TransactionId}", message.TransactionId);
-            
+
             return KeyValueStaticResponses.ErroredResponse;;
         }
 
         if (context.WriteIntent is null)
         {
             logger.LogWarning("Write intent is missing for {TransactionId}", message.TransactionId);
-            
+
             return KeyValueStaticResponses.ErroredResponse;
         }
 
         if (context.WriteIntent.TransactionId != message.TransactionId)
         {
             logger.LogWarning("Write intent conflict between {CurrentTransactionId} and {TransactionId}", context.WriteIntent.TransactionId, message.TransactionId);
-            
+
             return KeyValueStaticResponses.ErroredResponse;
         }
 
         if (context.MvccEntries is null)
         {
             logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [1]", message.TransactionId);
-            
+
             return KeyValueStaticResponses.ErroredResponse;
         }
 
         if (!context.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? entry))
         {
             logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [2]", message.TransactionId);
-            
+
             return KeyValueStaticResponses.ErroredResponse;
         }
 
@@ -84,56 +84,40 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         {
             if (context.Revisions is not null)
                 RemoveExpiredRevisions(context, proposal.Revision);
-            
+
             context.Revisions ??= new();
             context.Revisions.Add(context.Revision, context.Value);
-            
+
             context.Value = proposal.Value;
             context.Expires = proposal.Expires;
             context.Revision = proposal.Revision;
             context.LastUsed = proposal.LastUsed;
             context.LastModified = proposal.LastModified;
             context.State = proposal.State;
-            
+
             return new(KeyValueResponseType.Committed, 0);
         }
-        
+
         (bool success, long commitIndex) = await CommitKeyValueMessage(message.Key, message.ProposalTicketId);
         if (!success)
             return KeyValueStaticResponses.ErroredResponse;
-        
-        if (message.Durability == KeyValueDurability.Persistent)
-        {
-            // Schedule store to be processed asynchronously in a background actor
-            backgroundWriter.Send(new(
-                BackgroundWriteType.QueueStoreKeyValue,
-                -1,
-                proposal.Key,
-                proposal.Value,
-                proposal.Revision,
-                proposal.Expires,
-                proposal.LastUsed,
-                proposal.LastModified,
-                (int)proposal.State
-            ));
-        }
-        
+
         if (context.Revisions is not null)
             RemoveExpiredRevisions(context, proposal.Revision);
-        
+
         context.Revisions ??= new();
-        context.Revisions.Add(context.Revision, context.Value);        
-        
+        context.Revisions.Add(context.Revision, context.Value);
+
         context.Value = proposal.Value;
         context.Expires = proposal.Expires;
         context.Revision = proposal.Revision;
         context.LastUsed = proposal.LastUsed;
         context.LastModified = proposal.LastModified;
         context.State = proposal.State;
-        
+
         return new(KeyValueResponseType.Committed, commitIndex);
     }
-    
+
     /// <summary>
     /// Commits a previously proposed key value message
     /// </summary>
@@ -155,10 +139,10 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         if (!success)
         {
             logger.LogWarning("Failed to commit key/value {Key} Partition={Partition} Status={Status}", key, partitionId, status);
-            
+
             return (false, 0);
         }
-        
+
         logger.LogDebug("Successfully commmitted key/value {Key} Partition={Partition} ProposalIndex={ProposalIndex}", key, partitionId, commitLogId);
 
         return (success, commitLogId);

@@ -13,6 +13,7 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Locks;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
+using Kahuna.Server.Replication;
 using Kahuna.Server.ScriptParser;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
@@ -690,14 +691,22 @@ public sealed class KahunaManager : IKahuna
     
     public async Task<bool> OnLogRestored(int partitionId, RaftLog log)
     {
-        await Task.WhenAll(locks.OnLogRestored(log), keyValues.OnLogRestored(log));
-        return true;
+        return log.LogType switch
+        {
+            ReplicationTypes.KeyValues => await keyValues.OnLogRestored(partitionId, log),
+            ReplicationTypes.Locks => await locks.OnLogRestored(partitionId, log),
+            _ => true
+        };
     }
 
     public async Task<bool> OnReplicationReceived(int partitionId, RaftLog log)
     {
-        await Task.WhenAll(locks.OnReplicationReceived(log), keyValues.OnReplicationReceived(log));
-        return true;
+        return log.LogType switch
+        {
+            ReplicationTypes.KeyValues => await keyValues.OnReplicationReceived(partitionId, log),
+            ReplicationTypes.Locks => await locks.OnReplicationReceived(partitionId, log),
+            _ => true
+        };
     }
 
     public void OnReplicationError(int partitionId, RaftLog log)

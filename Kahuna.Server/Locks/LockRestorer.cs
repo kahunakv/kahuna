@@ -26,7 +26,7 @@ internal sealed class LockRestorer
         this.logger = logger;
     }
 
-    public bool Restore(RaftLog log)
+    public bool Restore(int partitionId, RaftLog log)
     {
         if (log.LogData is null || log.LogData.Length == 0)
             return true;
@@ -34,10 +34,6 @@ internal sealed class LockRestorer
         try
         {
             LockMessage lockMessage = ReplicationSerializer.UnserializeLockMessage(log.LogData);
-
-            HLCTimestamp eventTime = new(lockMessage.TimeLogical, lockMessage.TimeCounter);
-
-            raft.HybridLogicalClock.ReceiveEvent(eventTime);
 
             switch ((LockRequestType)lockMessage.Type)
             {
@@ -71,7 +67,7 @@ internal sealed class LockRestorer
                     
                     backgroundWriter.Send(new(
                         BackgroundWriteType.QueueStoreLock,
-                        -1,
+                        partitionId,
                         lockMessage.Resource,
                         owner,
                         lockMessage.FencingToken,
@@ -114,7 +110,7 @@ internal sealed class LockRestorer
                     
                     backgroundWriter.Send(new(
                         BackgroundWriteType.QueueStoreLock,
-                        -1,
+                        partitionId,
                         lockMessage.Resource,
                         owner,
                         lockMessage.FencingToken,
@@ -157,7 +153,7 @@ internal sealed class LockRestorer
                     
                     backgroundWriter.Send(new(
                         BackgroundWriteType.QueueStoreLock,
-                        -1,
+                        partitionId,
                         lockMessage.Resource,
                         owner,
                         lockMessage.FencingToken,

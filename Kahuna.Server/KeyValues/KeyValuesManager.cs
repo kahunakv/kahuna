@@ -123,21 +123,23 @@ internal sealed class KeyValuesManager
     /// <summary>
     /// Receives restore messages that haven't been checkpointed yet.
     /// </summary>
+    /// <param name="partitionId"></param>
     /// <param name="log"></param>
     /// <returns></returns>
-    public Task<bool> OnLogRestored(RaftLog log)
+    public Task<bool> OnLogRestored(int partitionId, RaftLog log)
     {
-        return Task.FromResult(log.LogType != ReplicationTypes.KeyValues || restorer.Restore(log));
+        return Task.FromResult(log.LogType != ReplicationTypes.KeyValues || restorer.Restore(partitionId, log));
     }
 
     /// <summary>
     /// Receives replication messages once they're committed to the Raft log.
     /// </summary>
+    /// <param name="partitionId"></param>
     /// <param name="log"></param>
     /// <returns></returns>
-    public Task<bool> OnReplicationReceived(RaftLog log)
+    public Task<bool> OnReplicationReceived(int partitionId, RaftLog log)
     {
-        return Task.FromResult(log.LogType != ReplicationTypes.KeyValues || replicator.Replicate(log));
+        return Task.FromResult(log.LogType != ReplicationTypes.KeyValues || replicator.Replicate(partitionId, log));
     }
 
     /// <summary>
