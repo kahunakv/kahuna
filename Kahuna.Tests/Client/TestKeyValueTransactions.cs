@@ -25,7 +25,7 @@ public class TestKeyValueTransactions
         );
         
         Assert.Equal(KeyValueResponseType.Set, response.Type);
-        Assert.Equal(0, response.Revision);
+        Assert.Equal(0, response.FirstRevision);
     }
     
     [Theory, CombinatorialData]
@@ -43,7 +43,7 @@ public class TestKeyValueTransactions
         );
         
         Assert.Equal(KeyValueResponseType.Set, response.Type);
-        Assert.Equal(0, response.Revision);
+        Assert.Equal(0, response.FirstRevision);
     }
     
     [Theory, CombinatorialData]
@@ -59,12 +59,12 @@ public class TestKeyValueTransactions
         KahunaKeyValueTransactionResult response = await client.ExecuteKeyValueTransaction("SET `" + keyName + "` 'some value'", cancellationToken: TestContext.Current.CancellationToken);
         
         Assert.Equal(KeyValueResponseType.Set, response.Type);
-        Assert.Equal(0, response.Revision);
+        Assert.Equal(0, response.FirstRevision);
 
         response = await client.ExecuteKeyValueTransaction("GET `" + keyName + "`", cancellationToken: TestContext.Current.CancellationToken);
         
         Assert.Equal(KeyValueResponseType.Get, response.Type);
-        Assert.Equal(0, response.Revision);
+        Assert.Equal(0, response.FirstRevision);
     }
     
     [Theory, CombinatorialData]
@@ -80,12 +80,12 @@ public class TestKeyValueTransactions
         KahunaKeyValueTransactionResult response = await client.ExecuteKeyValueTransaction("SET `" + keyName + "` 'some value'", cancellationToken: TestContext.Current.CancellationToken);
         
         Assert.Equal(KeyValueResponseType.Set, response.Type);
-        Assert.Equal(0, response.Revision);
+        Assert.Equal(0, response.FirstRevision);
 
         response = await client.ExecuteKeyValueTransaction("EXTEND `" + keyName + "` 1000", cancellationToken: TestContext.Current.CancellationToken);
         
         Assert.Equal(KeyValueResponseType.Extended, response.Type);
-        Assert.Equal(0, response.Revision);
+        Assert.Equal(0, response.FirstRevision);
     }
     
     [Theory, CombinatorialData]
@@ -104,7 +104,7 @@ public class TestKeyValueTransactions
         );
         
         Assert.Equal(KeyValueResponseType.Set, response.Type);
-        Assert.Equal(0, response.Revision);
+        Assert.Equal(0, response.FirstRevision);
 
         response = await client.ExecuteKeyValueTransaction(
             "EXISTS `" + keyName + "`",
@@ -112,7 +112,7 @@ public class TestKeyValueTransactions
         );
         
         Assert.Equal(KeyValueResponseType.Exists, response.Type);
-        Assert.Equal(0, response.Revision);
+        Assert.Equal(0, response.FirstRevision);
     }
     
     [Theory, CombinatorialData]
@@ -131,7 +131,7 @@ public class TestKeyValueTransactions
         );
         
         Assert.Equal(KeyValueResponseType.Set, response.Type);
-        Assert.Equal(0, response.Revision);
+        Assert.Equal(0, response.FirstRevision);
 
         response = await client.ExecuteKeyValueTransaction(
             "DELETE `" + keyName + "`",
@@ -139,7 +139,7 @@ public class TestKeyValueTransactions
         );
         
         Assert.Equal(KeyValueResponseType.Deleted, response.Type);
-        Assert.Equal(0, response.Revision);
+        Assert.Equal(0, response.FirstRevision);
     }
     
     [Theory, CombinatorialData]

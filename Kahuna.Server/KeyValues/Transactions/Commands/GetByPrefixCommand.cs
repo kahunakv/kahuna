@@ -1,4 +1,5 @@
 
+using System.Text;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Server.ScriptParser;
 using Kahuna.Server.KeyValues.Transactions.Data;
@@ -6,7 +7,7 @@ using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Transactions.Commands;
 
-internal sealed class ExistsCommand : BaseCommand
+internal sealed class GetByPrefixCommand : BaseCommand
 {
     public static async Task<KeyValueTransactionResult> Execute(
         KeyValuesManager manager,
@@ -24,32 +25,26 @@ internal sealed class ExistsCommand : BaseCommand
         
         string keyName = GetKeyName(context, ast.leftAst);
         
-        if (context.Locking == KeyValueTransactionLocking.Optimistic)
+        /*if (context.Locking == KeyValueTransactionLocking.Optimistic)
         {
             context.LocksAcquired ??= [];
             context.LocksAcquired.Add((keyName, durability));
-        }
-        
-        long compareRevision = -1;
-        
-        if (ast.extendedOne is not null)
-            compareRevision = int.Parse(ast.extendedOne.yytext!);
-        
-        (KeyValueResponseType type, ReadOnlyKeyValueContext? readOnlyContext) = await manager.LocateAndTryExistsValue(
-            context.TransactionId,
-            keyName,
-            compareRevision,
+        }*/
+                       
+        KeyValueGetByPrefixResult response = await manager.LocateAndGetByPrefix(
+            //context.TransactionId,
+            keyName,            
             durability,
             cancellationToken
         );
         
-        if (type is KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry)
+        /*if (response.type is KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry)
         {
             context.Action = KeyValueTransactionAction.Abort;
             context.Status = KeyValueExecutionStatus.Stop;
-        }
+        }*/
 
-        if (readOnlyContext is null)
+        if (response.Items.Count == 0)
         {
             if (ast.rightAst is not null)
                 context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new(KeyValueExpressionType.NullType));
@@ -57,22 +52,14 @@ internal sealed class ExistsCommand : BaseCommand
             return new()
             {
                 ServedFrom = "",
-                Type = type,
-                Values = [
-                    new()
-                    {
-                        Key = keyName,
-                        Revision = -1,
-                        Expires = HLCTimestamp.Zero
-                    }
-                ]
+                Type = KeyValueResponseType.DoesNotExist
             };
         }
         
-        if (ast.rightAst is not null)
+        /*if (ast.rightAst is not null)
             context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new(
-                type == KeyValueResponseType.Exists, 
-                readOnlyContext.Revision, 
+                Encoding.UTF8.GetString(readOnlyContext.Value ?? []),
+                readOnlyContext.Revision,
                 readOnlyContext.Expires.L
             ));
             
@@ -80,16 +67,29 @@ internal sealed class ExistsCommand : BaseCommand
         {
             ServedFrom = "",
             Type = type,
-            Values = [
-                new()
-                {
-                    Key = keyName,
-                    Value = readOnlyContext.Value,
-                    Revision = readOnlyContext.Revision,
-                    Expires = readOnlyContext.Expires,
-                    LastModified = readOnlyContext.LastModified
-                }
-            ]                        
+            Value = readOnlyContext.Value,
+            Revision = readOnlyContext.Revision,
+            Expires = readOnlyContext.Expires
+        };*/
+
+        List<KeyValueTransactionResultValue> values = new(response.Items.Count);
+        
+        foreach ((string key, ReadOnlyKeyValueContext valueContext) item in response.Items)
+        {
+            values.Add(new()
+            {
+                Key = item.key,
+                Value = item.valueContext.Value,
+                Revision = item.valueContext.Revision,
+                Expires = item.valueContext.Expires
+            });                        
+        }
+        
+        return new()
+        {
+            ServedFrom = "",
+            Type = KeyValueResponseType.Get,
+            Values = values
         };
     }
 }

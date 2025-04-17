@@ -1,10 +1,12 @@
 
+using Nixie;
+
+using Kommander;
+using Kommander.Time;
+
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
-using Kommander;
-using Kommander.Time;
-using Nixie;
 
 namespace Kahuna.Server.KeyValues.Handlers;
 
@@ -35,7 +37,7 @@ internal sealed class TryDeleteHandler : BaseHandler
         if (message.TransactionId == HLCTimestamp.Zero)
             currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
         else
-            currentTime = raft.HybridLogicalClock.ReceiveEvent(message.TransactionId);
+            currentTime = raft.HybridLogicalClock.ReceiveEvent(message.TransactionId); // Force currentTime to be higher than the transaction ID
         
         // Temporarily store the value in the MVCC entry if the transaction ID is set
         if (message.TransactionId != HLCTimestamp.Zero)

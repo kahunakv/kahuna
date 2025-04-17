@@ -71,13 +71,13 @@ internal sealed class SetCommand : BaseCommand
                     break;
             }
         }
-        
-        KeyValueTransactionResult result = KeyValueTransactionExpression.Eval(context, ast.rightAst).ToTransactionResult();
+
+        KeyValueExpressionResult result = KeyValueTransactionExpression.Eval(context, ast.rightAst);
         
         (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = await manager.LocateAndTrySetKeyValue(
             context.TransactionId,
             key: keyName,
-            value: result.Value,
+            value: result.ToBytes(),
             compareValue,
             compareRevision,
             flags,
@@ -102,16 +102,28 @@ internal sealed class SetCommand : BaseCommand
         context.ModifiedResult = new()
         {
             Type = type,
-            Revision = revision,
-            LastModified = lastModified
+            Values = [
+                new()
+                {
+                    Key = keyName,
+                    Revision = revision,
+                    LastModified = lastModified
+                }
+            ]
         };
 
         return new()
         {
             ServedFrom = "",
             Type = type,
-            Revision = revision,
-            LastModified = lastModified
+            Values = [
+                new()
+                {
+                    Key = keyName,
+                    Revision = revision,
+                    LastModified = lastModified
+                }
+            ]
         };
     }
 }

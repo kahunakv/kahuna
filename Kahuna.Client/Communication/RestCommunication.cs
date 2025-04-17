@@ -640,8 +640,8 @@ public class RestCommunication : IKahunaCommunication
                 return new()
                 {
                     Type = response.Type,
-                    Value = response.Value,
-                    Revision = response.Revision
+                    //Value = response.Values,
+                    //Revision = response.Revision
                 };
             
             if (response.Type == KeyValueResponseType.MustRetry)

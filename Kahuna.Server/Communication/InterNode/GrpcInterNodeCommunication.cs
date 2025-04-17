@@ -5,7 +5,7 @@ using Kommander.Communication.Grpc;
 using Google.Protobuf;
 using Grpc.Net.Client;
 using System.Runtime.InteropServices;
-
+using Google.Protobuf.Collections;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.Locks;
@@ -502,5 +502,50 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
                 ProposalTicketCounter = key.ticketId.C,
                 Durability = (GrpcKeyValueDurability)key.durability
             };
+    }
+    
+    public async Task<KeyValueGetByPrefixResult> GetByPrefix(string node, HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancelationToken)
+    {
+        GrpcChannel channel = SharedChannels.GetChannel(node);
+        
+        KeyValuer.KeyValuerClient client = new(channel);
+        
+        GrpcGetByPrefixRequest request = new()
+        {
+            PrefixKey = prefixedKey,
+            Durability = (GrpcKeyValueDurability)durability,
+        };
+        
+        GrpcGetByPrefixResponse? remoteResponse = await client.GetByPrefixAsync(request, cancellationToken: cancelationToken);
+        
+        remoteResponse.ServedFrom = $"https://{node}";
+        
+        return new(GetReadOnlyItem(remoteResponse.Items));
+    }
+    
+    private static List<(string, ReadOnlyKeyValueContext)> GetReadOnlyItem(RepeatedField<GrpcKeyValueByPrefixItemResponse> remoteResponseItems)
+    {
+        List<(string, ReadOnlyKeyValueContext)> responses = new(remoteResponseItems.Count);
+        
+        foreach (GrpcKeyValueByPrefixItemResponse? kv in remoteResponseItems)
+        {
+            byte[]? value;
+            
+            if (MemoryMarshal.TryGetArray(kv.Value.Memory, out ArraySegment<byte> segment))
+                value = segment.Array;
+            else
+                value = kv.Value.ToByteArray();
+            
+            responses.Add((kv.Key, new(
+                value, 
+                kv.Revision, 
+                new(kv.ExpiresPhysical, kv.ExpiresCounter),
+                new(kv.LastUsedPhysical, kv.LastUsedCounter),
+                new(kv.LastModifiedPhysical, kv.LastModifiedCounter),
+                (KeyValueState)kv.State
+            )));
+        }
+
+        return responses;
     }
 }

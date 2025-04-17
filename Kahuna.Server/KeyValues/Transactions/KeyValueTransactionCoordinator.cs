@@ -93,6 +93,9 @@ internal sealed class KeyValueTransactionCoordinator
                 case NodeType.Get:
                     return await GetCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
                 
+                case NodeType.GetByPrefix:
+                    return await GetByPrefixCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
+                
                 case NodeType.Exists:
                     return await ExistsCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
 
@@ -116,6 +119,9 @@ internal sealed class KeyValueTransactionCoordinator
 
                 case NodeType.Eextend:
                     return await ExtendCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
+                
+                case NodeType.EgetByPrefix:
+                    return await GetByPrefixCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
 
                 case NodeType.Begin:
                     return await ExecuteTransaction(ast.leftAst!, ast.rightAst, parameters, false);
@@ -551,7 +557,16 @@ internal sealed class KeyValueTransactionCoordinator
         HLCTimestamp highestModifiedTime = context.TransactionId;
 
         if (context.ModifiedResult?.Type is KeyValueResponseType.Set or KeyValueResponseType.Extended or KeyValueResponseType.Deleted)
-            highestModifiedTime = context.ModifiedResult.LastModified;
+        {
+            if (context.ModifiedResult.Values is not null)
+            {
+                foreach (KeyValueTransactionResultValue result in context.ModifiedResult.Values)
+                {
+                    if (result.LastModified != HLCTimestamp.Zero && result.LastModified > highestModifiedTime)
+                        highestModifiedTime = result.LastModified;
+                }
+            }
+        }
 
         // Request a new unique timestamp for the transaction
         HLCTimestamp commitId = raft.HybridLogicalClock.ReceiveEvent(highestModifiedTime);
@@ -737,10 +752,9 @@ internal sealed class KeyValueTransactionCoordinator
                     break;
                 
                 case NodeType.Return:
-                    if (ast.leftAst is not null)
-                        context.Result = KeyValueTransactionExpression.Eval(context, ast.leftAst).ToTransactionResult();
-                    
-                    context.Status = KeyValueExecutionStatus.Stop;
+                    KeyValueTransactionResult? result = ReturnCommand.Execute(context, ast);
+                    if (result is not null)
+                        context.Result = result;
                     break;
                 
                 case NodeType.Sleep:
@@ -774,7 +788,21 @@ internal sealed class KeyValueTransactionCoordinator
                 case NodeType.Div:
                 case NodeType.FuncCall:
                 case NodeType.ArgumentList:
-                    context.Result = KeyValueTransactionExpression.Eval(context, ast).ToTransactionResult();
+                    KeyValueExpressionResult evalResult = KeyValueTransactionExpression.Eval(context, ast);
+                    context.Result = new()
+                    {
+                        ServedFrom = "",
+                        Type = KeyValueResponseType.Get,
+                        Values = [
+                            new()
+                            {
+                                Key = "",
+                                Revision = evalResult.Revision,
+                                Expires = new(evalResult.Expires, 0),
+                                LastModified = HLCTimestamp.Zero
+                            }
+                        ]
+                    };
                     break;
                     
                 case NodeType.SetNotExists:

@@ -59,8 +59,14 @@ internal sealed class GetCommand : BaseCommand
             {
                 ServedFrom = "",
                 Type = type,
-                Revision = -1,
-                Expires = HLCTimestamp.Zero
+                Values = [
+                    new()
+                    {
+                        Key = keyName,
+                        Revision = -1,
+                        Expires = HLCTimestamp.Zero
+                    }
+                ]
             };
         }
         
@@ -75,9 +81,16 @@ internal sealed class GetCommand : BaseCommand
         {
             ServedFrom = "",
             Type = type,
-            Value = readOnlyContext.Value,
-            Revision = readOnlyContext.Revision,
-            Expires = readOnlyContext.Expires
+            Values = [
+                new()
+                {
+                    Key = keyName,
+                    Value = readOnlyContext.Value,
+                    Revision = readOnlyContext.Revision,
+                    Expires = readOnlyContext.Expires,
+                    LastModified = readOnlyContext.LastModified
+                }
+            ]                        
         };
     }
 }

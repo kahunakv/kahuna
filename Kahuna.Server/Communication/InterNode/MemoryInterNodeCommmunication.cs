@@ -359,4 +359,12 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
                 responses.Add((type, key, commitIndex, durability));
         }
     }
+
+    public async Task<KeyValueGetByPrefixResult> GetByPrefix(string node, HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancelationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))        
+            return await kahunaNode.GetByPrefix(prefixedKey, durability);        
+        
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
 }

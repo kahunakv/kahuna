@@ -736,4 +736,36 @@ public class TestKeyValueScripts : BaseCluster
         
         await LeaveCluster(node1, node2, node3);
     }
+    
+    [Theory, CombinatorialData]
+    public async Task TestSetGetByPrefixExecuteScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        // Persistent tests
+        string script = """
+        SET `my-prefix/pp1` 'hello world 1'
+        SET `my-prefix/pp2` 'hello world 2'
+        """;
+
+        KeyValueTransactionResult resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Set, resp.Type);
+        Assert.Equal(0, resp.Revision);
+
+        await Task.Delay(1000);
+        
+        script = "GET BY PREFIX `my-prefix`";
+
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+                
+        Assert.NotNull(resp.Values);
+        Assert.Equal(2, resp.Values.Count);
+        
+        Assert.Equal("hello world 1"u8.ToArray(), resp.Values[0].Value);
+        Assert.Equal("hello world 2"u8.ToArray(), resp.Values[1].Value);
+        
+        await LeaveCluster(node1, node2, node3);
+    }
 }

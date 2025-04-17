@@ -19,7 +19,7 @@ public static class InteractiveConsole
         Assembly assembly = Assembly.GetExecutingAssembly();
         FileVersionInfo fvi = FileVersionInfo.GetVersionInfo(assembly.Location);
         
-        AnsiConsole.MarkupLine("[green]Kahuna Shell {0} (alpha)[/]\n", fvi.FileVersion!);
+        AnsiConsole.MarkupLine("[green]Kahuna Shell {0} (alpha)[/]\n", fvi.FileMajorPart + "." + fvi.FileMinorPart + "." + fvi.FileBuildPart);
 
         string historyPath = string.Concat(Path.GetTempPath(), Path.PathSeparator, "kahuna.history.json");
         List<string> history = await GetHistory(historyPath);
@@ -52,6 +52,8 @@ public static class InteractiveConsole
                 "at",
                 "cmp",
                 "cmprev",
+                "by",
+                "prefix",
                 // control structures or operators
                 "not",
                 "let",
@@ -117,6 +119,7 @@ public static class InteractiveConsole
             [
                 @"(?<number>\b\d+(\.\d+)?\b)",
                 @"(?<singlequote>'(?:\\'|[^'])*')",
+                @"(?<escapedquote>`(?:\\`|[^`])*`)",
                 "(?<doublequote>\"(?:\\\\\"|[^\"])*\")"
             ];
 
@@ -362,31 +365,121 @@ public static class InteractiveConsole
         switch (result.Type)
         {
             case KeyValueResponseType.Get:
-                AnsiConsole.MarkupLine("r{0} [cyan]{1}[/] {2}ms\n", result.Revision, Markup.Escape(GetHumanValue(result)), stopwatch.GetElapsedMilliseconds());
+                if (result.Values is not null)
+                {
+                    if (result.Values.Count == 1)
+                    {
+                        AnsiConsole.MarkupLine(
+                            "r{0} [cyan]{1}[/] {2}ms\n",
+                            result.Values[0].Revision,                                                         
+                            Markup.Escape(GetHumanValue(result.Values[0])), stopwatch.GetElapsedMilliseconds()
+                        );
+                    }
+                    else
+                    {
+                        foreach (KahunaKeyValueTransactionResultValue value in result.Values)
+                            AnsiConsole.MarkupLine(
+                                "r{0} [lightpink3]{1}[/] [cyan]{2}[/] {3}ms",
+                                value.Revision,
+                                Markup.Escape(value.Key ?? ""),                             
+                                Markup.Escape(GetHumanValue(value)), stopwatch.GetElapsedMilliseconds()
+                            );
+                    
+                        AnsiConsole.WriteLine("");    
+                    }                    
+                }
+
                 break;
             
             case KeyValueResponseType.DoesNotExist:
-                AnsiConsole.MarkupLine("r{0} [yellow]not found[/] {1}ms\n", result.Revision, stopwatch.GetElapsedMilliseconds());
+                if (result.Values is not null)
+                {
+                    foreach (KahunaKeyValueTransactionResultValue value in result.Values)
+                        AnsiConsole.MarkupLine("r{0} [yellow]not found[/] {1}ms\n", value.Revision, stopwatch.GetElapsedMilliseconds());
+                }
+
                 break;
             
             case KeyValueResponseType.Set:
-                AnsiConsole.MarkupLine("r{0} [cyan]set[/] {1}ms\n", result.Revision, stopwatch.GetElapsedMilliseconds());
+                if (result.Values is not null)
+                {
+                    foreach (KahunaKeyValueTransactionResultValue value in result.Values)
+                        AnsiConsole.MarkupLine(
+                            "r{0} [cyan]set[/] {1}ms\n", 
+                            value.Revision,
+                            stopwatch.GetElapsedMilliseconds()
+                        );
+                }
+                else
+                {
+                    AnsiConsole.MarkupLine(
+                        "r{0} [cyan]set[/] {1}ms\n", 
+                        0,
+                        stopwatch.GetElapsedMilliseconds()
+                    );
+                }
+
                 break;
             
             case KeyValueResponseType.NotSet:
-                AnsiConsole.MarkupLine("r{0} [yellow]not set[/] {1}ms\n", result.Revision, stopwatch.GetElapsedMilliseconds());
+                if (result.Values is not null)
+                {
+                    foreach (KahunaKeyValueTransactionResultValue value in result.Values)
+                        AnsiConsole.MarkupLine(
+                            "r{0} [yellow]not set[/] {1}ms\n", 
+                            value.Revision,
+                            stopwatch.GetElapsedMilliseconds()
+                        );
+                } 
+                else                                 
+                    AnsiConsole.MarkupLine("r{0} [yellow]not set[/] {1}ms\n", 0, stopwatch.GetElapsedMilliseconds());
+                
                 break;
             
             case KeyValueResponseType.Deleted:
-                AnsiConsole.MarkupLine("r{0} [yellow]deleted[/] {1}ms\n", result.Revision, stopwatch.GetElapsedMilliseconds());
+                if (result.Values is not null)
+                {
+                    foreach (KahunaKeyValueTransactionResultValue value in result.Values)
+                        AnsiConsole.MarkupLine(
+                            "r{0} [cyan]deleted[/] {1}ms\n", 
+                            value.Revision,
+                            stopwatch.GetElapsedMilliseconds()
+                        );
+                } 
+                else                                 
+                    AnsiConsole.MarkupLine("r{0} [cyan]deleted[/] {1}ms\n", 0, stopwatch.GetElapsedMilliseconds());           
+                
                 break;
             
             case KeyValueResponseType.Extended:
-                AnsiConsole.MarkupLine("r{0} [yellow]extended[/] {1}ms\n", result.Revision, stopwatch.GetElapsedMilliseconds());
+                
+                if (result.Values is not null)
+                {
+                    foreach (KahunaKeyValueTransactionResultValue value in result.Values)
+                        AnsiConsole.MarkupLine(
+                            "r{0} [cyan]extended[/] {1}ms\n", 
+                            value.Revision,
+                            stopwatch.GetElapsedMilliseconds()
+                        );
+                } 
+                else                                 
+                    AnsiConsole.MarkupLine("r{0} [yellow]extended[/] {1}ms\n", 0, stopwatch.GetElapsedMilliseconds()); 
+                                
                 break;
             
             case KeyValueResponseType.Exists:
-                AnsiConsole.MarkupLine("r{0} [yellow]exists[/] {1}ms\n", result.Revision, stopwatch.GetElapsedMilliseconds());
+                if (result.Values is not null)
+                {
+                    foreach (KahunaKeyValueTransactionResultValue value in result.Values)
+                        AnsiConsole.MarkupLine(
+                            "r{0} [cyan]exists[/] {1}ms\n", 
+                            value.Revision,
+                            stopwatch.GetElapsedMilliseconds()
+                        );
+                } 
+                else                                 
+                    AnsiConsole.MarkupLine("r{0} [cyan]exists[/] {1}ms\n", 0, stopwatch.GetElapsedMilliseconds()); 
+                                
                 break;
 
             case KeyValueResponseType.Locked:
@@ -434,7 +527,7 @@ public static class InteractiveConsole
         }
     }
 
-    private static string GetHumanValue(KahunaKeyValueTransactionResult result)
+    private static string GetHumanValue(KahunaKeyValueTransactionResultValue result)
     {
         if (result.Value is null) 
             return "(null)";

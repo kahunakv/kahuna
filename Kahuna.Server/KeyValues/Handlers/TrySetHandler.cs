@@ -10,7 +10,7 @@ using Kahuna.Shared.KeyValue;
 namespace Kahuna.Server.KeyValues.Handlers;
 
 internal sealed class TrySetHandler : BaseHandler
-{
+{        
     public TrySetHandler(
         Dictionary<string, KeyValueContext> keyValuesStore,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
@@ -189,8 +189,11 @@ internal sealed class TrySetHandler : BaseHandler
             if (!success)
                 return KeyValueStaticResponses.ErroredResponse;
         }
+
+        if (context.Revisions is not null)
+            RemoveExpiredRevisions(context, proposal.Revision);        
         
-        context.Revisions ??= new();
+        context.Revisions ??= new();                       
         context.Revisions.Add(context.Revision, context.Value);
         
         context.Value = proposal.Value;
@@ -201,5 +204,5 @@ internal sealed class TrySetHandler : BaseHandler
         context.State = proposal.State;
 
         return new(KeyValueResponseType.Set, context.Revision);
-    }
+    }   
 }

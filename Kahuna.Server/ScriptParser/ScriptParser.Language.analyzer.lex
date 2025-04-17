@@ -37,6 +37,8 @@ TFound          (F|f)(O|o)(U|u)(N|n)(D|d)
 TNull           (N|n)(U|u)(L|l)(L|l)
 TAtWord         (A|a)(T|t)
 TNotWord        (N|n)(O|o)(T|t)
+TBy             (B|b)(Y|y)
+TPrefix         (P|p)(R|r)(E|e)(F|f)(I|i)(X|x)
 LParen          \(
 RParen          \)
 LBrace          \{
@@ -202,6 +204,10 @@ TAnd            &&
 {TAt} { yylval.l = yyline; return (int)Token.TAT; }
 
 {TAtWord} { yylval.l = yyline; return (int)Token.TAT; }
+
+{TBy} { yylval.l = yyline; return (int)Token.TBY; }
+
+{TPrefix} { yylval.l = yyline; return (int)Token.TPREFIX; }
 
 {Identifier} { yylval.l = yyline; yylval.s = yytext; return (int)Token.TIDENTIFIER; }
 

@@ -103,7 +103,7 @@ internal sealed class KeyValueLocator
         
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();              
         
-        (KeyValueResponseType, long, HLCTimestamp) x = await interNodeCommunication.TrySetKeyValue(
+        (KeyValueResponseType, long, HLCTimestamp) response = await interNodeCommunication.TrySetKeyValue(
             leader,
             transactionId, 
             key, 
@@ -118,7 +118,7 @@ internal sealed class KeyValueLocator
         
         logger.LogDebug("SET-KEYVALUE Redirect {Key} to leader partition {Partition} at {Leader} Time={Elapsed}ms", key, partitionId, leader, stopwatch.GetElapsedMilliseconds());
 
-        return x;
+        return response;
     }
     
     /// <summary>
@@ -705,64 +705,24 @@ internal sealed class KeyValueLocator
         return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.ProposalIndex);
     }
 
-    public async Task<KeyValueGetByPrefixResult> LocateAndGetByPrefix(string prefixedKey, KeyValueDurability durability, CancellationToken cancelationToken)
+    public async Task<KeyValueGetByPrefixResult> LocateAndGetByPrefix(string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(prefixedKey))
             return new([]);
         
         int partitionId = raft.GetPrefixPartitionKey(prefixedKey);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.GetByPrefix(prefixedKey, durability);
             
-        string leader = await raft.WaitForLeader(partitionId, cancelationToken);
+        string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
             return new([]);
         
         logger.LogDebug("GETPREFIX-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", prefixedKey, partitionId, leader);
         
-        GrpcChannel channel = SharedChannels.GetChannel(leader);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
-        
-        GrpcGetByPrefixRequest request = new()
-        {
-            PrefixKey = prefixedKey,
-            Durability = (GrpcKeyValueDurability)durability,
-        };
-        
-        GrpcGetByPrefixResponse? remoteResponse = await client.GetByPrefixAsync(request, cancellationToken: cancelationToken);
-        
-        remoteResponse.ServedFrom = $"https://{leader}";
-        
-        return new(GetReadOnlyItem(remoteResponse.Items));
-    }
-
-    private static List<(string, ReadOnlyKeyValueContext)> GetReadOnlyItem(RepeatedField<GrpcKeyValueByPrefixItemResponse> remoteResponseItems)
-    {
-        List<(string, ReadOnlyKeyValueContext)> responses = new(remoteResponseItems.Count);
-        
-        foreach (GrpcKeyValueByPrefixItemResponse? kv in remoteResponseItems)
-        {
-            byte[]? value;
-            
-            if (MemoryMarshal.TryGetArray(kv.Value.Memory, out ArraySegment<byte> segment))
-                value = segment.Array;
-            else
-                value = kv.Value.ToByteArray();
-            
-            responses.Add((kv.Key, new(
-                value, 
-                kv.Revision, 
-                new(kv.ExpiresPhysical, kv.ExpiresCounter),
-                new(kv.LastUsedPhysical, kv.LastUsedCounter),
-                new(kv.LastModifiedPhysical, kv.LastModifiedCounter),
-                (KeyValueState)kv.State
-            )));
-        }
-
-        return responses;
-    }
+        return await interNodeCommunication.GetByPrefix(leader, HLCTimestamp.Zero, prefixedKey, durability, cancellationToken);               
+    }    
 
     /// <summary>
     /// Scans all nodes in the cluster and returns key/value pairs by prefix 

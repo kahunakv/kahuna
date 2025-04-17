@@ -70,7 +70,7 @@ public sealed class KahunaManager : IKahuna
         {
             "rocksdb" => new RocksDbPersistenceBackend(configuration.StoragePath, configuration.StorageRevision),
             "sqlite" => new SqlitePersistenceBackend(configuration.StoragePath, configuration.StorageRevision),
-            "memory" => new SqlitePersistenceBackend(configuration.StoragePath, configuration.StorageRevision),
+            "memory" => new MemoryPersistenceBackend(),
             _ => throw new KahunaServerException("Invalid storage type: " + configuration.Storage)
         };
     }

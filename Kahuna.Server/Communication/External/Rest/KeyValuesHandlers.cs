@@ -265,9 +265,9 @@ public static class KeyValuesHandlers
             {
                 ServedFrom = result.ServedFrom,
                 Type = result.Type,
-                Value = result.Value,
-                Revision = result.Revision,
-                Expires = result.Expires,
+                //Value = result.Value,
+                //Revision = result.Revision,
+                //Expires = result.Expires,
                 Reason = result.Reason
             };
         });

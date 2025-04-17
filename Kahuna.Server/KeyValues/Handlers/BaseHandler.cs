@@ -23,6 +23,8 @@ internal abstract class BaseHandler
 
     protected readonly ILogger<IKahuna> logger;
     
+    private readonly HashSet<long> revisionsToRemove = [];
+    
     protected BaseHandler(
         Dictionary<string, KeyValueContext> keyValuesStore,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
@@ -139,5 +141,25 @@ internal abstract class BaseHandler
         }
         
         return context;
+    }
+    
+    protected void RemoveExpiredRevisions(KeyValueContext context, long refRevision)
+    {
+        if (context.Revisions is null)
+            return;               
+            
+        foreach (KeyValuePair<long, byte[]?> kv in context.Revisions)
+        {
+            if (kv.Key < (refRevision - 4))                
+                revisionsToRemove.Add(kv.Key);                
+        }
+
+        if (revisionsToRemove.Count > 0)
+        {
+            foreach (long revision in revisionsToRemove)                
+                context.Revisions.Remove(revision);                
+            
+            revisionsToRemove.Clear();
+        }
     }
 }

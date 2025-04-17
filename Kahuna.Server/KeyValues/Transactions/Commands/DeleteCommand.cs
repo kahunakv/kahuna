@@ -53,16 +53,28 @@ internal sealed class DeleteCommand : BaseCommand
         context.ModifiedResult = new()
         {
             Type = type,
-            Revision = revision,
-            LastModified = lastModified
+            Values = [
+                new()
+                {
+                    Key = keyName,
+                    Revision = revision,
+                    LastModified = lastModified
+                }
+            ]
         };
 
         return new()
         {
             ServedFrom = "",
             Type = type,
-            Revision = revision,
-            LastModified = lastModified
+            Values = [
+                new()
+                {
+                    Key = keyName,
+                    Revision = revision,
+                    LastModified = lastModified
+                }
+            ]
         };
     }
 }

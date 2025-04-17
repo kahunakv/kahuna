@@ -43,14 +43,18 @@ internal sealed class TryGetHandler : BaseHandler
             if (context?.Revisions != null)
             {
                 if (context.Revisions.TryGetValue(message.CompareRevision, out byte[]? revisionValue))
+                {
+                    Console.WriteLine("from memory");
+                    
                     return new(KeyValueResponseType.Get, new ReadOnlyKeyValueContext(
-                        revisionValue, 
-                        message.CompareRevision, 
+                        revisionValue,
+                        message.CompareRevision,
                         HLCTimestamp.Zero,
                         HLCTimestamp.Zero,
                         HLCTimestamp.Zero,
                         KeyValueState.Set
                     ));
+                }
             }
             
             // Fallback to disk
@@ -59,6 +63,8 @@ internal sealed class TryGetHandler : BaseHandler
                 KeyValueContext? revisionContext = await raft.ReadThreadPool.EnqueueTask(() => PersistenceBackend.GetKeyValueRevision(message.Key, message.CompareRevision));
                 if (revisionContext is null)
                     return KeyValueStaticResponses.DoesNotExistContextResponse;
+                
+                Console.WriteLine("from disk");
 
                 return new(KeyValueResponseType.Get, new ReadOnlyKeyValueContext(
                     revisionContext.Value, 

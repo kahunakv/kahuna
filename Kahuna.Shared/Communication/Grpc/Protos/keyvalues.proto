@@ -128,14 +128,19 @@ message GrpcKeyValueParameter {
 
 message GrpcTryExecuteTransactionResponse {
   optional string ServedFrom = 1;
-  GrpcKeyValueResponseType Type = 2;
-  optional bytes Value = 3;
-  int64 Revision = 4;
-  int64 ExpiresPhysical = 5;
-  uint32 ExpiresCounter = 6;
-  int64 LastModifiedPhysical = 7;
-  uint32 LastModifiedCounter = 8;
-  optional string Reason = 9;
+  GrpcKeyValueResponseType Type = 2; 
+  optional string Reason = 3;
+  repeated GrpcTryExecuteTransactionResponseValue Values = 4;
+}
+
+message GrpcTryExecuteTransactionResponseValue {
+  string Key = 1;
+  optional bytes Value = 2;
+  int64 Revision = 3;
+  int64 ExpiresPhysical = 4;
+  uint32 ExpiresCounter = 5;
+  int64 LastModifiedPhysical = 6;
+  uint32 LastModifiedCounter = 7;
 }
 
 message GrpcTryAcquireExclusiveLockRequest {

@@ -531,8 +531,7 @@ public class GrpcCommunication : IKahunaCommunication
                 return new()
                 {
                     Type = (KeyValueResponseType)response.Type,
-                    Value = response.Value?.ToByteArray(),
-                    Revision = response.Revision
+                    Values = GetTransactionValues(response.Values)
                 };
             
             if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
@@ -551,7 +550,28 @@ public class GrpcCommunication : IKahunaCommunication
 
         throw new KahunaException("Failed to execute key/value transaction: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
-    
+
+    private static List<KahunaKeyValueTransactionResultValue> GetTransactionValues(RepeatedField<GrpcTryExecuteTransactionResponseValue> responseValues)
+    {
+        List<KahunaKeyValueTransactionResultValue> values = new(responseValues.Count);
+        
+        foreach (GrpcTryExecuteTransactionResponseValue response in responseValues)
+        {
+            KahunaKeyValueTransactionResultValue responseValue = new()
+            {
+                Key = response.Key,
+                Value = response.Value?.ToByteArray(),
+                Revision = response.Revision,
+                Expires = new(response.ExpiresPhysical, response.ExpiresCounter),
+                LastModified = new(response.LastModifiedPhysical, response.LastModifiedCounter)
+            };
+            
+            values.Add(responseValue);
+        }
+        
+        return values;
+    }
+
     public async Task<(bool, List<string>)> GetByPrefix(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcGetByPrefixRequest request = new()

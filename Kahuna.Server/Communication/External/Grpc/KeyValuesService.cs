@@ -578,20 +578,39 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
 
         GrpcTryExecuteTransactionResponse response = new()
         {
-            Type = (GrpcKeyValueResponseType) result.Type,
-            Revision = result.Revision,
-            ExpiresPhysical = result.Expires.L,
-            ExpiresCounter = result.Expires.C,
+            Type = (GrpcKeyValueResponseType) result.Type
         };
-        
+                                  
         if (result.ServedFrom is not null)
             response.ServedFrom = result.ServedFrom;
         
-        if (result.Value is not null)
-            response.Value = UnsafeByteOperations.UnsafeWrap(result.Value);
-        
         if (result.Reason is not null)
             response.Reason = result.Reason;
+        
+        List<GrpcTryExecuteTransactionResponseValue> values = new(result.Values?.Count ?? 0);
+
+        if (result.Values is not null)
+        {
+            foreach (KeyValueTransactionResultValue value in result.Values)
+            {
+                GrpcTryExecuteTransactionResponseValue responseValue = new()
+                {
+                    Key = value.Key,
+                    Revision = value.Revision,
+                    ExpiresPhysical = value.Expires.L,
+                    ExpiresCounter = value.Expires.C,
+                    LastModifiedPhysical = value.LastModified.L,
+                    LastModifiedCounter = value.LastModified.C,
+                };                               
+                
+                if (value.Value is not null)
+                    responseValue.Value = UnsafeByteOperations.UnsafeWrap(value.Value);
+                
+                values.Add(responseValue);
+            }
+        }
+        
+        response.Values.AddRange(values);
         
         return response;
     }

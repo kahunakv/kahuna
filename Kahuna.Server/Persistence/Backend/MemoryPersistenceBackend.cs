@@ -89,11 +89,30 @@ public class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
 
     public List<(string, ReadOnlyKeyValueContext)> GetKeyValueByPrefix(string prefixKeyName)
     {
-        throw new NotImplementedException();
+        List<(string, ReadOnlyKeyValueContext)> items = [];
+        
+        foreach ((string? key, KeyValueContext? value) in keyValues)
+        {
+            if (key.StartsWith(prefixKeyName))
+            {
+                items.Add((key, new(
+                    value.Value,
+                    value.Revision,
+                    value.Expires,
+                    value.LastUsed,
+                    value.LastModified,
+                    value.State
+                )));
+            }
+        }
+
+        return items;
     }
 
     public void Dispose()
     {
+        GC.SuppressFinalize(this);
+        
         //throw new NotImplementedException();
     }
 }
