@@ -3,7 +3,6 @@ using Nixie;
 using Kommander;
 using System.Diagnostics;
 using Kahuna.Server.Persistence.Backend;
-using Kommander.Time;
 using Polly.Contrib.WaitAndRetry;
 
 namespace Kahuna.Server.Persistence;

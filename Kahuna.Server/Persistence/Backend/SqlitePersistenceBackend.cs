@@ -3,6 +3,7 @@ using Kahuna.Server.Locks;
 using Kommander;
 using Kahuna.Server.KeyValues;
 using Microsoft.Data.Sqlite;
+using System.Collections.Generic;
 
 namespace Kahuna.Server.Persistence.Backend;
 
@@ -29,7 +30,7 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
         int shard = (int)HashUtils.InversePrefixedHash(resource, '/', MaxShards);
         
         return TryOpenDatabaseByShard(shard);
-    }
+    }       
     
     private (ReaderWriterLock readerWriterLock, SqliteConnection connection) TryOpenDatabaseByShard(int shard)
     {
@@ -220,77 +221,90 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
               lastModifiedCounter=@lastModifiedCounter, 
               state=@state;
               """;
-            
-            Console.WriteLine("{0}", System.Text.Json.JsonSerializer.Serialize(items));
-            
+
+            Dictionary<int, List<PersistenceRequestItem>> plan = new();
+
             foreach (PersistenceRequestItem item in items)
             {
-                (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabase(item.Key);
+                int shard = (int)HashUtils.InversePrefixedHash(item.Key, '/', MaxShards);
+                
+                if (plan.TryGetValue(shard, out List<PersistenceRequestItem>? itemsPerShard))
+                    itemsPerShard.Add(item);
+                else
+                    plan.Add(shard, [item]);
+            }
+
+            foreach (KeyValuePair<int, List<PersistenceRequestItem>> kv in plan)
+            {
+                (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(kv.Key);
 
                 try
                 {
                     readerWriterLock.AcquireWriterLock(TimeSpan.FromSeconds(5));
-
+                    
                     using SqliteTransaction transaction = connection.BeginTransaction();
-
+                                        
                     try
                     {
-                        using SqliteCommand command = new(insertKeyRevisions, connection);
+                        foreach (PersistenceRequestItem item in kv.Value)
+                        {
+                            using SqliteCommand command = new(insertKeyRevisions, connection);
 
-                        command.Transaction = transaction;
+                            command.Transaction = transaction;
 
-                        command.Parameters.AddWithValue("@key", item.Key);
+                            command.Parameters.AddWithValue("@key", item.Key);
 
-                        if (item.Value is null)
-                            command.Parameters.AddWithValue("@value", DBNull.Value);
-                        else
-                            command.Parameters.AddWithValue("@value", item.Value);
+                            if (item.Value is null)
+                                command.Parameters.AddWithValue("@value", DBNull.Value);
+                            else
+                                command.Parameters.AddWithValue("@value", item.Value);
 
-                        command.Parameters.AddWithValue("@expiresPhysical", item.ExpiresPhysical);
-                        command.Parameters.AddWithValue("@expiresCounter", item.ExpiresCounter);
-                        command.Parameters.AddWithValue("@lastUsedPhysical", item.LastUsedPhysical);
-                        command.Parameters.AddWithValue("@lastUsedCounter", item.LastUsedCounter);
-                        command.Parameters.AddWithValue("@lastModifiedPhysical", item.LastModifiedPhysical);
-                        command.Parameters.AddWithValue("@lastModifiedCounter", item.LastModifiedCounter);
-                        command.Parameters.AddWithValue("@revision", item.Revision);
-                        command.Parameters.AddWithValue("@state", item.State);
+                            command.Parameters.AddWithValue("@expiresPhysical", item.ExpiresPhysical);
+                            command.Parameters.AddWithValue("@expiresCounter", item.ExpiresCounter);
+                            command.Parameters.AddWithValue("@lastUsedPhysical", item.LastUsedPhysical);
+                            command.Parameters.AddWithValue("@lastUsedCounter", item.LastUsedCounter);
+                            command.Parameters.AddWithValue("@lastModifiedPhysical", item.LastModifiedPhysical);
+                            command.Parameters.AddWithValue("@lastModifiedCounter", item.LastModifiedCounter);
+                            command.Parameters.AddWithValue("@revision", item.Revision);
+                            command.Parameters.AddWithValue("@state", item.State);
 
-                        command.ExecuteNonQuery();
+                            command.ExecuteNonQuery();
 
-                        using SqliteCommand command2 = new(insertKeys, connection);
+                            using SqliteCommand command2 = new(insertKeys, connection);
 
-                        command2.Transaction = transaction;
+                            command2.Transaction = transaction;
 
-                        command2.Parameters.AddWithValue("@key", item.Key);
+                            command2.Parameters.AddWithValue("@key", item.Key);
 
-                        if (item.Value is null)
-                            command2.Parameters.AddWithValue("@value", DBNull.Value);
-                        else
-                            command2.Parameters.AddWithValue("@value", item.Value);
+                            if (item.Value is null)
+                                command2.Parameters.AddWithValue("@value", DBNull.Value);
+                            else
+                                command2.Parameters.AddWithValue("@value", item.Value);
 
-                        command2.Parameters.AddWithValue("@expiresPhysical", item.ExpiresPhysical);
-                        command2.Parameters.AddWithValue("@expiresCounter", item.ExpiresCounter);
-                        command2.Parameters.AddWithValue("@lastUsedPhysical", item.LastUsedPhysical);
-                        command2.Parameters.AddWithValue("@lastUsedCounter", item.LastUsedCounter);
-                        command2.Parameters.AddWithValue("@lastModifiedPhysical", item.LastModifiedPhysical);
-                        command2.Parameters.AddWithValue("@lastModifiedCounter", item.LastModifiedCounter);
-                        command2.Parameters.AddWithValue("@revision", item.Revision);
-                        command2.Parameters.AddWithValue("@state", item.State);
+                            command2.Parameters.AddWithValue("@expiresPhysical", item.ExpiresPhysical);
+                            command2.Parameters.AddWithValue("@expiresCounter", item.ExpiresCounter);
+                            command2.Parameters.AddWithValue("@lastUsedPhysical", item.LastUsedPhysical);
+                            command2.Parameters.AddWithValue("@lastUsedCounter", item.LastUsedCounter);
+                            command2.Parameters.AddWithValue("@lastModifiedPhysical", item.LastModifiedPhysical);
+                            command2.Parameters.AddWithValue("@lastModifiedCounter", item.LastModifiedCounter);
+                            command2.Parameters.AddWithValue("@revision", item.Revision);
+                            command2.Parameters.AddWithValue("@state", item.State);
 
-                        command2.ExecuteNonQuery();
-
+                            command2.ExecuteNonQuery();                            
+                        }
+                        
                         transaction.Commit();
                     }
                     catch
                     {
                         transaction.Rollback();
                         throw;
-                    }
+                    }                                       
                 }
                 finally
                 {
                     readerWriterLock.ReleaseWriterLock();
-                }
+                }    
             }
             
             return true;

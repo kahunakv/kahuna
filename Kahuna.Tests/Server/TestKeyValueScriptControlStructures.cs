@@ -304,7 +304,7 @@ public class TestKeyValueScriptControlStructures : BaseCluster
 
         KeyValueTransactionResult resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
         script = """
@@ -315,7 +315,7 @@ public class TestKeyValueScriptControlStructures : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("another world"u8.ToArray(), resp.Value);
 
         await LeaveCluster(node1, node2, node3);
@@ -376,7 +376,7 @@ public class TestKeyValueScriptControlStructures : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("10.5", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -387,14 +387,14 @@ public class TestKeyValueScriptControlStructures : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("11", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = "RETURN (100 + 50) * 2 - 1";
 
         resp = await kahuna3.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("299", Encoding.UTF8.GetString(resp.Value ?? []));
 
         await LeaveCluster(node1, node2, node3);

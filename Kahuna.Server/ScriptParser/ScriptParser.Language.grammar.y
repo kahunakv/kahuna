@@ -13,6 +13,7 @@
 %start stmt_list
 %visibility internal
 
+%left LSQUAREBRACE
 %left TDOUBLEDOT
 %left TOR
 %left TAND
@@ -128,6 +129,7 @@ eget_by_prefix_stmt : TEGET TBY TPREFIX key_name { $$.n = new(NodeType.EgetByPre
             
 key_name : identifier { $$.n = $1.n; $$.l = $1.l; }
          | placeholder  { $$.n = $1.n; $$.l = $1.l; }
+         | string  { $$.n = $1.n; $$.l = $1.l; }
          ;
             
 let_stmt : TLET identifier TEQUALS expression { $$.n = new(NodeType.Let, $2.n, $4.n, null, null, null, null, null, $1.l); }                   

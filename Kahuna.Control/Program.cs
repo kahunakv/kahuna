@@ -10,6 +10,7 @@ using CommandLine;
 using Kahuna.Client;
 using Kahuna.Control;
 using Kahuna.Control.Commands;
+using Spectre.Console;
 
 ParserResult<Options> optsResult = Parser.Default.ParseArguments<Options>(args);
 
@@ -69,7 +70,7 @@ if (IsSingleCommand(opts))
     }
     catch (Exception ex)
     {
-        Console.WriteLine("{0}: {1}", ex.GetType().Name, ex.Message);
+        AnsiConsole.WriteLine("{0}: {1}", ex.GetType().Name, ex.Message);
         return;
     }
 }

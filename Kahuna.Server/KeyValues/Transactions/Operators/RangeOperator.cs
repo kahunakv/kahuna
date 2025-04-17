@@ -18,9 +18,9 @@ internal sealed class RangeOperator
         KeyValueExpressionResult right = KeyValueTransactionExpression.Eval(context, ast.rightAst);
         
         if (left.Type != KeyValueExpressionType.LongType || right.Type != KeyValueExpressionType.LongType)
-            throw new KahunaScriptException("Invalid operands for range operator: " + left.Type + " - " + right.Type, ast.yyline);
+            throw new KahunaScriptException("Invalid operands for range operator: " + left.Type + " - " + right.Type, ast.yyline);               
         
-        List<KeyValueExpressionResult> result = [];
+        List<KeyValueExpressionResult> result = new(right.LongValue > left.LongValue ? (int)(right.LongValue - left.LongValue) : 2);
         
         foreach (int valueRange in Enumerable.Range((int)left.LongValue, (int)right.LongValue))
             result.Add(new(valueRange));

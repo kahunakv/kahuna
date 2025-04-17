@@ -97,10 +97,24 @@ public static class InteractiveConsole
                 "is_string",
                 "is_str",
                 "is_null",
+                "to_json",
                 "revision",
                 "rev",
                 "length",
                 "expires",
+                "len",
+                "length",
+                "count",
+                "upper",
+                "lower",  
+                "max",
+                "min",
+                "round",
+                "ceil",
+                "floor",
+                "abs",
+                "pow",
+                "current_time",                
             ];
 
             string[] commands =
@@ -381,14 +395,25 @@ public static class InteractiveConsole
                     else
                     {
                         foreach (KahunaKeyValueTransactionResultValue value in result.Values)
-                            AnsiConsole.MarkupLine(
-                                "r{0} [lightpink3]{1}[/] [cyan]{2}[/] {3}ms",
-                                value.Revision,
-                                Markup.Escape(value.Key ?? ""),                             
-                                Markup.Escape(GetHumanValue(value)), stopwatch.GetElapsedMilliseconds()
-                            );
-                    
-                        AnsiConsole.WriteLine("");    
+                        {
+                            if (value.Key is null)
+                                AnsiConsole.MarkupLine(
+                                    "r{0} [cyan]{1}[/]",
+                                    value.Revision >= 0 ? value.Revision : "-",                                   
+                                    Markup.Escape(GetHumanValue(value))
+                                );
+                            else
+                            {
+                                AnsiConsole.MarkupLine(
+                                    "r{0} [lightpink3]{1}[/] [cyan]{2}[/]",
+                                    value.Revision >= 0 ? value.Revision : "-",
+                                    Markup.Escape(value.Key ?? ""),
+                                    Markup.Escape(GetHumanValue(value)) 
+                                );
+                            }
+                        }
+
+                        AnsiConsole.WriteLine("{0}ms\n", stopwatch.GetElapsedMilliseconds());
                     }                    
                 }
 
@@ -409,7 +434,7 @@ public static class InteractiveConsole
                     foreach (KahunaKeyValueTransactionResultValue value in result.Values)
                         AnsiConsole.MarkupLine(
                             "r{0} [cyan]set[/] {1}ms\n", 
-                            value.Revision,
+                            value.Revision >= 0 ? value.Revision : "-",
                             stopwatch.GetElapsedMilliseconds()
                         );
                 }
@@ -417,7 +442,7 @@ public static class InteractiveConsole
                 {
                     AnsiConsole.MarkupLine(
                         "r{0} [cyan]set[/] {1}ms\n", 
-                        0,
+                        "-",
                         stopwatch.GetElapsedMilliseconds()
                     );
                 }
