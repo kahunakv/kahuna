@@ -208,7 +208,7 @@ namespace QUT.Gppg {
         /// </summary>
         /// <returns>True if parse succeeds, else false for
         /// unrecoverable errors</returns>
-        public bool Parse() {
+        protected bool Parse() {
             Initialize();	// allow derived classes to instantiate rules, states and nonTerminals
 
             NextToken = 0;

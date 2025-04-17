@@ -60,11 +60,11 @@ internal sealed partial class scriptParser
         scriptScanner scanner = new(stream);
 
         Scanner = scanner;
-
+        
         Parse();
 
         if (!string.IsNullOrEmpty(scanner.YYError))
-            throw new KahunaScriptException(scanner.YYError, scanner.yylloc.StartLine);
+            throw new KahunaScriptException(scanner.YYError + " at line " + scanner.yylloc.EndLine, scanner.yylloc.StartLine);
 
         NodeAst? root = CurrentSemanticValue.n;
 

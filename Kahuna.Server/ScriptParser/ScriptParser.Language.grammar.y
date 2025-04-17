@@ -123,7 +123,7 @@ get_by_prefix_stmt : TGET TBY TPREFIX key_name { $$.n = new(NodeType.GetByPrefix
                    ;
                    
 eget_by_prefix_stmt : TEGET TBY TPREFIX key_name { $$.n = new(NodeType.EgetByPrefix, $4.n, null, null, null, null, null, null, $1.l); }    
-                   | TLET identifier TEQUALS TGET TBY TPREFIX key_name { $$.n = new(NodeType.EgetByPrefix, $7.n, $2.n, null, null, null, null, null, $1.l); }
+                   | TLET identifier TEQUALS TEGET TBY TPREFIX key_name { $$.n = new(NodeType.EgetByPrefix, $7.n, $2.n, null, null, null, null, null, $1.l); }
                    ;            
             
 key_name : identifier { $$.n = $1.n; $$.l = $1.l; }
