@@ -1,3 +1,4 @@
+
 using System.Text;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
@@ -47,7 +48,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         KeyValueTransactionResult resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
 
         script = """
@@ -57,7 +58,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -67,7 +68,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -77,7 +78,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -87,7 +88,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -97,7 +98,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -107,7 +108,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -117,7 +118,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -128,7 +129,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -138,7 +139,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -148,8 +149,28 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+        script = """
+         LET x = true
+         RETURN is_array(x)
+         """;
+
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(-1, resp.Revision);
+        Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+        script = """
+         LET x = 1..10
+         RETURN is_array(x)
+         """;
+
+        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(-1, resp.Revision);
+        Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
 
         await LeaveCluster(node1, node2, node3);
     }
@@ -169,7 +190,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         KeyValueTransactionResult resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("1", Encoding.UTF8.GetString(resp.Value ?? []));
 
         script = """
@@ -179,7 +200,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("1", Encoding.UTF8.GetString(resp.Value ?? []));   
         
         script = """
@@ -189,7 +210,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("1", Encoding.UTF8.GetString(resp.Value ?? []));  
         
         script = """
@@ -199,7 +220,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("1.2", Encoding.UTF8.GetString(resp.Value ?? []));  
         
         script = """
@@ -209,7 +230,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("0", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -219,7 +240,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("1", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -229,7 +250,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("0", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -239,7 +260,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("1", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -249,7 +270,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -259,7 +280,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("1", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -269,7 +290,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("100", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -279,7 +300,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("hello", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -289,7 +310,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("", Encoding.UTF8.GetString(resp.Value ?? []));
 
         await LeaveCluster(node1, node2, node3);
@@ -301,7 +322,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -311,7 +332,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -321,7 +342,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -331,7 +352,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -341,7 +362,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -351,7 +372,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -361,7 +382,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -371,8 +392,8 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
-        Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
+        Assert.Equal(-1, resp.Revision);
+        Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));               
         
         await LeaveCluster(node1, node2, node3);
     }
@@ -392,7 +413,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         KeyValueTransactionResult resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("0", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -403,7 +424,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("0", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -450,7 +471,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         KeyValueTransactionResult resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("5", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -461,7 +482,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("5", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -472,8 +493,48 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("0", Encoding.UTF8.GetString(resp.Value ?? []));     
+        
+        await LeaveCluster(node1, node2, node3);
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestCountFuncCalls([CombinatorialValues("memory")] string storage,[CombinatorialValues(4)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+         await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        // Persistent tests
+        string script = """
+         ESET `services/hello` 'value'
+         ESET `services/hello1` 'value'
+         ESET `services/hello2` 'value'
+         LET x = EGET BY PREFIX `services`
+         RETURN count(x)
+         """;
+
+        KeyValueTransactionResult resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(-1, resp.Revision);
+        Assert.Equal("3", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+        script = """         
+         LET x = 1..10
+         RETURN count(x)
+         """;
+
+        resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(-1, resp.Revision);
+        Assert.Equal("10", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+        script = "RETURN count(1..10)";
+
+        resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(-1, resp.Revision);
+        Assert.Equal("10", Encoding.UTF8.GetString(resp.Value ?? []));   
         
         await LeaveCluster(node1, node2, node3);
     }
@@ -489,140 +550,140 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         KeyValueTransactionResult resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("100", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = "RETURN abs(-100)";
 
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("100", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = "RETURN pow(2, 3)";
 
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("8", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = "RETURN pow(-2, 3)";
 
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("-8", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = "RETURN round(2.551, 1)";
 
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("2.6", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = "RETURN round(100.72, 0)";
 
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("101", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = "RETURN max(2.551, 1)";
 
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("2.551", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = "RETURN max(-100, 2.551)";
 
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("2.551", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = "RETURN max(0, 100)";
 
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("100", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = "RETURN min(2.551, 1)";
 
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("1", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = "RETURN min(-100, 2.551)";
 
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("-100", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = "RETURN min(0, 100)";
 
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("0", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = "RETURN ceil(-100)";
 
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("-100", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = "RETURN ceil(100)";
 
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("100", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = "RETURN ceil(-100.25)";
 
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("-100", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = "RETURN ceil(100.75)";
 
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("101", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = "RETURN floor(-100)";
 
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("-100", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = "RETURN floor(100)";
 
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("100", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = "RETURN floor(-100.25)";
 
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("-101", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = "RETURN floor(100.25)";
 
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("100", Encoding.UTF8.GetString(resp.Value ?? []));
         
         await LeaveCluster(node1, node2, node3);
