@@ -83,6 +83,8 @@ builder.Services.AddGrpcReflection();
 // Listen on all http/https ports in the configuration    
 builder.WebHost.ConfigureKestrel(options =>
 {
+    options.AllowSynchronousIO = false;
+    
     if (opts.HttpPorts is null || !opts.HttpPorts.Any())
         options.Listen(IPAddress.Any, 2070, listenOptions =>
         {

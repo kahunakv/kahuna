@@ -46,6 +46,8 @@ LParen          \(
 RParen          \)
 LBrace          \{
 RBrace          \}
+LSquareBrace    \[
+RSquareBrace    \]
 Eol             (\r\n?|\n)
 NotWh           [^ \t\r\n]
 Space           [ \t]
@@ -110,6 +112,10 @@ TAnd            &&
 {LBrace} { yylval.l = yyline; return (int)Token.LBRACE; }
 
 {RBrace} { yylval.l = yyline; return (int)Token.RBRACE; }
+
+{LSquareBrace} { yylval.l = yyline; return (int)Token.LSQUAREBRACE; }
+
+{RSquareBrace} { yylval.l = yyline; return (int)Token.RSQUAREBRACE; }
 
 {TComma} { yylval.l = yyline; return (int)Token.TCOMMA; }
 

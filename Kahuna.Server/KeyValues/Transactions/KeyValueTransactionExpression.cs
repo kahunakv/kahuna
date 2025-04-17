@@ -72,6 +72,9 @@ internal static class KeyValueTransactionExpression
             case NodeType.Div:
                 return DivOperator.Eval(context, ast);
             
+            case NodeType.ArrayIndex:
+                return ArrayIndexOperator.Eval(context, ast);
+            
             case NodeType.Range:
                 return RangeOperator.Eval(context, ast);
             

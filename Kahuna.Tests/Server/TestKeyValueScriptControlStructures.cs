@@ -335,7 +335,7 @@ public class TestKeyValueScriptControlStructures : BaseCluster
 
         KeyValueTransactionResult resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("299", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -346,7 +346,7 @@ public class TestKeyValueScriptControlStructures : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("598", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -356,7 +356,7 @@ public class TestKeyValueScriptControlStructures : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -366,7 +366,7 @@ public class TestKeyValueScriptControlStructures : BaseCluster
 
         resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
+        Assert.Equal(-1, resp.Revision);
         Assert.Equal("", Encoding.UTF8.GetString(resp.Value ?? []));
         
          script = """

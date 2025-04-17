@@ -154,6 +154,7 @@ internal sealed class KeyValueTransactionCoordinator
                 case NodeType.Mult:
                 case NodeType.Div:
                 case NodeType.Range:
+                case NodeType.ArrayIndex:
                 case NodeType.FuncCall:
                 case NodeType.ArgumentList:
                 case NodeType.NotFound:
@@ -805,6 +806,7 @@ internal sealed class KeyValueTransactionCoordinator
                 case NodeType.Mult:
                 case NodeType.Div:
                 case NodeType.Range:
+                case NodeType.ArrayIndex:
                 case NodeType.FuncCall:
                 case NodeType.ArgumentList:
                 case NodeType.NullType:

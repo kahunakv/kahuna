@@ -1188,4 +1188,48 @@ public class TestKeyValueScriptOperators : BaseCluster
                       
         await LeaveCluster(node1, node2, node3);
     }
+
+    [Theory, CombinatorialData]
+    public async Task TestSetGetSameArrayIndexScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna _) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        // Persistent tests
+        string script = """
+        LET x = 1..10
+        RETURN x[0]
+        """;
+
+        KeyValueTransactionResult resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(-1, resp.Revision);
+        Assert.Equal("1", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+        script = """
+         LET x = 1..10
+         RETURN x[9]
+         """;
+
+        resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(-1, resp.Revision);
+        Assert.Equal("10", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+        script = """
+         LET x = 1..10
+         LET total = 0
+         FOR i IN x DO
+            LET total = total + x[i - 1]
+         END
+         RETURN total
+        """;
+
+        resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(-1, resp.Revision);
+        Assert.Equal("55", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+        await LeaveCluster(node1, node2, node3);
+    }
 }

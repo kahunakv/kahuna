@@ -40,6 +40,7 @@ public enum NodeType
     Mult,
     Div,
     Range,
+    ArrayIndex,
     FuncCall,
     ArgumentList,
     NotSet,

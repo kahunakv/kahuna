@@ -136,6 +136,7 @@ internal sealed class KeyValueLockHelper : BaseCommand
                 case NodeType.Subtract:
                 case NodeType.Mult:
                 case NodeType.Div:
+                case NodeType.ArrayIndex:
                 case NodeType.FuncCall:
                 case NodeType.ArgumentList:
                 case NodeType.NotFound:

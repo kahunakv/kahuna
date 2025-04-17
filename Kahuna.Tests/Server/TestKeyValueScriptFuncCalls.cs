@@ -413,7 +413,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         KeyValueTransactionResult resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(-1, resp.Revision);
+        Assert.Equal(0, resp.Revision);
         Assert.Equal("0", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
@@ -424,7 +424,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
 
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(-1, resp.Revision);
+        Assert.Equal(0, resp.Revision);
         Assert.Equal("0", Encoding.UTF8.GetString(resp.Value ?? []));
         
         script = """
