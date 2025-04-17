@@ -749,6 +749,14 @@ internal sealed class KeyValueTransactionCoordinator
                     context.Result = await ExtendCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
                 
+                case NodeType.GetByPrefix:
+                    context.Result = await GetByPrefixCommand.Execute(manager, context, ast, KeyValueDurability.Persistent, cancellationToken);
+                    break;
+                    
+                case NodeType.EgetByPrefix:
+                    context.Result = await GetByPrefixCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
+                    break;
+                
                 case NodeType.Commit:
                     context.Action = KeyValueTransactionAction.Commit;
                     break;
@@ -792,8 +800,11 @@ internal sealed class KeyValueTransactionCoordinator
                 case NodeType.Subtract:
                 case NodeType.Mult:
                 case NodeType.Div:
+                case NodeType.Range:
                 case NodeType.FuncCall:
                 case NodeType.ArgumentList:
+                case NodeType.NullType:
+                case NodeType.Placeholder:
                     KeyValueExpressionResult evalResult = KeyValueTransactionExpression.Eval(context, ast);
                     context.Result = evalResult.ToTransactionResult();
                     break;
@@ -804,6 +815,10 @@ internal sealed class KeyValueTransactionCoordinator
                 case NodeType.SetCmpRev:
                     break;
                 
+                case NodeType.NotSet:
+                case NodeType.NotFound:
+                case NodeType.BeginOptionList:
+                case NodeType.BeginOption:
                 default:
                     throw new NotImplementedException();
             }

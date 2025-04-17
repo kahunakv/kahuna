@@ -85,9 +85,9 @@ namespace QUT.Gppg {
         private bool recovering;
         private int tokensSinceLastError;
 
-        private PushdownPrefixState<State> StateStack = new PushdownPrefixState<State>();
-        private PushdownPrefixState<TValue> valueStack = new PushdownPrefixState<TValue>();
-        private PushdownPrefixState<TSpan> locationStack = new PushdownPrefixState<TSpan>();
+        private readonly PushdownPrefixState<State> StateStack = new PushdownPrefixState<State>();
+        private readonly PushdownPrefixState<TValue> valueStack = new PushdownPrefixState<TValue>();
+        private readonly PushdownPrefixState<TSpan> locationStack = new PushdownPrefixState<TSpan>();
 
         /// <summary>
         /// The stack of semantic value (YYSTYPE) values.
@@ -340,8 +340,8 @@ namespace QUT.Gppg {
             }
             FsaState = StateStack.TopElement();
 
-            if (FsaState.Goto.ContainsKey( rule.LeftHandSide ))
-                FsaState = states[FsaState.Goto[rule.LeftHandSide]];
+            if (FsaState.Goto.TryGetValue(rule.LeftHandSide, out int value))
+                FsaState = states[value];
 
             StateStack.Push( FsaState );
             valueStack.Push( CurrentSemanticValue );
@@ -373,9 +373,10 @@ namespace QUT.Gppg {
             return discard;
         }
 
-        private void ReportError() {
-            StringBuilder errorMsg = new StringBuilder();
-            errorMsg.AppendFormat( "Syntax error, unexpected {0}", TerminalToString( NextToken ) );
+        private void ReportError()
+        {
+            StringBuilder errorMsg = new();
+            errorMsg.Append($"Syntax error, unexpected {TerminalToString(NextToken)}");
 
             if (FsaState.ParserTable.Count < 7) {
                 bool first = true;
@@ -385,10 +386,11 @@ namespace QUT.Gppg {
                     else
                         errorMsg.Append( ", or " );
 
-                    errorMsg.Append( TerminalToString( terminal ) );
+                    errorMsg.Append(TerminalToString( terminal ));
                     first = false;
                 }
             }
+            
             scanner.yyerror( errorMsg.ToString() );
         }
 
@@ -452,8 +454,8 @@ namespace QUT.Gppg {
                     if (NextToken == endOfFileToken)
                         return false;
 
-                    if (FsaState.ParserTable.ContainsKey( NextToken ))
-                        action = FsaState.ParserTable[NextToken];
+                    if (FsaState.ParserTable.TryGetValue(NextToken, out int value))
+                        action = value;
 
                     if (action != 0)
                         return true;
@@ -556,8 +558,8 @@ namespace QUT.Gppg {
         private string SymbolToString( int symbol ) {
             if (symbol < 0)
                 return nonTerminals[-symbol - 1];
-            else
-                return TerminalToString( symbol );
+           
+            return TerminalToString( symbol );
         }
 
         /// <summary>
@@ -619,10 +621,10 @@ namespace QUT.Gppg {
     internal class LexLocation : IMerge<LexLocation>
 #endif
  {
-        private int startLine;   // start line
-        private int startColumn; // start column
-        private int endLine;     // end line
-        private int endColumn;   // end column
+        private readonly int startLine;   // start line
+        private readonly int startColumn; // start column
+        private readonly int endLine;     // end line
+        private readonly int endColumn;   // end column
 
         /// <summary>
         /// The line at which the text span starts.
@@ -752,9 +754,9 @@ namespace QUT.Gppg {
         /// </summary>
         internal int number;
 #endif
-        internal Dictionary<int, int> ParserTable;   // Terminal -> ParseAction
-        internal Dictionary<int, int> Goto;          // NonTerminal -> State;
-        internal int defaultAction; // = 0;		     // ParseAction
+        internal readonly Dictionary<int, int> ParserTable;   // Terminal -> ParseAction
+        internal readonly Dictionary<int, int> Goto;          // NonTerminal -> State;
+        internal readonly int defaultAction; // = 0;		     // ParseAction
 
         /// <summary>
         /// State transition data for this state. Pairs of elements of the 
@@ -812,8 +814,8 @@ namespace QUT.Gppg {
     internal class Rule
 #endif
  {
-        internal int LeftHandSide; // symbol
-        internal int[] RightHandSide; // symbols
+        internal readonly int LeftHandSide; // symbol
+        internal readonly int[] RightHandSide; // symbols
 
         /// <summary>
         /// Rule constructor.  This holds the ordinal of

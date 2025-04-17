@@ -595,13 +595,15 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
             {
                 GrpcTryExecuteTransactionResponseValue responseValue = new()
                 {
-                    Key = value.Key,
                     Revision = value.Revision,
                     ExpiresPhysical = value.Expires.L,
                     ExpiresCounter = value.Expires.C,
                     LastModifiedPhysical = value.LastModified.L,
                     LastModifiedCounter = value.LastModified.C,
-                };                               
+                };
+                
+                if (value.Key is not null)
+                    responseValue.Key = value.Key;
                 
                 if (value.Value is not null)
                     responseValue.Value = UnsafeByteOperations.UnsafeWrap(value.Value);

@@ -490,7 +490,22 @@ public class TestKeyValueScriptControlStructures : BaseCluster
         resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(-1, resp.Revision);
-        Assert.Equal("55", Encoding.UTF8.GetString(resp.Value ?? []));
+        Assert.Equal("10", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+        script = """
+         let r_start = 0
+         let r_end = 9
+         let total = 0
+         for x in r_start..r_end do
+             let total = total + x
+         end
+         return total
+         """;
+
+        resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(-1, resp.Revision);
+        Assert.Equal("36", Encoding.UTF8.GetString(resp.Value ?? []));
 
         await LeaveCluster(node1, node2, node3);
     }
