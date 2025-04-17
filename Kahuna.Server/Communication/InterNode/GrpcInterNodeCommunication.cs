@@ -512,6 +512,8 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcGetByPrefixRequest request = new()
         {
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
             PrefixKey = prefixedKey,
             Durability = (GrpcKeyValueDurability)durability,
         };
@@ -520,7 +522,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         remoteResponse.ServedFrom = $"https://{node}";
         
-        return new(GetReadOnlyItem(remoteResponse.Items));
+        return new((KeyValueResponseType)remoteResponse.Type, GetReadOnlyItem(remoteResponse.Items));
     }
     
     private static List<(string, ReadOnlyKeyValueContext)> GetReadOnlyItem(RepeatedField<GrpcKeyValueByPrefixItemResponse> remoteResponseItems)

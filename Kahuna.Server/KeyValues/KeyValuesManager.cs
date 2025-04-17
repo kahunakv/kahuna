@@ -377,15 +377,15 @@ internal sealed class KeyValuesManager
     }
 
     /// <summary>
-    /// 
+    /// Locates the leader node for the given prefix and executes the GetByPrefix request.
     /// </summary>
     /// <param name="prefixedKey"></param>
     /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public Task<KeyValueGetByPrefixResult> LocateAndGetByPrefix(string prefixedKey, KeyValueDurability durability, CancellationToken cancelationToken)
+    public Task<KeyValueGetByPrefixResult> LocateAndGetByPrefix(HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancelationToken)
     {
-        return locator.LocateAndGetByPrefix(prefixedKey, durability, cancelationToken);
+        return locator.LocateAndGetByPrefix(transactionId, prefixedKey, durability, cancelationToken);
     }
 
     /// <summary>
@@ -994,7 +994,8 @@ internal sealed class KeyValuesManager
     }
 
     /// <summary>
-    /// Scans the current node and returns key/value pairs by prefix 
+    /// Scans the current node and returns key/value pairs by prefix
+    /// The returned values aren't consistent, they can contain stale data
     /// </summary>
     /// <param name="prefixKeyName"></param>
     /// <param name="durability"></param>
@@ -1036,7 +1037,7 @@ internal sealed class KeyValuesManager
                     items.AddRange(response.Items);    
             }
             
-            return new(items);
+            return new(KeyValueResponseType.Get, items);
         }
 
         if (durability == KeyValueDurability.Persistent)
@@ -1055,24 +1056,24 @@ internal sealed class KeyValuesManager
                     items.AddRange(response.Items);    
             }
             
-            return new(items);
+            return new(KeyValueResponseType.Get, items);
         }
 
         throw new KahunaServerException("Unknown durability");
     }
 
     /// <summary>
-    /// Scans the current node and returns key/value pairs by prefix 
+    /// Returns a consistent snapshot of key/value pairs that matches the specified prefix
     /// </summary>
+    /// <param name="transactionId"></param>
     /// <param name="prefixKeyName"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    /// <exception cref="KahunaServerException"></exception>
-    public async Task<KeyValueGetByPrefixResult> GetByPrefix(string prefixKeyName, KeyValueDurability durability)
+    public async Task<KeyValueGetByPrefixResult> GetByPrefix(HLCTimestamp transactionId, string prefixKeyName, KeyValueDurability durability)
     {
         KeyValueRequest request = new(
             KeyValueRequestType.GetByPrefix,
-            HLCTimestamp.Zero,
+            transactionId,
             HLCTimestamp.Zero,
             prefixKeyName,
             null,
@@ -1092,11 +1093,11 @@ internal sealed class KeyValuesManager
             response = await persistentKeyValuesRouter.Ask(request);
 
         if (response is null)
-            return new([]);
+            return new(KeyValueResponseType.Errored, []);
         
         if (response is { Type: KeyValueResponseType.Get, Items: not null })
-            return new(response.Items); 
+            return new(response.Type, response.Items); 
         
-        return new([]);
+        return new(response.Type, []);
     }
 }

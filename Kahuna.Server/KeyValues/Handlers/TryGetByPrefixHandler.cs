@@ -35,45 +35,74 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
         
         foreach ((string key, KeyValueContext? _) in keyValuesStore)
-        {
+        {                        
             if (!key.StartsWith(message.Key, StringComparison.Ordinal))
                 continue;
+                       
+            KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability);                       
 
-            KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability);
+            if (response.Type != KeyValueResponseType.Get)
+                return new(response.Type, []);
 
             if (response is { Type: KeyValueResponseType.Get, Context: not null })
                 items.Add((key, response.Context));
         }
 
         items.Sort(EnsureLexicographicalOrder);
-        
-        //foreach (var item in items)
-        //    Console.WriteLine($"{item.Item1}");
-        
+                
         return new(KeyValueResponseType.Get, items);
     }
 
     private async Task<KeyValueResponse> GetByPrefixPersistent(KeyValueRequest message)
     {
-        List<(string, ReadOnlyKeyValueContext)> items = [];
+        Dictionary<string, ReadOnlyKeyValueContext> items = new();
+        
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
 
+        // step 1: we need to check the in-memory store to get the MVCC entry or the latest value
+        foreach ((string key, KeyValueContext? _) in keyValuesStore)
+        {
+            if (!key.StartsWith(message.Key, StringComparison.Ordinal))
+                continue;
+            
+            KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability);
+            
+            if (response.Type != KeyValueResponseType.Get)
+                return new(response.Type, []);
+            
+            if (response.Context is null)
+                return new(response.Type, []);
+                       
+            items.Add(key, new(
+                response.Context.Value, 
+                response.Context.Revision, 
+                response.Context.Expires, 
+                response.Context.LastUsed,
+                response.Context.LastModified,
+                response.Context.State
+            ));
+        }
+
+        // step 2: we join the in-memory store with the disk store
         List<(string, ReadOnlyKeyValueContext)> itemsFromDisk = await raft.ReadThreadPool.EnqueueTask(() => PersistenceBackend.GetKeyValueByPrefix(message.Key));
         
         foreach ((string key, ReadOnlyKeyValueContext readOnlyKeyValueContext) in itemsFromDisk)
         {
+            if (items.ContainsKey(key))
+                continue;
+            
             KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability, readOnlyKeyValueContext);
 
             if (response is { Type: KeyValueResponseType.Get, Context: not null })
-                items.Add((key, response.Context));
+                items.Add(key, response.Context);
         }
+
+        // step 3: make sure the items are sorted in lexicographical order
+        List<(string Key, ReadOnlyKeyValueContext Value)> itemsToReturn = items.Select(kv => (kv.Key, kv.Value)).ToList();
         
-        items.Sort(EnsureLexicographicalOrder);
-        
-        //foreach (var item in items)
-        //    Console.WriteLine($"{item.Item1}");
-        
-        return new(KeyValueResponseType.Get, items);
+        itemsToReturn.Sort(EnsureLexicographicalOrder);
+                
+        return new(KeyValueResponseType.Get, itemsToReturn);
     }
 
     private async Task<KeyValueResponse> Get(HLCTimestamp currentTime, HLCTimestamp transactionId, string key, KeyValueDurability durability, ReadOnlyKeyValueContext? keyValueContext = null)

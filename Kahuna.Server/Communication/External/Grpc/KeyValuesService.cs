@@ -657,11 +657,16 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
             
-        KeyValueGetByPrefixResult result = await keyValues.LocateAndGetByPrefix(request.PrefixKey, (KeyValueDurability)request.Durability, context.CancellationToken);
+        KeyValueGetByPrefixResult result = await keyValues.LocateAndGetByPrefix(
+            new(request.TransactionIdPhysical, request.TransactionIdCounter), 
+            request.PrefixKey, 
+            (KeyValueDurability)request.Durability, 
+            context.CancellationToken
+        );
 
         GrpcGetByPrefixResponse response = new()
         {
-            Type = GrpcKeyValueResponseType.TypeGot,
+            Type = (GrpcKeyValueResponseType)result.Type
         };
         
         response.Items.Add(GetKeyValueItems(result.Items));

@@ -322,8 +322,10 @@ message GrpcScanByPrefixResponse {
 }
 
 message GrpcGetByPrefixRequest {
-  string PrefixKey = 1;
-  GrpcKeyValueDurability Durability = 2;
+  int64 TransactionIdPhysical = 1;
+  uint32 TransactionIdCounter = 2;
+  string PrefixKey = 3;
+  GrpcKeyValueDurability Durability = 4;
 }
 
 message GrpcGetByPrefixResponse {

@@ -455,19 +455,21 @@ public sealed class KahunaManager : IKahuna
     }
 
     /// <summary>
-    /// Locates the leader node for the given key and executes the GetByPrefix request.
+    /// Locates the leader node for the given prefix and executes the GetByPrefix request.
     /// </summary>
+    /// <param name="transactionId"></param>
     /// <param name="prefixedKey"></param>
     /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
     public Task<KeyValueGetByPrefixResult> LocateAndGetByPrefix(
+        HLCTimestamp transactionId, 
         string prefixedKey, 
         KeyValueDurability durability, 
         CancellationToken cancelationToken
     )
     {
-        return keyValues.LocateAndGetByPrefix(prefixedKey, durability, cancelationToken);
+        return keyValues.LocateAndGetByPrefix(transactionId, prefixedKey, durability, cancelationToken);
     }
 
     /// <summary>
@@ -670,12 +672,13 @@ public sealed class KahunaManager : IKahuna
     /// <summary>
     /// Gets the key/value pairs by prefix from the current node in the cluster
     /// </summary>
+    /// <param name="transactionId"></param>
     /// <param name="prefixKeyName"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public Task<KeyValueGetByPrefixResult> GetByPrefix(string prefixKeyName, KeyValueDurability durability)
+    public Task<KeyValueGetByPrefixResult> GetByPrefix(HLCTimestamp transactionId, string prefixKeyName, KeyValueDurability durability)
     {
-        return keyValues.GetByPrefix(prefixKeyName, durability);
+        return keyValues.GetByPrefix(transactionId, prefixKeyName, durability);
     }
     
     /// <summary>

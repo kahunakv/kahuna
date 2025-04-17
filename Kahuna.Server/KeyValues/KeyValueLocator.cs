@@ -705,23 +705,23 @@ internal sealed class KeyValueLocator
         return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.ProposalIndex);
     }
 
-    public async Task<KeyValueGetByPrefixResult> LocateAndGetByPrefix(string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<KeyValueGetByPrefixResult> LocateAndGetByPrefix(HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(prefixedKey))
-            return new([]);
+            return new(KeyValueResponseType.Errored, []);
         
         int partitionId = raft.GetPrefixPartitionKey(prefixedKey);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
-            return await manager.GetByPrefix(prefixedKey, durability);
+            return await manager.GetByPrefix(transactionId, prefixedKey, durability);
             
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
-            return new([]);
+            return new(KeyValueResponseType.MustRetry, []);
         
         logger.LogDebug("GETPREFIX-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", prefixedKey, partitionId, leader);
         
-        return await interNodeCommunication.GetByPrefix(leader, HLCTimestamp.Zero, prefixedKey, durability, cancellationToken);               
+        return await interNodeCommunication.GetByPrefix(leader, transactionId, prefixedKey, durability, cancellationToken);               
     }    
 
     /// <summary>

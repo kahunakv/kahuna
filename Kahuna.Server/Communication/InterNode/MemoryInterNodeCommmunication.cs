@@ -363,7 +363,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     public async Task<KeyValueGetByPrefixResult> GetByPrefix(string node, HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancelationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))        
-            return await kahunaNode.GetByPrefix(prefixedKey, durability);        
+            return await kahunaNode.GetByPrefix(transactionId, prefixedKey, durability);        
         
         throw new KahunaServerException($"The node {node} does not exist.");
     }

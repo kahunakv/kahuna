@@ -32,17 +32,17 @@ internal sealed class GetByPrefixCommand : BaseCommand
         }*/
                        
         KeyValueGetByPrefixResult response = await manager.LocateAndGetByPrefix(
-            //context.TransactionId,
+            context.TransactionId,
             keyName,            
             durability,
             cancellationToken
         );
         
-        /*if (response.type is KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry)
+        if (response.Type is KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry)
         {
             context.Action = KeyValueTransactionAction.Abort;
             context.Status = KeyValueExecutionStatus.Stop;
-        }*/
+        }
 
         if (response.Items.Count == 0)
         {

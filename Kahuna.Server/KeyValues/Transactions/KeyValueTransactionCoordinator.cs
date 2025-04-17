@@ -55,6 +55,8 @@ internal sealed class KeyValueTransactionCoordinator
     private readonly IRaft raft;
 
     private readonly ILogger<IKahuna> logger;
+
+    private readonly ScriptParserProcessor scriptParserProcessor;
     
     /// <summary>
     /// Constructor
@@ -69,6 +71,8 @@ internal sealed class KeyValueTransactionCoordinator
         this.configuration = configuration;
         this.raft = raft;
         this.logger = logger;
+
+        this.scriptParserProcessor = new(this.configuration, logger);
     }
 
     /// <summary>
@@ -83,7 +87,7 @@ internal sealed class KeyValueTransactionCoordinator
     {
         try
         {
-            NodeAst ast = ScriptParserProcessor.Parse(script, hash, configuration, logger);
+            NodeAst ast = scriptParserProcessor.Parse(script, hash);
 
             switch (ast.nodeType)
             {
