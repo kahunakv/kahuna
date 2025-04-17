@@ -47,7 +47,7 @@ internal sealed class GetByPrefixCommand : BaseCommand
         if (response.Items.Count == 0)
         {
             if (ast.rightAst is not null)
-                context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new(KeyValueExpressionType.NullType));
+                context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new([]));
             
             return new()
             {
@@ -55,22 +55,16 @@ internal sealed class GetByPrefixCommand : BaseCommand
                 Type = KeyValueResponseType.DoesNotExist
             };
         }
-        
-        /*if (ast.rightAst is not null)
-            context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new(
-                Encoding.UTF8.GetString(readOnlyContext.Value ?? []),
-                readOnlyContext.Revision,
-                readOnlyContext.Expires.L
-            ));
-            
-        return new()
+
+        if (ast.rightAst is not null)
         {
-            ServedFrom = "",
-            Type = type,
-            Value = readOnlyContext.Value,
-            Revision = readOnlyContext.Revision,
-            Expires = readOnlyContext.Expires
-        };*/
+            List<KeyValueExpressionResult> varValues = new(response.Items.Count);
+            
+            foreach ((string key, ReadOnlyKeyValueContext valueContext) item in response.Items)
+                varValues.Add(new(Encoding.UTF8.GetString(item.valueContext.Value ?? []), item.valueContext.Revision, item.valueContext.Expires.L));
+            
+            context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new(varValues));
+        }
 
         List<KeyValueTransactionResultValue> values = new(response.Items.Count);
         

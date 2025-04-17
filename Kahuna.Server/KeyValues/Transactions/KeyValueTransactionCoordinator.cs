@@ -135,6 +135,7 @@ internal sealed class KeyValueTransactionCoordinator
                 case NodeType.BooleanType:
                 case NodeType.Identifier:
                 case NodeType.If:
+                case NodeType.For:
                 case NodeType.Equals:
                 case NodeType.NotEquals:
                 case NodeType.LessThan:
@@ -148,6 +149,7 @@ internal sealed class KeyValueTransactionCoordinator
                 case NodeType.Subtract:
                 case NodeType.Mult:
                 case NodeType.Div:
+                case NodeType.Range:
                 case NodeType.FuncCall:
                 case NodeType.ArgumentList:
                 case NodeType.NotFound:
@@ -689,6 +691,10 @@ internal sealed class KeyValueTransactionCoordinator
                     await ExecuteIf(context, ast, cancellationToken);
                     break;
                 
+                case NodeType.For:
+                    await ExecuteFor(context, ast, cancellationToken);
+                    break;
+                
                 case NodeType.Let:
                 {
                     context.Result = LetCommand.Execute(context, ast);
@@ -789,20 +795,7 @@ internal sealed class KeyValueTransactionCoordinator
                 case NodeType.FuncCall:
                 case NodeType.ArgumentList:
                     KeyValueExpressionResult evalResult = KeyValueTransactionExpression.Eval(context, ast);
-                    context.Result = new()
-                    {
-                        ServedFrom = "",
-                        Type = KeyValueResponseType.Get,
-                        Values = [
-                            new()
-                            {
-                                Key = "",
-                                Revision = evalResult.Revision,
-                                Expires = new(evalResult.Expires, 0),
-                                LastModified = HLCTimestamp.Zero
-                            }
-                        ]
-                    };
+                    context.Result = evalResult.ToTransactionResult();
                     break;
                     
                 case NodeType.SetNotExists:
@@ -842,5 +835,33 @@ internal sealed class KeyValueTransactionCoordinator
         
         if (ast.extendedOne is not null) 
             await ExecuteTransactionInternal(context, ast.extendedOne, cancellationToken);
+    }
+    
+    /// <summary>
+    /// Executes an "for" stmt
+    /// </summary>
+    /// <param name="context"></param>
+    /// <param name="ast"></param>
+    /// <exception cref="Exception"></exception>
+    private async Task ExecuteFor(KeyValueTransactionContext context, NodeAst ast, CancellationToken cancellationToken)
+    {
+        if (ast.leftAst is null)
+            throw new KahunaScriptException("Invalid FOR variable", ast.yyline);
+        
+        if (ast.rightAst is null)
+            throw new KahunaScriptException("Invalid FOR expression", ast.yyline);
+        
+        KeyValueExpressionResult expressionResult = KeyValueTransactionExpression.Eval(context, ast.rightAst);
+        
+        if (expressionResult.Type != KeyValueExpressionType.ArrayType || expressionResult.ArrayValue is null)
+            throw new KahunaScriptException("FOR expression is not iterable", ast.yyline);
+
+        foreach (KeyValueExpressionResult iter in expressionResult.ArrayValue)
+        {
+            context.SetVariable(ast.leftAst, ast.leftAst.yytext!, iter);
+            
+            if (ast.extendedOne is not null)
+                await ExecuteTransactionInternal(context, ast.extendedOne, cancellationToken);
+        }
     }
 }

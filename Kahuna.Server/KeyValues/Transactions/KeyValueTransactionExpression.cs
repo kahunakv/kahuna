@@ -72,6 +72,9 @@ internal static class KeyValueTransactionExpression
             case NodeType.Div:
                 return DivOperator.Eval(context, ast);
             
+            case NodeType.Range:
+                return RangeOperator.Eval(context, ast);
+            
             case NodeType.FuncCall:
                 return CallFunction.Eval(context, ast);
             
@@ -117,7 +120,9 @@ internal static class KeyValueTransactionExpression
             case NodeType.BeginOptionList:
             case NodeType.BeginOption:
             case NodeType.Sleep:
-            case NodeType.Throw:    
+            case NodeType.Throw:
+            case NodeType.GetByPrefix:
+            case NodeType.EgetByPrefix:
             default:
                 throw new NotImplementedException();
         }

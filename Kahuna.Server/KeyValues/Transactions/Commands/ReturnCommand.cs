@@ -1,8 +1,6 @@
 
-using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.ScriptParser;
-using Kahuna.Shared.KeyValue;
-using Kommander.Time;
+using Kahuna.Server.KeyValues.Transactions.Data;
 
 namespace Kahuna.Server.KeyValues.Transactions.Commands;
 
@@ -18,21 +16,8 @@ internal sealed class ReturnCommand : BaseCommand
         if (ast.leftAst is not null)
         {
             KeyValueExpressionResult result = KeyValueTransactionExpression.Eval(context, ast.leftAst);
-            
-            return new()
-            {
-                ServedFrom = "",
-                Type = KeyValueResponseType.Get,
-                Values = [
-                    new()
-                    {
-                        Key = ast.leftAst.yytext!,
-                        Revision = result.Revision,
-                        Expires = new(result.Expires, 0),
-                        LastModified = HLCTimestamp.Zero
-                    }
-                ]
-            };
+
+            return result.ToTransactionResult();
         }
 
         return null;

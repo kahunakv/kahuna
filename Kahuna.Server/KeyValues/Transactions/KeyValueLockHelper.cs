@@ -112,6 +112,11 @@ internal sealed class KeyValueLockHelper : BaseCommand
                     ephemeralLocks.Add(GetKeyName(context, ast.leftAst));
                     break;
                 
+                case NodeType.For:
+                    if (ast.extendedOne is not null) 
+                        GetLocksToAcquire(context, ast.extendedOne, ephemeralLocks, persistentLocks);
+                    break;
+                
                 case NodeType.IntegerType:
                 case NodeType.StringType:
                 case NodeType.FloatType:
@@ -149,6 +154,10 @@ internal sealed class KeyValueLockHelper : BaseCommand
                 case NodeType.Eexists:
                 case NodeType.BeginOptionList:
                 case NodeType.BeginOption:
+                case NodeType.NullType:
+                case NodeType.GetByPrefix:
+                case NodeType.EgetByPrefix:
+                case NodeType.Range:
                     break;
                 
                 default:

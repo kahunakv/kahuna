@@ -9,4 +9,5 @@ public enum KeyValueExpressionType
     DoubleType,
     StringType,
     BytesType,
+    ArrayType,
 }

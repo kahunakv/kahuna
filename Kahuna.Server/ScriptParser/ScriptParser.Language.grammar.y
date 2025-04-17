@@ -13,6 +13,7 @@
 %start stmt_list
 %visibility internal
 
+%left TDOUBLEDOT
 %left TOR
 %left TAND
 %left TLIKE TILIKE
@@ -25,7 +26,7 @@
 %token LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV LBRACE RBRACE
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TDOUBLEQUALS
 %token TBEGIN TROLLBACK TCOMMIT TLET TSET TGET TESET TEGET TDELETE TEDELETE TEXTEND TEEXTEND TEXISTS TEEXISTS
-%token TIF TELSE TTHEN TEND TNX TXX TEX TCMP TCMPREV TTHROW TFOUND 
+%token TIF TELSE TTHEN TEND TNX TXX TEX TCMP TCMPREV TTHROW TFOUND TFOR TDO TIN
 %token TRETURN TSLEEP TDIGIT TFLOAT TSTRING TIDENTIFIER TESCIDENTIFIER TPLACEHOLDER TTRUE TFALSE TNULL TAT TPREFIX TBY
 
 %%
@@ -47,6 +48,7 @@ stmt    : set_stmt { $$.n = $1.n; $$.l = $1.l; }
         | get_by_prefix_stmt { $$.n = $1.n; $$.l = $1.l; }
         | eget_by_prefix_stmt { $$.n = $1.n; $$.l = $1.l; }
         | let_stmt { $$.n = $1.n; $$.l = $1.l; }
+        | for_stmt { $$.n = $1.n; $$.l = $1.l; }
         | if_stmt { $$.n = $1.n; $$.l = $1.l; } 
         | begin_stmt { $$.n = $1.n; $$.l = $1.l; }
         | commit_stmt { $$.n = $1.n; $$.l = $1.l; }
@@ -135,6 +137,9 @@ if_stmt : TIF expression TTHEN stmt_list TEND { $$.n = new(NodeType.If, $2.n, $4
         | TIF expression TTHEN stmt_list TELSE stmt_list TEND { $$.n = new(NodeType.If, $2.n, $4.n, $6.n, null, null, null, null, $1.l); }
         ;
         
+for_stmt : TFOR identifier TIN expression TDO stmt_list TEND { $$.n = new(NodeType.For, $2.n, $4.n, $6.n, null, null, null, null, $1.l); }
+         ; 
+        
 begin_stmt : TBEGIN stmt_list TEND { $$.n = new(NodeType.Begin, $2.n, null, null, null, null, null, null, $1.l); }     
            | TBEGIN LPAREN begin_options RPAREN stmt_list TEND { $$.n = new(NodeType.Begin, $5.n, $3.n, null, null, null, null, null, $1.l); }
            ;
@@ -175,6 +180,7 @@ expression : expression TEQUALS expression { $$.n = new(NodeType.Equals, $1.n, $
            | expression TMINUS expression { $$.n = new(NodeType.Subtract, $1.n, $3.n, null, null, null, null, null, $1.l); }
            | expression TMULT expression { $$.n = new(NodeType.Mult, $1.n, $3.n, null, null, null, null, null, $1.l); }
            | expression TDIV expression { $$.n = new(NodeType.Div, $1.n, $3.n, null, null, null, null, null, $1.l); }
+           | expression TDOUBLEDOT expression { $$.n = new(NodeType.Range, $1.n, $3.n, null, null, null, null, null, $1.l); }
            | TNOT expression { $$.n = new(NodeType.Not, $2.n, null, null, null, null, null, null, $1.l); }
            | TNOT TSET { $$.n = new(NodeType.NotSet, null, null, null, null, null, null, null, $1.l); }
            | TNOT TFOUND { $$.n = new(NodeType.NotFound, null, null, null, null, null, null, null, $1.l); }

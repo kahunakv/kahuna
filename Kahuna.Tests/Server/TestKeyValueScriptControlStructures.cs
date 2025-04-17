@@ -458,4 +458,40 @@ public class TestKeyValueScriptControlStructures : BaseCluster
         
         await LeaveCluster(node1, node2, node3);
     }
+    
+    [Theory, CombinatorialData]
+    public async Task TestBasicForScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        // Persistent tests
+        string script = """
+        let total = 0
+        for x in 1..10 do
+            let total = total + x
+        end
+        return total
+        """;
+
+        KeyValueTransactionResult resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(-1, resp.Revision);
+        Assert.Equal("55", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+        script = """
+         let total = 0
+         for x in 10..1 do
+             let total = total + x
+         end
+         return total
+         """;
+
+        resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(-1, resp.Revision);
+        Assert.Equal("55", Encoding.UTF8.GetString(resp.Value ?? []));
+
+        await LeaveCluster(node1, node2, node3);
+    }
 }

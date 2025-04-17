@@ -14,6 +14,9 @@ TIf             (I|i)(F|f)
 TThen           (T|t)(H|h)(E|e)(N|n)
 TElse           (E|e)(L|l)(S|s)(E|e)
 TEnd            (E|e)(N|n)(D|d)
+TFor            (F|f)(O|o)(R|r)
+TDo             (D|d)(O|o)
+TIn             (I|i)(N|n)
 TNx             (N|n)(X|x)
 TXx             (X|x)(X|x)
 TEx             (E|e)(X|x)
@@ -69,6 +72,7 @@ TMult           \*
 TMinus          \-
 TDiv            /
 TComma          ,
+TDoubleDot      \.\.
 TDoubleEquals   ==
 TEquals         =
 TNotEquals      <>
@@ -139,6 +143,12 @@ TAnd            &&
 
 {TEnd} { yylval.l = yyline; return (int)Token.TEND; }
 
+{TFor} { yylval.l = yyline; return (int)Token.TFOR; }
+
+{TDo} { yylval.l = yyline; return (int)Token.TDO; }
+
+{TIn} { yylval.l = yyline; return (int)Token.TIN; }
+
 {TBegin} { yylval.l = yyline; return (int)Token.TBEGIN; }
 
 {TRollback} { yylval.l = yyline; return (int)Token.TROLLBACK; }
@@ -200,6 +210,8 @@ TAnd            &&
 {TNotEquals} { yylval.l = yyline; return (int)Token.TNOTEQUALS; }
 
 {TNotEquals2} { yylval.l = yyline; return (int)Token.TNOTEQUALS; }
+
+{TDoubleDot} { yylval.l = yyline; return (int)Token.TDOUBLEDOT; }
 
 {TAt} { yylval.l = yyline; return (int)Token.TAT; }
 
