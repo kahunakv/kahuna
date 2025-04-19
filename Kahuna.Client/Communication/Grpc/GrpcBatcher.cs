@@ -1,9 +1,3 @@
-using System.Collections.Concurrent;
-using System.Net.Security;
-using Grpc.Core;
-using Grpc.Net.Client;
-using Grpc.Net.Client.Configuration;
-using Kahuna.Shared.Locks;
 
 /**
  * This file is part of Kahuna
@@ -12,8 +6,22 @@ using Kahuna.Shared.Locks;
  * file that was distributed with this source code.
  */
 
+using System.Collections.Concurrent;
+using System.Net.Security;
+using Grpc.Core;
+using Grpc.Net.Client;
+using Grpc.Net.Client.Configuration;
+using Kahuna.Shared.Locks;
+
 namespace Kahuna.Client.Communication;
 
+/// <summary>
+/// It tries to batch as many concurrent requests as possible to a specific host and uses gRPC bidirectional streaming to reduce the number
+/// of HTTP/2 streams needed at any given time.
+///
+/// This approach improves throughput and reduces connection overhead by allowing multiple operations to be multiplexed
+/// over a single long-lived stream, rather than opening a new stream for each request.
+/// </summary>
 internal sealed class GrpcBatcher
 {
     private static readonly ConcurrentDictionary<string, Lazy<List<GrpcChannel>>> channels = new();
@@ -39,12 +47,7 @@ internal sealed class GrpcBatcher
 
         GrpcBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
 
-        inbox.Enqueue(grpcBatcherItem);
-
-        if (1 == Interlocked.Exchange(ref processing, 0))
-            _ = DeliverMessages();
-
-        return promise.Task;
+        return TryProcessQueue(grpcBatcherItem, promise);
     }
     
     public Task<GrpcBatcherResponse> Enqueue(GrpcTryGetKeyValueRequest message)
@@ -53,6 +56,29 @@ internal sealed class GrpcBatcher
 
         GrpcBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
 
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
+    public Task<GrpcBatcherResponse> Enqueue(GrpcTryDeleteKeyValueRequest message)
+    {
+        TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
+    public Task<GrpcBatcherResponse> Enqueue(GrpcTryExtendKeyValueRequest message)
+    {
+        TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
+    private Task<GrpcBatcherResponse> TryProcessQueue(GrpcBatcherItem grpcBatcherItem, TaskCompletionSource<GrpcBatcherResponse> promise)
+    {
         inbox.Enqueue(grpcBatcherItem);
 
         if (1 == Interlocked.Exchange(ref processing, 0))
@@ -88,94 +114,133 @@ internal sealed class GrpcBatcher
         }
         catch (Exception ex)
         {
+            Console.WriteLine("Exception: " + ex.Message);
             //manager.Logger.LogError("[{Actor}] {Exception}: {Message}\n{StackTrace}", manager.LocalEndpoint, ex.GetType().Name, ex.Message, ex.StackTrace);
         }
     }
 
     private async Task Receive(List<GrpcBatcherItem> requests)
     {
-        Console.WriteLine("Request count: " + requests.Count);
+        //Console.WriteLine("Request count: " + requests.Count);
         
         _ = RunBatch(requests);
         
         if (requests.Count < 10)
-            await Task.Delay(1);
+            await Task.Delay(Random.Shared.Next(1, 3)); // Force large batches
     }
 
     private async Task RunBatch(List<GrpcBatcherItem> requests)
     {
-        GrpcChannel channel = GetSharedChannel(url);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
-        
-        if (requests.Count == 1)
+        try
         {
-            GrpcBatcherRequest b = requests[0].Request;
-            TaskCompletionSource<GrpcBatcherResponse> promise = requests[0].Promise;
+            GrpcChannel channel = GetSharedChannel(url);
 
-            if (b.TrySetKeyValue is not null)
-                promise.SetResult(new(await client.TrySetKeyValueAsync(b.TrySetKeyValue)));
-            else if (b.TryGetKeyValue is not null)
-                promise.SetResult(new(await client.TryGetKeyValueAsync(b.TryGetKeyValue)));
-            else 
-                throw new KahunaException("Unknown request type", LockResponseType.Errored);
-            
-            return;
-        }
-        
-        AsyncDuplexStreamingCall<GrpcBatchClientRequest, GrpcBatchClientResponse> streaming = client.BatchClientRequests();
-        
-        Task readTask = Task.Run(async () =>
-        {
-            await foreach (GrpcBatchClientResponse response in streaming.ResponseStream.ReadAllAsync())
+            KeyValuer.KeyValuerClient client = new(channel);
+
+            if (requests.Count == 1) // Prevent streaming for single requests
             {
-                if (requestRefs.TryGetValue(response.RequestId, out GrpcBatcherItem item))
+                GrpcBatcherRequest itemRequest = requests[0].Request;
+                TaskCompletionSource<GrpcBatcherResponse> promise = requests[0].Promise;
+
+                if (itemRequest.TrySetKeyValue is not null)
+                    promise.SetResult(new(await client.TrySetKeyValueAsync(itemRequest.TrySetKeyValue)));
+                else if (itemRequest.TryGetKeyValue is not null)
+                    promise.SetResult(new(await client.TryGetKeyValueAsync(itemRequest.TryGetKeyValue)));
+                else if (itemRequest.TryDeleteKeyValue is not null)
+                    promise.SetResult(new(await client.TryDeleteKeyValueAsync(itemRequest.TryDeleteKeyValue)));
+                else if (itemRequest.TryExtendKeyValue is not null)
+                    promise.SetResult(new(await client.TryExtendKeyValueAsync(itemRequest.TryExtendKeyValue)));
+                else
+                    throw new KahunaException("Unknown request type", LockResponseType.Errored);
+                
+                return;
+            }
+
+            using AsyncDuplexStreamingCall<GrpcBatchClientKeyValueRequest, GrpcBatchClientKeyValueResponse> streaming = client.BatchClientKeyValueRequests();
+
+            Task readTask = Task.Run(async () =>
+            {
+                // ReSharper disable once AccessToDisposedClosure
+                await foreach (GrpcBatchClientKeyValueResponse response in streaming.ResponseStream.ReadAllAsync())
                 {
-                    if (response.Type == GrpcBatchClientType.TrySetKeyValue)
-                        item.Promise.SetResult(new(response.TrySetKeyValue));
-                    else if (response.Type == GrpcBatchClientType.TryGetKeyValue)
-                        item.Promise.SetResult(new(response.TryGetKeyValue));
+                    if (requestRefs.TryGetValue(response.RequestId, out GrpcBatcherItem item))
+                    {
+                        switch (response.Type)
+                        {
+                            case GrpcBatchClientType.TrySetKeyValue:
+                                item.Promise.SetResult(new(response.TrySetKeyValue));
+                                break;
+                            
+                            case GrpcBatchClientType.TryGetKeyValue:
+                                item.Promise.SetResult(new(response.TryGetKeyValue));
+                                break;
+                            
+                            case GrpcBatchClientType.TryDeleteKeyValue:
+                                item.Promise.SetResult(new(response.TryDeleteKeyValue));
+                                break;
+                            
+                            case GrpcBatchClientType.TryExtendKeyValue:
+                                item.Promise.SetResult(new(response.TryExtendKeyValue));
+                                break;
+                            
+                            case GrpcBatchClientType.TypeNone:
+                            default:                                
+                                throw new KahunaException("Unknown response type: " + response.Type,LockResponseType.Errored);
+                        }
+
+                        requestRefs.TryRemove(response.RequestId, out _);
+                    }
                     else
-                        throw new KahunaException("Unknown response type: " + response.Type, LockResponseType.Errored);
-                    
-                    requestRefs.TryRemove(response.RequestId, out _);
+                        Console.WriteLine("Request not found " + response.RequestId);
+                }
+            });
+
+            foreach (GrpcBatcherItem request in requests)
+            {
+                requestRefs.TryAdd(request.RequestId, request);
+
+                GrpcBatchClientKeyValueRequest batchRequest = new()
+                {
+                    RequestId = request.RequestId
+                };
+
+                GrpcBatcherRequest itemRequest = request.Request;
+
+                if (itemRequest.TrySetKeyValue is not null)
+                {
+                    batchRequest.Type = GrpcBatchClientType.TrySetKeyValue;
+                    batchRequest.TrySetKeyValue = itemRequest.TrySetKeyValue;
+                }
+                else if (itemRequest.TryGetKeyValue is not null)
+                {
+                    batchRequest.Type = GrpcBatchClientType.TryGetKeyValue;
+                    batchRequest.TryGetKeyValue = itemRequest.TryGetKeyValue;
+                }
+                else if (itemRequest.TryDeleteKeyValue is not null)
+                {
+                    batchRequest.Type = GrpcBatchClientType.TryDeleteKeyValue;
+                    batchRequest.TryDeleteKeyValue = itemRequest.TryDeleteKeyValue;
+                } 
+                else if (itemRequest.TryExtendKeyValue is not null)
+                {
+                    batchRequest.Type = GrpcBatchClientType.TryExtendKeyValue;
+                    batchRequest.TryExtendKeyValue = itemRequest.TryExtendKeyValue;
                 }
                 else
-                    Console.WriteLine("Request not found " + response.RequestId);
-            }
-        });
+                {
+                    throw new KahunaException("Unknown request type", LockResponseType.Errored);
+                }
 
-        foreach (GrpcBatcherItem request in requests)
-        {
-            requestRefs.TryAdd(request.RequestId, request);
-            
-            GrpcBatchClientRequest requestx = new()
-            {
-                RequestId = request.RequestId
-            };
-            
-            GrpcBatcherRequest b = request.Request;
-
-            if (b.TrySetKeyValue is not null)
-            {
-                requestx.Type = GrpcBatchClientType.TrySetKeyValue;
-                requestx.TrySetKeyValue = b.TrySetKeyValue;
-            }
-            else if (b.TryGetKeyValue is not null)
-            {
-                requestx.Type = GrpcBatchClientType.TryGetKeyValue;
-                requestx.TryGetKeyValue = b.TryGetKeyValue;
-            } 
-            else 
-            {
-                throw new KahunaException("Unknown request type", LockResponseType.Errored);
+                await streaming.RequestStream.WriteAsync(batchRequest);
             }
 
-            await streaming.RequestStream.WriteAsync(requestx);
+            await streaming.RequestStream.CompleteAsync();
+            await readTask;
         }
-        
-        await streaming.RequestStream.CompleteAsync();
-        await readTask;
+        catch (Exception ex)
+        {
+            Console.WriteLine("{0}", ex.Message);
+        }
     }
     
     public static GrpcChannel GetSharedChannel(string url)
@@ -222,9 +287,9 @@ internal sealed class GrpcBatcher
             }
         };
         
-        List<GrpcChannel> urlChannels = new(4);
+        List<GrpcChannel> urlChannels = new(2);
         
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < 2; i++)
         {
             urlChannels.Add(GrpcChannel.ForAddress(url, new() {
                 HttpHandler = handler,

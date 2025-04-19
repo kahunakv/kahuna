@@ -19,7 +19,7 @@ service KeyValuer {
   rpc ScanByPrefix (GrpcScanByPrefixRequest) returns (GrpcScanByPrefixResponse);
   rpc ScanAllByPrefix (GrpcScanAllByPrefixRequest) returns (GrpcScanAllByPrefixResponse);
   rpc GetByPrefix (GrpcGetByPrefixRequest) returns (GrpcGetByPrefixResponse);
-  rpc BatchClientRequests (stream GrpcBatchClientRequest) returns (stream GrpcBatchClientResponse);
+  rpc BatchClientKeyValueRequests (stream GrpcBatchClientKeyValueRequest) returns (stream GrpcBatchClientKeyValueResponse);
 }
 
 message GrpcTrySetKeyValueRequest {
@@ -358,19 +358,23 @@ message GrpcKeyValueByPrefixItemResponse {
   GrpcKeyValueState State = 11;
 }
 
-message GrpcBatchClientRequest {
+message GrpcBatchClientKeyValueRequest {
   GrpcBatchClientType Type = 1;
   int32 RequestId = 2;
   optional GrpcTrySetKeyValueRequest TrySetKeyValue = 3;
   optional GrpcTryGetKeyValueRequest TryGetKeyValue = 4;
+  optional GrpcTryDeleteKeyValueRequest TryDeleteKeyValue = 5;
+  optional GrpcTryExtendKeyValueRequest TryExtendKeyValue = 6;
 }
 
-message GrpcBatchClientResponse
+message GrpcBatchClientKeyValueResponse
 {
   GrpcBatchClientType Type = 1;
   int32 RequestId = 2;
   optional GrpcTrySetKeyValueResponse TrySetKeyValue = 3;
   optional GrpcTryGetKeyValueResponse TryGetKeyValue = 4;
+  optional GrpcTryDeleteKeyValueResponse TryDeleteKeyValue = 5;
+  optional GrpcTryExtendKeyValueResponse TryExtendKeyValue = 6;
 }
 
 enum GrpcBatchClientType {

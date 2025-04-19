@@ -1,4 +1,10 @@
-﻿// See https://aka.ms/new-console-template for more information
+﻿
+/**
+ * This file is part of Kahuna
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
 
 using System.Diagnostics;
 using DotNext;
@@ -9,7 +15,7 @@ using Kahuna.Shared.Locks;
 Console.WriteLine("Kahuna Benchmark");
 
 const int numberOfTasks = 550;
-const int MaxTokens = 10_000;
+const int MaxTokens = 5_000;
 
 List<string> tokens = new(MaxTokens);
 
@@ -40,11 +46,26 @@ for (int j = 0; j < 5; j++)
 
     for (int i = 0; i < numberOfTasks; i++)
     {
-        if (i % 2 == 0)
-            tasks.Add(SetKeyConcurrently(locks));
-        else
-           tasks.Add(GetKeyConcurrently(locks));
-        //tasks.Add(ExecuteTxConcurrently(kahunaScript));
+        int remainder = i % 4;
+        
+        switch (remainder)
+        {
+            case 3:
+                tasks.Add(ExtendKeyConcurrently(locks));
+                break;
+            
+            case 2:
+                tasks.Add(SetKeyConcurrently(locks));
+                break;
+            
+            case 1:
+                tasks.Add(GetKeyConcurrently(locks));
+                break;
+            
+            case 0:
+                tasks.Add(DeleteKeyConcurrently(locks));
+                break;                
+        }               
     }
 
     await Task.WhenAll(tasks);
@@ -64,13 +85,13 @@ async Task AdquireLockConcurrently(KahunaClient locksx)
     try
     {
         using CancellationTokenSource cts = new();
-        cts.CancelAfter(TimeSpan.FromSeconds(10));
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
 
         string lockName = GetRandomLockNameFromList(tokens);
 
         await using KahunaLock kahunaLock = await locksx.GetOrCreateLock(
             lockName,
-            expiry: TimeSpan.FromSeconds(5),
+            expiry: TimeSpan.FromSeconds(30),
             durability: LockDurability.Persistent,
             cancellationToken: cts.Token
         );
@@ -96,7 +117,7 @@ async Task SetKeyConcurrently(KahunaClient keyValues)
     try
     {
         using CancellationTokenSource cts = new();
-        cts.CancelAfter(TimeSpan.FromSeconds(10));
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
 
         string key = GetRandomLockNameFromList(tokens);
         string value = GetRandomLockNameFromList(tokens);
@@ -111,6 +132,69 @@ async Task SetKeyConcurrently(KahunaClient keyValues)
 
         if (!result.Success)
             throw new KahunaException("Not set " + key, LockResponseType.Busy);
+
+        //if (revision > 1)
+        //    Console.WriteLine("Got repeated revision " + revision);
+    }
+    catch (KahunaException ex)
+    {
+        Console.WriteLine("KahunaException {0} {1}", ex.Message, ex.KeyValueErrorCode);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine("Exception {0}", ex.Message);
+    }
+}
+
+async Task DeleteKeyConcurrently(KahunaClient keyValues)
+{
+    try
+    {
+        using CancellationTokenSource cts = new();
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
+
+        string key = GetRandomLockNameFromList(tokens);        
+
+        KahunaKeyValue result = await keyValues.DeleteKeyValue(
+            key, 
+            KeyValueDurability.Persistent,
+            cancellationToken: cts.Token
+        );
+
+        //if (!result.Success)
+        //    throw new KahunaException("Not deleted " + key, LockResponseType.Busy);
+
+        //if (revision > 1)
+        //    Console.WriteLine("Got repeated revision " + revision);
+    }
+    catch (KahunaException ex)
+    {
+        Console.WriteLine("KahunaException {0} {1}", ex.Message, ex.KeyValueErrorCode);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine("Exception {0}", ex.Message);
+    }
+}
+
+async Task ExtendKeyConcurrently(KahunaClient keyValues)
+{
+    try
+    {
+        using CancellationTokenSource cts = new();
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
+
+        string key = GetRandomLockNameFromList(tokens);        
+
+        KahunaKeyValue result = await keyValues.ExtendKeyValue(
+            key, 
+            TimeSpan.FromSeconds(120),
+            KeyValueDurability.Persistent,
+            cancellationToken: cts.Token
+        );
+
+        //if (!result.Success)
+        //    throw new KahunaException("Not deleted " + key, LockResponseType.Busy);
 
         //if (revision > 1)
         //    Console.WriteLine("Got repeated revision " + revision);

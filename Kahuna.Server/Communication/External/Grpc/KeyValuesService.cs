@@ -750,15 +750,15 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return parameters;
     }
 
-    public override async Task BatchClientRequests(
-        IAsyncStreamReader<GrpcBatchClientRequest> requestStream,
-        IServerStreamWriter<GrpcBatchClientResponse> responseStream, 
+    public override async Task BatchClientKeyValueRequests(
+        IAsyncStreamReader<GrpcBatchClientKeyValueRequest> requestStream,
+        IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream, 
         ServerCallContext context
     )
     {
         List<Task> tasks = [];
         
-        await foreach (GrpcBatchClientRequest request in requestStream.ReadAllAsync())
+        await foreach (GrpcBatchClientKeyValueRequest request in requestStream.ReadAllAsync())
         {
             switch (request.Type)
             {
@@ -778,6 +778,23 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 } 
                 break;
                 
+                case GrpcBatchClientType.TryDeleteKeyValue:
+                {
+                    GrpcTryDeleteKeyValueRequest? deleteKeyRequest = request.TryDeleteKeyValue;
+            
+                    tasks.Add(TryDeleteKeyValueDelayed(request.RequestId, deleteKeyRequest, responseStream, context));
+                } 
+                break;
+                
+                case GrpcBatchClientType.TryExtendKeyValue:
+                {
+                    GrpcTryExtendKeyValueRequest? extendKeyRequest = request.TryExtendKeyValue;
+            
+                    tasks.Add(TryExtendKeyValueDelayed(request.RequestId, extendKeyRequest, responseStream, context));
+                } 
+                break;
+                
+                case GrpcBatchClientType.TypeNone:
                 default:
                     logger.LogError("Unknown batch client request type: {Type}", request.Type);
                     break;
@@ -787,11 +804,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         await Task.WhenAll(tasks);
     }
 
-    private async Task TrySetKeyValueDelayed(int requestId, GrpcTrySetKeyValueRequest setKeyRequest, IServerStreamWriter<GrpcBatchClientResponse> responseStream, ServerCallContext context)
+    private async Task TrySetKeyValueDelayed(int requestId, GrpcTrySetKeyValueRequest setKeyRequest, IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream, ServerCallContext context)
     {
         GrpcTrySetKeyValueResponse trySetResponse = await TrySetKeyValueInternal(setKeyRequest, context);
         
-        GrpcBatchClientResponse response = new()
+        GrpcBatchClientKeyValueResponse response = new()
         {
             Type = GrpcBatchClientType.TrySetKeyValue,
             RequestId = requestId,
@@ -801,15 +818,43 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         await responseStream.WriteAsync(response);
     }
     
-    private async Task TryGetKeyValueDelayed(int requestId, GrpcTryGetKeyValueRequest getKeyRequest, IServerStreamWriter<GrpcBatchClientResponse> responseStream, ServerCallContext context)
+    private async Task TryGetKeyValueDelayed(int requestId, GrpcTryGetKeyValueRequest getKeyRequest, IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream, ServerCallContext context)
     {
         GrpcTryGetKeyValueResponse tryGetResponse = await TryGetKeyValueInternal(getKeyRequest, context);
         
-        GrpcBatchClientResponse response = new()
+        GrpcBatchClientKeyValueResponse response = new()
         {
             Type = GrpcBatchClientType.TryGetKeyValue,
             RequestId = requestId,
             TryGetKeyValue = tryGetResponse
+        };
+
+        await responseStream.WriteAsync(response);
+    }
+    
+    private async Task TryDeleteKeyValueDelayed(int requestId, GrpcTryDeleteKeyValueRequest deleteKeyRequest, IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream, ServerCallContext context)
+    {
+        GrpcTryDeleteKeyValueResponse tryDeleteResponse = await TryDeleteKeyValueInternal(deleteKeyRequest, context);
+        
+        GrpcBatchClientKeyValueResponse response = new()
+        {
+            Type = GrpcBatchClientType.TryDeleteKeyValue,
+            RequestId = requestId,
+            TryDeleteKeyValue = tryDeleteResponse
+        };
+
+        await responseStream.WriteAsync(response);
+    }
+    
+    private async Task TryExtendKeyValueDelayed(int requestId, GrpcTryExtendKeyValueRequest extendKeyRequest, IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream, ServerCallContext context)
+    {
+        GrpcTryExtendKeyValueResponse tryExtendResponse = await TryExtendKeyValueInternal(extendKeyRequest, context);
+        
+        GrpcBatchClientKeyValueResponse response = new()
+        {
+            Type = GrpcBatchClientType.TryExtendKeyValue,
+            RequestId = requestId,
+            TryExtendKeyValue = tryExtendResponse
         };
 
         await responseStream.WriteAsync(response);

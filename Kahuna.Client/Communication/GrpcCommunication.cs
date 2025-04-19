@@ -7,12 +7,10 @@
  */
 
 using System.Collections.Concurrent;
-using System.Net.Security;
+using System.Runtime.InteropServices;
 using Google.Protobuf;
 using Google.Protobuf.Collections;
-using Grpc.Core;
 using Grpc.Net.Client;
-using Grpc.Net.Client.Configuration;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 using Microsoft.Extensions.Logging;
@@ -237,19 +235,13 @@ public class GrpcCommunication : IKahunaCommunication
         
         int retries = 0;
         GrpcTrySetKeyValueResponse? response;
-        
-        //GrpcChannel channel = GetSharedChannel(url);
-        
-        //KeyValuer.KeyValuerClient client = new(channel);
-        
+                
         GrpcBatcher batcher = GetSharedBatcher(url);
         
         do
         {
             if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
-        
-            //response = await client.TrySetKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);                   
             
             GrpcBatcherResponse batchResponse = await batcher.Enqueue(request);
             response = batchResponse.TrySetKeyValue;
@@ -332,18 +324,13 @@ public class GrpcCommunication : IKahunaCommunication
 
         int retries = 0;
         GrpcTryGetKeyValueResponse? response;
-        
-        //GrpcChannel channel = GetSharedChannel(url);
-        //KeyValuer.KeyValuerClient client = new(channel);
-        
+               
         GrpcBatcher batcher = GetSharedBatcher(url);
         
         do
         {
             if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
-        
-            //response = await client.TryGetKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);                   
             
             GrpcBatcherResponse batchResponse = await batcher.Enqueue(request);
             response = batchResponse.TryGetKeyValue;;
@@ -354,8 +341,17 @@ public class GrpcCommunication : IKahunaCommunication
             switch (response.Type)
             {
                 case GrpcKeyValueResponseType.TypeGot:
-                    return (true, response.Value.ToArray(), response.Revision);
-                
+                {
+                    byte[]? value;
+
+                    if (MemoryMarshal.TryGetArray(response.Value.Memory, out ArraySegment<byte> segment))
+                        value = segment.Array;
+                    else
+                        value = response.Value.ToByteArray();
+                    
+                    return (true, value, response.Revision);
+                }
+
                 case GrpcKeyValueResponseType.TypeDoesNotExist:
                     return (false, null, 0);
             }
@@ -426,18 +422,17 @@ public class GrpcCommunication : IKahunaCommunication
         };
         
         int retries = 0;
-        GrpcTryDeleteKeyValueResponse? response;
+        GrpcTryDeleteKeyValueResponse? response;               
         
-        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
+        GrpcBatcher batcher = GetSharedBatcher(url);
         
         do
         {
             if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
-        
-            response = await client.TryDeleteKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+                throw new KahunaException("Operation cancelled", LockResponseType.Errored);                   
+            
+            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request);
+            response = batchResponse.TryDeleteKeyValue;
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -472,18 +467,17 @@ public class GrpcCommunication : IKahunaCommunication
         };
 
         int retries = 0;
-        GrpcTryExtendKeyValueResponse? response;
+        GrpcTryExtendKeyValueResponse? response;               
         
-        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
+        GrpcBatcher batcher = GetSharedBatcher(url);
         
         do
         {
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
         
-            response = await client.TryExtendKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request);
+            response = batchResponse.TryExtendKeyValue;
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -568,10 +562,17 @@ public class GrpcCommunication : IKahunaCommunication
         
         foreach (GrpcTryExecuteTransactionResponseValue response in responseValues)
         {
+            byte[]? value;
+
+            if (MemoryMarshal.TryGetArray(response.Value.Memory, out ArraySegment<byte> segment))
+                value = segment.Array;
+            else
+                value = response.Value.ToByteArray();
+            
             KahunaKeyValueTransactionResultValue responseValue = new()
             {
                 Key = response.Key,
-                Value = response.Value?.ToByteArray(),
+                Value = value,
                 Revision = response.Revision,
                 Expires = new(response.ExpiresPhysical, response.ExpiresCounter),
                 LastModified = new(response.LastModifiedPhysical, response.LastModifiedCounter)
