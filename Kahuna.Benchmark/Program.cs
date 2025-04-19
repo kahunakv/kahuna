@@ -8,7 +8,7 @@ using Kahuna.Shared.Locks;
 
 Console.WriteLine("Kahuna Benchmark");
 
-const int numberOfTasks = 350;
+const int numberOfTasks = 550;
 const int MaxTokens = 10_000;
 
 List<string> tokens = new(MaxTokens);
@@ -43,16 +43,16 @@ for (int j = 0; j < 5; j++)
         if (i % 2 == 0)
             tasks.Add(SetKeyConcurrently(locks));
         else
-            tasks.Add(GetKeyConcurrently(locks));
+           tasks.Add(GetKeyConcurrently(locks));
         //tasks.Add(ExecuteTxConcurrently(kahunaScript));
     }
 
     await Task.WhenAll(tasks);
 
     if (j <= 1)
-        Console.WriteLine($"Warm Up: " + stopwatch.Elapsed);
+        Console.WriteLine($"Warm Up: {stopwatch.Elapsed}");
     else
-        Console.WriteLine($"[{(j - 2) + 1}] Total time: " + stopwatch.Elapsed);
+        Console.WriteLine($"[{(j - 2) + 1}] Total time: {stopwatch.Elapsed}");
 
     stopwatch.Restart();
 }
@@ -127,7 +127,6 @@ async Task SetKeyConcurrently(KahunaClient keyValues)
 
 async Task GetKeyConcurrently(KahunaClient keyValues)
 {
-
     try
     {
         using CancellationTokenSource src = new();

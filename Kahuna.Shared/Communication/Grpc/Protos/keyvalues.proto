@@ -19,6 +19,7 @@ service KeyValuer {
   rpc ScanByPrefix (GrpcScanByPrefixRequest) returns (GrpcScanByPrefixResponse);
   rpc ScanAllByPrefix (GrpcScanAllByPrefixRequest) returns (GrpcScanAllByPrefixResponse);
   rpc GetByPrefix (GrpcGetByPrefixRequest) returns (GrpcGetByPrefixResponse);
+  rpc BatchClientRequests (stream GrpcBatchClientRequest) returns (stream GrpcBatchClientResponse);
 }
 
 message GrpcTrySetKeyValueRequest {
@@ -355,6 +356,33 @@ message GrpcKeyValueByPrefixItemResponse {
   int64 LastModifiedPhysical = 9;
   uint32 LastModifiedCounter = 10;
   GrpcKeyValueState State = 11;
+}
+
+message GrpcBatchClientRequest {
+  GrpcBatchClientType Type = 1;
+  int32 RequestId = 2;
+  optional GrpcTrySetKeyValueRequest TrySetKeyValue = 3;
+  optional GrpcTryGetKeyValueRequest TryGetKeyValue = 4;
+}
+
+message GrpcBatchClientResponse
+{
+  GrpcBatchClientType Type = 1;
+  int32 RequestId = 2;
+  optional GrpcTrySetKeyValueResponse TrySetKeyValue = 3;
+  optional GrpcTryGetKeyValueResponse TryGetKeyValue = 4;
+}
+
+enum GrpcBatchClientType {
+  TYPE_NONE = 0;
+  TRY_SET_KEY_VALUE = 1;
+  TRY_EXTEND_KEY_VALUE = 2;
+  TRY_DELETE_KEY_VALUE = 3;
+  TRY_GET_KEY_VALUE = 4;
+  TRY_EXISTS_KEY_VALUE = 5;
+  TRY_EXECUTE_TRANSACTION = 6;
+  TRY_ACQUIRE_EXCLUSIVE_LOCK = 7;
+  TRY_RELEASE_EXCLUSIVE_LOCK = 8;
 }
 
 enum GrpcKeyValueFlags {

@@ -50,7 +50,23 @@ internal sealed class TryCollectHandler : BaseHandler
             number++;
         }
         
-        // Step 2: Evict keys that haven't been used in a while
+        // Step 2: Evict deleted keys
+        foreach (KeyValuePair<string, KeyValueContext> key in keyValuesStore)
+        {
+            if (number >= 100)
+                break;
+            
+            if (key.Value.WriteIntent is not null)
+                continue;
+
+            if (key.Value.State is KeyValueState.Deleted or KeyValueState.Undefined)
+            {
+                keysToEvict.Add(key.Key);
+                number++;
+            }
+        }
+        
+        // Step 3: Evict keys that haven't been used in a while
         foreach (KeyValuePair<string, KeyValueContext> key in keyValuesStore)
         {
             if (number >= 100)

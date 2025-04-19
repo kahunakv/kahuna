@@ -10,7 +10,9 @@ using System.Collections.Concurrent;
 using System.Net.Security;
 using Google.Protobuf;
 using Google.Protobuf.Collections;
+using Grpc.Core;
 using Grpc.Net.Client;
+using Grpc.Net.Client.Configuration;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 using Microsoft.Extensions.Logging;
@@ -19,7 +21,7 @@ namespace Kahuna.Client.Communication;
 
 public class GrpcCommunication : IKahunaCommunication
 {
-    private static readonly ConcurrentDictionary<string, Lazy<List<GrpcChannel>>> channels = new();
+    private static readonly ConcurrentDictionary<string, Lazy<GrpcBatcher>> batchers = new();
 
     private readonly KahunaOptions? options;
     
@@ -46,8 +48,7 @@ public class GrpcCommunication : IKahunaCommunication
         
         do
         {
-            GrpcChannel channel = GetSharedChannel(url);
-        
+            GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
             Locker.LockerClient client = new(channel);
         
             response = await client.TryLockAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -81,7 +82,7 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcUnlockResponse? response;
         
-        GrpcChannel channel = GetSharedChannel(url);
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
         
         Locker.LockerClient client = new(channel);
         
@@ -122,8 +123,7 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcExtendLockResponse? response;
         
-        GrpcChannel channel = GetSharedChannel(url);
-        
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
         Locker.LockerClient client = new(channel);
         
         do
@@ -158,8 +158,7 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcGetLockResponse? response;
         
-        GrpcChannel channel = GetSharedChannel(url);
-        
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
         Locker.LockerClient client = new(channel);
         
         do
@@ -185,6 +184,8 @@ public class GrpcCommunication : IKahunaCommunication
     
     public async Task<(bool, long)> TrySetKeyValue(string url, string key, byte[]? value, int expiryTime, KeyValueFlags flags, KeyValueDurability durability, CancellationToken cancellationToken)
     {
+        GrpcBatcher batcher = GetSharedBatcher(url);
+        
         GrpcTrySetKeyValueRequest request = new()
         {
             Key = key, 
@@ -196,17 +197,14 @@ public class GrpcCommunication : IKahunaCommunication
         
         int retries = 0;
         GrpcTrySetKeyValueResponse? response;
-        
-        GrpcChannel channel = GetSharedChannel(url);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
-        
+
         do
         {
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
-        
-            response = await client.TrySetKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request);
+            response = batchResponse.TrySetKeyValue;
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -216,7 +214,7 @@ public class GrpcCommunication : IKahunaCommunication
             
             if (response.Type == GrpcKeyValueResponseType.TypeNotset)
                 return (false, response.Revision);
-            
+
             if (++retries >= 5)
                 throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
 
@@ -240,16 +238,21 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcTrySetKeyValueResponse? response;
         
-        GrpcChannel channel = GetSharedChannel(url);
+        //GrpcChannel channel = GetSharedChannel(url);
         
-        KeyValuer.KeyValuerClient client = new(channel);
+        //KeyValuer.KeyValuerClient client = new(channel);
+        
+        GrpcBatcher batcher = GetSharedBatcher(url);
         
         do
         {
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
         
-            response = await client.TrySetKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+            //response = await client.TrySetKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+            
+            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request);
+            response = batchResponse.TrySetKeyValue;
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -283,16 +286,20 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcTrySetKeyValueResponse? response;
         
-        GrpcChannel channel = GetSharedChannel(url);
+        //GrpcChannel channel = GetSharedChannel(url);
+        //KeyValuer.KeyValuerClient client = new(channel);
         
-        KeyValuer.KeyValuerClient client = new(channel);
+        GrpcBatcher batcher = GetSharedBatcher(url);
         
         do
         {
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
         
-            response = await client.TrySetKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+            //response = await client.TrySetKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+            
+            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request);
+            response = batchResponse.TrySetKeyValue;
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -326,16 +333,20 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcTryGetKeyValueResponse? response;
         
-        GrpcChannel channel = GetSharedChannel(url);
+        //GrpcChannel channel = GetSharedChannel(url);
+        //KeyValuer.KeyValuerClient client = new(channel);
         
-        KeyValuer.KeyValuerClient client = new(channel);
+        GrpcBatcher batcher = GetSharedBatcher(url);
         
         do
         {
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
         
-            response = await client.TryGetKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+            //response = await client.TryGetKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+            
+            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request);
+            response = batchResponse.TryGetKeyValue;;
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -372,7 +383,7 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcTryExistsKeyValueResponse? response;
         
-        GrpcChannel channel = GetSharedChannel(url);
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
         
         KeyValuer.KeyValuerClient client = new(channel);
         
@@ -417,7 +428,7 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcTryDeleteKeyValueResponse? response;
         
-        GrpcChannel channel = GetSharedChannel(url);
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
         
         KeyValuer.KeyValuerClient client = new(channel);
         
@@ -463,7 +474,7 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcTryExtendKeyValueResponse? response;
         
-        GrpcChannel channel = GetSharedChannel(url);
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
         
         KeyValuer.KeyValuerClient client = new(channel);
         
@@ -513,7 +524,7 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcTryExecuteTransactionResponse? response;
         
-        GrpcChannel channel = GetSharedChannel(url);
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
         
         KeyValuer.KeyValuerClient client = new(channel);
         
@@ -583,7 +594,7 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcGetByPrefixResponse? response;
         
-        GrpcChannel channel = GetSharedChannel(url);
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
         
         KeyValuer.KeyValuerClient client = new(channel);
         
@@ -625,7 +636,7 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcScanAllByPrefixResponse? response;
         
-        GrpcChannel channel = GetSharedChannel(url);
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
         
         KeyValuer.KeyValuerClient client = new(channel);
         
@@ -672,46 +683,14 @@ public class GrpcCommunication : IKahunaCommunication
         }
     }
 
-    private static GrpcChannel GetSharedChannel(string url)
+    private static GrpcBatcher GetSharedBatcher(string url)
     {
-        Lazy<List<GrpcChannel>> x = channels.GetOrAdd(url, GetSharedChannels);
-
-        List<GrpcChannel> s = x.Value;
-        
-        return s[Random.Shared.Next(0, s.Count)];
+        Lazy<GrpcBatcher> lazyBatchers = batchers.GetOrAdd(url, GetSharedBatchers);
+        return lazyBatchers.Value;
     }
-
-    private static Lazy<List<GrpcChannel>> GetSharedChannels(string url)
+    
+    private static Lazy<GrpcBatcher> GetSharedBatchers(string url)
     {
-        return new(() => CreateSharedChannels(url));
-    }
-
-    private static List<GrpcChannel> CreateSharedChannels(string url)
-    {
-        SslClientAuthenticationOptions sslOptions = new()
-        {
-            RemoteCertificateValidationCallback = delegate { return true; }
-        };
-
-        SocketsHttpHandler handler = new()
-        {
-            SslOptions = sslOptions,
-            ConnectTimeout = TimeSpan.FromSeconds(10),
-            PooledConnectionIdleTimeout = Timeout.InfiniteTimeSpan,
-            KeepAlivePingDelay = TimeSpan.FromSeconds(30),
-            KeepAlivePingTimeout = TimeSpan.FromSeconds(10),
-            EnableMultipleHttp2Connections = true
-        };
-        
-        List<GrpcChannel> urlChannels = new(4);
-        
-        for (int i = 0; i < 4; i++)
-        {
-            urlChannels.Add(GrpcChannel.ForAddress(url, new() {
-                HttpHandler = handler
-            }));
-        }
-
-        return urlChannels;
+        return new(() => new(url));
     }
 }

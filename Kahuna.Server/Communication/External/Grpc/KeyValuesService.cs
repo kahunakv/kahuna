@@ -17,7 +17,7 @@ using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Communication.External.Grpc;
 
-public class KeyValuesService : KeyValuer.KeyValuerBase
+public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 {
     private readonly IKahuna keyValues;
     
@@ -43,6 +43,11 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
     /// <param name="context"></param>
     /// <returns></returns>
     public override async Task<GrpcTrySetKeyValueResponse> TrySetKeyValue(GrpcTrySetKeyValueRequest request, ServerCallContext context)
+    {
+        return await TrySetKeyValueInternal(request, context);
+    }
+
+    private async Task<GrpcTrySetKeyValueResponse> TrySetKeyValueInternal(GrpcTrySetKeyValueRequest request, ServerCallContext context)
     {
         if (string.IsNullOrEmpty(request.Key))
             return new()
@@ -99,6 +104,11 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns></returns>
     public override async Task<GrpcTryExtendKeyValueResponse> TryExtendKeyValue(GrpcTryExtendKeyValueRequest request, ServerCallContext context)
     {
+        return await TryExtendKeyValueInternal(request, context);
+    }
+
+    private async Task<GrpcTryExtendKeyValueResponse> TryExtendKeyValueInternal(GrpcTryExtendKeyValueRequest request, ServerCallContext context)
+    {
         if (string.IsNullOrEmpty(request.Key))
             return new()
             {
@@ -136,6 +146,11 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns></returns>
     public override async Task<GrpcTryDeleteKeyValueResponse> TryDeleteKeyValue(GrpcTryDeleteKeyValueRequest request, ServerCallContext context)
     {
+        return await TryDeleteKeyValueInternal(request, context);
+    }
+
+    private async Task<GrpcTryDeleteKeyValueResponse> TryDeleteKeyValueInternal(GrpcTryDeleteKeyValueRequest request, ServerCallContext context)
+    {
         if (string.IsNullOrEmpty(request.Key))
             return new()
             {
@@ -165,6 +180,11 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
     /// <param name="context"></param>
     /// <returns></returns>
     public override async Task<GrpcTryGetKeyValueResponse> TryGetKeyValue(GrpcTryGetKeyValueRequest request, ServerCallContext context)
+    {
+        return await TryGetKeyValueInternal(request, context);
+    }
+    
+    private async Task<GrpcTryGetKeyValueResponse> TryGetKeyValueInternal(GrpcTryGetKeyValueRequest request, ServerCallContext context)
     {
         if (string.IsNullOrEmpty(request.Key))
             return new()
@@ -728,5 +748,70 @@ public class KeyValuesService : KeyValuer.KeyValuerBase
             parameters.Add(new() { Key = parameter.Key, Value = parameter.Value });
         
         return parameters;
+    }
+
+    public override async Task BatchClientRequests(
+        IAsyncStreamReader<GrpcBatchClientRequest> requestStream,
+        IServerStreamWriter<GrpcBatchClientResponse> responseStream, 
+        ServerCallContext context
+    )
+    {
+        List<Task> tasks = [];
+        
+        await foreach (GrpcBatchClientRequest request in requestStream.ReadAllAsync())
+        {
+            switch (request.Type)
+            {
+                case GrpcBatchClientType.TrySetKeyValue:
+                {
+                    GrpcTrySetKeyValueRequest? setKeyRequest = request.TrySetKeyValue;
+            
+                    tasks.Add(TrySetKeyValueDelayed(request.RequestId, setKeyRequest, responseStream, context));
+                } 
+                break;
+                
+                case GrpcBatchClientType.TryGetKeyValue:
+                {
+                    GrpcTryGetKeyValueRequest? getKeyRequest = request.TryGetKeyValue;
+            
+                    tasks.Add(TryGetKeyValueDelayed(request.RequestId, getKeyRequest, responseStream, context));
+                } 
+                break;
+                
+                default:
+                    logger.LogError("Unknown batch client request type: {Type}", request.Type);
+                    break;
+            }
+        }
+
+        await Task.WhenAll(tasks);
+    }
+
+    private async Task TrySetKeyValueDelayed(int requestId, GrpcTrySetKeyValueRequest setKeyRequest, IServerStreamWriter<GrpcBatchClientResponse> responseStream, ServerCallContext context)
+    {
+        GrpcTrySetKeyValueResponse trySetResponse = await TrySetKeyValueInternal(setKeyRequest, context);
+        
+        GrpcBatchClientResponse response = new()
+        {
+            Type = GrpcBatchClientType.TrySetKeyValue,
+            RequestId = requestId,
+            TrySetKeyValue = trySetResponse
+        };
+
+        await responseStream.WriteAsync(response);
+    }
+    
+    private async Task TryGetKeyValueDelayed(int requestId, GrpcTryGetKeyValueRequest getKeyRequest, IServerStreamWriter<GrpcBatchClientResponse> responseStream, ServerCallContext context)
+    {
+        GrpcTryGetKeyValueResponse tryGetResponse = await TryGetKeyValueInternal(getKeyRequest, context);
+        
+        GrpcBatchClientResponse response = new()
+        {
+            Type = GrpcBatchClientType.TryGetKeyValue,
+            RequestId = requestId,
+            TryGetKeyValue = tryGetResponse
+        };
+
+        await responseStream.WriteAsync(response);
     }
 }

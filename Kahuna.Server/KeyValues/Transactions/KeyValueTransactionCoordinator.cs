@@ -764,10 +764,12 @@ internal sealed class KeyValueTransactionCoordinator
                 
                 case NodeType.Commit:
                     context.Action = KeyValueTransactionAction.Commit;
+                    context.Status = KeyValueExecutionStatus.Stop;
                     break;
                 
                 case NodeType.Rollback:
                     context.Action = KeyValueTransactionAction.Abort;
+                    context.Status = KeyValueExecutionStatus.Stop;
                     break;
                 
                 case NodeType.Return:
