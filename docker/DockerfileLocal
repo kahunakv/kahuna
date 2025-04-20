@@ -23,7 +23,7 @@ COPY --from=build-env /app .
 COPY certs/development-certificate.pfx /app/certificate.pfx
 
 # install sqlite to debug
-RUN apt -y update && apt -y upgrade && apt-get -y install sqlite3
+# RUN apt -y update && apt -y upgrade && apt-get -y install sqlite3
 
 ARG KAHUNA_RAFT_NODEID
 ARG KAHUNA_RAFT_HOST
@@ -32,6 +32,7 @@ ARG KAHUNA_HTTP_PORTS
 ARG KAHUNA_HTTPS_PORTS
 ARG KAHUNA_INITIAL_CLUSTER
 
+ENV DOTNET_SYSTEM_NET_SOCKETS_INLINE_COMPLETIONS=1
 ENV KAHUNA_RAFT_NODEID="$KAHUNA_RAFT_NODEID"
 ENV KAHUNA_RAFT_HOST="$KAHUNA_RAFT_HOST"
 ENV KAHUNA_RAFT_PORT="$KAHUNA_RAFT_PORT"
