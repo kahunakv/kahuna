@@ -8,7 +8,7 @@ namespace Kahuna.Server.Locks;
 /// <summary>
 /// Represents a request to perform an action on a locker actor
 /// </summary>
-public readonly struct LockRequest : IConsistentHashable
+public sealed class LockRequest : IConsistentHashable
 {
     public LockRequestType Type { get; }
     

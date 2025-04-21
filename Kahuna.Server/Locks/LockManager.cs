@@ -29,9 +29,9 @@ public sealed class LockManager
 
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
 
-    private readonly IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> ephemeralLocksRouter;
+    private readonly IActorRef<ConsistentHashActor<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> ephemeralLocksRouter;
     
-    private readonly IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> persistentLocksRouter;
+    private readonly IActorRef<ConsistentHashActor<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> persistentLocksRouter;
 
     private readonly LockLocator locator;
     
@@ -79,17 +79,17 @@ public sealed class LockManager
     /// <param name="persistenceBackend"></param>
     /// <param name="workers"></param>
     /// <returns></returns>
-    private IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> GetEphemeralRouter(
+    private IActorRef<ConsistentHashActor<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> GetEphemeralRouter(
         IPersistenceBackend persistenceBackend, 
         KahunaConfiguration configuration
     )
     {
-        List<IActorRefStruct<LockActor, LockRequest, LockResponse>> ephemeralInstances = new(configuration.LocksWorkers);
+        List<IActorRef<LockActor, LockRequest, LockResponse>> ephemeralInstances = new(configuration.LocksWorkers);
 
         for (int i = 0; i < configuration.LocksWorkers; i++)
-            ephemeralInstances.Add(actorSystem.SpawnStruct<LockActor, LockRequest, LockResponse>("ephemeral-lock-" + i, backgroundWriter, persistenceBackend, raft, logger));
+            ephemeralInstances.Add(actorSystem.Spawn<LockActor, LockRequest, LockResponse>("ephemeral-lock-" + i, backgroundWriter, persistenceBackend, raft, logger));
 
-        return actorSystem.CreateConsistentHashRouterStruct(ephemeralInstances);
+        return actorSystem.CreateConsistentHashRouter(ephemeralInstances);
     }
 
     /// <summary>
@@ -99,17 +99,17 @@ public sealed class LockManager
     /// <param name="persistenceBackend"></param>
     /// <param name="workers"></param>
     /// <returns></returns>
-    private IActorRefStruct<ConsistentHashActorStruct<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> GetPersistentRouter(
+    private IActorRef<ConsistentHashActor<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> GetPersistentRouter(
         IPersistenceBackend persistenceBackend, 
         KahunaConfiguration configuration
     )
     {
-        List<IActorRefStruct<LockActor, LockRequest, LockResponse>> persistentInstances = new(configuration.LocksWorkers);
+        List<IActorRef<LockActor, LockRequest, LockResponse>> persistentInstances = new(configuration.LocksWorkers);
 
         for (int i = 0; i < configuration.LocksWorkers; i++)
-            persistentInstances.Add(actorSystem.SpawnStruct<LockActor, LockRequest, LockResponse>("persistent-lock-" + i, backgroundWriter, persistenceBackend, raft, logger));
+            persistentInstances.Add(actorSystem.Spawn<LockActor, LockRequest, LockResponse>("persistent-lock-" + i, backgroundWriter, persistenceBackend, raft, logger));
         
-        return actorSystem.CreateConsistentHashRouterStruct(persistentInstances);
+        return actorSystem.CreateConsistentHashRouter(persistentInstances);
     }
     
     /// <summary>
@@ -215,12 +215,15 @@ public sealed class LockManager
             durability
         );
 
-        LockResponse response;
+        LockResponse? response;
         
         if (durability == LockDurability.Ephemeral)
             response = await ephemeralLocksRouter.Ask(request);
         else
             response = await persistentLocksRouter.Ask(request);
+        
+        if (response is null)
+            return (LockResponseType.Errored, 0);
         
         return (response.Type, response.FencingToken);
     }
@@ -243,12 +246,15 @@ public sealed class LockManager
             durability
         );
 
-        LockResponse response;
+        LockResponse? response;
         
         if (durability == LockDurability.Ephemeral)
             response = await ephemeralLocksRouter.Ask(request);
         else
             response = await persistentLocksRouter.Ask(request);
+
+        if (response is null)
+            return (LockResponseType.Errored, 0);
         
         return (response.Type, response.FencingToken);
     }
@@ -270,12 +276,15 @@ public sealed class LockManager
             durability
         );
 
-        LockResponse response;
+        LockResponse? response;
         
         if (durability == LockDurability.Ephemeral)
             response = await ephemeralLocksRouter.Ask(request);
         else
             response = await persistentLocksRouter.Ask(request);
+        
+        if (response is null)
+            return LockResponseType.Errored;
         
         return response.Type;
     }
@@ -296,12 +305,15 @@ public sealed class LockManager
             durability
         );
 
-        LockResponse response;
+        LockResponse? response;
         
         if (durability == LockDurability.Ephemeral)
             response = await ephemeralLocksRouter.Ask(request);
         else
             response = await persistentLocksRouter.Ask(request);
+        
+        if (response is null)
+            return (LockResponseType.Errored, null);
         
         return (response.Type, response.Context);
     }

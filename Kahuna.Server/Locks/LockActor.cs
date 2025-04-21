@@ -17,11 +17,11 @@ namespace Kahuna.Server.Locks;
 /// Actor to manage lock operations on resources
 /// It ensures linearizable and serializable access to the resources on the same bucket
 /// </summary>
-public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
+public sealed class LockActor : IActor<LockRequest, LockResponse>
 {
     private const int CollectThreshold = 1000;
     
-    private readonly IActorContextStruct<LockActor, LockRequest, LockResponse> actorContext;
+    private readonly IActorContext<LockActor, LockRequest, LockResponse> actorContext;
 
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
 
@@ -46,7 +46,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     /// <param name="raft"></param>
     /// <param name="logger"></param>
     public LockActor(
-        IActorContextStruct<LockActor, LockRequest, LockResponse> actorContext,
+        IActorContext<LockActor, LockRequest, LockResponse> actorContext,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft, 
@@ -66,7 +66,7 @@ public sealed class LockActor : IActorStruct<LockRequest, LockResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    public async Task<LockResponse> Receive(LockRequest message)
+    public async Task<LockResponse?> Receive(LockRequest message)
     {
         stopwatch.Restart();
         

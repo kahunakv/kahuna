@@ -3,7 +3,7 @@ using Kommander.Time;
 
 namespace Kahuna.Server.Locks;
 
-public readonly struct LockProposal
+public sealed class LockProposal
 {
     public string Resource { get; } 
     
