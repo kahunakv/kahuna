@@ -365,6 +365,7 @@ message GrpcBatchClientKeyValueRequest {
   optional GrpcTryGetKeyValueRequest TryGetKeyValue = 4;
   optional GrpcTryDeleteKeyValueRequest TryDeleteKeyValue = 5;
   optional GrpcTryExtendKeyValueRequest TryExtendKeyValue = 6;
+  optional GrpcTryExistsKeyValueRequest TryExistsKeyValue = 7;
 }
 
 message GrpcBatchClientKeyValueResponse
@@ -375,6 +376,7 @@ message GrpcBatchClientKeyValueResponse
   optional GrpcTryGetKeyValueResponse TryGetKeyValue = 4;
   optional GrpcTryDeleteKeyValueResponse TryDeleteKeyValue = 5;
   optional GrpcTryExtendKeyValueResponse TryExtendKeyValue = 6;
+  optional GrpcTryExistsKeyValueResponse TryExistsKeyValue = 7;
 }
 
 enum GrpcBatchClientType {
@@ -384,9 +386,7 @@ enum GrpcBatchClientType {
   TRY_DELETE_KEY_VALUE = 3;
   TRY_GET_KEY_VALUE = 4;
   TRY_EXISTS_KEY_VALUE = 5;
-  TRY_EXECUTE_TRANSACTION = 6;
-  TRY_ACQUIRE_EXCLUSIVE_LOCK = 7;
-  TRY_RELEASE_EXCLUSIVE_LOCK = 8;
+  TRY_EXECUTE_TRANSACTION = 6;  
 }
 
 enum GrpcKeyValueFlags {

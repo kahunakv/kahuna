@@ -3,7 +3,7 @@ using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues;
 
-public readonly struct KeyValueProposal
+public sealed class KeyValueProposal
 {
     public string Key { get; } 
     

@@ -379,16 +379,15 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcTryExistsKeyValueResponse? response;
         
-        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
+        GrpcBatcher batcher = GetSharedBatcher(url);
         
         do
         {
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
         
-            response = await client.TryExistsKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request);
+            response = batchResponse.TryExistsKeyValue;
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);

@@ -8,7 +8,7 @@
 
 namespace Kahuna.Client.Communication;
 
-internal readonly struct GrpcBatcherItem
+internal sealed class GrpcBatcherItem
 {
     public int RequestId { get; }
     

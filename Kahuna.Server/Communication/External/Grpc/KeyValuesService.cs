@@ -231,6 +231,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns></returns>
     public override async Task<GrpcTryExistsKeyValueResponse> TryExistsKeyValue(GrpcTryExistsKeyValueRequest request, ServerCallContext context)
     {
+        return await TryExistsKeyValueInternal(request, context);
+    }
+
+    private async Task<GrpcTryExistsKeyValueResponse> TryExistsKeyValueInternal(GrpcTryExistsKeyValueRequest request, ServerCallContext context)
+    {
         if (string.IsNullOrEmpty(request.Key))
             return new()
             {
@@ -794,6 +799,14 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 } 
                 break;
                 
+                case GrpcBatchClientType.TryExistsKeyValue:
+                {
+                    GrpcTryExistsKeyValueRequest? extendKeyRequest = request.TryExistsKeyValue;
+            
+                    tasks.Add(TryExistsKeyValueDelayed(request.RequestId, extendKeyRequest, responseStream, context));
+                } 
+                break;
+                
                 case GrpcBatchClientType.TypeNone:
                 default:
                     logger.LogError("Unknown batch client request type: {Type}", request.Type);
@@ -855,6 +868,20 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             Type = GrpcBatchClientType.TryExtendKeyValue,
             RequestId = requestId,
             TryExtendKeyValue = tryExtendResponse
+        };
+
+        await responseStream.WriteAsync(response);
+    }
+    
+    private async Task TryExistsKeyValueDelayed(int requestId, GrpcTryExistsKeyValueRequest existKeyRequest, IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream, ServerCallContext context)
+    {
+        GrpcTryExistsKeyValueResponse tryExistsResponse = await TryExistsKeyValueInternal(existKeyRequest, context);
+        
+        GrpcBatchClientKeyValueResponse response = new()
+        {
+            Type = GrpcBatchClientType.TryExistsKeyValue,
+            RequestId = requestId,
+            TryExistsKeyValue = tryExistsResponse
         };
 
         await responseStream.WriteAsync(response);

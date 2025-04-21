@@ -1,6 +1,7 @@
 ﻿
 using Nixie;
 using System.Net;
+using System.Runtime.CompilerServices;
 using CommandLine;
 using Flurl.Http;
 
@@ -10,6 +11,7 @@ using Kahuna.Server.Configuration;
 using Kahuna.Communication.External.Grpc;
 using Kahuna.Communication.External.Rest;
 using Kahuna.Server.Communication.Internode;
+using Kahuna.Server.Locks;
 using Kommander;
 using Kommander.Time;
 using Kommander.WAL;

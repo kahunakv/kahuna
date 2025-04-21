@@ -76,6 +76,15 @@ internal sealed class GrpcBatcher
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
+    
+    public Task<GrpcBatcherResponse> Enqueue(GrpcTryExistsKeyValueRequest message)
+    {
+        TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
 
     private Task<GrpcBatcherResponse> TryProcessQueue(GrpcBatcherItem grpcBatcherItem, TaskCompletionSource<GrpcBatcherResponse> promise)
     {
@@ -102,7 +111,7 @@ internal sealed class GrpcBatcher
                 {
                     List<GrpcBatcherItem> messages = [];
                     
-                    while (inbox.TryDequeue(out GrpcBatcherItem message))
+                    while (inbox.TryDequeue(out GrpcBatcherItem? message))
                         messages.Add(message);
 
                     if (messages.Count > 0)
@@ -150,6 +159,8 @@ internal sealed class GrpcBatcher
                     promise.SetResult(new(await client.TryDeleteKeyValueAsync(itemRequest.TryDeleteKeyValue)));
                 else if (itemRequest.TryExtendKeyValue is not null)
                     promise.SetResult(new(await client.TryExtendKeyValueAsync(itemRequest.TryExtendKeyValue)));
+                else if (itemRequest.TryExistsKeyValue is not null)
+                    promise.SetResult(new(await client.TryExistsKeyValueAsync(itemRequest.TryExistsKeyValue)));
                 else
                     throw new KahunaException("Unknown request type", LockResponseType.Errored);
                 
@@ -163,7 +174,7 @@ internal sealed class GrpcBatcher
                 // ReSharper disable once AccessToDisposedClosure
                 await foreach (GrpcBatchClientKeyValueResponse response in streaming.ResponseStream.ReadAllAsync())
                 {
-                    if (requestRefs.TryGetValue(response.RequestId, out GrpcBatcherItem item))
+                    if (requestRefs.TryGetValue(response.RequestId, out GrpcBatcherItem? item))
                     {
                         switch (response.Type)
                         {
@@ -181,6 +192,10 @@ internal sealed class GrpcBatcher
                             
                             case GrpcBatchClientType.TryExtendKeyValue:
                                 item.Promise.SetResult(new(response.TryExtendKeyValue));
+                                break;
+                            
+                            case GrpcBatchClientType.TryExistsKeyValue:
+                                item.Promise.SetResult(new(response.TryExistsKeyValue));
                                 break;
                             
                             case GrpcBatchClientType.TypeNone:
@@ -225,6 +240,11 @@ internal sealed class GrpcBatcher
                 {
                     batchRequest.Type = GrpcBatchClientType.TryExtendKeyValue;
                     batchRequest.TryExtendKeyValue = itemRequest.TryExtendKeyValue;
+                } 
+                else if (itemRequest.TryExistsKeyValue is not null)
+                {
+                    batchRequest.Type = GrpcBatchClientType.TryExistsKeyValue;
+                    batchRequest.TryExistsKeyValue = itemRequest.TryExistsKeyValue;
                 }
                 else
                 {

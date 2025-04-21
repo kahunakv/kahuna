@@ -25,8 +25,8 @@ public abstract class BaseCluster
             Host = "localhost",
             Port = 8001,
             InitialPartitions = partitions,
-            StartElectionTimeout = 1500,
-            EndElectionTimeout = 2500,
+            StartElectionTimeout = 500,
+            EndElectionTimeout = 1500,
             CompactEveryOperations = 1000,
             CompactNumberEntries = 50
         };
@@ -77,8 +77,8 @@ public abstract class BaseCluster
             Host = "localhost",
             Port = 8002,
             InitialPartitions = partitions,
-            StartElectionTimeout = 1500,
-            EndElectionTimeout = 2500,
+            StartElectionTimeout = 500,
+            EndElectionTimeout = 1500,
             CompactEveryOperations = 1000,
             CompactNumberEntries = 50
         };
@@ -129,8 +129,8 @@ public abstract class BaseCluster
             Host = "localhost",
             Port = 8003,
             InitialPartitions = partitions,
-            StartElectionTimeout = 1500,
-            EndElectionTimeout = 2500,
+            StartElectionTimeout = 500,
+            EndElectionTimeout = 1500,
             CompactEveryOperations = 1000,            
             CompactNumberEntries = 50
         };
@@ -220,7 +220,7 @@ public abstract class BaseCluster
                     await raft3.AmILeader(i, cancellationToken: TestContext.Current.CancellationToken))
                     break;
 
-                await Task.Delay(100, cancellationToken: TestContext.Current.CancellationToken);
+                await Task.Delay(50, cancellationToken: TestContext.Current.CancellationToken);
             }
         }
     }

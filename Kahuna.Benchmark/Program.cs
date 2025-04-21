@@ -46,18 +46,24 @@ for (int j = 0; j < 5; j++)
 
     for (int i = 0; i < numberOfTasks; i++)
     {
-        int remainder = i % 4;
+        int remainder = i % 7;
         
         switch (remainder)
         {
-            case 3:
-                tasks.Add(ExtendKeyConcurrently(locks));
-                break;
-            
-            case 2:
+            case 6:
+            case 5:
+            case 4:
                 tasks.Add(SetKeyConcurrently(locks));
                 break;
             
+            case 3:
+                tasks.Add(ExistsKeyConcurrently(locks));
+                break;
+            
+            case 2:
+                tasks.Add(ExtendKeyConcurrently(locks));
+                break;
+                                   
             case 1:
                 tasks.Add(GetKeyConcurrently(locks));
                 break;
@@ -189,6 +195,37 @@ async Task ExtendKeyConcurrently(KahunaClient keyValues)
         KahunaKeyValue result = await keyValues.ExtendKeyValue(
             key, 
             TimeSpan.FromSeconds(120),
+            KeyValueDurability.Persistent,
+            cancellationToken: cts.Token
+        );
+
+        //if (!result.Success)
+        //    throw new KahunaException("Not deleted " + key, LockResponseType.Busy);
+
+        //if (revision > 1)
+        //    Console.WriteLine("Got repeated revision " + revision);
+    }
+    catch (KahunaException ex)
+    {
+        Console.WriteLine("KahunaException {0} {1}", ex.Message, ex.KeyValueErrorCode);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine("Exception {0}", ex.Message);
+    }
+}
+
+async Task ExistsKeyConcurrently(KahunaClient keyValues)
+{
+    try
+    {
+        using CancellationTokenSource cts = new();
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
+
+        string key = GetRandomLockNameFromList(tokens);        
+
+        KahunaKeyValue result = await keyValues.ExistsKeyValue(
+            key,             
             KeyValueDurability.Persistent,
             cancellationToken: cts.Token
         );

@@ -19,7 +19,7 @@ internal static class KeyValueTransactionExpression
                 return new(long.Parse(ast.yytext!));
             
             case NodeType.StringType:
-                return new(ast.yytext!, -1, 0);
+                return new(ast.yytext!);
             
             case NodeType.FloatType:               
                 return new(double.Parse(ast.yytext!));
@@ -28,7 +28,7 @@ internal static class KeyValueTransactionExpression
                 return new(ast.yytext! == "true");
             
             case NodeType.Placeholder:
-                return new(context.GetParameter(ast), -1, 0);
+                return new(context.GetParameter(ast));
             
             case NodeType.NullType:
                 return new(KeyValueExpressionType.NullType);
@@ -102,6 +102,7 @@ internal static class KeyValueTransactionExpression
             case NodeType.Eset:
             case NodeType.Eget:
             case NodeType.If:
+            case NodeType.For:
             case NodeType.SetNotExists:
             case NodeType.SetExists:
             case NodeType.SetCmp:
