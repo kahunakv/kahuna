@@ -12,7 +12,7 @@ namespace Kahuna.Server.ScriptParser;
 /// </summary>
 internal sealed class ScriptParserProcessor
 {
-    private static readonly DefaultObjectPoolProvider ScriptPoolProvider = new() { MaximumRetained = 32 };
+    private static readonly DefaultObjectPoolProvider ScriptPoolProvider = new();
 
     private readonly ObjectPool<scriptParser> scriptParserPool;
     
