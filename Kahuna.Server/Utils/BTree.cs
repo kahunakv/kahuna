@@ -1,3 +1,5 @@
+using System.Diagnostics.CodeAnalysis;
+
 namespace Kahuna.Utils;
 
 /// <summary>
@@ -147,7 +149,7 @@ public sealed class Node<TKey, TValue>
 /// </summary>
 /// <typeparam name="TKey">The type of keys stored in the B-Tree.</typeparam>
 /// <typeparam name="TValue">The type of values associated with keys.</typeparam>
-public class BTree<TKey, TValue> where TKey : IComparable<TKey>
+public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 {
     private readonly int _minDegree;
     
@@ -182,9 +184,16 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey>
     /// <param name="value">When this method returns, contains the value associated with the specified key, 
     /// if the key is found; otherwise, the default value for the type of the value parameter.</param>
     /// <returns>true if the B-Tree contains an element with the specified key; otherwise, false.</returns>
-    public bool TryGetValue(TKey key, out TValue? value)
+    public bool TryGetValue(TKey key, [MaybeNullWhen(false)] out TValue value)
     {
-        return Search(_root, key, out value);
+        if (Search(_root, key, out TValue? tempValue))
+        {
+            value = tempValue!;
+            return true;
+        }
+
+        value = default;
+        return false;
     }
 
     /// <summary>
@@ -195,7 +204,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey>
     /// <param name="value">When this method returns, contains the value associated with the specified key, 
     /// if the key is found; otherwise, the default value for the type of the value parameter.</param>
     /// <returns>true if the key is found; otherwise, false.</returns>
-    private bool Search(Node<TKey, TValue> node, TKey key, out TValue? value)
+    private bool Search(Node<TKey, TValue> node, TKey key, [MaybeNullWhen(false)] out TValue? value)
     {
         // Find the first key greater than or equal to the search key
         int i = 0;
@@ -336,7 +345,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey>
             }
             
             // Case 2: The child that follows the key has at least t keys
-            else if (node.Children[i + 1].KeyCount >= _minDegree)
+            if (node.Children[i + 1].KeyCount >= _minDegree)
             {
                 // Find the successor of the key
                 KeyValuePair<TKey, TValue> successor = FindSuccessor(node, i);
@@ -370,7 +379,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey>
     /// <param name="node">The node containing the key.</param>
     /// <param name="keyIndex">The index of the key.</param>
     /// <returns>The predecessor key-value pair.</returns>
-    private KeyValuePair<TKey, TValue> FindPredecessor(Node<TKey, TValue> node, int keyIndex)
+    private static KeyValuePair<TKey, TValue> FindPredecessor(Node<TKey, TValue> node, int keyIndex)
     {
         // Start with the child that precedes the key
         Node<TKey, TValue> current = node.Children[keyIndex];

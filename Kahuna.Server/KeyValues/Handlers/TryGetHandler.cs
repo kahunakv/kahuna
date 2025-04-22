@@ -4,6 +4,7 @@ using Kommander;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Utils;
 using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Handlers;
@@ -11,7 +12,7 @@ namespace Kahuna.Server.KeyValues.Handlers;
 internal sealed class TryGetHandler : BaseHandler
 {
     public TryGetHandler(
-        Dictionary<string, KeyValueContext> keyValuesStore,
+        BTree<string, KeyValueContext> keyValuesStore,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
@@ -44,8 +45,6 @@ internal sealed class TryGetHandler : BaseHandler
             {
                 if (context.Revisions.TryGetValue(message.CompareRevision, out byte[]? revisionValue))
                 {
-                    Console.WriteLine("from memory");
-                    
                     return new(KeyValueResponseType.Get, new ReadOnlyKeyValueContext(
                         revisionValue,
                         message.CompareRevision,
@@ -63,8 +62,6 @@ internal sealed class TryGetHandler : BaseHandler
                 KeyValueContext? revisionContext = await raft.ReadThreadPool.EnqueueTask(() => PersistenceBackend.GetKeyValueRevision(message.Key, message.CompareRevision));
                 if (revisionContext is null)
                     return KeyValueStaticResponses.DoesNotExistContextResponse;
-                
-                Console.WriteLine("from disk");
 
                 return new(KeyValueResponseType.Get, new ReadOnlyKeyValueContext(
                     revisionContext.Value, 
@@ -90,7 +87,7 @@ internal sealed class TryGetHandler : BaseHandler
             if (context is null)
             {
                 context = new() { State = KeyValueState.Undefined, Revision = -1 };
-                keyValuesStore.Add(message.Key, context);
+                keyValuesStore.Insert(message.Key, context);
             }
             
             context.MvccEntries ??= new();

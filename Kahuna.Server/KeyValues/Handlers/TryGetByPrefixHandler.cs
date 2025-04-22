@@ -2,6 +2,7 @@
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Utils;
 using Kommander;
 using Kommander.Time;
 using Nixie;
@@ -11,7 +12,7 @@ namespace Kahuna.Server.KeyValues.Handlers;
 internal sealed class TryGetByPrefixHandler : BaseHandler
 {
     public TryGetByPrefixHandler(
-        Dictionary<string, KeyValueContext> keyValuesStore,
+        BTree<string, KeyValueContext> keyValuesStore,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
@@ -34,7 +35,7 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
         List<(string, ReadOnlyKeyValueContext)> items = [];
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
         
-        foreach ((string key, KeyValueContext? _) in keyValuesStore)
+        foreach ((string key, KeyValueContext? _) in keyValuesStore.GetItems())
         {                        
             if (!key.StartsWith(message.Key, StringComparison.Ordinal))
                 continue;
@@ -63,7 +64,7 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
 
         // step 1: we need to check the in-memory store to get the MVCC entry or the latest value
-        foreach ((string key, KeyValueContext? _) in keyValuesStore)
+        foreach ((string key, KeyValueContext? _) in keyValuesStore.GetItems())
         {
             if (!key.StartsWith(message.Key, StringComparison.Ordinal))
                 continue;
@@ -129,7 +130,7 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
             if (context is null)
             {
                 context = new() { State = KeyValueState.Undefined, Revision = -1 };
-                keyValuesStore.Add(key, context);
+                keyValuesStore.Insert(key, context);
             }
             
             context.MvccEntries ??= new();

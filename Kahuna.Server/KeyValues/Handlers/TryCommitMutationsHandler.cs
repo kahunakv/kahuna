@@ -8,13 +8,14 @@ using Kommander.Time;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
+using Kahuna.Utils;
 
 namespace Kahuna.Server.KeyValues.Handlers;
 
 internal sealed class TryCommitMutationsHandler : BaseHandler
 {
     public TryCommitMutationsHandler(
-        Dictionary<string, KeyValueContext> keyValuesStore,
+        BTree<string, KeyValueContext> keyValuesStore,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
@@ -39,7 +40,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         {
             logger.LogWarning("Key/Value context is missing for {TransactionId}", message.TransactionId);
 
-            return KeyValueStaticResponses.ErroredResponse;;
+            return KeyValueStaticResponses.ErroredResponse;
         }
 
         if (context.WriteIntent is null)

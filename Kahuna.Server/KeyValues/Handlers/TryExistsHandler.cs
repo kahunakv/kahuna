@@ -4,6 +4,7 @@ using Kommander;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Utils;
 using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Handlers;
@@ -11,7 +12,7 @@ namespace Kahuna.Server.KeyValues.Handlers;
 internal sealed class TryExistsHandler : BaseHandler
 {
     public TryExistsHandler(
-        Dictionary<string, KeyValueContext> keyValuesStore,
+        BTree<string, KeyValueContext> keyValuesStore,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
@@ -82,7 +83,7 @@ internal sealed class TryExistsHandler : BaseHandler
             if (context is null)
             {
                 context = new() { State = KeyValueState.Undefined, Revision = -1 };
-                keyValuesStore.Add(message.Key, context);
+                keyValuesStore.Insert(message.Key, context);
             }
             
             context.MvccEntries ??= new();

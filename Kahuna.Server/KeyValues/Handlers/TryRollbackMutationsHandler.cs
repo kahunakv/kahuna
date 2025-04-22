@@ -2,6 +2,7 @@
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Utils;
 using Kommander;
 using Kommander.Data;
 using Kommander.Time;
@@ -12,7 +13,7 @@ namespace Kahuna.Server.KeyValues.Handlers;
 internal sealed class TryRollbackMutationsHandler : BaseHandler
 {
     public TryRollbackMutationsHandler(
-        Dictionary<string, KeyValueContext> keyValuesStore,
+        BTree<string, KeyValueContext> keyValuesStore,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,

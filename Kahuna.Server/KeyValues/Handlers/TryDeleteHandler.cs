@@ -7,13 +7,14 @@ using Kommander.Time;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Utils;
 
 namespace Kahuna.Server.KeyValues.Handlers;
 
 internal sealed class TryDeleteHandler : BaseHandler
 {
     public TryDeleteHandler(
-        Dictionary<string, KeyValueContext> keyValuesStore,
+        BTree<string, KeyValueContext> keyValuesStore,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,

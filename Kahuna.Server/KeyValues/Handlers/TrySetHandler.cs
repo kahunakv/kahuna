@@ -6,13 +6,14 @@ using Kommander.Time;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Utils;
 
 namespace Kahuna.Server.KeyValues.Handlers;
 
 internal sealed class TrySetHandler : BaseHandler
 {        
     public TrySetHandler(
-        Dictionary<string, KeyValueContext> keyValuesStore,
+        BTree<string, KeyValueContext> keyValuesStore,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
@@ -70,7 +71,7 @@ internal sealed class TrySetHandler : BaseHandler
             
             // logger.LogDebug("{0} {1}", context.State, context.Revision);
 
-            keyValuesStore.Add(message.Key, newContext);
+            keyValuesStore.Insert(message.Key, newContext);
         }
         else
         {

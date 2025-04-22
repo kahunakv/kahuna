@@ -4,6 +4,7 @@ using Kommander;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Utils;
 using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Handlers;
@@ -11,7 +12,7 @@ namespace Kahuna.Server.KeyValues.Handlers;
 internal sealed class TryAdquireExclusiveLockHandler : BaseHandler
 {
     public TryAdquireExclusiveLockHandler(
-        Dictionary<string, KeyValueContext> keyValuesStore,
+        BTree<string, KeyValueContext> keyValuesStore,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
@@ -40,7 +41,7 @@ internal sealed class TryAdquireExclusiveLockHandler : BaseHandler
             
             context = newContext;
 
-            keyValuesStore.Add(message.Key, newContext);
+            keyValuesStore.Insert(message.Key, newContext);
         }
 
         if (context.WriteIntent is not null)

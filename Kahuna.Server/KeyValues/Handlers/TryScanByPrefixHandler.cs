@@ -2,6 +2,7 @@
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Utils;
 using Kommander;
 using Kommander.Time;
 using Nixie;
@@ -11,7 +12,7 @@ namespace Kahuna.Server.KeyValues.Handlers;
 internal sealed class TryScanByPrefixHandler : BaseHandler
 {
     public TryScanByPrefixHandler(
-        Dictionary<string, KeyValueContext> keyValuesStore,
+        BTree<string, KeyValueContext> keyValuesStore,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
@@ -25,7 +26,7 @@ internal sealed class TryScanByPrefixHandler : BaseHandler
     {
         List<(string, ReadOnlyKeyValueContext)> items = [];
         
-        foreach ((string? key, KeyValueContext? keyValueContext) in keyValuesStore)
+        foreach ((string? key, KeyValueContext? keyValueContext) in keyValuesStore.GetItems())
         {
             if (!key.StartsWith(message.Key))
                 continue;

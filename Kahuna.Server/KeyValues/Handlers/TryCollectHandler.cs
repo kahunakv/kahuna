@@ -1,6 +1,7 @@
 
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
+using Kahuna.Utils;
 using Kommander;
 using Kommander.Time;
 using Nixie;
@@ -12,7 +13,7 @@ internal sealed class TryCollectHandler : BaseHandler
     private readonly HashSet<string> keysToEvict = [];
     
     public TryCollectHandler(
-        Dictionary<string, KeyValueContext> keyValuesStore,
+        BTree<string, KeyValueContext> keyValuesStore,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
@@ -32,7 +33,7 @@ internal sealed class TryCollectHandler : BaseHandler
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
 
         // Step 1: Evict expired keys
-        foreach (KeyValuePair<string, KeyValueContext> key in keyValuesStore)
+        foreach (KeyValuePair<string, KeyValueContext> key in keyValuesStore.GetItems())
         {
             if (number >= 100)
                 break;
@@ -51,7 +52,7 @@ internal sealed class TryCollectHandler : BaseHandler
         }
         
         // Step 2: Evict deleted keys
-        foreach (KeyValuePair<string, KeyValueContext> key in keyValuesStore)
+        foreach (KeyValuePair<string, KeyValueContext> key in keyValuesStore.GetItems())
         {
             if (number >= 100)
                 break;
@@ -67,7 +68,7 @@ internal sealed class TryCollectHandler : BaseHandler
         }
         
         // Step 3: Evict keys that haven't been used in a while
-        foreach (KeyValuePair<string, KeyValueContext> key in keyValuesStore)
+        foreach (KeyValuePair<string, KeyValueContext> key in keyValuesStore.GetItems())
         {
             if (number >= 100)
                 break;
@@ -92,6 +93,6 @@ internal sealed class TryCollectHandler : BaseHandler
         keysToEvict.Clear();
         
         // Ensure that the store has enough capacity for future writes
-        keyValuesStore.EnsureCapacity(keyValuesStore.Count + 16);
+        // keyValuesStore.EnsureCapacity(keyValuesStore.Count + 16);
     }
 }

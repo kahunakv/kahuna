@@ -5,6 +5,7 @@ using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Utils;
 using Kommander;
 using Kommander.Time;
 using Nixie;
@@ -19,14 +20,14 @@ internal abstract class BaseHandler
 
     protected readonly IPersistenceBackend PersistenceBackend;
 
-    protected readonly Dictionary<string, KeyValueContext> keyValuesStore;
+    protected readonly BTree<string, KeyValueContext> keyValuesStore;
 
     protected readonly ILogger<IKahuna> logger;
     
     private readonly HashSet<long> revisionsToRemove = [];
     
     protected BaseHandler(
-        Dictionary<string, KeyValueContext> keyValuesStore,
+        BTree<string, KeyValueContext> keyValuesStore,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
@@ -117,11 +118,9 @@ internal abstract class BaseHandler
                 if (context is not null)
                 {
                     context.LastUsed = raft.HybridLogicalClock.TrySendOrLocalEvent();
-                    keyValuesStore.Add(key, context);
+                    keyValuesStore.Insert(key, context);
                     return context;
                 }
-                
-                return null;
             }
             
             return null;    

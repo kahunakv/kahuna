@@ -10,13 +10,14 @@ using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Utils;
 
 namespace Kahuna.Server.KeyValues.Handlers;
 
 internal sealed class TryPrepareMutationsHandler : BaseHandler
 {
     public TryPrepareMutationsHandler(
-        Dictionary<string, KeyValueContext> keyValuesStore,
+        BTree<string, KeyValueContext> keyValuesStore,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
