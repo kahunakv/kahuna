@@ -5,7 +5,10 @@ using Kommander.Communication.Grpc;
 using Google.Protobuf;
 using Grpc.Net.Client;
 using System.Runtime.InteropServices;
+using System.Collections.Concurrent;
 using Google.Protobuf.Collections;
+
+using Kahuna.Server.Communication.Internode.Grpc;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.Locks;
@@ -16,6 +19,8 @@ namespace Kahuna.Server.Communication.Internode;
 
 public class GrpcInterNodeCommunication : IInterNodeCommunication
 {
+    private static readonly ConcurrentDictionary<string, Lazy<GrpcServerBatcher>> batchers = new();
+    
     private readonly KahunaConfiguration configuration;
     
     public GrpcInterNodeCommunication(KahunaConfiguration configuration)
@@ -117,9 +122,8 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
 
     public async Task<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValue(string node, HLCTimestamp transactionId, string key, byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
+        //GrpcChannel channel = SharedChannels.GetChannel(node);
+        //KeyValuer.KeyValuerClient client = new(channel);
 
         GrpcTrySetKeyValueRequest request = new()
         {
@@ -138,17 +142,28 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         if (compareValue is not null)
             request.CompareValue = UnsafeByteOperations.UnsafeWrap(compareValue);
         
-        GrpcTrySetKeyValueResponse? remoteResponse = await client.TrySetKeyValueAsync(request, cancellationToken: cancellationToken);
+        //GrpcTrySetKeyValueResponse? remoteResponse = await client.TrySetKeyValueAsync(request, cancellationToken: cancellationToken);
+        
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+        
+        //GrpcTryGetKeyValueResponse? remoteResponse = await client.TryGetKeyValueAsync(request, cancellationToken: cancellationToken);
+        
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcTrySetKeyValueResponse? remoteResponse = response.TrySetKeyValue!;
+        
         remoteResponse.ServedFrom = $"https://{node}";
         
-        return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.Revision, new(remoteResponse.LastModifiedPhysical, remoteResponse.LastModifiedCounter));
+        return (
+            (KeyValueResponseType)remoteResponse.Type, 
+            remoteResponse.Revision, 
+            new(remoteResponse.LastModifiedPhysical, remoteResponse.LastModifiedCounter)
+        );
     }
 
     public async Task<(KeyValueResponseType, long, HLCTimestamp)> TryDeleteKeyValue(string node, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancelationToken)
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
+        //GrpcChannel channel = SharedChannels.GetChannel(node);
+        //KeyValuer.KeyValuerClient client = new(channel);
         
         GrpcTryDeleteKeyValueRequest request = new()
         {
@@ -158,18 +173,26 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcKeyValueDurability)durability,
         };
         
-        GrpcTryDeleteKeyValueResponse? remoteResponse = await client.TryDeleteKeyValueAsync(request, cancellationToken: cancelationToken);
+        //GrpcTryDeleteKeyValueResponse? remoteResponse = await client.TryDeleteKeyValueAsync(request, cancellationToken: cancelationToken);
+        
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+        
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcTryDeleteKeyValueResponse? remoteResponse = response.TryDeleteKeyValue!;
         
         remoteResponse.ServedFrom = $"https://{node}";
         
-        return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.Revision, new(remoteResponse.LastModifiedPhysical, remoteResponse.LastModifiedCounter));
+        return (
+            (KeyValueResponseType)remoteResponse.Type, 
+            remoteResponse.Revision, 
+            new(remoteResponse.LastModifiedPhysical, remoteResponse.LastModifiedCounter)
+        );
     }
 
     public async Task<(KeyValueResponseType, long, HLCTimestamp)> TryExtendKeyValue(string node, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancelationToken)
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
+        //GrpcChannel channel = SharedChannels.GetChannel(node);
+        //KeyValuer.KeyValuerClient client = new(channel);
         
         GrpcTryExtendKeyValueRequest request = new()
         {
@@ -180,18 +203,26 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcKeyValueDurability)durability,
         };
         
-        GrpcTryExtendKeyValueResponse? remoteResponse = await client.TryExtendKeyValueAsync(request, cancellationToken: cancelationToken);
+        //GrpcTryExtendKeyValueResponse? remoteResponse = await client.TryExtendKeyValueAsync(request, cancellationToken: cancelationToken);
+        
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+        
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcTryExtendKeyValueResponse? remoteResponse = response.TryExtendKeyValue!;
         
         remoteResponse.ServedFrom = $"https://{node}";
         
-        return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.Revision, new(remoteResponse.LastModifiedPhysical, remoteResponse.LastModifiedCounter));
+        return (
+            (KeyValueResponseType)remoteResponse.Type, 
+            remoteResponse.Revision, 
+            new(remoteResponse.LastModifiedPhysical, remoteResponse.LastModifiedCounter)
+        );
     }
 
     public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryGetValue(string node, HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
+        //GrpcChannel channel = SharedChannels.GetChannel(node);
+        //KeyValuer.KeyValuerClient client = new(channel);
         
         GrpcTryGetKeyValueRequest request = new()
         {
@@ -202,7 +233,12 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcKeyValueDurability) durability,
         };
         
-        GrpcTryGetKeyValueResponse? remoteResponse = await client.TryGetKeyValueAsync(request, cancellationToken: cancellationToken);
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+        
+        //GrpcTryGetKeyValueResponse? remoteResponse = await client.TryGetKeyValueAsync(request, cancellationToken: cancellationToken);
+        
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcTryGetKeyValueResponse? remoteResponse = response.TryGetKeyValue!;
         
         remoteResponse.ServedFrom = $"https://{node}";
         
@@ -225,9 +261,8 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
 
     public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryExistsValue(string node, HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
+        //GrpcChannel channel = SharedChannels.GetChannel(node);
+        //KeyValuer.KeyValuerClient client = new(channel);
         
         GrpcTryExistsKeyValueRequest request = new()
         {
@@ -238,7 +273,12 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcKeyValueDurability) durability,
         };
         
-        GrpcTryExistsKeyValueResponse? remoteResponse = await client.TryExistsKeyValueAsync(request, cancellationToken: cancellationToken);
+        //GrpcTryExistsKeyValueResponse? remoteResponse = await client.TryExistsKeyValueAsync(request, cancellationToken: cancellationToken);
+        
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+        
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcTryExistsKeyValueResponse? remoteResponse = response.TryExistsKeyValue!;
         
         remoteResponse.ServedFrom = $"https://{node}";
         
@@ -549,5 +589,16 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         }
 
         return responses;
+    }
+    
+    private static GrpcServerBatcher GetSharedBatcher(string url)
+    {
+        Lazy<GrpcServerBatcher> lazyBatchers = batchers.GetOrAdd(url, GetSharedBatchers);
+        return lazyBatchers.Value;
+    }
+    
+    private static Lazy<GrpcServerBatcher> GetSharedBatchers(string url)
+    {
+        return new(() => new(url));
     }
 }

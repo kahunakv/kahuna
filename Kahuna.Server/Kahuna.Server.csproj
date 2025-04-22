@@ -5,6 +5,7 @@
   <Nullable>enable</Nullable>
   <ImplicitUsings>enable</ImplicitUsings>
   <RootNamespace>Kahuna.Server</RootNamespace>
+  <ServerGarbageCollection>true</ServerGarbageCollection>
 </PropertyGroup>
 
   <PropertyGroup>

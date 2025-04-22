@@ -20,6 +20,7 @@ service KeyValuer {
   rpc ScanAllByPrefix (GrpcScanAllByPrefixRequest) returns (GrpcScanAllByPrefixResponse);
   rpc GetByPrefix (GrpcGetByPrefixRequest) returns (GrpcGetByPrefixResponse);
   rpc BatchClientKeyValueRequests (stream GrpcBatchClientKeyValueRequest) returns (stream GrpcBatchClientKeyValueResponse);
+  rpc BatchServerKeyValueRequests (stream GrpcBatchServerKeyValueRequest) returns (stream GrpcBatchServerKeyValueResponse);
 }
 
 message GrpcTrySetKeyValueRequest {
@@ -361,22 +362,51 @@ message GrpcKeyValueByPrefixItemResponse {
 message GrpcBatchClientKeyValueRequest {
   GrpcBatchClientType Type = 1;
   int32 RequestId = 2;
-  optional GrpcTrySetKeyValueRequest TrySetKeyValue = 3;
-  optional GrpcTryGetKeyValueRequest TryGetKeyValue = 4;
-  optional GrpcTryDeleteKeyValueRequest TryDeleteKeyValue = 5;
-  optional GrpcTryExtendKeyValueRequest TryExtendKeyValue = 6;
-  optional GrpcTryExistsKeyValueRequest TryExistsKeyValue = 7;
+  oneof payload {
+    GrpcTrySetKeyValueRequest TrySetKeyValue = 3;
+    GrpcTryGetKeyValueRequest TryGetKeyValue = 4;
+    GrpcTryDeleteKeyValueRequest TryDeleteKeyValue = 5;
+    GrpcTryExtendKeyValueRequest TryExtendKeyValue = 6;
+    GrpcTryExistsKeyValueRequest TryExistsKeyValue = 7;
+  }
 }
 
 message GrpcBatchClientKeyValueResponse
 {
   GrpcBatchClientType Type = 1;
   int32 RequestId = 2;
-  optional GrpcTrySetKeyValueResponse TrySetKeyValue = 3;
-  optional GrpcTryGetKeyValueResponse TryGetKeyValue = 4;
-  optional GrpcTryDeleteKeyValueResponse TryDeleteKeyValue = 5;
-  optional GrpcTryExtendKeyValueResponse TryExtendKeyValue = 6;
-  optional GrpcTryExistsKeyValueResponse TryExistsKeyValue = 7;
+  oneof payload {
+    GrpcTrySetKeyValueResponse TrySetKeyValue = 3;
+    GrpcTryGetKeyValueResponse TryGetKeyValue = 4;
+    GrpcTryDeleteKeyValueResponse TryDeleteKeyValue = 5;
+    GrpcTryExtendKeyValueResponse TryExtendKeyValue = 6;
+    GrpcTryExistsKeyValueResponse TryExistsKeyValue = 7;
+  }
+}
+
+message GrpcBatchServerKeyValueRequest {
+  GrpcBatchClientType Type = 1;
+  int32 RequestId = 2;
+  oneof payload {
+    GrpcTrySetKeyValueRequest TrySetKeyValue = 3;
+    GrpcTryGetKeyValueRequest TryGetKeyValue = 4;
+    GrpcTryDeleteKeyValueRequest TryDeleteKeyValue = 5;
+    GrpcTryExtendKeyValueRequest TryExtendKeyValue = 6;
+    GrpcTryExistsKeyValueRequest TryExistsKeyValue = 7;
+  }
+}
+
+message GrpcBatchServerKeyValueResponse
+{
+  GrpcBatchClientType Type = 1;
+  int32 RequestId = 2;
+  oneof payload {
+    GrpcTrySetKeyValueResponse TrySetKeyValue = 3;
+    GrpcTryGetKeyValueResponse TryGetKeyValue = 4;
+    GrpcTryDeleteKeyValueResponse TryDeleteKeyValue = 5;
+    GrpcTryExtendKeyValueResponse TryExtendKeyValue = 6;
+    GrpcTryExistsKeyValueResponse TryExistsKeyValue = 7;
+  }
 }
 
 enum GrpcBatchClientType {

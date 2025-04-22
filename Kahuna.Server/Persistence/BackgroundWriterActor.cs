@@ -102,7 +102,7 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
             if (!await raft.AmILeader(kv.Key, CancellationToken.None))
             {
-                logger.LogWarning("No longer leader to checkpoint partition #{PartitionId}", kv.Key);
+                //logger.LogWarning("No longer leader to checkpoint partition #{PartitionId}", kv.Key);
                 
                 partitionsToRemove.Add(kv.Key);
                 continue;
