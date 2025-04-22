@@ -15,18 +15,6 @@ using Kahuna.Shared.Locks;
 
 namespace Kahuna.Client.Communication;
 
-internal sealed class GrpcSharedStreaming
-{
-    public SemaphoreSlim Semaphore { get; } = new(1, 1);
-    
-    public AsyncDuplexStreamingCall<GrpcBatchClientKeyValueRequest, GrpcBatchClientKeyValueResponse> Streaming { get; }
-    
-    public GrpcSharedStreaming(AsyncDuplexStreamingCall<GrpcBatchClientKeyValueRequest, GrpcBatchClientKeyValueResponse> streaming)
-    {
-        Streaming = streaming;
-    }
-}
-
 /// <summary>
 /// It tries to batch as many concurrent requests as possible to a specific host and uses gRPC bidirectional streaming to reduce the number
 /// of HTTP/2 streams needed at any given time.
@@ -92,6 +80,15 @@ internal sealed class GrpcBatcher
     }
     
     public Task<GrpcBatcherResponse> Enqueue(GrpcTryExistsKeyValueRequest message)
+    {
+        TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
+    public Task<GrpcBatcherResponse> Enqueue(GrpcTryExecuteTransactionRequest message)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -194,6 +191,11 @@ internal sealed class GrpcBatcher
                     batchRequest.Type = GrpcBatchClientType.TryExistsKeyValue;
                     batchRequest.TryExistsKeyValue = itemRequest.TryExistsKeyValue;
                 }
+                else if (itemRequest.TryExecuteTransaction is not null)
+                {
+                    batchRequest.Type = GrpcBatchClientType.TryExecuteTransaction;
+                    batchRequest.TryExecuteTransaction = itemRequest.TryExecuteTransaction;
+                }
                 else
                 {
                     throw new KahunaException("Unknown request type", LockResponseType.Errored);
@@ -248,10 +250,15 @@ internal sealed class GrpcBatcher
                 case GrpcBatchClientType.TryExistsKeyValue:
                     item.Promise.SetResult(new(response.TryExistsKeyValue));
                     break;
+                
+                case GrpcBatchClientType.TryExecuteTransaction:
+                    item.Promise.SetResult(new(response.TryExecuteTransaction));
+                    break;
                         
                 case GrpcBatchClientType.TypeNone:
                 default:
-                    throw new KahunaException("Unknown response type: " + response.Type,LockResponseType.Errored);
+                    item.Promise.SetException(new KahunaException("Unknown response type: " + response.Type,LockResponseType.Errored));
+                    break;
             }
 
             requestRefs.TryRemove(response.RequestId, out _);

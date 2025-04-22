@@ -180,7 +180,7 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to get lock information", (LockResponseType)response.Type);
     }
     
-    public async Task<(bool, long)> TrySetKeyValue(string url, string key, byte[]? value, int expiryTime, KeyValueFlags flags, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(bool, long, int)> TrySetKeyValue(string url, string key, byte[]? value, int expiryTime, KeyValueFlags flags, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcBatcher batcher = GetSharedBatcher(url);
         
@@ -199,29 +199,29 @@ public class GrpcCommunication : IKahunaCommunication
         do
         {
             if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
+                throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
 
             GrpcBatcherResponse batchResponse = await batcher.Enqueue(request);
             response = batchResponse.TrySetKeyValue;
 
             if (response is null)
-                throw new KahunaException("Response is null", LockResponseType.Errored);
+                throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
             if (response.Type == GrpcKeyValueResponseType.TypeSet)
-                return (true, response.Revision);
+                return (true, response.Revision, response.TimeElapsedMs);
             
             if (response.Type == GrpcKeyValueResponseType.TypeNotset)
-                return (false, response.Revision);
+                return (false, response.Revision, response.TimeElapsedMs);
 
             if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
 
         } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
             
         throw new KahunaException("Failed to set key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
-    public async Task<(bool, long)> TryCompareValueAndSetKeyValue(string url, string key, byte[]? value, byte[]? compareValue, int expiryTime, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(bool, long, int)> TryCompareValueAndSetKeyValue(string url, string key, byte[]? value, byte[]? compareValue, int expiryTime, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcTrySetKeyValueRequest request = new()
         {
@@ -241,19 +241,19 @@ public class GrpcCommunication : IKahunaCommunication
         do
         {
             if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", LockResponseType.Errored);                   
+                throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);                   
             
             GrpcBatcherResponse batchResponse = await batcher.Enqueue(request);
             response = batchResponse.TrySetKeyValue;
 
             if (response is null)
-                throw new KahunaException("Response is null", LockResponseType.Errored);
+                throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
             if (response.Type == GrpcKeyValueResponseType.TypeSet)
-                return (true, response.Revision);
+                return (true, response.Revision, response.TimeElapsedMs);
             
             if (response.Type == GrpcKeyValueResponseType.TypeNotset)
-                return (false, response.Revision);
+                return (false, response.Revision, response.TimeElapsedMs);
             
             if (++retries >= 5)
                 throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
@@ -263,7 +263,7 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
-    public async Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string url, string key, byte[]? value, long compareRevision, int expiryTime, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(bool, long, int)> TryCompareRevisionAndSetKeyValue(string url, string key, byte[]? value, long compareRevision, int expiryTime, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcTrySetKeyValueRequest request = new()
         {
@@ -286,7 +286,7 @@ public class GrpcCommunication : IKahunaCommunication
         do
         {
             if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
+                throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
         
             //response = await client.TrySetKeyValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
             
@@ -294,13 +294,13 @@ public class GrpcCommunication : IKahunaCommunication
             response = batchResponse.TrySetKeyValue;
 
             if (response is null)
-                throw new KahunaException("Response is null", LockResponseType.Errored);
+                throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
             if (response.Type == GrpcKeyValueResponseType.TypeSet)
-                return (true, response.Revision);
+                return (true, response.Revision, response.TimeElapsedMs);
             
             if (response.Type == GrpcKeyValueResponseType.TypeNotset)
-                return (false, response.Revision);
+                return (false, response.Revision, response.TimeElapsedMs);
             
             if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
                 logger?.LogDebug("Server asked to retry set key/value");
@@ -313,7 +313,7 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
-    public async Task<(bool, byte[]?, long)> TryGetKeyValue(string url, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(bool, byte[]?, long, int)> TryGetKeyValue(string url, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcTryGetKeyValueRequest request = new()
         {
@@ -330,13 +330,13 @@ public class GrpcCommunication : IKahunaCommunication
         do
         {
             if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", LockResponseType.Errored);                   
+                throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);                   
             
             GrpcBatcherResponse batchResponse = await batcher.Enqueue(request);
-            response = batchResponse.TryGetKeyValue;;
+            response = batchResponse.TryGetKeyValue;
 
             if (response is null)
-                throw new KahunaException("Response is null", LockResponseType.Errored);
+                throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
             switch (response.Type)
             {
@@ -349,11 +349,11 @@ public class GrpcCommunication : IKahunaCommunication
                     else
                         value = response.Value.ToByteArray();
                     
-                    return (true, value, response.Revision);
+                    return (true, value, response.Revision, response.TimeElapsedMs);
                 }
 
                 case GrpcKeyValueResponseType.TypeDoesNotExist:
-                    return (false, null, 0);
+                    return (false, null, 0, response.TimeElapsedMs);
             }
             
             if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
@@ -367,7 +367,7 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to get key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
 
-    public async Task<(bool, long)> TryExistsKeyValue(string url, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(bool, long, int)> TryExistsKeyValue(string url, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcTryExistsKeyValueRequest request = new()
         {
@@ -384,21 +384,21 @@ public class GrpcCommunication : IKahunaCommunication
         do
         {
             if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
+                throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
         
             GrpcBatcherResponse batchResponse = await batcher.Enqueue(request);
             response = batchResponse.TryExistsKeyValue;
 
             if (response is null)
-                throw new KahunaException("Response is null", LockResponseType.Errored);
+                throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
             switch (response.Type)
             {
                 case GrpcKeyValueResponseType.TypeExists:
-                    return (true, response.Revision);
+                    return (true, response.Revision, response.TimeElapsedMs);
                 
                 case GrpcKeyValueResponseType.TypeDoesNotExist:
-                    return (false, 0);
+                    return (false, 0, response.TimeElapsedMs);
             }
             
             if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
@@ -412,7 +412,7 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to check if exists key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
-    public async Task<(bool, long)> TryDeleteKeyValue(string url, string key, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(bool, long, int)> TryDeleteKeyValue(string url, string key, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcTryDeleteKeyValueRequest request = new()
         {
@@ -428,21 +428,21 @@ public class GrpcCommunication : IKahunaCommunication
         do
         {
             if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", LockResponseType.Errored);                   
+                throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);                   
             
             GrpcBatcherResponse batchResponse = await batcher.Enqueue(request);
             response = batchResponse.TryDeleteKeyValue;
 
             if (response is null)
-                throw new KahunaException("Response is null", LockResponseType.Errored);
+                throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
             switch (response.Type)
             {
                 case GrpcKeyValueResponseType.TypeDeleted:
-                    return (true, response.Revision);
+                    return (true, response.Revision, response.TimeElapsedMs);
                 
                 case GrpcKeyValueResponseType.TypeDoesNotExist:
-                    return (false, response.Revision);
+                    return (false, response.Revision, response.TimeElapsedMs);
             }
             
             if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
@@ -456,7 +456,7 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to delete key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
-    public async Task<(bool, long)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(bool, long, int)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcTryExtendKeyValueRequest request = new()
         {
@@ -473,21 +473,21 @@ public class GrpcCommunication : IKahunaCommunication
         do
         {
             if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
+                throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
         
-            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request);
+            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
             response = batchResponse.TryExtendKeyValue;
 
             if (response is null)
-                throw new KahunaException("Response is null", LockResponseType.Errored);
+                throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
             switch (response.Type)
             {
                 case GrpcKeyValueResponseType.TypeExtended:
-                    return (true, response.Revision);
+                    return (true, response.Revision, response.TimeElapsedMs);
                 
                 case GrpcKeyValueResponseType.TypeDoesNotExist:
-                    return (false, 0);
+                    return (false, 0, response.TimeElapsedMs);
             }
             
             if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
@@ -517,25 +517,25 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcTryExecuteTransactionResponse? response;
         
-        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
+        GrpcBatcher batcher = GetSharedBatcher(url);
         
         do
         {
             if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
-        
-            response = await client.TryExecuteTransactionAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+                throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
+            
+            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            response = batchResponse.TryExecuteTransaction;
 
             if (response is null)
-                throw new KahunaException("Response is null", LockResponseType.Errored);
+                throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
             if (response.Type is < GrpcKeyValueResponseType.TypeErrored or GrpcKeyValueResponseType.TypeDoesNotExist)
                 return new()
                 {
                     Type = (KeyValueResponseType)response.Type,
-                    Values = GetTransactionValues(response.Values)
+                    Values = GetTransactionValues(response.Values),
+                    TimeElapsedMs = response.TimeElapsedMs
                 };
             
             if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
@@ -601,12 +601,12 @@ public class GrpcCommunication : IKahunaCommunication
         do
         {
             if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
+                throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
         
             response = await client.GetByPrefixAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
             if (response is null)
-                throw new KahunaException("Response is null", LockResponseType.Errored);
+                throw new KahunaException("Response is null", KeyValueResponseType.Errored);
             
             if (response.Type == GrpcKeyValueResponseType.TypeGot)
                 return (true, response.Items.Select(x => x.Key).ToList());
@@ -643,12 +643,12 @@ public class GrpcCommunication : IKahunaCommunication
         do
         {
             if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
+                throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
         
             response = await client.ScanAllByPrefixAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
             if (response is null)
-                throw new KahunaException("Response is null", LockResponseType.Errored);
+                throw new KahunaException("Response is null", KeyValueResponseType.Errored);
             
             if (response.Type == GrpcKeyValueResponseType.TypeGot)
                 return (true, response.Items.Select(x => x.Key).ToList());

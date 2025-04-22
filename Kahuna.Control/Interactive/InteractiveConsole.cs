@@ -106,7 +106,9 @@ public static class InteractiveConsole
                 "length",
                 "count",
                 "upper",
-                "lower",  
+                "lower",
+                "concat",
+                "trim",
                 "max",
                 "min",
                 "round",
@@ -369,7 +371,7 @@ public static class InteractiveConsole
 
     private static async Task RunCommand(KahunaClient connection, Dictionary<string, KahunaScript> scripts, List<string> history, string commandTrim)
     {
-        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
+        //ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
         if (!scripts.TryGetValue(commandTrim, out KahunaScript? script))
         {
@@ -389,7 +391,8 @@ public static class InteractiveConsole
                         AnsiConsole.MarkupLine(
                             "r{0} [cyan]{1}[/] {2}ms\n",
                             result.Values[0].Revision,                                                         
-                            Markup.Escape(GetHumanValue(result.Values[0])), stopwatch.GetElapsedMilliseconds()
+                            Markup.Escape(GetHumanValue(result.Values[0])), 
+                            result.TimeElapsedMs
                         );
                     }
                     else
@@ -413,7 +416,7 @@ public static class InteractiveConsole
                             }
                         }
 
-                        AnsiConsole.WriteLine("{0}ms\n", stopwatch.GetElapsedMilliseconds());
+                        AnsiConsole.WriteLine("{0}ms\n", result.TimeElapsedMs);
                     }                    
                 }
 
@@ -423,7 +426,7 @@ public static class InteractiveConsole
                 if (result.Values is not null)
                 {
                     foreach (KahunaKeyValueTransactionResultValue value in result.Values)
-                        AnsiConsole.MarkupLine("r{0} [yellow]not found[/] {1}ms\n", value.Revision, stopwatch.GetElapsedMilliseconds());
+                        AnsiConsole.MarkupLine("r{0} [yellow]not found[/] {1}ms\n", value.Revision, result.TimeElapsedMs);
                 }
 
                 break;
@@ -435,7 +438,7 @@ public static class InteractiveConsole
                         AnsiConsole.MarkupLine(
                             "r{0} [cyan]set[/] {1}ms\n", 
                             value.Revision >= 0 ? value.Revision : "-",
-                            stopwatch.GetElapsedMilliseconds()
+                            result.TimeElapsedMs
                         );
                 }
                 else
@@ -443,7 +446,7 @@ public static class InteractiveConsole
                     AnsiConsole.MarkupLine(
                         "r{0} [cyan]set[/] {1}ms\n", 
                         "-",
-                        stopwatch.GetElapsedMilliseconds()
+                        result.TimeElapsedMs
                     );
                 }
 
@@ -455,12 +458,12 @@ public static class InteractiveConsole
                     foreach (KahunaKeyValueTransactionResultValue value in result.Values)
                         AnsiConsole.MarkupLine(
                             "r{0} [yellow]not set[/] {1}ms\n", 
-                            value.Revision,
-                            stopwatch.GetElapsedMilliseconds()
+                            value.Revision >= 0 ? value.Revision : "-",
+                            result.TimeElapsedMs
                         );
                 } 
                 else                                 
-                    AnsiConsole.MarkupLine("r{0} [yellow]not set[/] {1}ms\n", 0, stopwatch.GetElapsedMilliseconds());
+                    AnsiConsole.MarkupLine("r{0} [yellow]not set[/] {1}ms\n", 0, result.TimeElapsedMs);
                 
                 break;
             
@@ -470,12 +473,12 @@ public static class InteractiveConsole
                     foreach (KahunaKeyValueTransactionResultValue value in result.Values)
                         AnsiConsole.MarkupLine(
                             "r{0} [cyan]deleted[/] {1}ms\n", 
-                            value.Revision,
-                            stopwatch.GetElapsedMilliseconds()
+                            value.Revision >= 0 ? value.Revision : "-",
+                            result.TimeElapsedMs
                         );
                 } 
                 else                                 
-                    AnsiConsole.MarkupLine("r{0} [cyan]deleted[/] {1}ms\n", 0, stopwatch.GetElapsedMilliseconds());           
+                    AnsiConsole.MarkupLine("r{0} [cyan]deleted[/] {1}ms\n", 0, result.TimeElapsedMs);           
                 
                 break;
             
@@ -486,12 +489,12 @@ public static class InteractiveConsole
                     foreach (KahunaKeyValueTransactionResultValue value in result.Values)
                         AnsiConsole.MarkupLine(
                             "r{0} [cyan]extended[/] {1}ms\n", 
-                            value.Revision,
-                            stopwatch.GetElapsedMilliseconds()
+                            value.Revision >= 0 ? value.Revision : "-",
+                            result.TimeElapsedMs
                         );
                 } 
                 else                                 
-                    AnsiConsole.MarkupLine("r{0} [yellow]extended[/] {1}ms\n", 0, stopwatch.GetElapsedMilliseconds()); 
+                    AnsiConsole.MarkupLine("r{0} [yellow]extended[/] {1}ms\n", 0, result.TimeElapsedMs); 
                                 
                 break;
             
@@ -501,12 +504,12 @@ public static class InteractiveConsole
                     foreach (KahunaKeyValueTransactionResultValue value in result.Values)
                         AnsiConsole.MarkupLine(
                             "r{0} [cyan]exists[/] {1}ms\n", 
-                            value.Revision,
-                            stopwatch.GetElapsedMilliseconds()
+                            value.Revision >= 0 ? value.Revision : "-",
+                            result.TimeElapsedMs
                         );
                 } 
                 else                                 
-                    AnsiConsole.MarkupLine("r{0} [cyan]exists[/] {1}ms\n", 0, stopwatch.GetElapsedMilliseconds()); 
+                    AnsiConsole.MarkupLine("r{0} [cyan]exists[/] {1}ms\n", 0, result.TimeElapsedMs); 
                                 
                 break;
 
@@ -521,7 +524,7 @@ public static class InteractiveConsole
             case KeyValueResponseType.Aborted:
             case KeyValueResponseType.AlreadyLocked:
             default:
-                AnsiConsole.MarkupLine("[yellow]{0}[/]ms\n", result.Type, stopwatch.GetElapsedMilliseconds());
+                AnsiConsole.MarkupLine("[yellow]{0}[/]ms\n", result.Type, result.TimeElapsedMs);
                 break;
         }
         

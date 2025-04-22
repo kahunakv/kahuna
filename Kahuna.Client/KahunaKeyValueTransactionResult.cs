@@ -25,6 +25,8 @@ public class KahunaKeyValueTransactionResult
        
     public List<KahunaKeyValueTransactionResultValue>? Values { get; set; }
     
+    public int TimeElapsedMs { get; set; }
+    
     public long FirstRevision
     {
         get

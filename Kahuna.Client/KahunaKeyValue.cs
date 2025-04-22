@@ -20,17 +20,20 @@ public class KahunaKeyValue
     public long Revision { get; }
     
     public byte[]? Value { get; }
+    
+    public int TimeElapsedMs { get; }
 
-    public KahunaKeyValue(KahunaClient client, string key, bool success, long revision, KeyValueDurability durability)
+    public KahunaKeyValue(KahunaClient client, string key, bool success, long revision, KeyValueDurability durability, int timeElapsedMs)
     {
         this.client = client;
         this.key = key;
         Success = success;
         Revision = revision;
         this.durability = durability;
+        TimeElapsedMs = timeElapsedMs;
     }
     
-    public KahunaKeyValue(KahunaClient client, string key, bool success, byte[]? value, long revision, KeyValueDurability durability)
+    public KahunaKeyValue(KahunaClient client, string key, bool success, byte[]? value, long revision, KeyValueDurability durability, int timeElapsedMs)
     {
         this.client = client;
         this.key = key;
@@ -38,6 +41,7 @@ public class KahunaKeyValue
         Value = value;
         Revision = revision;
         this.durability = durability;
+        TimeElapsedMs = timeElapsedMs;
     }
     
     public string? ValueAsString()

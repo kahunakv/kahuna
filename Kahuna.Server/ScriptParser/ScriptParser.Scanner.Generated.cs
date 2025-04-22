@@ -5,8 +5,8 @@
 //  See accompanying file GPLEXcopyright.rtf.
 //
 //  GPLEX Version:  1.2.3
-//  DateTime: 4/17/2025 12:05:38 PM
-//  GPLEX input file <ScriptParser/ScriptParser.Language.analyzer.lex - 4/17/2025 12:00:44 PM>
+//  DateTime: 4/21/2025 10:07:21 PM
+//  GPLEX input file <ScriptParser/ScriptParser.Language.analyzer.lex - 4/21/2025 9:59:02 PM>
 //  GPLEX frame file <embedded resource>
 //
 //  Option settings: verbose, parser, stack, minimize
@@ -1728,11 +1728,9 @@ yylval.l = yyline; return (int)Token.TAT;
         case 119: // Recognized '{Identifier}',	Shortest string "EEXIS"
         case 120: // Recognized '{Identifier}',	Shortest string "EEXIST"
         case 122: // Recognized '{Identifier}',	Shortest string "EDE"
-        case 123: // Recognized '{Identifier}',	Shortest string "EDEL"
         case 124: // Recognized '{Identifier}',	Shortest string "EDELE"
         case 125: // Recognized '{Identifier}',	Shortest string "EDELET"
         case 127: // Recognized '{Identifier}',	Shortest string "DE"
-        case 129: // Recognized '{Identifier}',	Shortest string "DEL"
         case 130: // Recognized '{Identifier}',	Shortest string "DELE"
         case 131: // Recognized '{Identifier}',	Shortest string "DELET"
         case 133: // Recognized '{Identifier}',	Shortest string "CM"
@@ -1846,11 +1844,17 @@ yylval.l = yyline; return (int)Token.TEEXTEND;
         case 121: // Recognized '{TEExists}',	Shortest string "EEXISTS"
 yylval.l = yyline; return (int)Token.TEEXISTS;
             break;
+        case 123: // Recognized '{TEDel}',	Shortest string "EDEL"
+yylval.l = yyline; return (int)Token.TEDELETE;
+            break;
         case 126: // Recognized '{TEDelete}',	Shortest string "EDELETE"
 yylval.l = yyline; return (int)Token.TEDELETE;
             break;
         case 128: // Recognized '{TDo}',	Shortest string "DO"
 yylval.l = yyline; return (int)Token.TDO;
+            break;
+        case 129: // Recognized '{TDel}',	Shortest string "DEL"
+yylval.l = yyline; return (int)Token.TDELETE;
             break;
         case 132: // Recognized '{TDelete}',	Shortest string "DELETE"
 yylval.l = yyline; return (int)Token.TDELETE;

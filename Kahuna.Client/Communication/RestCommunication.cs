@@ -263,7 +263,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to get lock information", response.Type);
     }
 
-    public async Task<(bool, long)> TrySetKeyValue(string url, string key, byte[]? value, int expiryTime, KeyValueFlags flags, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(bool, long, int)> TrySetKeyValue(string url, string key, byte[]? value, int expiryTime, KeyValueFlags flags, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         KahunaSetKeyValueRequest request = new()
         {
@@ -301,10 +301,10 @@ public class RestCommunication : IKahunaCommunication
                 throw new KahunaException("Response is null", LockResponseType.Errored);
 
             if (response.Type == KeyValueResponseType.Set)
-                return (true, response.Revision);
+                return (true, response.Revision, 0);
             
             if (response.Type == KeyValueResponseType.NotSet)
-                return (false, response.Revision);
+                return (false, response.Revision, 0);
             
             if (++retries >= 5)
                 throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
@@ -314,7 +314,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value: " + response.Type, response.Type);
     }
 
-    public async Task<(bool, long)> TryCompareValueAndSetKeyValue(string url, string key, byte[]? value, byte[]? compareValue, int expiryTime, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(bool, long, int)> TryCompareValueAndSetKeyValue(string url, string key, byte[]? value, byte[]? compareValue, int expiryTime, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         KahunaSetKeyValueRequest request = new()
         {
@@ -353,10 +353,10 @@ public class RestCommunication : IKahunaCommunication
                 throw new KahunaException("Response is null", LockResponseType.Errored);
 
             if (response.Type == KeyValueResponseType.Set)
-                return (true, response.Revision);
+                return (true, response.Revision, 0);
             
             if (response.Type == KeyValueResponseType.NotSet)
-                return (false, response.Revision);
+                return (false, response.Revision, 0);
             
             if (++retries >= 5)
                 throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
@@ -366,7 +366,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value: " + response.Type, response.Type);
     }
 
-    public async Task<(bool, long)> TryCompareRevisionAndSetKeyValue(string url, string key, byte[]? value, long compareRevision, int expiryTime, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(bool, long, int)> TryCompareRevisionAndSetKeyValue(string url, string key, byte[]? value, long compareRevision, int expiryTime, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         KahunaSetKeyValueRequest request = new()
         {
@@ -405,10 +405,10 @@ public class RestCommunication : IKahunaCommunication
                 throw new KahunaException("Response is null", LockResponseType.Errored);
 
             if (response.Type == KeyValueResponseType.Set)
-                return (true, response.Revision);
+                return (true, response.Revision, 0);
             
             if (response.Type == KeyValueResponseType.NotSet)
-                return (false, response.Revision);
+                return (false, response.Revision, 0);
             
             if (++retries >= 5)
                 throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
@@ -418,7 +418,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value: " + response.Type, response.Type);
     }
 
-    public async Task<(bool, byte[]?, long)> TryGetKeyValue(string url, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(bool, byte[]?, long, int)> TryGetKeyValue(string url, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         KahunaGetKeyValueRequest request = new()
         {
@@ -454,10 +454,10 @@ public class RestCommunication : IKahunaCommunication
                 throw new KahunaException("Response is null", LockResponseType.Errored);
 
             if (response.Type == KeyValueResponseType.Get)
-                return (true, response.Value, response.Revision);
+                return (true, response.Value, response.Revision, 0);
             
             if (response.Type == KeyValueResponseType.DoesNotExist)
-                return (false, null, response.Revision);
+                return (false, null, response.Revision, 0);
             
             if (++retries >= 5)
                 throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
@@ -467,7 +467,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to get key/value: " + response.Type, response.Type);
     }
     
-    public async Task<(bool, long)> TryExistsKeyValue(string url, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(bool, long, int)> TryExistsKeyValue(string url, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         KahunaExistsKeyValueRequest request = new()
         {
@@ -502,17 +502,17 @@ public class RestCommunication : IKahunaCommunication
                 throw new KahunaException("Response is null", LockResponseType.Errored);
 
             if (response.Type == KeyValueResponseType.Exists)
-                return (true, response.Revision);
+                return (true, response.Revision, 0);
             
             if (response.Type == KeyValueResponseType.DoesNotExist)
-                return (false, response.Revision);
+                return (false, response.Revision, 0);
 
         } while (response.Type == KeyValueResponseType.MustRetry);
             
         throw new KahunaException("Failed to check if exists key/value: " + response.Type, response.Type);
     }
 
-    public async Task<(bool, long)> TryDeleteKeyValue(string url, string key, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(bool, long, int)> TryDeleteKeyValue(string url, string key, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         KahunaDeleteKeyValueRequest request = new()
         {
@@ -546,17 +546,17 @@ public class RestCommunication : IKahunaCommunication
                 throw new KahunaException("Response is null", LockResponseType.Errored);
 
             if (response.Type == KeyValueResponseType.Deleted)
-                return (true, response.Revision);
+                return (true, response.Revision, 0);
             
             if (response.Type == KeyValueResponseType.DoesNotExist)
-                return (false, response.Revision);
+                return (false, response.Revision, 0);
 
         } while (response.Type == KeyValueResponseType.MustRetry);
             
         throw new KahunaException("Failed to delete key/value: " + response.Type, response.Type);
     }
 
-    public async Task<(bool, long)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(bool, long, int)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         KahunaExtendKeyValueRequest request = new()
         {
@@ -591,10 +591,10 @@ public class RestCommunication : IKahunaCommunication
                 throw new KahunaException("Response is null", LockResponseType.Errored);
 
             if (response.Type == KeyValueResponseType.Extended)
-                return (true, response.Revision);
+                return (true, response.Revision, 0);
             
             if (response.Type == KeyValueResponseType.DoesNotExist)
-                return (false, response.Revision);
+                return (false, response.Revision, 0);
 
         } while (response.Type == KeyValueResponseType.MustRetry);
             

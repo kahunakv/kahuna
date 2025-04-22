@@ -28,7 +28,9 @@ TRollback       (R|r)(O|o)(L|l)(L|l)(B|b)(A|a)(C|c)(K|k)
 TReturn         (R|r)(E|e)(T|t)(U|u)(R|r)(N|n)
 TSleep          (S|s)(L|l)(E|e)(E|e)(P|p)
 TDelete         (D|d)(E|e)(L|l)(E|e)(T|t)(E|e)
+TDel            (D|d)(E|e)(L|l)
 TEDelete        (E|e)(D|d)(E|e)(L|l)(E|e)(T|t)(E|e)
+TEDel           (E|e)(D|d)(E|e)(L|l)
 TExtend         (E|e)(X|x)(T|t)(E|e)(N|n)(D|d)
 TEExtend        (E|e)(E|e)(X|x)(T|t)(E|e)(N|n)(D|d)
 TExists         (E|e)(X|x)(I|i)(S|s)(T|t)(S|s)
@@ -131,7 +133,11 @@ TAnd            &&
 
 {TDelete} { yylval.l = yyline; return (int)Token.TDELETE; }
 
+{TDel} { yylval.l = yyline; return (int)Token.TDELETE; }
+
 {TEDelete} { yylval.l = yyline; return (int)Token.TEDELETE; }
+
+{TEDel} { yylval.l = yyline; return (int)Token.TEDELETE; }
 
 {TExists} { yylval.l = yyline; return (int)Token.TEXISTS; }
 

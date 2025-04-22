@@ -39,7 +39,10 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
             if (!key.StartsWith(message.Key, StringComparison.Ordinal))
                 continue;
                        
-            KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability);                       
+            KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability);     
+            
+            if (response.Type == KeyValueResponseType.DoesNotExist)
+                continue;
 
             if (response.Type != KeyValueResponseType.Get)
                 return new(response.Type, []);
@@ -66,6 +69,9 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
                 continue;
             
             KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability);
+
+            if (response.Type == KeyValueResponseType.DoesNotExist)
+                continue;
             
             if (response.Type != KeyValueResponseType.Get)
                 return new(response.Type, []);
@@ -92,6 +98,9 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
                 continue;
             
             KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability, readOnlyKeyValueContext);
+            
+            if (response.Type == KeyValueResponseType.DoesNotExist)
+                continue;
 
             if (response is { Type: KeyValueResponseType.Get, Context: not null })
                 items.Add(key, response.Context);

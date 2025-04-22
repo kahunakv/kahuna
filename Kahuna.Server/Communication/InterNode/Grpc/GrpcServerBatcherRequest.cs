@@ -12,6 +12,8 @@ internal sealed class GrpcServerBatcherRequest
     public GrpcTryExtendKeyValueRequest? TryExtendKeyValue { get; }
     
     public GrpcTryExistsKeyValueRequest? TryExistsKeyValue { get; }
+    
+    public GrpcTryExecuteTransactionRequest? TryExecuteTransaction { get; }
 
     public GrpcServerBatcherRequest(GrpcTrySetKeyValueRequest trySetKeyValue)
     {
@@ -36,5 +38,10 @@ internal sealed class GrpcServerBatcherRequest
     public GrpcServerBatcherRequest(GrpcTryExistsKeyValueRequest tryExistsKeyValue)
     {
         TryExistsKeyValue = tryExistsKeyValue;
+    }
+    
+    public GrpcServerBatcherRequest(GrpcTryExecuteTransactionRequest tryExecuteTransaction)
+    {
+        TryExecuteTransaction = tryExecuteTransaction;
     }
 }

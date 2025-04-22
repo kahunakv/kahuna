@@ -41,6 +41,7 @@ message GrpcTrySetKeyValueResponse {
   int64 Revision = 3;
   int64 LastModifiedPhysical = 4;
   uint32 LastModifiedCounter = 5;
+  int32 TimeElapsedMs = 6;
 }
 
 message GrpcTryExtendKeyValueRequest {
@@ -57,6 +58,7 @@ message GrpcTryExtendKeyValueResponse {
   int64 Revision = 3;
   int64 LastModifiedPhysical = 4;
   uint32 LastModifiedCounter = 5;
+  int32 TimeElapsedMs = 6;
 }
 
 message GrpcTryDeleteKeyValueRequest {
@@ -72,6 +74,7 @@ message GrpcTryDeleteKeyValueResponse {
   int64 Revision = 3;
   int64 LastModifiedPhysical = 4;
   uint32 LastModifiedCounter = 5;
+  int32 TimeElapsedMs = 6;
 }
 
 message GrpcTryGetKeyValueRequest {
@@ -94,6 +97,7 @@ message GrpcTryGetKeyValueResponse {
   int64 LastModifiedPhysical = 9;
   uint32 LastModifiedCounter = 10;
   GrpcKeyValueState State = 11;
+  int32 TimeElapsedMs = 12;
 }
 
 message GrpcTryExistsKeyValueRequest {
@@ -115,6 +119,7 @@ message GrpcTryExistsKeyValueResponse {
   int64 LastModifiedPhysical = 8;
   uint32 LastModifiedCounter = 9;
   GrpcKeyValueState State = 10;
+  int32 TimeElapsedMs = 11;
 }
 
 message GrpcTryExecuteTransactionRequest {
@@ -133,6 +138,7 @@ message GrpcTryExecuteTransactionResponse {
   GrpcKeyValueResponseType Type = 2; 
   optional string Reason = 3;
   repeated GrpcTryExecuteTransactionResponseValue Values = 4;
+  int32 TimeElapsedMs = 5;
 }
 
 message GrpcTryExecuteTransactionResponseValue {
@@ -368,6 +374,7 @@ message GrpcBatchClientKeyValueRequest {
     GrpcTryDeleteKeyValueRequest TryDeleteKeyValue = 5;
     GrpcTryExtendKeyValueRequest TryExtendKeyValue = 6;
     GrpcTryExistsKeyValueRequest TryExistsKeyValue = 7;
+    GrpcTryExecuteTransactionRequest TryExecuteTransaction = 8;
   }
 }
 
@@ -381,6 +388,7 @@ message GrpcBatchClientKeyValueResponse
     GrpcTryDeleteKeyValueResponse TryDeleteKeyValue = 5;
     GrpcTryExtendKeyValueResponse TryExtendKeyValue = 6;
     GrpcTryExistsKeyValueResponse TryExistsKeyValue = 7;
+    GrpcTryExecuteTransactionResponse TryExecuteTransaction = 8;
   }
 }
 
@@ -393,6 +401,7 @@ message GrpcBatchServerKeyValueRequest {
     GrpcTryDeleteKeyValueRequest TryDeleteKeyValue = 5;
     GrpcTryExtendKeyValueRequest TryExtendKeyValue = 6;
     GrpcTryExistsKeyValueRequest TryExistsKeyValue = 7;
+    GrpcTryExecuteTransactionRequest TryExecuteTransaction = 8;
   }
 }
 
@@ -406,6 +415,7 @@ message GrpcBatchServerKeyValueResponse
     GrpcTryDeleteKeyValueResponse TryDeleteKeyValue = 5;
     GrpcTryExtendKeyValueResponse TryExtendKeyValue = 6;
     GrpcTryExistsKeyValueResponse TryExistsKeyValue = 7;
+    GrpcTryExecuteTransactionResponse TryExecuteTransaction = 8;
   }
 }
 

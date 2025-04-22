@@ -70,6 +70,15 @@ internal sealed class GrpcServerBatcher
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
+    
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryExecuteTransactionRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
 
     private Task<GrpcServerBatcherResponse> TryProcessQueue(GrpcServerBatcherItem grpcBatcherItem, TaskCompletionSource<GrpcServerBatcherResponse> promise)
     {
@@ -165,6 +174,11 @@ internal sealed class GrpcServerBatcher
                     batchRequest.Type = GrpcBatchClientType.TryExistsKeyValue;
                     batchRequest.TryExistsKeyValue = itemRequest.TryExistsKeyValue;
                 }
+                else if (itemRequest.TryExecuteTransaction is not null)
+                {
+                    batchRequest.Type = GrpcBatchClientType.TryExecuteTransaction;
+                    batchRequest.TryExecuteTransaction = itemRequest.TryExecuteTransaction;
+                }
                 else
                 {
                     throw new KahunaServerException("Unknown request type");
@@ -218,6 +232,10 @@ internal sealed class GrpcServerBatcher
                         
                 case GrpcBatchClientType.TryExistsKeyValue:
                     item.Promise.SetResult(new(response.TryExistsKeyValue));
+                    break;
+                
+                case GrpcBatchClientType.TryExecuteTransaction:
+                    item.Promise.SetResult(new(response.TryExecuteTransaction));
                     break;
                         
                 case GrpcBatchClientType.TypeNone:

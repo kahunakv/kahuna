@@ -67,7 +67,14 @@ public class KahunaClient
     
     private async Task<(KahunaLockAcquireResult, long, string?)> TryAcquireLock(string resource, byte[] owner, TimeSpan expiryTime, LockDurability durability, CancellationToken cancellationToken = default)
     {
-        return await communication.TryAcquireLock(GetRoundRobinUrl(), resource, owner, (int)expiryTime.TotalMilliseconds, durability, cancellationToken).ConfigureAwait(false);
+        return await communication.TryAcquireLock(
+            GetRoundRobinUrl(), 
+            resource, 
+            owner, 
+            (int)expiryTime.TotalMilliseconds, 
+            durability, 
+            cancellationToken
+        ).ConfigureAwait(false);
     }
     
     private async Task<KahunaLock> PeriodicallyTryAcquireLock(
@@ -275,9 +282,17 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<KahunaKeyValue> SetKeyValue(string key, byte[]? value, int expiryTime = 0, KeyValueFlags flags = KeyValueFlags.Set, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, long revision) = await communication.TrySetKeyValue(GetRoundRobinUrl(), key, value, expiryTime, flags, durability, cancellationToken).ConfigureAwait(false);
+        (bool success, long revision, int timeElapsedMs) = await communication.TrySetKeyValue(
+            GetRoundRobinUrl(), 
+            key, 
+            value, 
+            expiryTime, 
+            flags, 
+            durability, 
+            cancellationToken
+        ).ConfigureAwait(false);
         
-        return new(this, key, success, value, revision, durability);
+        return new(this, key, success, value, revision, durability, timeElapsedMs);
     }
     
     /// <summary>
@@ -292,9 +307,17 @@ public class KahunaClient
     {
         byte[] valueBytes = Encoding.UTF8.GetBytes(value);
         
-        (bool success, long revision) = await communication.TrySetKeyValue(GetRoundRobinUrl(), key, valueBytes, expiryTime, flags, durability, cancellationToken).ConfigureAwait(false);
+        (bool success, long revision, int timeElapsedMs) = await communication.TrySetKeyValue(
+            GetRoundRobinUrl(), 
+            key, 
+            valueBytes, 
+            expiryTime, 
+            flags, 
+            durability, 
+            cancellationToken
+        ).ConfigureAwait(false);
         
-        return new(this, key, success, valueBytes, revision, durability);
+        return new(this, key, success, valueBytes, revision, durability, timeElapsedMs);
     }
     
     /// <summary>
@@ -309,7 +332,7 @@ public class KahunaClient
     {
         byte[] valueBytes = Encoding.UTF8.GetBytes(value);
         
-        (bool success, long revision) = await communication.TrySetKeyValue(
+        (bool success, long revision, int timeElapsedMs) = await communication.TrySetKeyValue(
             GetRoundRobinUrl(), 
             key, 
             valueBytes, 
@@ -319,7 +342,7 @@ public class KahunaClient
             cancellationToken
         ).ConfigureAwait(false);
         
-        return new(this, key, success, valueBytes, revision, durability);
+        return new(this, key, success, valueBytes, revision, durability, timeElapsedMs);
     }
     
     /// <summary>
@@ -333,7 +356,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<KahunaKeyValue> TryCompareValueAndSetKeyValue(string key, byte[] value, byte[] compareValue, int expiryTime = 30000, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, long revision) = await communication.TryCompareValueAndSetKeyValue(
+        (bool success, long revision, int timeElapsedMs) = await communication.TryCompareValueAndSetKeyValue(
             GetRoundRobinUrl(), 
             key, 
             value, 
@@ -343,7 +366,7 @@ public class KahunaClient
             cancellationToken
         ).ConfigureAwait(false);
         
-        return new(this, key, success, value, revision, durability);
+        return new(this, key, success, value, revision, durability, timeElapsedMs);
     }
     
     /// <summary>
@@ -359,7 +382,7 @@ public class KahunaClient
     {
         byte[] valueBytes = Encoding.UTF8.GetBytes(value);
         
-        (bool success, long revision) = await communication.TryCompareValueAndSetKeyValue(
+        (bool success, long revision, int timeElapsedMs) = await communication.TryCompareValueAndSetKeyValue(
             GetRoundRobinUrl(), 
             key, 
             valueBytes, 
@@ -369,7 +392,7 @@ public class KahunaClient
             cancellationToken
         ).ConfigureAwait(false);
         
-        return new(this, key, success, valueBytes, revision, durability);
+        return new(this, key, success, valueBytes, revision, durability, timeElapsedMs);
     }
     
     /// <summary>
@@ -383,7 +406,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<KahunaKeyValue> TryCompareRevisionAndSetKeyValue(string key, byte[]? value, long compareRevision, int expiryTime = 0, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, long revision) = await communication.TryCompareRevisionAndSetKeyValue(
+        (bool success, long revision, int timeElapsedMs) = await communication.TryCompareRevisionAndSetKeyValue(
             GetRoundRobinUrl(), 
             key, 
             value, 
@@ -393,7 +416,7 @@ public class KahunaClient
             cancellationToken
         ).ConfigureAwait(false);
         
-        return new(this, key, success, value, revision, durability);
+        return new(this, key, success, value, revision, durability, timeElapsedMs);
     }
     
     /// <summary>
@@ -409,7 +432,7 @@ public class KahunaClient
     {
         byte[] valueBytes = Encoding.UTF8.GetBytes(value);
         
-        (bool success, long revision) = await communication.TryCompareRevisionAndSetKeyValue(
+        (bool success, long revision, int timeElapsedMs) = await communication.TryCompareRevisionAndSetKeyValue(
             GetRoundRobinUrl(), 
             key, 
             valueBytes, 
@@ -419,7 +442,7 @@ public class KahunaClient
             cancellationToken
         ).ConfigureAwait(false);
         
-        return new(this, key, success, valueBytes, revision, durability);
+        return new(this, key, success, valueBytes, revision, durability, timeElapsedMs);
     }
     
     /// <summary>
@@ -443,7 +466,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<KahunaKeyValue> GetKeyValue(string key, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, byte[]? value, long revision) = await communication.TryGetKeyValue(
+        (bool success, byte[]? value, long revision, int timeElapsedMs) = await communication.TryGetKeyValue(
             GetRoundRobinUrl(), 
             key, 
             -1, 
@@ -451,7 +474,7 @@ public class KahunaClient
             cancellationToken
         ).ConfigureAwait(false);
         
-        return new(this, key, success, value, revision, durability);
+        return new(this, key, success, value, revision, durability, timeElapsedMs);
     }
     
     /// <summary>
@@ -462,7 +485,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<KahunaKeyValue> ExistsKeyValue(string key, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, long revision) = await communication.TryExistsKeyValue(
+        (bool success, long revision, int timeElapsedMs) = await communication.TryExistsKeyValue(
             GetRoundRobinUrl(), 
             key, 
             -1, 
@@ -470,7 +493,7 @@ public class KahunaClient
             cancellationToken
         ).ConfigureAwait(false);
         
-        return new(this, key, success, revision, durability);
+        return new(this, key, success, revision, durability, timeElapsedMs);
     }
     
     /// <summary>
@@ -482,7 +505,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<KahunaKeyValue> GetKeyValueRevision(string key, long revision, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, byte[]? value, long returnRevision) = await communication.TryGetKeyValue(
+        (bool success, byte[]? value, long returnRevision, int timeElapsedMs) = await communication.TryGetKeyValue(
             GetRoundRobinUrl(), 
             key, 
             revision, 
@@ -490,7 +513,7 @@ public class KahunaClient
             cancellationToken
         ).ConfigureAwait(false);
         
-        return new(this, key, success, value, returnRevision, durability);
+        return new(this, key, success, value, returnRevision, durability, timeElapsedMs);
     }
     
     /// <summary>
@@ -501,9 +524,14 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<KahunaKeyValue> DeleteKeyValue(string key, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, long revision) = await communication.TryDeleteKeyValue(GetRoundRobinUrl(), key, durability, cancellationToken).ConfigureAwait(false);
+        (bool success, long revision, int timeElapsedMs) = await communication.TryDeleteKeyValue(
+            GetRoundRobinUrl(), 
+            key, 
+            durability, 
+            cancellationToken
+        ).ConfigureAwait(false);
         
-        return new(this, key, success, revision, durability);
+        return new(this, key, success, revision, durability, timeElapsedMs);
     }
     
     /// <summary>
@@ -516,9 +544,15 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<KahunaKeyValue> ExtendKeyValue(string key, int expiresMs, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, long revision) = await communication.TryExtendKeyValue(GetRoundRobinUrl(), key, expiresMs, durability, cancellationToken).ConfigureAwait(false);
+        (bool success, long revision, int timeElapsedMs) = await communication.TryExtendKeyValue(
+            GetRoundRobinUrl(), 
+            key, 
+            expiresMs, 
+            durability, 
+            cancellationToken
+        ).ConfigureAwait(false);
         
-        return new(this, key, success, revision, durability);
+        return new(this, key, success, revision, durability, timeElapsedMs);
     }
     
     /// <summary>
@@ -531,9 +565,15 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<KahunaKeyValue> ExtendKeyValue(string key, TimeSpan expiresMs, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, long revision) = await communication.TryExtendKeyValue(GetRoundRobinUrl(), key, (int)expiresMs.TotalMilliseconds, durability, cancellationToken).ConfigureAwait(false);
+        (bool success, long revision, int timeElapsedMs) = await communication.TryExtendKeyValue(
+            GetRoundRobinUrl(), 
+            key, 
+            (int)expiresMs.TotalMilliseconds, 
+            durability, 
+            cancellationToken
+        ).ConfigureAwait(false);
         
-        return new(this, key, success, revision, durability);
+        return new(this, key, success, revision, durability, timeElapsedMs);
     }
 
     /// <summary>
@@ -548,7 +588,13 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransaction(string script, string? hash = null, List<KeyValueParameter>? parameters = null, CancellationToken cancellationToken = default)
     {
-        return await communication.TryExecuteKeyValueTransaction(GetRoundRobinUrl(), Encoding.UTF8.GetBytes(script), hash, parameters, cancellationToken).ConfigureAwait(false);
+        return await communication.TryExecuteKeyValueTransaction(
+            GetRoundRobinUrl(), 
+            Encoding.UTF8.GetBytes(script), 
+            hash, 
+            parameters, 
+            cancellationToken
+        ).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -606,7 +652,7 @@ public class KahunaClient
     private string GetRoundRobinUrl()
     {
         int serverPointer = Interlocked.Increment(ref currentServer);
-        return urls[serverPointer % urls.Length];
+        return urls[Math.Abs(serverPointer) % urls.Length];
     }
 }
 

@@ -14,6 +14,7 @@ using Grpc.Core;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
+using Kommander.Diagnostics;
 
 namespace Kahuna.Communication.External.Grpc;
 
@@ -60,6 +61,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             {
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
+        
+        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
         byte[]? value;
         
@@ -92,7 +95,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             Type = (GrpcKeyValueResponseType)response,
             Revision = revision,
             LastModifiedPhysical = lastModified.L,
-            LastModifiedCounter = lastModified.C
+            LastModifiedCounter = lastModified.C,
+            TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
         };
     }
     
@@ -121,6 +125,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
         
+        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
+        
         (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTryExtendKeyValue(
             new(request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key, 
@@ -134,7 +140,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             Type = (GrpcKeyValueResponseType)type,
             Revision = revision,
             LastModifiedPhysical = lastModified.L,
-            LastModifiedCounter = lastModified.C
+            LastModifiedCounter = lastModified.C,
+            TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
         };
     }
     
@@ -157,6 +164,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
         
+        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
+        
         (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTryDeleteKeyValue(
             new(request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key, 
@@ -169,7 +178,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             Type = (GrpcKeyValueResponseType)type,
             Revision = revision,
             LastModifiedPhysical = lastModified.L,
-            LastModifiedCounter = lastModified.C
+            LastModifiedCounter = lastModified.C,
+            TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
         };
     }
     
@@ -192,6 +202,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
         
+        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
+        
         (KeyValueResponseType type, ReadOnlyKeyValueContext? keyValueContext) = await keyValues.LocateAndTryGetValue(
             new(request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key, 
@@ -209,6 +221,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 Revision = keyValueContext.Revision,
                 ExpiresPhysical = keyValueContext.Expires.L,
                 ExpiresCounter = keyValueContext.Expires.C,
+                TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
             };
 
             if (keyValueContext.Value is not null)
@@ -219,7 +232,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
         return new()
         {
-            Type = (GrpcKeyValueResponseType)type
+            Type = (GrpcKeyValueResponseType)type,
+            TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
         };
     }
     
@@ -242,6 +256,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
         
+        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
+        
         (KeyValueResponseType type, ReadOnlyKeyValueContext? keyValueContext) = await keyValues.LocateAndTryExistsValue(
             new(request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key, 
@@ -259,6 +275,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 Revision = keyValueContext.Revision,
                 ExpiresPhysical = keyValueContext.Expires.L,
                 ExpiresCounter = keyValueContext.Expires.C,
+                TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
             };
             
             return response;
@@ -266,7 +283,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
         return new()
         {
-            Type = (GrpcKeyValueResponseType)type
+            Type = (GrpcKeyValueResponseType)type,
+            TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
         };
     }
     
@@ -593,17 +611,29 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns></returns>
     public override async Task<GrpcTryExecuteTransactionResponse> TryExecuteTransaction(GrpcTryExecuteTransactionRequest request, ServerCallContext context)
     {
+        return await TryExecuteTransactionInternal(request, context);
+    }
+
+    private async Task<GrpcTryExecuteTransactionResponse> TryExecuteTransactionInternal(GrpcTryExecuteTransactionRequest request, ServerCallContext context)
+    {
         if (request.Script is null)
             return new()
             {
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
+        
+        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
             
-        KeyValueTransactionResult result = await keyValues.TryExecuteTx(request.Script.ToByteArray(), request.Hash, GetParameters(request.Parameters));
+        KeyValueTransactionResult result = await keyValues.TryExecuteTx(
+            request.Script.ToByteArray(), 
+            request.Hash, 
+            GetParameters(request.Parameters)
+        );
 
         GrpcTryExecuteTransactionResponse response = new()
         {
-            Type = (GrpcKeyValueResponseType) result.Type
+            Type = (GrpcKeyValueResponseType) result.Type,
+            TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
         };
                                   
         if (result.ServedFrom is not null)
@@ -624,7 +654,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                     ExpiresPhysical = value.Expires.L,
                     ExpiresCounter = value.Expires.C,
                     LastModifiedPhysical = value.LastModified.L,
-                    LastModifiedCounter = value.LastModified.C,
+                    LastModifiedCounter = value.LastModified.C
                 };
                 
                 if (value.Key is not null)
@@ -810,6 +840,14 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                         tasks.Add(TryExistsKeyValueDelayed(semaphore, request.RequestId, extendKeyRequest, responseStream, context));
                     }
                     break;
+                    
+                    case GrpcBatchClientType.TryExecuteTransaction:
+                    {
+                        GrpcTryExecuteTransactionRequest? tryExecuteTransactionRequest = request.TryExecuteTransaction;
+
+                        tasks.Add(TryExecuteTransactionDelayed(semaphore, request.RequestId, tryExecuteTransactionRequest, responseStream, context));
+                    }
+                    break;
 
                     case GrpcBatchClientType.TypeNone:
                     default:
@@ -822,7 +860,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         }
         catch (IOException ex)
         {
-            logger.LogWarning("IOException: {Message}", ex.Message);
+            logger.LogDebug("IOException: {Message}", ex.Message);
         }
     }
 
@@ -957,6 +995,35 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             Type = GrpcBatchClientType.TryExistsKeyValue,
             RequestId = requestId,
             TryExistsKeyValue = tryExistsResponse
+        };
+
+        try
+        {
+            await semaphore.WaitAsync(context.CancellationToken);
+
+            await responseStream.WriteAsync(response);
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+    
+    private async Task TryExecuteTransactionDelayed(
+        SemaphoreSlim semaphore, 
+        int requestId, 
+        GrpcTryExecuteTransactionRequest tryExecuteTransactionRequest, 
+        IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcTryExecuteTransactionResponse tryExecuteTransactionResponse = await TryExecuteTransactionInternal(tryExecuteTransactionRequest, context);
+        
+        GrpcBatchClientKeyValueResponse response = new()
+        {
+            Type = GrpcBatchClientType.TryExecuteTransaction,
+            RequestId = requestId,
+            TryExecuteTransaction = tryExecuteTransactionResponse
         };
 
         try
