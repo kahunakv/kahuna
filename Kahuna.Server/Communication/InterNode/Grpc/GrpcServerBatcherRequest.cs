@@ -16,6 +16,16 @@ internal sealed class GrpcServerBatcherRequest
     public GrpcTryExecuteTransactionRequest? TryExecuteTransaction { get; }
     
     public GrpcTryAcquireExclusiveLockRequest? TryAcquireExclusiveLock { get; }
+    
+    public GrpcTryAcquireManyExclusiveLocksRequest? TryAcquireManyExclusiveLocks { get; }
+    
+    public GrpcTryReleaseExclusiveLockRequest? TryReleaseExclusiveLock { get; }
+    
+    public GrpcTryReleaseManyExclusiveLocksRequest? TryReleaseManyExclusiveLocks { get; }
+    
+    public GrpcTryPrepareMutationsRequest? TryPrepareMutations { get; }
+    
+    public GrpcTryPrepareManyMutationsRequest? TryPrepareManyMutations { get; }
 
     public GrpcServerBatcherRequest(GrpcTrySetKeyValueRequest trySetKeyValue)
     {
@@ -50,5 +60,30 @@ internal sealed class GrpcServerBatcherRequest
     public GrpcServerBatcherRequest(GrpcTryAcquireExclusiveLockRequest tryAcquireExclusiveLock)
     {
         TryAcquireExclusiveLock = tryAcquireExclusiveLock;
+    }
+    
+    public GrpcServerBatcherRequest(GrpcTryAcquireManyExclusiveLocksRequest tryAcquireManyExclusiveLocks)
+    {
+        TryAcquireManyExclusiveLocks = tryAcquireManyExclusiveLocks;
+    }
+    
+    public GrpcServerBatcherRequest(GrpcTryReleaseExclusiveLockRequest tryReleaseExclusiveLock)
+    {
+        TryReleaseExclusiveLock = tryReleaseExclusiveLock;
+    }
+    
+    public GrpcServerBatcherRequest(GrpcTryReleaseManyExclusiveLocksRequest tryReleaseManyExclusiveLocks)
+    {
+        TryReleaseManyExclusiveLocks = tryReleaseManyExclusiveLocks;
+    }
+    
+    public GrpcServerBatcherRequest(GrpcTryPrepareMutationsRequest tryPrepareMutations)
+    {
+        TryPrepareMutations = tryPrepareMutations;
+    }
+    
+    public GrpcServerBatcherRequest(GrpcTryPrepareManyMutationsRequest tryPrepareManyMutations)
+    {
+        TryPrepareManyMutations = tryPrepareManyMutations;
     }
 }

@@ -343,9 +343,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         CancellationToken cancelationToken
     )
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node);
-            
-        KeyValuer.KeyValuerClient client = new(channel);
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
             
         GrpcTryAcquireManyExclusiveLocksRequest request = new()
         {
@@ -354,8 +352,9 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         };
             
         request.Items.Add(GetAcquireLockRequestItems(xkeys));
-            
-        GrpcTryAcquireManyExclusiveLocksResponse? remoteResponse = await client.TryAcquireManyExclusiveLocksAsync(request, cancellationToken: cancelationToken);
+        
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcTryAcquireManyExclusiveLocksResponse remoteResponse = response.TryAcquireManyExclusiveLocks!;
 
         lock (lockSync)
         {
@@ -383,9 +382,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         CancellationToken cancelationToken
     )
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
         
         GrpcTryReleaseExclusiveLockRequest request = new()
         {
@@ -395,7 +392,8 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcKeyValueDurability)durability,
         };
         
-        GrpcTryReleaseExclusiveLockResponse? remoteResponse = await client.TryReleaseExclusiveLockAsync(request, cancellationToken: cancelationToken);
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcTryReleaseExclusiveLockResponse remoteResponse = response.TryReleaseExclusiveLock!;
         
         remoteResponse.ServedFrom = $"https://{node}";
         
@@ -411,9 +409,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         CancellationToken cancellationToken
     )
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node);
-            
-        KeyValuer.KeyValuerClient client = new(channel);
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
             
         GrpcTryReleaseManyExclusiveLocksRequest request = new()
         {
@@ -422,8 +418,9 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         };
             
         request.Items.Add(GetReleaseLockRequestItems(xkeys));
-            
-        GrpcTryReleaseManyExclusiveLocksResponse? remoteResponse = await client.TryReleaseManyExclusiveLocksAsync(request, cancellationToken: cancellationToken);
+        
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcTryReleaseManyExclusiveLocksResponse remoteResponse = response.TryReleaseManyExclusiveLocks!;
 
         lock (lockSync)
         {
@@ -450,9 +447,10 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         CancellationToken cancellationToken
     )
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node);
+        //GrpcChannel channel = SharedChannels.GetChannel(node);
+        //KeyValuer.KeyValuerClient client = new(channel);
         
-        KeyValuer.KeyValuerClient client = new(channel);
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
         
         GrpcTryPrepareMutationsRequest request = new()
         {
@@ -464,7 +462,10 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcKeyValueDurability)durability
         };
         
-        GrpcTryPrepareMutationsResponse? remoteResponse = await client.TryPrepareMutationsAsync(request, cancellationToken: cancellationToken);
+        // GrpcTryPrepareMutationsResponse? remoteResponse = await client.TryPrepareMutationsAsync(request, cancellationToken: cancellationToken);
+        
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcTryPrepareMutationsResponse remoteResponse = response.TryPrepareMutations!;
         
         remoteResponse.ServedFrom = $"https://{node}";
         
@@ -486,9 +487,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         CancellationToken cancellationToken
     )
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node);
-            
-        KeyValuer.KeyValuerClient client = new(channel);
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
             
         GrpcTryPrepareManyMutationsRequest request = new()
         {
@@ -499,8 +498,9 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         };
             
         request.Items.Add(GetPrepareRequestItems(xkeys));
-            
-        GrpcTryPrepareManyMutationsResponse? remoteResponse = await client.TryPrepareManyMutationsAsync(request, cancellationToken: cancellationToken);
+        
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcTryPrepareManyMutationsResponse remoteResponse = response.TryPrepareManyMutations!;
 
         lock (lockSync)
         {

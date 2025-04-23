@@ -329,6 +329,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns></returns>
     public override async Task<GrpcTryAcquireManyExclusiveLocksResponse> TryAcquireManyExclusiveLocks(GrpcTryAcquireManyExclusiveLocksRequest request, ServerCallContext context)
     {
+        return await TryAcquireManyExclusiveLocksInternal(request, context);
+    }
+
+    private async Task<GrpcTryAcquireManyExclusiveLocksResponse> TryAcquireManyExclusiveLocksInternal(GrpcTryAcquireManyExclusiveLocksRequest request, ServerCallContext context)
+    {
         List<(KeyValueResponseType, string, KeyValueDurability)> responses = await keyValues.LocateAndTryAcquireManyExclusiveLocks(
             new(request.TransactionIdPhysical, request.TransactionIdCounter), 
             GetRequestLocksItems(request.Items), 
@@ -371,6 +376,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns></returns>
     public override async Task<GrpcTryReleaseExclusiveLockResponse> TryReleaseExclusiveLock(GrpcTryReleaseExclusiveLockRequest request, ServerCallContext context)
     {
+        return await TryReleaseExclusiveLockInternal(request, context);   
+    }
+
+    private async Task<GrpcTryReleaseExclusiveLockResponse> TryReleaseExclusiveLockInternal(GrpcTryReleaseExclusiveLockRequest request, ServerCallContext context)
+    {
         if (string.IsNullOrEmpty(request.Key))
             return new()
             {
@@ -397,6 +407,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <param name="context"></param>
     /// <returns></returns>
     public override async Task<GrpcTryReleaseManyExclusiveLocksResponse> TryReleaseManyExclusiveLocks(GrpcTryReleaseManyExclusiveLocksRequest request, ServerCallContext context)
+    {
+        return await TryReleaseManyExclusiveLocksInternal(request, context);
+    }
+
+    private async Task<GrpcTryReleaseManyExclusiveLocksResponse> TryReleaseManyExclusiveLocksInternal(GrpcTryReleaseManyExclusiveLocksRequest request, ServerCallContext context)
     {
         List<(KeyValueResponseType, string, KeyValueDurability)> responses = await keyValues.LocateAndTryReleaseManyExclusiveLocks(
             new(request.TransactionIdPhysical, request.TransactionIdCounter), 
@@ -440,6 +455,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns></returns>
     public override async Task<GrpcTryPrepareMutationsResponse> TryPrepareMutations(GrpcTryPrepareMutationsRequest request, ServerCallContext context)
     {
+        return await TryPrepareMutationsInternal(request, context); 
+    }
+    
+    private async Task<GrpcTryPrepareMutationsResponse> TryPrepareMutationsInternal(GrpcTryPrepareMutationsRequest request, ServerCallContext context)
+    {
         if (string.IsNullOrEmpty(request.Key))
             return new()
             {
@@ -469,6 +489,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <param name="context"></param>
     /// <returns></returns>
     public override async Task<GrpcTryPrepareManyMutationsResponse> TryPrepareManyMutations(GrpcTryPrepareManyMutationsRequest request, ServerCallContext context)
+    {
+        return await TryPrepareManyMutationsInternal(request, context);
+    }
+
+    private async Task<GrpcTryPrepareManyMutationsResponse> TryPrepareManyMutationsInternal(GrpcTryPrepareManyMutationsRequest request, ServerCallContext context)
     {
         List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> responses = await keyValues.LocateAndTryPrepareManyMutations(
             new(request.TransactionIdPhysical, request.TransactionIdCounter),
@@ -1115,6 +1140,46 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                         tasks.Add(TryAcquireExclusiveLockDelayed(semaphore, request.RequestId, tryAcquireExclusiveLockRequest, responseStream, context));
                     }
                     break;
+                    
+                    case GrpcServerBatchType.ServerTryAcquireManyExclusiveLocks:
+                    {
+                        GrpcTryAcquireManyExclusiveLocksRequest? tryAcquireManyExclusiveLocksRequest = request.TryAcquireManyExclusiveLocks;
+
+                        tasks.Add(TryAcquireManyExclusiveLocksDelayed(semaphore, request.RequestId, tryAcquireManyExclusiveLocksRequest, responseStream, context));
+                    }
+                    break;
+                    
+                    case GrpcServerBatchType.ServerTryReleaseExclusiveLock:
+                    {
+                        GrpcTryReleaseExclusiveLockRequest? tryReleaseExclusiveLockRequest = request.TryReleaseExclusiveLock;
+
+                        tasks.Add(TryReleaseExclusiveLockDelayed(semaphore, request.RequestId, tryReleaseExclusiveLockRequest, responseStream, context));
+                    }
+                    break;
+                    
+                    case GrpcServerBatchType.ServerTryReleaseManyExclusiveLocks:
+                    {
+                        GrpcTryReleaseManyExclusiveLocksRequest? tryReleaseManyExclusiveLocksRequest = request.TryReleaseManyExclusiveLocks;
+
+                        tasks.Add(TryReleaseManyExclusiveLocksDelayed(semaphore, request.RequestId, tryReleaseManyExclusiveLocksRequest, responseStream, context));
+                    }
+                    break;
+                    
+                    case GrpcServerBatchType.ServerTryPrepareMutations:
+                    {
+                        GrpcTryPrepareMutationsRequest? tryPrepareMutationsRequest = request.TryPrepareMutations;
+
+                        tasks.Add(TryPrepareMutationsDelayed(semaphore, request.RequestId, tryPrepareMutationsRequest, responseStream, context));
+                    }
+                    break;
+                    
+                    case GrpcServerBatchType.ServerTryPrepareManyMutations:
+                    {
+                        GrpcTryPrepareManyMutationsRequest? tryPrepareManyMutationsRequest = request.TryPrepareManyMutations;
+
+                        tasks.Add(TryPrepareManyMutationsDelayed(semaphore, request.RequestId, tryPrepareManyMutationsRequest, responseStream, context));
+                    }
+                    break;
 
                     case GrpcServerBatchType.ServerTypeNone:
                     default:                                                
@@ -1320,6 +1385,151 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             Type = GrpcServerBatchType.ServerTryAcquireExclusiveLock,
             RequestId = requestId,
             TryAcquireExclusiveLock = tryExecuteTransactionResponse
+        };
+
+        try
+        {
+            await semaphore.WaitAsync(context.CancellationToken);
+
+            await responseStream.WriteAsync(response);
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+    
+    private async Task TryAcquireManyExclusiveLocksDelayed(
+        SemaphoreSlim semaphore, 
+        int requestId, 
+        GrpcTryAcquireManyExclusiveLocksRequest tryAcquireManyExclusiveLocksnRequest, 
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcTryAcquireManyExclusiveLocksResponse tryAcquireManyExclusiveLocksResponse = await TryAcquireManyExclusiveLocksInternal(tryAcquireManyExclusiveLocksnRequest, context);
+        
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type = GrpcServerBatchType.ServerTryAcquireManyExclusiveLocks,
+            RequestId = requestId,
+            TryAcquireManyExclusiveLocks = tryAcquireManyExclusiveLocksResponse
+        };
+
+        try
+        {
+            await semaphore.WaitAsync(context.CancellationToken);
+
+            await responseStream.WriteAsync(response);
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+    
+    private async Task TryReleaseExclusiveLockDelayed(
+        SemaphoreSlim semaphore, 
+        int requestId, 
+        GrpcTryReleaseExclusiveLockRequest tryReleaseExclusiveLockRequest, 
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcTryReleaseExclusiveLockResponse tryReleaseExclusiveLockResponse = await TryReleaseExclusiveLockInternal(tryReleaseExclusiveLockRequest, context);
+        
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type = GrpcServerBatchType.ServerTryReleaseExclusiveLock,
+            RequestId = requestId,
+            TryReleaseExclusiveLock = tryReleaseExclusiveLockResponse
+        };
+
+        try
+        {
+            await semaphore.WaitAsync(context.CancellationToken);
+
+            await responseStream.WriteAsync(response);
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+    
+    private async Task TryReleaseManyExclusiveLocksDelayed(
+        SemaphoreSlim semaphore, 
+        int requestId, 
+        GrpcTryReleaseManyExclusiveLocksRequest tryReleaseManyExclusiveLocksnRequest, 
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcTryReleaseManyExclusiveLocksResponse tryReleaseManyExclusiveLocksResponse = await TryReleaseManyExclusiveLocksInternal(tryReleaseManyExclusiveLocksnRequest, context);
+        
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type = GrpcServerBatchType.ServerTryReleaseManyExclusiveLocks,
+            RequestId = requestId,
+            TryReleaseManyExclusiveLocks = tryReleaseManyExclusiveLocksResponse
+        };
+
+        try
+        {
+            await semaphore.WaitAsync(context.CancellationToken);
+
+            await responseStream.WriteAsync(response);
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+    
+    private async Task TryPrepareMutationsDelayed(
+        SemaphoreSlim semaphore, 
+        int requestId, 
+        GrpcTryPrepareMutationsRequest tryPrepareMutationsRequest, 
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcTryPrepareMutationsResponse tryPrepareMutationsResponse = await TryPrepareMutationsInternal(tryPrepareMutationsRequest, context);
+        
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type = GrpcServerBatchType.ServerTryPrepareMutations,
+            RequestId = requestId,
+            TryPrepareMutations = tryPrepareMutationsResponse
+        };
+
+        try
+        {
+            await semaphore.WaitAsync(context.CancellationToken);
+
+            await responseStream.WriteAsync(response);
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+    
+    private async Task TryPrepareManyMutationsDelayed(
+        SemaphoreSlim semaphore, 
+        int requestId, 
+        GrpcTryPrepareManyMutationsRequest tryPrepareManyMutationsRequest, 
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcTryPrepareManyMutationsResponse tryPrepareManyMutationsResponse = await TryPrepareManyMutationsInternal(tryPrepareManyMutationsRequest, context);
+        
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type = GrpcServerBatchType.ServerTryPrepareManyMutations,
+            RequestId = requestId,
+            TryPrepareManyMutations = tryPrepareManyMutationsResponse
         };
 
         try

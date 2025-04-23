@@ -403,6 +403,11 @@ message GrpcBatchServerKeyValueRequest {
     GrpcTryExistsKeyValueRequest TryExistsKeyValue = 7;
     GrpcTryExecuteTransactionRequest TryExecuteTransaction = 8;
     GrpcTryAcquireExclusiveLockRequest TryAcquireExclusiveLock = 9;    
+    GrpcTryAcquireManyExclusiveLocksRequest TryAcquireManyExclusiveLocks = 10;
+    GrpcTryReleaseExclusiveLockRequest TryReleaseExclusiveLock = 11;
+    GrpcTryReleaseManyExclusiveLocksRequest TryReleaseManyExclusiveLocks = 12;
+    GrpcTryPrepareMutationsRequest TryPrepareMutations = 13;
+    GrpcTryPrepareManyMutationsRequest TryPrepareManyMutations = 14;
   }
 }
 
@@ -418,6 +423,11 @@ message GrpcBatchServerKeyValueResponse
     GrpcTryExistsKeyValueResponse TryExistsKeyValue = 7;
     GrpcTryExecuteTransactionResponse TryExecuteTransaction = 8;
     GrpcTryAcquireExclusiveLockResponse TryAcquireExclusiveLock = 9;
+    GrpcTryAcquireManyExclusiveLocksResponse TryAcquireManyExclusiveLocks = 10;
+    GrpcTryReleaseExclusiveLockResponse TryReleaseExclusiveLock = 11;
+    GrpcTryReleaseManyExclusiveLocksResponse TryReleaseManyExclusiveLocks = 12;
+    GrpcTryPrepareMutationsResponse TryPrepareMutations = 13;
+    GrpcTryPrepareManyMutationsResponse TryPrepareManyMutations = 14;
   }
 }
 
@@ -440,6 +450,11 @@ enum GrpcServerBatchType {
   SERVER_TRY_EXISTS_KEY_VALUE = 5;
   SERVER_TRY_EXECUTE_TRANSACTION = 6; 
   SERVER_TRY_ACQUIRE_EXCLUSIVE_LOCK = 7;
+  SERVER_TRY_ACQUIRE_MANY_EXCLUSIVE_LOCKS = 8;
+  SERVER_TRY_RELEASE_EXCLUSIVE_LOCK = 9;
+  SERVER_TRY_RELEASE_MANY_EXCLUSIVE_LOCKS = 10;
+  SERVER_TRY_PREPARE_MUTATIONS = 11;
+  SERVER_TRY_PREPARE_MANY_MUTATIONS = 12;
 }
 
 enum GrpcKeyValueFlags {

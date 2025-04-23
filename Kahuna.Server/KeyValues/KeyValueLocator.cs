@@ -116,7 +116,7 @@ internal sealed class KeyValueLocator
             cancellationToken
         );               
         
-        logger.LogDebug("SET-KEYVALUE Redirect {Key} to leader partition {Partition} at {Leader} Time={Elapsed}ms", key, partitionId, leader, stopwatch.GetElapsedMilliseconds());
+        logger.LogDebug("SET-KEYVALUE Redirected {Key} to leader partition {Partition} at {Leader} Time={Elapsed}ms", key, partitionId, leader, stopwatch.GetElapsedMilliseconds());
 
         return response;
     }
@@ -148,7 +148,7 @@ internal sealed class KeyValueLocator
         if (leader == raft.GetLocalEndpoint())
             return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);               
         
-        logger.LogDebug("DELETE-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
+        logger.LogDebug("DELETE-KEYVALUE Redirected {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
         
         return await interNodeCommunication.TryDeleteKeyValue(leader, transactionId, key, durability, cancellationToken);
     }
@@ -176,7 +176,7 @@ internal sealed class KeyValueLocator
         if (leader == raft.GetLocalEndpoint())
             return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);               
         
-        logger.LogDebug("EXTEND-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
+        logger.LogDebug("EXTEND-KEYVALUE Redirected {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
 
         return await interNodeCommunication.TryExtendKeyValue(leader, transactionId, key, expiresMs, durability, cancellationToken);
     }
@@ -211,11 +211,11 @@ internal sealed class KeyValueLocator
 
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
         
-        (KeyValueResponseType, ReadOnlyKeyValueContext?) x = await interNodeCommunication.TryGetValue(leader, transactionId, key, revision, durability, cancellationToken);
+        (KeyValueResponseType, ReadOnlyKeyValueContext?) response = await interNodeCommunication.TryGetValue(leader, transactionId, key, revision, durability, cancellationToken);
         
-        logger.LogDebug("GET-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader} Time={Elapsed}ms", key, partitionId, leader, stopwatch.GetElapsedMilliseconds());
+        logger.LogDebug("GET-KEYVALUE Redirected {KeyValueName} to leader partition {Partition} at {Leader} Time={Elapsed}ms", key, partitionId, leader, stopwatch.GetElapsedMilliseconds());
 
-        return x;
+        return response;
     }
     
     /// <summary>
@@ -432,7 +432,7 @@ internal sealed class KeyValueLocator
         CancellationToken cancelationToken
     )
     {
-        logger.LogDebug("RELEASE-LOCK-KEYVALUE Redirect {Number} release lock acquisitions to node {Leader}", xkeys.Count, leader);
+        logger.LogDebug("RELEASE-LOCK-KEYVALUE Redirect {Number} lock releases to node {Leader}", xkeys.Count, leader);
         
         if (leader == localNode)
         {

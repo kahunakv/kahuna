@@ -80,7 +80,52 @@ internal sealed class GrpcServerBatcher
         return TryProcessQueue(grpcBatcherItem, promise);
     }
     
-     public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryAcquireExclusiveLockRequest message)
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryAcquireExclusiveLockRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryAcquireManyExclusiveLocksRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryReleaseExclusiveLockRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryReleaseManyExclusiveLocksRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryPrepareMutationsRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryPrepareManyMutationsRequest message)
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -193,6 +238,31 @@ internal sealed class GrpcServerBatcher
                     batchRequest.Type = GrpcServerBatchType.ServerTryAcquireExclusiveLock;
                     batchRequest.TryAcquireExclusiveLock = itemRequest.TryAcquireExclusiveLock;
                 }
+                else if (itemRequest.TryAcquireManyExclusiveLocks is not null)
+                {
+                    batchRequest.Type = GrpcServerBatchType.ServerTryAcquireManyExclusiveLocks;
+                    batchRequest.TryAcquireManyExclusiveLocks = itemRequest.TryAcquireManyExclusiveLocks;
+                }
+                else if (itemRequest.TryReleaseExclusiveLock is not null)
+                {
+                    batchRequest.Type = GrpcServerBatchType.ServerTryReleaseExclusiveLock;
+                    batchRequest.TryReleaseExclusiveLock = itemRequest.TryReleaseExclusiveLock;
+                }
+                else if (itemRequest.TryReleaseManyExclusiveLocks is not null)
+                {
+                    batchRequest.Type = GrpcServerBatchType.ServerTryReleaseManyExclusiveLocks;
+                    batchRequest.TryReleaseManyExclusiveLocks = itemRequest.TryReleaseManyExclusiveLocks;
+                }
+                else if (itemRequest.TryPrepareMutations is not null)
+                {
+                    batchRequest.Type = GrpcServerBatchType.ServerTryPrepareMutations;
+                    batchRequest.TryPrepareMutations = itemRequest.TryPrepareMutations;
+                }
+                else if (itemRequest.TryPrepareManyMutations is not null)
+                {
+                    batchRequest.Type = GrpcServerBatchType.ServerTryPrepareManyMutations;
+                    batchRequest.TryPrepareManyMutations = itemRequest.TryPrepareManyMutations;
+                }
                 else
                 {
                     throw new KahunaServerException("Unknown request type");
@@ -259,6 +329,26 @@ internal sealed class GrpcServerBatcher
                     
                     case GrpcServerBatchType.ServerTryAcquireExclusiveLock:
                         item.Promise.SetResult(new(response.TryAcquireExclusiveLock));
+                        break;
+                    
+                    case GrpcServerBatchType.ServerTryAcquireManyExclusiveLocks:
+                        item.Promise.SetResult(new(response.TryAcquireManyExclusiveLocks));
+                        break;
+                    
+                    case GrpcServerBatchType.ServerTryReleaseExclusiveLock:
+                        item.Promise.SetResult(new(response.TryReleaseExclusiveLock));
+                        break;
+                    
+                    case GrpcServerBatchType.ServerTryReleaseManyExclusiveLocks:
+                        item.Promise.SetResult(new(response.TryReleaseManyExclusiveLocks));
+                        break;
+                    
+                    case GrpcServerBatchType.ServerTryPrepareMutations:
+                        item.Promise.SetResult(new(response.TryPrepareMutations));
+                        break;
+                    
+                    case GrpcServerBatchType.ServerTryPrepareManyMutations:
+                        item.Promise.SetResult(new(response.TryPrepareManyMutations));
                         break;
 
                     case GrpcServerBatchType.ServerTypeNone:
