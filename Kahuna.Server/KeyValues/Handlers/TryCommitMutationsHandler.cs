@@ -99,13 +99,13 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             return new(KeyValueResponseType.Committed, 0);
         }
 
-        (bool success, long commitIndex) = await CommitKeyValueMessage(message.Key, message.ProposalTicketId);
+        (bool success, int partitionId, long commitIndex) = await CommitKeyValueMessage(message.Key, message.ProposalTicketId);
         if (!success)
             return KeyValueStaticResponses.ErroredResponse;
 
         if (context.Revisions is not null)
             RemoveExpiredRevisions(context, proposal.Revision);
-
+               
         context.Revisions ??= new();
         context.Revisions.Add(context.Revision, context.Value);
 
@@ -115,6 +115,18 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         context.LastUsed = proposal.LastUsed;
         context.LastModified = proposal.LastModified;
         context.State = proposal.State;
+        
+        backgroundWriter.Send(new(
+            BackgroundWriteType.QueueStoreKeyValue,
+            partitionId,
+            proposal.Key,
+            proposal.Value,
+            proposal.Revision,
+            proposal.Expires,
+            proposal.LastUsed,
+            proposal.LastModified,
+            (int)proposal.State
+        ));
 
         return new(KeyValueResponseType.Committed, commitIndex);
     }
@@ -125,10 +137,10 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
     /// <param name="key"></param>
     /// <param name="proposalTicketId"></param>
     /// <returns></returns>
-    private async Task<(bool, long)> CommitKeyValueMessage(string key, HLCTimestamp proposalTicketId)
+    private async Task<(bool, int, long)> CommitKeyValueMessage(string key, HLCTimestamp proposalTicketId)
     {
         if (!raft.Joined)
-            return (true, 0);
+            return (true, -1, 0);
 
         int partitionId = raft.GetPartitionKey(key);
 
@@ -141,11 +153,11 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         {
             logger.LogWarning("Failed to commit key/value {Key} Partition={Partition} Status={Status}", key, partitionId, status);
 
-            return (false, 0);
-        }
+            return (false, -1, 0);
+        }               
 
         logger.LogDebug("Successfully commmitted key/value {Key} Partition={Partition} ProposalIndex={ProposalIndex}", key, partitionId, commitLogId);
 
-        return (success, commitLogId);
+        return (success, partitionId, commitLogId);
     }
 }

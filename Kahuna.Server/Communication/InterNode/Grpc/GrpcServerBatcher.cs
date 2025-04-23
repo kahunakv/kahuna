@@ -79,6 +79,15 @@ internal sealed class GrpcServerBatcher
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
+    
+     public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryAcquireExclusiveLockRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
 
     private Task<GrpcServerBatcherResponse> TryProcessQueue(GrpcServerBatcherItem grpcBatcherItem, TaskCompletionSource<GrpcServerBatcherResponse> promise)
     {
@@ -142,7 +151,7 @@ internal sealed class GrpcServerBatcher
             {
                 requestRefs.TryAdd(request.RequestId, request);
 
-                GrpcBatchClientKeyValueRequest batchRequest = new()
+                GrpcBatchServerKeyValueRequest batchRequest = new()
                 {
                     RequestId = request.RequestId
                 };
@@ -151,33 +160,38 @@ internal sealed class GrpcServerBatcher
 
                 if (itemRequest.TrySetKeyValue is not null)
                 {
-                    batchRequest.Type = GrpcBatchClientType.TrySetKeyValue;
+                    batchRequest.Type = GrpcServerBatchType.ServerTrySetKeyValue;
                     batchRequest.TrySetKeyValue = itemRequest.TrySetKeyValue;
                 }
                 else if (itemRequest.TryGetKeyValue is not null)
                 {
-                    batchRequest.Type = GrpcBatchClientType.TryGetKeyValue;
+                    batchRequest.Type = GrpcServerBatchType.ServerTryGetKeyValue;
                     batchRequest.TryGetKeyValue = itemRequest.TryGetKeyValue;
                 }
                 else if (itemRequest.TryDeleteKeyValue is not null)
                 {
-                    batchRequest.Type = GrpcBatchClientType.TryDeleteKeyValue;
+                    batchRequest.Type = GrpcServerBatchType.ServerTryDeleteKeyValue;
                     batchRequest.TryDeleteKeyValue = itemRequest.TryDeleteKeyValue;
                 } 
                 else if (itemRequest.TryExtendKeyValue is not null)
                 {
-                    batchRequest.Type = GrpcBatchClientType.TryExtendKeyValue;
+                    batchRequest.Type = GrpcServerBatchType.ServerTryExtendKeyValue;
                     batchRequest.TryExtendKeyValue = itemRequest.TryExtendKeyValue;
                 } 
                 else if (itemRequest.TryExistsKeyValue is not null)
                 {
-                    batchRequest.Type = GrpcBatchClientType.TryExistsKeyValue;
+                    batchRequest.Type = GrpcServerBatchType.ServerTryExistsKeyValue;
                     batchRequest.TryExistsKeyValue = itemRequest.TryExistsKeyValue;
                 }
                 else if (itemRequest.TryExecuteTransaction is not null)
                 {
-                    batchRequest.Type = GrpcBatchClientType.TryExecuteTransaction;
+                    batchRequest.Type = GrpcServerBatchType.ServerTryExecuteTransaction;
                     batchRequest.TryExecuteTransaction = itemRequest.TryExecuteTransaction;
+                } 
+                else if (itemRequest.TryAcquireExclusiveLock is not null)
+                {
+                    batchRequest.Type = GrpcServerBatchType.ServerTryAcquireExclusiveLock;
+                    batchRequest.TryAcquireExclusiveLock = itemRequest.TryAcquireExclusiveLock;
                 }
                 else
                 {
@@ -198,53 +212,67 @@ internal sealed class GrpcServerBatcher
         }
         catch (Exception ex)
         {
+            foreach (GrpcServerBatcherItem request in requests)
+                request.Promise.SetException(ex);
+            
             Console.WriteLine("{0}", ex.Message);
         }
     }
 
-    private static async Task ReadMessages(AsyncDuplexStreamingCall<GrpcBatchClientKeyValueRequest, GrpcBatchClientKeyValueResponse> streaming)
+    private static async Task ReadMessages(AsyncDuplexStreamingCall<GrpcBatchServerKeyValueRequest, GrpcBatchServerKeyValueResponse> streaming)
     {
-        await foreach (GrpcBatchClientKeyValueResponse response in streaming.ResponseStream.ReadAllAsync())
+        try
         {
-            if (!requestRefs.TryGetValue(response.RequestId, out GrpcServerBatcherItem? item))
+            await foreach (GrpcBatchServerKeyValueResponse response in streaming.ResponseStream.ReadAllAsync())
             {
-                Console.WriteLine("Request not found " + response.RequestId);
-                continue;
-            }
-            
-            switch (response.Type)
-            {
-                case GrpcBatchClientType.TrySetKeyValue:
-                    item.Promise.SetResult(new(response.TrySetKeyValue));
-                    break;
-                        
-                case GrpcBatchClientType.TryGetKeyValue:
-                    item.Promise.SetResult(new(response.TryGetKeyValue));
-                    break;
-                        
-                case GrpcBatchClientType.TryDeleteKeyValue:
-                    item.Promise.SetResult(new(response.TryDeleteKeyValue));
-                    break;
-                        
-                case GrpcBatchClientType.TryExtendKeyValue:
-                    item.Promise.SetResult(new(response.TryExtendKeyValue));
-                    break;
-                        
-                case GrpcBatchClientType.TryExistsKeyValue:
-                    item.Promise.SetResult(new(response.TryExistsKeyValue));
-                    break;
-                
-                case GrpcBatchClientType.TryExecuteTransaction:
-                    item.Promise.SetResult(new(response.TryExecuteTransaction));
-                    break;
-                        
-                case GrpcBatchClientType.TypeNone:
-                default:
-                    item.Promise.SetException(new KahunaServerException("Unknown response type: " + response.Type));
-                    break;
-            }
+                if (!requestRefs.TryGetValue(response.RequestId, out GrpcServerBatcherItem? item))
+                {
+                    Console.WriteLine("Request not found " + response.RequestId);
+                    continue;
+                }
 
-            requestRefs.TryRemove(response.RequestId, out _);
+                switch (response.Type)
+                {
+                    case GrpcServerBatchType.ServerTrySetKeyValue:
+                        item.Promise.SetResult(new(response.TrySetKeyValue));
+                        break;
+
+                    case GrpcServerBatchType.ServerTryGetKeyValue:
+                        item.Promise.SetResult(new(response.TryGetKeyValue));
+                        break;
+
+                    case GrpcServerBatchType.ServerTryDeleteKeyValue:
+                        item.Promise.SetResult(new(response.TryDeleteKeyValue));
+                        break;
+
+                    case GrpcServerBatchType.ServerTryExtendKeyValue:
+                        item.Promise.SetResult(new(response.TryExtendKeyValue));
+                        break;
+
+                    case GrpcServerBatchType.ServerTryExistsKeyValue:
+                        item.Promise.SetResult(new(response.TryExistsKeyValue));
+                        break;
+
+                    case GrpcServerBatchType.ServerTryExecuteTransaction:
+                        item.Promise.SetResult(new(response.TryExecuteTransaction));
+                        break;
+                    
+                    case GrpcServerBatchType.ServerTryAcquireExclusiveLock:
+                        item.Promise.SetResult(new(response.TryAcquireExclusiveLock));
+                        break;
+
+                    case GrpcServerBatchType.ServerTypeNone:
+                    default:
+                        item.Promise.SetException(new KahunaServerException("Unknown response type: " + response.Type));
+                        break;
+                }
+
+                requestRefs.TryRemove(response.RequestId, out _);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("Exception: " + ex.Message);
         }
     }
 
@@ -272,7 +300,7 @@ internal sealed class GrpcServerBatcher
         {
             KeyValuer.KeyValuerClient client = new(channel);
 
-            AsyncDuplexStreamingCall<GrpcBatchClientKeyValueRequest, GrpcBatchClientKeyValueResponse>? streaming = client.BatchClientKeyValueRequests();
+            AsyncDuplexStreamingCall<GrpcBatchServerKeyValueRequest, GrpcBatchServerKeyValueResponse>? streaming = client.BatchServerKeyValueRequests();
             
             _ = ReadMessages(streaming);
             

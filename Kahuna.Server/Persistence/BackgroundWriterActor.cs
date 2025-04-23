@@ -15,7 +15,7 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 {
     private const int WriteRetries = 5;
     
-    private const int MaxBatchSize = 500;
+    private const int MaxBatchSize = 1024;
     
     private const int MaxPacketSize = 1024 * 512;
     
@@ -54,7 +54,7 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             context.Self,
             "flush-locks",
             new(BackgroundWriteType.Flush),
-            TimeSpan.FromSeconds(1),
+            TimeSpan.FromSeconds(5),
             TimeSpan.FromMilliseconds(200)
         );
     }

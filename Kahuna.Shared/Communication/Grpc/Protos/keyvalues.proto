@@ -366,7 +366,7 @@ message GrpcKeyValueByPrefixItemResponse {
 }
 
 message GrpcBatchClientKeyValueRequest {
-  GrpcBatchClientType Type = 1;
+  GrpcClientBatchType Type = 1;
   int32 RequestId = 2;
   oneof payload {
     GrpcTrySetKeyValueRequest TrySetKeyValue = 3;
@@ -374,13 +374,13 @@ message GrpcBatchClientKeyValueRequest {
     GrpcTryDeleteKeyValueRequest TryDeleteKeyValue = 5;
     GrpcTryExtendKeyValueRequest TryExtendKeyValue = 6;
     GrpcTryExistsKeyValueRequest TryExistsKeyValue = 7;
-    GrpcTryExecuteTransactionRequest TryExecuteTransaction = 8;
+    GrpcTryExecuteTransactionRequest TryExecuteTransaction = 8;    
   }
 }
 
 message GrpcBatchClientKeyValueResponse
 {
-  GrpcBatchClientType Type = 1;
+  GrpcClientBatchType Type = 1;
   int32 RequestId = 2;
   oneof payload {
     GrpcTrySetKeyValueResponse TrySetKeyValue = 3;
@@ -388,12 +388,12 @@ message GrpcBatchClientKeyValueResponse
     GrpcTryDeleteKeyValueResponse TryDeleteKeyValue = 5;
     GrpcTryExtendKeyValueResponse TryExtendKeyValue = 6;
     GrpcTryExistsKeyValueResponse TryExistsKeyValue = 7;
-    GrpcTryExecuteTransactionResponse TryExecuteTransaction = 8;
+    GrpcTryExecuteTransactionResponse TryExecuteTransaction = 8;    
   }
 }
 
 message GrpcBatchServerKeyValueRequest {
-  GrpcBatchClientType Type = 1;
+  GrpcServerBatchType Type = 1;
   int32 RequestId = 2;
   oneof payload {
     GrpcTrySetKeyValueRequest TrySetKeyValue = 3;
@@ -402,12 +402,13 @@ message GrpcBatchServerKeyValueRequest {
     GrpcTryExtendKeyValueRequest TryExtendKeyValue = 6;
     GrpcTryExistsKeyValueRequest TryExistsKeyValue = 7;
     GrpcTryExecuteTransactionRequest TryExecuteTransaction = 8;
+    GrpcTryAcquireExclusiveLockRequest TryAcquireExclusiveLock = 9;    
   }
 }
 
 message GrpcBatchServerKeyValueResponse
 {
-  GrpcBatchClientType Type = 1;
+  GrpcServerBatchType Type = 1;
   int32 RequestId = 2;
   oneof payload {
     GrpcTrySetKeyValueResponse TrySetKeyValue = 3;
@@ -416,10 +417,11 @@ message GrpcBatchServerKeyValueResponse
     GrpcTryExtendKeyValueResponse TryExtendKeyValue = 6;
     GrpcTryExistsKeyValueResponse TryExistsKeyValue = 7;
     GrpcTryExecuteTransactionResponse TryExecuteTransaction = 8;
+    GrpcTryAcquireExclusiveLockResponse TryAcquireExclusiveLock = 9;
   }
 }
 
-enum GrpcBatchClientType {
+enum GrpcClientBatchType {
   TYPE_NONE = 0;
   TRY_SET_KEY_VALUE = 1;
   TRY_EXTEND_KEY_VALUE = 2;
@@ -427,6 +429,17 @@ enum GrpcBatchClientType {
   TRY_GET_KEY_VALUE = 4;
   TRY_EXISTS_KEY_VALUE = 5;
   TRY_EXECUTE_TRANSACTION = 6;  
+}
+
+enum GrpcServerBatchType {
+  SERVER_TYPE_NONE = 0;
+  SERVER_TRY_SET_KEY_VALUE = 1;
+  SERVER_TRY_EXTEND_KEY_VALUE = 2;
+  SERVER_TRY_DELETE_KEY_VALUE = 3;
+  SERVER_TRY_GET_KEY_VALUE = 4;
+  SERVER_TRY_EXISTS_KEY_VALUE = 5;
+  SERVER_TRY_EXECUTE_TRANSACTION = 6; 
+  SERVER_TRY_ACQUIRE_EXCLUSIVE_LOCK = 7;
 }
 
 enum GrpcKeyValueFlags {

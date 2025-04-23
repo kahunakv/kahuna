@@ -85,6 +85,18 @@ internal abstract class BaseHandler
             
             return false;
         }
+        
+        backgroundWriter.Send(new(
+            BackgroundWriteType.QueueStoreKeyValue,
+            partitionId,
+            proposal.Key,
+            proposal.Value,
+            proposal.Revision,
+            proposal.Expires,
+            proposal.LastUsed,
+            proposal.LastModified,
+            (int)proposal.State
+        ));
 
         return result.Success;
     }

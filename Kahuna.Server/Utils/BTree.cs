@@ -3,10 +3,12 @@ using System.Diagnostics.CodeAnalysis;
 
 namespace Kahuna.Utils;
 
-public class BTree<TKey, TValue> where TKey : IComparable<TKey>
+public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 {
     private readonly int _order;
+    
     private Node<TKey, TValue>? Root { get; set; }
+    
     public int Count { get; internal set; }
 
     public BTree(int order)
@@ -38,28 +40,33 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey>
     }
 
     public bool TryGetValue(TKey key, [MaybeNullWhen(false)] out TValue value)
+    {                
+        value = Get(key);        
+        return value is not null;
+    }
+    
+    public TValue? Get(TKey key)
     {
         Node<TKey, TValue>? node = Root;
         
         while (node is not null)
         {
-            int idx = node.FindIndex(key);
+            // binary‐search the sorted key array
+            int idx = Array.BinarySearch(node.Keys, 0, node.KeyCount, key);
+
             if (node.IsLeaf)
             {
-                if (idx < node.KeyCount && node.Keys[idx].CompareTo(key) == 0)
-                {
-                    value = node.Values[idx]!;
-                    return true;
-                }
-                break;
+                if (idx >= 0)
+                    return node.Values[idx]!;           // found in leaf
+                break;                                  // not in tree
             }
-            
-            int childIdx = node.FindChildIndex(key);
+
+            // if found in interior, go right of that key; otherwise ~idx is the child to descend
+            int childIdx = idx >= 0 ? idx + 1 : ~idx;
             node = node.Children[childIdx];
         }
-        
-        value = default;
-        return false;
+
+        return default;
     }
 
     public void Insert(TKey key, TValue value)
@@ -110,7 +117,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
         Node<TKey, TValue> node = temp;
         while (!node.IsLeaf)
-            node = node.Children[0]!;
+            node = node.Children[0];
 
         Node<TKey, TValue>? cursor = node;
         
@@ -132,7 +139,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey>
         // 1) Descend to the leaf that should contain minKey
         Node<TKey, TValue> node = temp;
         while (!node.IsLeaf)
-            node = node.Children[node.FindChildIndex(minKey)]!;
+            node = node.Children[node.FindChildIndex(minKey)];
 
         // 2) Walk forward through the leaf chain
         Node<TKey, TValue>? cursor = node;
@@ -208,7 +215,7 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
         
         // interior
         int childIdx = FindChildIndex(key);
-        (Node<TKey, TValue>? childSib, TKey childPromote) = Children[childIdx]!.InsertRec(key, value, tree);
+        (Node<TKey, TValue>? childSib, TKey childPromote) = Children[childIdx].InsertRec(key, value, tree);
         if (childSib is not null)
         {
             for (int i = KeyCount; i > childIdx; i--)
@@ -231,16 +238,19 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
     {
         int mid = KeyCount / 2;
         Node<TKey, TValue> sibling = new(_order, true);
+        
         int j = 0;
         for (int i = mid; i < KeyCount; i++, j++)
         {
             sibling.Keys[j] = Keys[i];
             sibling.Values[j] = Values[i];
         }
+        
         sibling.KeyCount = KeyCount - mid;
         KeyCount = mid;
         sibling.Next = Next;
         Next = sibling;
+        
         return (sibling, sibling.Keys[0]);
     }
 
@@ -300,13 +310,13 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
 
         // internal node: recurse to child
         int childIdx = FindChildIndex(key);
-        bool removed = Children[childIdx]!.RemoveRec(key, tree);
+        bool removed = Children[childIdx].RemoveRec(key, tree);
         if (removed == false)
             return false;
 
         // if child underflows, rebalance
         int minKeys = (_order - 1) / 2;
-        Node<TKey, TValue> child = Children[childIdx]!;
+        Node<TKey, TValue> child = Children[childIdx];
         if (child.KeyCount < minKeys)
             Rebalance(childIdx);
 
@@ -332,8 +342,8 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
 
     private void BorrowFromLeft(int idxChild)
     {
-        Node<TKey, TValue> child = Children[idxChild]!;
-        Node<TKey, TValue> left  = Children[idxChild - 1]!;
+        Node<TKey, TValue> child = Children[idxChild];
+        Node<TKey, TValue> left  = Children[idxChild - 1];
 
         if (child.IsLeaf)
         {
@@ -369,8 +379,8 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
 
     private void BorrowFromRight(int idxChild)
     {
-        Node<TKey, TValue> child = Children[idxChild]!;
-        Node<TKey, TValue> right = Children[idxChild + 1]!;
+        Node<TKey, TValue> child = Children[idxChild];
+        Node<TKey, TValue> right = Children[idxChild + 1];
 
         if (child.IsLeaf)
         {
@@ -408,8 +418,8 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
 
     private void MergeWithLeft(int idxChild)
     {
-        Node<TKey, TValue> child = Children[idxChild]!;
-        Node<TKey, TValue> left  = Children[idxChild - 1]!;
+        Node<TKey, TValue> child = Children[idxChild];
+        Node<TKey, TValue> left  = Children[idxChild - 1];
 
         if (child.IsLeaf)
         {
@@ -447,8 +457,8 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
 
     private void MergeWithRight(int idxChild)
     {
-        Node<TKey, TValue> child = Children[idxChild]!;
-        Node<TKey, TValue> right = Children[idxChild + 1]!;
+        Node<TKey, TValue> child = Children[idxChild];
+        Node<TKey, TValue> right = Children[idxChild + 1];
 
         if (child.IsLeaf)
         {

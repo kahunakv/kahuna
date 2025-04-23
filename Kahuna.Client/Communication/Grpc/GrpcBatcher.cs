@@ -168,32 +168,32 @@ internal sealed class GrpcBatcher
 
                 if (itemRequest.TrySetKeyValue is not null)
                 {
-                    batchRequest.Type = GrpcBatchClientType.TrySetKeyValue;
+                    batchRequest.Type = GrpcClientBatchType.TrySetKeyValue;
                     batchRequest.TrySetKeyValue = itemRequest.TrySetKeyValue;
                 }
                 else if (itemRequest.TryGetKeyValue is not null)
                 {
-                    batchRequest.Type = GrpcBatchClientType.TryGetKeyValue;
+                    batchRequest.Type = GrpcClientBatchType.TryGetKeyValue;
                     batchRequest.TryGetKeyValue = itemRequest.TryGetKeyValue;
                 }
                 else if (itemRequest.TryDeleteKeyValue is not null)
                 {
-                    batchRequest.Type = GrpcBatchClientType.TryDeleteKeyValue;
+                    batchRequest.Type = GrpcClientBatchType.TryDeleteKeyValue;
                     batchRequest.TryDeleteKeyValue = itemRequest.TryDeleteKeyValue;
                 } 
                 else if (itemRequest.TryExtendKeyValue is not null)
                 {
-                    batchRequest.Type = GrpcBatchClientType.TryExtendKeyValue;
+                    batchRequest.Type = GrpcClientBatchType.TryExtendKeyValue;
                     batchRequest.TryExtendKeyValue = itemRequest.TryExtendKeyValue;
                 } 
                 else if (itemRequest.TryExistsKeyValue is not null)
                 {
-                    batchRequest.Type = GrpcBatchClientType.TryExistsKeyValue;
+                    batchRequest.Type = GrpcClientBatchType.TryExistsKeyValue;
                     batchRequest.TryExistsKeyValue = itemRequest.TryExistsKeyValue;
                 }
                 else if (itemRequest.TryExecuteTransaction is not null)
                 {
-                    batchRequest.Type = GrpcBatchClientType.TryExecuteTransaction;
+                    batchRequest.Type = GrpcClientBatchType.TryExecuteTransaction;
                     batchRequest.TryExecuteTransaction = itemRequest.TryExecuteTransaction;
                 }
                 else
@@ -215,7 +215,12 @@ internal sealed class GrpcBatcher
         }
         catch (Exception ex)
         {
-            Console.WriteLine("{0}", ex.Message);
+            foreach (GrpcBatcherItem request in requests)
+            {
+                requestRefs.TryRemove(request.RequestId, out _);
+                
+                request.Promise.SetException(ex);
+            }
         }
     }
 
@@ -231,31 +236,31 @@ internal sealed class GrpcBatcher
             
             switch (response.Type)
             {
-                case GrpcBatchClientType.TrySetKeyValue:
+                case GrpcClientBatchType.TrySetKeyValue:
                     item.Promise.SetResult(new(response.TrySetKeyValue));
                     break;
                         
-                case GrpcBatchClientType.TryGetKeyValue:
+                case GrpcClientBatchType.TryGetKeyValue:
                     item.Promise.SetResult(new(response.TryGetKeyValue));
                     break;
                         
-                case GrpcBatchClientType.TryDeleteKeyValue:
+                case GrpcClientBatchType.TryDeleteKeyValue:
                     item.Promise.SetResult(new(response.TryDeleteKeyValue));
                     break;
                         
-                case GrpcBatchClientType.TryExtendKeyValue:
+                case GrpcClientBatchType.TryExtendKeyValue:
                     item.Promise.SetResult(new(response.TryExtendKeyValue));
                     break;
                         
-                case GrpcBatchClientType.TryExistsKeyValue:
+                case GrpcClientBatchType.TryExistsKeyValue:
                     item.Promise.SetResult(new(response.TryExistsKeyValue));
                     break;
                 
-                case GrpcBatchClientType.TryExecuteTransaction:
+                case GrpcClientBatchType.TryExecuteTransaction:
                     item.Promise.SetResult(new(response.TryExecuteTransaction));
                     break;
                         
-                case GrpcBatchClientType.TypeNone:
+                case GrpcClientBatchType.TypeNone:
                 default:
                     item.Promise.SetException(new KahunaException("Unknown response type: " + response.Type,LockResponseType.Errored));
                     break;

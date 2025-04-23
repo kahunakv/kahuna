@@ -315,7 +315,7 @@ internal sealed class KeyValueLocator
         List<(KeyValueResponseType, string, KeyValueDurability)> responses = [];
         
         // Requests to nodes are sent in parallel
-        foreach ((string leader, List<(string key, int expiresMs, KeyValueDurability durability)>? xkeys) in acquisitionPlan)
+        foreach ((string leader, List<(string key, int expiresMs, KeyValueDurability durability)> xkeys) in acquisitionPlan)
             tasks.Add(TryAcquireNodeExclusiveLocks(transactionId, leader, localNode, xkeys, lockSync, responses, cancelationToken));
         
         await Task.WhenAll(tasks);
@@ -414,7 +414,7 @@ internal sealed class KeyValueLocator
         List<(KeyValueResponseType, string, KeyValueDurability)> responses = [];
         
         // Requests to nodes are sent in parallel
-        foreach ((string leader, List<(string key, KeyValueDurability durability)>? xkeys) in acquisitionPlan)
+        foreach ((string leader, List<(string key, KeyValueDurability durability)> xkeys) in acquisitionPlan)
             tasks.Add(TryReleaseNodeExclusiveLocks(transactionId, leader, localNode, xkeys, lockSync, responses, cancelationToken));
         
         await Task.WhenAll(tasks);
