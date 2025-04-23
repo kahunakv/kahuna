@@ -6,7 +6,6 @@ using System.Text.Json;
 using DotNext.Threading.Tasks;
 using Kahuna.Client;
 using Kahuna.Shared.KeyValue;
-using Kommander.Diagnostics;
 using RadLine;
 using Spectre.Console;
 

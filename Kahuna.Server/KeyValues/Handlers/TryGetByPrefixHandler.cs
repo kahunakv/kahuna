@@ -35,11 +35,8 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
         List<(string, ReadOnlyKeyValueContext)> items = [];
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
         
-        foreach ((string key, KeyValueContext? _) in keyValuesStore.GetItems())
-        {                        
-            if (!key.StartsWith(message.Key, StringComparison.Ordinal))
-                continue;
-                       
+        foreach ((string key, KeyValueContext? _) in keyValuesStore.GetByPrefix(message.Key))
+        {
             KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability);     
             
             if (response.Type == KeyValueResponseType.DoesNotExist)
@@ -64,11 +61,8 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
 
         // step 1: we need to check the in-memory store to get the MVCC entry or the latest value
-        foreach ((string key, KeyValueContext? _) in keyValuesStore.GetItems())
+        foreach ((string key, KeyValueContext? _) in keyValuesStore.GetByPrefix(message.Key))
         {
-            if (!key.StartsWith(message.Key, StringComparison.Ordinal))
-                continue;
-            
             KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability);
 
             if (response.Type == KeyValueResponseType.DoesNotExist)
@@ -91,6 +85,7 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
         }
 
         // step 2: we join the in-memory store with the disk store
+        // @todo we probably want to cache this in an mvcc entry
         List<(string, ReadOnlyKeyValueContext)> itemsFromDisk = await raft.ReadThreadPool.EnqueueTask(() => PersistenceBackend.GetKeyValueByPrefix(message.Key));
         
         foreach ((string key, ReadOnlyKeyValueContext readOnlyKeyValueContext) in itemsFromDisk)

@@ -7,7 +7,6 @@
  */
 
 using System.Diagnostics;
-using DotNext;
 using Kahuna.Client;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;

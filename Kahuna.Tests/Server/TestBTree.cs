@@ -319,6 +319,53 @@ public class TestBTree
         items = btree.GetItems("services/008", "services/010");
         Assert.Equal(2, items.Count());
         
+        items = btree.GetByPrefix("services");
+        Assert.Equal(9, items.Count());
+        
         Assert.Equal(9, btree.Count);
+    }
+    
+    [Fact]
+    public void TestBTreeBasicRange3()
+    {
+        BTree<string, string> btree = new(32);
+
+        for (int i = 0; i < 100; i++)
+        {
+            btree.Insert("services/" + i.ToString("D4"), i.ToString());    
+            btree.Insert("config/" + i.ToString("D4"), i.ToString());
+        }
+        
+        Assert.True(btree.ContainsKey("services/0001"));        
+        Assert.True(btree.TryGetValue("services/0001", out string? value));
+        Assert.Equal("1", value);
+        
+        Assert.True(btree.ContainsKey("services/0002"));
+        Assert.True(btree.TryGetValue("services/0002", out value));
+        Assert.Equal("2", value);
+        
+        Assert.True(btree.ContainsKey("services/0003"));
+        Assert.True(btree.TryGetValue("services/0003", out value));
+        Assert.Equal("3", value);
+        
+        IEnumerable<KeyValuePair<string, string>> items = btree.GetItems();
+        Assert.Equal(200, items.Count());
+        
+        /*items = btree.GetItems("services/003", "services/006");
+        Assert.Equal(4, items.Count());
+        
+        items = btree.GetItems("services/000", "services/003");
+        Assert.Equal(3, items.Count());
+        
+        items = btree.GetItems("services/008", "services/010");
+        Assert.Equal(2, items.Count());*/
+        
+        items = btree.GetByPrefix("services");
+        Assert.Equal(100, items.Count());
+        
+        items = btree.GetByPrefix("config");
+        Assert.Equal(100, items.Count());
+        
+        Assert.Equal(200, btree.Count);
     }
 }

@@ -26,12 +26,7 @@ public class TestKeyValueScripts : BaseCluster
 
         raftLogger = loggerFactory.CreateLogger<IRaft>();
         kahunaLogger = loggerFactory.CreateLogger<IKahuna>();
-    }
-
-    private static string GetRandomKey()
-    {
-        return Guid.NewGuid().ToString("N")[..10];
-    }
+    }    
     
     [Theory, CombinatorialData]
     public async Task TestSetGetExecuteScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
@@ -90,9 +85,7 @@ public class TestKeyValueScripts : BaseCluster
         Assert.Equal(2, resp.Revision);
         Assert.Equal("another world"u8.ToArray(), resp.Value);
 
-        await node1.LeaveCluster(true);
-        await node2.LeaveCluster(true);
-        await node3.LeaveCluster(true);
+        await LeaveCluster(node1, node2, node3);
     }
 
     [Theory, CombinatorialData]
@@ -139,9 +132,7 @@ public class TestKeyValueScripts : BaseCluster
         resp = await kahuna3.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.DoesNotExist, resp.Type);   
         
-        await node1.LeaveCluster(true);
-        await node2.LeaveCluster(true);
-        await node3.LeaveCluster(true);
+        await LeaveCluster(node1, node2, node3);
     }
     
     [Theory, CombinatorialData]
@@ -206,9 +197,7 @@ public class TestKeyValueScripts : BaseCluster
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);    
         
-        await node1.LeaveCluster(true);
-        await node2.LeaveCluster(true);
-        await node3.LeaveCluster(true);
+        await LeaveCluster(node1, node2, node3);
     }
     
     [Theory, CombinatorialData]
@@ -265,9 +254,7 @@ public class TestKeyValueScripts : BaseCluster
         resp = await kahuna3.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.DoesNotExist, resp.Type);
         
-        await node1.LeaveCluster(true);
-        await node2.LeaveCluster(true);
-        await node3.LeaveCluster(true);
+        await LeaveCluster(node1, node2, node3);
     }
 
     [Theory, CombinatorialData]
@@ -297,9 +284,7 @@ public class TestKeyValueScripts : BaseCluster
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
-        await node1.LeaveCluster(true);
-        await node2.LeaveCluster(true);
-        await node3.LeaveCluster(true);
+        await LeaveCluster(node1, node2, node3);
     }
     
     [Theory, CombinatorialData]
@@ -331,9 +316,7 @@ public class TestKeyValueScripts : BaseCluster
         Assert.Equal(1, resp.Revision);
         Assert.Equal("hello world 2"u8.ToArray(), resp.Value);
         
-        await node1.LeaveCluster(true);
-        await node2.LeaveCluster(true);
-        await node3.LeaveCluster(true);
+        await LeaveCluster(node1, node2, node3);
     }
     
     [Theory, CombinatorialData]
@@ -365,9 +348,7 @@ public class TestKeyValueScripts : BaseCluster
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
-        await node1.LeaveCluster(true);
-        await node2.LeaveCluster(true);
-        await node3.LeaveCluster(true);
+        await LeaveCluster(node1, node2, node3);
     }
     
     [Theory, CombinatorialData]
@@ -399,9 +380,7 @@ public class TestKeyValueScripts : BaseCluster
         Assert.Equal(1, resp.Revision);
         Assert.Equal("hello world 2"u8.ToArray(), resp.Value);
         
-        await node1.LeaveCluster(true);
-        await node2.LeaveCluster(true);
-        await node3.LeaveCluster(true);
+        await LeaveCluster(node1, node2, node3);
     }
     
     [Theory, CombinatorialData]
@@ -441,9 +420,7 @@ public class TestKeyValueScripts : BaseCluster
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
-        await node1.LeaveCluster(true);
-        await node2.LeaveCluster(true);
-        await node3.LeaveCluster(true);
+        await LeaveCluster(node1, node2, node3);
     }
     
     [Theory, CombinatorialData]
@@ -480,9 +457,7 @@ public class TestKeyValueScripts : BaseCluster
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
-        await node1.LeaveCluster(true);
-        await node2.LeaveCluster(true);
-        await node3.LeaveCluster(true);
+        await LeaveCluster(node1, node2, node3);
     }
     
     [Theory, CombinatorialData]
@@ -546,9 +521,7 @@ public class TestKeyValueScripts : BaseCluster
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
-        await node1.LeaveCluster(true);
-        await node2.LeaveCluster(true);
-        await node3.LeaveCluster(true);
+        await LeaveCluster(node1, node2, node3);
     }
     
     [Theory, CombinatorialData]
@@ -616,9 +589,7 @@ public class TestKeyValueScripts : BaseCluster
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
-        await node1.LeaveCluster(true);
-        await node2.LeaveCluster(true);
-        await node3.LeaveCluster(true);
+        await LeaveCluster(node1, node2, node3);
     }
 
     [Theory, CombinatorialData]
@@ -753,7 +724,7 @@ public class TestKeyValueScripts : BaseCluster
         Assert.Equal(KeyValueResponseType.Set, resp.Type);
         Assert.Equal(0, resp.Revision);
 
-        await Task.Delay(1000);
+        //await Task.Delay(1000);
         
         script = "GET BY PREFIX `my-prefix`";
 
