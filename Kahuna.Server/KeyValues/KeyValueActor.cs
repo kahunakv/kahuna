@@ -22,7 +22,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     
     private readonly IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext;
     
-    private readonly BTree<string, KeyValueContext> keyValuesStore = new(16);
+    private readonly BTree<string, KeyValueContext> keyValuesStore = new(32);
 
     private readonly ILogger<IKahuna> logger;
 

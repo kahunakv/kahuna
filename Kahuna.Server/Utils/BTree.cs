@@ -138,11 +138,13 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
         // 1) Descend to the leaf that should contain minKey
         Node<TKey, TValue> node = temp;
+        
         while (!node.IsLeaf)
             node = node.Children[node.FindChildIndex(minKey)];
 
         // 2) Walk forward through the leaf chain
         Node<TKey, TValue>? cursor = node;
+        
         while (cursor is not null)
         {
             for (int i = 0; i < cursor.KeyCount; i++)
@@ -156,6 +158,43 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
                 
                 yield return new(key, cursor.Values[i]!);
             }
+            cursor = cursor.Next;
+        }
+    }
+    
+    public IEnumerable<KeyValuePair<TKey, TValue>> GetByPrefix(string prefix)
+    {
+        // only valid when TKey is string
+        if (typeof(TKey) != typeof(string))
+            throw new InvalidOperationException("GetByPrefix only supported for BTree<string, TValue>");
+
+        Node<TKey, TValue>? temp = Root;
+        if (temp is null)
+            yield break;
+
+        // 1) Descend to the leaf that would contain `prefix`
+        Node<TKey, TValue> node = temp;
+        
+        while (!node.IsLeaf)
+            node = node.Children[node.FindChildIndex((TKey)(object)prefix)]!;
+
+        // 2) Walk forward through the linked leaves
+        Node<TKey, TValue>? cursor = node;
+        
+        while (cursor is not null)
+        {
+            for (int i = 0; i < cursor.KeyCount; i++)
+            {
+                // safe cast because we checked TKey==string
+                string key = (string)(object)cursor.Keys[i];
+                
+                if (key.StartsWith(prefix))
+                    yield return new((TKey)(object)key, cursor.Values[i]!);
+                else if (string.Compare(key, prefix, StringComparison.Ordinal) > 0)
+                    // once we pass the prefix range, we can stop
+                    yield break;
+            }
+            
             cursor = cursor.Next;
         }
     }
@@ -202,6 +241,7 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
                 Keys[i] = Keys[i - 1];
                 Values[i] = Values[i - 1];
             }
+            
             Keys[idx] = key;
             Values[idx] = value;
             KeyCount++;
@@ -215,7 +255,9 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
         
         // interior
         int childIdx = FindChildIndex(key);
+        
         (Node<TKey, TValue>? childSib, TKey childPromote) = Children[childIdx].InsertRec(key, value, tree);
+        
         if (childSib is not null)
         {
             for (int i = KeyCount; i > childIdx; i--)
@@ -223,6 +265,7 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
                 Keys[i] = Keys[i - 1];
                 Children[i + 1] = Children[i];
             }
+            
             Keys[childIdx] = childPromote;
             Children[childIdx + 1] = childSib;
             KeyCount++;
@@ -260,6 +303,7 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
         Node<TKey, TValue> sibling = new(_order, false);
         
         int j = 0;
+        
         for (int i = mid + 1; i < KeyCount; i++, j++)
             sibling.Keys[j] = Keys[i];
         
@@ -269,22 +313,27 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
         sibling.KeyCount = KeyCount - mid - 1;
         TKey promoteKey = Keys[mid];
         KeyCount = mid;
+        
         return (sibling, promoteKey);
     }
 
     internal int FindIndex(TKey key)
     {
         int i = 0;
+        
         while (i < KeyCount && Keys[i].CompareTo(key) < 0)
             i++;
+        
         return i;
     }
 
     internal int FindChildIndex(TKey key)
     {
         int i = 0;
+        
         while (i < KeyCount && Keys[i].CompareTo(key) <= 0)
             i++;
+        
         return i;
     }
     
@@ -452,6 +501,7 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
             Keys[i]      = Keys[i + 1];
             Children[i+1] = Children[i+2];
         }
+        
         KeyCount--;
     }
 
