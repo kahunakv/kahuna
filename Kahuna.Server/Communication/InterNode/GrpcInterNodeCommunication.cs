@@ -462,8 +462,6 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcKeyValueDurability)durability
         };
         
-        // GrpcTryPrepareMutationsResponse? remoteResponse = await client.TryPrepareMutationsAsync(request, cancellationToken: cancellationToken);
-        
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
         GrpcTryPrepareMutationsResponse remoteResponse = response.TryPrepareMutations!;
         
@@ -521,9 +519,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
 
     public async Task<(KeyValueResponseType, long)> TryCommitMutations(string node, HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancelationToken)
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
         
         GrpcTryCommitMutationsRequest request = new()
         {
@@ -535,7 +531,8 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcKeyValueDurability)durability,
         };
         
-        GrpcTryCommitMutationsResponse? remoteResponse = await client.TryCommitMutationsAsync(request, cancellationToken: cancelationToken);
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcTryCommitMutationsResponse remoteResponse = response.TryCommitMutations!;
         
         remoteResponse.ServedFrom = $"https://{node}";
         
@@ -544,9 +541,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
 
     public async Task TryCommitNodeMutations(string node, HLCTimestamp transactionId, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys, Lock lockSync, List<(KeyValueResponseType type, string key, long, KeyValueDurability durability)> responses, CancellationToken cancellationToken)
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node);
-            
-        KeyValuer.KeyValuerClient client = new(channel);
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
             
         GrpcTryCommitManyMutationsRequest request = new()
         {
@@ -556,7 +551,8 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             
         request.Items.Add(GetCommitRequestItems(xkeys));
             
-        GrpcTryCommitManyMutationsResponse? remoteResponse = await client.TryCommitManyMutationsAsync(request, cancellationToken: cancellationToken);
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcTryCommitManyMutationsResponse remoteResponse = response.TryCommitManyMutations!;
 
         lock (lockSync)
         {

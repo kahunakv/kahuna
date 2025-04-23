@@ -26,6 +26,10 @@ internal sealed class GrpcServerBatcherRequest
     public GrpcTryPrepareMutationsRequest? TryPrepareMutations { get; }
     
     public GrpcTryPrepareManyMutationsRequest? TryPrepareManyMutations { get; }
+    
+    public GrpcTryCommitMutationsRequest? TryCommitMutations { get; }
+    
+    public GrpcTryCommitManyMutationsRequest? TryCommitManyMutations { get; }
 
     public GrpcServerBatcherRequest(GrpcTrySetKeyValueRequest trySetKeyValue)
     {
@@ -85,5 +89,15 @@ internal sealed class GrpcServerBatcherRequest
     public GrpcServerBatcherRequest(GrpcTryPrepareManyMutationsRequest tryPrepareManyMutations)
     {
         TryPrepareManyMutations = tryPrepareManyMutations;
+    }
+    
+    public GrpcServerBatcherRequest(GrpcTryCommitMutationsRequest tryCommitMutations)
+    {
+        TryCommitMutations = tryCommitMutations;
+    }
+    
+    public GrpcServerBatcherRequest(GrpcTryCommitManyMutationsRequest tryCommitManyMutations)
+    {
+        TryCommitManyMutations = tryCommitManyMutations;
     }
 }

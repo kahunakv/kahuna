@@ -26,6 +26,10 @@ internal sealed class GrpcServerBatcherResponse
     public GrpcTryPrepareMutationsResponse? TryPrepareMutations { get; }
     
     public GrpcTryPrepareManyMutationsResponse? TryPrepareManyMutations { get; }
+    
+    public GrpcTryCommitMutationsResponse? TryCommitMutations { get; }
+    
+    public GrpcTryCommitManyMutationsResponse? TryCommitManyMutations { get; }
 
     public GrpcServerBatcherResponse(GrpcTrySetKeyValueResponse trySetKeyValue)
     {
@@ -85,5 +89,15 @@ internal sealed class GrpcServerBatcherResponse
     public GrpcServerBatcherResponse(GrpcTryPrepareManyMutationsResponse tryPrepareManyMutations)
     {
         TryPrepareManyMutations = tryPrepareManyMutations;
+    }
+    
+    public GrpcServerBatcherResponse(GrpcTryCommitMutationsResponse tryCommitMutations)
+    {
+        TryCommitMutations = tryCommitMutations;
+    }
+    
+    public GrpcServerBatcherResponse(GrpcTryCommitManyMutationsResponse tryCommitManyMutations)
+    {
+        TryCommitManyMutations = tryCommitManyMutations;
     }
 }

@@ -408,6 +408,8 @@ message GrpcBatchServerKeyValueRequest {
     GrpcTryReleaseManyExclusiveLocksRequest TryReleaseManyExclusiveLocks = 12;
     GrpcTryPrepareMutationsRequest TryPrepareMutations = 13;
     GrpcTryPrepareManyMutationsRequest TryPrepareManyMutations = 14;
+    GrpcTryCommitMutationsRequest TryCommitMutations = 15;
+    GrpcTryCommitManyMutationsRequest TryCommitManyMutations = 16;
   }
 }
 
@@ -428,6 +430,8 @@ message GrpcBatchServerKeyValueResponse
     GrpcTryReleaseManyExclusiveLocksResponse TryReleaseManyExclusiveLocks = 12;
     GrpcTryPrepareMutationsResponse TryPrepareMutations = 13;
     GrpcTryPrepareManyMutationsResponse TryPrepareManyMutations = 14;
+    GrpcTryCommitMutationsResponse TryCommitMutations = 15;
+    GrpcTryCommitManyMutationsResponse TryCommitManyMutations = 16;
   }
 }
 
@@ -455,6 +459,8 @@ enum GrpcServerBatchType {
   SERVER_TRY_RELEASE_MANY_EXCLUSIVE_LOCKS = 10;
   SERVER_TRY_PREPARE_MUTATIONS = 11;
   SERVER_TRY_PREPARE_MANY_MUTATIONS = 12;
+  SERVER_TRY_COMMIT_MUTATIONS = 13;
+  SERVER_TRY_COMMIT_MANY_MUTATIONS = 14;
 }
 
 enum GrpcKeyValueFlags {

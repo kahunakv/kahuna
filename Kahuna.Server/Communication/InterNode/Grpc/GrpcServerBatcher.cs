@@ -133,6 +133,24 @@ internal sealed class GrpcServerBatcher
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
+    
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryCommitMutationsRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryCommitManyMutationsRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
 
     private Task<GrpcServerBatcherResponse> TryProcessQueue(GrpcServerBatcherItem grpcBatcherItem, TaskCompletionSource<GrpcServerBatcherResponse> promise)
     {
@@ -263,6 +281,16 @@ internal sealed class GrpcServerBatcher
                     batchRequest.Type = GrpcServerBatchType.ServerTryPrepareManyMutations;
                     batchRequest.TryPrepareManyMutations = itemRequest.TryPrepareManyMutations;
                 }
+                else if (itemRequest.TryCommitMutations is not null)
+                {
+                    batchRequest.Type = GrpcServerBatchType.ServerTryCommitMutations;
+                    batchRequest.TryCommitMutations = itemRequest.TryCommitMutations;
+                }
+                else if (itemRequest.TryCommitManyMutations is not null)
+                {
+                    batchRequest.Type = GrpcServerBatchType.ServerTryCommitManyMutations;
+                    batchRequest.TryCommitManyMutations = itemRequest.TryCommitManyMutations;
+                }
                 else
                 {
                     throw new KahunaServerException("Unknown request type");
@@ -349,6 +377,14 @@ internal sealed class GrpcServerBatcher
                     
                     case GrpcServerBatchType.ServerTryPrepareManyMutations:
                         item.Promise.SetResult(new(response.TryPrepareManyMutations));
+                        break;
+                    
+                    case GrpcServerBatchType.ServerTryCommitMutations:
+                        item.Promise.SetResult(new(response.TryCommitMutations));
+                        break;
+                    
+                    case GrpcServerBatchType.ServerTryCommitManyMutations:
+                        item.Promise.SetResult(new(response.TryCommitManyMutations));
                         break;
 
                     case GrpcServerBatchType.ServerTypeNone:

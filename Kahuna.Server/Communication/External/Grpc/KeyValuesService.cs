@@ -540,6 +540,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns></returns>
     public override async Task<GrpcTryCommitMutationsResponse> TryCommitMutations(GrpcTryCommitMutationsRequest request, ServerCallContext context)
     {
+        return await TryCommitMutationsInternal(request, context);
+    }
+    
+    private async Task<GrpcTryCommitMutationsResponse> TryCommitMutationsInternal(GrpcTryCommitMutationsRequest request, ServerCallContext context)
+    {
         if (string.IsNullOrEmpty(request.Key))
             return new()
             {
@@ -568,6 +573,17 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <param name="context"></param>
     /// <returns></returns>
     public override async Task<GrpcTryCommitManyMutationsResponse> TryCommitManyMutations(GrpcTryCommitManyMutationsRequest request, ServerCallContext context)
+    {
+        return await TryCommitManyMutationsInternal(request, context);
+    }
+    
+    /// <summary>
+    /// Receives requests for the key/value "CommitManyMutations" service 
+    /// </summary>
+    /// <param name="request"></param>
+    /// <param name="context"></param>
+    /// <returns></returns>
+    private async Task<GrpcTryCommitManyMutationsResponse> TryCommitManyMutationsInternal(GrpcTryCommitManyMutationsRequest request, ServerCallContext context)
     {
         List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> responses = await keyValues.LocateAndTryCommitManyMutations(
             new(request.TransactionIdPhysical, request.TransactionIdCounter), 
@@ -1180,6 +1196,22 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                         tasks.Add(TryPrepareManyMutationsDelayed(semaphore, request.RequestId, tryPrepareManyMutationsRequest, responseStream, context));
                     }
                     break;
+                    
+                    case GrpcServerBatchType.ServerTryCommitMutations:
+                    {
+                        GrpcTryCommitMutationsRequest? tryCommitMutationsRequest = request.TryCommitMutations;
+
+                        tasks.Add(TryCommitMutationsDelayed(semaphore, request.RequestId, tryCommitMutationsRequest, responseStream, context));
+                    }
+                        break;
+                    
+                    case GrpcServerBatchType.ServerTryCommitManyMutations:
+                    {
+                        GrpcTryCommitManyMutationsRequest? tryCommitManyMutationsRequest = request.TryCommitManyMutations;
+
+                        tasks.Add(TryCommitManyMutationsDelayed(semaphore, request.RequestId, tryCommitManyMutationsRequest, responseStream, context));
+                    }
+                        break;
 
                     case GrpcServerBatchType.ServerTypeNone:
                     default:                                                
@@ -1530,6 +1562,64 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             Type = GrpcServerBatchType.ServerTryPrepareManyMutations,
             RequestId = requestId,
             TryPrepareManyMutations = tryPrepareManyMutationsResponse
+        };
+
+        try
+        {
+            await semaphore.WaitAsync(context.CancellationToken);
+
+            await responseStream.WriteAsync(response);
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+    
+    private async Task TryCommitMutationsDelayed(
+        SemaphoreSlim semaphore, 
+        int requestId, 
+        GrpcTryCommitMutationsRequest tryCommitMutationsRequest, 
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcTryCommitMutationsResponse tryCommitMutationsResponse = await TryCommitMutationsInternal(tryCommitMutationsRequest, context);
+        
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type = GrpcServerBatchType.ServerTryCommitMutations,
+            RequestId = requestId,
+            TryCommitMutations = tryCommitMutationsResponse
+        };
+
+        try
+        {
+            await semaphore.WaitAsync(context.CancellationToken);
+
+            await responseStream.WriteAsync(response);
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+    
+    private async Task TryCommitManyMutationsDelayed(
+        SemaphoreSlim semaphore, 
+        int requestId, 
+        GrpcTryCommitManyMutationsRequest tryPrepareManyMutationsRequest, 
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcTryCommitManyMutationsResponse tryCommitManyMutationsResponse = await TryCommitManyMutationsInternal(tryPrepareManyMutationsRequest, context);
+        
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type = GrpcServerBatchType.ServerTryCommitManyMutations,
+            RequestId = requestId,
+            TryCommitManyMutations = tryCommitManyMutationsResponse
         };
 
         try
