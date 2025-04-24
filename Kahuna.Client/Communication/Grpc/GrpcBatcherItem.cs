@@ -10,10 +10,13 @@ namespace Kahuna.Client.Communication;
 
 internal sealed class GrpcBatcherItem
 {
+    /// <summary>
+    /// Unique ID of the request
+    /// </summary>
     public int RequestId { get; }
     
     /// <summary>
-    /// List of logs to store
+    /// Request to be sent to the server
     /// </summary>
     public GrpcBatcherRequest Request { get; }
 

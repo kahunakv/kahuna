@@ -13,7 +13,7 @@ internal sealed class GrpcServerBatcherResponse
 
     public GrpcTryExistsKeyValueResponse? TryExistsKeyValue { get; }
     
-    public GrpcTryExecuteTransactionResponse? TryExecuteTransaction { get; }
+    public GrpcTryExecuteTransactionScriptResponse? TryExecuteTransactionScript { get; }
     
     public GrpcTryAcquireExclusiveLockResponse? TryAcquireExclusiveLock { get; }
     
@@ -56,9 +56,9 @@ internal sealed class GrpcServerBatcherResponse
         TryExistsKeyValue = tryExistsKeyValue;
     }
     
-    public GrpcServerBatcherResponse(GrpcTryExecuteTransactionResponse tryExecuteTransaction)
+    public GrpcServerBatcherResponse(GrpcTryExecuteTransactionScriptResponse tryExecuteTransactionScript)
     {
-        TryExecuteTransaction = tryExecuteTransaction;
+        TryExecuteTransactionScript = tryExecuteTransactionScript;
     }
     
     public GrpcServerBatcherResponse(GrpcTryAcquireExclusiveLockResponse tryAcquireExclusiveLock)

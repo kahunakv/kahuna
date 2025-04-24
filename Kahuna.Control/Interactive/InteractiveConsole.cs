@@ -25,7 +25,7 @@ public static class InteractiveConsole
 
         LineEditor? editor = null;
         Dictionary<string, KahunaLock> locks = new();
-        Dictionary<string, KahunaScript> scripts = new();
+        Dictionary<string, KahunaTransactionScript> scripts = new();
 
         if (LineEditor.IsSupported(AnsiConsole.Console))
         {
@@ -368,13 +368,13 @@ public static class InteractiveConsole
         //AnsiConsole.MarkupLine("[cyan]Saving history to {0}...[/]", Markup.Escape(historyPath));
     }
 
-    private static async Task RunCommand(KahunaClient connection, Dictionary<string, KahunaScript> scripts, List<string> history, string commandTrim)
+    private static async Task RunCommand(KahunaClient connection, Dictionary<string, KahunaTransactionScript> scripts, List<string> history, string commandTrim)
     {
         //ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
-        if (!scripts.TryGetValue(commandTrim, out KahunaScript? script))
+        if (!scripts.TryGetValue(commandTrim, out KahunaTransactionScript? script))
         {
-            script = connection.LoadScript(commandTrim);
+            script = connection.LoadTransactionScript(commandTrim);
             scripts.Add(commandTrim, script);
         }
         
@@ -531,7 +531,7 @@ public static class InteractiveConsole
             history.Add(commandTrim);
     }
 
-    private static async Task LoadAndRunScript(KahunaClient connection, Dictionary<string, KahunaScript> scripts, List<string> history, string commandTrim)
+    private static async Task LoadAndRunScript(KahunaClient connection, Dictionary<string, KahunaTransactionScript> scripts, List<string> history, string commandTrim)
     {                       
         string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
         

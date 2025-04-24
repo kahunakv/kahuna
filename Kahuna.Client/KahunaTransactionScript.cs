@@ -3,7 +3,7 @@ using System.Text;
 
 namespace Kahuna.Client;
 
-public class KahunaScript
+public class KahunaTransactionScript
 {
     private readonly KahunaClient kahunaClient;
 
@@ -16,7 +16,7 @@ public class KahunaScript
     /// </summary>
     /// <param name="kahunaClient"></param>
     /// <param name="script"></param>
-    public KahunaScript(KahunaClient kahunaClient, string script)
+    public KahunaTransactionScript(KahunaClient kahunaClient, string script)
     {
         this.kahunaClient = kahunaClient;
         this.script = Encoding.UTF8.GetBytes(script);
@@ -29,6 +29,6 @@ public class KahunaScript
     /// <returns></returns>
     public async Task<KahunaKeyValueTransactionResult> Run()
     {
-        return await kahunaClient.ExecuteKeyValueTransaction(script, hash).ConfigureAwait(false);
+        return await kahunaClient.ExecuteKeyValueTransactionScript(script, hash).ConfigureAwait(false);
     }
 }

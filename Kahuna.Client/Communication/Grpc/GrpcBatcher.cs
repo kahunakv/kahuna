@@ -88,7 +88,7 @@ internal sealed class GrpcBatcher
         return TryProcessQueue(grpcBatcherItem, promise);
     }
     
-    public Task<GrpcBatcherResponse> Enqueue(GrpcTryExecuteTransactionRequest message)
+    public Task<GrpcBatcherResponse> Enqueue(GrpcTryExecuteTransactionScriptRequest message)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -191,15 +191,13 @@ internal sealed class GrpcBatcher
                     batchRequest.Type = GrpcClientBatchType.TryExistsKeyValue;
                     batchRequest.TryExistsKeyValue = itemRequest.TryExistsKeyValue;
                 }
-                else if (itemRequest.TryExecuteTransaction is not null)
+                else if (itemRequest.TryExecuteTransactionScript is not null)
                 {
-                    batchRequest.Type = GrpcClientBatchType.TryExecuteTransaction;
-                    batchRequest.TryExecuteTransaction = itemRequest.TryExecuteTransaction;
+                    batchRequest.Type = GrpcClientBatchType.TryExecuteTransactionScript;
+                    batchRequest.TryExecuteTransactionScript = itemRequest.TryExecuteTransactionScript;
                 }
                 else
-                {
                     throw new KahunaException("Unknown request type", LockResponseType.Errored);
-                }
 
                 try
                 {
@@ -256,8 +254,8 @@ internal sealed class GrpcBatcher
                     item.Promise.SetResult(new(response.TryExistsKeyValue));
                     break;
                 
-                case GrpcClientBatchType.TryExecuteTransaction:
-                    item.Promise.SetResult(new(response.TryExecuteTransaction));
+                case GrpcClientBatchType.TryExecuteTransactionScript:
+                    item.Promise.SetResult(new(response.TryExecuteTransactionScript));
                     break;
                         
                 case GrpcClientBatchType.TypeNone:

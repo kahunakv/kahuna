@@ -29,24 +29,12 @@ public sealed class LocksService : Locker.LockerBase
     
     public override async Task<GrpcTryLockResponse> TryLock(GrpcTryLockRequest request, ServerCallContext context)
     {
-        if (string.IsNullOrEmpty(request.Resource))
+        if (string.IsNullOrEmpty(request.Resource) || request.Owner is null || request.ExpiresMs <= 0)
             return new()
             {
                 Type = GrpcLockResponseType.LockResponseTypeInvalidInput
             };
-        
-        if (request.Owner is null)
-            return new()
-            {
-                Type = GrpcLockResponseType.LockResponseTypeInvalidInput
-            };
-        
-        if (request.ExpiresMs <= 0)
-            return new()
-            {
-                Type = GrpcLockResponseType.LockResponseTypeInvalidInput
-            };
-        
+
         byte[] owner;
 
         if (MemoryMarshal.TryGetArray(request.Owner.Memory, out ArraySegment<byte> segment))
@@ -72,24 +60,12 @@ public sealed class LocksService : Locker.LockerBase
     
     public override async Task<GrpcExtendLockResponse> TryExtendLock(GrpcExtendLockRequest request, ServerCallContext context)
     {
-        if (string.IsNullOrEmpty(request.Resource))
+        if (string.IsNullOrEmpty(request.Resource) || request.Owner is null || request.ExpiresMs <= 0)
             return new()
             {
                 Type = GrpcLockResponseType.LockResponseTypeInvalidInput
             };
-        
-        if (request.Owner is null)
-            return new()
-            {
-                Type = GrpcLockResponseType.LockResponseTypeInvalidInput
-            };
-        
-        if (request.ExpiresMs <= 0)
-            return new()
-            {
-                Type = GrpcLockResponseType.LockResponseTypeInvalidInput
-            };
-        
+
         byte[] owner;
 
         if (MemoryMarshal.TryGetArray(request.Owner.Memory, out ArraySegment<byte> segment))
@@ -115,18 +91,12 @@ public sealed class LocksService : Locker.LockerBase
     
     public override async Task<GrpcUnlockResponse> Unlock(GrpcUnlockRequest request, ServerCallContext context)
     {
-        if (string.IsNullOrEmpty(request.Resource))
+        if (string.IsNullOrEmpty(request.Resource) || request.Owner is null)
             return new()
             {
                 Type = GrpcLockResponseType.LockResponseTypeInvalidInput
             };
-        
-        if (request.Owner is null)
-            return new()
-            {
-                Type = GrpcLockResponseType.LockResponseTypeInvalidInput
-            };
-        
+
         byte[] owner;
 
         if (MemoryMarshal.TryGetArray(request.Owner.Memory, out ArraySegment<byte> segment))

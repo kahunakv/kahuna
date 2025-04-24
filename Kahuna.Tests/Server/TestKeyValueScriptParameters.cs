@@ -37,13 +37,13 @@ public class TestKeyValueScriptParameters : BaseCluster
         // Persistent tests
         string script = "SET @pp_param 'hello world'";
 
-        KeyValueTransactionResult resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, [new() { Key = "@pp_param", Value = "pp" }]);
+        KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, [new() { Key = "@pp_param", Value = "pp" }]);
         Assert.Equal(KeyValueResponseType.Set, resp.Type);
         Assert.Equal(0, resp.Revision);
         
         script = "GET @pp_param";
 
-        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, [new() { Key = "@pp_param", Value = "pp" }]);
+        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, [new() { Key = "@pp_param", Value = "pp" }]);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         
@@ -55,7 +55,7 @@ public class TestKeyValueScriptParameters : BaseCluster
          return true
          """;
 
-        resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, [new() { Key = "@leader_param", Value = "election/leader1" }]);
+        resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, [new() { Key = "@leader_param", Value = "election/leader1" }]);
         Assert.Equal(KeyValueResponseType.Errored, resp.Type);
         Assert.Equal("election failed at line 3", resp.Reason);
         
@@ -68,7 +68,7 @@ public class TestKeyValueScriptParameters : BaseCluster
          return true
          """;
 
-        resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, [new() { Key = "@leader_param", Value = "election/leader1" }]);
+        resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, [new() { Key = "@leader_param", Value = "election/leader1" }]);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));     
            
@@ -82,7 +82,7 @@ public class TestKeyValueScriptParameters : BaseCluster
          end  
          """;
 
-        resp = await kahuna3.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, [new() { Key = "@leader_param", Value = "election/leader2" }]);
+        resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, [new() { Key = "@leader_param", Value = "election/leader2" }]);
         Assert.Equal(KeyValueResponseType.Set, resp.Type);        
         
         await LeaveCluster(node1, node2, node3);

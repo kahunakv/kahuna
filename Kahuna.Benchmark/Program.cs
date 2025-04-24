@@ -269,7 +269,7 @@ async Task GetKeyConcurrently(KahunaClient keyValues)
     }
 }
 
-async Task ExecuteTxConcurrently(KahunaScript ks)
+async Task ExecuteTxConcurrently(KahunaTransactionScript ks)
 {
     for (int i = 0; i < 10; i++)
     {

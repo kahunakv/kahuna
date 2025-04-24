@@ -35,7 +35,7 @@ public interface IKahunaCommunication
 
      Task<(bool, long, int)> TryExtendKeyValue(string url, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken);
 
-     Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransaction(string url, byte[] script, string? hash, List<KeyValueParameter>? parameters, CancellationToken cancellationToken);
+     Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransactionScript(string url, byte[] script, string? hash, List<KeyValueParameter>? parameters, CancellationToken cancellationToken);
 
      Task<(bool, List<string>)> GetByPrefix(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken);
      

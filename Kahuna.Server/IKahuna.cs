@@ -76,7 +76,7 @@ public interface IKahuna
 
     public Task<(KeyValueResponseType, long)> TryCommitMutations(HLCTimestamp transactionId, string key, HLCTimestamp proposalTicketId, KeyValueDurability durability);
     
-    public Task<KeyValueTransactionResult> TryExecuteTx(byte[] script, string? hash, List<KeyValueParameter>? parameters);
+    public Task<KeyValueTransactionResult> TryExecuteTransactionScript(byte[] script, string? hash, List<KeyValueParameter>? parameters);
     
     public Task<KeyValueGetByPrefixResult> GetByPrefix(HLCTimestamp transactionId, string prefixKeyName, KeyValueDurability durability);
 

@@ -501,9 +501,9 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to extend key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
 
-    public async Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransaction(string url, byte[] script, string? hash, List<KeyValueParameter>? parameters, CancellationToken cancellationToken)
+    public async Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransactionScript(string url, byte[] script, string? hash, List<KeyValueParameter>? parameters, CancellationToken cancellationToken)
     {
-        GrpcTryExecuteTransactionRequest request = new()
+        GrpcTryExecuteTransactionScriptRequest request = new()
         {
             Script = UnsafeByteOperations.UnsafeWrap(script)
         };
@@ -515,7 +515,7 @@ public class GrpcCommunication : IKahunaCommunication
             request.Parameters.AddRange(GetTransactionParameters(parameters));
 
         int retries = 0;
-        GrpcTryExecuteTransactionResponse? response;
+        GrpcTryExecuteTransactionScriptResponse? response;
         
         GrpcBatcher batcher = GetSharedBatcher(url);
         
@@ -525,7 +525,7 @@ public class GrpcCommunication : IKahunaCommunication
                 throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
             
             GrpcBatcherResponse batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-            response = batchResponse.TryExecuteTransaction;
+            response = batchResponse.TryExecuteTransactionScript;
 
             if (response is null)
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);

@@ -298,7 +298,7 @@ public class RestCommunication : IKahunaCommunication
                     .ConfigureAwait(false);
 
             if (response is null)
-                throw new KahunaException("Response is null", LockResponseType.Errored);
+                throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
             if (response.Type == KeyValueResponseType.Set)
                 return (true, response.Revision, 0);
@@ -307,7 +307,7 @@ public class RestCommunication : IKahunaCommunication
                 return (false, response.Revision, 0);
             
             if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
 
         } while (response.Type == KeyValueResponseType.MustRetry);
             
@@ -334,7 +334,7 @@ public class RestCommunication : IKahunaCommunication
         do
         {
             if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
+                throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
             
             AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
         
@@ -350,7 +350,7 @@ public class RestCommunication : IKahunaCommunication
                     .ConfigureAwait(false);
 
             if (response is null)
-                throw new KahunaException("Response is null", LockResponseType.Errored);
+                throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
             if (response.Type == KeyValueResponseType.Set)
                 return (true, response.Revision, 0);
@@ -359,7 +359,7 @@ public class RestCommunication : IKahunaCommunication
                 return (false, response.Revision, 0);
             
             if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
 
         } while (response.Type == KeyValueResponseType.MustRetry);
             
@@ -386,7 +386,7 @@ public class RestCommunication : IKahunaCommunication
         do
         {
             if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
+                throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
             
             AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
         
@@ -402,7 +402,7 @@ public class RestCommunication : IKahunaCommunication
                     .ConfigureAwait(false);
 
             if (response is null)
-                throw new KahunaException("Response is null", LockResponseType.Errored);
+                throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
             if (response.Type == KeyValueResponseType.Set)
                 return (true, response.Revision, 0);
@@ -411,7 +411,7 @@ public class RestCommunication : IKahunaCommunication
                 return (false, response.Revision, 0);
             
             if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
 
         } while (response.Type == KeyValueResponseType.MustRetry);
             
@@ -435,7 +435,7 @@ public class RestCommunication : IKahunaCommunication
         do
         {
             if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
+                throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
             
             AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
         
@@ -451,7 +451,7 @@ public class RestCommunication : IKahunaCommunication
                     .ConfigureAwait(false);
 
             if (response is null)
-                throw new KahunaException("Response is null", LockResponseType.Errored);
+                throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
             if (response.Type == KeyValueResponseType.Get)
                 return (true, response.Value, response.Revision, 0);
@@ -460,7 +460,7 @@ public class RestCommunication : IKahunaCommunication
                 return (false, null, response.Revision, 0);
             
             if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
 
         } while (response.Type == KeyValueResponseType.MustRetry);
             
@@ -499,7 +499,7 @@ public class RestCommunication : IKahunaCommunication
                     .ConfigureAwait(false);
 
             if (response is null)
-                throw new KahunaException("Response is null", LockResponseType.Errored);
+                throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
             if (response.Type == KeyValueResponseType.Exists)
                 return (true, response.Revision, 0);
@@ -543,7 +543,7 @@ public class RestCommunication : IKahunaCommunication
                     .ConfigureAwait(false);
 
             if (response is null)
-                throw new KahunaException("Response is null", LockResponseType.Errored);
+                throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
             if (response.Type == KeyValueResponseType.Deleted)
                 return (true, response.Revision, 0);
@@ -588,7 +588,7 @@ public class RestCommunication : IKahunaCommunication
                     .ConfigureAwait(false);
 
             if (response is null)
-                throw new KahunaException("Response is null", LockResponseType.Errored);
+                throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
             if (response.Type == KeyValueResponseType.Extended)
                 return (true, response.Revision, 0);
@@ -601,7 +601,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to extend key/value: " + response.Type, response.Type);
     }
 
-    public async Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransaction(string url, byte[] script, string? hash, List<KeyValueParameter>? parameters, CancellationToken cancellationToken)
+    public async Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransactionScript(string url, byte[] script, string? hash, List<KeyValueParameter>? parameters, CancellationToken cancellationToken)
     {
         KeyValueTransactionRequest request = new()
         {
@@ -625,7 +625,7 @@ public class RestCommunication : IKahunaCommunication
             response = await retryPolicy.ExecuteAsync(() =>
                 url
                     .WithOAuthBearerToken("xxx")
-                    .AppendPathSegments("v1/kv/try-execute-tx")
+                    .AppendPathSegments("v1/kv/try-execute-tx-script")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
                     .WithSettings(o => o.HttpVersion = "2.0")
@@ -634,7 +634,7 @@ public class RestCommunication : IKahunaCommunication
                     .ConfigureAwait(false);
 
             if (response is null)
-                throw new KahunaException("Response is null", LockResponseType.Errored);
+                throw new KahunaException("Response is null", KeyValueResponseType.Errored);
             
             if (response.Type is < KeyValueResponseType.Errored or KeyValueResponseType.DoesNotExist)
                 return new()

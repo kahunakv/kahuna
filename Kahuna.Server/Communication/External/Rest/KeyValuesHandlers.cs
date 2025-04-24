@@ -1,7 +1,4 @@
 
-using System.Text.Json;
-using Flurl;
-using Flurl.Http;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.Communication.Rest;
@@ -17,15 +14,9 @@ public static class KeyValuesHandlers
     {
         app.MapPost("/v1/kv/try-set", async (KahunaSetKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
-            if (string.IsNullOrEmpty(request.Key))
+            if (string.IsNullOrEmpty(request.Key) || request.Value is null || request.ExpiresMs < 0)
                 return new() { Type = KeyValueResponseType.InvalidInput };
 
-            if (request.Value is null)
-                return new() { Type = KeyValueResponseType.InvalidInput };
-            
-            if (request.ExpiresMs < 0)
-                return new() { Type = KeyValueResponseType.InvalidInput };
-            
             (KeyValueResponseType response, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTrySetKeyValue(
                 request.TransactionId,
                 request.Key, 
@@ -48,10 +39,7 @@ public static class KeyValuesHandlers
 
         app.MapPost("/v1/kv/try-extend", async (KahunaExtendKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
-            if (string.IsNullOrEmpty(request.Key))
-                return new() { Type = KeyValueResponseType.InvalidInput };
-            
-            if (request.ExpiresMs <= 0)
+            if (string.IsNullOrEmpty(request.Key) || request.ExpiresMs <= 0)
                 return new() { Type = KeyValueResponseType.InvalidInput };
 
             (KeyValueResponseType response, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTryExtendKeyValue(
@@ -168,20 +156,14 @@ public static class KeyValuesHandlers
             }*/
         });
 
-        app.MapPost("/v1/kv/try-get", async (KahunaGetKeyValueRequest request, IKahuna keyValues, IRaft raft, ILogger<IKahuna> logger, CancellationToken cancellationToken) =>
+        app.MapPost("/v1/kv/try-get", async (KahunaGetKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
-            if (string.IsNullOrEmpty(request.Key))
+            if (string.IsNullOrEmpty(request.Key) || string.IsNullOrEmpty(request.Key))
                 return new()
                 {
                     Type = KeyValueResponseType.InvalidInput
                 };
-        
-            if (string.IsNullOrEmpty(request.Key))
-                return new()
-                {
-                    Type = KeyValueResponseType.InvalidInput
-                };
-        
+
             (KeyValueResponseType type, ReadOnlyKeyValueContext? keyValueContext) = await keyValues.LocateAndTryGetValue(
                 request.TransactionId,
                 request.Key, 
@@ -212,18 +194,12 @@ public static class KeyValuesHandlers
         
         app.MapPost("/v1/kv/try-exists", async (KahunaExistsKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
-            if (string.IsNullOrEmpty(request.Key))
+            if (string.IsNullOrEmpty(request.Key) || string.IsNullOrEmpty(request.Key))
                 return new()
                 {
                     Type = KeyValueResponseType.InvalidInput
                 };
-        
-            if (string.IsNullOrEmpty(request.Key))
-                return new()
-                {
-                    Type = KeyValueResponseType.InvalidInput
-                };
-        
+
             (KeyValueResponseType type, ReadOnlyKeyValueContext? keyValueContext) = await keyValues.LocateAndTryExistsValue(
                 request.TransactionId,
                 request.Key, 
@@ -251,7 +227,7 @@ public static class KeyValuesHandlers
             };
         });
         
-        app.MapPost("/v1/kv/try-execute-tx", async (KahunaTxKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
+        app.MapPost("/v1/kv/try-execute-tx-script", async (KahunaTxKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
             if (request.Script is null)
                 return new()
@@ -259,7 +235,7 @@ public static class KeyValuesHandlers
                     Type = KeyValueResponseType.InvalidInput
                 };
             
-            KeyValueTransactionResult result = await keyValues.TryExecuteTx(request.Script, request.Hash, request.Parameters);
+            KeyValueTransactionResult result = await keyValues.TryExecuteTransactionScript(request.Script, request.Hash, request.Parameters);
 
             return new KahunaTxKeyValueResponse
             {

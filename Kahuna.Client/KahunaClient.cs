@@ -542,7 +542,12 @@ public class KahunaClient
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<KahunaKeyValue> ExtendKeyValue(string key, int expiresMs, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
+    public async Task<KahunaKeyValue> ExtendKeyValue(
+        string key, 
+        int expiresMs, 
+        KeyValueDurability durability = KeyValueDurability.Persistent, 
+        CancellationToken cancellationToken = default
+    )
     {
         (bool success, long revision, int timeElapsedMs) = await communication.TryExtendKeyValue(
             GetRoundRobinUrl(), 
@@ -563,7 +568,12 @@ public class KahunaClient
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<KahunaKeyValue> ExtendKeyValue(string key, TimeSpan expiresMs, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
+    public async Task<KahunaKeyValue> ExtendKeyValue(
+        string key, 
+        TimeSpan expiresMs, 
+        KeyValueDurability durability = KeyValueDurability.Persistent, 
+        CancellationToken cancellationToken = default
+    )
     {
         (bool success, long revision, int timeElapsedMs) = await communication.TryExtendKeyValue(
             GetRoundRobinUrl(), 
@@ -586,9 +596,14 @@ public class KahunaClient
     /// <param name="parameters"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransaction(string script, string? hash = null, List<KeyValueParameter>? parameters = null, CancellationToken cancellationToken = default)
+    public async Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransactionScript(
+        string script,
+        string? hash = null, 
+        List<KeyValueParameter>? parameters = null, 
+        CancellationToken cancellationToken = default
+    )
     {
-        return await communication.TryExecuteKeyValueTransaction(
+        return await communication.TryExecuteKeyValueTransactionScript(
             GetRoundRobinUrl(), 
             Encoding.UTF8.GetBytes(script), 
             hash, 
@@ -607,9 +622,14 @@ public class KahunaClient
     /// <param name="parameters"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransaction(byte[] script, string? hash = null, List<KeyValueParameter>? parameters = null, CancellationToken cancellationToken = default)
+    public async Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransactionScript(
+        byte[] script, 
+        string? hash = null, 
+        List<KeyValueParameter>? parameters = null, 
+        CancellationToken cancellationToken = default
+    )
     {
-        return await communication.TryExecuteKeyValueTransaction(GetRoundRobinUrl(), script, hash, parameters, cancellationToken).ConfigureAwait(false);
+        return await communication.TryExecuteKeyValueTransactionScript(GetRoundRobinUrl(), script, hash, parameters, cancellationToken).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -640,7 +660,7 @@ public class KahunaClient
     /// </summary>
     /// <param name="script"></param>
     /// <returns></returns>
-    public KahunaScript LoadScript(string script)
+    public KahunaTransactionScript LoadTransactionScript(string script)
     {
         return new(this, script);
     }

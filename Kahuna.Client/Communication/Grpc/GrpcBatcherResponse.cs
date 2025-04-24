@@ -20,7 +20,7 @@ internal sealed class GrpcBatcherResponse
 
     public GrpcTryExistsKeyValueResponse? TryExistsKeyValue { get; }
     
-    public GrpcTryExecuteTransactionResponse? TryExecuteTransaction { get; }
+    public GrpcTryExecuteTransactionScriptResponse? TryExecuteTransactionScript { get; }
 
     public GrpcBatcherResponse(GrpcTrySetKeyValueResponse trySetKeyValue)
     {
@@ -47,8 +47,8 @@ internal sealed class GrpcBatcherResponse
         TryExistsKeyValue = tryExistsKeyValue;
     }
     
-    public GrpcBatcherResponse(GrpcTryExecuteTransactionResponse tryExecuteTransaction)
+    public GrpcBatcherResponse(GrpcTryExecuteTransactionScriptResponse tryExecuteTransactionScript)
     {
-        TryExecuteTransaction = tryExecuteTransaction;
+        TryExecuteTransactionScript = tryExecuteTransactionScript;
     }
 }

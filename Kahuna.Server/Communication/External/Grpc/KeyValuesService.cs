@@ -650,17 +650,17 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
 
     /// <summary>
-    /// Executes a transaction on the key/value store
+    /// Executes a transaction script on the key/value store
     /// </summary>
     /// <param name="request"></param>
     /// <param name="context"></param>
     /// <returns></returns>
-    public override async Task<GrpcTryExecuteTransactionResponse> TryExecuteTransaction(GrpcTryExecuteTransactionRequest request, ServerCallContext context)
+    public override async Task<GrpcTryExecuteTransactionScriptResponse> TryExecuteTransactionScript(GrpcTryExecuteTransactionScriptRequest request, ServerCallContext context)
     {
-        return await TryExecuteTransactionInternal(request, context);
+        return await TryExecuteTransactionScriptInternal(request, context);
     }
 
-    private async Task<GrpcTryExecuteTransactionResponse> TryExecuteTransactionInternal(GrpcTryExecuteTransactionRequest request, ServerCallContext context)
+    private async Task<GrpcTryExecuteTransactionScriptResponse> TryExecuteTransactionScriptInternal(GrpcTryExecuteTransactionScriptRequest request, ServerCallContext context)
     {
         if (request.Script is null)
             return new()
@@ -670,13 +670,13 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
             
-        KeyValueTransactionResult result = await keyValues.TryExecuteTx(
+        KeyValueTransactionResult result = await keyValues.TryExecuteTransactionScript(
             request.Script.ToByteArray(), 
             request.Hash, 
             GetParameters(request.Parameters)
         );
 
-        GrpcTryExecuteTransactionResponse response = new()
+        GrpcTryExecuteTransactionScriptResponse response = new()
         {
             Type = (GrpcKeyValueResponseType) result.Type,
             TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
@@ -887,11 +887,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                     }
                     break;
                     
-                    case GrpcClientBatchType.TryExecuteTransaction:
+                    case GrpcClientBatchType.TryExecuteTransactionScript:
                     {
-                        GrpcTryExecuteTransactionRequest? tryExecuteTransactionRequest = request.TryExecuteTransaction;
+                        GrpcTryExecuteTransactionScriptRequest? tryExecuteTransactionScriptRequest = request.TryExecuteTransactionScript;
 
-                        tasks.Add(TryExecuteTransactionDelayed(semaphore, request.RequestId, tryExecuteTransactionRequest, responseStream, context));
+                        tasks.Add(TryExecuteTransactionScriptDelayed(semaphore, request.RequestId, tryExecuteTransactionScriptRequest, responseStream, context));
                     }
                     break;
 
@@ -1055,21 +1055,21 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         }
     }
     
-    private async Task TryExecuteTransactionDelayed(
+    private async Task TryExecuteTransactionScriptDelayed(
         SemaphoreSlim semaphore, 
         int requestId, 
-        GrpcTryExecuteTransactionRequest tryExecuteTransactionRequest, 
+        GrpcTryExecuteTransactionScriptRequest tryExecuteTransactionRequest, 
         IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream,
         ServerCallContext context
     )
     {
-        GrpcTryExecuteTransactionResponse tryExecuteTransactionResponse = await TryExecuteTransactionInternal(tryExecuteTransactionRequest, context);
+        GrpcTryExecuteTransactionScriptResponse tryExecuteTransactionScriptResponse = await TryExecuteTransactionScriptInternal(tryExecuteTransactionRequest, context);
         
         GrpcBatchClientKeyValueResponse response = new()
         {
-            Type = GrpcClientBatchType.TryExecuteTransaction,
+            Type = GrpcClientBatchType.TryExecuteTransactionScript,
             RequestId = requestId,
-            TryExecuteTransaction = tryExecuteTransactionResponse
+            TryExecuteTransactionScript = tryExecuteTransactionScriptResponse
         };
 
         try
@@ -1141,11 +1141,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                     }
                     break;
                     
-                    case GrpcServerBatchType.ServerTryExecuteTransaction:
+                    case GrpcServerBatchType.ServerTryExecuteTransactionScript:
                     {
-                        GrpcTryExecuteTransactionRequest? tryExecuteTransactionRequest = request.TryExecuteTransaction;
+                        GrpcTryExecuteTransactionScriptRequest? tryExecuteTransactionScriptRequest = request.TryExecuteTransactionScript;
 
-                        tasks.Add(TryExecuteTransactionServerDelayed(semaphore, request.RequestId, tryExecuteTransactionRequest, responseStream, context));
+                        tasks.Add(TryExecuteTransactionServerDelayed(semaphore, request.RequestId, tryExecuteTransactionScriptRequest, responseStream, context));
                     }
                     break;
                     
@@ -1376,18 +1376,18 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     private async Task TryExecuteTransactionServerDelayed(
         SemaphoreSlim semaphore, 
         int requestId, 
-        GrpcTryExecuteTransactionRequest tryExecuteTransactionRequest, 
+        GrpcTryExecuteTransactionScriptRequest tryExecuteTransactionRequest, 
         IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
         ServerCallContext context
     )
     {
-        GrpcTryExecuteTransactionResponse tryExecuteTransactionResponse = await TryExecuteTransactionInternal(tryExecuteTransactionRequest, context);
+        GrpcTryExecuteTransactionScriptResponse tryExecuteTransactionScriptResponse = await TryExecuteTransactionScriptInternal(tryExecuteTransactionRequest, context);
         
         GrpcBatchServerKeyValueResponse response = new()
         {
-            Type = GrpcServerBatchType.ServerTryExecuteTransaction,
+            Type = GrpcServerBatchType.ServerTryExecuteTransactionScript,
             RequestId = requestId,
-            TryExecuteTransaction = tryExecuteTransactionResponse
+            TryExecuteTransactionScript = tryExecuteTransactionScriptResponse
         };
 
         try

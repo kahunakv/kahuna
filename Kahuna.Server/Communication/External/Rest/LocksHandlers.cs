@@ -19,15 +19,9 @@ public static class LocksHandlers
     {
         app.MapPost("/v1/locks/try-lock", async (KahunaLockRequest request, IKahuna locks, CancellationToken cancellationToken) =>
         {
-            if (string.IsNullOrEmpty(request.Resource))
+            if (string.IsNullOrEmpty(request.Resource) || request.Owner is null || request.ExpiresMs <= 0)
                 return new() { Type = LockResponseType.InvalidInput };
-        
-            if (request.Owner is null)
-                return new() { Type = LockResponseType.InvalidInput };
-        
-            if (request.ExpiresMs <= 0)
-                return new() { Type = LockResponseType.InvalidInput };
-        
+
             (LockResponseType response, long fencingToken)  = await locks.LocateAndTryLock(
                 request.Resource, 
                 request.Owner, 
@@ -94,15 +88,9 @@ public static class LocksHandlers
 
         app.MapPost("/v1/locks/try-extend", async (KahunaLockRequest request, IKahuna locks, CancellationToken cancellationToken) =>
         {
-            if (string.IsNullOrEmpty(request.Resource))
+            if (string.IsNullOrEmpty(request.Resource) || request.Owner is null || request.ExpiresMs <= 0)
                 return new() { Type = LockResponseType.InvalidInput };
-        
-            if (request.Owner is null)
-                return new() { Type = LockResponseType.InvalidInput };
-        
-            if (request.ExpiresMs <= 0)
-                return new() { Type = LockResponseType.InvalidInput };
-        
+
             (LockResponseType response, long fencingToken) = await locks.LocateAndTryExtendLock(
                 request.Resource, 
                 request.Owner, 
@@ -169,12 +157,9 @@ public static class LocksHandlers
 
         app.MapPost("/v1/locks/try-unlock", async (KahunaLockRequest request, IKahuna locks, CancellationToken cancellationToken) =>
         {
-            if (string.IsNullOrEmpty(request.Resource))
+            if (string.IsNullOrEmpty(request.Resource) || request.Owner is null)
                 return new() { Type = LockResponseType.InvalidInput };
 
-            if (request.Owner is null)
-                return new() { Type = LockResponseType.InvalidInput };
-            
             LockResponseType response = await locks.LocateAndTryUnlock(
                 request.Resource, 
                 request.Owner, 
@@ -245,7 +230,7 @@ public static class LocksHandlers
                     Type = type
                 };
 
-            return new KahunaGetLockResponse()
+            return new KahunaGetLockResponse
             {
                 Type = type,
                 Owner = lockContext?.Owner,

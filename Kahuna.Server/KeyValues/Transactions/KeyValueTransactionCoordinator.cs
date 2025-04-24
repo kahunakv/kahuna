@@ -1,4 +1,5 @@
 
+using System.Collections.Concurrent;
 using Kommander;
 using Kommander.Time;
 
@@ -57,6 +58,8 @@ internal sealed class KeyValueTransactionCoordinator
     private readonly ILogger<IKahuna> logger;
 
     private readonly ScriptParserProcessor scriptParserProcessor;
+    
+    private readonly ConcurrentDictionary<HLCTimestamp, KeyValueTransactionContext> sessions = new();
     
     /// <summary>
     /// Constructor
@@ -213,6 +216,27 @@ internal sealed class KeyValueTransactionCoordinator
             
             return new() { Type = KeyValueResponseType.Errored, Reason = ex.Message };
         }
+    }
+
+    /// <summary>
+    /// Starts an interactive session
+    /// </summary>
+    /// <returns></returns>
+    public async Task<string> StartTransaction()
+    {
+        HLCTimestamp transactionId = raft.HybridLogicalClock.SendOrLocalEvent();
+
+        sessions.TryAdd(transactionId, new()
+        {
+            TransactionId = transactionId,
+            Locking = KeyValueTransactionLocking.Pessimistic,
+            Action = KeyValueTransactionAction.Commit,
+            AsyncRelease = true,
+            //Parameters = parameters
+        });
+        
+        await Task.CompletedTask;
+        return "";
     }
 
     /// <summary>
@@ -501,18 +525,9 @@ internal sealed class KeyValueTransactionCoordinator
                 }
                 
                 case NodeType.BeginOption:
-                    if (ast.leftAst is null)
+                    if (ast.leftAst?.yytext is null || ast.rightAst?.yytext is null)
                         throw new KahunaScriptException("Invalid BEGIN option", ast.yyline);
-                    
-                    if (ast.leftAst.yytext is null)
-                        throw new KahunaScriptException("Invalid BEGIN option", ast.yyline);
-                    
-                    if (ast.rightAst is null)
-                        throw new KahunaScriptException("Invalid BEGIN option", ast.yyline);
-                    
-                    if (ast.rightAst.yytext is null)
-                        throw new KahunaScriptException("Invalid BEGIN option", ast.yyline);
-                    
+
                     options.Add(ast.leftAst.yytext, ast.rightAst.yytext);
                     break;
             }
@@ -673,8 +688,7 @@ internal sealed class KeyValueTransactionCoordinator
             if (context.Status == KeyValueExecutionStatus.Stop)
                 break;
 
-            if (cancellationToken.IsCancellationRequested)
-                break;
+            cancellationToken.ThrowIfCancellationRequested();
             
             switch (ast.nodeType)
             {

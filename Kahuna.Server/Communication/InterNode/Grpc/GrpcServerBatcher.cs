@@ -71,7 +71,7 @@ internal sealed class GrpcServerBatcher
         return TryProcessQueue(grpcBatcherItem, promise);
     }
     
-    public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryExecuteTransactionRequest message)
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryExecuteTransactionScriptRequest message)
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -246,10 +246,10 @@ internal sealed class GrpcServerBatcher
                     batchRequest.Type = GrpcServerBatchType.ServerTryExistsKeyValue;
                     batchRequest.TryExistsKeyValue = itemRequest.TryExistsKeyValue;
                 }
-                else if (itemRequest.TryExecuteTransaction is not null)
+                else if (itemRequest.TryExecuteTransactionScript is not null)
                 {
-                    batchRequest.Type = GrpcServerBatchType.ServerTryExecuteTransaction;
-                    batchRequest.TryExecuteTransaction = itemRequest.TryExecuteTransaction;
+                    batchRequest.Type = GrpcServerBatchType.ServerTryExecuteTransactionScript;
+                    batchRequest.TryExecuteTransactionScript = itemRequest.TryExecuteTransactionScript;
                 } 
                 else if (itemRequest.TryAcquireExclusiveLock is not null)
                 {
@@ -351,8 +351,8 @@ internal sealed class GrpcServerBatcher
                         item.Promise.SetResult(new(response.TryExistsKeyValue));
                         break;
 
-                    case GrpcServerBatchType.ServerTryExecuteTransaction:
-                        item.Promise.SetResult(new(response.TryExecuteTransaction));
+                    case GrpcServerBatchType.ServerTryExecuteTransactionScript:
+                        item.Promise.SetResult(new(response.TryExecuteTransactionScript));
                         break;
                     
                     case GrpcServerBatchType.ServerTryAcquireExclusiveLock:

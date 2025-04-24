@@ -37,50 +37,50 @@ public class TestKeyValueScriptTransactions : BaseCluster
         // Persistent tests
         string script = "BEGIN SET pp 'hello world' COMMIT END";
 
-        KeyValueTransactionResult resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Set, resp.Type);
         Assert.Equal(0, resp.Revision);
         
         script = "GET pp";
 
-        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
 
         script = "BEGIN ESET pp 'hello world' COMMIT END";
 
-        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Set, resp.Type);
         Assert.Equal(0, resp.Revision);
         
         script = "EGET pp";
 
-        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
         script = "BEGIN SET pp 'hello world 2' ROLLBACK END";
 
-        resp = await kahuna3.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Aborted, resp.Type);
         
         script = "GET pp";
 
-        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
         script = "BEGIN SET pp 'hello world 2' END";
 
-        resp = await kahuna3.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Aborted, resp.Type);
         
         script = "GET pp";
 
-        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
@@ -88,24 +88,24 @@ public class TestKeyValueScriptTransactions : BaseCluster
         // Ephemeral
         script = "BEGIN ESET pp 'hello world 2' ROLLBACK END";
 
-        resp = await kahuna3.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Aborted, resp.Type);
         
         script = "EGET pp";
 
-        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
         script = "BEGIN ESET pp 'hello world 2' END";
 
-        resp = await kahuna3.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Aborted, resp.Type);
         
         script = "EGET pp";
 
-        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
@@ -122,58 +122,58 @@ public class TestKeyValueScriptTransactions : BaseCluster
         // Persistent tests
         string script = "BEGIN SET pp1 'hello world' SET pp2 'hello world' COMMIT END";
 
-        KeyValueTransactionResult resp = await kahuna1.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Set, resp.Type);
         Assert.Equal(0, resp.Revision);
         
         script = "GET pp1";
 
-        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
         script = "GET pp2";
 
-        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
         script = "BEGIN SET pp1 'hello world 2' SET pp2 'hello world 2' ROLLBACK END";
 
-        resp = await kahuna3.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Aborted, resp.Type);
         
         script = "GET pp1";
 
-        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
         script = "GET pp2";
 
-        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
         script = "BEGIN SET pp1 'hello world 2' SET pp2 'hello world 2' END";
 
-        resp = await kahuna3.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Aborted, resp.Type);
         
         script = "GET pp1";
 
-        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
         script = "GET pp2";
 
-        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
@@ -181,58 +181,58 @@ public class TestKeyValueScriptTransactions : BaseCluster
         // Ephemeral
         script = "BEGIN ESET pp1 'hello world' ESET pp2 'hello world' COMMIT END";
 
-        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Set, resp.Type);
         Assert.Equal(0, resp.Revision);
         
         script = "EGET pp1";
 
-        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
         script = "EGET pp2";
 
-        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
         script = "BEGIN ESET pp1 'hello world 2' ESET pp2 'hello world 2' END";
 
-        resp = await kahuna3.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Aborted, resp.Type);
         
         script = "EGET pp1";
 
-        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
         script = "EGET pp2";
 
-        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
         script = "BEGIN ESET pp1 'hello world 2' ESET pp1 'hello world 2' ROLLBACK END";
 
-        resp = await kahuna3.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Aborted, resp.Type);
         
         script = "EGET pp1";
 
-        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
         script = "EGET pp2";
 
-        resp = await kahuna2.TryExecuteTx(Encoding.UTF8.GetBytes(script), null, null);
+        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
