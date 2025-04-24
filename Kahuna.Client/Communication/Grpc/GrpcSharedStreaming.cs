@@ -12,12 +12,18 @@ namespace Kahuna.Client.Communication;
 
 internal sealed class GrpcSharedStreaming
 {
-    public SemaphoreSlim Semaphore { get; } = new(1, 1);
+    public SemaphoreSlim Semaphore { get; } = new(1, 1);    
     
-    public AsyncDuplexStreamingCall<GrpcBatchClientKeyValueRequest, GrpcBatchClientKeyValueResponse> Streaming { get; }
+    public AsyncDuplexStreamingCall<GrpcBatchClientLockRequest, GrpcBatchClientLockResponse> LockStreaming { get; }
     
-    public GrpcSharedStreaming(AsyncDuplexStreamingCall<GrpcBatchClientKeyValueRequest, GrpcBatchClientKeyValueResponse> streaming)
+    public AsyncDuplexStreamingCall<GrpcBatchClientKeyValueRequest, GrpcBatchClientKeyValueResponse> KeyValueStreaming { get; }
+    
+    public GrpcSharedStreaming(
+        AsyncDuplexStreamingCall<GrpcBatchClientLockRequest, GrpcBatchClientLockResponse> lockStreaming,
+        AsyncDuplexStreamingCall<GrpcBatchClientKeyValueRequest, GrpcBatchClientKeyValueResponse> keyValueStreaming        
+    )
     {
-        Streaming = streaming;
+        LockStreaming = lockStreaming;
+        KeyValueStreaming = keyValueStreaming;        
     }
 }

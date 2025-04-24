@@ -113,7 +113,7 @@ public sealed class KahunaLock : IAsyncDisposable
     }
     
     /// <summary>
-    /// Obtains information about the lock (even if the lock wasn't adquired)
+    /// Obtains information about the lock (even if the lock wasn't Acquired)
     /// </summary>
     /// <returns></returns>
     /// <exception cref="KahunaException"></exception>

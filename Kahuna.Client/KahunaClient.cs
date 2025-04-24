@@ -117,6 +117,28 @@ public class KahunaClient
     /// <param name="expiryTime"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
+    private async Task<KahunaLock> SingleTimeTryAcquireLock(string resource, int expiryTime, LockDurability durability, CancellationToken cancellationToken = default)
+    {
+        byte[] owner = Encoding.UTF8.GetBytes(Guid.NewGuid().ToString("N"));
+
+        (KahunaLockAcquireResult result, long fencingToken, string? servedFrom) = await TryAcquireLock(
+            resource, 
+            owner, 
+            TimeSpan.FromMilliseconds(expiryTime), 
+            durability, 
+            cancellationToken
+        ).ConfigureAwait(false);
+
+        return new(this, resource, result, owner, durability, fencingToken, servedFrom);
+    }
+    
+    /// <summary>
+    /// Tries to acquire a lock on a resource with a given expiry time
+    /// </summary>
+    /// <param name="resource"></param>
+    /// <param name="expiryTime"></param>
+    /// <param name="durability"></param>
+    /// <returns></returns>
     private async Task<KahunaLock> SingleTimeTryAcquireLock(string resource, TimeSpan expiryTime, LockDurability durability, CancellationToken cancellationToken = default)
     {
         byte[] owner = Encoding.UTF8.GetBytes(Guid.NewGuid().ToString("N"));
@@ -165,6 +187,19 @@ public class KahunaClient
             throw new KahunaException("Retry cannot be zero", LockResponseType.InvalidInput);
         
         return await PeriodicallyTryAcquireLock(resource, expiry, wait, retry, durability, cancellationToken).ConfigureAwait(false);
+    }
+    
+    /// <summary>
+    /// Gets or creates a lock on a resource with a given expiry time.
+    /// Gives up immediately if the lock is not available 
+    /// </summary>
+    /// <param name="resource"></param>
+    /// <param name="expiry"></param>
+    /// <param name="durability"></param>
+    /// <returns></returns>
+    public async Task<KahunaLock> GetOrCreateLock(string resource, int expiry, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
+    {
+        return await SingleTimeTryAcquireLock(resource, expiry, durability, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

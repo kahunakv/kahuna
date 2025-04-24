@@ -12,5 +12,6 @@ public enum LockResponseType
     InvalidInput = 100,
     MustRetry = 101,
     LockDoesNotExist = 102,
-    InvalidOwner = 103
+    InvalidOwner = 103,
+    Aborted = 104
 }

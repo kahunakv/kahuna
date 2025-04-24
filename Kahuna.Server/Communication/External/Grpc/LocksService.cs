@@ -1,11 +1,11 @@
 
-using System.Runtime.InteropServices;
+using Kommander;
 using Google.Protobuf;
 using Grpc.Core;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.Locks;
 using Kahuna.Shared.Locks;
-using Kommander;
+using System.Runtime.InteropServices;
 
 namespace Kahuna.Communication.External.Grpc;
 
@@ -28,6 +28,11 @@ public sealed class LocksService : Locker.LockerBase
     }
     
     public override async Task<GrpcTryLockResponse> TryLock(GrpcTryLockRequest request, ServerCallContext context)
+    {
+        return await TryLockInternal(request, context);
+    }
+
+    private async Task<GrpcTryLockResponse> TryLockInternal(GrpcTryLockRequest request, ServerCallContext context)
     {
         if (string.IsNullOrEmpty(request.Resource) || request.Owner is null || request.ExpiresMs <= 0)
             return new()
@@ -60,6 +65,11 @@ public sealed class LocksService : Locker.LockerBase
     
     public override async Task<GrpcExtendLockResponse> TryExtendLock(GrpcExtendLockRequest request, ServerCallContext context)
     {
+        return await TryExtendLockInternal(request, context);
+    }
+
+    private async Task<GrpcExtendLockResponse> TryExtendLockInternal(GrpcExtendLockRequest request, ServerCallContext context)
+    {
         if (string.IsNullOrEmpty(request.Resource) || request.Owner is null || request.ExpiresMs <= 0)
             return new()
             {
@@ -91,6 +101,11 @@ public sealed class LocksService : Locker.LockerBase
     
     public override async Task<GrpcUnlockResponse> Unlock(GrpcUnlockRequest request, ServerCallContext context)
     {
+        return await UnlockInternal(request, context);
+    }
+
+    public async Task<GrpcUnlockResponse> UnlockInternal(GrpcUnlockRequest request, ServerCallContext context)
+    {
         if (string.IsNullOrEmpty(request.Resource) || request.Owner is null)
             return new()
             {
@@ -120,6 +135,11 @@ public sealed class LocksService : Locker.LockerBase
     
     public override async Task<GrpcGetLockResponse> GetLock(GrpcGetLockRequest request, ServerCallContext context)
     {
+        return await GetLockInternal(request, context);
+    }
+
+    private async Task<GrpcGetLockResponse> GetLockInternal(GrpcGetLockRequest request, ServerCallContext context)
+    {
         if (string.IsNullOrEmpty(request.Resource))
             return new()
             {
@@ -147,5 +167,73 @@ public sealed class LocksService : Locker.LockerBase
             ExpiresCounter = lockContext?.Expires.C ?? 0,
             ServedFrom = ""
         };
+    }
+    
+    public override async Task BatchClientLockRequests(
+        IAsyncStreamReader<GrpcBatchClientLockRequest> requestStream,
+        IServerStreamWriter<GrpcBatchClientLockResponse> responseStream, 
+        ServerCallContext context
+    )
+    {
+        try
+        {
+            List<Task> tasks = [];
+
+            using SemaphoreSlim semaphore = new(1, 1);
+
+            await foreach (GrpcBatchClientLockRequest request in requestStream.ReadAllAsync())
+            {
+                switch (request.Type)
+                {
+                    case GrpcLockClientBatchType.TypeTryLock:
+                    {
+                        GrpcTryLockRequest? lockRequest = request.TryLock;
+
+                        tasks.Add(TryLockDelayed(semaphore, request.RequestId, lockRequest, responseStream, context));
+                    }
+                    break;                   
+
+                    case GrpcLockClientBatchType.TypeNone:
+                    default:
+                        logger.LogError("Unknown batch client request type: {Type}", request.Type);
+                        break;
+                }
+            }
+
+            await Task.WhenAll(tasks);
+        }
+        catch (IOException ex)
+        {
+            logger.LogDebug("IOException: {Message}", ex.Message);
+        }
+    }
+    
+    private async Task TryLockDelayed(
+        SemaphoreSlim semaphore, 
+        int requestId, 
+        GrpcTryLockRequest setKeyRequest, 
+        IServerStreamWriter<GrpcBatchClientLockResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcTryLockResponse tryLockResponse = await TryLockInternal(setKeyRequest, context);
+        
+        GrpcBatchClientLockResponse response = new()
+        {
+            Type = GrpcLockClientBatchType.TypeTryLock,
+            RequestId = requestId,
+            TryLock = tryLockResponse
+        };
+
+        try
+        {
+            await semaphore.WaitAsync(context.CancellationToken);
+
+            await responseStream.WriteAsync(response);
+        }
+        finally
+        {
+            semaphore.Release();
+        }
     }
 }

@@ -246,7 +246,7 @@ public class TestLocks
     }
     
     [Theory, CombinatorialData]
-    public async Task TestAdquireLockAndGetInfo(
+    public async Task TestAcquireLockAndGetInfo(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability,

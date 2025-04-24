@@ -11,7 +11,12 @@ namespace Kahuna.Client.Communication;
 internal sealed class GrpcBatcherItem
 {
     /// <summary>
-    /// Unique ID of the request
+    /// Type of batching
+    /// </summary>
+    public GrpcBatcherItemType Type { get; }
+    
+    /// <summary>
+    /// Unique ID for the request
     /// </summary>
     public int RequestId { get; }
     
@@ -31,8 +36,9 @@ internal sealed class GrpcBatcherItem
     /// <param name="requestId"></param>
     /// <param name="request"></param>
     /// <param name="promise"></param>
-    public GrpcBatcherItem(int requestId, GrpcBatcherRequest request, TaskCompletionSource<GrpcBatcherResponse> promise)
+    public GrpcBatcherItem(GrpcBatcherItemType type, int requestId, GrpcBatcherRequest request, TaskCompletionSource<GrpcBatcherResponse> promise)
     {
+        Type = type;
         RequestId = requestId;
         Request = request;
         Promise = promise;
