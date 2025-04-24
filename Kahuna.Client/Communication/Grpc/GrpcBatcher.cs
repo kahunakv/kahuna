@@ -11,6 +11,7 @@ using System.Net.Security;
 using Grpc.Core;
 using Grpc.Net.Client;
 using Grpc.Net.Client.Configuration;
+using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 
 namespace Kahuna.Client.Communication;
@@ -42,8 +43,35 @@ internal sealed class GrpcBatcher
     {
         this.url = url;
     }
-    
+
     public Task<GrpcBatcherResponse> Enqueue(GrpcTryLockRequest message)
+    {
+        TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.Locks, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
+    public Task<GrpcBatcherResponse> Enqueue(GrpcUnlockRequest message)
+    {
+        TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.Locks, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
+    public Task<GrpcBatcherResponse> Enqueue(GrpcExtendLockRequest message)
+    {
+        TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.Locks, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
+    public Task<GrpcBatcherResponse> Enqueue(GrpcGetLockRequest message)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -207,6 +235,21 @@ internal sealed class GrpcBatcher
         {
             batchRequest.Type = GrpcLockClientBatchType.TypeTryLock;
             batchRequest.TryLock = itemRequest.TryLock;
+        } 
+        else if (itemRequest.Unlock is not null)
+        {
+            batchRequest.Type = GrpcLockClientBatchType.TypeUnlock;
+            batchRequest.Unlock = itemRequest.Unlock;
+        }
+        else if (itemRequest.ExtendLock is not null)
+        {
+            batchRequest.Type = GrpcLockClientBatchType.TypeExtendLock;
+            batchRequest.ExtendLock = itemRequest.ExtendLock;
+        }
+        else if (itemRequest.GetLock is not null)
+        {
+            batchRequest.Type = GrpcLockClientBatchType.TypeGetLock;
+            batchRequest.GetLock = itemRequest.GetLock;
         }
         else        
             throw new KahunaException("Unknown request type", LockResponseType.Errored);        
@@ -257,13 +300,13 @@ internal sealed class GrpcBatcher
             batchRequest.Type = GrpcClientBatchType.TryExistsKeyValue;
             batchRequest.TryExistsKeyValue = itemRequest.TryExistsKeyValue;
         }
-        else if (itemRequest.TryExecuteTransaction is not null)
+        else if (itemRequest.TryExecuteTransactionScript is not null)
         {
-            batchRequest.Type = GrpcClientBatchType.TryExecuteTransaction;
-            batchRequest.TryExecuteTransaction = itemRequest.TryExecuteTransaction;
+            batchRequest.Type = GrpcClientBatchType.TryExecuteTransactionScript;
+            batchRequest.TryExecuteTransactionScript = itemRequest.TryExecuteTransactionScript;
         }
         else        
-            throw new KahunaException("Unknown request type", LockResponseType.Errored);        
+            throw new KahunaException("Unknown request type", KeyValueResponseType.Errored);        
 
         try
         {
@@ -345,7 +388,19 @@ internal sealed class GrpcBatcher
             {
                 case GrpcLockClientBatchType.TypeTryLock:
                     item.Promise.SetResult(new(response.TryLock));
-                    break;                                                           
+                    break;
+                
+                case GrpcLockClientBatchType.TypeUnlock:
+                    item.Promise.SetResult(new(response.Unlock));
+                    break;
+                
+                case GrpcLockClientBatchType.TypeExtendLock:
+                    item.Promise.SetResult(new(response.ExtendLock));
+                    break;
+                
+                case GrpcLockClientBatchType.TypeGetLock:
+                    item.Promise.SetResult(new(response.GetLock));
+                    break;
                         
                 case GrpcLockClientBatchType.TypeNone:
                 default:

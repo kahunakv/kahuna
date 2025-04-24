@@ -104,7 +104,7 @@ public sealed class LocksService : Locker.LockerBase
         return await UnlockInternal(request, context);
     }
 
-    public async Task<GrpcUnlockResponse> UnlockInternal(GrpcUnlockRequest request, ServerCallContext context)
+    private async Task<GrpcUnlockResponse> UnlockInternal(GrpcUnlockRequest request, ServerCallContext context)
     {
         if (string.IsNullOrEmpty(request.Resource) || request.Owner is null)
             return new()
@@ -191,7 +191,31 @@ public sealed class LocksService : Locker.LockerBase
 
                         tasks.Add(TryLockDelayed(semaphore, request.RequestId, lockRequest, responseStream, context));
                     }
-                    break;                   
+                    break;
+                    
+                    case GrpcLockClientBatchType.TypeUnlock:
+                    {
+                        GrpcUnlockRequest? unlockRequest = request.Unlock;
+
+                        tasks.Add(TryUnlockDelayed(semaphore, request.RequestId, unlockRequest, responseStream, context));
+                    }
+                    break;
+                    
+                    case GrpcLockClientBatchType.TypeExtendLock:
+                    {
+                        GrpcExtendLockRequest? extendLockRequest = request.ExtendLock;
+
+                        tasks.Add(TryExtendLockDelayed(semaphore, request.RequestId, extendLockRequest, responseStream, context));
+                    }
+                    break;
+                    
+                    case GrpcLockClientBatchType.TypeGetLock:
+                    {
+                        GrpcGetLockRequest? getLockRequest = request.GetLock;
+
+                        tasks.Add(TryGetLockDelayed(semaphore, request.RequestId, getLockRequest, responseStream, context));
+                    }
+                    break;
 
                     case GrpcLockClientBatchType.TypeNone:
                     default:
@@ -211,18 +235,105 @@ public sealed class LocksService : Locker.LockerBase
     private async Task TryLockDelayed(
         SemaphoreSlim semaphore, 
         int requestId, 
-        GrpcTryLockRequest setKeyRequest, 
+        GrpcTryLockRequest lockRequest, 
         IServerStreamWriter<GrpcBatchClientLockResponse> responseStream,
         ServerCallContext context
     )
     {
-        GrpcTryLockResponse tryLockResponse = await TryLockInternal(setKeyRequest, context);
+        GrpcTryLockResponse tryLockResponse = await TryLockInternal(lockRequest, context);
         
         GrpcBatchClientLockResponse response = new()
         {
             Type = GrpcLockClientBatchType.TypeTryLock,
             RequestId = requestId,
             TryLock = tryLockResponse
+        };
+
+        try
+        {
+            await semaphore.WaitAsync(context.CancellationToken);
+
+            await responseStream.WriteAsync(response);
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+    
+    private async Task TryUnlockDelayed(
+        SemaphoreSlim semaphore, 
+        int requestId, 
+        GrpcUnlockRequest setKeyRequest, 
+        IServerStreamWriter<GrpcBatchClientLockResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcUnlockResponse unlockResponse = await UnlockInternal(setKeyRequest, context);
+        
+        GrpcBatchClientLockResponse response = new()
+        {
+            Type = GrpcLockClientBatchType.TypeUnlock,
+            RequestId = requestId,
+            Unlock = unlockResponse
+        };
+
+        try
+        {
+            await semaphore.WaitAsync(context.CancellationToken);
+
+            await responseStream.WriteAsync(response);
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+    
+    private async Task TryExtendLockDelayed(
+        SemaphoreSlim semaphore, 
+        int requestId, 
+        GrpcExtendLockRequest extendLockRequest, 
+        IServerStreamWriter<GrpcBatchClientLockResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcExtendLockResponse extendLockResponse = await TryExtendLockInternal(extendLockRequest, context);
+        
+        GrpcBatchClientLockResponse response = new()
+        {
+            Type = GrpcLockClientBatchType.TypeExtendLock,
+            RequestId = requestId,
+            ExtendLock = extendLockResponse
+        };
+
+        try
+        {
+            await semaphore.WaitAsync(context.CancellationToken);
+
+            await responseStream.WriteAsync(response);
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+    
+    private async Task TryGetLockDelayed(
+        SemaphoreSlim semaphore, 
+        int requestId, 
+        GrpcGetLockRequest getLockRequest, 
+        IServerStreamWriter<GrpcBatchClientLockResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcGetLockResponse getLockResponse = await GetLockInternal(getLockRequest, context);
+        
+        GrpcBatchClientLockResponse response = new()
+        {
+            Type = GrpcLockClientBatchType.TypeGetLock,
+            RequestId = requestId,
+            GetLock = getLockResponse
         };
 
         try

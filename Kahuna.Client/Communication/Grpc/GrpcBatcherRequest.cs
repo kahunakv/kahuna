@@ -12,6 +12,12 @@ internal sealed class GrpcBatcherRequest
 {
     public GrpcTryLockRequest? TryLock { get; }
     
+    public GrpcUnlockRequest? Unlock { get; }
+    
+    public GrpcExtendLockRequest? ExtendLock { get; }
+    
+    public GrpcGetLockRequest? GetLock { get; }
+    
     public GrpcTrySetKeyValueRequest? TrySetKeyValue { get; }
     
     public GrpcTryGetKeyValueRequest? TryGetKeyValue { get; }
@@ -22,11 +28,26 @@ internal sealed class GrpcBatcherRequest
     
     public GrpcTryExistsKeyValueRequest? TryExistsKeyValue { get; }
     
-    public GrpcTryExecuteTransactionRequest? TryExecuteTransaction { get; }
+    public GrpcTryExecuteTransactionScriptRequest? TryExecuteTransactionScript { get; }
     
     public GrpcBatcherRequest(GrpcTryLockRequest tryLock)
     {
         TryLock = tryLock;
+    }
+    
+    public GrpcBatcherRequest(GrpcUnlockRequest unlock)
+    {
+        Unlock = unlock;
+    }
+    
+    public GrpcBatcherRequest(GrpcExtendLockRequest extendLock)
+    {
+        ExtendLock = extendLock;
+    }
+    
+    public GrpcBatcherRequest(GrpcGetLockRequest getLock)
+    {
+        GetLock = getLock;
     }
 
     public GrpcBatcherRequest(GrpcTrySetKeyValueRequest trySetKeyValue)

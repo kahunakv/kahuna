@@ -63,7 +63,10 @@ message GrpcBatchClientLockRequest {
   GrpcLockClientBatchType Type = 1;
   int32 RequestId = 2;
   oneof payload {
-    GrpcTryLockRequest TryLock = 3;    
+    GrpcTryLockRequest TryLock = 3;
+    GrpcUnlockRequest Unlock = 4;
+    GrpcExtendLockRequest ExtendLock = 5;
+    GrpcGetLockRequest GetLock = 6;
   }
 }
 
@@ -72,7 +75,10 @@ message GrpcBatchClientLockResponse
   GrpcLockClientBatchType Type = 1;
   int32 RequestId = 2;
   oneof payload {
-    GrpcTryLockResponse TryLock = 3;        
+    GrpcTryLockResponse TryLock = 3;
+    GrpcUnlockResponse Unlock = 4;
+    GrpcExtendLockResponse ExtendLock = 5;
+    GrpcGetLockResponse GetLock = 6;
   }
 }
 

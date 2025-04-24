@@ -12,7 +12,7 @@ public class TestLocks
 
     private readonly string[] urls = ["https://localhost:8082", "https://localhost:8084", "https://localhost:8086"];
     
-    //private int total;
+    private int total;
 
     private static string GetRandomLockName()
     {
@@ -122,10 +122,10 @@ public class TestLocks
         Assert.Equal(1, kLock2.FencingToken);
     }
     
-    /*[Theory, CombinatorialData]
+    [Theory, CombinatorialData]
     public async Task TestValidateAcquireLockExpiresRace(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability,
         [CombinatorialValues(true, false)] bool upgradeUrls
     ) 
@@ -165,7 +165,7 @@ public class TestLocks
     [Theory, CombinatorialData]
     public async Task TestValidateAcquireSameLockExpiresRace(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
-        [CombinatorialValues(KahunaClientType.Single, KahunaClientType.Pool)] KahunaClientType clientType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability,
         [CombinatorialValues(true, false)] bool upgradeUrls
     ) 
@@ -203,7 +203,7 @@ public class TestLocks
             return;
 
         total++;
-    }*/
+    }
     
     [Theory, CombinatorialData]
     public async Task TestValidateAcquireAndExtendLock(

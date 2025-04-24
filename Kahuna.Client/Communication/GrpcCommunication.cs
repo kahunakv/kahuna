@@ -48,11 +48,6 @@ public class GrpcCommunication : IKahunaCommunication
         
         do
         {
-            //GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
-            //Locker.LockerClient client = new(channel);
-        
-            //response = await client.TryLockAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
-            
             GrpcBatcherResponse batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
             response = batchResponse.TryLock;
 
@@ -85,16 +80,15 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcUnlockResponse? response;
         
-        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
-        
-        Locker.LockerClient client = new(channel);
+        GrpcBatcher batcher = GetSharedBatcher(url);
         
         do
         {
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
             
-            response = await client.UnlockAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            response = batchResponse.Unlock;
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -126,15 +120,15 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcExtendLockResponse? response;
         
-        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
-        Locker.LockerClient client = new(channel);
+        GrpcBatcher batcher = GetSharedBatcher(url);
         
         do
         {
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
-        
-            response = await client.TryExtendLockAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+            
+            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            response = batchResponse.ExtendLock;
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);

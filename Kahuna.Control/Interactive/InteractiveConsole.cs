@@ -1,4 +1,11 @@
 
+/**
+ * This file is part of Kahuna
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 using System.Diagnostics;
 using System.Reflection;
 using System.Text;
@@ -28,7 +35,7 @@ public static class InteractiveConsole
         LineEditor? editor = null;
         Dictionary<string, KahunaLock> locks = new();
         Dictionary<string, KahunaLock> elocks = new();
-        Dictionary<string, KahunaScript> scripts = new();
+        Dictionary<string, KahunaTransactionScript> scripts = new();
 
         if (LineEditor.IsSupported(AnsiConsole.Console))
         {
@@ -257,70 +264,25 @@ public static class InteractiveConsole
 
                 if (commandTrim.StartsWith("get-lock ", StringComparison.InvariantCultureIgnoreCase))
                 {
-                    history.Add(commandTrim);
-                    
-                    string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
-
-                    if (locks.TryGetValue(parts[1], out KahunaLock? kahunaLock))
-                    {
-                        KahunaLockInfo? info = await kahunaLock.GetInfo();
-
-                        if (info is not null)
-                            AnsiConsole.MarkupLine("[cyan]f{0} {1}[/]\n", info.FencingToken, Markup.Escape(Encoding.UTF8.GetString(info.Owner ?? [])));
-                        else
-                            AnsiConsole.MarkupLine("[yellow]not found[/]\n");
-                    }
-                    else
-                    {
-                        AnsiConsole.MarkupLine("[yellow]not found[/]\n");
-                    }
-                    
+                    await GetLock(history, commandTrim, locks);
                     continue;
                 }
 
                 if (commandTrim.StartsWith("eget-lock ", StringComparison.InvariantCultureIgnoreCase))
                 {
-                    history.Add(commandTrim);
-                    
-                    string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
-
-                    if (elocks.TryGetValue(parts[1], out KahunaLock? kahunaLock))
-                    {
-                        KahunaLockInfo? info = await kahunaLock.GetInfo();
-
-                        if (info is not null)
-                            AnsiConsole.MarkupLine("[cyan]f{0} {1}[/]\n", info.FencingToken, Markup.Escape(Encoding.UTF8.GetString(info.Owner ?? [])));
-                        else
-                            AnsiConsole.MarkupLine("[yellow]not found[/]\n");
-                    }
-                    else
-                    {
-                        AnsiConsole.MarkupLine("[yellow]not found[/]\n");
-                    }
-                    
+                    await GetLock(history, commandTrim, elocks);
                     continue;
                 }
                 
-                if (commandTrim.StartsWith("extend-lock ", StringComparison.InvariantCultureIgnoreCase) || commandTrim.StartsWith("eextend-lock ", StringComparison.InvariantCultureIgnoreCase))
+                if (commandTrim.StartsWith("extend-lock ", StringComparison.InvariantCultureIgnoreCase))
                 {
-                    history.Add(commandTrim);
-                    
-                    string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
+                    await TryExtendLock(history, commandTrim, locks);
+                    continue;
+                }
 
-                    if (locks.TryGetValue(parts[1], out KahunaLock? kahunaLock))
-                    {
-                        (bool success, long fencingToken) = await kahunaLock.TryExtend(int.Parse(parts[2]));
-
-                        if (success)
-                            AnsiConsole.MarkupLine("[cyan]f{0} extended {1}[/]\n", fencingToken, Markup.Escape(Encoding.UTF8.GetString(kahunaLock.Owner)));
-                        else
-                            AnsiConsole.MarkupLine("[yellow]not acquired[/]\n");
-                    }
-                    else
-                    {
-                        AnsiConsole.MarkupLine("[yellow]not acquired[/]\n");
-                    }
-                    
+                if (commandTrim.StartsWith("eextend-lock ", StringComparison.InvariantCultureIgnoreCase))
+                {
+                    await TryExtendLock(history, commandTrim, elocks);
                     continue;
                 }
 
@@ -364,7 +326,6 @@ public static class InteractiveConsole
         }
 
         await SaveHistory(historyPath, history);
-        return;
     }
     
     private static async Task<List<string>> GetHistory(string historyPath)
@@ -435,6 +396,48 @@ public static class InteractiveConsole
         else
         {
             AnsiConsole.MarkupLine("[yellow]not acquired[/]\n");
+        }
+    }
+    
+    private static async Task TryExtendLock(List<string> history, string commandTrim, Dictionary<string, KahunaLock> locks)
+    {
+        history.Add(commandTrim);
+                    
+        string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
+
+        if (locks.TryGetValue(parts[1], out KahunaLock? kahunaLock))
+        {
+            (bool success, long fencingToken) = await kahunaLock.TryExtend(int.Parse(parts[2]));
+
+            if (success)
+                AnsiConsole.MarkupLine("[cyan]f{0} extended {1}[/]\n", fencingToken, Markup.Escape(Encoding.UTF8.GetString(kahunaLock.Owner)));
+            else
+                AnsiConsole.MarkupLine("[yellow]not acquired[/]\n");
+        }
+        else
+        {
+            AnsiConsole.MarkupLine("[yellow]not acquired[/]\n");
+        }
+    }
+
+    private static async Task GetLock(List<string> history, string commandTrim, Dictionary<string, KahunaLock> locks)
+    {
+        history.Add(commandTrim);
+                    
+        string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
+
+        if (locks.TryGetValue(parts[1], out KahunaLock? kahunaLock))
+        {
+            KahunaLockInfo? info = await kahunaLock.GetInfo();
+
+            if (info is not null)
+                AnsiConsole.MarkupLine("[cyan]f{0} {1}[/]\n", info.FencingToken, Markup.Escape(Encoding.UTF8.GetString(info.Owner ?? [])));
+            else
+                AnsiConsole.MarkupLine("[yellow]not found[/]\n");
+        }
+        else
+        {
+            AnsiConsole.MarkupLine("[yellow]not found[/]\n");
         }
     }
 
