@@ -6,6 +6,10 @@ using Kommander.Time;
 
 namespace Kahuna.Server.Persistence.Backend;
 
+/// <summary>
+/// Provides an in-memory implementation of the <see cref="IPersistenceBackend"/> interface
+/// to store locks and key-value pairs without the use of persistent storage.
+/// </summary>
 public class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
 {
     private readonly ConcurrentDictionary<string, LockContext> locks = new();
@@ -91,7 +95,7 @@ public class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
     {
         List<(string, ReadOnlyKeyValueContext)> items = [];
         
-        foreach ((string? key, KeyValueContext? value) in keyValues)
+        foreach ((string key, KeyValueContext? value) in keyValues)
         {
             if (key.StartsWith(prefixKeyName))
             {

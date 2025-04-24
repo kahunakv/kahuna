@@ -11,6 +11,7 @@ using Kommander.Time;
 using Google.Protobuf;
 using Google.Protobuf.Collections;
 using Grpc.Core;
+using Kahuna.Communication.External.Grpc.KeyValues;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
@@ -18,11 +19,20 @@ using Kommander.Diagnostics;
 
 namespace Kahuna.Communication.External.Grpc;
 
+/// <summary>
+/// Provides gRPC services for managing key-value pairs, locks, and mutations.
+/// Implements functionality for setting, extending, deleting, and retrieving
+/// key-value pairs, as well as lock management and mutation operations.
+/// </summary>
 public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 {
     private readonly IKahuna keyValues;
     
     private readonly ILogger<IKahuna> logger;
+    
+    private readonly KeyValueClientBatcher clientBatcher;
+    
+    private readonly KeyValueServerBatcher serverBatcher;
     
     /// <summary>
     /// Constructor
@@ -35,6 +45,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     {
         this.keyValues = keyValues;
         this.logger = logger;
+        
+        clientBatcher = new(this, logger);
+        serverBatcher = new(this, logger);
     }
     
     /// <summary>
@@ -48,20 +61,14 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return await TrySetKeyValueInternal(request, context);
     }
 
-    private async Task<GrpcTrySetKeyValueResponse> TrySetKeyValueInternal(GrpcTrySetKeyValueRequest request, ServerCallContext context)
+    internal async Task<GrpcTrySetKeyValueResponse> TrySetKeyValueInternal(GrpcTrySetKeyValueRequest request, ServerCallContext context)
     {
-        if (string.IsNullOrEmpty(request.Key))
+        if (string.IsNullOrEmpty(request.Key) || request.ExpiresMs < 0)
             return new()
             {
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
-        
-        if (request.ExpiresMs < 0)
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.TypeInvalidInput
-            };
-        
+
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
         byte[]? value;
@@ -111,20 +118,14 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return await TryExtendKeyValueInternal(request, context);
     }
 
-    private async Task<GrpcTryExtendKeyValueResponse> TryExtendKeyValueInternal(GrpcTryExtendKeyValueRequest request, ServerCallContext context)
+    internal async Task<GrpcTryExtendKeyValueResponse> TryExtendKeyValueInternal(GrpcTryExtendKeyValueRequest request, ServerCallContext context)
     {
-        if (string.IsNullOrEmpty(request.Key))
+        if (string.IsNullOrEmpty(request.Key) || request.ExpiresMs < 0)
             return new()
             {
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
-        
-        if (request.ExpiresMs < 0)
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.TypeInvalidInput
-            };
-        
+
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
         
         (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTryExtendKeyValue(
@@ -156,7 +157,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return await TryDeleteKeyValueInternal(request, context);
     }
 
-    private async Task<GrpcTryDeleteKeyValueResponse> TryDeleteKeyValueInternal(GrpcTryDeleteKeyValueRequest request, ServerCallContext context)
+    internal async Task<GrpcTryDeleteKeyValueResponse> TryDeleteKeyValueInternal(GrpcTryDeleteKeyValueRequest request, ServerCallContext context)
     {
         if (string.IsNullOrEmpty(request.Key))
             return new()
@@ -194,7 +195,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return await TryGetKeyValueInternal(request, context);
     }
     
-    private async Task<GrpcTryGetKeyValueResponse> TryGetKeyValueInternal(GrpcTryGetKeyValueRequest request, ServerCallContext context)
+    internal async Task<GrpcTryGetKeyValueResponse> TryGetKeyValueInternal(GrpcTryGetKeyValueRequest request, ServerCallContext context)
     {
         if (string.IsNullOrEmpty(request.Key))
             return new()
@@ -248,7 +249,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return await TryExistsKeyValueInternal(request, context);
     }
 
-    private async Task<GrpcTryExistsKeyValueResponse> TryExistsKeyValueInternal(GrpcTryExistsKeyValueRequest request, ServerCallContext context)
+    internal async Task<GrpcTryExistsKeyValueResponse> TryExistsKeyValueInternal(GrpcTryExistsKeyValueRequest request, ServerCallContext context)
     {
         if (string.IsNullOrEmpty(request.Key))
             return new()
@@ -299,7 +300,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return await TryAcquireExclusiveLockInternal(request, context);
     }
     
-    private async Task<GrpcTryAcquireExclusiveLockResponse> TryAcquireExclusiveLockInternal(GrpcTryAcquireExclusiveLockRequest request, ServerCallContext context)
+    internal async Task<GrpcTryAcquireExclusiveLockResponse> TryAcquireExclusiveLockInternal(GrpcTryAcquireExclusiveLockRequest request, ServerCallContext context)
     {
         if (string.IsNullOrEmpty(request.Key))
             return new()
@@ -332,7 +333,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return await TryAcquireManyExclusiveLocksInternal(request, context);
     }
 
-    private async Task<GrpcTryAcquireManyExclusiveLocksResponse> TryAcquireManyExclusiveLocksInternal(GrpcTryAcquireManyExclusiveLocksRequest request, ServerCallContext context)
+    internal async Task<GrpcTryAcquireManyExclusiveLocksResponse> TryAcquireManyExclusiveLocksInternal(GrpcTryAcquireManyExclusiveLocksRequest request, ServerCallContext context)
     {
         List<(KeyValueResponseType, string, KeyValueDurability)> responses = await keyValues.LocateAndTryAcquireManyExclusiveLocks(
             new(request.TransactionIdPhysical, request.TransactionIdCounter), 
@@ -379,7 +380,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return await TryReleaseExclusiveLockInternal(request, context);   
     }
 
-    private async Task<GrpcTryReleaseExclusiveLockResponse> TryReleaseExclusiveLockInternal(GrpcTryReleaseExclusiveLockRequest request, ServerCallContext context)
+    internal async Task<GrpcTryReleaseExclusiveLockResponse> TryReleaseExclusiveLockInternal(GrpcTryReleaseExclusiveLockRequest request, ServerCallContext context)
     {
         if (string.IsNullOrEmpty(request.Key))
             return new()
@@ -411,7 +412,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return await TryReleaseManyExclusiveLocksInternal(request, context);
     }
 
-    private async Task<GrpcTryReleaseManyExclusiveLocksResponse> TryReleaseManyExclusiveLocksInternal(GrpcTryReleaseManyExclusiveLocksRequest request, ServerCallContext context)
+    internal async Task<GrpcTryReleaseManyExclusiveLocksResponse> TryReleaseManyExclusiveLocksInternal(GrpcTryReleaseManyExclusiveLocksRequest request, ServerCallContext context)
     {
         List<(KeyValueResponseType, string, KeyValueDurability)> responses = await keyValues.LocateAndTryReleaseManyExclusiveLocks(
             new(request.TransactionIdPhysical, request.TransactionIdCounter), 
@@ -458,7 +459,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return await TryPrepareMutationsInternal(request, context); 
     }
     
-    private async Task<GrpcTryPrepareMutationsResponse> TryPrepareMutationsInternal(GrpcTryPrepareMutationsRequest request, ServerCallContext context)
+    internal async Task<GrpcTryPrepareMutationsResponse> TryPrepareMutationsInternal(GrpcTryPrepareMutationsRequest request, ServerCallContext context)
     {
         if (string.IsNullOrEmpty(request.Key))
             return new()
@@ -493,7 +494,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return await TryPrepareManyMutationsInternal(request, context);
     }
 
-    private async Task<GrpcTryPrepareManyMutationsResponse> TryPrepareManyMutationsInternal(GrpcTryPrepareManyMutationsRequest request, ServerCallContext context)
+    internal async Task<GrpcTryPrepareManyMutationsResponse> TryPrepareManyMutationsInternal(GrpcTryPrepareManyMutationsRequest request, ServerCallContext context)
     {
         List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> responses = await keyValues.LocateAndTryPrepareManyMutations(
             new(request.TransactionIdPhysical, request.TransactionIdCounter),
@@ -543,7 +544,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return await TryCommitMutationsInternal(request, context);
     }
     
-    private async Task<GrpcTryCommitMutationsResponse> TryCommitMutationsInternal(GrpcTryCommitMutationsRequest request, ServerCallContext context)
+    internal async Task<GrpcTryCommitMutationsResponse> TryCommitMutationsInternal(GrpcTryCommitMutationsRequest request, ServerCallContext context)
     {
         if (string.IsNullOrEmpty(request.Key))
             return new()
@@ -583,7 +584,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <param name="request"></param>
     /// <param name="context"></param>
     /// <returns></returns>
-    private async Task<GrpcTryCommitManyMutationsResponse> TryCommitManyMutationsInternal(GrpcTryCommitManyMutationsRequest request, ServerCallContext context)
+    internal async Task<GrpcTryCommitManyMutationsResponse> TryCommitManyMutationsInternal(GrpcTryCommitManyMutationsRequest request, ServerCallContext context)
     {
         List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> responses = await keyValues.LocateAndTryCommitManyMutations(
             new(request.TransactionIdPhysical, request.TransactionIdCounter), 
@@ -660,7 +661,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return await TryExecuteTransactionScriptInternal(request, context);
     }
 
-    private async Task<GrpcTryExecuteTransactionScriptResponse> TryExecuteTransactionScriptInternal(GrpcTryExecuteTransactionScriptRequest request, ServerCallContext context)
+    internal async Task<GrpcTryExecuteTransactionScriptResponse> TryExecuteTransactionScriptInternal(GrpcTryExecuteTransactionScriptRequest request, ServerCallContext context)
     {
         if (request.Script is null)
             return new()
@@ -726,6 +727,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns></returns>
     public override async Task<GrpcScanByPrefixResponse> ScanByPrefix(GrpcScanByPrefixRequest request, ServerCallContext context)
     {
+        return await ScanByPrefixInternal(request, context);
+    }
+
+    internal async Task<GrpcScanByPrefixResponse> ScanByPrefixInternal(GrpcScanByPrefixRequest request, ServerCallContext context)
+    {
         if (request.PrefixKey is null)
             return new()
             {
@@ -751,6 +757,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <param name="context"></param>
     /// <returns></returns>
     public override async Task<GrpcGetByPrefixResponse> GetByPrefix(GrpcGetByPrefixRequest request, ServerCallContext context)
+    {
+        return await GetByPrefixInternal(request, context);
+    }
+
+    internal async Task<GrpcGetByPrefixResponse> GetByPrefixInternal(GrpcGetByPrefixRequest request, ServerCallContext context)
     {
         if (request.PrefixKey is null)
             return new()
@@ -782,6 +793,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <param name="context"></param>
     /// <returns></returns>
     public override async Task<GrpcScanAllByPrefixResponse> ScanAllByPrefix(GrpcScanAllByPrefixRequest request, ServerCallContext context)
+    {
+        return await ScanAllByPrefixInternal(request, context);
+    }
+
+    internal async Task<GrpcScanAllByPrefixResponse> ScanAllByPrefixInternal(GrpcScanAllByPrefixRequest request, ServerCallContext context)
     {
         if (request.PrefixKey is null)
             return new()
@@ -833,803 +849,19 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
     public override async Task BatchClientKeyValueRequests(
         IAsyncStreamReader<GrpcBatchClientKeyValueRequest> requestStream,
-        IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream, 
-        ServerCallContext context
-    )
-    {
-        try
-        {
-            List<Task> tasks = [];
-
-            using SemaphoreSlim semaphore = new(1, 1);
-
-            await foreach (GrpcBatchClientKeyValueRequest request in requestStream.ReadAllAsync())
-            {
-                switch (request.Type)
-                {
-                    case GrpcClientBatchType.TrySetKeyValue:
-                    {
-                        GrpcTrySetKeyValueRequest? setKeyRequest = request.TrySetKeyValue;
-
-                        tasks.Add(TrySetKeyValueDelayed(semaphore, request.RequestId, setKeyRequest, responseStream, context));
-                    }
-                    break;
-
-                    case GrpcClientBatchType.TryGetKeyValue:
-                    {
-                        GrpcTryGetKeyValueRequest? getKeyRequest = request.TryGetKeyValue;
-
-                        tasks.Add(TryGetKeyValueDelayed(semaphore, request.RequestId, getKeyRequest, responseStream, context));
-                    }
-                    break;
-
-                    case GrpcClientBatchType.TryDeleteKeyValue:
-                    {
-                        GrpcTryDeleteKeyValueRequest? deleteKeyRequest = request.TryDeleteKeyValue;
-
-                        tasks.Add(TryDeleteKeyValueDelayed(semaphore, request.RequestId, deleteKeyRequest, responseStream, context));
-                    }
-                    break;
-
-                    case GrpcClientBatchType.TryExtendKeyValue:
-                    {
-                        GrpcTryExtendKeyValueRequest? extendKeyRequest = request.TryExtendKeyValue;
-
-                        tasks.Add(TryExtendKeyValueDelayed(semaphore, request.RequestId, extendKeyRequest, responseStream, context));
-                    }
-                    break;
-
-                    case GrpcClientBatchType.TryExistsKeyValue:
-                    {
-                        GrpcTryExistsKeyValueRequest? extendKeyRequest = request.TryExistsKeyValue;
-
-                        tasks.Add(TryExistsKeyValueDelayed(semaphore, request.RequestId, extendKeyRequest, responseStream, context));
-                    }
-                    break;
-                    
-                    case GrpcClientBatchType.TryExecuteTransactionScript:
-                    {
-                        GrpcTryExecuteTransactionScriptRequest? tryExecuteTransactionScriptRequest = request.TryExecuteTransactionScript;
-
-                        tasks.Add(TryExecuteTransactionScriptDelayed(semaphore, request.RequestId, tryExecuteTransactionScriptRequest, responseStream, context));
-                    }
-                    break;
-
-                    case GrpcClientBatchType.TypeNone:
-                    default:
-                        logger.LogError("Unknown batch client request type: {Type}", request.Type);
-                        break;
-                }
-            }
-
-            await Task.WhenAll(tasks);
-        }
-        catch (IOException ex)
-        {
-            logger.LogDebug("IOException: {Message}", ex.Message);
-        }
-    }
-
-    private async Task TrySetKeyValueDelayed(
-        SemaphoreSlim semaphore, 
-        int requestId, 
-        GrpcTrySetKeyValueRequest setKeyRequest, 
         IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream,
         ServerCallContext context
     )
     {
-        GrpcTrySetKeyValueResponse trySetResponse = await TrySetKeyValueInternal(setKeyRequest, context);
-        
-        GrpcBatchClientKeyValueResponse response = new()
-        {
-            Type = GrpcClientBatchType.TrySetKeyValue,
-            RequestId = requestId,
-            TrySetKeyValue = trySetResponse
-        };
-
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
+        await clientBatcher.BatchClientKeyValueRequests(requestStream, responseStream, context);
     }
-    
-    private async Task TryGetKeyValueDelayed(
-        SemaphoreSlim semaphore, 
-        int requestId, 
-        GrpcTryGetKeyValueRequest getKeyRequest, 
-        IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream,
-        ServerCallContext context
-    )
-    {
-        GrpcTryGetKeyValueResponse tryGetResponse = await TryGetKeyValueInternal(getKeyRequest, context);
-        
-        GrpcBatchClientKeyValueResponse response = new()
-        {
-            Type = GrpcClientBatchType.TryGetKeyValue,
-            RequestId = requestId,
-            TryGetKeyValue = tryGetResponse
-        };
 
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
-    }
-    
-    private async Task TryDeleteKeyValueDelayed(
-        SemaphoreSlim semaphore, 
-        int requestId, 
-        GrpcTryDeleteKeyValueRequest deleteKeyRequest, 
-        IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream,
-        ServerCallContext context
-    )
-    {
-        GrpcTryDeleteKeyValueResponse tryDeleteResponse = await TryDeleteKeyValueInternal(deleteKeyRequest, context);
-        
-        GrpcBatchClientKeyValueResponse response = new()
-        {
-            Type = GrpcClientBatchType.TryDeleteKeyValue,
-            RequestId = requestId,
-            TryDeleteKeyValue = tryDeleteResponse
-        };
-
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
-    }
-    
-    private async Task TryExtendKeyValueDelayed(
-        SemaphoreSlim semaphore, 
-        int requestId, 
-        GrpcTryExtendKeyValueRequest extendKeyRequest, 
-        IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream,
-        ServerCallContext context
-    )
-    {
-        GrpcTryExtendKeyValueResponse tryExtendResponse = await TryExtendKeyValueInternal(extendKeyRequest, context);
-        
-        GrpcBatchClientKeyValueResponse response = new()
-        {
-            Type = GrpcClientBatchType.TryExtendKeyValue,
-            RequestId = requestId,
-            TryExtendKeyValue = tryExtendResponse
-        };
-
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
-    }
-    
-    private async Task TryExistsKeyValueDelayed(
-        SemaphoreSlim semaphore, 
-        int requestId, 
-        GrpcTryExistsKeyValueRequest existKeyRequest, 
-        IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream,
-        ServerCallContext context
-    )
-    {
-        GrpcTryExistsKeyValueResponse tryExistsResponse = await TryExistsKeyValueInternal(existKeyRequest, context);
-        
-        GrpcBatchClientKeyValueResponse response = new()
-        {
-            Type = GrpcClientBatchType.TryExistsKeyValue,
-            RequestId = requestId,
-            TryExistsKeyValue = tryExistsResponse
-        };
-
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
-    }
-    
-    private async Task TryExecuteTransactionScriptDelayed(
-        SemaphoreSlim semaphore, 
-        int requestId, 
-        GrpcTryExecuteTransactionScriptRequest tryExecuteTransactionRequest, 
-        IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream,
-        ServerCallContext context
-    )
-    {
-        GrpcTryExecuteTransactionScriptResponse tryExecuteTransactionScriptResponse = await TryExecuteTransactionScriptInternal(tryExecuteTransactionRequest, context);
-        
-        GrpcBatchClientKeyValueResponse response = new()
-        {
-            Type = GrpcClientBatchType.TryExecuteTransactionScript,
-            RequestId = requestId,
-            TryExecuteTransactionScript = tryExecuteTransactionScriptResponse
-        };
-
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }               
-    }
-    
     public override async Task BatchServerKeyValueRequests(
         IAsyncStreamReader<GrpcBatchServerKeyValueRequest> requestStream,
-        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream, 
-        ServerCallContext context
-    )
-    {
-        try
-        {
-            List<Task> tasks = [];
-
-            using SemaphoreSlim semaphore = new(1, 1);
-
-            await foreach (GrpcBatchServerKeyValueRequest request in requestStream.ReadAllAsync())
-            {
-                switch (request.Type)
-                {
-                    case GrpcServerBatchType.ServerTrySetKeyValue:
-                    {
-                        GrpcTrySetKeyValueRequest? setKeyRequest = request.TrySetKeyValue;
-
-                        tasks.Add(TrySetKeyValueServerDelayed(semaphore, request.RequestId, setKeyRequest, responseStream, context));
-                    }
-                    break;
-
-                    case GrpcServerBatchType.ServerTryGetKeyValue:
-                    {
-                        GrpcTryGetKeyValueRequest? getKeyRequest = request.TryGetKeyValue;
-
-                        tasks.Add(TryGetKeyValueServerDelayed(semaphore, request.RequestId, getKeyRequest, responseStream, context));
-                    }
-                    break;
-
-                    case GrpcServerBatchType.ServerTryDeleteKeyValue:
-                    {
-                        GrpcTryDeleteKeyValueRequest? deleteKeyRequest = request.TryDeleteKeyValue;
-
-                        tasks.Add(TryDeleteKeyValueServerDelayed(semaphore, request.RequestId, deleteKeyRequest, responseStream, context));
-                    }
-                    break;
-
-                    case GrpcServerBatchType.ServerTryExtendKeyValue:
-                    {
-                        GrpcTryExtendKeyValueRequest? extendKeyRequest = request.TryExtendKeyValue;
-
-                        tasks.Add(TryExtendKeyValueServerDelayed(semaphore, request.RequestId, extendKeyRequest, responseStream, context));
-                    }
-                    break;
-
-                    case GrpcServerBatchType.ServerTryExistsKeyValue:
-                    {
-                        GrpcTryExistsKeyValueRequest? extendKeyRequest = request.TryExistsKeyValue;
-
-                        tasks.Add(TryExistsKeyValueServerDelayed(semaphore, request.RequestId, extendKeyRequest, responseStream, context));
-                    }
-                    break;
-                    
-                    case GrpcServerBatchType.ServerTryExecuteTransactionScript:
-                    {
-                        GrpcTryExecuteTransactionScriptRequest? tryExecuteTransactionScriptRequest = request.TryExecuteTransactionScript;
-
-                        tasks.Add(TryExecuteTransactionServerDelayed(semaphore, request.RequestId, tryExecuteTransactionScriptRequest, responseStream, context));
-                    }
-                    break;
-                    
-                    case GrpcServerBatchType.ServerTryAcquireExclusiveLock:
-                    {
-                        GrpcTryAcquireExclusiveLockRequest? tryAcquireExclusiveLockRequest = request.TryAcquireExclusiveLock;
-
-                        tasks.Add(TryAcquireExclusiveLockDelayed(semaphore, request.RequestId, tryAcquireExclusiveLockRequest, responseStream, context));
-                    }
-                    break;
-                    
-                    case GrpcServerBatchType.ServerTryAcquireManyExclusiveLocks:
-                    {
-                        GrpcTryAcquireManyExclusiveLocksRequest? tryAcquireManyExclusiveLocksRequest = request.TryAcquireManyExclusiveLocks;
-
-                        tasks.Add(TryAcquireManyExclusiveLocksDelayed(semaphore, request.RequestId, tryAcquireManyExclusiveLocksRequest, responseStream, context));
-                    }
-                    break;
-                    
-                    case GrpcServerBatchType.ServerTryReleaseExclusiveLock:
-                    {
-                        GrpcTryReleaseExclusiveLockRequest? tryReleaseExclusiveLockRequest = request.TryReleaseExclusiveLock;
-
-                        tasks.Add(TryReleaseExclusiveLockDelayed(semaphore, request.RequestId, tryReleaseExclusiveLockRequest, responseStream, context));
-                    }
-                    break;
-                    
-                    case GrpcServerBatchType.ServerTryReleaseManyExclusiveLocks:
-                    {
-                        GrpcTryReleaseManyExclusiveLocksRequest? tryReleaseManyExclusiveLocksRequest = request.TryReleaseManyExclusiveLocks;
-
-                        tasks.Add(TryReleaseManyExclusiveLocksDelayed(semaphore, request.RequestId, tryReleaseManyExclusiveLocksRequest, responseStream, context));
-                    }
-                    break;
-                    
-                    case GrpcServerBatchType.ServerTryPrepareMutations:
-                    {
-                        GrpcTryPrepareMutationsRequest? tryPrepareMutationsRequest = request.TryPrepareMutations;
-
-                        tasks.Add(TryPrepareMutationsDelayed(semaphore, request.RequestId, tryPrepareMutationsRequest, responseStream, context));
-                    }
-                    break;
-                    
-                    case GrpcServerBatchType.ServerTryPrepareManyMutations:
-                    {
-                        GrpcTryPrepareManyMutationsRequest? tryPrepareManyMutationsRequest = request.TryPrepareManyMutations;
-
-                        tasks.Add(TryPrepareManyMutationsDelayed(semaphore, request.RequestId, tryPrepareManyMutationsRequest, responseStream, context));
-                    }
-                    break;
-                    
-                    case GrpcServerBatchType.ServerTryCommitMutations:
-                    {
-                        GrpcTryCommitMutationsRequest? tryCommitMutationsRequest = request.TryCommitMutations;
-
-                        tasks.Add(TryCommitMutationsDelayed(semaphore, request.RequestId, tryCommitMutationsRequest, responseStream, context));
-                    }
-                        break;
-                    
-                    case GrpcServerBatchType.ServerTryCommitManyMutations:
-                    {
-                        GrpcTryCommitManyMutationsRequest? tryCommitManyMutationsRequest = request.TryCommitManyMutations;
-
-                        tasks.Add(TryCommitManyMutationsDelayed(semaphore, request.RequestId, tryCommitManyMutationsRequest, responseStream, context));
-                    }
-                        break;
-
-                    case GrpcServerBatchType.ServerTypeNone:
-                    default:                                                
-                        logger.LogError("Unknown batch Server request type: {Type}", request.Type);
-                        break;
-                }
-            }
-
-            await Task.WhenAll(tasks);
-        }
-        catch (IOException ex)
-        {
-            logger.LogDebug("IOException: {Message}", ex.Message);
-        }
-    }
-
-    private async Task TrySetKeyValueServerDelayed(
-        SemaphoreSlim semaphore, 
-        int requestId, 
-        GrpcTrySetKeyValueRequest setKeyRequest, 
         IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
         ServerCallContext context
     )
     {
-        GrpcTrySetKeyValueResponse trySetResponse = await TrySetKeyValueInternal(setKeyRequest, context);
-        
-        GrpcBatchServerKeyValueResponse response = new()
-        {
-            Type = GrpcServerBatchType.ServerTrySetKeyValue,
-            RequestId = requestId,
-            TrySetKeyValue = trySetResponse
-        };
-
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
-    }
-
-    private async Task TryGetKeyValueServerDelayed(
-        SemaphoreSlim semaphore, 
-        int requestId, 
-        GrpcTryGetKeyValueRequest getKeyRequest, 
-        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
-        ServerCallContext context
-    )
-    {
-        GrpcTryGetKeyValueResponse tryGetResponse = await TryGetKeyValueInternal(getKeyRequest, context);
-        
-        GrpcBatchServerKeyValueResponse response = new()
-        {
-            Type = GrpcServerBatchType.ServerTryGetKeyValue,
-            RequestId = requestId,
-            TryGetKeyValue = tryGetResponse
-        };
-
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
-    }
-
-    private async Task TryDeleteKeyValueServerDelayed(
-        SemaphoreSlim semaphore, 
-        int requestId, 
-        GrpcTryDeleteKeyValueRequest deleteKeyRequest, 
-        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
-        ServerCallContext context
-    )
-    {
-        GrpcTryDeleteKeyValueResponse tryDeleteResponse = await TryDeleteKeyValueInternal(deleteKeyRequest, context);
-        
-        GrpcBatchServerKeyValueResponse response = new()
-        {
-            Type = GrpcServerBatchType.ServerTryDeleteKeyValue,
-            RequestId = requestId,
-            TryDeleteKeyValue = tryDeleteResponse
-        };
-
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
-    }
-
-    private async Task TryExtendKeyValueServerDelayed(
-        SemaphoreSlim semaphore, 
-        int requestId, 
-        GrpcTryExtendKeyValueRequest extendKeyRequest, 
-        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
-        ServerCallContext context
-    )
-    {
-        GrpcTryExtendKeyValueResponse tryExtendResponse = await TryExtendKeyValueInternal(extendKeyRequest, context);
-        
-        GrpcBatchServerKeyValueResponse response = new()
-        {
-            Type = GrpcServerBatchType.ServerTryExtendKeyValue,
-            RequestId = requestId,
-            TryExtendKeyValue = tryExtendResponse
-        };
-
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
-    }
-
-    private async Task TryExistsKeyValueServerDelayed(
-        SemaphoreSlim semaphore, 
-        int requestId, 
-        GrpcTryExistsKeyValueRequest existKeyRequest, 
-        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
-        ServerCallContext context
-    )
-    {
-        GrpcTryExistsKeyValueResponse tryExistsResponse = await TryExistsKeyValueInternal(existKeyRequest, context);
-        
-        GrpcBatchServerKeyValueResponse response = new()
-        {
-            Type = GrpcServerBatchType.ServerTryExistsKeyValue,
-            RequestId = requestId,
-            TryExistsKeyValue = tryExistsResponse
-        };
-
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
-    }
-
-    private async Task TryExecuteTransactionServerDelayed(
-        SemaphoreSlim semaphore, 
-        int requestId, 
-        GrpcTryExecuteTransactionScriptRequest tryExecuteTransactionRequest, 
-        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
-        ServerCallContext context
-    )
-    {
-        GrpcTryExecuteTransactionScriptResponse tryExecuteTransactionScriptResponse = await TryExecuteTransactionScriptInternal(tryExecuteTransactionRequest, context);
-        
-        GrpcBatchServerKeyValueResponse response = new()
-        {
-            Type = GrpcServerBatchType.ServerTryExecuteTransactionScript,
-            RequestId = requestId,
-            TryExecuteTransactionScript = tryExecuteTransactionScriptResponse
-        };
-
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
-    }
-    
-    private async Task TryAcquireExclusiveLockDelayed(
-        SemaphoreSlim semaphore, 
-        int requestId, 
-        GrpcTryAcquireExclusiveLockRequest tryExecuteTransactionRequest, 
-        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
-        ServerCallContext context
-    )
-    {
-        GrpcTryAcquireExclusiveLockResponse tryExecuteTransactionResponse = await TryAcquireExclusiveLockInternal(tryExecuteTransactionRequest, context);
-        
-        GrpcBatchServerKeyValueResponse response = new()
-        {
-            Type = GrpcServerBatchType.ServerTryAcquireExclusiveLock,
-            RequestId = requestId,
-            TryAcquireExclusiveLock = tryExecuteTransactionResponse
-        };
-
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
-    }
-    
-    private async Task TryAcquireManyExclusiveLocksDelayed(
-        SemaphoreSlim semaphore, 
-        int requestId, 
-        GrpcTryAcquireManyExclusiveLocksRequest tryAcquireManyExclusiveLocksnRequest, 
-        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
-        ServerCallContext context
-    )
-    {
-        GrpcTryAcquireManyExclusiveLocksResponse tryAcquireManyExclusiveLocksResponse = await TryAcquireManyExclusiveLocksInternal(tryAcquireManyExclusiveLocksnRequest, context);
-        
-        GrpcBatchServerKeyValueResponse response = new()
-        {
-            Type = GrpcServerBatchType.ServerTryAcquireManyExclusiveLocks,
-            RequestId = requestId,
-            TryAcquireManyExclusiveLocks = tryAcquireManyExclusiveLocksResponse
-        };
-
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
-    }
-    
-    private async Task TryReleaseExclusiveLockDelayed(
-        SemaphoreSlim semaphore, 
-        int requestId, 
-        GrpcTryReleaseExclusiveLockRequest tryReleaseExclusiveLockRequest, 
-        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
-        ServerCallContext context
-    )
-    {
-        GrpcTryReleaseExclusiveLockResponse tryReleaseExclusiveLockResponse = await TryReleaseExclusiveLockInternal(tryReleaseExclusiveLockRequest, context);
-        
-        GrpcBatchServerKeyValueResponse response = new()
-        {
-            Type = GrpcServerBatchType.ServerTryReleaseExclusiveLock,
-            RequestId = requestId,
-            TryReleaseExclusiveLock = tryReleaseExclusiveLockResponse
-        };
-
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
-    }
-    
-    private async Task TryReleaseManyExclusiveLocksDelayed(
-        SemaphoreSlim semaphore, 
-        int requestId, 
-        GrpcTryReleaseManyExclusiveLocksRequest tryReleaseManyExclusiveLocksnRequest, 
-        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
-        ServerCallContext context
-    )
-    {
-        GrpcTryReleaseManyExclusiveLocksResponse tryReleaseManyExclusiveLocksResponse = await TryReleaseManyExclusiveLocksInternal(tryReleaseManyExclusiveLocksnRequest, context);
-        
-        GrpcBatchServerKeyValueResponse response = new()
-        {
-            Type = GrpcServerBatchType.ServerTryReleaseManyExclusiveLocks,
-            RequestId = requestId,
-            TryReleaseManyExclusiveLocks = tryReleaseManyExclusiveLocksResponse
-        };
-
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
-    }
-    
-    private async Task TryPrepareMutationsDelayed(
-        SemaphoreSlim semaphore, 
-        int requestId, 
-        GrpcTryPrepareMutationsRequest tryPrepareMutationsRequest, 
-        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
-        ServerCallContext context
-    )
-    {
-        GrpcTryPrepareMutationsResponse tryPrepareMutationsResponse = await TryPrepareMutationsInternal(tryPrepareMutationsRequest, context);
-        
-        GrpcBatchServerKeyValueResponse response = new()
-        {
-            Type = GrpcServerBatchType.ServerTryPrepareMutations,
-            RequestId = requestId,
-            TryPrepareMutations = tryPrepareMutationsResponse
-        };
-
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
-    }
-    
-    private async Task TryPrepareManyMutationsDelayed(
-        SemaphoreSlim semaphore, 
-        int requestId, 
-        GrpcTryPrepareManyMutationsRequest tryPrepareManyMutationsRequest, 
-        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
-        ServerCallContext context
-    )
-    {
-        GrpcTryPrepareManyMutationsResponse tryPrepareManyMutationsResponse = await TryPrepareManyMutationsInternal(tryPrepareManyMutationsRequest, context);
-        
-        GrpcBatchServerKeyValueResponse response = new()
-        {
-            Type = GrpcServerBatchType.ServerTryPrepareManyMutations,
-            RequestId = requestId,
-            TryPrepareManyMutations = tryPrepareManyMutationsResponse
-        };
-
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
-    }
-    
-    private async Task TryCommitMutationsDelayed(
-        SemaphoreSlim semaphore, 
-        int requestId, 
-        GrpcTryCommitMutationsRequest tryCommitMutationsRequest, 
-        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
-        ServerCallContext context
-    )
-    {
-        GrpcTryCommitMutationsResponse tryCommitMutationsResponse = await TryCommitMutationsInternal(tryCommitMutationsRequest, context);
-        
-        GrpcBatchServerKeyValueResponse response = new()
-        {
-            Type = GrpcServerBatchType.ServerTryCommitMutations,
-            RequestId = requestId,
-            TryCommitMutations = tryCommitMutationsResponse
-        };
-
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
-    }
-    
-    private async Task TryCommitManyMutationsDelayed(
-        SemaphoreSlim semaphore, 
-        int requestId, 
-        GrpcTryCommitManyMutationsRequest tryPrepareManyMutationsRequest, 
-        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
-        ServerCallContext context
-    )
-    {
-        GrpcTryCommitManyMutationsResponse tryCommitManyMutationsResponse = await TryCommitManyMutationsInternal(tryPrepareManyMutationsRequest, context);
-        
-        GrpcBatchServerKeyValueResponse response = new()
-        {
-            Type = GrpcServerBatchType.ServerTryCommitManyMutations,
-            RequestId = requestId,
-            TryCommitManyMutations = tryCommitManyMutationsResponse
-        };
-
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
+        await serverBatcher.BatchServerKeyValueRequests(requestStream, responseStream, context);
     }
 }

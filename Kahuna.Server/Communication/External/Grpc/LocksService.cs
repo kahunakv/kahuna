@@ -9,6 +9,15 @@ using System.Runtime.InteropServices;
 
 namespace Kahuna.Communication.External.Grpc;
 
+/// <summary>
+/// Provides gRPC service for managing distributed locks. This service allows creating, extending,
+/// releasing, and retrieving locks using gRPC requests and responses.
+/// </summary>
+/// <remarks>
+/// The LocksService class extends `Locker.LockerBase` to implement the required gRPC functionality for managing locks.
+/// It interacts with the lock management system and provides functionality to both individual
+/// and batch operations. The service is used for distributed environments where coordination is needed.
+/// </remarks>
 public sealed class LocksService : Locker.LockerBase
 {
     private readonly IKahuna locks;
@@ -19,6 +28,13 @@ public sealed class LocksService : Locker.LockerBase
     
     private readonly ILogger<IKahuna> logger;
     
+    /// <summary>
+    /// Constructor
+    /// </summary>
+    /// <param name="locks"></param>
+    /// <param name="configuration"></param>
+    /// <param name="raft"></param>
+    /// <param name="logger"></param>
     public LocksService(IKahuna locks, KahunaConfiguration configuration, IRaft raft, ILogger<IKahuna> logger)
     {
         this.locks = locks;
@@ -380,11 +396,11 @@ public sealed class LocksService : Locker.LockerBase
                     }
                     break;
                     
-                    /*case GrpcLockServerBatchType.ServerTypeExtendLock:
+                    case GrpcLockServerBatchType.ServerTypeExtendLock:
                     {
                         GrpcExtendLockRequest? extendLockRequest = request.ExtendLock;
 
-                        tasks.Add(TryExtendLockDelayed(semaphore, request.RequestId, extendLockRequest, responseStream, context));
+                        tasks.Add(ExtendLockServerDelayed(semaphore, request.RequestId, extendLockRequest, responseStream, context));
                     }
                     break;
                     
@@ -392,9 +408,9 @@ public sealed class LocksService : Locker.LockerBase
                     {
                         GrpcGetLockRequest? getLockRequest = request.GetLock;
 
-                        tasks.Add(TryGetLockDelayed(semaphore, request.RequestId, getLockRequest, responseStream, context));
+                        tasks.Add(GetLockServerDelayed(semaphore, request.RequestId, getLockRequest, responseStream, context));
                     }
-                    break;*/
+                    break;
 
                     case GrpcLockServerBatchType.ServerTypeNone:
                     default:
@@ -440,6 +456,35 @@ public sealed class LocksService : Locker.LockerBase
         }
     }
     
+    private async Task ExtendLockServerDelayed(
+        SemaphoreSlim semaphore, 
+        int requestId, 
+        GrpcExtendLockRequest lockRequest, 
+        IServerStreamWriter<GrpcBatchServerLockResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcExtendLockResponse extendLockResponse = await TryExtendLockInternal(lockRequest, context);
+        
+        GrpcBatchServerLockResponse response = new()
+        {
+            Type = GrpcLockServerBatchType.ServerTypeExtendLock,
+            RequestId = requestId,
+            ExtendLock = extendLockResponse
+        };
+
+        try
+        {
+            await semaphore.WaitAsync(context.CancellationToken);
+
+            await responseStream.WriteAsync(response);
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+    
     private async Task TryUnlockServerDelayed(
         SemaphoreSlim semaphore, 
         int requestId, 
@@ -455,6 +500,35 @@ public sealed class LocksService : Locker.LockerBase
             Type = GrpcLockServerBatchType.ServerTypeUnlock,
             RequestId = requestId,
             Unlock = unlockResponse
+        };
+
+        try
+        {
+            await semaphore.WaitAsync(context.CancellationToken);
+
+            await responseStream.WriteAsync(response);
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+    
+    private async Task GetLockServerDelayed(
+        SemaphoreSlim semaphore, 
+        int requestId, 
+        GrpcGetLockRequest lockRequest, 
+        IServerStreamWriter<GrpcBatchServerLockResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcGetLockResponse getLockResponse = await GetLockInternal(lockRequest, context);
+        
+        GrpcBatchServerLockResponse response = new()
+        {
+            Type = GrpcLockServerBatchType.ServerTypeGetLock,
+            RequestId = requestId,
+            GetLock = getLockResponse
         };
 
         try

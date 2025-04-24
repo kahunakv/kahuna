@@ -7,10 +7,18 @@ using Polly.Contrib.WaitAndRetry;
 
 namespace Kahuna.Server.Persistence;
 
-/*
- * Writes dirty locks/key-values from memory to disk in batches
- * before they are forced out by backend processes.
- */
+/// <summary>
+/// Represents an actor responsible for handling background write operations, performing tasks
+/// such as storing locks and key-value pairs, and triggering periodic flush operations.
+///
+/// Writes dirty lock/key-value objects from memory to disk in batches
+/// before they are forced out by backend processes.
+/// </summary>
+/// <remarks>
+/// The <c>BackgroundWriterActor</c> processes requests of type <see cref="BackgroundWriteRequest"/>
+/// and executes operations based on the request type. It supports queueing locks and key-value write
+/// requests, as well as flushing data at scheduled intervals.
+/// </remarks>
 public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 {
     private const int WriteRetries = 5;
@@ -82,6 +90,14 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         }
     }
 
+    /// <summary>
+    /// Performs a checkpoint operation on partitions to ensure their state is up-to-date and synchronized.
+    /// This method checks if any pending checkpoints can be completed by iterating over tracked partitions.
+    /// Partitions that have exceeded the allowed checkpoint interval are processed, ensuring they are in a consistent state.
+    /// If the actor is no longer the leader for a partition, the partition is removed from tracking.
+    /// Successfully checked partitions are updated, and the checkpoint status is cleared when no partitions remain.
+    /// </summary>
+    /// <returns>A value task representing the asynchronous checkpoint operation.</returns>
     private async ValueTask CheckpointPartitions()
     {
         if (dirtyLocks.Count > 0 || dirtyKeyValues.Count > 0)
@@ -125,6 +141,13 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             pendingCheckpoint = false;
     }
 
+    /// <summary>
+    /// Attempts to flush all pending locks in the background writer to the persistence backend.
+    /// If there are no pending locks, the method returns immediately.
+    /// If any locks fail to flush, they may be retried up to the maximum retry count.
+    /// Successfully flushed locks are removed from the queue, and any failed locks are retained for future retries.
+    /// </summary>
+    /// <returns>A task that represents the asynchronous operation of flushing locks.</returns>
     private async ValueTask FlushLocks()
     {
         if (dirtyLocks.Count == 0)
@@ -206,6 +229,13 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         logger.LogError("Coundn't store batch of {Count} locks", items.Count);
     }
 
+    /// <summary>
+    /// Flushes the queued key-value items by processing and storing them persistently.
+    /// If there are no queued key-value items, the method immediately returns.
+    /// Batches are created from the queue, retrying on failure with exponential backoff.
+    /// Successfully stored items are cleared, while failed batches are retained for further attempts.
+    /// </summary>
+    /// <returns>A value task representing the asynchronous operation of flushing key-value items.</returns>
     private async ValueTask FlushKeyValues()
     {
         if (dirtyKeyValues.Count == 0)

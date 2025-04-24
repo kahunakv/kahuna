@@ -68,12 +68,9 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
             if (response.Type == KeyValueResponseType.DoesNotExist)
                 continue;
             
-            if (response.Type != KeyValueResponseType.Get)
+            if (response.Type != KeyValueResponseType.Get || response.Context is null)
                 return new(response.Type, []);
-            
-            if (response.Context is null)
-                return new(response.Type, []);
-                       
+
             items.Add(key, new(
                 response.Context.Value, 
                 response.Context.Revision, 
@@ -145,12 +142,9 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
                 context.MvccEntries.Add(transactionId, entry);
             }
             
-            if (entry.State is KeyValueState.Undefined or KeyValueState.Deleted)
+            if (entry.State is KeyValueState.Undefined or KeyValueState.Deleted || entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
                 return KeyValueStaticResponses.DoesNotExistContextResponse;
-            
-            if (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
-                return KeyValueStaticResponses.DoesNotExistContextResponse;
-            
+
             readOnlyKeyValueContext = new(
                 entry.Value, 
                 entry.Revision, 
@@ -163,13 +157,7 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
             return new(KeyValueResponseType.Get, readOnlyKeyValueContext);
         }
 
-        if (context is null)
-            return KeyValueStaticResponses.DoesNotExistContextResponse;
-
-        if (context.State == KeyValueState.Deleted)
-            return KeyValueStaticResponses.DoesNotExistContextResponse;
-
-        if (context.Expires != HLCTimestamp.Zero && context.Expires - currentTime < TimeSpan.Zero)
+        if (context is null || context.State == KeyValueState.Deleted || context.Expires != HLCTimestamp.Zero && context.Expires - currentTime < TimeSpan.Zero)
             return KeyValueStaticResponses.DoesNotExistContextResponse;
 
         context.LastUsed = currentTime;

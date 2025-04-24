@@ -19,7 +19,7 @@ using Microsoft.Extensions.Logging;
 namespace Kahuna.Client;
 
 /// <summary>
-/// Client for the Kahuna service
+/// Represents a client for interacting with the Kahuna locking and key-value system.
 /// </summary>
 public class KahunaClient
 {
@@ -64,7 +64,16 @@ public class KahunaClient
         this.communication = (communication ?? new GrpcCommunication(Options, logger));
         this.Options = options ?? new();
     }
-    
+
+    /// <summary>
+    /// Attempts to acquire a lock on a specified resource.
+    /// </summary>
+    /// <param name="resource">The name of the resource to lock.</param>
+    /// <param name="owner">The identifier representing the entity attempting to acquire the lock.</param>
+    /// <param name="expiryTime">The duration for which the lock is held before it expires.</param>
+    /// <param name="durability">The durability level of the lock.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+    /// <returns>A task representing the asynchronous operation. The result is a tuple containing the lock acquisition result, fencing token, and the server URL from which the lock was served.</returns>
     private async Task<(KahunaLockAcquireResult, long, string?)> TryAcquireLock(string resource, byte[] owner, TimeSpan expiryTime, LockDurability durability, CancellationToken cancellationToken = default)
     {
         return await communication.TryAcquireLock(
@@ -76,11 +85,21 @@ public class KahunaClient
             cancellationToken
         ).ConfigureAwait(false);
     }
-    
+
+    /// <summary>
+    /// Attempts to acquire a lock on a resource by periodically retrying within a specified wait time.
+    /// </summary>
+    /// <param name="resource">The resource identifier to acquire the lock for.</param>
+    /// <param name="expiryTime">The time span after which the lock will expire if not manually released.</param>
+    /// <param name="wait">The maximum duration to attempt acquiring the lock.</param>
+    /// <param name="retry">The interval between each acquisition attempt within the wait duration.</param>
+    /// <param name="durability">The durability level of the lock (e.g., Ephemeral, Persistent, or ReplicationConsistent).</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+    /// <returns>Returns an instance of <see cref="KahunaLock"/> representing the acquired lock, or a failed lock instance if acquisition was unsuccessful within the specified wait time.</returns>
     private async Task<KahunaLock> PeriodicallyTryAcquireLock(
-        string resource, 
-        TimeSpan expiryTime, 
-        TimeSpan wait, 
+        string resource,
+        TimeSpan expiryTime,
+        TimeSpan wait,
         TimeSpan retry,
         LockDurability durability,
         CancellationToken cancellationToken = default
@@ -109,14 +128,15 @@ public class KahunaClient
 
         return new(this, resource, result, null, durability, fencingToken, servedFrom);
     }
-    
+
     /// <summary>
-    /// Tries to acquire a lock on a resource with a given expiry time
+    /// Attempts to acquire a single-use lock for a specified resource with a defined expiry time and durability.
     /// </summary>
-    /// <param name="resource"></param>
-    /// <param name="expiryTime"></param>
-    /// <param name="durability"></param>
-    /// <returns></returns>
+    /// <param name="resource">The name of the resource to lock.</param>
+    /// <param name="expiryTime">The expiry time for the lock, in milliseconds.</param>
+    /// <param name="durability">The durability level of the lock.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+    /// <returns>A <see cref="KahunaLock"/> instance representing the acquired lock.</returns>
     private async Task<KahunaLock> SingleTimeTryAcquireLock(string resource, int expiryTime, LockDurability durability, CancellationToken cancellationToken = default)
     {
         byte[] owner = Encoding.UTF8.GetBytes(Guid.NewGuid().ToString("N"));
@@ -131,14 +151,15 @@ public class KahunaClient
 
         return new(this, resource, result, owner, durability, fencingToken, servedFrom);
     }
-    
+
     /// <summary>
-    /// Tries to acquire a lock on a resource with a given expiry time
+    /// Attempts to acquire a single-use lock on the specified resource.
     /// </summary>
-    /// <param name="resource"></param>
-    /// <param name="expiryTime"></param>
-    /// <param name="durability"></param>
-    /// <returns></returns>
+    /// <param name="resource">The resource identifier to be locked.</param>
+    /// <param name="expiryTime">The duration for which the lock is valid before it expires.</param>
+    /// <param name="durability">The durability type of the lock (e.g., ephemeral, persistent).</param>
+    /// <param name="cancellationToken">A token to observe while waiting for the lock acquisition to complete.</param>
+    /// <returns>Returns a <see cref="KahunaLock"/> object representing the acquired lock, including lock details and metadata.</returns>
     private async Task<KahunaLock> SingleTimeTryAcquireLock(string resource, TimeSpan expiryTime, LockDurability durability, CancellationToken cancellationToken = default)
     {
         byte[] owner = Encoding.UTF8.GetBytes(Guid.NewGuid().ToString("N"));
@@ -147,18 +168,26 @@ public class KahunaClient
 
         return new(this, resource, result, owner, durability, fencingToken, servedFrom);
     }
-    
+
     /// <summary>
-    /// Gets or creates a lock on a resource with a given expiry time.
-    /// If the lock can't be acquired immediately, it will try to acquire it periodically 
+    /// Acquires or creates a lock for the specified resource with the given parameters.    
+    /// If the lock can't be acquired immediately, it will try to acquire it periodically.
     /// </summary>
-    /// <param name="resource"></param>
-    /// <param name="expiryTime"></param>
-    /// <param name="waitTime"></param>
-    /// <param name="retryTime"></param>
-    /// <param name="durability"></param>
-    /// <returns></returns>
-    public async Task<KahunaLock> GetOrCreateLock(string resource, int expiryTime = 30000, int waitTime = 0, int retryTime = 0, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
+    /// <param name="resource">The unique identifier for the resource the lock is being applied to.</param>
+    /// <param name="expiryTime">The lock duration in milliseconds before it expires. Default is 30000 ms.</param>
+    /// <param name="waitTime">The maximum time in milliseconds to wait to acquire the lock if unavailable. Default is 0 ms.</param>
+    /// <param name="retryTime">The time in milliseconds to wait before retrying to acquire the lock. Default is 0 ms.</param>
+    /// <param name="durability">Specifies whether the lock is ephemeral or persistent. Default is persistent.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+    /// <returns>A task representing the asynchronous operation. The task result contains the acquired <see cref="KahunaLock"/>.</returns>
+    public async Task<KahunaLock> GetOrCreateLock(
+        string resource, 
+        int expiryTime = 30000, 
+        int waitTime = 0, 
+        int retryTime = 0, 
+        LockDurability durability = LockDurability.Persistent,
+        CancellationToken cancellationToken = default
+    )
     {
         TimeSpan expiry = TimeSpan.FromMilliseconds(expiryTime);
         TimeSpan wait = TimeSpan.FromMilliseconds(waitTime);
@@ -354,16 +383,20 @@ public class KahunaClient
         
         return new(this, key, success, valueBytes, revision, durability, timeElapsedMs);
     }
-    
+
     /// <summary>
-    /// Set key to hold the string value. If key already holds a value, it is overwritten
+    /// Sets a key-value pair in the Kahuna key/value store with the specified parameters.
+    /// If key already holds a value, it is overwritten.
     /// </summary>
-    /// <param name="key"></param>
-    /// <param name="value"></param>
-    /// <param name="expiryTime"></param>
-    /// <param name="durability"></param>
-    /// <returns></returns>
-    public async Task<KahunaKeyValue> SetKeyValue(string key, string value, TimeSpan expiryTime, KeyValueFlags flags = KeyValueFlags.Set, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
+    /// <param name="key">The key to set in the database.</param>
+    /// <param name="value">The value to associate with the specified key.</param>
+    /// <param name="expiryTime">The expiration time for the key-value pair.</param>
+    /// <param name="flags">Optional flags for setting the key-value pair. Default is <c>KeyValueFlags.Set</c>.</param>
+    /// <param name="durability">Specifies the durability level of the key-value pair. Default is <c>KeyValueDurability.Persistent</c>.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+    /// <returns>Returns an instance of <c>KahunaKeyValue</c> containing details about the operation.</returns>
+    public async Task<KahunaKeyValue> SetKeyValue(string key, string value, TimeSpan expiryTime, KeyValueFlags flags = KeyValueFlags.Set, KeyValueDurability durability = KeyValueDurability.Persistent,
+        CancellationToken cancellationToken = default)
     {
         byte[] valueBytes = Encoding.UTF8.GetBytes(value);
         
@@ -379,17 +412,24 @@ public class KahunaClient
         
         return new(this, key, success, valueBytes, revision, durability, timeElapsedMs);
     }
-    
+
     /// <summary>
-    /// Compare-Value-And-Swap (CVAS) operation. Sets the value of a key if the current value is equal to the expected value
+    /// Compare-Value-And-Swap (CVAS) operation. Sets the value of a key if the current value is equal to the expected value.
+    /// Attempts to compare a specified value with the current value associated with a key
+    /// and, if they match, sets the key to a new value with an optional expiry time and durability setting.
     /// </summary>
-    /// <param name="key"></param>
-    /// <param name="value"></param>
-    /// <param name="compareValue"></param>
-    /// <param name="expiryTime"></param>
-    /// <param name="durability"></param>
-    /// <returns></returns>
-    public async Task<KahunaKeyValue> TryCompareValueAndSetKeyValue(string key, byte[] value, byte[] compareValue, int expiryTime = 30000, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
+    /// <param name="key">The key to be accessed or updated.</param>
+    /// <param name="value">The new value to set if the comparison succeeds.</param>
+    /// <param name="compareValue">The value to compare against the current value associated with the key.</param>
+    /// <param name="expiryTime">The expiration time (in milliseconds) for the key-value pair. Default is 30000 milliseconds.</param>
+    /// <param name="durability">Specifies whether the key-value pair is ephemeral or persistent. Default is persistent.</param>
+    /// <param name="cancellationToken">Token used to propagate notification that operations should be canceled.</param>
+    /// <returns>
+    /// An instance of <see cref="KahunaKeyValue"/> that provides details about the operation,
+    /// including whether it succeeded, the updated value, revision, and timing information.
+    /// </returns>
+    public async Task<KahunaKeyValue> TryCompareValueAndSetKeyValue(string key, byte[] value, byte[] compareValue, int expiryTime = 30000, KeyValueDurability durability = KeyValueDurability.Persistent,
+        CancellationToken cancellationToken = default)
     {
         (bool success, long revision, int timeElapsedMs) = await communication.TryCompareValueAndSetKeyValue(
             GetRoundRobinUrl(), 

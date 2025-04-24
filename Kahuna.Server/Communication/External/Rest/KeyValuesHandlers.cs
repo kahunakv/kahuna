@@ -8,6 +8,14 @@ using Kommander.Time;
 
 namespace Kahuna.Communication.External.Rest;
 
+/// <summary>
+/// Provides methods to map HTTP routes for handling key-value operations in the RESTful API.
+/// </summary>
+/// <remarks>
+/// This class is responsible for defining routes related to key-value functionalities,
+/// including setting, extending, deleting, retrieving, checking existence,
+/// and executing transaction scripts in the context of a key-value store.
+/// </remarks>
 public static class KeyValuesHandlers
 {
     public static void MapKeyValueRoutes(WebApplication app)

@@ -3,6 +3,10 @@ using System.Security.Cryptography.X509Certificates;
 
 namespace Kahuna.Server.Configuration;
 
+/// <summary>
+/// Provides methods to validate and construct configurations required
+/// for the Kahuna server based on command-line options.
+/// </summary>
 public static class ConfigurationValidator
 {
     public static KahunaConfiguration Validate(KahunaCommandLineOptions opts)

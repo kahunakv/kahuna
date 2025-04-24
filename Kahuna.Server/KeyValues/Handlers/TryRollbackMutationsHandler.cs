@@ -10,6 +10,22 @@ using Nixie;
 
 namespace Kahuna.Server.KeyValues.Handlers;
 
+/// <summary>
+/// Handles the rollback of mutations in the key-value store based on the given transaction ID and durability requirements.
+/// </summary>
+/// <remarks>
+/// The <c>TryRollbackMutationsHandler</c> is responsible for ensuring that any mutations associated
+/// with a given transaction are correctly rolled back if necessary. This handler validates the transaction ID,
+/// checks the corresponding key-value context, and performs cleanup of write intents and MVCC entries as needed.
+/// It also supports persistence operations for cases requiring data durability.
+/// </remarks>
+/// <example>
+/// This class is typically invoked as part of the key-value actor's workflow when a rollback request
+/// is received. It interacts with the <c>KeyValueContext</c>, persistence systems, and logs any relevant warnings or errors.
+/// </example>
+/// <threadsafety>
+/// Instances of this class are expected to be thread-safe as they may operate concurrently within an actor-based system.
+/// </threadsafety>
 internal sealed class TryRollbackMutationsHandler : BaseHandler
 {
     public TryRollbackMutationsHandler(

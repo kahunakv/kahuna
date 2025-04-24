@@ -12,6 +12,16 @@ using Kahuna.Utils;
 
 namespace Kahuna.Server.KeyValues.Handlers;
 
+/// <summary>
+/// Handles the execution of mutation commit requests in the key-value store.
+/// </summary>
+/// <remarks>
+/// This handler is responsible for committing prepared mutations to ensure
+/// consistency and durability within the key-value store. It interacts with
+/// the persistence backend, the Raft consensus module, and other components
+/// required for distributed state management.
+/// </remarks>
+/// <seealso cref="BaseHandler"/>
 internal sealed class TryCommitMutationsHandler : BaseHandler
 {
     public TryCommitMutationsHandler(

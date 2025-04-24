@@ -8,6 +8,11 @@ using Nixie;
 
 namespace Kahuna.Server.KeyValues.Handlers;
 
+/// <summary>
+/// Handles the periodic collection and eviction of key-value pairs based on specific criteria.
+/// This ensures efficient memory usage and optimal performance by removing expired, deleted,
+/// or unused keys from the key-value store.
+/// </summary>
 internal sealed class TryCollectHandler : BaseHandler
 {
     private readonly HashSet<string> keysToEvict = [];

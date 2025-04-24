@@ -5,6 +5,11 @@ using Microsoft.IO;
 
 namespace Kahuna.Server.Replication;
 
+/// <summary>
+/// Provides serialization and deserialization utilities for replication messages,
+/// specifically for LockMessage and KeyValueMessage types, handling different
+/// message sizes efficiently.
+/// </summary>
 public static class ReplicationSerializer
 {
     private const int MaxMessageSize = 1024;

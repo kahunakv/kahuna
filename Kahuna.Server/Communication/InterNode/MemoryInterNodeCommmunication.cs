@@ -7,6 +7,10 @@ using Kommander.Time;
 
 namespace Kahuna.Server.Communication.Internode;
 
+/// <summary>
+/// Provides inter-node communication functionality using memory-based calls, implementing operations
+/// such as locking, unlocking, key-value management, and transactional support among distributed nodes.
+/// </summary>
 public class MemoryInterNodeCommmunication : IInterNodeCommunication
 {
     private Dictionary<string, IKahuna>? nodes;

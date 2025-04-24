@@ -1,18 +1,16 @@
 
-using Flurl;
-using Flurl.Http;
-
 using Kommander;
-using Kommander.Time;
 
 using Kahuna.Server.Locks;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.Locks;
 
-using System.Text.Json;
-
 namespace Kahuna.Communication.External.Rest;
 
+/// <summary>
+/// Provides methods for mapping routes related to lock operations
+/// in a RESTful web application environment.
+/// </summary>
 public static class LocksHandlers
 {
     public static void MapLocksRoutes(WebApplication app)

@@ -9,6 +9,10 @@ using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Handlers;
 
+/// <summary>
+/// Handles the process of attempting to acquire an exclusive lock on a key-value resource.
+/// </summary>
+/// <see cref="BaseHandler"/>
 internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
 {
     public TryAcquireExclusiveLockHandler(

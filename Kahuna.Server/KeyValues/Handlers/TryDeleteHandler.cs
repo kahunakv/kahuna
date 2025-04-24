@@ -11,6 +11,11 @@ using Kahuna.Utils;
 
 namespace Kahuna.Server.KeyValues.Handlers;
 
+/// <summary>
+/// Handles the execution of delete operations for key-value data. This handler is responsible
+/// for processing requests to delete entries in a key-value store while ensuring proper
+/// synchronization and persistence via raft consensus and background writing mechanisms.
+/// </summary>
 internal sealed class TryDeleteHandler : BaseHandler
 {
     public TryDeleteHandler(

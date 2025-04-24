@@ -8,6 +8,9 @@
 
 namespace Kahuna.Client;
 
+/// <summary>
+/// Represents configuration options for the Kahuna client.
+/// </summary>
 public class KahunaOptions
 {
     public bool UpgradeUrls { get; set; }

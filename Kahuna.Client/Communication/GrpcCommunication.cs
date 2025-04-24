@@ -17,6 +17,10 @@ using Microsoft.Extensions.Logging;
 
 namespace Kahuna.Client.Communication;
 
+/// <summary>
+/// Provides an implementation of the IKahunaCommunication interface for gRPC-based communication.
+/// This class offers methods to perform distributed locking and manage key-value storage in a gRPC context.
+/// </summary>
 public class GrpcCommunication : IKahunaCommunication
 {
     private static readonly ConcurrentDictionary<string, Lazy<GrpcBatcher>> batchers = new();
@@ -593,16 +597,15 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcGetByPrefixResponse? response;
         
-        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
+        GrpcBatcher batcher = GetSharedBatcher(url);
         
         do
         {
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
         
-            response = await client.GetByPrefixAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            response = batchResponse.GetByPrefix;
 
             if (response is null)
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
@@ -633,18 +636,17 @@ public class GrpcCommunication : IKahunaCommunication
         };
 
         int retries = 0;
-        GrpcScanAllByPrefixResponse? response;
+        GrpcScanAllByPrefixResponse? response;               
         
-        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
+        GrpcBatcher batcher = GetSharedBatcher(url);
         
         do
         {
             if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
-        
-            response = await client.ScanAllByPrefixAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+                throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);                   
+            
+            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            response = batchResponse.ScanByPrefix;
 
             if (response is null)
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);

@@ -7,6 +7,19 @@ using System.Collections.Generic;
 
 namespace Kahuna.Server.Persistence.Backend;
 
+/// <summary>
+/// Represents a persistence backend implementation using SQLite for storing key-value pairs
+/// and lock data. This class provides functionality for managing and retrieving stored
+/// data, enabling flexible data management in applications.
+/// </summary>
+/// <remarks>
+/// This class implements the <see cref="IPersistenceBackend"/> interface, providing
+/// methods for storing and retrieving key-value and lock data, as well as querying
+/// data by prefix. It is designed for use cases requiring persistence in SQLite-based
+/// storage for high-performance scenarios.
+/// The class also implements IDisposable to ensure proper handling and release of resources
+/// like database connections and locks.
+/// </remarks>
 public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
 {
     private const int MaxShards = 8;
@@ -24,14 +37,32 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
         this.path = path;
         this.dbRevision = dbRevision;
     }
-    
+
+    /// <summary>
+    /// Attempts to open the database connection and acquire a reader-writer lock
+    /// for the specified resource.
+    /// </summary>
+    /// <param name="resource">The resource for which the database should be accessed. This is used to determine the appropriate shard.</param>
+    /// <returns>
+    /// A tuple containing a <see cref="ReaderWriterLock"/> for controlling concurrent access
+    /// and a <see cref="SqliteConnection"/> representing the database connection.
+    /// </returns>
     private (ReaderWriterLock readerWriterLock, SqliteConnection connection) TryOpenDatabase(string resource)
     {
         int shard = (int)HashUtils.InversePrefixedHash(resource, '/', MaxShards);
         
         return TryOpenDatabaseByShard(shard);
-    }       
-    
+    }
+
+    /// <summary>
+    /// Attempts to open the database connection and acquire a reader-writer lock
+    /// for the specified shard.
+    /// </summary>
+    /// <param name="shard">The shard identifier used to locate the appropriate database.</param>
+    /// <returns>
+    /// A tuple containing a <see cref="ReaderWriterLock"/> for managing concurrent access
+    /// and a <see cref="SqliteConnection"/> representing the database connection for the specified shard.
+    /// </returns>
     private (ReaderWriterLock readerWriterLock, SqliteConnection connection) TryOpenDatabaseByShard(int shard)
     {
         if (connections.TryGetValue(shard, out (ReaderWriterLock readerWriterLock, SqliteConnection connection) sqlConnection))
@@ -120,25 +151,32 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
             semaphore.Release();
         }
     }
-    
+
+    /// <summary>
+    /// Persists a collection of lock-related request items to the database.
+    /// </summary>
+    /// <param name="items">The list of <see cref="PersistenceRequestItem"/> objects representing lock data to be stored.</param>
+    /// <returns>
+    /// A boolean value indicating whether the lock data was successfully stored.
+    /// </returns>
     public bool StoreLocks(List<PersistenceRequestItem> items)
     {
         try
         {
             const string insert = """
-              INSERT INTO locks (resource, owner, expiresPhysical, expiresCounter, fencingToken, state) 
-              VALUES (@resource, @owner, @expiresPhysical, @expiresCounter, @fencingToken, @state) 
-              ON CONFLICT(resource) DO UPDATE SET 
-              owner=@owner, 
-              expiresPhysical=@expiresPhysical, 
-              expiresCounter=@expiresCounter,
-              lastUsedPhysical=@lastUsedPhysical, 
-              lastUsedCounter=@lastUsedCounter,
-              lastModifiedPhysical=@lastModifiedPhysical, 
-              lastModifiedCounter=@lastModifiedCounter,
-              fencingToken=@fencingToken, 
-              state=@state;
-              """;
+                                  INSERT INTO locks (resource, owner, expiresPhysical, expiresCounter, fencingToken, state) 
+                                  VALUES (@resource, @owner, @expiresPhysical, @expiresCounter, @fencingToken, @state) 
+                                  ON CONFLICT(resource) DO UPDATE SET 
+                                  owner=@owner, 
+                                  expiresPhysical=@expiresPhysical, 
+                                  expiresCounter=@expiresCounter,
+                                  lastUsedPhysical=@lastUsedPhysical, 
+                                  lastUsedCounter=@lastUsedCounter,
+                                  lastModifiedPhysical=@lastModifiedPhysical, 
+                                  lastModifiedCounter=@lastModifiedCounter,
+                                  fencingToken=@fencingToken, 
+                                  state=@state;
+                                  """;
             
             foreach (PersistenceRequestItem item in items)
             {
@@ -188,7 +226,14 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
 
         return false;
     }
-    
+
+    /// <summary>
+    /// Stores a collection of key-value pairs in the database, ensuring persistent storage for the specified items.
+    /// </summary>
+    /// <param name="items">A list of <see cref="PersistenceRequestItem"/> objects representing the key-value pairs to be stored.</param>
+    /// <returns>
+    /// A boolean value indicating whether the operation to store the key-value pairs was successful.
+    /// </returns>
     public bool StoreKeyValues(List<PersistenceRequestItem> items)
     {
         try
@@ -322,6 +367,13 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
         return false;
     }
 
+    /// <summary>
+    /// Attempts to obtain data for a lock in the specified resource and manage concurrent access.
+    /// </summary>
+    /// <param name="resource">The resource for which the lock data will be queried. This is used to identify the corresponding database shard.</param>
+    /// <returns>
+    /// A <see cref="LockContext"/> instance representing the acquired lock context or null if the lock could not be acquired.
+    /// </returns>
     public LockContext? GetLock(string resource)
     {
         try
@@ -417,7 +469,16 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
         
         return null;
     }
-    
+
+    /// <summary>
+    /// Retrieves the version-specific key-value pair context from persistent storage.
+    /// </summary>
+    /// <param name="keyName">The name of the key to retrieve the context for.</param>
+    /// <param name="revision">The specific revision of the key-value pair to retrieve.</param>
+    /// <returns>
+    /// A <see cref="KeyValueContext"/> representing the key-value pair context for the specified key and revision,
+    /// or null if the key or specific revision does not exist.
+    /// </returns>
     public KeyValueContext? GetKeyValueRevision(string keyName, long revision)
     {
         try
@@ -465,7 +526,15 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
         
         return null;
     }
-    
+
+    /// <summary>
+    /// Retrieves a list of key-value pairs whose keys match the specified prefix.
+    /// </summary>
+    /// <param name="prefixKeyName">The prefix of the keys to filter and retrieve.</param>
+    /// <returns>
+    /// A list of tuples, where each tuple contains a key as a string and its associated
+    /// <see cref="ReadOnlyKeyValueContext"/> representing the value.
+    /// </returns>
     public List<(string, ReadOnlyKeyValueContext)> GetKeyValueByPrefix(string prefixKeyName)
     {
         List<(string, ReadOnlyKeyValueContext)> results = [];

@@ -386,7 +386,9 @@ message GrpcBatchClientKeyValueRequest {
     GrpcTryDeleteKeyValueRequest TryDeleteKeyValue = 5;
     GrpcTryExtendKeyValueRequest TryExtendKeyValue = 6;
     GrpcTryExistsKeyValueRequest TryExistsKeyValue = 7;
-    GrpcTryExecuteTransactionScriptRequest TryExecuteTransactionScript = 8;    
+    GrpcTryExecuteTransactionScriptRequest TryExecuteTransactionScript = 8;
+    GrpcGetByPrefixRequest GetByPrefix = 9;
+    GrpcScanAllByPrefixRequest ScanByPrefix = 10;
   }
 }
 
@@ -401,6 +403,8 @@ message GrpcBatchClientKeyValueResponse
     GrpcTryExtendKeyValueResponse TryExtendKeyValue = 6;
     GrpcTryExistsKeyValueResponse TryExistsKeyValue = 7;
     GrpcTryExecuteTransactionScriptResponse TryExecuteTransactionScript = 8;    
+    GrpcGetByPrefixResponse GetByPrefix = 9;
+    GrpcScanAllByPrefixResponse ScanByPrefix = 10;
   }
 }
 
@@ -422,6 +426,7 @@ message GrpcBatchServerKeyValueRequest {
     GrpcTryPrepareManyMutationsRequest TryPrepareManyMutations = 14;
     GrpcTryCommitMutationsRequest TryCommitMutations = 15;
     GrpcTryCommitManyMutationsRequest TryCommitManyMutations = 16;
+    GrpcGetByPrefixRequest GetByPrefix = 17;
   }
 }
 
@@ -444,6 +449,7 @@ message GrpcBatchServerKeyValueResponse
     GrpcTryPrepareManyMutationsResponse TryPrepareManyMutations = 14;
     GrpcTryCommitMutationsResponse TryCommitMutations = 15;
     GrpcTryCommitManyMutationsResponse TryCommitManyMutations = 16;
+    GrpcGetByPrefixResponse GetByPrefix = 17;
   }
 }
 
@@ -455,6 +461,8 @@ enum GrpcClientBatchType {
   TRY_GET_KEY_VALUE = 4;
   TRY_EXISTS_KEY_VALUE = 5;
   TRY_EXECUTE_TRANSACTION_SCRIPT = 6;  
+  TRY_GET_BY_PREFIX = 7;
+  TRY_SCAN_BY_PREFIX = 8;
 }
 
 enum GrpcServerBatchType {
@@ -473,6 +481,7 @@ enum GrpcServerBatchType {
   SERVER_TRY_PREPARE_MANY_MUTATIONS = 12;
   SERVER_TRY_COMMIT_MUTATIONS = 13;
   SERVER_TRY_COMMIT_MANY_MUTATIONS = 14;
+  SERVER_TRY_GET_BY_PREFIX = 15;
 }
 
 enum GrpcKeyValueFlags {

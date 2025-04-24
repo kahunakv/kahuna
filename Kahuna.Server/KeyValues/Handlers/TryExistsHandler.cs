@@ -9,6 +9,9 @@ using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Handlers;
 
+/// <summary>
+/// Handles the processing of requests to check the existence of a key-value entry in the store.
+/// </summary>
 internal sealed class TryExistsHandler : BaseHandler
 {
     public TryExistsHandler(

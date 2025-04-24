@@ -44,6 +44,11 @@ internal sealed class GrpcBatcher
         this.url = url;
     }
 
+    /// <summary>
+    /// Adds a new lock request to the batch processing queue and processes the queue as needed.
+    /// </summary>
+    /// <param name="message">The lock request message to be enqueued.</param>
+    /// <returns>A task that represents the asynchronous operation, containing the batcher response for the lock request.</returns>
     public Task<GrpcBatcherResponse> Enqueue(GrpcTryLockRequest message)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -53,6 +58,11 @@ internal sealed class GrpcBatcher
         return TryProcessQueue(grpcBatcherItem, promise);
     }
 
+    /// <summary>
+    /// Adds an unlock request to the batch processing queue and initiates queue processing as needed.
+    /// </summary>
+    /// <param name="message">The unlock request message to be added to the queue.</param>
+    /// <returns>A task representing the asynchronous operation, containing the batcher response for the unlock request.</returns>
     public Task<GrpcBatcherResponse> Enqueue(GrpcUnlockRequest message)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -61,7 +71,12 @@ internal sealed class GrpcBatcher
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
-    
+
+    /// <summary>
+    /// Adds a lock extension request to the batch queue for processing and handles the request as necessary.
+    /// </summary>
+    /// <param name="message">The lock extension request to be enqueued.</param>
+    /// <returns>A task that represents the asynchronous operation, containing the batcher response for the lock extension request.</returns>
     public Task<GrpcBatcherResponse> Enqueue(GrpcExtendLockRequest message)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -70,7 +85,12 @@ internal sealed class GrpcBatcher
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
-    
+
+    /// <summary>
+    /// Adds a lock request to the batch processing queue and processes the queue as needed.
+    /// </summary>
+    /// <param name="message">The lock request message to be enqueued.</param>
+    /// <returns>A task that represents the asynchronous operation, containing the batcher response for the lock request.</returns>
     public Task<GrpcBatcherResponse> Enqueue(GrpcGetLockRequest message)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -79,7 +99,12 @@ internal sealed class GrpcBatcher
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
-    
+
+    /// <summary>
+    /// Adds a key-value set request to the batch queue and processes it accordingly.
+    /// </summary>
+    /// <param name="message">The key-value set request to be enqueued.</param>
+    /// <returns>A task representing the asynchronous operation, containing the response for the processed request.</returns>
     public Task<GrpcBatcherResponse> Enqueue(GrpcTrySetKeyValueRequest message)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -126,6 +151,24 @@ internal sealed class GrpcBatcher
     }
     
     public Task<GrpcBatcherResponse> Enqueue(GrpcTryExecuteTransactionScriptRequest message)
+    {
+        TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
+    public Task<GrpcBatcherResponse> Enqueue(GrpcGetByPrefixRequest message)
+    {
+        TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
+    public Task<GrpcBatcherResponse> Enqueue(GrpcScanAllByPrefixRequest message)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -186,6 +229,11 @@ internal sealed class GrpcBatcher
             await Task.Delay(Random.Shared.Next(1, 3)); // Force large batches
     }
 
+    /// <summary>
+    /// Processes a batch of requests, delegating them to specific handling mechanisms based on their type.
+    /// </summary>
+    /// <param name="requests">The list of batcher items to be processed.</param>
+    /// <returns>A task that represents the asynchronous batch processing operation.</returns>
     private async Task RunBatch(List<GrpcBatcherItem> requests)
     {
         try
@@ -206,6 +254,7 @@ internal sealed class GrpcBatcher
                         await RunKeyValueBatch(sharedStreaming, request);
                         break;
                     
+                    case GrpcBatcherItemType.Sequences:
                     default:
                         throw new KahunaException("Unknown batch type", LockResponseType.Errored);
                 }
@@ -222,6 +271,13 @@ internal sealed class GrpcBatcher
         }
     }
 
+    /// <summary>
+    /// Processes a batch of lock-related requests and sends them to the shared streaming service.
+    /// </summary>
+    /// <param name="sharedStreaming">The streaming client used for sending lock batch requests.</param>
+    /// <param name="request">The batcher item containing the lock-related request information.</param>
+    /// <returns>A task that represents the asynchronous operation.</returns>
+    /// <exception cref="KahunaException">Thrown when the request type is unknown or invalid.</exception>
     private static async Task RunLocksBatch(GrpcSharedStreaming sharedStreaming, GrpcBatcherItem request)
     {
         GrpcBatchClientLockRequest batchRequest = new()
@@ -266,6 +322,13 @@ internal sealed class GrpcBatcher
         }
     }
 
+    /// <summary>
+    /// Processes a batch of key-value operations based on the request type and sends it through the shared streaming instance.
+    /// </summary>
+    /// <param name="sharedStreaming">The shared streaming instance for sending the batched request.</param>
+    /// <param name="request">The batcher item containing the key-value request details to be processed.</param>
+    /// <returns>A task that represents the asynchronous operation of processing the key-value batch.</returns>
+    /// <exception cref="KahunaException">Thrown if the request type is unknown or invalid.</exception>
     private static async Task RunKeyValueBatch(GrpcSharedStreaming sharedStreaming, GrpcBatcherItem request)
     {
         GrpcBatchClientKeyValueRequest batchRequest = new()
@@ -305,6 +368,16 @@ internal sealed class GrpcBatcher
             batchRequest.Type = GrpcClientBatchType.TryExecuteTransactionScript;
             batchRequest.TryExecuteTransactionScript = itemRequest.TryExecuteTransactionScript;
         }
+        else if (itemRequest.GetByPrefix is not null)
+        {
+            batchRequest.Type = GrpcClientBatchType.TryGetByPrefix;
+            batchRequest.GetByPrefix = itemRequest.GetByPrefix;
+        }
+        else if (itemRequest.ScanByPrefix is not null)
+        {
+            batchRequest.Type = GrpcClientBatchType.TryScanByPrefix;
+            batchRequest.ScanByPrefix = itemRequest.ScanByPrefix;
+        }
         else        
             throw new KahunaException("Unknown request type", KeyValueResponseType.Errored);        
 
@@ -321,9 +394,10 @@ internal sealed class GrpcBatcher
     }
 
     /// <summary>
-    /// Reads responses from the key/value stream
+    /// Reads key-value response messages from the provided streaming call and processes them asynchronously.
     /// </summary>
-    /// <param name="streaming"></param>
+    /// <param name="streaming">The asynchronous duplex streaming call that delivers key-value request and response messages.</param>
+    /// <returns>A task that represents the asynchronous operation of reading and processing the key-value messages.</returns>
     private static async Task ReadKeyValueMessages(AsyncDuplexStreamingCall<GrpcBatchClientKeyValueRequest, GrpcBatchClientKeyValueResponse> streaming)
     {
         await foreach (GrpcBatchClientKeyValueResponse response in streaming.ResponseStream.ReadAllAsync())
@@ -359,6 +433,14 @@ internal sealed class GrpcBatcher
                 case GrpcClientBatchType.TryExecuteTransactionScript:
                     item.Promise.SetResult(new(response.TryExecuteTransactionScript));
                     break;
+                
+                case GrpcClientBatchType.TryGetByPrefix:
+                    item.Promise.SetResult(new(response.GetByPrefix));
+                    break;
+                
+                case GrpcClientBatchType.TryScanByPrefix:
+                    item.Promise.SetResult(new(response.ScanByPrefix));
+                    break;
                         
                 case GrpcClientBatchType.TypeNone:
                 default:
@@ -369,11 +451,12 @@ internal sealed class GrpcBatcher
             requestRefs.TryRemove(response.RequestId, out _);
         }
     }
-    
+
     /// <summary>
-    /// Reads responses from the lock stream
+    /// Reads lock messages asynchronously from a duplex streaming call, processes the responses,
+    /// and resolves or rejects associated tasks based on the response type.
     /// </summary>
-    /// <param name="streaming"></param>
+    /// <param name="streaming">The asynchronous duplex streaming call containing lock request and response messages.</param>
     private static async Task ReadLockMessages(AsyncDuplexStreamingCall<GrpcBatchClientLockRequest, GrpcBatchClientLockResponse> streaming)
     {
         await foreach (GrpcBatchClientLockResponse response in streaming.ResponseStream.ReadAllAsync())
@@ -411,12 +494,12 @@ internal sealed class GrpcBatcher
             requestRefs.TryRemove(response.RequestId, out _);
         }
     }
-    
+
     /// <summary>
-    /// Selects a random shared channel from the list of channels for the given URL.
+    /// Retrieves a shared gRPC channel for the specified URL from the shared channel pool.
     /// </summary>
-    /// <param name="url"></param>
-    /// <returns></returns>
+    /// <param name="url">The URL for which the shared gRPC channel is requested.</param>
+    /// <returns>A shared gRPC channel corresponding to the specified URL.</returns>
     public static GrpcChannel GetSharedChannel(string url)
     {
         Lazy<List<GrpcChannel>> lazyChannels = channels.GetOrAdd(url, GetSharedChannels);

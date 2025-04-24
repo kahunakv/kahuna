@@ -4,6 +4,12 @@ namespace Kahuna.Server.Communication.Internode.Grpc;
 internal sealed class GrpcServerBatcherRequest
 {   
     public GrpcTryLockRequest? TryLock { get; }
+
+    public GrpcUnlockRequest? Unlock { get; }
+    
+    public GrpcExtendLockRequest? ExtendLock { get; }
+    
+    public GrpcGetLockRequest? GetLock { get; }
     
     public GrpcTrySetKeyValueRequest? TrySetKeyValue { get; }
     
@@ -36,6 +42,21 @@ internal sealed class GrpcServerBatcherRequest
     public GrpcServerBatcherRequest(GrpcTryLockRequest tryLock)
     {
         TryLock = tryLock;
+    }
+    
+    public GrpcServerBatcherRequest(GrpcUnlockRequest unlock)
+    {
+        Unlock = unlock;
+    }
+    
+    public GrpcServerBatcherRequest(GrpcExtendLockRequest extendLock)
+    {
+        ExtendLock = extendLock;
+    }
+    
+    public GrpcServerBatcherRequest(GrpcGetLockRequest getLock)
+    {
+        GetLock = getLock;
     }
 
     public GrpcServerBatcherRequest(GrpcTrySetKeyValueRequest trySetKeyValue)

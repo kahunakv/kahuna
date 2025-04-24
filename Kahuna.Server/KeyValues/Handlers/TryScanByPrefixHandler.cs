@@ -9,6 +9,16 @@ using Nixie;
 
 namespace Kahuna.Server.KeyValues.Handlers;
 
+/// <summary>
+/// Represents a handler that attempts to scan key-value entries in a data store based on a specified prefix.
+/// </summary>
+/// <remarks>
+/// This handler iterates over the key-value store, filters entries that match the given prefix, discards expired entries,
+/// and returns the filtered entries in lexicographical order. 
+/// </remarks>
+/// <threadsafety>
+/// This class is intended for use in a multi-threaded actor context, ensuring encapsulated access to shared resources.
+/// </threadsafety>
 internal sealed class TryScanByPrefixHandler : BaseHandler
 {
     public TryScanByPrefixHandler(
@@ -26,11 +36,8 @@ internal sealed class TryScanByPrefixHandler : BaseHandler
     {
         List<(string, ReadOnlyKeyValueContext)> items = [];
         
-        foreach ((string? key, KeyValueContext? keyValueContext) in keyValuesStore.GetItems())
-        {
-            if (!key.StartsWith(message.Key))
-                continue;
-
+        foreach ((string key, KeyValueContext keyValueContext) in keyValuesStore.GetByPrefix(message.Key))
+        {            
             if (keyValueContext.State != KeyValueState.Set)
                 continue;
 

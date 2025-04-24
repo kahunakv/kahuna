@@ -9,6 +9,10 @@ using Nixie;
 
 namespace Kahuna.Server.KeyValues.Handlers;
 
+/// <summary>
+/// Handles the execution of key-value operations related to extending the expiration of a given key in the B-tree store.
+/// </summary>
+/// <seealso cref="BaseHandler"/>
 internal sealed class TryExtendHandler : BaseHandler
 {
     public TryExtendHandler(

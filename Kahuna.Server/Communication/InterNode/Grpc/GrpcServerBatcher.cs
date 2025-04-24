@@ -7,6 +7,11 @@ using Kommander.Communication.Grpc;
 
 namespace Kahuna.Server.Communication.Internode.Grpc;
 
+/// <summary>
+/// A server-side batching utility designed to handle gRPC-based communication requests at scale.
+/// The primary function of this class is to queue various gRPC request types for processing
+/// and to return the appropriate responses.
+/// </summary>
 internal sealed class GrpcServerBatcher
 {
     private static readonly ConcurrentDictionary<string, Lazy<List<GrpcServerSharedStreaming>>> streamings = new();
@@ -27,6 +32,33 @@ internal sealed class GrpcServerBatcher
     }
     
     public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryLockRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.Locks, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcUnlockRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.Locks, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcExtendLockRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.Locks, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcGetLockRequest message)
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -261,6 +293,21 @@ internal sealed class GrpcServerBatcher
             batchRequest.Type = GrpcLockServerBatchType.ServerTypeTryLock;
             batchRequest.TryLock = itemRequest.TryLock;
         } 
+        else if (itemRequest.Unlock is not null)
+        {
+            batchRequest.Type = GrpcLockServerBatchType.ServerTypeUnlock;
+            batchRequest.Unlock = itemRequest.Unlock;
+        }
+        else if (itemRequest.ExtendLock is not null)
+        {
+            batchRequest.Type = GrpcLockServerBatchType.ServerTypeExtendLock;
+            batchRequest.ExtendLock = itemRequest.ExtendLock;
+        }
+        else if (itemRequest.GetLock is not null)
+        {
+            batchRequest.Type = GrpcLockServerBatchType.ServerTypeGetLock;
+            batchRequest.GetLock = itemRequest.GetLock;
+        }
         else
             throw new KahunaServerException("Unknown request type");
 
@@ -386,6 +433,18 @@ internal sealed class GrpcServerBatcher
                 {
                     case GrpcLockServerBatchType.ServerTypeTryLock:
                         item.Promise.SetResult(new(response.TryLock));
+                        break;
+                    
+                    case GrpcLockServerBatchType.ServerTypeUnlock:
+                        item.Promise.SetResult(new(response.Unlock));
+                        break;
+                    
+                    case GrpcLockServerBatchType.ServerTypeExtendLock:
+                        item.Promise.SetResult(new(response.ExtendLock));
+                        break;
+                    
+                    case GrpcLockServerBatchType.ServerTypeGetLock:
+                        item.Promise.SetResult(new(response.GetLock));
                         break;
 
                     case GrpcLockServerBatchType.ServerTypeNone:

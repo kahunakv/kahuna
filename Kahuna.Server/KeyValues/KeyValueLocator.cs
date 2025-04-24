@@ -15,6 +15,9 @@ using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues;
 
+/// <summary>
+/// Locates the appropriate leader node for a given key and executes the corresponding key-value operations.
+/// </summary>
 internal sealed class KeyValueLocator
 {
     private readonly KeyValuesManager manager;

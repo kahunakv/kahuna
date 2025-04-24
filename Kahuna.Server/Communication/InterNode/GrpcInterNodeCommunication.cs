@@ -17,6 +17,11 @@ using Kahuna.Shared.Locks;
 
 namespace Kahuna.Server.Communication.Internode;
 
+/// <summary>
+/// Provides gRPC-based inter-node communication functionalities within the Kahuna Server.
+/// This implementation facilitates distributed locking, key-value operations, and other
+/// inter-node coordination mechanisms.
+/// </summary>
 public class GrpcInterNodeCommunication : IInterNodeCommunication
 {
     private static readonly ConcurrentDictionary<string, Lazy<GrpcServerBatcher>> batchers = new();
@@ -27,7 +32,17 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     {
         this.configuration = configuration;
     }
-    
+
+    /// <summary>
+    /// Attempts to acquire a distributed lock on a specified resource using gRPC communication.
+    /// </summary>
+    /// <param name="node">The target node to coordinate the lock request.</param>
+    /// <param name="resource">The name or identifier of the resource to lock.</param>
+    /// <param name="owner">A unique identifier representing the lock owner, typically in byte format.</param>
+    /// <param name="expiresMs">The expiration time for the lock, in milliseconds.</param>
+    /// <param name="durability">Specifies the durability level of the lock, either ephemeral or persistent.</param>
+    /// <param name="cancellationToken">A token to observe cancellation requests for the operation.</param>
+    /// <returns>A tuple consisting of the lock response type and a fencing token to validate lock state.</returns>
     public async Task<(LockResponseType, long)> TryLock(string node, string resource, byte[] owner, int expiresMs, LockDurability durability, CancellationToken cancellationToken)
     {
         GrpcTryLockRequest request = new()
@@ -48,6 +63,16 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         return ((LockResponseType)remoteResponse.Type, remoteResponse.FencingToken);
     }
 
+    /// <summary>
+    /// Attempts to extend the duration of an existing distributed lock on a specified resource using gRPC communication.
+    /// </summary>
+    /// <param name="node">The target node responsible for coordinating the lock extension request.</param>
+    /// <param name="resource">The name or identifier of the resource whose lock is being extended.</param>
+    /// <param name="owner">A unique identifier representing the lock owner, provided in byte format.</param>
+    /// <param name="expiresMs">The new expiration time, in milliseconds, for the lock's validity.</param>
+    /// <param name="durability">Specifies the durability level of the lock, either ephemeral or persistent.</param>
+    /// <param name="cancellationToken">A token to observe cancellation requests for the operation.</param>
+    /// <returns>A tuple containing the lock response type and an updated fencing token to validate the extended lock's state.</returns>
     public async Task<(LockResponseType, long)> TryExtendLock(string node, string resource, byte[] owner, int expiresMs, LockDurability durability, CancellationToken cancellationToken)
     {
         GrpcExtendLockRequest request = new()
@@ -58,16 +83,25 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcLockDurability)durability
         };
         
-        GrpcChannel channel = SharedChannels.GetChannel(node);
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
         
-        Locker.LockerClient client = new(channel);
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcExtendLockResponse remoteResponse = response.ExtendLock!;
         
-        GrpcExtendLockResponse? remoteResponse = await client.TryExtendLockAsync(request, cancellationToken: cancellationToken);
         remoteResponse.ServedFrom = $"https://{node}";
         
         return ((LockResponseType)remoteResponse.Type, remoteResponse.FencingToken);
     }
 
+    /// <summary>
+    /// Attempts to release a distributed lock on a specified resource using gRPC communication.
+    /// </summary>
+    /// <param name="node">The target node to coordinate the unlock request.</param>
+    /// <param name="resource">The name or identifier of the resource to unlock.</param>
+    /// <param name="owner">A unique identifier representing the lock owner, typically in byte format.</param>
+    /// <param name="durability">Specifies the durability level of the lock, either ephemeral or persistent.</param>
+    /// <param name="cancellationToken">A token to observe cancellation requests for the operation.</param>
+    /// <returns>The response type indicating the result of the unlock operation.</returns>
     public async Task<LockResponseType> TryUnlock(string node, string resource, byte[] owner, LockDurability durability, CancellationToken cancellationToken)
     {
         GrpcUnlockRequest request = new()
@@ -77,11 +111,11 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcLockDurability)durability
         };
         
-        GrpcChannel channel = SharedChannels.GetChannel(node);
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
         
-        Locker.LockerClient client = new(channel);
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcUnlockResponse remoteResponse = response.Unlock!;
         
-        GrpcUnlockResponse? remoteResponse = await client.UnlockAsync(request, cancellationToken: cancellationToken);
         remoteResponse.ServedFrom = $"https://{node}";
         
         return (LockResponseType)remoteResponse.Type;
@@ -93,12 +127,12 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         {
             Resource = resource,
             Durability = (GrpcLockDurability)durability
-        };
+        };               
         
-        GrpcChannel channel = SharedChannels.GetChannel(node);
-        Locker.LockerClient client = new(channel);
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
         
-        GrpcGetLockResponse? remoteResponse = await client.GetLockAsync(request, cancellationToken: cancellationToken);
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcGetLockResponse remoteResponse = response.GetLock!;
         
         if (remoteResponse.Type != GrpcLockResponseType.LockResponseTypeGot)
             return ((LockResponseType)remoteResponse.Type, null);

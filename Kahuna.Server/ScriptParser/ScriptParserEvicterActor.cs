@@ -3,6 +3,9 @@ using Nixie;
 
 namespace Kahuna.Server.ScriptParser;
 
+/// <summary>
+/// Represents an actor responsible for evicting expired script parser entries from the script cache.
+/// </summary>
 public sealed class ScriptParserEvicterActor : IActor<ScriptParserEvicterRequest>
 {
     private readonly ILogger<IKahuna> logger;

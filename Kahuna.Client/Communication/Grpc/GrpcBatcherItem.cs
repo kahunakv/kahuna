@@ -8,6 +8,11 @@
 
 namespace Kahuna.Client.Communication;
 
+/// <summary>
+/// Represents a single batch item to be processed in a gRPC batching system.
+/// This class encapsulates metadata and request/response information
+/// for efficient batch processing of different gRPC operation types.
+/// </summary>
 internal sealed class GrpcBatcherItem
 {
     /// <summary>

@@ -3,6 +3,12 @@ using Kommander;
 
 namespace Kahuna.Server.Diagnostics;
 
+/// <summary>
+/// Monitors thread pool usage and logs thread statistics at regular intervals. This singleton class
+/// observes the thread pool's active and available threads and reports information for diagnostics and analysis.
+/// It also identifies scenarios where thread pool levels are nearing potentially problematic thresholds
+/// and tracks warnings related to underutilization or thread pool depletion.
+/// </summary>
 public sealed class ThreadStatsLogger : IDisposable
 {
     private const int DEPLETION_WARN_LEVEL = 10;
@@ -35,6 +41,16 @@ public sealed class ThreadStatsLogger : IDisposable
     
     private readonly ILogger<IRaft> _logger;
 
+    /// <summary>
+    /// Monitors thread pool usage and periodically logs thread statistics for diagnostics and analysis.
+    /// Provides detailed information about thread pool levels and tracks conditions such as underutilization
+    /// and potential thread pool depletion. This class uses a timer to sample thread pool metrics at regular intervals.
+    /// </summary>
+    /// <remarks>
+    /// The ThreadStatsLogger class gathers runtime information about the thread pool, including the
+    /// number of active, available, minimum, and maximum worker and IO threads. The data collected is
+    /// helpful for understanding application performance and identifying resource bottlenecks.
+    /// </remarks>
     public ThreadStatsLogger(ILogger<IRaft> logger)
     {
         _logger = logger;
@@ -59,6 +75,12 @@ public sealed class ThreadStatsLogger : IDisposable
             _minIoThreadLevelRecovery = _minIoThreadLevel - 1;
     }
 
+    /// <summary>
+    /// Handles the periodic timer elapsed event by capturing and logging the current status of thread pool resources.
+    /// Evaluates thread pool conditions such as active worker/IO threads, available thread levels,
+    /// and warning/threshold levels for potential depletion or recovery.
+    /// </summary>
+    /// <param name="sender">An optional parameter that represents the source of the timer event.</param>
     private void TimerElasped(object? sender)
     {
         ThreadPool.GetAvailableThreads(out int availableWorkerThreads, out int availableIoThreads);

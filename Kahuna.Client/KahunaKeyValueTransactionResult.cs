@@ -1,4 +1,11 @@
 
+/**
+ * This file is part of Kahuna
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 using Kommander.Time;
 using Kahuna.Shared.KeyValue;
 
@@ -17,6 +24,9 @@ public class KahunaKeyValueTransactionResultValue
     public HLCTimestamp LastModified { get; set; }
 }
 
+/// <summary>
+/// Represents the result of a key-value transaction operation in the Kahuna system.
+/// </summary>
 public class KahunaKeyValueTransactionResult
 {
     public string? ServedFrom { get; set; }

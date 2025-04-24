@@ -10,6 +10,15 @@ using Microsoft.IO;
 
 namespace Kahuna.Server.Persistence.Backend;
 
+/// <summary>
+/// Provides persistence backend functionality using RocksDB as the underlying database.
+/// Implements the <see cref="IPersistenceBackend"/> interface along with IDisposable.
+/// </summary>
+/// <remarks>
+/// This class allows storing and retrieving data categorized into different column families
+/// such as key-values and locks. The implementation ensures efficient read-write operations
+/// and transactional support using RocksDB capabilities.
+/// </remarks>
 public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
 {
     private const int MaxMessageSize = 1024;
@@ -29,7 +38,17 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
     private readonly string path;
     
     private readonly string dbRevision;
-    
+
+    /// <summary>
+    /// RocksDbPersistenceBackend is a persistence backend implementation based on RocksDB.
+    /// It provides methods for storing and retrieving key-value pairs and locks, categorized
+    /// into distinct column families for better organization and efficiency.
+    /// </summary>
+    /// <remarks>
+    /// The class offers support for efficient data management, including transactional
+    /// operations, prefix-based queries, and version-specific retrievals. It integrates
+    /// RocksDB's advanced features, ensuring high-performance persistent storage.
+    /// </remarks>
     public RocksDbPersistenceBackend(string path = ".", string dbRevision = "v1")
     {
         this.path = path;
@@ -54,6 +73,11 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
         columnFamilyLocks = db.GetColumnFamily("locks");
     }
 
+    /// <summary>
+    /// Stores a batch of lock-related items into the RocksDB database within the designated column family.
+    /// </summary>
+    /// <param name="items">A list of <see cref="PersistenceRequestItem"/> representing the locks and their associated metadata to be stored.</param>
+    /// <returns>Returns <c>true</c> if the operation completes successfully.</returns>
     public bool StoreLocks(List<PersistenceRequestItem> items)
     {
         using WriteBatch batch = new();
@@ -82,7 +106,15 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
 
         return true;
     }
-    
+
+    /// <summary>
+    /// Inserts lock items into the RocksDB database using the specified write batch, item data,
+    /// lock message, and column family handle.
+    /// </summary>
+    /// <param name="batch">The write batch used for batching multiple write operations.</param>
+    /// <param name="item">The lock item containing key, revision, and additional metadata.</param>
+    /// <param name="kvm">The RocksDB lock message to be serialized and persisted.</param>
+    /// <param name="columnFamily">The column family handle identifying the column family where the data is stored.</param>
     private static void PutLocksItems(WriteBatch batch, PersistenceRequestItem item, RocksDbLockMessage kvm, ColumnFamilyHandle columnFamily)
     {
         byte[] serialized = Serialize(kvm);

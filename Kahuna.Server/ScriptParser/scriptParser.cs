@@ -14,7 +14,8 @@ using Microsoft.IO;
 namespace Kahuna.Server.ScriptParser;
 
 /// <summary>
-/// Entrypoint for the Script Parser
+/// Represents the primary logic for parsing scripts, either generating a new parsed result
+/// or retrieving a previously cached result, using the provided configuration and logger.
 /// </summary>
 internal sealed partial class scriptParser
 {

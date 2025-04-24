@@ -1,4 +1,11 @@
 
+/**
+ * This file is part of Kahuna
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 using System.Net;
 using System.Text.Json;
 using Flurl.Http;
@@ -12,6 +19,15 @@ using Polly.Retry;
 
 namespace Kahuna.Client.Communication;
 
+/// <summary>
+/// Represents a communication mechanism using REST protocol for interacting
+/// with Kahuna's functionalities such as locks and key-value operations.
+/// Implements the IKahunaCommunication interface to provide methods for
+/// interacting with Kahuna's lock acquisition, extension, deletion,
+/// and key-value transactions.
+/// This class provides a set of asynchronous methods to facilitate communication
+/// with a REST-based backend for lock management and key-value store operations.
+/// </summary>
 public class RestCommunication : IKahunaCommunication
 {
     private readonly ILogger? logger;

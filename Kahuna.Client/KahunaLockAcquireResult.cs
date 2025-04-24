@@ -8,6 +8,9 @@
 
 namespace Kahuna.Client;
 
+/// <summary>
+/// Represents the result of an attempt to acquire a lock in the Kahuna system.
+/// </summary>
 public enum KahunaLockAcquireResult
 {
     Success = 0,

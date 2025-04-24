@@ -5,6 +5,12 @@ internal sealed class GrpcServerBatcherResponse
 {
     public GrpcTryLockResponse? TryLock { get; }
     
+    public GrpcUnlockResponse? Unlock { get; }
+    
+    public GrpcExtendLockResponse? ExtendLock { get; }
+    
+    public GrpcGetLockResponse? GetLock { get; }
+    
     public GrpcTrySetKeyValueResponse? TrySetKeyValue { get; }
     
     public GrpcTryGetKeyValueResponse? TryGetKeyValue { get; }
@@ -36,6 +42,21 @@ internal sealed class GrpcServerBatcherResponse
     public GrpcServerBatcherResponse(GrpcTryLockResponse tryLock)
     {
         TryLock = tryLock;
+    }
+    
+    public GrpcServerBatcherResponse(GrpcUnlockResponse unlock)
+    {
+        Unlock = unlock;
+    }
+    
+    public GrpcServerBatcherResponse(GrpcExtendLockResponse extendLock)
+    {
+        ExtendLock = extendLock;
+    }
+    
+    public GrpcServerBatcherResponse(GrpcGetLockResponse getLock)
+    {
+        GetLock = getLock;
     }
 
     public GrpcServerBatcherResponse(GrpcTrySetKeyValueResponse trySetKeyValue)

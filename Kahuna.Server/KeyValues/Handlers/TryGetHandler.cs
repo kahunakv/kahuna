@@ -9,6 +9,14 @@ using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Handlers;
 
+/// <summary>
+/// Represents a handler for attempting to retrieve key-value pairs.
+/// </summary>
+/// <remarks>
+/// This handler is used within the KeyValue system to process requests for retrieving
+/// key-value data. It operates on the basis of the provided key-value store, background
+/// writer, persistence backend, and Raft consensus system for managing distributed state.
+/// </remarks>
 internal sealed class TryGetHandler : BaseHandler
 {
     public TryGetHandler(

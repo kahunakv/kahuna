@@ -10,6 +10,9 @@ using System.Text;
 
 namespace Kahuna.Client;
 
+/// <summary>
+/// Represents a transaction script that can be executed on a KahunaClient instance.
+/// </summary>
 public class KahunaTransactionScript
 {
     private readonly KahunaClient kahunaClient;

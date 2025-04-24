@@ -13,6 +13,17 @@ using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues;
 
+/// <summary>
+/// Responsible for handling the replication of key-value operations in a distributed system.
+/// Processes replication requests received from the Raft log and commits the replication
+/// operations as appropriate.
+/// </summary>
+/// <remarks>
+/// This class plays a critical role in maintaining consistency in a distributed key-value store
+/// by executing replication messages. It interacts with the Raft consensus module to process
+/// log entries that represent key-value operations such as setting, deleting, or extending keys.
+/// The replication ensures distributed state is properly synchronized across nodes.
+/// </remarks>
 internal sealed class KeyValueReplicator
 {
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
@@ -28,6 +39,12 @@ internal sealed class KeyValueReplicator
         this.logger = logger;
     }
 
+    /// <summary>
+    /// Replicates the specified log entry for the given partition.
+    /// </summary>
+    /// <param name="partitionId">The unique identifier of the partition where the log entry should be replicated.</param>
+    /// <param name="log">The log entry containing the data to be replicated.</param>
+    /// <returns>Returns <c>true</c> if replication succeeded or the log data was empty; otherwise, <c>false</c> if an error occurred during replication.</returns>
     public bool Replicate(int partitionId, RaftLog log)
     {
         if (log.LogData is null || log.LogData.Length == 0)

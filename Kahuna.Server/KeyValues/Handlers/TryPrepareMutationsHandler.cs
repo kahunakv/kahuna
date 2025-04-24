@@ -14,6 +14,11 @@ using Kahuna.Utils;
 
 namespace Kahuna.Server.KeyValues.Handlers;
 
+/// <summary>
+/// Handles the preparation of mutations for the key-value store.
+/// Responsible for validating and preparing mutation requests before they are executed or persisted.
+/// Ensures the mutations adhere to required conditions for proper operation within the key-value system.
+/// </summary>
 internal sealed class TryPrepareMutationsHandler : BaseHandler
 {
     public TryPrepareMutationsHandler(

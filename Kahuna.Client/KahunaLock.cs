@@ -15,7 +15,8 @@ using Kahuna.Shared.Locks;
 namespace Kahuna.Client;
 
 /// <summary>
-/// Represents a lock acquired from the Kahuna service.
+/// Represents a distributed lock managed by the Kahuna client library.
+/// Provides functionality to acquire, extend, and release a lock with fencing token support.
 /// </summary>
 public sealed class KahunaLock : IAsyncDisposable
 {
@@ -37,12 +38,30 @@ public sealed class KahunaLock : IAsyncDisposable
 
     private bool disposed;
 
+    /// <summary>
+    /// Indicates whether the lock has been successfully acquired.
+    /// Returns true if the lock acquisition operation completed with a success result; otherwise, false.
+    /// </summary>
     public bool IsAcquired => result == KahunaLockAcquireResult.Success;
-    
+
+    /// <summary>
+    /// Represents the fencing token assigned to this lock.
+    /// The fencing token is a monotonically increasing number that ensures sequential consistency
+    /// in distributed systems by preventing stale writes or operations from older lock holders.
+    /// </summary>
     public long FencingToken => fencingToken;
-    
+
+    /// <summary>
+    /// Gets the owner identifier of the lock.
+    /// The owner is represented as a byte array and uniquely identifies the entity
+    /// that currently holds the lock. Throws a KahunaException if the lock has not been acquired.
+    /// </summary>
     public byte[] Owner => owner ?? throw new KahunaException("Lock was not acquired", LockResponseType.Errored);
 
+    /// <summary>
+    /// Gets the owner of the lock as a string representation.
+    /// If the lock owner information is available, it returns the owner's string value; otherwise, an empty string.
+    /// </summary>
     public string? OwnerAsString => owner is not null ? Encoding.UTF8.GetString(owner) : "";
 
     /// <summary>
@@ -145,7 +164,14 @@ public sealed class KahunaLock : IAsyncDisposable
             await client.Communication.TryUnlock(servedFrom, resource, owner, durability, CancellationToken.None);
         }
     }
-    
+
+    /// <summary>
+    /// Serializes the lock's state, including the resource name, acquisition status, fencing token,
+    /// and owner, into a JSON string format.
+    /// </summary>
+    /// <returns>
+    /// A JSON string representation of the lock's state.
+    /// </returns>
     public string? ToJson()
     {
         return JsonSerializer.Serialize(new
