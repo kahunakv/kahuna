@@ -38,11 +38,11 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcLockDurability)durability
         };
         
-        GrpcChannel channel = SharedChannels.GetChannel(node);
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
         
-        Locker.LockerClient client = new(channel);
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcTryLockResponse remoteResponse = response.TryLock!;
         
-        GrpcTryLockResponse? remoteResponse = await client.TryLockAsync(request, cancellationToken: cancellationToken);
         remoteResponse.ServedFrom = $"https://{node}";
         
         return ((LockResponseType)remoteResponse.Type, remoteResponse.FencingToken);
@@ -96,7 +96,6 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         };
         
         GrpcChannel channel = SharedChannels.GetChannel(node);
-        
         Locker.LockerClient client = new(channel);
         
         GrpcGetLockResponse? remoteResponse = await client.GetLockAsync(request, cancellationToken: cancellationToken);

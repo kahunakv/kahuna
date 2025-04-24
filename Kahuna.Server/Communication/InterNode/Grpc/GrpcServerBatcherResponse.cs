@@ -3,6 +3,8 @@ namespace Kahuna.Server.Communication.Internode.Grpc;
 
 internal sealed class GrpcServerBatcherResponse
 {
+    public GrpcTryLockResponse? TryLock { get; }
+    
     public GrpcTrySetKeyValueResponse? TrySetKeyValue { get; }
     
     public GrpcTryGetKeyValueResponse? TryGetKeyValue { get; }
@@ -30,6 +32,11 @@ internal sealed class GrpcServerBatcherResponse
     public GrpcTryCommitMutationsResponse? TryCommitMutations { get; }
     
     public GrpcTryCommitManyMutationsResponse? TryCommitManyMutations { get; }
+    
+    public GrpcServerBatcherResponse(GrpcTryLockResponse tryLock)
+    {
+        TryLock = tryLock;
+    }
 
     public GrpcServerBatcherResponse(GrpcTrySetKeyValueResponse trySetKeyValue)
     {

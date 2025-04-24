@@ -7,10 +7,15 @@ internal sealed class GrpcServerSharedStreaming
 {
     public SemaphoreSlim Semaphore { get; } = new(1, 1);
     
-    public AsyncDuplexStreamingCall<GrpcBatchServerKeyValueRequest, GrpcBatchServerKeyValueResponse> Streaming { get; }
+    public AsyncDuplexStreamingCall<GrpcBatchServerLockRequest, GrpcBatchServerLockResponse> LockStreaming { get; }
     
-    public GrpcServerSharedStreaming(AsyncDuplexStreamingCall<GrpcBatchServerKeyValueRequest, GrpcBatchServerKeyValueResponse> streaming)
+    public AsyncDuplexStreamingCall<GrpcBatchServerKeyValueRequest, GrpcBatchServerKeyValueResponse> KeyValueStreaming { get; }
+    
+    public GrpcServerSharedStreaming(
+        AsyncDuplexStreamingCall<GrpcBatchServerLockRequest, GrpcBatchServerLockResponse> lockStreaming,
+        AsyncDuplexStreamingCall<GrpcBatchServerKeyValueRequest, GrpcBatchServerKeyValueResponse> keyValueStreaming)
     {
-        Streaming = streaming;
+        LockStreaming = lockStreaming;
+        KeyValueStreaming = keyValueStreaming;
     }
 }

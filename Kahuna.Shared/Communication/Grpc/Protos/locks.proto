@@ -6,6 +6,7 @@ service Locker {
   rpc Unlock (GrpcUnlockRequest) returns (GrpcUnlockResponse);
   rpc GetLock (GrpcGetLockRequest) returns (GrpcGetLockResponse);
   rpc BatchClientLockRequests (stream GrpcBatchClientLockRequest) returns (stream GrpcBatchClientLockResponse);
+  rpc BatchServerLockRequests (stream GrpcBatchServerLockRequest) returns (stream GrpcBatchServerLockResponse);
 }
 
 message GrpcTryLockRequest {
@@ -82,12 +83,43 @@ message GrpcBatchClientLockResponse
   }
 }
 
+message GrpcBatchServerLockRequest {
+  GrpcLockServerBatchType Type = 1;
+  int32 RequestId = 2;
+  oneof payload {
+    GrpcTryLockRequest TryLock = 3;
+    GrpcUnlockRequest Unlock = 4;
+    GrpcExtendLockRequest ExtendLock = 5;
+    GrpcGetLockRequest GetLock = 6;
+  }
+}
+
+message GrpcBatchServerLockResponse
+{
+  GrpcLockServerBatchType Type = 1;
+  int32 RequestId = 2;
+  oneof payload {
+    GrpcTryLockResponse TryLock = 3;
+    GrpcUnlockResponse Unlock = 4;
+    GrpcExtendLockResponse ExtendLock = 5;
+    GrpcGetLockResponse GetLock = 6;
+  }
+}
+
 enum GrpcLockClientBatchType {
   TYPE_NONE = 0;
   TYPE_TRY_LOCK = 1;
   TYPE_EXTEND_LOCK = 2;
   TYPE_UNLOCK = 3;
   TYPE_GET_LOCK = 4;
+}
+
+enum GrpcLockServerBatchType {
+  SERVER_TYPE_NONE = 0;
+  SERVER_TYPE_TRY_LOCK = 1;
+  SERVER_TYPE_EXTEND_LOCK = 2;
+  SERVER_TYPE_UNLOCK = 3;
+  SERVER_TYPE_GET_LOCK = 4;
 }
 
 enum GrpcLockResponseType {

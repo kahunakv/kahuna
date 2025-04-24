@@ -46,13 +46,7 @@ internal sealed class LockLocator
     /// <returns></returns>
     public async Task<(LockResponseType, long)> LocateAndTryLock(string resource, byte[] owner, int expiresMs, LockDurability durability, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrEmpty(resource))
-            return (LockResponseType.InvalidInput, 0);
-
-        if (owner.Length == 0)
-            return (LockResponseType.InvalidInput, 0);
-
-        if (expiresMs <= 0)
+        if (string.IsNullOrEmpty(resource) || owner.Length == 0 || expiresMs <= 0)
             return (LockResponseType.InvalidInput, 0);
 
         int partitionId = raft.GetPartitionKey(resource);
@@ -80,13 +74,7 @@ internal sealed class LockLocator
     /// <returns></returns>
     public async Task<(LockResponseType, long)> LocateAndTryExtendLock(string resource, byte[] owner, int expiresMs, LockDurability durability, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrEmpty(resource))
-            return (LockResponseType.InvalidInput, 0);
-
-        if (owner.Length == 0)
-            return (LockResponseType.InvalidInput, 0);
-
-        if (expiresMs <= 0)
+        if (string.IsNullOrEmpty(resource) || owner.Length == 0 || expiresMs <= 0)
             return (LockResponseType.InvalidInput, 0);
 
         int partitionId = raft.GetPartitionKey(resource);
@@ -114,10 +102,7 @@ internal sealed class LockLocator
     /// <returns></returns>
     public async Task<LockResponseType> LocateAndTryUnlock(string resource, byte[] owner, LockDurability durability, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrEmpty(resource))
-            return LockResponseType.InvalidInput;
-
-        if (owner.Length == 0)
+        if (string.IsNullOrEmpty(resource) || owner.Length == 0)
             return LockResponseType.InvalidInput;
 
         int partitionId = raft.GetPartitionKey(resource);

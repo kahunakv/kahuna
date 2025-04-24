@@ -26,11 +26,20 @@ internal sealed class GrpcServerBatcher
         this.url = url;
     }
     
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryLockRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.Locks, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
     public Task<GrpcServerBatcherResponse> Enqueue(GrpcTrySetKeyValueRequest message)
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcServerBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
@@ -39,7 +48,7 @@ internal sealed class GrpcServerBatcher
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcServerBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
@@ -48,7 +57,7 @@ internal sealed class GrpcServerBatcher
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcServerBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
@@ -57,7 +66,7 @@ internal sealed class GrpcServerBatcher
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcServerBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
@@ -66,7 +75,7 @@ internal sealed class GrpcServerBatcher
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcServerBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
@@ -75,7 +84,7 @@ internal sealed class GrpcServerBatcher
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcServerBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
@@ -84,7 +93,7 @@ internal sealed class GrpcServerBatcher
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcServerBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
@@ -93,7 +102,7 @@ internal sealed class GrpcServerBatcher
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcServerBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
@@ -102,7 +111,7 @@ internal sealed class GrpcServerBatcher
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcServerBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
@@ -111,7 +120,7 @@ internal sealed class GrpcServerBatcher
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcServerBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
@@ -120,7 +129,7 @@ internal sealed class GrpcServerBatcher
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcServerBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
@@ -129,7 +138,7 @@ internal sealed class GrpcServerBatcher
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcServerBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
@@ -138,7 +147,7 @@ internal sealed class GrpcServerBatcher
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcServerBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
@@ -147,7 +156,7 @@ internal sealed class GrpcServerBatcher
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcServerBatcherItem grpcBatcherItem = new(Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
@@ -214,97 +223,18 @@ internal sealed class GrpcServerBatcher
             {
                 requestRefs.TryAdd(request.RequestId, request);
 
-                GrpcBatchServerKeyValueRequest batchRequest = new()
+                switch (request.Type)
                 {
-                    RequestId = request.RequestId
-                };
-
-                GrpcServerBatcherRequest itemRequest = request.Request;
-
-                if (itemRequest.TrySetKeyValue is not null)
-                {
-                    batchRequest.Type = GrpcServerBatchType.ServerTrySetKeyValue;
-                    batchRequest.TrySetKeyValue = itemRequest.TrySetKeyValue;
-                }
-                else if (itemRequest.TryGetKeyValue is not null)
-                {
-                    batchRequest.Type = GrpcServerBatchType.ServerTryGetKeyValue;
-                    batchRequest.TryGetKeyValue = itemRequest.TryGetKeyValue;
-                }
-                else if (itemRequest.TryDeleteKeyValue is not null)
-                {
-                    batchRequest.Type = GrpcServerBatchType.ServerTryDeleteKeyValue;
-                    batchRequest.TryDeleteKeyValue = itemRequest.TryDeleteKeyValue;
-                } 
-                else if (itemRequest.TryExtendKeyValue is not null)
-                {
-                    batchRequest.Type = GrpcServerBatchType.ServerTryExtendKeyValue;
-                    batchRequest.TryExtendKeyValue = itemRequest.TryExtendKeyValue;
-                } 
-                else if (itemRequest.TryExistsKeyValue is not null)
-                {
-                    batchRequest.Type = GrpcServerBatchType.ServerTryExistsKeyValue;
-                    batchRequest.TryExistsKeyValue = itemRequest.TryExistsKeyValue;
-                }
-                else if (itemRequest.TryExecuteTransactionScript is not null)
-                {
-                    batchRequest.Type = GrpcServerBatchType.ServerTryExecuteTransactionScript;
-                    batchRequest.TryExecuteTransactionScript = itemRequest.TryExecuteTransactionScript;
-                } 
-                else if (itemRequest.TryAcquireExclusiveLock is not null)
-                {
-                    batchRequest.Type = GrpcServerBatchType.ServerTryAcquireExclusiveLock;
-                    batchRequest.TryAcquireExclusiveLock = itemRequest.TryAcquireExclusiveLock;
-                }
-                else if (itemRequest.TryAcquireManyExclusiveLocks is not null)
-                {
-                    batchRequest.Type = GrpcServerBatchType.ServerTryAcquireManyExclusiveLocks;
-                    batchRequest.TryAcquireManyExclusiveLocks = itemRequest.TryAcquireManyExclusiveLocks;
-                }
-                else if (itemRequest.TryReleaseExclusiveLock is not null)
-                {
-                    batchRequest.Type = GrpcServerBatchType.ServerTryReleaseExclusiveLock;
-                    batchRequest.TryReleaseExclusiveLock = itemRequest.TryReleaseExclusiveLock;
-                }
-                else if (itemRequest.TryReleaseManyExclusiveLocks is not null)
-                {
-                    batchRequest.Type = GrpcServerBatchType.ServerTryReleaseManyExclusiveLocks;
-                    batchRequest.TryReleaseManyExclusiveLocks = itemRequest.TryReleaseManyExclusiveLocks;
-                }
-                else if (itemRequest.TryPrepareMutations is not null)
-                {
-                    batchRequest.Type = GrpcServerBatchType.ServerTryPrepareMutations;
-                    batchRequest.TryPrepareMutations = itemRequest.TryPrepareMutations;
-                }
-                else if (itemRequest.TryPrepareManyMutations is not null)
-                {
-                    batchRequest.Type = GrpcServerBatchType.ServerTryPrepareManyMutations;
-                    batchRequest.TryPrepareManyMutations = itemRequest.TryPrepareManyMutations;
-                }
-                else if (itemRequest.TryCommitMutations is not null)
-                {
-                    batchRequest.Type = GrpcServerBatchType.ServerTryCommitMutations;
-                    batchRequest.TryCommitMutations = itemRequest.TryCommitMutations;
-                }
-                else if (itemRequest.TryCommitManyMutations is not null)
-                {
-                    batchRequest.Type = GrpcServerBatchType.ServerTryCommitManyMutations;
-                    batchRequest.TryCommitManyMutations = itemRequest.TryCommitManyMutations;
-                }
-                else
-                {
-                    throw new KahunaServerException("Unknown request type");
-                }
-
-                try
-                {
-                    await sharedStreaming.Semaphore.WaitAsync();
-
-                    await sharedStreaming.Streaming.RequestStream.WriteAsync(batchRequest);
-                }
-                finally
-                {
-                    sharedStreaming.Semaphore.Release();
+                    case GrpcServerBatcherItemType.Locks:
+                        await RunLockBatch(sharedStreaming, request);
+                        break;
+                    
+                    case GrpcServerBatcherItemType.KeyValues:
+                        await RunKeyValueBatch(sharedStreaming, request);
+                        break;
+                    
+                    default:
+                        throw new KahunaServerException("Unknown request type: " + request.Type);
                 }
             }
         }
@@ -317,7 +247,163 @@ internal sealed class GrpcServerBatcher
         }
     }
 
-    private static async Task ReadMessages(AsyncDuplexStreamingCall<GrpcBatchServerKeyValueRequest, GrpcBatchServerKeyValueResponse> streaming)
+    private static async Task RunLockBatch(GrpcServerSharedStreaming sharedStreaming, GrpcServerBatcherItem request)
+    {
+        GrpcBatchServerLockRequest batchRequest = new()
+        {
+            RequestId = request.RequestId
+        };
+
+        GrpcServerBatcherRequest itemRequest = request.Request;
+
+        if (itemRequest.TryLock is not null)
+        {
+            batchRequest.Type = GrpcLockServerBatchType.ServerTypeTryLock;
+            batchRequest.TryLock = itemRequest.TryLock;
+        } 
+        else
+            throw new KahunaServerException("Unknown request type");
+
+        try
+        {
+            await sharedStreaming.Semaphore.WaitAsync();
+
+            await sharedStreaming.LockStreaming.RequestStream.WriteAsync(batchRequest);
+        }
+        finally
+        {
+            sharedStreaming.Semaphore.Release();
+        }
+    }
+
+    private static async Task RunKeyValueBatch(GrpcServerSharedStreaming sharedStreaming, GrpcServerBatcherItem request)
+    {
+        GrpcBatchServerKeyValueRequest batchRequest = new()
+        {
+            RequestId = request.RequestId
+        };
+
+        GrpcServerBatcherRequest itemRequest = request.Request;
+
+        if (itemRequest.TrySetKeyValue is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTrySetKeyValue;
+            batchRequest.TrySetKeyValue = itemRequest.TrySetKeyValue;
+        }
+        else if (itemRequest.TryGetKeyValue is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryGetKeyValue;
+            batchRequest.TryGetKeyValue = itemRequest.TryGetKeyValue;
+        }
+        else if (itemRequest.TryDeleteKeyValue is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryDeleteKeyValue;
+            batchRequest.TryDeleteKeyValue = itemRequest.TryDeleteKeyValue;
+        } 
+        else if (itemRequest.TryExtendKeyValue is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryExtendKeyValue;
+            batchRequest.TryExtendKeyValue = itemRequest.TryExtendKeyValue;
+        } 
+        else if (itemRequest.TryExistsKeyValue is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryExistsKeyValue;
+            batchRequest.TryExistsKeyValue = itemRequest.TryExistsKeyValue;
+        }
+        else if (itemRequest.TryExecuteTransactionScript is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryExecuteTransactionScript;
+            batchRequest.TryExecuteTransactionScript = itemRequest.TryExecuteTransactionScript;
+        } 
+        else if (itemRequest.TryAcquireExclusiveLock is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryAcquireExclusiveLock;
+            batchRequest.TryAcquireExclusiveLock = itemRequest.TryAcquireExclusiveLock;
+        }
+        else if (itemRequest.TryAcquireManyExclusiveLocks is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryAcquireManyExclusiveLocks;
+            batchRequest.TryAcquireManyExclusiveLocks = itemRequest.TryAcquireManyExclusiveLocks;
+        }
+        else if (itemRequest.TryReleaseExclusiveLock is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryReleaseExclusiveLock;
+            batchRequest.TryReleaseExclusiveLock = itemRequest.TryReleaseExclusiveLock;
+        }
+        else if (itemRequest.TryReleaseManyExclusiveLocks is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryReleaseManyExclusiveLocks;
+            batchRequest.TryReleaseManyExclusiveLocks = itemRequest.TryReleaseManyExclusiveLocks;
+        }
+        else if (itemRequest.TryPrepareMutations is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryPrepareMutations;
+            batchRequest.TryPrepareMutations = itemRequest.TryPrepareMutations;
+        }
+        else if (itemRequest.TryPrepareManyMutations is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryPrepareManyMutations;
+            batchRequest.TryPrepareManyMutations = itemRequest.TryPrepareManyMutations;
+        }
+        else if (itemRequest.TryCommitMutations is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryCommitMutations;
+            batchRequest.TryCommitMutations = itemRequest.TryCommitMutations;
+        }
+        else if (itemRequest.TryCommitManyMutations is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryCommitManyMutations;
+            batchRequest.TryCommitManyMutations = itemRequest.TryCommitManyMutations;
+        }
+        else
+            throw new KahunaServerException("Unknown request type");
+
+        try
+        {
+            await sharedStreaming.Semaphore.WaitAsync();
+
+            await sharedStreaming.KeyValueStreaming.RequestStream.WriteAsync(batchRequest);
+        }
+        finally
+        {
+            sharedStreaming.Semaphore.Release();
+        }
+    }
+    
+    private static async Task ReadLockMessages(AsyncDuplexStreamingCall<GrpcBatchServerLockRequest, GrpcBatchServerLockResponse> streaming)
+    {
+        try
+        {
+            await foreach (GrpcBatchServerLockResponse response in streaming.ResponseStream.ReadAllAsync())
+            {
+                if (!requestRefs.TryGetValue(response.RequestId, out GrpcServerBatcherItem? item))
+                {
+                    Console.WriteLine("Request not found " + response.RequestId);
+                    continue;
+                }
+
+                switch (response.Type)
+                {
+                    case GrpcLockServerBatchType.ServerTypeTryLock:
+                        item.Promise.SetResult(new(response.TryLock));
+                        break;
+
+                    case GrpcLockServerBatchType.ServerTypeNone:
+                    default:
+                        item.Promise.SetException(new KahunaServerException("Unknown response type: " + response.Type));
+                        break;
+                }
+
+                requestRefs.TryRemove(response.RequestId, out _);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("Exception: " + ex.Message);
+        }
+    }
+
+    private static async Task ReadKeyValueMessages(AsyncDuplexStreamingCall<GrpcBatchServerKeyValueRequest, GrpcBatchServerKeyValueResponse> streaming)
     {
         try
         {
@@ -424,13 +510,16 @@ internal sealed class GrpcServerBatcher
 
         foreach (GrpcChannel channel in nodeChannels)
         {
-            KeyValuer.KeyValuerClient client = new(channel);
+            Locker.LockerClient lockClient = new(channel);
+            KeyValuer.KeyValuerClient keyValueClient = new(channel);
 
-            AsyncDuplexStreamingCall<GrpcBatchServerKeyValueRequest, GrpcBatchServerKeyValueResponse>? streaming = client.BatchServerKeyValueRequests();
+            AsyncDuplexStreamingCall<GrpcBatchServerLockRequest, GrpcBatchServerLockResponse>? locksStreaming = lockClient.BatchServerLockRequests();
+            AsyncDuplexStreamingCall<GrpcBatchServerKeyValueRequest, GrpcBatchServerKeyValueResponse>? keyValueStreaming = keyValueClient.BatchServerKeyValueRequests();
             
-            _ = ReadMessages(streaming);
+            _ = ReadLockMessages(locksStreaming);
+            _ = ReadKeyValueMessages(keyValueStreaming);
             
-            nodeStreamings.Add(new(streaming));
+            nodeStreamings.Add(new(locksStreaming, keyValueStreaming));
         }
 
         return nodeStreamings;
