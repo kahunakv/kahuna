@@ -9,7 +9,9 @@
 namespace Kahuna.Client.Communication;
 
 internal sealed class GrpcBatcherRequest
-{        
+{
+    public GrpcTryLockRequest? TryLock { get; }
+    
     public GrpcTrySetKeyValueRequest? TrySetKeyValue { get; }
     
     public GrpcTryGetKeyValueRequest? TryGetKeyValue { get; }
@@ -21,6 +23,11 @@ internal sealed class GrpcBatcherRequest
     public GrpcTryExistsKeyValueRequest? TryExistsKeyValue { get; }
     
     public GrpcTryExecuteTransactionRequest? TryExecuteTransaction { get; }
+    
+    public GrpcBatcherRequest(GrpcTryLockRequest tryLock)
+    {
+        TryLock = tryLock;
+    }
 
     public GrpcBatcherRequest(GrpcTrySetKeyValueRequest trySetKeyValue)
     {

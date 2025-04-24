@@ -1081,8 +1081,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         finally
         {
             semaphore.Release();
-        }
-               
+        }               
     }
     
     public override async Task BatchServerKeyValueRequests(

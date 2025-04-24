@@ -85,7 +85,7 @@ for (int j = 0; j < 10; j++)
 
 return;
 
-async Task AdquireLockConcurrently(KahunaClient locksx)
+async Task AcquireLockConcurrently(KahunaClient locksx)
 {
     try
     {

@@ -7,6 +7,7 @@
  */
 
 using Kahuna.Client;
+using Kahuna.Shared.Locks;
 
 namespace Kahuna.Control.Commands;
 
@@ -14,7 +15,7 @@ public static class LockCommand
 {    
     public static async Task Execute(KahunaClient connection, string optsLock, int optsExpires, string? format)
     {
-        KahunaLock result = await connection.GetOrCreateLock(optsLock, optsExpires);
+        KahunaLock result = await connection.GetOrCreateLock(optsLock, optsExpires, LockDurability.Persistent);
 
         if (format == "json")
             Console.WriteLine("{0}", result.ToJson());

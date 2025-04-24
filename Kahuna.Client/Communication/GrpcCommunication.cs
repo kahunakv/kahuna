@@ -44,12 +44,17 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcTryLockResponse? response;
         
+        GrpcBatcher batcher = GetSharedBatcher(url);
+        
         do
         {
-            GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
-            Locker.LockerClient client = new(channel);
+            //GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
+            //Locker.LockerClient client = new(channel);
         
-            response = await client.TryLockAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+            //response = await client.TryLockAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+            
+            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            response = batchResponse.TryLock;
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -181,9 +186,7 @@ public class GrpcCommunication : IKahunaCommunication
     }
     
     public async Task<(bool, long, int)> TrySetKeyValue(string url, string key, byte[]? value, int expiryTime, KeyValueFlags flags, KeyValueDurability durability, CancellationToken cancellationToken)
-    {
-        GrpcBatcher batcher = GetSharedBatcher(url);
-        
+    {                
         GrpcTrySetKeyValueRequest request = new()
         {
             Key = key, 
@@ -195,6 +198,8 @@ public class GrpcCommunication : IKahunaCommunication
         
         int retries = 0;
         GrpcTrySetKeyValueResponse? response;
+        
+        GrpcBatcher batcher = GetSharedBatcher(url);
 
         do
         {

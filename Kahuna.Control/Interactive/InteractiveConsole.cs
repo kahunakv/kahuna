@@ -3,9 +3,11 @@ using System.Diagnostics;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using DotNext.Threading;
 using DotNext.Threading.Tasks;
 using Kahuna.Client;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Shared.Locks;
 using RadLine;
 using Spectre.Console;
 
@@ -25,6 +27,7 @@ public static class InteractiveConsole
 
         LineEditor? editor = null;
         Dictionary<string, KahunaLock> locks = new();
+        Dictionary<string, KahunaLock> elocks = new();
         Dictionary<string, KahunaScript> scripts = new();
 
         if (LineEditor.IsSupported(AnsiConsole.Console))
@@ -75,6 +78,10 @@ public static class InteractiveConsole
                 "extend-lock",
                 "unlock",
                 "get-lock",
+                "elock",
+                "eextend-lock",
+                "eunlock",
+                "eget-lock",
             ];
 
             string[] functions = [
@@ -208,21 +215,7 @@ public static class InteractiveConsole
                 
                 if (string.Equals(commandTrim, "exit", StringComparison.InvariantCultureIgnoreCase) || string.Equals(commandTrim, "quit", StringComparison.InvariantCultureIgnoreCase))
                 {
-                    foreach (KeyValuePair<string, KahunaLock> kvp in locks)
-                    {
-                        try
-                        {
-                            AnsiConsole.MarkupLine("[yellow]Disposing lock {0}...[/]", Markup.Escape(Encoding.UTF8.GetString(kvp.Value.Owner)));
-
-                            await kvp.Value.DisposeAsync();
-                        }
-                        catch (Exception ex)
-                        {
-                            AnsiConsole.MarkupLine("[red]{0}[/]: {1}\n", Markup.Escape(ex.GetType().Name), Markup.Escape(ex.Message));
-                        }
-                    }
-
-                    await SaveHistory(historyPath, history);
+                    await Exit(historyPath, history, locks, elocks);
                     break;
                 }
                 
@@ -240,49 +233,28 @@ public static class InteractiveConsole
                 
                 if (commandTrim.StartsWith("lock ", StringComparison.InvariantCultureIgnoreCase))
                 {
-                    history.Add(commandTrim);
-                    
-                    string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
-
-                    KahunaLock kahunaLock = await connection.GetOrCreateLock(parts[1], int.Parse(parts[2]));
-
-                    if (kahunaLock.IsAcquired)
-                    {
-                        AnsiConsole.MarkupLine("[cyan]f{0} acquired {1}[/]\n", Markup.Escape(kahunaLock.FencingToken.ToString()), Markup.Escape(Encoding.UTF8.GetString(kahunaLock.Owner)));
-                        
-                        locks.TryAdd(parts[1], kahunaLock);
-                    }
-                    else
-                        AnsiConsole.MarkupLine("[yellow]not acquired[/]\n");
-
+                    await TryLock(connection, history, commandTrim, locks, LockDurability.Persistent);
+                    continue;
+                }
+                
+                if (commandTrim.StartsWith("elock ", StringComparison.InvariantCultureIgnoreCase))
+                {
+                    await TryLock(connection, history, commandTrim, elocks, LockDurability.Ephemeral);
                     continue;
                 }
                 
                 if (commandTrim.StartsWith("unlock ", StringComparison.InvariantCultureIgnoreCase))
                 {
-                    history.Add(commandTrim);
-                    
-                    string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
-
-                    if (locks.TryGetValue(parts[1], out KahunaLock? kahunaLock))
-                    {
-                        await kahunaLock.DisposeAsync();
-
-                        //if (success)
-                            AnsiConsole.MarkupLine("[cyan]unlocked[/]\n");
-                        //else
-                        //    AnsiConsole.MarkupLine("[yellow]not unlocked[/]");
-                        
-                        locks.Remove(parts[1]);
-                    } 
-                    else
-                    {
-                        AnsiConsole.MarkupLine("[yellow]not acquired[/]\n");
-                    }
-                    
+                    await TryUnlock(history, commandTrim, locks);
                     continue;
                 }
-                
+
+                if (commandTrim.StartsWith("eunlock ", StringComparison.InvariantCultureIgnoreCase))
+                {
+                    await TryUnlock(history, commandTrim, elocks);
+                    continue;
+                }
+
                 if (commandTrim.StartsWith("get-lock ", StringComparison.InvariantCultureIgnoreCase))
                 {
                     history.Add(commandTrim);
@@ -305,8 +277,31 @@ public static class InteractiveConsole
                     
                     continue;
                 }
+
+                if (commandTrim.StartsWith("eget-lock ", StringComparison.InvariantCultureIgnoreCase))
+                {
+                    history.Add(commandTrim);
+                    
+                    string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
+
+                    if (elocks.TryGetValue(parts[1], out KahunaLock? kahunaLock))
+                    {
+                        KahunaLockInfo? info = await kahunaLock.GetInfo();
+
+                        if (info is not null)
+                            AnsiConsole.MarkupLine("[cyan]f{0} {1}[/]\n", info.FencingToken, Markup.Escape(Encoding.UTF8.GetString(info.Owner ?? [])));
+                        else
+                            AnsiConsole.MarkupLine("[yellow]not found[/]\n");
+                    }
+                    else
+                    {
+                        AnsiConsole.MarkupLine("[yellow]not found[/]\n");
+                    }
+                    
+                    continue;
+                }
                 
-                if (commandTrim.StartsWith("extend-lock ", StringComparison.InvariantCultureIgnoreCase))
+                if (commandTrim.StartsWith("extend-lock ", StringComparison.InvariantCultureIgnoreCase) || commandTrim.StartsWith("eextend-lock ", StringComparison.InvariantCultureIgnoreCase))
                 {
                     history.Add(commandTrim);
                     
@@ -336,6 +331,40 @@ public static class InteractiveConsole
                 AnsiConsole.MarkupLine("[red]{0}[/]: {1}\n", Markup.Escape(ex.GetType().Name), Markup.Escape(ex.Message));
             }
         }
+    }    
+
+    private static async Task Exit(string historyPath, List<string> history, Dictionary<string, KahunaLock> locks, Dictionary<string, KahunaLock> elocks)
+    {
+        foreach (KeyValuePair<string, KahunaLock> kvp in locks)
+        {
+            try
+            {
+                AnsiConsole.MarkupLine("[yellow]Disposing persistent lock {0}...[/]", Markup.Escape(Encoding.UTF8.GetString(kvp.Value.Owner)));
+
+                await kvp.Value.DisposeAsync();
+            }
+            catch (Exception ex)
+            {
+                AnsiConsole.MarkupLine("[red]{0}[/]: {1}\n", Markup.Escape(ex.GetType().Name), Markup.Escape(ex.Message));
+            }
+        }
+        
+        foreach (KeyValuePair<string, KahunaLock> kvp in elocks)
+        {
+            try
+            {
+                AnsiConsole.MarkupLine("[yellow]Disposing ephemeral lock {0}...[/]", Markup.Escape(Encoding.UTF8.GetString(kvp.Value.Owner)));
+
+                await kvp.Value.DisposeAsync();
+            }
+            catch (Exception ex)
+            {
+                AnsiConsole.MarkupLine("[red]{0}[/]: {1}\n", Markup.Escape(ex.GetType().Name), Markup.Escape(ex.Message));
+            }
+        }
+
+        await SaveHistory(historyPath, history);
+        return;
     }
     
     private static async Task<List<string>> GetHistory(string historyPath)
@@ -366,6 +395,47 @@ public static class InteractiveConsole
             await File.WriteAllTextAsync(historyPath, JsonSerializer.Serialize(history));
         
         //AnsiConsole.MarkupLine("[cyan]Saving history to {0}...[/]", Markup.Escape(historyPath));
+    }
+    
+    private static async Task TryLock(KahunaClient connection, List<string> history, string commandTrim, Dictionary<string, KahunaLock> locks, LockDurability durability)
+    {
+        history.Add(commandTrim);
+                    
+        string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
+
+        KahunaLock kahunaLock = await connection.GetOrCreateLock(parts[1], int.Parse(parts[2]), durability);
+
+        if (kahunaLock.IsAcquired)
+        {
+            AnsiConsole.MarkupLine("[cyan]f{0} acquired {1}[/]\n", Markup.Escape(kahunaLock.FencingToken.ToString()), Markup.Escape(Encoding.UTF8.GetString(kahunaLock.Owner)));
+            
+            locks.TryAdd(parts[1], kahunaLock);
+        }
+        else
+            AnsiConsole.MarkupLine("[yellow]not acquired[/]\n");
+    }
+
+    private static async Task TryUnlock(List<string> history, string commandTrim, Dictionary<string, KahunaLock> locks)
+    {
+        history.Add(commandTrim);
+                    
+        string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
+
+        if (locks.TryGetValue(parts[1], out KahunaLock? kahunaLock))
+        {
+            await kahunaLock.DisposeAsync();
+
+            //if (success)
+                AnsiConsole.MarkupLine("[cyan]unlocked[/]\n");
+            //else
+            //    AnsiConsole.MarkupLine("[yellow]not unlocked[/]");
+            
+            locks.Remove(parts[1]);
+        } 
+        else
+        {
+            AnsiConsole.MarkupLine("[yellow]not acquired[/]\n");
+        }
     }
 
     private static async Task RunCommand(KahunaClient connection, Dictionary<string, KahunaScript> scripts, List<string> history, string commandTrim)

@@ -5,6 +5,7 @@ service Locker {
   rpc TryExtendLock (GrpcExtendLockRequest) returns (GrpcExtendLockResponse);
   rpc Unlock (GrpcUnlockRequest) returns (GrpcUnlockResponse);
   rpc GetLock (GrpcGetLockRequest) returns (GrpcGetLockResponse);
+  rpc BatchClientLockRequests (stream GrpcBatchClientLockRequest) returns (stream GrpcBatchClientLockResponse);
 }
 
 message GrpcTryLockRequest {
@@ -58,6 +59,31 @@ message GrpcGetLockResponse {
   int64 FencingToken = 6;
 }
 
+message GrpcBatchClientLockRequest {
+  GrpcLockClientBatchType Type = 1;
+  int32 RequestId = 2;
+  oneof payload {
+    GrpcTryLockRequest TryLock = 3;    
+  }
+}
+
+message GrpcBatchClientLockResponse
+{
+  GrpcLockClientBatchType Type = 1;
+  int32 RequestId = 2;
+  oneof payload {
+    GrpcTryLockResponse TryLock = 3;        
+  }
+}
+
+enum GrpcLockClientBatchType {
+  TYPE_NONE = 0;
+  TYPE_TRY_LOCK = 1;
+  TYPE_EXTEND_LOCK = 2;
+  TYPE_UNLOCK = 3;
+  TYPE_GET_LOCK = 4;
+}
+
 enum GrpcLockResponseType {
   LOCK_RESPONSE_TYPE_LOCKED = 0;
   LOCK_RESPONSE_TYPE_BUSY = 1;
@@ -69,10 +95,10 @@ enum GrpcLockResponseType {
   LOCK_RESPONSE_TYPE_MUST_RETRY = 101;
   LOCK_RESPONSE_TYPE_LOCK_DOES_NOT_EXIST = 102;
   LOCK_RESPONSE_TYPE_INVALID_OWNER = 103;
+  LOCK_RESPONSE_TYPE_ABORTED = 104;
 }
 
 enum GrpcLockDurability {
   LOCK_DURABILITY_EPHEMERAL = 0;
-  LOCK_DURABILITY_PERSISTENT = 1;
-  LOCK_DURABILITY_REPLICATION_CONSISTENT = 2;
+  LOCK_DURABILITY_PERSISTENT = 1;  
 }

@@ -62,7 +62,7 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
             return KeyValueStaticResponses.ErroredResponse;
         }
 
-        if (!context.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? entry))
+        if (!context.MvccEntries.ContainsKey(message.TransactionId))
         {
             logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [2]", message.TransactionId);
             

@@ -42,7 +42,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     
     private readonly TryExistsHandler tryExistsHandler;
 
-    private readonly TryAdquireExclusiveLockHandler tryAdquireExclusiveLockHandler;
+    private readonly TryAcquireExclusiveLockHandler tryAcquireExclusiveLockHandler;
     
     private readonly TryReleaseExclusiveLockHandler tryReleaseExclusiveLockHandler;
 
@@ -80,7 +80,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         tryScanByPrefixHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
         tryGetByPrefixHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
         tryExistsHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
-        tryAdquireExclusiveLockHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
+        tryAcquireExclusiveLockHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
         tryReleaseExclusiveLockHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
         tryPrepareMutationsHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
         tryCommitMutationsHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
@@ -128,7 +128,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.TryDelete => await TryDelete(message),
                 KeyValueRequestType.TryGet => await TryGet(message),
                 KeyValueRequestType.TryExists => await TryExists(message),
-                KeyValueRequestType.TryAcquireExclusiveLock => await TryAdquireExclusiveLock(message),
+                KeyValueRequestType.TryAcquireExclusiveLock => await TryAcquireExclusiveLock(message),
                 KeyValueRequestType.TryReleaseExclusiveLock => await TryReleaseExclusiveLock(message),
                 KeyValueRequestType.TryPrepareMutations => await TryPrepareMutations(message),
                 KeyValueRequestType.TryCommitMutations => await TryCommitMutations(message),
@@ -235,9 +235,9 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private Task<KeyValueResponse> TryAdquireExclusiveLock(KeyValueRequest message)
+    private Task<KeyValueResponse> TryAcquireExclusiveLock(KeyValueRequest message)
     {
-        return tryAdquireExclusiveLockHandler.Execute(message);
+        return tryAcquireExclusiveLockHandler.Execute(message);
     }
     
     /// <summary>

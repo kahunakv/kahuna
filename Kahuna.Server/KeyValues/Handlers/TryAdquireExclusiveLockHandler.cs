@@ -9,9 +9,9 @@ using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Handlers;
 
-internal sealed class TryAdquireExclusiveLockHandler : BaseHandler
+internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
 {
-    public TryAdquireExclusiveLockHandler(
+    public TryAcquireExclusiveLockHandler(
         BTree<string, KeyValueContext> keyValuesStore,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
