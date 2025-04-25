@@ -422,6 +422,68 @@ public class TestKeyValueTransactions
         Assert.Equal("some value2", result.ValueAsString());
     }
     
+    [Theory, CombinatorialData]
+    public async Task TestSnapshotIsolationConflictInteractive(
+        [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType,
+        [CombinatorialValues(KahunaClientType.SingleEndpoint)] KahunaClientType clientType
+    )
+    {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+        
+        string keyNameA = GetRandomKeyName();
+        string keyNameB = GetRandomKeyName();
+        
+        KahunaKeyValue result = await client.SetKeyValue(keyNameA, "10", cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(result.Success);
+        
+        result = await client.SetKeyValue(keyNameB, "10", cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(result.Success);
+        
+        await using KahunaTransactionSession session1 = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Optimistic }, 
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
+        await using KahunaTransactionSession session2 = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Optimistic }, 
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
+        KahunaKeyValue av1 = await session1.GetKeyValue(keyNameA, cancellationToken: TestContext.Current.CancellationToken);
+        KahunaKeyValue bv1 = await session1.GetKeyValue(keyNameB, cancellationToken: TestContext.Current.CancellationToken);
+        
+        if (int.Parse(av1.ValueAsString() ?? "0") + int.Parse(bv1.ValueAsString() ?? "0") == 20)
+            await session1.SetKeyValue(keyNameA, "0", cancellationToken: TestContext.Current.CancellationToken);
+        
+        KahunaKeyValue av2 = await session2.GetKeyValue(keyNameA, cancellationToken: TestContext.Current.CancellationToken);
+        KahunaKeyValue bv2 = await session2.GetKeyValue(keyNameB, cancellationToken: TestContext.Current.CancellationToken);
+        
+        if (int.Parse(av2.ValueAsString() ?? "0") + int.Parse(bv2.ValueAsString() ?? "0") == 20)
+            await session2.SetKeyValue(keyNameA, "0", cancellationToken: TestContext.Current.CancellationToken);
+
+        try
+        {
+            await Task.WhenAll(
+                session1.Commit(cancellationToken: TestContext.Current.CancellationToken),
+                session2.Commit(cancellationToken: TestContext.Current.CancellationToken)
+            );
+            
+            Assert.False(true);
+        }
+        catch (KahunaException e)
+        {
+            Assert.Equal(KeyValueResponseType.Aborted, e.KeyValueErrorCode);
+        }
+        
+        KahunaKeyValue resultA = await client.GetKeyValue(keyNameA, cancellationToken: TestContext.Current.CancellationToken);
+        KahunaKeyValue resultB = await client.GetKeyValue(keyNameB, cancellationToken: TestContext.Current.CancellationToken);
+        
+        Assert.True(
+            ("10" == resultA.ValueAsString() && "0" == resultB.ValueAsString()) || 
+            ("0" == resultA.ValueAsString() && "10" == resultB.ValueAsString())
+        );
+    }
+    
     private KahunaClient GetClientByType(KahunaCommunicationType communicationType, KahunaClientType clientType)
     {
         return clientType switch

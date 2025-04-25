@@ -868,6 +868,12 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             new(request.TransactionIdPhysical, request.TransactionIdCounter),
             GetTransactionModifiedKeys(request.ModifiedKeys).ToList()
         );
+        
+        if (!success)
+            return new()
+            {
+                Type = GrpcKeyValueResponseType.TypeAborted
+            };
 
         GrpcCommitTransactionResponse response = new()
         {

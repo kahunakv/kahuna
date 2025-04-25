@@ -264,6 +264,8 @@ internal sealed class KeyValueTransactionCoordinator
 
         try
         {
+            context.Result = new() { Type = KeyValueResponseType.Set, Reason = null };
+            
             foreach (KeyValueTransactionModifiedKey modifiedKey in modifiedKeys)
             {
                 context.LocksAcquired ??= [];
@@ -274,15 +276,21 @@ internal sealed class KeyValueTransactionCoordinator
             }
             
             await TwoPhaseCommit(context, CancellationToken.None);
+
+            if (context.Result is null)
+                return false;
+                
+            if (context.Result.Type is KeyValueResponseType.Aborted or KeyValueResponseType.Errored)
+                return false;
             
             logger.LogDebug("Committed interactive transaction {TransactionId}", transactionId);
+            
+            return true;
         }
         finally
         {
             await ReleaseAcquiredLocks(context);
         }
-
-        return true;
     }
     
     /// <summary>
