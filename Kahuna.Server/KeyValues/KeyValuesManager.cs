@@ -1111,12 +1111,25 @@ internal sealed class KeyValuesManager
         return txCoordinator.StartTransaction(options);
     }
 
-    public Task<bool> CommitTransaction(HLCTimestamp timestamp)
+    /// <summary>
+    /// Commits a transaction identified by the given timestamp.
+    /// </summary>
+    /// <param name="timestamp">The timestamp associated with the transaction to be committed.</param>
+    /// <param name="modifiedKeys">List of modified keys</param> 
+    /// <returns>A task that represents the asynchronous operation, containing a boolean value that indicates whether the transaction was successfully committed.</returns>
+    public Task<bool> CommitTransaction(HLCTimestamp timestamp, List<KeyValueTransactionModifiedKey> modifiedKeys)
     {
+        return txCoordinator.CommitTransaction(timestamp, modifiedKeys);
     }
 
-    public Task<bool> RollbackTransaction(HLCTimestamp timestamp)
+    /// <summary>
+    /// Rollbacks a transaction identified by the given timestamp.
+    /// </summary>
+    /// <param name="timestamp"></param>
+    /// <param name="modifiedKeys">List of modified keys</param> 
+    /// <returns></returns>
+    public Task<bool> RollbackTransaction(HLCTimestamp timestamp, List<KeyValueTransactionModifiedKey> modifiedKeys)
     {
-        
+        return txCoordinator.RollbackTransaction(timestamp, modifiedKeys);
     }
 }

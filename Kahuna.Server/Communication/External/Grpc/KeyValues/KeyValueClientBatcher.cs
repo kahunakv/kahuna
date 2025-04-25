@@ -105,6 +105,22 @@ internal sealed class KeyValueClientBatcher
                         tasks.Add(TryStartTransactionDelayed(semaphore, request.RequestId, startTransactionRequest, responseStream, context));
                     }
                     break;
+                    
+                    case GrpcClientBatchType.TryCommitTransaction:
+                    {
+                        GrpcCommitTransactionRequest? commitTransactionRequest = request.CommitTransaction;
+
+                        tasks.Add(TryCommitTransactionDelayed(semaphore, request.RequestId, commitTransactionRequest, responseStream, context));
+                    }
+                    break;
+                    
+                    case GrpcClientBatchType.TryRollbackTransaction:
+                    {
+                        GrpcRollbackTransactionRequest? rollbackTransactionRequest = request.RollbackTransaction;
+
+                        tasks.Add(TryRollbackTransactionDelayed(semaphore, request.RequestId, rollbackTransactionRequest, responseStream, context));
+                    }
+                    break;
 
                     case GrpcClientBatchType.TypeNone:
                     default:
@@ -300,8 +316,48 @@ internal sealed class KeyValueClientBatcher
 
         await WriteResponseToStream(semaphore, responseStream, response, context);
     }
+    
+    private async Task TryCommitTransactionDelayed(
+        SemaphoreSlim semaphore, 
+        int requestId, 
+        GrpcCommitTransactionRequest commitTransactionRequest, 
+        IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcCommitTransactionResponse commitTransactionResponse = await service.CommitTransactionInternal(commitTransactionRequest, context);
+        
+        GrpcBatchClientKeyValueResponse response = new()
+        {
+            Type = GrpcClientBatchType.TryCommitTransaction,
+            RequestId = requestId,
+            CommitTransaction = commitTransactionResponse
+        };
 
-    private async Task WriteResponseToStream(
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+    
+    private async Task TryRollbackTransactionDelayed(
+        SemaphoreSlim semaphore, 
+        int requestId, 
+        GrpcRollbackTransactionRequest rollbackTransactionRequest, 
+        IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcRollbackTransactionResponse rollbackTransactionResponse = await service.RollbackTransactionInternal(rollbackTransactionRequest, context);
+        
+        GrpcBatchClientKeyValueResponse response = new()
+        {
+            Type = GrpcClientBatchType.TryRollbackTransaction,
+            RequestId = requestId,
+            RollbackTransaction = rollbackTransactionResponse
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+
+    private static async Task WriteResponseToStream(
         SemaphoreSlim semaphore, 
         IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream, 
         GrpcBatchClientKeyValueResponse response, 
@@ -318,5 +374,5 @@ internal sealed class KeyValueClientBatcher
         {
             semaphore.Release();
         }
-    }        
+    }
 }

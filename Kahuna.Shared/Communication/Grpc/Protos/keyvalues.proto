@@ -375,6 +375,7 @@ message GrpcCommitTransactionRequest
   string UniqueId = 1;
   int64 TransactionIdPhysical = 2;
   uint32 TransactionIdCounter = 3;
+  repeated GrpcTransactionModifiedKey ModifiedKeys = 4;
 }
 
 message GrpcRollbackTransactionRequest
@@ -382,6 +383,13 @@ message GrpcRollbackTransactionRequest
   string UniqueId = 1;
   int64 TransactionIdPhysical = 2;
   uint32 TransactionIdCounter = 3;
+  repeated GrpcTransactionModifiedKey ModifiedKeys = 4;
+}
+
+message GrpcTransactionModifiedKey
+{
+  string Key = 1;
+  GrpcKeyValueDurability Durability = 2;
 }
 
 message GrpcCommitTransactionResponse

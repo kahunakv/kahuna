@@ -190,16 +190,7 @@ internal sealed class KeyValueServerBatcher
             TrySetKeyValue = trySetResponse
         };
 
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
+        await WriteResponseToStream(semaphore, responseStream, response, context);
     }
 
     private async Task TryGetKeyValueServerDelayed(
@@ -219,16 +210,7 @@ internal sealed class KeyValueServerBatcher
             TryGetKeyValue = tryGetResponse
         };
 
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
+        await WriteResponseToStream(semaphore, responseStream, response, context);
     }
 
     private async Task TryDeleteKeyValueServerDelayed(
@@ -248,16 +230,7 @@ internal sealed class KeyValueServerBatcher
             TryDeleteKeyValue = tryDeleteResponse
         };
 
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
+        await WriteResponseToStream(semaphore, responseStream, response, context);
     }
 
     private async Task TryExtendKeyValueServerDelayed(
@@ -277,16 +250,7 @@ internal sealed class KeyValueServerBatcher
             TryExtendKeyValue = tryExtendResponse
         };
 
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
+        await WriteResponseToStream(semaphore, responseStream, response, context);
     }
 
     private async Task TryExistsKeyValueServerDelayed(
@@ -306,16 +270,7 @@ internal sealed class KeyValueServerBatcher
             TryExistsKeyValue = tryExistsResponse
         };
 
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
+        await WriteResponseToStream(semaphore, responseStream, response, context);
     }
 
     private async Task TryExecuteTransactionServerDelayed(
@@ -335,16 +290,7 @@ internal sealed class KeyValueServerBatcher
             TryExecuteTransactionScript = tryExecuteTransactionScriptResponse
         };
 
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
+        await WriteResponseToStream(semaphore, responseStream, response, context);
     }
     
     private async Task TryAcquireExclusiveLockDelayed(
@@ -364,16 +310,7 @@ internal sealed class KeyValueServerBatcher
             TryAcquireExclusiveLock = tryExecuteTransactionResponse
         };
 
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
+        await WriteResponseToStream(semaphore, responseStream, response, context);
     }
     
     private async Task TryAcquireManyExclusiveLocksDelayed(
@@ -393,16 +330,7 @@ internal sealed class KeyValueServerBatcher
             TryAcquireManyExclusiveLocks = tryAcquireManyExclusiveLocksResponse
         };
 
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
+        await WriteResponseToStream(semaphore, responseStream, response, context);
     }
     
     private async Task TryReleaseExclusiveLockDelayed(
@@ -422,16 +350,7 @@ internal sealed class KeyValueServerBatcher
             TryReleaseExclusiveLock = tryReleaseExclusiveLockResponse
         };
 
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
+        await WriteResponseToStream(semaphore, responseStream, response, context);
     }
     
     private async Task TryReleaseManyExclusiveLocksDelayed(
@@ -451,16 +370,7 @@ internal sealed class KeyValueServerBatcher
             TryReleaseManyExclusiveLocks = tryReleaseManyExclusiveLocksResponse
         };
 
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
+        await WriteResponseToStream(semaphore, responseStream, response, context);
     }
     
     private async Task TryPrepareMutationsDelayed(
@@ -480,16 +390,7 @@ internal sealed class KeyValueServerBatcher
             TryPrepareMutations = tryPrepareMutationsResponse
         };
 
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
+        await WriteResponseToStream(semaphore, responseStream, response, context);
     }
     
     private async Task TryPrepareManyMutationsDelayed(
@@ -509,16 +410,7 @@ internal sealed class KeyValueServerBatcher
             TryPrepareManyMutations = tryPrepareManyMutationsResponse
         };
 
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
+        await WriteResponseToStream(semaphore, responseStream, response, context);
     }
     
     private async Task TryCommitMutationsDelayed(
@@ -538,16 +430,7 @@ internal sealed class KeyValueServerBatcher
             TryCommitMutations = tryCommitMutationsResponse
         };
 
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
+        await WriteResponseToStream(semaphore, responseStream, response, context);
     }
     
     private async Task TryCommitManyMutationsDelayed(
@@ -567,6 +450,16 @@ internal sealed class KeyValueServerBatcher
             TryCommitManyMutations = tryCommitManyMutationsResponse
         };
 
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+    
+    private static async Task WriteResponseToStream(
+        SemaphoreSlim semaphore, 
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream, 
+        GrpcBatchServerKeyValueResponse response, 
+        ServerCallContext context
+    )
+    {
         try
         {
             await semaphore.WaitAsync(context.CancellationToken);
@@ -577,5 +470,5 @@ internal sealed class KeyValueServerBatcher
         {
             semaphore.Release();
         }
-    }
+    }   
 }

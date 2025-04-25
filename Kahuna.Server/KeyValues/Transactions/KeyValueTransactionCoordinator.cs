@@ -238,8 +238,7 @@ internal sealed class KeyValueTransactionCoordinator
                 Locking = options.Locking,
                 Action = KeyValueTransactionAction.Commit,
                 AsyncRelease = options.AsyncRelease,
-                Timeout = options.Timeout <= 0 ? configuration.DefaultTransactionTimeout : options.Timeout,
-                //Parameters = parameters
+                Timeout = options.Timeout <= 0 ? configuration.DefaultTransactionTimeout : options.Timeout
             };
 
             result = sessions.TryAdd(transactionId, context);
@@ -250,6 +249,76 @@ internal sealed class KeyValueTransactionCoordinator
         
         await Task.CompletedTask;
         return transactionId;
+    }
+
+    /// <summary>
+    /// Commits the transaction with the given transaction ID.
+    /// </summary>
+    /// <param name="options">The options used to configure the transaction, such as locking, timeout, and release behavior.</param>
+    /// <param name="modifiedKeys">List of modified keys</param>  
+    /// <returns>Returns the unique transaction ID of type <see cref="HLCTimestamp"/>.</returns>
+    public async Task<bool> CommitTransaction(HLCTimestamp transactionId, List<KeyValueTransactionModifiedKey> modifiedKeys)
+    {
+        if (!sessions.TryGetValue(transactionId, out KeyValueTransactionContext? context))
+            return false;
+
+        try
+        {
+            foreach (KeyValueTransactionModifiedKey modifiedKey in modifiedKeys)
+            {
+                context.LocksAcquired ??= [];
+                context.ModifiedKeys ??= [];
+
+                context.LocksAcquired.Add((modifiedKey.Key ?? "", modifiedKey.Durability));
+                context.ModifiedKeys.Add((modifiedKey.Key ?? "", modifiedKey.Durability));
+            }
+            
+            await TwoPhaseCommit(context, CancellationToken.None);
+            
+            logger.LogDebug("Committed interactive transaction {TransactionId}", transactionId);
+        }
+        finally
+        {
+            await ReleaseAcquiredLocks(context);
+        }
+
+        return true;
+    }
+    
+    /// <summary>
+    /// Rollbacks the transaction with the given transaction ID.
+    /// </summary>
+    /// <param name="options">The options used to configure the transaction, such as locking, timeout, and release behavior.</param>
+    /// <param name="modifiedKeys">List of modified keys</param> 
+    /// <returns>Returns the unique transaction ID of type <see cref="HLCTimestamp"/>.</returns>
+    public async Task<bool> RollbackTransaction(HLCTimestamp transactionId, List<KeyValueTransactionModifiedKey> modifiedKeys)
+    {
+        if (!sessions.TryGetValue(transactionId, out KeyValueTransactionContext? context))
+            return false;
+
+        try
+        {
+            foreach (KeyValueTransactionModifiedKey modifiedKey in modifiedKeys)
+            {
+                context.LocksAcquired ??= [];
+                context.ModifiedKeys ??= [];
+
+                context.LocksAcquired.Add((modifiedKey.Key ?? "", modifiedKey.Durability));
+                context.ModifiedKeys.Add((modifiedKey.Key ?? "", modifiedKey.Durability));
+            }
+
+            context.Action = KeyValueTransactionAction.Abort;
+
+            //await TwoPhaseCommit(context, CancellationToken.None);
+
+            logger.LogDebug("Rolled back interactive transaction {TransactionId}", transactionId);
+        }
+        finally
+        {
+            await ReleaseAcquiredLocks(context);
+        }
+
+        return true;
     }
 
     /// <summary>

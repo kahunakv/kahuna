@@ -44,7 +44,7 @@ public interface IKahunaCommunication
      
      Task<(string, HLCTimestamp transactionId)> StartTransactionSession(string url, string uniqueId, KahunaTransactionOptions txOptions, CancellationToken cancellationToken);
      
-     Task<bool> CommitTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, CancellationToken cancellationToken);
+     Task<bool> CommitTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken);
      
-     Task<bool> RollbackTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, CancellationToken cancellationToken);
+     Task<bool> RollbackTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken);
 }

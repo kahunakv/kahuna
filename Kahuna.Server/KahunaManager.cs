@@ -700,6 +700,28 @@ public sealed class KahunaManager : IKahuna
     {
         return keyValues.StartTransaction(options);
     }
+
+    /// <summary>
+    /// Commits a transaction with the specified timestamp and list of modified keys.
+    /// </summary>
+    /// <param name="timestamp">The timestamp associated with the transaction.</param>
+    /// <param name="modifiedKeys">The list of keys that were modified as part of the transaction.</param>
+    /// <returns>A task that represents the asynchronous operation, containing a boolean indicating whether the transaction commitment was successful.</returns>
+    public Task<bool> CommitTransaction(HLCTimestamp timestamp, List<KeyValueTransactionModifiedKey> modifiedKeys)
+    {
+        return keyValues.CommitTransaction(timestamp, modifiedKeys);
+    }
+
+    /// <summary>
+    /// Rolls back a transaction, reverting changes associated with the specified keys.
+    /// </summary>
+    /// <param name="timestamp">The timestamp of the transaction to be rolled back.</param>
+    /// <param name="modifiedKeys">The list of modified keys associated with the transaction.</param>
+    /// <returns>A task that represents the asynchronous operation. The task result contains a boolean indicating whether the rollback succeeded.</returns>
+    public Task<bool> RollbackTransaction(HLCTimestamp timestamp, List<KeyValueTransactionModifiedKey> modifiedKeys)
+    {
+        return keyValues.RollbackTransaction(timestamp, modifiedKeys);
+    }
     
     public async Task<bool> OnLogRestored(int partitionId, RaftLog log)
     {

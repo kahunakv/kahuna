@@ -971,6 +971,7 @@ public class GrpcCommunication : IKahunaCommunication
     /// <param name="url">The endpoint URL of the server where the transaction will be committed.</param>
     /// <param name="uniqueId">A unique identifier for the session or request being committed.</param>
     /// <param name="transactionId">The hybrid logical clock timestamp representing the transaction to be committed.</param>
+    /// <param name="modifiedKeys">Modified keys to commit</param>
     /// <param name="cancellationToken">A token to observe for cancellation requests during the transaction commit operation.</param>
     /// <returns>
     /// A boolean value indicating whether the transaction was successfully committed.
@@ -978,7 +979,7 @@ public class GrpcCommunication : IKahunaCommunication
     /// <exception cref="KahunaException">
     /// Thrown if the transaction commit process encounters an error, fails, or exceeds retry limits.
     /// </exception>
-    public async Task<bool> CommitTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, CancellationToken cancellationToken)
+    public async Task<bool> CommitTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken)
     {
         GrpcCommitTransactionRequest request = new()
         {
@@ -986,11 +987,14 @@ public class GrpcCommunication : IKahunaCommunication
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
         };
+        
+        if (modifiedKeys.Count > 0)
+            request.ModifiedKeys.AddRange(GetTransactionModifiedKeys(modifiedKeys));
 
         int retries = 0;
         
         GrpcBatcher batcher = GetSharedBatcher(url);
-        GrpcStartTransactionResponse? response;
+        GrpcCommitTransactionResponse? response;
         
         do
         {
@@ -998,7 +1002,7 @@ public class GrpcCommunication : IKahunaCommunication
                 throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);                   
             
             GrpcBatcherResponse batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-            response = batchResponse.StartTransaction;
+            response = batchResponse.CommitTransaction;
 
             if (response is null)
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
@@ -1023,6 +1027,7 @@ public class GrpcCommunication : IKahunaCommunication
     /// <param name="url">The endpoint URL of the server where the rollback request will be executed.</param>
     /// <param name="uniqueId">A unique identifier associated with the session or transaction.</param>
     /// <param name="transactionId">The HLCTimestamp representing the transaction to be rolled back.</param>
+    /// <param name="modifiedKeys">Modified keys to rollback</param> 
     /// <param name="cancellationToken">A token to observe for cancellation requests during the rollback operation.</param>
     /// <returns>
     /// A boolean value indicating whether the rollback operation was successful.
@@ -1030,19 +1035,22 @@ public class GrpcCommunication : IKahunaCommunication
     /// <exception cref="KahunaException">
     /// Thrown if the rollback operation encounters an error, retries are exhausted, or the operation is explicitly cancelled.
     /// </exception>
-    public async Task<bool> RollbackTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, CancellationToken cancellationToken)
+    public async Task<bool> RollbackTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken)
     {
-        GrpcCommitTransactionRequest request = new()
+        GrpcRollbackTransactionRequest request = new()
         {
             UniqueId = uniqueId,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
         };
+        
+        if (modifiedKeys.Count > 0)
+            request.ModifiedKeys.AddRange(GetTransactionModifiedKeys(modifiedKeys));
 
         int retries = 0;
         
         GrpcBatcher batcher = GetSharedBatcher(url);
-        GrpcStartTransactionResponse? response;
+        GrpcRollbackTransactionResponse? response;
         
         do
         {
@@ -1050,7 +1058,7 @@ public class GrpcCommunication : IKahunaCommunication
                 throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);                   
             
             GrpcBatcherResponse batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-            response = batchResponse.StartTransaction;
+            response = batchResponse.RollbackTransaction;
 
             if (response is null)
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
@@ -1067,6 +1075,12 @@ public class GrpcCommunication : IKahunaCommunication
         } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
             
         throw new KahunaException("Failed to rollback key/value transaction: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
+    }
+    
+    private static IEnumerable<GrpcTransactionModifiedKey> GetTransactionModifiedKeys(List<KeyValueTransactionModifiedKey> modifiedKeys)
+    {
+        foreach (KeyValueTransactionModifiedKey modifiedKey in modifiedKeys)
+            yield return new() { Key = modifiedKey.Key, Durability = (GrpcKeyValueDurability)modifiedKey.Durability };
     }
 
     private static IEnumerable<GrpcKeyValueParameter> GetTransactionParameters(List<KeyValueParameter> parameters)

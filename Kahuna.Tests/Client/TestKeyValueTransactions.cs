@@ -297,7 +297,129 @@ public class TestKeyValueTransactions
         
         /// Value shouldn't exist outside the scope of the transaction
         result = await client.GetKeyValue(keyName, cancellationToken: TestContext.Current.CancellationToken);
-        Assert.False(result.Success);        
+        Assert.False(result.Success); 
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestStartTransactionAndExplicitRollback(
+        [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType,
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType
+    )
+    {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+
+        await using KahunaTransactionSession session = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Pessimistic },
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
+        string keyName = GetRandomKeyName();
+        
+        Assert.True(session.TransactionId.L > 0);
+
+        KahunaKeyValue result = await session.SetKeyValue(keyName, "some value", cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(result.Success);
+        
+        result = await session.GetKeyValue(keyName, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(result.Success);        
+        Assert.Equal("some value", result.ValueAsString());
+        
+        await session.Rollback(cancellationToken: TestContext.Current.CancellationToken);
+        
+        /// Value shouldn't exist outside the scope of the transaction
+        result = await client.GetKeyValue(keyName, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.False(result.Success); 
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestStartTransactionAndCommit(
+        [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType,
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType
+    )
+    {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+
+        await using KahunaTransactionSession session = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Pessimistic },
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
+        string keyName = GetRandomKeyName();
+        
+        Assert.True(session.TransactionId.L > 0);
+
+        KahunaKeyValue result = await session.SetKeyValue(keyName, "some value", cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(result.Success);
+        
+        result = await session.GetKeyValue(keyName, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(result.Success);        
+        Assert.Equal("some value", result.ValueAsString());
+        
+        /// Value shouldn't exist outside the scope of the transaction
+        result = await client.GetKeyValue(keyName, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.False(result.Success); 
+        
+        await session.Commit(cancellationToken: TestContext.Current.CancellationToken);
+        
+        // Value should exist after commit
+        result = await client.GetKeyValue(keyName, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(result.Success);        
+        Assert.Equal("some value", result.ValueAsString());
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestStartTransactionAndCommitNoChanges(
+        [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType,
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType
+    )
+    {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+
+        await using KahunaTransactionSession session = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Pessimistic },
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
+        Assert.True(session.TransactionId.L > 0);
+        
+        await session.Commit(cancellationToken: TestContext.Current.CancellationToken);
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestStartTransactionAndCommitMultiKey(
+        [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType,
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType
+    )
+    {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+
+        await using KahunaTransactionSession session = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Pessimistic },
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
+        string keyName1 = GetRandomKeyName();
+        string keyName2 = GetRandomKeyName();
+        
+        Assert.True(session.TransactionId.L > 0);
+
+        KahunaKeyValue result = await session.SetKeyValue(keyName1, "some value1", cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(result.Success);
+        
+        result = await session.SetKeyValue(keyName2, "some value2", cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(result.Success);
+        
+        await session.Commit(cancellationToken: TestContext.Current.CancellationToken);
+        
+        // Value should exist after commit
+        result = await client.GetKeyValue(keyName1, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(result.Success);        
+        Assert.Equal("some value1", result.ValueAsString());
+        
+        // Value should exist after commit
+        result = await client.GetKeyValue(keyName2, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(result.Success);        
+        Assert.Equal("some value2", result.ValueAsString());
     }
     
     private KahunaClient GetClientByType(KahunaCommunicationType communicationType, KahunaClientType clientType)

@@ -864,7 +864,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
             
-        bool success = await keyValues.CommitTransaction(new(request.TransactionIdPhysical, request.TransactionIdCounter));
+        bool success = await keyValues.CommitTransaction(
+            new(request.TransactionIdPhysical, request.TransactionIdCounter),
+            GetTransactionModifiedKeys(request.ModifiedKeys).ToList()
+        );
 
         GrpcCommitTransactionResponse response = new()
         {
@@ -890,7 +893,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
             
-        bool success = await keyValues.RollbackTransaction(new(request.TransactionIdPhysical, request.TransactionIdCounter));
+        bool success = await keyValues.RollbackTransaction(
+            new(request.TransactionIdPhysical, request.TransactionIdCounter),
+            GetTransactionModifiedKeys(request.ModifiedKeys).ToList()
+        );
 
         GrpcRollbackTransactionResponse response = new()
         {
@@ -901,6 +907,18 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         //    response.Items.Add(GetKeyValueItems(result.Items));
         
         return response;
+    }
+
+    private static IEnumerable<KeyValueTransactionModifiedKey> GetTransactionModifiedKeys(RepeatedField<GrpcTransactionModifiedKey> requestModifiedKeys)
+    {
+        foreach (GrpcTransactionModifiedKey item in requestModifiedKeys)
+        {
+            yield return new()
+            {
+                Key = item.Key,
+                Durability = (KeyValueDurability)item.Durability
+            };
+        }
     }
 
     private static IEnumerable<GrpcKeyValueByPrefixItemResponse> GetKeyValueItems(List<(string, ReadOnlyKeyValueContext)> resultItems)

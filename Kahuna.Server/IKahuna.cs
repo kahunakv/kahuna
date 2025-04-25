@@ -86,9 +86,9 @@ public interface IKahuna
 
     public Task<HLCTimestamp> StartTransaction(KeyValueTransactionOptions options);       
     
-    public Task<bool> CommitTransaction(HLCTimestamp timestamp);
+    public Task<bool> CommitTransaction(HLCTimestamp timestamp, List<KeyValueTransactionModifiedKey> modifiedKeys);
     
-    public Task<bool> RollbackTransaction(HLCTimestamp timestamp);
+    public Task<bool> RollbackTransaction(HLCTimestamp timestamp, List<KeyValueTransactionModifiedKey> modifiedKeys);
     
     public Task<bool> OnLogRestored(int partitionId, RaftLog log);
 

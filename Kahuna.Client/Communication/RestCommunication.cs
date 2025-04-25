@@ -738,7 +738,13 @@ public class RestCommunication : IKahunaCommunication
     /// <exception cref="KahunaException">
     /// Thrown when the deletion operation fails for a non-retryable reason.
     /// </exception>
-    public async Task<(bool, long, int)> TryDeleteKeyValue(string url, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(bool, long, int)> TryDeleteKeyValue(
+        string url, 
+        HLCTimestamp transactionId, 
+        string key, 
+        KeyValueDurability durability, 
+        CancellationToken cancellationToken
+    )
     {
         KahunaDeleteKeyValueRequest request = new()
         {
@@ -798,7 +804,14 @@ public class RestCommunication : IKahunaCommunication
     /// <exception cref="KahunaException">
     /// Thrown when the operation fails permanently and cannot be retried.
     /// </exception>
-    public async Task<(bool, long, int)> TryExtendKeyValue(string url, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(bool, long, int)> TryExtendKeyValue(
+        string url, 
+        HLCTimestamp transactionId, 
+        string key, 
+        int expiresMs, 
+        KeyValueDurability durability, 
+        CancellationToken cancellationToken
+    )
     {
         KahunaExtendKeyValueRequest request = new()
         {
@@ -935,12 +948,12 @@ public class RestCommunication : IKahunaCommunication
         throw new NotImplementedException();
     }
 
-    public Task<bool> CommitTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, CancellationToken cancellationToken)
+    public Task<bool> CommitTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken)
     {
         throw new NotImplementedException();
     }
 
-    public Task<bool> RollbackTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, CancellationToken cancellationToken)
+    public Task<bool> RollbackTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken)
     {
         throw new NotImplementedException();
     }

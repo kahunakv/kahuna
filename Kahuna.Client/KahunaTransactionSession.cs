@@ -22,11 +22,15 @@ public class KahunaTransactionSession : IAsyncDisposable
 
     private string UniqueId { get; }
     
+    private KahunaTransactionStatus Status { get; set; } = KahunaTransactionStatus.Pending;
+    
     public HLCTimestamp TransactionId { get; }
     
-    public KahunaTransactionStatus Status { get; set; } = KahunaTransactionStatus.Pending;
+    private readonly SemaphoreSlim semaphore = new(1, 1);
     
-    private SemaphoreSlim semaphore = new(1, 1);
+    private HashSet<(string, KeyValueDurability)>? modifiedKeys;
+
+    private bool disposed;
     
     public KahunaTransactionSession(KahunaClient client, string url, string uniqueId, HLCTimestamp transactionId)
     {
@@ -53,6 +57,9 @@ public class KahunaTransactionSession : IAsyncDisposable
         CancellationToken cancellationToken = default
     )
     {       
+        if (Status != KahunaTransactionStatus.Pending)
+            throw new KahunaException("Cannot perform actions on a completed transaction.", KeyValueResponseType.Errored);
+        
         (bool success, long revision, int timeElapsedMs) = await Client.Communication.TrySetKeyValue(
             Url,
             TransactionId,
@@ -63,6 +70,12 @@ public class KahunaTransactionSession : IAsyncDisposable
             durability,
             cancellationToken
         ).ConfigureAwait(false);
+
+        if (success)
+        {
+            modifiedKeys ??= [];
+            modifiedKeys.Add((key, durability));
+        }
 
         return new(Client, key, success, value, revision, durability, timeElapsedMs);        
     }
@@ -84,6 +97,9 @@ public class KahunaTransactionSession : IAsyncDisposable
         CancellationToken cancellationToken = default
     )
     {
+        if (Status != KahunaTransactionStatus.Pending)
+            throw new KahunaException("Cannot perform actions on a completed transaction.", KeyValueResponseType.Errored);
+        
         byte[] valueBytes = Encoding.UTF8.GetBytes(value);
         
         (bool success, long revision, int timeElapsedMs) = await Client.Communication.TrySetKeyValue(
@@ -97,6 +113,12 @@ public class KahunaTransactionSession : IAsyncDisposable
             cancellationToken
         ).ConfigureAwait(false);
         
+        if (success)
+        {
+            modifiedKeys ??= [];
+            modifiedKeys.Add((key, durability));
+        }
+        
         return new(Client, key, success, valueBytes, revision, durability, timeElapsedMs);
     }
     
@@ -109,6 +131,9 @@ public class KahunaTransactionSession : IAsyncDisposable
     /// <returns>A task that represents the asynchronous operation, which returns a <see cref="KahunaKeyValue"/> containing the key-value information.</returns>
     public async Task<KahunaKeyValue> GetKeyValue(string key, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
+        if (Status != KahunaTransactionStatus.Pending)
+            throw new KahunaException("Cannot perform actions on a completed transaction.", KeyValueResponseType.Errored);
+        
         (bool success, byte[]? value, long revision, int timeElapsedMs) = await Client.Communication.TryGetKeyValue(
             Url, 
             TransactionId,
@@ -141,10 +166,19 @@ public class KahunaTransactionSession : IAsyncDisposable
             if (Status != KahunaTransactionStatus.Pending)
                 throw new KahunaException("Cannot commit a transaction that is not pending.", KeyValueResponseType.Errored);
             
+            List<KeyValueTransactionModifiedKey> modifiedKeysList = new();
+
+            if (modifiedKeys is not null)
+            {
+                foreach ((string key, KeyValueDurability durability) in modifiedKeys)
+                    modifiedKeysList.Add(new() { Key = key, Durability = durability});
+            }
+            
             bool result = await Client.Communication.CommitTransactionSession(
                 Url,
                 UniqueId,
                 TransactionId,
+                modifiedKeysList,
                 cancellationToken
             ).ConfigureAwait(false);
             
@@ -175,11 +209,20 @@ public class KahunaTransactionSession : IAsyncDisposable
 
             if (Status != KahunaTransactionStatus.Pending)
                 throw new KahunaException("Cannot rollback a transaction that is not pending.", KeyValueResponseType.Errored);
+            
+            List<KeyValueTransactionModifiedKey> modifiedKeysList = new();
+
+            if (modifiedKeys is not null)
+            {
+                foreach ((string key, KeyValueDurability durability) in modifiedKeys)
+                    modifiedKeysList.Add(new() { Key = key, Durability = durability});
+            }
 
             bool result = await Client.Communication.RollbackTransactionSession(
                 Url,
                 UniqueId,
                 TransactionId,
+                modifiedKeysList,
                 cancellationToken
             ).ConfigureAwait(false);
 
@@ -196,7 +239,16 @@ public class KahunaTransactionSession : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        if (disposed)
+            return;
+
+        disposed = true;
+        
+        GC.SuppressFinalize(this);
+        
         if (Status == KahunaTransactionStatus.Pending)
             await Rollback().ConfigureAwait(false);
+        
+        semaphore.Dispose();
     }
 }
