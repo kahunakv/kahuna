@@ -30,6 +30,8 @@ internal sealed class GrpcBatcherRequest
     
     public GrpcTryExecuteTransactionScriptRequest? TryExecuteTransactionScript { get; }
     
+    public GrpcTryAcquireExclusiveLockRequest? TryAcquireExclusiveLock { get; }
+    
     public GrpcGetByPrefixRequest? GetByPrefix { get; }
     
     public GrpcScanAllByPrefixRequest? ScanByPrefix { get; }
@@ -88,6 +90,11 @@ internal sealed class GrpcBatcherRequest
     public GrpcBatcherRequest(GrpcTryExecuteTransactionScriptRequest tryExecuteTransactionScript)
     {
         TryExecuteTransactionScript = tryExecuteTransactionScript;
+    }
+    
+    public GrpcBatcherRequest(GrpcTryAcquireExclusiveLockRequest tryAcquireExclusiveLock)
+    {
+        TryAcquireExclusiveLock = tryAcquireExclusiveLock;
     }
     
     public GrpcBatcherRequest(GrpcGetByPrefixRequest getByPrefix)

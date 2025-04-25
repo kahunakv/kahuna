@@ -131,7 +131,7 @@ public class GrpcCommunication : IKahunaCommunication
                 return false;
             
             if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
+                throw new KahunaException("Retries exhausted.", LockResponseType.Aborted);
 
         } while (response.Type == GrpcLockResponseType.LockResponseTypeMustRetry);
         
@@ -181,7 +181,7 @@ public class GrpcCommunication : IKahunaCommunication
                 return (true, response.FencingToken);
             
             if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
+                throw new KahunaException("Retries exhausted.", LockResponseType.Aborted);
 
         } while (response.Type == GrpcLockResponseType.LockResponseTypeMustRetry);
         
@@ -227,7 +227,7 @@ public class GrpcCommunication : IKahunaCommunication
                 return new(response.Owner?.ToByteArray(), new(response.ExpiresPhysical, response.ExpiresCounter), response.FencingToken);
             
             if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
+                throw new KahunaException("Retries exhausted.", LockResponseType.Aborted);
 
         } while (response.Type == GrpcLockResponseType.LockResponseTypeMustRetry);
         
@@ -297,7 +297,7 @@ public class GrpcCommunication : IKahunaCommunication
                 return (false, response.Revision, response.TimeElapsedMs);
 
             if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
 
         } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
             
@@ -368,7 +368,7 @@ public class GrpcCommunication : IKahunaCommunication
                 return (false, response.Revision, response.TimeElapsedMs);
             
             if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
 
         } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
             
@@ -440,7 +440,7 @@ public class GrpcCommunication : IKahunaCommunication
                 logger?.LogDebug("Server asked to retry set key/value");
             
             if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
 
         } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
             
@@ -520,7 +520,7 @@ public class GrpcCommunication : IKahunaCommunication
                 logger?.LogDebug("Server asked to retry get key/value");
             
             if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
             
         } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
             
@@ -585,7 +585,7 @@ public class GrpcCommunication : IKahunaCommunication
                 logger?.LogDebug("Server asked to retry exists key/value");
             
             if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
             
         } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
             
@@ -643,7 +643,7 @@ public class GrpcCommunication : IKahunaCommunication
                 logger?.LogDebug("Server asked to retry delete key/value");
             
             if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
             
         } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
             
@@ -704,7 +704,7 @@ public class GrpcCommunication : IKahunaCommunication
                 logger?.LogDebug("Server asked to retry extend key/value");
             
             if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
             
         } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
             
@@ -764,7 +764,7 @@ public class GrpcCommunication : IKahunaCommunication
                 logger?.LogDebug("Server asked to retry transaction");
             
             if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
 
         } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
         
@@ -775,6 +775,58 @@ public class GrpcCommunication : IKahunaCommunication
             throw new KahunaException("Transaction aborted", (KeyValueResponseType)response.Type);
 
         throw new KahunaException("Failed to execute key/value transaction: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
+    }
+
+    /// <summary>
+    /// Attempts to acquire an exclusive key-value lock using the provided parameters.
+    /// </summary>
+    /// <param name="url">The endpoint URL of the server where the lock request will be executed.</param>
+    /// <param name="transactionId">The high-level consistent timestamp associated with the ongoing transaction.</param>
+    /// <param name="key">The key representing the resource to lock.</param>
+    /// <param name="durability">The durability type of the lock, indicating whether it is ephemeral or persistent.</param>
+    /// <param name="cancellationToken">A token to observe for cancellation requests while attempting to acquire the lock.</param>
+    /// <returns>
+    /// A task that represents the asynchronous operation. The task result is a boolean indicating whether the lock was successfully acquired.
+    /// </returns>
+    /// <exception cref="KahunaException">Thrown if the lock acquisition process fails or encounters an error.</exception>
+    public async Task<bool> TryAcquireExclusiveKeyValueLock(string url, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        GrpcTryAcquireExclusiveLockRequest request = new()
+        {
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
+            Key = key,             
+            Durability = (GrpcKeyValueDurability)durability
+        };
+
+        int retries = 0;
+        GrpcTryAcquireExclusiveLockResponse? response;               
+        
+        GrpcBatcher batcher = GetSharedBatcher(url);
+        
+        do
+        {
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
+        
+            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            response = batchResponse.TryAcquireExclusiveLock;
+
+            if (response is null)
+                throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+
+            if (response.Type == GrpcKeyValueResponseType.TypeLocked)            
+                return true;
+            
+            if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
+                logger?.LogDebug("Server asked to retry acquire key/value lock");
+            
+            if (++retries >= 5)
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
+            
+        } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
+            
+        throw new KahunaException("Failed to acquire key/value lock: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
 
     private static List<KahunaKeyValueTransactionResultValue> GetTransactionValues(RepeatedField<GrpcTryExecuteTransactionResponseValue> responseValues)
@@ -971,6 +1023,7 @@ public class GrpcCommunication : IKahunaCommunication
     /// <param name="url">The endpoint URL of the server where the transaction will be committed.</param>
     /// <param name="uniqueId">A unique identifier for the session or request being committed.</param>
     /// <param name="transactionId">The hybrid logical clock timestamp representing the transaction to be committed.</param>
+    /// <param name="acquiredLocks">Acquired locks during the transaction execution</param> 
     /// <param name="modifiedKeys">Modified keys to commit</param>
     /// <param name="cancellationToken">A token to observe for cancellation requests during the transaction commit operation.</param>
     /// <returns>
@@ -979,7 +1032,14 @@ public class GrpcCommunication : IKahunaCommunication
     /// <exception cref="KahunaException">
     /// Thrown if the transaction commit process encounters an error, fails, or exceeds retry limits.
     /// </exception>
-    public async Task<bool> CommitTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken)
+    public async Task<bool> CommitTransactionSession(
+        string url, 
+        string uniqueId, 
+        HLCTimestamp transactionId,
+        List<KeyValueTransactionModifiedKey> acquiredLocks, 
+        List<KeyValueTransactionModifiedKey> modifiedKeys, 
+        CancellationToken cancellationToken
+    )
     {
         GrpcCommitTransactionRequest request = new()
         {
@@ -988,8 +1048,11 @@ public class GrpcCommunication : IKahunaCommunication
             TransactionIdCounter = transactionId.C,
         };
         
+        if (acquiredLocks.Count > 0)
+            request.AcquiredLocks.AddRange(GetTransactionAcquiredOrModifiedKeys(acquiredLocks));
+        
         if (modifiedKeys.Count > 0)
-            request.ModifiedKeys.AddRange(GetTransactionModifiedKeys(modifiedKeys));
+            request.ModifiedKeys.AddRange(GetTransactionAcquiredOrModifiedKeys(modifiedKeys));
 
         int retries = 0;
         
@@ -1027,6 +1090,7 @@ public class GrpcCommunication : IKahunaCommunication
     /// <param name="url">The endpoint URL of the server where the rollback request will be executed.</param>
     /// <param name="uniqueId">A unique identifier associated with the session or transaction.</param>
     /// <param name="transactionId">The HLCTimestamp representing the transaction to be rolled back.</param>
+    /// <param name="modifiedKeys">Acquired locks during the transaction execution</param>
     /// <param name="modifiedKeys">Modified keys to rollback</param> 
     /// <param name="cancellationToken">A token to observe for cancellation requests during the rollback operation.</param>
     /// <returns>
@@ -1035,7 +1099,14 @@ public class GrpcCommunication : IKahunaCommunication
     /// <exception cref="KahunaException">
     /// Thrown if the rollback operation encounters an error, retries are exhausted, or the operation is explicitly cancelled.
     /// </exception>
-    public async Task<bool> RollbackTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken)
+    public async Task<bool> RollbackTransactionSession(
+        string url, 
+        string uniqueId, 
+        HLCTimestamp transactionId, 
+        List<KeyValueTransactionModifiedKey> acquiredLocks, 
+        List<KeyValueTransactionModifiedKey> modifiedKeys, 
+        CancellationToken cancellationToken
+    )
     {
         GrpcRollbackTransactionRequest request = new()
         {
@@ -1044,8 +1115,11 @@ public class GrpcCommunication : IKahunaCommunication
             TransactionIdCounter = transactionId.C,
         };
         
+        if (acquiredLocks.Count > 0)
+            request.AcquiredLocks.AddRange(GetTransactionAcquiredOrModifiedKeys(acquiredLocks));
+        
         if (modifiedKeys.Count > 0)
-            request.ModifiedKeys.AddRange(GetTransactionModifiedKeys(modifiedKeys));
+            request.ModifiedKeys.AddRange(GetTransactionAcquiredOrModifiedKeys(modifiedKeys));
 
         int retries = 0;
         
@@ -1077,7 +1151,7 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to rollback key/value transaction: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
     
-    private static IEnumerable<GrpcTransactionModifiedKey> GetTransactionModifiedKeys(List<KeyValueTransactionModifiedKey> modifiedKeys)
+    private static IEnumerable<GrpcTransactionModifiedKey> GetTransactionAcquiredOrModifiedKeys(List<KeyValueTransactionModifiedKey> modifiedKeys)
     {
         foreach (KeyValueTransactionModifiedKey modifiedKey in modifiedKeys)
             yield return new() { Key = modifiedKey.Key, Durability = (GrpcKeyValueDurability)modifiedKey.Durability };

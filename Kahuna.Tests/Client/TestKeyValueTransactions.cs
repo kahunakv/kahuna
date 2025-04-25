@@ -484,6 +484,66 @@ public class TestKeyValueTransactions
         );
     }
     
+    [Theory, CombinatorialData]
+    public async Task TestSerializableConflictInteractive(
+        [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType,
+        [CombinatorialValues(KahunaClientType.SingleEndpoint)] KahunaClientType clientType
+    )
+    {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+
+        int oneFailed = 0;
+        
+        string keyNameA = GetRandomKeyName();
+                
+        try
+        {
+            await Task.WhenAll(
+                SerializableConflictInteractiveOne(client, keyNameA), 
+                SerializableConflictInteractiveTwo(client, keyNameA)
+            );
+            
+            Assert.False(true);
+        }
+        catch (KahunaException e)
+        {
+            oneFailed++;
+            
+            Assert.Equal(KeyValueResponseType.Aborted, e.KeyValueErrorCode);
+        }
+        
+        Assert.Equal(1, oneFailed);        
+    }
+
+    private static async Task SerializableConflictInteractiveOne(KahunaClient client, string keyName)
+    {
+        KahunaTransactionSession session1 = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Pessimistic }, 
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
+        KahunaKeyValue result = await session1.GetKeyValue(keyName, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.False(result.Success);
+        
+        await Task.Delay(500, TestContext.Current.CancellationToken);
+        
+        await session1.SetKeyValue(keyName, "30", cancellationToken: TestContext.Current.CancellationToken);
+
+        await session1.Commit(TestContext.Current.CancellationToken);
+    }
+    
+     private static async Task SerializableConflictInteractiveTwo(KahunaClient client, string keyName)
+    {
+        KahunaTransactionSession session2 = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Pessimistic }, 
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
+        await session2.SetKeyValue(keyName, "30", cancellationToken: TestContext.Current.CancellationToken);
+
+        await session2.Commit(TestContext.Current.CancellationToken);
+    }
+    
     private KahunaClient GetClientByType(KahunaCommunicationType communicationType, KahunaClientType clientType)
     {
         return clientType switch

@@ -82,6 +82,14 @@ internal sealed class KeyValueClientBatcher
                     }
                     break;
                     
+                    case GrpcClientBatchType.TryAcquireExclusiveLock:
+                    {
+                        GrpcTryAcquireExclusiveLockRequest? tryAcquireExclusiveLockRequest = request.TryAcquireExclusiveLock;
+
+                        tasks.Add(TryAcquireExclusiveLockDelayed(semaphore, request.RequestId, tryAcquireExclusiveLockRequest, responseStream, context));
+                    }
+                    break;
+                    
                     case GrpcClientBatchType.TryGetByPrefix:
                     {
                         GrpcGetByPrefixRequest? getByPrefixRequest = request.GetByPrefix;
@@ -232,6 +240,26 @@ internal sealed class KeyValueClientBatcher
             Type = GrpcClientBatchType.TryExistsKeyValue,
             RequestId = requestId,
             TryExistsKeyValue = tryExistsResponse
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+    
+    private async Task TryAcquireExclusiveLockDelayed(
+        SemaphoreSlim semaphore, 
+        int requestId, 
+        GrpcTryAcquireExclusiveLockRequest existKeyRequest, 
+        IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcTryAcquireExclusiveLockResponse tryAcquireExclusiveLockResponse = await service.TryAcquireExclusiveLockInternal(existKeyRequest, context);
+        
+        GrpcBatchClientKeyValueResponse response = new()
+        {
+            Type = GrpcClientBatchType.TryAcquireExclusiveLock,
+            RequestId = requestId,
+            TryAcquireExclusiveLock = tryAcquireExclusiveLockResponse
         };
 
         await WriteResponseToStream(semaphore, responseStream, response, context);

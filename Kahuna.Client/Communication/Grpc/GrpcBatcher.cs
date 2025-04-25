@@ -164,6 +164,15 @@ internal sealed class GrpcBatcher
         return TryProcessQueue(grpcBatcherItem, promise);
     }
     
+    public Task<GrpcBatcherResponse> Enqueue(GrpcTryAcquireExclusiveLockRequest message)
+    {
+        TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
     public Task<GrpcBatcherResponse> Enqueue(GrpcGetByPrefixRequest message)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -395,6 +404,11 @@ internal sealed class GrpcBatcher
             batchRequest.Type = GrpcClientBatchType.TryExistsKeyValue;
             batchRequest.TryExistsKeyValue = itemRequest.TryExistsKeyValue;
         }
+        else if (itemRequest.TryAcquireExclusiveLock is not null)
+        {
+            batchRequest.Type = GrpcClientBatchType.TryAcquireExclusiveLock;
+            batchRequest.TryAcquireExclusiveLock = itemRequest.TryAcquireExclusiveLock;
+        }
         else if (itemRequest.TryExecuteTransactionScript is not null)
         {
             batchRequest.Type = GrpcClientBatchType.TryExecuteTransactionScript;
@@ -475,6 +489,10 @@ internal sealed class GrpcBatcher
                         
                 case GrpcClientBatchType.TryExistsKeyValue:
                     item.Promise.SetResult(new(response.TryExistsKeyValue));
+                    break;
+                
+                case GrpcClientBatchType.TryAcquireExclusiveLock:
+                    item.Promise.SetResult(new(response.TryAcquireExclusiveLock));
                     break;
                 
                 case GrpcClientBatchType.TryExecuteTransactionScript:

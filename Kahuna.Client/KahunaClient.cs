@@ -429,6 +429,29 @@ public class KahunaClient
         
         return new(this, key, success, valueBytes, revision, durability, timeElapsedMs);
     }
+    
+    /// <summary>
+    /// Sets a key-value pair in the storage with optional expiration and durability settings.
+    /// If key already holds a value, it is overwritten.
+    /// </summary>
+    /// <param name="key">The key to be stored.</param>
+    /// <param name="value">The value to be associated with the key. Can be null.</param>
+    /// <param name="expiry">The expiration time for the key-value pair. Set to zero for no expiration.</param>
+    /// <param name="flags">Flags indicating conditions for setting the key. Default is 'Set'.</param>
+    /// <param name="durability">Specifies the durability of the key-value pair. Default is 'Persistent'.</param>
+    /// <param name="cancellationToken">A token to cancel the operation if required.</param>
+    /// <returns>A task representing the asynchronous operation. The task result contains the key-value pair information after the operation.</returns>
+    public async Task<KahunaKeyValue> SetKeyValue(
+        string key, 
+        byte[]? value, 
+        TimeSpan expiry, 
+        KeyValueFlags flags = KeyValueFlags.Set, 
+        KeyValueDurability durability = KeyValueDurability.Persistent,
+        CancellationToken cancellationToken = default
+    )
+    {
+        return await SetKeyValue(key, value, (int)expiry.TotalMilliseconds, flags, durability, cancellationToken).ConfigureAwait(false);
+    }
 
     /// <summary>
     /// Compare-Value-And-Swap (CVAS) operation. 
@@ -577,29 +600,6 @@ public class KahunaClient
         ).ConfigureAwait(false);
         
         return new(this, key, success, valueBytes, revision, durability, timeElapsedMs);
-    }
-
-    /// <summary>
-    /// Sets a key-value pair in the storage with optional expiration and durability settings.
-    /// If key already holds a value, it is overwritten.
-    /// </summary>
-    /// <param name="key">The key to be stored.</param>
-    /// <param name="value">The value to be associated with the key. Can be null.</param>
-    /// <param name="expiry">The expiration time for the key-value pair. Set to zero for no expiration.</param>
-    /// <param name="flags">Flags indicating conditions for setting the key. Default is 'Set'.</param>
-    /// <param name="durability">Specifies the durability of the key-value pair. Default is 'Persistent'.</param>
-    /// <param name="cancellationToken">A token to cancel the operation if required.</param>
-    /// <returns>A task representing the asynchronous operation. The task result contains the key-value pair information after the operation.</returns>
-    public async Task<KahunaKeyValue> SetKeyValue(
-        string key, 
-        byte[]? value, 
-        TimeSpan expiry, 
-        KeyValueFlags flags = KeyValueFlags.Set, 
-        KeyValueDurability durability = KeyValueDurability.Persistent,
-        CancellationToken cancellationToken = default
-    )
-    {
-        return await SetKeyValue(key, value, (int)expiry.TotalMilliseconds, flags, durability, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -828,7 +828,7 @@ public class KahunaClient
             cancellationToken
         ).ConfigureAwait(false);
         
-        return new(this, result.url, uniqueId, result.transactionId);
+        return new(this, result.url, uniqueId, result.transactionId, options.Locking);
     }
 
     /// <summary>
