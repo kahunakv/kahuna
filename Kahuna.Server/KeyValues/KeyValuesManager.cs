@@ -1115,21 +1115,31 @@ internal sealed class KeyValuesManager
     /// Commits a transaction identified by the given timestamp.
     /// </summary>
     /// <param name="timestamp">The timestamp associated with the transaction to be committed.</param>
+    /// <param name="acquiredLocks">List of acquired locks</param> 
     /// <param name="modifiedKeys">List of modified keys</param> 
     /// <returns>A task that represents the asynchronous operation, containing a boolean value that indicates whether the transaction was successfully committed.</returns>
-    public Task<bool> CommitTransaction(HLCTimestamp timestamp, List<KeyValueTransactionModifiedKey> modifiedKeys)
+    public Task<bool> CommitTransaction(
+        HLCTimestamp timestamp, 
+        List<KeyValueTransactionModifiedKey> acquiredLocks, 
+        List<KeyValueTransactionModifiedKey> modifiedKeys
+    )
     {
-        return txCoordinator.CommitTransaction(timestamp, modifiedKeys);
+        return txCoordinator.CommitTransaction(timestamp, acquiredLocks, modifiedKeys);
     }
 
     /// <summary>
     /// Rollbacks a transaction identified by the given timestamp.
     /// </summary>
     /// <param name="timestamp"></param>
+    /// <param name="acquiredLocks">List of acquired locks</param> 
     /// <param name="modifiedKeys">List of modified keys</param> 
     /// <returns></returns>
-    public Task<bool> RollbackTransaction(HLCTimestamp timestamp, List<KeyValueTransactionModifiedKey> modifiedKeys)
+    public Task<bool> RollbackTransaction(
+        HLCTimestamp timestamp, 
+        List<KeyValueTransactionModifiedKey> acquiredLocks, 
+        List<KeyValueTransactionModifiedKey> modifiedKeys
+    )
     {
-        return txCoordinator.RollbackTransaction(timestamp, modifiedKeys);
+        return txCoordinator.RollbackTransaction(timestamp, acquiredLocks, modifiedKeys);
     }
 }

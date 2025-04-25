@@ -257,7 +257,7 @@ internal sealed class KeyValueTransactionCoordinator
     /// <param name="options">The options used to configure the transaction, such as locking, timeout, and release behavior.</param>
     /// <param name="modifiedKeys">List of modified keys</param>  
     /// <returns>Returns the unique transaction ID of type <see cref="HLCTimestamp"/>.</returns>
-    public async Task<bool> CommitTransaction(HLCTimestamp transactionId, List<KeyValueTransactionModifiedKey> modifiedKeys)
+    public async Task<bool> CommitTransaction(HLCTimestamp transactionId, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys)
     {
         if (!sessions.TryGetValue(transactionId, out KeyValueTransactionContext? context))
             return false;
@@ -265,13 +265,16 @@ internal sealed class KeyValueTransactionCoordinator
         try
         {
             context.Result = new() { Type = KeyValueResponseType.Set, Reason = null };
+
+            foreach (KeyValueTransactionModifiedKey acquiredLock in acquiredLocks)
+            {
+                context.LocksAcquired ??= [];
+                context.LocksAcquired.Add((acquiredLock.Key ?? "", acquiredLock.Durability));
+            }
             
             foreach (KeyValueTransactionModifiedKey modifiedKey in modifiedKeys)
             {
-                context.LocksAcquired ??= [];
                 context.ModifiedKeys ??= [];
-
-                context.LocksAcquired.Add((modifiedKey.Key ?? "", modifiedKey.Durability));
                 context.ModifiedKeys.Add((modifiedKey.Key ?? "", modifiedKey.Durability));
             }
             
@@ -299,19 +302,22 @@ internal sealed class KeyValueTransactionCoordinator
     /// <param name="options">The options used to configure the transaction, such as locking, timeout, and release behavior.</param>
     /// <param name="modifiedKeys">List of modified keys</param> 
     /// <returns>Returns the unique transaction ID of type <see cref="HLCTimestamp"/>.</returns>
-    public async Task<bool> RollbackTransaction(HLCTimestamp transactionId, List<KeyValueTransactionModifiedKey> modifiedKeys)
+    public async Task<bool> RollbackTransaction(HLCTimestamp transactionId, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys)
     {
         if (!sessions.TryGetValue(transactionId, out KeyValueTransactionContext? context))
             return false;
 
         try
         {
-            foreach (KeyValueTransactionModifiedKey modifiedKey in modifiedKeys)
+            foreach (KeyValueTransactionModifiedKey acquiredLock in acquiredLocks)
             {
                 context.LocksAcquired ??= [];
+                context.LocksAcquired.Add((acquiredLock.Key ?? "", acquiredLock.Durability));
+            }
+            
+            foreach (KeyValueTransactionModifiedKey modifiedKey in modifiedKeys)
+            {
                 context.ModifiedKeys ??= [];
-
-                context.LocksAcquired.Add((modifiedKey.Key ?? "", modifiedKey.Durability));
                 context.ModifiedKeys.Add((modifiedKey.Key ?? "", modifiedKey.Durability));
             }
 

@@ -866,7 +866,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             
         bool success = await keyValues.CommitTransaction(
             new(request.TransactionIdPhysical, request.TransactionIdCounter),
-            GetTransactionModifiedKeys(request.ModifiedKeys).ToList()
+            GetTransactionAcquiredOrModifiedKeys(request.AcquiredLocks).ToList(),
+            GetTransactionAcquiredOrModifiedKeys(request.ModifiedKeys).ToList()
         );
         
         if (!success)
@@ -901,7 +902,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             
         bool success = await keyValues.RollbackTransaction(
             new(request.TransactionIdPhysical, request.TransactionIdCounter),
-            GetTransactionModifiedKeys(request.ModifiedKeys).ToList()
+            GetTransactionAcquiredOrModifiedKeys(request.AcquiredLocks).ToList(),
+            GetTransactionAcquiredOrModifiedKeys(request.ModifiedKeys).ToList()
         );
 
         GrpcRollbackTransactionResponse response = new()
@@ -915,7 +917,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return response;
     }
 
-    private static IEnumerable<KeyValueTransactionModifiedKey> GetTransactionModifiedKeys(RepeatedField<GrpcTransactionModifiedKey> requestModifiedKeys)
+    private static IEnumerable<KeyValueTransactionModifiedKey> GetTransactionAcquiredOrModifiedKeys(RepeatedField<GrpcTransactionModifiedKey> requestModifiedKeys)
     {
         foreach (GrpcTransactionModifiedKey item in requestModifiedKeys)
         {

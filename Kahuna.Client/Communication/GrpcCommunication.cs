@@ -299,7 +299,7 @@ public class GrpcCommunication : IKahunaCommunication
             if (++retries >= 5)
                 throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
 
-        } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
+        } while (transactionId == HLCTimestamp.Zero && response.Type == GrpcKeyValueResponseType.TypeMustRetry);
             
         throw new KahunaException("Failed to set key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
@@ -370,7 +370,7 @@ public class GrpcCommunication : IKahunaCommunication
             if (++retries >= 5)
                 throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
 
-        } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
+        } while (transactionId == HLCTimestamp.Zero && response.Type == GrpcKeyValueResponseType.TypeMustRetry);
             
         throw new KahunaException("Failed to set key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
@@ -442,7 +442,7 @@ public class GrpcCommunication : IKahunaCommunication
             if (++retries >= 5)
                 throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
 
-        } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
+        } while (transactionId == HLCTimestamp.Zero && response.Type == GrpcKeyValueResponseType.TypeMustRetry);
             
         throw new KahunaException("Failed to set key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
@@ -522,7 +522,7 @@ public class GrpcCommunication : IKahunaCommunication
             if (++retries >= 5)
                 throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
             
-        } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
+        } while (transactionId == HLCTimestamp.Zero && response.Type == GrpcKeyValueResponseType.TypeMustRetry);
             
         throw new KahunaException("Failed to get key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
@@ -587,7 +587,7 @@ public class GrpcCommunication : IKahunaCommunication
             if (++retries >= 5)
                 throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
             
-        } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
+        } while (transactionId == HLCTimestamp.Zero && response.Type == GrpcKeyValueResponseType.TypeMustRetry);
             
         throw new KahunaException("Failed to check if exists key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
@@ -645,7 +645,7 @@ public class GrpcCommunication : IKahunaCommunication
             if (++retries >= 5)
                 throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
             
-        } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
+        } while (transactionId == HLCTimestamp.Zero && response.Type == GrpcKeyValueResponseType.TypeMustRetry);
             
         throw new KahunaException("Failed to delete key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
@@ -706,7 +706,7 @@ public class GrpcCommunication : IKahunaCommunication
             if (++retries >= 5)
                 throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
             
-        } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
+        } while (transactionId == HLCTimestamp.Zero && response.Type == GrpcKeyValueResponseType.TypeMustRetry);
             
         throw new KahunaException("Failed to extend key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
@@ -824,7 +824,7 @@ public class GrpcCommunication : IKahunaCommunication
             if (++retries >= 5)
                 throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
             
-        } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
+        } while (transactionId == HLCTimestamp.Zero && response.Type == GrpcKeyValueResponseType.TypeMustRetry);
             
         throw new KahunaException("Failed to acquire key/value lock: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
