@@ -4,9 +4,12 @@ using System.Text.Json.Serialization;
 
 namespace Kahuna.Shared.Communication.Rest;
 
+/// <summary>
+/// Represents a request to perform operations on a distributed lock in the Kahuna system.
+/// </summary>
 public sealed class KahunaLockRequest
 {
-    [JsonPropertyName("lockName")]
+    [JsonPropertyName("resource")]
     public string? Resource { get; set; }
     
     [JsonPropertyName("lockId")]

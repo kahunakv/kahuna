@@ -4,6 +4,10 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 
 namespace Kahuna.Server.KeyValues.Transactions.Commands;
 
+/// <summary>
+/// Represents a command that halts the execution of a key-value transaction
+/// and optionally evaluates and returns the result of an associated expression.
+/// </summary>
 internal sealed class ReturnCommand : BaseCommand
 {
     public static KeyValueTransactionResult? Execute(

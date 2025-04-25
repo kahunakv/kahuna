@@ -4,7 +4,8 @@ using Kommander.Time;
 namespace Kahuna.Server.Locks;
 
 /// <summary>
-/// 
+/// Represents the context of a lock, encapsulating the state, owner, expiration, and other
+/// relevant metadata associated with a specific lock resource.
 /// </summary>
 public sealed class LockContext
 {

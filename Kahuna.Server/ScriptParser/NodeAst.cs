@@ -3,6 +3,11 @@
 
 namespace Kahuna.Server.ScriptParser;
 
+/// <summary>
+/// Represents a node within an abstract syntax tree (AST).
+/// This class is used during script parsing and evaluation,
+/// encapsulating the structure of the parsed script and its components.
+/// </summary>
 public sealed class NodeAst
 {
     public readonly NodeType nodeType;

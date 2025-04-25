@@ -4,7 +4,9 @@ using Kommander.Time;
 namespace Kahuna.Server.KeyValues;
 
 /// <summary>
-/// 
+/// Represents a context that holds metadata, historical versions, and state for a key-value entry
+/// in the system. Used to manage the lifecycle and multi-version concurrency control (MVCC)
+/// of key-value pairs, providing support for persistence, revisions, expiration, and lock management.
 /// </summary>
 public sealed class KeyValueContext
 {

@@ -3,6 +3,12 @@ using Kahuna.Client;
 
 namespace Kahuna.Control.Commands;
 
+/// <summary>
+/// The <c>ExtendLockCommand</c> class provides functionality to extend an existing lock
+/// managed by a <see cref="KahunaClient"/>. It interacts with the lock system to
+/// attempt an extension of the lock's expiration time, ensuring that the lock remains valid
+/// for the specified duration.
+/// </summary>
 public static class ExtendLockCommand
 {    
     public static async Task Execute(KahunaClient connection, string optsLock, string optsOwner, int optsExpires, string? format)

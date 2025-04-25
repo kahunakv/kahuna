@@ -219,24 +219,37 @@ internal sealed class KeyValueTransactionCoordinator
     }
 
     /// <summary>
-    /// Starts an interactive session
+    /// Starts a new key-value transaction and returns the unique transaction identifier.
     /// </summary>
-    /// <returns></returns>
-    public async Task<string> StartTransaction()
+    /// <param name="options">The options used to configure the transaction, such as locking, timeout, and release behavior.</param>
+    /// <returns>Returns the unique transaction ID of type <see cref="HLCTimestamp"/>.</returns>
+    public async Task<HLCTimestamp> StartTransaction(KeyValueTransactionOptions options)
     {
-        HLCTimestamp transactionId = raft.HybridLogicalClock.SendOrLocalEvent();
-
-        sessions.TryAdd(transactionId, new()
+        bool result;
+        HLCTimestamp transactionId;        
+        
+        do
         {
-            TransactionId = transactionId,
-            Locking = KeyValueTransactionLocking.Pessimistic,
-            Action = KeyValueTransactionAction.Commit,
-            AsyncRelease = true,
-            //Parameters = parameters
-        });
+            transactionId = raft.HybridLogicalClock.SendOrLocalEvent();
+            
+            KeyValueTransactionContext context = new()
+            {
+                TransactionId = transactionId,
+                Locking = options.Locking,
+                Action = KeyValueTransactionAction.Commit,
+                AsyncRelease = options.AsyncRelease,
+                Timeout = options.Timeout <= 0 ? configuration.DefaultTransactionTimeout : options.Timeout,
+                //Parameters = parameters
+            };
+
+            result = sessions.TryAdd(transactionId, context);
+
+        } while (!result);
+
+        logger.LogDebug("Started interactive transaction {TransactionId}", transactionId);
         
         await Task.CompletedTask;
-        return "";
+        return transactionId;
     }
 
     /// <summary>

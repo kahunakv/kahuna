@@ -20,6 +20,12 @@ using Spectre.Console;
 
 namespace Kahuna.Control;
 
+/// <summary>
+/// The InteractiveConsole class provides an entry point for running an interactive shell
+/// that facilitates communication with the Kahuna cluster or load balancer.
+/// This console provides a command-line interface supporting various interactive operations
+/// and utilizes session history and advanced input handling for user convenience.
+/// </summary>
 public static class InteractiveConsole
 {
     public static async Task Run(KahunaClient connection)
@@ -293,8 +299,18 @@ public static class InteractiveConsole
                 AnsiConsole.MarkupLine("[red]{0}[/]: {1}\n", Markup.Escape(ex.GetType().Name), Markup.Escape(ex.Message));
             }
         }
-    }    
+    }
 
+    /// <summary>
+    /// Cleans up resources including disposing locks and saving the command history.
+    /// This method ensures proper disposal of persistent and ephemeral locks, handling any exceptions that occur,
+    /// as well as saving the session's history to a specified path.
+    /// </summary>
+    /// <param name="historyPath">The file path where the session history should be saved.</param>
+    /// <param name="history">A list of strings representing the command history of the session.</param>
+    /// <param name="locks">A dictionary of persistent locks to be disposed, keyed by their identifiers.</param>
+    /// <param name="elocks">A dictionary of ephemeral locks to be disposed, keyed by their identifiers.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     private static async Task Exit(string historyPath, List<string> history, Dictionary<string, KahunaLock> locks, Dictionary<string, KahunaLock> elocks)
     {
         foreach (KeyValuePair<string, KahunaLock> kvp in locks)
@@ -327,7 +343,14 @@ public static class InteractiveConsole
 
         await SaveHistory(historyPath, history);
     }
-    
+
+    /// <summary>
+    /// Retrieves the command history from the specified file path.
+    /// If the file exists and contains valid data, it reads and deserializes the command history.
+    /// If the file does not exist or contains invalid data, an empty list is returned.
+    /// </summary>
+    /// <param name="historyPath">The file path where the command history is stored.</param>
+    /// <returns>A task representing the asynchronous operation, containing a list of strings representing the command history.</returns>
     private static async Task<List<string>> GetHistory(string historyPath)
     {
         List<string>? history = [];
@@ -349,7 +372,14 @@ public static class InteractiveConsole
 
         return history;
     }
-    
+
+    /// <summary>
+    /// Saves the command history to a specified file path in JSON format.
+    /// This method ensures that the session history is serialized and stored persistently for future use.
+    /// </summary>
+    /// <param name="historyPath">The path to the file where the session history will be saved.</param>
+    /// <param name="history">A list of strings representing the session's command history. If null, no action is taken.</param>
+    /// <returns>A task representing the asynchronous save operation.</returns>
     private static async Task SaveHistory(string historyPath, List<string>? history)
     {
         if (history is not null)
@@ -357,11 +387,22 @@ public static class InteractiveConsole
         
         //AnsiConsole.MarkupLine("[cyan]Saving history to {0}...[/]", Markup.Escape(historyPath));
     }
-    
+
+    /// <summary>
+    /// Attempts to acquire a lock on the specified resource through the provided connection,
+    /// updates the history, and stores the lock in the provided dictionary if successful.
+    /// Displays the acquisition result in the console output.
+    /// </summary>
+    /// <param name="connection">The KahunaClient instance responsible for managing communication and lock operations.</param>
+    /// <param name="history">A list of strings to record the commands executed during the session.</param>
+    /// <param name="commandTrim">The command string containing lock information, trimmed of whitespace.</param>
+    /// <param name="locks">A dictionary for storing successfully acquired locks, keyed by resource names.</param>
+    /// <param name="durability">The durability level of the lock, defining its persistence mode (ephemeral or persistent).</param>
+    /// <returns>A task representing the asynchronous operation of obtaining the lock.</returns>
     private static async Task TryLock(KahunaClient connection, List<string> history, string commandTrim, Dictionary<string, KahunaLock> locks, LockDurability durability)
     {
         history.Add(commandTrim);
-                    
+
         string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
 
         KahunaLock kahunaLock = await connection.GetOrCreateLock(parts[1], int.Parse(parts[2]), durability);
@@ -376,6 +417,14 @@ public static class InteractiveConsole
             AnsiConsole.MarkupLine("[yellow]not acquired[/]\n");
     }
 
+    /// <summary>
+    /// Attempts to unlock a specified resource by disposing the corresponding lock object if it exists.
+    /// Adds the command for unlocking to the session history and notifies the user about the result of the operation.
+    /// </summary>
+    /// <param name="history">A list of strings that represents the session command history.</param>
+    /// <param name="commandTrim">The processed command string indicating the unlock operation, including the target resource.</param>
+    /// <param name="locks">A dictionary mapping resource identifiers to their associated KahunaLock instances, representing acquired locks.</param>
+    /// <returns>A task representing the asynchronous operation of unlocking a resource.</returns>
     private static async Task TryUnlock(List<string> history, string commandTrim, Dictionary<string, KahunaLock> locks)
     {
         history.Add(commandTrim);
@@ -398,7 +447,17 @@ public static class InteractiveConsole
             AnsiConsole.MarkupLine("[yellow]not acquired[/]\n");
         }
     }
-    
+
+    /// <summary>
+    /// Attempts to extend the specified lock within the given duration.
+    /// This method parses the command, updates the session history, and extends the lock
+    /// if it is found in the provided dictionary of locks. The result of the extension
+    /// operation is displayed in the console.
+    /// </summary>
+    /// <param name="history">A list of strings representing the session's command history.</param>
+    /// <param name="commandTrim">The parsed and trimmed command to execute, containing lock information and duration.</param>
+    /// <param name="locks">A dictionary of locks to search, keyed by their identifiers.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     private static async Task TryExtendLock(List<string> history, string commandTrim, Dictionary<string, KahunaLock> locks)
     {
         history.Add(commandTrim);
@@ -420,6 +479,15 @@ public static class InteractiveConsole
         }
     }
 
+    /// <summary>
+    /// Processes a locking command by inspecting the provided lock dictionary and printing information
+    /// about the lock's status or existence. If the specified lock is found, its information is retrieved
+    /// and displayed; otherwise, a "not found" message is shown.
+    /// </summary>
+    /// <param name="history">A list that maintains a history of executed commands.</param>
+    /// <param name="commandTrim">The trimmed command string used to identify the lock.</param>
+    /// <param name="locks">A dictionary containing locks associated with their identifiers.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     private static async Task GetLock(List<string> history, string commandTrim, Dictionary<string, KahunaLock> locks)
     {
         history.Add(commandTrim);
@@ -441,6 +509,15 @@ public static class InteractiveConsole
         }
     }
 
+    /// <summary>
+    /// Executes a specified command using the provided connection and scripts, processes the result,
+    /// and logs the command to history if it completes without errors or retries.
+    /// </summary>
+    /// <param name="connection">The Kahuna client connection used to execute the command.</param>
+    /// <param name="scripts">A dictionary containing available transaction scripts keyed by their name.</param>
+    /// <param name="history">A list storing the history of successfully executed commands.</param>
+    /// <param name="commandTrim">The input command to be executed, trimmed of any extraneous whitespace.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     private static async Task RunCommand(KahunaClient connection, Dictionary<string, KahunaTransactionScript> scripts, List<string> history, string commandTrim)
     {
         //ValueStopwatch stopwatch = ValueStopwatch.StartNew();
@@ -604,8 +681,18 @@ public static class InteractiveConsole
             history.Add(commandTrim);
     }
 
+    /// <summary>
+    /// Loads and executes a script file by reading its contents and running its commands.
+    /// This method validates the existence of the script file, reads its contents asynchronously,
+    /// and attempts to execute the script commands using the provided `KahunaClient` connection.
+    /// </summary>
+    /// <param name="connection">An instance of <see cref="KahunaClient"/> used to execute the script commands.</param>
+    /// <param name="scripts">A dictionary of available transaction scripts, keyed by their identifiers.</param>
+    /// <param name="history">A list of previous commands executed during the session.</param>
+    /// <param name="commandTrim">The trimmed command string that contains the script file path.</param>
+    /// <returns>A task representing the asynchronous execution of the script.</returns>
     private static async Task LoadAndRunScript(KahunaClient connection, Dictionary<string, KahunaTransactionScript> scripts, List<string> history, string commandTrim)
-    {                       
+    {
         string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
         
         if (!File.Exists(parts[1]))

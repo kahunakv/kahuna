@@ -4,6 +4,10 @@ using Kahuna.Server.ScriptParser;
 
 namespace Kahuna.Server.KeyValues.Transactions.Functions;
 
+/// <summary>
+/// Provides a static implementation of the 'abs' function for use in
+/// mathematical operations within the key-value transaction system.
+/// </summary>
 internal static class AbsFunction
 {
     internal static KeyValueExpressionResult Execute(NodeAst ast, List<KeyValueExpressionResult> arguments)

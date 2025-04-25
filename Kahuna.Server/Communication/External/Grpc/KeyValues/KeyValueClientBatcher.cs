@@ -97,6 +97,14 @@ internal sealed class KeyValueClientBatcher
                         tasks.Add(TryScanAllByPrefixDelayed(semaphore, request.RequestId, scanByPrefixRequest, responseStream, context));
                     }
                     break;
+                    
+                    case GrpcClientBatchType.TryStartTransaction:
+                    {
+                        GrpcStartTransactionRequest? startTransactionRequest = request.StartTransaction;
+
+                        tasks.Add(TryStartTransactionDelayed(semaphore, request.RequestId, startTransactionRequest, responseStream, context));
+                    }
+                    break;
 
                     case GrpcClientBatchType.TypeNone:
                     default:
@@ -130,16 +138,7 @@ internal sealed class KeyValueClientBatcher
             TrySetKeyValue = trySetResponse
         };
 
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
+        await WriteResponseToStream(semaphore, responseStream, response, context);
     }
     
     private async Task TryGetKeyValueDelayed(
@@ -159,16 +158,7 @@ internal sealed class KeyValueClientBatcher
             TryGetKeyValue = tryGetResponse
         };
 
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
+        await WriteResponseToStream(semaphore, responseStream, response, context);
     }
     
     private async Task TryDeleteKeyValueDelayed(
@@ -188,16 +178,7 @@ internal sealed class KeyValueClientBatcher
             TryDeleteKeyValue = tryDeleteResponse
         };
 
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
+        await WriteResponseToStream(semaphore, responseStream, response, context);
     }
     
     private async Task TryExtendKeyValueDelayed(
@@ -217,16 +198,7 @@ internal sealed class KeyValueClientBatcher
             TryExtendKeyValue = tryExtendResponse
         };
 
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
+        await WriteResponseToStream(semaphore, responseStream, response, context);
     }
     
     private async Task TryExistsKeyValueDelayed(
@@ -246,16 +218,7 @@ internal sealed class KeyValueClientBatcher
             TryExistsKeyValue = tryExistsResponse
         };
 
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
+        await WriteResponseToStream(semaphore, responseStream, response, context);
     }
     
     private async Task TryExecuteTransactionScriptDelayed(
@@ -275,16 +238,7 @@ internal sealed class KeyValueClientBatcher
             TryExecuteTransactionScript = tryExecuteTransactionScriptResponse
         };
 
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }               
+        await WriteResponseToStream(semaphore, responseStream, response, context);              
     }
     
     private async Task TryGetByPrefixDelayed(
@@ -304,16 +258,7 @@ internal sealed class KeyValueClientBatcher
             GetByPrefix = getByPrefixResponse
         };
 
-        try
-        {
-            await semaphore.WaitAsync(context.CancellationToken);
-
-            await responseStream.WriteAsync(response);
-        }
-        finally
-        {
-            semaphore.Release();
-        }               
+        await WriteResponseToStream(semaphore, responseStream, response, context);             
     }
     
     private async Task TryScanAllByPrefixDelayed(
@@ -333,6 +278,36 @@ internal sealed class KeyValueClientBatcher
             ScanByPrefix = scanAllByPrefixResponse
         };
 
+        await WriteResponseToStream(semaphore, responseStream, response, context);              
+    }
+    
+    private async Task TryStartTransactionDelayed(
+        SemaphoreSlim semaphore, 
+        int requestId, 
+        GrpcStartTransactionRequest startTransactionRequest, 
+        IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcStartTransactionResponse startTransactionResponse = await service.StartTransactionInternal(startTransactionRequest, context);
+        
+        GrpcBatchClientKeyValueResponse response = new()
+        {
+            Type = GrpcClientBatchType.TryStartTransaction,
+            RequestId = requestId,
+            StartTransaction = startTransactionResponse
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+
+    private async Task WriteResponseToStream(
+        SemaphoreSlim semaphore, 
+        IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream, 
+        GrpcBatchClientKeyValueResponse response, 
+        ServerCallContext context
+    )
+    {
         try
         {
             await semaphore.WaitAsync(context.CancellationToken);
@@ -342,6 +317,6 @@ internal sealed class KeyValueClientBatcher
         finally
         {
             semaphore.Release();
-        }               
-    }
+        }
+    }        
 }

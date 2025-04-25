@@ -6,8 +6,20 @@ using Kahuna.Server.ScriptParser;
 
 namespace Kahuna.Server.KeyValues.Transactions;
 
+/// <summary>
+/// Contains static methods to evaluate key-value transaction expressions
+/// within a specified context and abstract syntax tree (AST).
+/// Provides functionality to traverse and compute results for transaction AST nodes.
+/// </summary>
 internal static class KeyValueTransactionExpression
 {
+    /// <summary>
+    /// Evaluates the specified abstract syntax tree (AST) within the context of a key-value transaction,
+    /// producing a result based on the AST evaluation logic.
+    /// </summary>
+    /// <param name="context">The context of the key-value transaction which contains necessary state and configuration.</param>
+    /// <param name="ast">The abstract syntax tree to be evaluated, representing the input expression or operation.</param>
+    /// <returns>A result encapsulated in a <see cref="KeyValueExpressionResult"/> object, containing the evaluation outcome.</returns>
     public static KeyValueExpressionResult Eval(KeyValueTransactionContext context, NodeAst ast)
     {
         switch (ast.nodeType)

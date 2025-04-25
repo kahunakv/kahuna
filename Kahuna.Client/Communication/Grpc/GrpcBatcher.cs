@@ -113,7 +113,12 @@ internal sealed class GrpcBatcher
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
-    
+
+    /// <summary>
+    /// Adds a key-value request to the batch processing queue and processes the queue as needed.
+    /// </summary>
+    /// <param name="message">The key-value request message to be enqueued.</param>
+    /// <returns>A task representing the asynchronous operation, containing the batcher response for the key-value request.</returns>
     public Task<GrpcBatcherResponse> Enqueue(GrpcTryGetKeyValueRequest message)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -169,6 +174,33 @@ internal sealed class GrpcBatcher
     }
     
     public Task<GrpcBatcherResponse> Enqueue(GrpcScanAllByPrefixRequest message)
+    {
+        TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
+    public Task<GrpcBatcherResponse> Enqueue(GrpcStartTransactionRequest message)
+    {
+        TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
+    public Task<GrpcBatcherResponse> Enqueue(GrpcCommitTransactionRequest message)
+    {
+        TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
+    public Task<GrpcBatcherResponse> Enqueue(GrpcRollbackTransactionRequest message)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -378,6 +410,21 @@ internal sealed class GrpcBatcher
             batchRequest.Type = GrpcClientBatchType.TryScanByPrefix;
             batchRequest.ScanByPrefix = itemRequest.ScanByPrefix;
         }
+        else if (itemRequest.StartTransaction is not null)
+        {
+            batchRequest.Type = GrpcClientBatchType.TryStartTransaction;
+            batchRequest.StartTransaction = itemRequest.StartTransaction;
+        }
+        else if (itemRequest.CommitTransaction is not null)
+        {
+            batchRequest.Type = GrpcClientBatchType.TryCommitTransaction;
+            batchRequest.CommitTransaction = itemRequest.CommitTransaction;
+        }
+        else if (itemRequest.RollbackTransaction is not null)
+        {
+            batchRequest.Type = GrpcClientBatchType.TryRollbackTransaction;
+            batchRequest.RollbackTransaction = itemRequest.RollbackTransaction;
+        }
         else        
             throw new KahunaException("Unknown request type", KeyValueResponseType.Errored);        
 
@@ -441,10 +488,22 @@ internal sealed class GrpcBatcher
                 case GrpcClientBatchType.TryScanByPrefix:
                     item.Promise.SetResult(new(response.ScanByPrefix));
                     break;
+                
+                case GrpcClientBatchType.TryStartTransaction:
+                    item.Promise.SetResult(new(response.StartTransaction));
+                    break;
+                
+                case GrpcClientBatchType.TryCommitTransaction:
+                    item.Promise.SetResult(new(response.CommitTransaction));
+                    break;
+                
+                case GrpcClientBatchType.TryRollbackTransaction:
+                    item.Promise.SetResult(new(response.RollbackTransaction));
+                    break;
                         
                 case GrpcClientBatchType.TypeNone:
                 default:
-                    item.Promise.SetException(new KahunaException("Unknown response type: " + response.Type,LockResponseType.Errored));
+                    item.Promise.SetException(new KahunaException("Unknown response type: " + response.Type, KeyValueResponseType.Errored));
                     break;
             }
 

@@ -4,6 +4,18 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 
 namespace Kahuna.Server.KeyValues.Transactions.Functions;
 
+/// <summary>
+/// Provides functionality to execute the 'ceil' function in scripts.
+/// </summary>
+/// <remarks>
+/// The 'ceil' function returns the smallest integral value that is greater than or equal to the specified number.
+/// It supports arguments of type <see cref="KeyValueExpressionType.LongType"/> and <see cref="KeyValueExpressionType.DoubleType"/>.
+/// </remarks>
+/// <exception cref="KahunaScriptException">
+/// Thrown when:
+/// - The number of arguments is not exactly one.
+/// - The argument type is not supported.
+/// </exception>
 internal static class CeilFunction
 {
     internal static KeyValueExpressionResult Execute(NodeAst ast, List<KeyValueExpressionResult> arguments)

@@ -78,6 +78,9 @@ if (IsSingleCommand(opts))
 await InteractiveConsole.Run(connection);
 return;
 
+/// <summary>
+/// Starts a connection to the Kahuna cluster or load balancer
+/// </summary>
 static Task<KahunaClient> GetConnection(Options opts)
 {
     string? connectionString = opts.ConnectionSource;

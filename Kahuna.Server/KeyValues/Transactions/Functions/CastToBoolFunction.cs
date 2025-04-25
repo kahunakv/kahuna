@@ -4,6 +4,21 @@ using Kahuna.Server.ScriptParser;
 
 namespace Kahuna.Server.KeyValues.Transactions.Functions;
 
+/// <summary>
+/// Provides functionality to cast a given argument to a boolean value.
+/// </summary>
+/// <remarks>
+/// This class implements the `to_bool` function, which converts a single argument
+/// to boolean based on its type. Supported conversions include:
+/// - Boolean: Returns the same boolean value.
+/// - Long: Converts non-zero values to `true`, zero to `false`.
+/// - Double: Converts non-zero values to `true`, zero to `false`.
+/// - String: Compares the string (case-insensitively) with "true" to determine the boolean value.
+/// </remarks>
+/// <exception cref="KahunaScriptException">
+/// Thrown if the number of arguments provided is not exactly 1,
+/// or if the argument type is unsupported for boolean conversion.
+/// </exception>
 internal static class CastToBoolFunction
 {
     internal static KeyValueExpressionResult Execute(NodeAst ast, List<KeyValueExpressionResult> arguments)

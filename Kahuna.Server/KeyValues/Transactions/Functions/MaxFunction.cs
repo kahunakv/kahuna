@@ -4,6 +4,11 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 
 namespace Kahuna.Server.KeyValues.Transactions.Functions;
 
+/// <summary>
+/// Represents a function for calculating the maximum value between two numeric arguments
+/// in a key-value expression context. The function supports both long and double types
+/// for the arguments.
+/// </summary>
 internal static class MaxFunction
 {
     internal static KeyValueExpressionResult Execute(NodeAst ast, List<KeyValueExpressionResult> arguments)

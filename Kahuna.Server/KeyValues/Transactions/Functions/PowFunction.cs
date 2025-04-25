@@ -4,6 +4,9 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 
 namespace Kahuna.Server.KeyValues.Transactions.Functions;
 
+/// <summary>
+/// Provides functionality to execute a power function ('pow') operation within the context of key-value expressions.
+/// </summary>
 internal static class PowFunction
 {
     internal static KeyValueExpressionResult Execute(NodeAst ast, List<KeyValueExpressionResult> arguments)

@@ -3,14 +3,25 @@ using System.Diagnostics.CodeAnalysis;
 
 namespace Kahuna.Utils;
 
+/// <summary>
+/// Represents a generic B-Tree data structure for storing key-value pairs.
+/// </summary>
+/// <typeparam name="TKey">The type of the key. Must implement IComparable interface.</typeparam>
+/// <typeparam name="TValue">The type of the value.</typeparam>
 public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 {
     private readonly int _order;
-    
+
     private Node<TKey, TValue>? Root { get; set; }
     
     public int Count { get; internal set; }
 
+    /// <summary>
+    /// Represents a self-balancing B-Tree structure for storing key-value pairs, where keys are always sorted in ascending order.
+    /// Provides efficient insertion, deletion, and search operations.
+    /// </summary>
+    /// <typeparam name="TKey">The type of the keys, which must implement IComparable to ensure proper ordering.</typeparam>
+    /// <typeparam name="TValue">The type of the values associated with the keys.</typeparam>
     public BTree(int order)
     {
         if (order < 3)
@@ -21,10 +32,17 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         Count = 0;
     }
 
+    /// <summary>
+    /// Determines whether the B-Tree contains a specified key.
+    /// </summary>
+    /// <param name="key">The key to locate in the B-Tree.</param>
+    /// <returns>
+    /// True if the key exists in the B-Tree; otherwise, false.
+    /// </returns>
     public bool ContainsKey(TKey key)
     {
         Node<TKey, TValue>? node = Root;
-        
+
         while (node is not null)
         {
             int idx = node.FindIndex(key);
@@ -39,16 +57,28 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         return false;
     }
 
+    /// <summary>
+    /// Attempts to retrieve the value associated with the specified key in the B-Tree.
+    /// </summary>
+    /// <param name="key">The key whose associated value is to be retrieved.</param>
+    /// <param name="value">When this method returns, contains the value associated with the specified key, if the key is found; otherwise, contains the default value for the type of the value parameter. This parameter is passed uninitialized.</param>
+    /// <returns>True if the key exists in the B-Tree and its value is retrieved successfully; otherwise, false.</returns>
     public bool TryGetValue(TKey key, [MaybeNullWhen(false)] out TValue value)
-    {                
-        value = Get(key);        
+    {
+        value = Get(key);
         return value is not null;
     }
-    
+
+    /// <summary>
+    /// Retrieves the value associated with the specified key from the B-Tree.
+    /// If the key does not exist in the tree, the default value for the type of the value is returned.
+    /// </summary>
+    /// <param name="key">The key to locate in the B-Tree.</param>
+    /// <returns>The value associated with the specified key, or the default value for the type of the value if the key is not found.</returns>
     public TValue? Get(TKey key)
     {
         Node<TKey, TValue>? node = Root;
-        
+
         while (node is not null)
         {
             // binary‐search the sorted key array
@@ -69,6 +99,11 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         return default;
     }
 
+    /// <summary>
+    /// Inserts a key-value pair into the B-Tree. If the key already exists, its value is updated.
+    /// </summary>
+    /// <param name="key">The key to be inserted or updated. Must implement IComparable for proper ordering.</param>
+    /// <param name="value">The value associated with the key.</param>
     public void Insert(TKey key, TValue value)
     {
         Root ??= new(_order, true);
@@ -93,6 +128,11 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         }
     }
 
+    /// <summary>
+    /// Removes the specified key from the B-Tree. If the key exists, it is deleted, and the structure is updated accordingly.
+    /// </summary>
+    /// <param name="key">The key to be removed from the B-Tree.</param>
+    /// <returns>True if the key was successfully removed; otherwise, false if the key was not found.</returns>
     public bool Remove(TKey key)
     {
         if (Root is null)
@@ -109,6 +149,11 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         return removed;
     }
 
+    /// <summary>
+    /// Retrieves all key-value pairs contained within the B-Tree in ascending key order,
+    /// starting from the smallest key and traversing through the tree using linked nodes.
+    /// </summary>
+    /// <returns>An enumerable collection of key-value pairs stored in the B-Tree.</returns>
     public IEnumerable<KeyValuePair<TKey, TValue>> GetItems()
     {
         Node<TKey, TValue>? temp = Root;
@@ -129,7 +174,14 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             cursor = cursor.Next;
         }
     }
-    
+
+    /// <summary>
+    /// Retrieves all key-value pairs in the B-Tree within a specified range of keys,
+    /// inclusive of the minimum and maximum keys.
+    /// </summary>
+    /// <param name="minKey">The minimum key of the range. All returned keys will be greater than or equal to this key.</param>
+    /// <param name="maxKey">The maximum key of the range. All returned keys will be less than or equal to this key.</param>
+    /// <returns>A collection of key-value pairs that fall within the specified key range, ordered by ascending key.</returns>
     public IEnumerable<KeyValuePair<TKey, TValue>> GetItems(TKey minKey, TKey maxKey)
     {
         Node<TKey, TValue>? temp = Root;
@@ -161,7 +213,14 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             cursor = cursor.Next;
         }
     }
-    
+
+    /// <summary>
+    /// Retrieves all key-value pairs from the B-Tree where the keys start with the specified prefix.
+    /// This method is only supported for BTree instances where TKey is of type string.
+    /// </summary>
+    /// <param name="prefix">The prefix to match against the keys in the B-Tree. Only keys that begin with this prefix will be included in the results.</param>
+    /// <returns>A collection of key-value pairs where the keys start with the specified prefix, retrieved in lexicographical order.</returns>
+    /// <exception cref="InvalidOperationException">Thrown when TKey is not of type string, as the operation is only valid for string-type keys.</exception>
     public IEnumerable<KeyValuePair<TKey, TValue>> GetByPrefix(string prefix)
     {
         // only valid when TKey is string
@@ -200,10 +259,15 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     }
 }
 
+/// <summary>
+/// Represents a node within a B-Tree data structure. A node contains keys, values, and pointers to child nodes, enabling efficient organization and retrieval of data.
+/// </summary>
+/// <typeparam name="TKey">The type of the keys stored in the node, which must implement the IComparable interface for comparison.</typeparam>
+/// <typeparam name="TValue">The type of the values stored in the node.</typeparam>
 public class Node<TKey, TValue> where TKey : IComparable<TKey>
 {
     internal readonly TKey[] Keys;
-    
+
     internal readonly TValue?[] Values;
     
     internal readonly Node<TKey, TValue>[] Children;

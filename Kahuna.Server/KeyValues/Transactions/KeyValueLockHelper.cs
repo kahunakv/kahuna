@@ -5,6 +5,10 @@ using Kahuna.Server.KeyValues.Transactions.Commands;
 
 namespace Kahuna.Server.KeyValues;
 
+/// <summary>
+/// Provides functionality to assist with acquiring the necessary locks for key-value transactions.
+/// Traverses the AST looking for operations that require locks.
+/// </summary>
 internal sealed class KeyValueLockHelper : BaseCommand
 {
     /// <summary>

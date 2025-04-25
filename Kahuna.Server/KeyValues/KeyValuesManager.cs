@@ -1100,4 +1100,23 @@ internal sealed class KeyValuesManager
         
         return new(response.Type, []);
     }
+
+    /// <summary>
+    /// Starts a new transaction with the specified options.
+    /// </summary>
+    /// <param name="options">The options for configuring the transaction.</param>
+    /// <returns>Returns an <c>HLCTimestamp</c> representing the timestamp of the started transaction.</returns>
+    public Task<HLCTimestamp> StartTransaction(KeyValueTransactionOptions options)
+    {
+        return txCoordinator.StartTransaction(options);
+    }
+
+    public Task<bool> CommitTransaction(HLCTimestamp timestamp)
+    {
+    }
+
+    public Task<bool> RollbackTransaction(HLCTimestamp timestamp)
+    {
+        
+    }
 }

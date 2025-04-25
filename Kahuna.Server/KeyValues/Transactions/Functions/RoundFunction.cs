@@ -4,6 +4,9 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 
 namespace Kahuna.Server.KeyValues.Transactions.Functions;
 
+/// <summary>
+/// Provides functionality to execute a rounding operation on numeric values with a specified precision.
+/// </summary>
 internal static class RoundFunction
 {
     internal static KeyValueExpressionResult Execute(NodeAst ast, List<KeyValueExpressionResult> arguments)

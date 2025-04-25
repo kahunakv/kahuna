@@ -4,6 +4,11 @@ using Kahuna.Server.ScriptParser;
 
 namespace Kahuna.Server.KeyValues.Transactions.Functions;
 
+/// <summary>
+/// Represents a static utility class that implements the 'is_bool' function
+/// in the scripting engine. This function is used to evaluate whether
+/// a given argument is of a boolean type.
+/// </summary>
 internal static class IsBoolFunction
 {
     internal static KeyValueExpressionResult Execute(NodeAst ast, List<KeyValueExpressionResult> arguments)

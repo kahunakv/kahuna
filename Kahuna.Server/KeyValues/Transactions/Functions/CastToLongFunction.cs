@@ -4,6 +4,18 @@ using Kahuna.Server.ScriptParser;
 
 namespace Kahuna.Server.KeyValues.Transactions.Functions;
 
+/// <summary>
+/// Provides a static method to cast a variety of input types to a <c>long</c> type.
+/// Supports calling through various aliases such as "to_int", "to_integer", "to_long", and "to_number".
+/// </summary>
+/// <remarks>
+/// The function processes a single argument and attempts to cast it into a <c>long</c>, based on its type:
+/// - <c>BoolType</c>: Converts <c>true</c> to <c>1</c> and <c>false</c> to <c>0</c>.
+/// - <c>LongType</c>: Returns the argument as-is.
+/// - <c>DoubleType</c>: Performs a cast by truncating the fractional part.
+/// - <c>StringType</c>: Attempts to parse the string into a <c>long</c>, throwing an exception if parsing fails.
+/// Throws a <c>KahunaScriptException</c> for unsupported types or if the number of arguments is incorrect.
+/// </remarks>
 internal static class CastToLongFunction
 {
     internal static KeyValueExpressionResult Execute(NodeAst ast, List<KeyValueExpressionResult> arguments)

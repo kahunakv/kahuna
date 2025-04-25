@@ -6,6 +6,9 @@ using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Transactions.Commands;
 
+/// <summary>
+/// Represents a command that handles the ability to extend the expiry time of a key-value pair.
+/// </summary>
 internal sealed class ExtendCommand : BaseCommand
 {
     public static async Task<KeyValueTransactionResult> Execute(

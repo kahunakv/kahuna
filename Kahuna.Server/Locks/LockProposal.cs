@@ -3,6 +3,12 @@ using Kommander.Time;
 
 namespace Kahuna.Server.Locks;
 
+/// <summary>
+/// Represents a proposal for a lock operation in the system.
+/// This class encapsulates the state and metadata for a lock
+/// associated with a resource, including ownership, expiration,
+/// and fencing information.
+/// </summary>
 public sealed class LockProposal
 {
     public string Resource { get; } 

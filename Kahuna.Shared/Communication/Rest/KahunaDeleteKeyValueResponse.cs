@@ -5,6 +5,9 @@ using System.Text.Json.Serialization;
 
 namespace Kahuna.Shared.Communication.Rest;
 
+/// <summary>
+/// Represents the response for a delete key-value operation in Kahuna.
+/// </summary>
 public sealed class KahunaDeleteKeyValueResponse
 {
     [JsonPropertyName("servedFrom")]

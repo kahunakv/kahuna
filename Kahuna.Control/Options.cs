@@ -2,6 +2,12 @@ using CommandLine;
 
 namespace Kahuna.Control;
 
+/// <summary>
+/// Represents the available options for configuring and executing commands
+/// via the command-line interface for the Kahuna system. This class
+/// provides a variety of optional parameters to customize the behavior
+/// of the kahuna-cli tool.
+/// </summary>
 public sealed class Options
 {
     [Option('c', "connection-source", Required = false, HelpText = "Set the connection string")]

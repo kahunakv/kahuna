@@ -17,7 +17,10 @@ using Kahuna.Server.Communication.Internode;
 namespace Kahuna.Server.Locks;
 
 /// <summary>
-/// LockManager is a singleton class that manages lock actors.
+/// Provides functionality for managing resource locks within the system.
+/// The LockManager class is responsible for coordinating lock-related operations
+/// including acquiring, extending, releasing, and querying locks. Additionally, it
+/// handles replication and log restoration events to maintain consistency across nodes.
 /// </summary>
 public sealed class LockManager
 {
@@ -27,10 +30,30 @@ public sealed class LockManager
 
     private readonly ILogger<IKahuna> logger;
 
+    /// <summary>
+    /// A reference to the background writer actor responsible for processing
+    /// background write requests in a concurrent and non-blocking manner.
+    /// This actor handles operations related to persistence
+    /// and other background tasks required by the LockManager.
+    /// </summary>
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
 
+    /// <summary>
+    /// A router responsible for managing and dispatching ephemeral lock-related requests
+    /// to a dynamic pool of <see cref="LockActor"/> instances. This router handles the
+    /// consistency and routing of <see cref="LockRequest"/> messages that pertain to locks
+    /// with ephemeral durability, ensuring non-persistent, transient lock operations
+    /// are processed efficiently.
+    /// </summary>
     private readonly IActorRef<ConsistentHashActor<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> ephemeralLocksRouter;
-    
+
+    /// <summary>
+    /// A router used to manage persistent lock actors for handling lock requests
+    /// and responses for locks with persistent durability. This router ensures
+    /// that lock operations are consistently hashed, enabling efficient and
+    /// deterministic routing of lock requests to the appropriate lock actor
+    /// instances.
+    /// </summary>
     private readonly IActorRef<ConsistentHashActor<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> persistentLocksRouter;
 
     private readonly LockLocator locator;

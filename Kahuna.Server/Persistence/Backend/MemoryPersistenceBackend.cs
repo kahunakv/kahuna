@@ -15,7 +15,13 @@ public class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
     private readonly ConcurrentDictionary<string, LockContext> locks = new();
     
     private readonly ConcurrentDictionary<string, KeyValueContext> keyValues = new();
-    
+
+    /// <summary>
+    /// Stores locks in the persistence backend. Updates existing locks or adds new ones
+    /// based on the provided list of persistence request items.
+    /// </summary>
+    /// <param name="items">A list of <see cref="PersistenceRequestItem"/> containing the lock data to be stored or updated.</param>
+    /// <returns>Returns <c>true</c> if the locks were successfully stored or updated.</returns>
     public bool StoreLocks(List<PersistenceRequestItem> items)
     {
         foreach (PersistenceRequestItem item in items)
@@ -46,6 +52,12 @@ public class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
         return true;
     }
 
+    /// <summary>
+    /// Stores key-value pairs in the memory persistence backend. Updates existing entries or adds new ones
+    /// based on the provided list of persistence request items.
+    /// </summary>
+    /// <param name="items">A list of <see cref="PersistenceRequestItem"/> containing the key-value data to be stored or updated.</param>
+    /// <returns>Returns <c>true</c> if the key-value pairs were successfully stored or updated.</returns>
     public bool StoreKeyValues(List<PersistenceRequestItem> items)
     {
         foreach (PersistenceRequestItem item in items)
@@ -91,6 +103,12 @@ public class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
         throw new NotImplementedException();
     }
 
+    /// <summary>
+    /// Retrieves a list of key-value pairs where the key starts with the specified prefix.
+    /// The values are returned in a read-only context.
+    /// </summary>
+    /// <param name="prefixKeyName">The prefix used to filter keys in the key-value store.</param>
+    /// <returns>Returns a list of tuples where each tuple contains a key and its associated <see cref="ReadOnlyKeyValueContext"/>.</returns>
     public List<(string, ReadOnlyKeyValueContext)> GetKeyValueByPrefix(string prefixKeyName)
     {
         List<(string, ReadOnlyKeyValueContext)> items = [];

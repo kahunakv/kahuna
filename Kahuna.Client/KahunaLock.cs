@@ -141,7 +141,7 @@ public sealed class KahunaLock : IAsyncDisposable
         if (string.IsNullOrEmpty(servedFrom) || !client.Options.UpgradeUrls)
             return await client.GetLockInfo(resource, durability, cancellationToken);
         
-        return await client.Communication.Get(servedFrom, resource, durability, cancellationToken);
+        return await client.Communication.GetLock(servedFrom, resource, durability, cancellationToken);
     }
 
     /// <summary>

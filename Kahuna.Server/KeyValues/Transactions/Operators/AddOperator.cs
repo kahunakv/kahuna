@@ -4,6 +4,10 @@ using Kahuna.Server.ScriptParser;
 
 namespace Kahuna.Server.KeyValues.Transactions.Operators;
 
+/// <summary>
+/// Provides functionality to evaluate math addition operations within the context of a
+/// key-value transaction represented by a specific AST (Abstract Syntax Tree) node.
+/// </summary>
 internal static class AddOperator
 {
     public static KeyValueExpressionResult Eval(KeyValueTransactionContext context, NodeAst ast)

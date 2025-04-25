@@ -4,6 +4,12 @@ using Kahuna.Server.ScriptParser;
 
 namespace Kahuna.Server.KeyValues.Transactions.Functions;
 
+/// <summary>
+/// Provides functionality to execute the 'count' function within key-value transactions.
+/// </summary>
+/// <remarks>
+/// This function executes operations to count the number of elements in an array-type argument.
+/// </remarks>
 internal static class CountFunction
 {
     internal static KeyValueExpressionResult Execute(NodeAst ast, List<KeyValueExpressionResult> arguments)

@@ -34,6 +34,12 @@ internal sealed class GrpcBatcherResponse
     
     public GrpcScanAllByPrefixResponse? ScanByPrefix { get; }
     
+    public GrpcStartTransactionResponse? StartTransaction { get; }
+    
+    public GrpcCommitTransactionResponse? CommitTransaction { get; }
+    
+    public GrpcRollbackTransactionResponse? RollbackTransaction { get; }
+    
     public GrpcBatcherResponse(GrpcTryLockResponse tryLock)
     {
         TryLock = tryLock;
@@ -92,5 +98,20 @@ internal sealed class GrpcBatcherResponse
     public GrpcBatcherResponse(GrpcScanAllByPrefixResponse scanByPrefix)
     {
         ScanByPrefix = scanByPrefix;
+    }
+    
+    public GrpcBatcherResponse(GrpcStartTransactionResponse startTransaction)
+    {
+        StartTransaction = startTransaction;
+    }
+    
+    public GrpcBatcherResponse(GrpcCommitTransactionResponse commitTransaction)
+    {
+        CommitTransaction = commitTransaction;
+    }
+    
+    public GrpcBatcherResponse(GrpcRollbackTransactionResponse rollbackTransaction)
+    {
+        RollbackTransaction = rollbackTransaction;
     }
 }

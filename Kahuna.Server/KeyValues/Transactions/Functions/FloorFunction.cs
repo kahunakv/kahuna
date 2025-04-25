@@ -4,6 +4,10 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 
 namespace Kahuna.Server.KeyValues.Transactions.Functions;
 
+/// <summary>
+/// Provides the implementation for the 'floor' function, which computes
+/// the largest integer less than or equal to the given input.
+/// </summary>
 internal static class FloorFunction
 {
     internal static KeyValueExpressionResult Execute(NodeAst ast, List<KeyValueExpressionResult> arguments)

@@ -7,6 +7,14 @@ using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Transactions.Commands;
 
+/// <summary>
+/// Represents a command for retrieving a key-value pair within a transactional context.
+/// </summary>
+/// <remarks>
+/// The GetCommand is used to execute operations that fetch data associated with a given key
+/// within the key-value store, ensuring compliance with transaction durability settings and
+/// leveraging the provided transaction context.
+/// </remarks>
 internal sealed class GetCommand : BaseCommand
 {
     public static async Task<KeyValueTransactionResult> Execute(
@@ -17,12 +25,9 @@ internal sealed class GetCommand : BaseCommand
         CancellationToken cancellationToken
     )
     {
-        if (ast.leftAst is null)
+        if (ast.leftAst?.yytext is null)
             throw new KahunaScriptException("Invalid key", ast.yyline);
-        
-        if (ast.leftAst.yytext is null)
-            throw new KahunaScriptException("Invalid key", ast.yyline);
-        
+
         string keyName = GetKeyName(context, ast.leftAst);
         
         if (context.Locking == KeyValueTransactionLocking.Optimistic)

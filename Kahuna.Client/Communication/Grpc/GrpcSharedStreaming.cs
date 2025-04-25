@@ -17,12 +17,27 @@ namespace Kahuna.Client.Communication;
 /// </summary>
 internal sealed class GrpcSharedStreaming
 {
-    public SemaphoreSlim Semaphore { get; } = new(1, 1);    
-    
+    public SemaphoreSlim Semaphore { get; } = new(1, 1);
+
+    /// <summary>
+    /// Represents a duplex streaming call for handling lock requests and responses
+    /// in a gRPC communication context. It facilitates asynchronous communication
+    /// between the client and server for managing distributed locking operations.
+    /// </summary>
     public AsyncDuplexStreamingCall<GrpcBatchClientLockRequest, GrpcBatchClientLockResponse> LockStreaming { get; }
-    
+
+    /// <summary>
+    /// Represents a duplex streaming call for handling key-value requests and responses
+    /// in a gRPC communication context. It enables asynchronous processing of
+    /// batched key-value operations between the client and server.
+    /// </summary>
     public AsyncDuplexStreamingCall<GrpcBatchClientKeyValueRequest, GrpcBatchClientKeyValueResponse> KeyValueStreaming { get; }
     
+    /// <summary>
+    /// Constructor
+    /// </summary>
+    /// <param name="lockStreaming"></param>
+    /// <param name="keyValueStreaming"></param>
     public GrpcSharedStreaming(
         AsyncDuplexStreamingCall<GrpcBatchClientLockRequest, GrpcBatchClientLockResponse> lockStreaming,
         AsyncDuplexStreamingCall<GrpcBatchClientKeyValueRequest, GrpcBatchClientKeyValueResponse> keyValueStreaming        

@@ -12,6 +12,10 @@ using Kahuna.Shared.Locks;
 
 namespace Kahuna.Server.Locks;
 
+/// <summary>
+/// The LockRestorer class is responsible for restoring lock state based on persisted log data.
+/// It deserializes log entries and performs the necessary actions to restore the distributed lock state.
+/// </summary>
 internal sealed class LockRestorer
 {
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
@@ -20,6 +24,12 @@ internal sealed class LockRestorer
 
     private readonly ILogger<IKahuna> logger;
 
+    /// <summary>
+    /// Constructor
+    /// </summary>
+    /// <param name="backgroundWriter"></param>
+    /// <param name="raft"></param>
+    /// <param name="logger"></param>
     public LockRestorer(IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, IRaft raft, ILogger<IKahuna> logger)
     {
         this.backgroundWriter = backgroundWriter;
@@ -27,6 +37,13 @@ internal sealed class LockRestorer
         this.logger = logger;
     }
 
+    /// <summary>
+    /// Restores the distributed lock state based on the provided partition ID and log entry.
+    /// It processes the log data to apply the appropriate lock state changes.
+    /// </summary>
+    /// <param name="partitionId">The identifier of the partition to restore.</param>
+    /// <param name="log">The log containing serialized lock state data.</param>
+    /// <returns>True if restoration succeeds or the log contains no data; false otherwise.</returns>
     public bool Restore(int partitionId, RaftLog log)
     {
         if (log.LogData is null || log.LogData.Length == 0)

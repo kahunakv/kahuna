@@ -3,6 +3,18 @@ using Kahuna.Server.ScriptParser;
 
 namespace Kahuna.Server.KeyValues.Transactions.Operators;
 
+/// <summary>
+/// Represents a static operator used to evaluate logical AND expressions within a key-value transaction context.
+/// </summary>
+/// <remarks>
+/// This operator processes left and right abstract syntax tree (AST) nodes to determine the result
+/// of a logical AND operation based on their types and values. Supported value types include Boolean,
+/// Long, and Double. The result of the operation is returned as a KeyValueExpressionResult.
+/// </remarks>
+/// <exception cref="KahunaScriptException">
+/// Thrown if the left or right AST node is null, or if the operand types are incompatible for
+/// an AND operation.
+/// </exception>
 internal static class AndOperator
 {
     public static KeyValueExpressionResult Eval(KeyValueTransactionContext context, NodeAst ast)

@@ -13,6 +13,12 @@ public sealed class ScriptCacheEntry
     
     public DateTime Expiration { get; set; }
 
+    /// <summary>
+    /// Constructor
+    /// </summary>
+    /// <param name="hash"></param>
+    /// <param name="ast"></param>
+    /// <param name="expiration"></param>
     public ScriptCacheEntry(string hash, NodeAst ast, DateTime expiration)
     {
         Hash = hash;

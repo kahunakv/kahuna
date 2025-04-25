@@ -6,6 +6,10 @@ using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Transactions.Commands;
 
+/// <summary>
+/// Represents a command that performs a set operation within a key-value transactional context.
+/// This command interacts with the key-value store to set or update data based on the provided parameters.
+/// </summary>
 internal sealed class SetCommand : BaseCommand
 {
     public static async Task<KeyValueTransactionResult> Execute(
@@ -16,12 +20,9 @@ internal sealed class SetCommand : BaseCommand
         CancellationToken cancellationToken
     )
     {
-        if (ast.leftAst is null)
+        if (ast.leftAst?.yytext is null)
             throw new KahunaScriptException("Invalid key", ast.yyline);
-        
-        if (ast.leftAst.yytext is null)
-            throw new KahunaScriptException("Invalid key", ast.yyline);
-        
+
         if (ast.rightAst is null)
             throw new KahunaScriptException("Invalid value", ast.yyline);
         

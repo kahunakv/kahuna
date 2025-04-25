@@ -11,6 +11,9 @@ using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Control.Commands;
 
+/// <summary>
+/// Represents a command for retrieving a key-value pair using the specified connection and options.
+/// </summary>
 public static class KeyValueGetCommand
 {    
     public static async Task Execute(KahunaClient connection, string optsGet, string? format)

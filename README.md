@@ -2,18 +2,14 @@
 
 <img src="https://github.com/user-attachments/assets/d73a177f-5b9a-4e63-9b8d-9bcf067da002" height="350" alt="kahuna">
 
-Kahuna is an open-source solution designed to help developers coordinate modern distributed systems by integrating three 
-critical functionalities: **distributed locking, a distributed key/value store and a distributed sequencer.**
+Distributed systems can become highly complex due to the many reasons: execution may be non-deterministic, unexpected edge cases, and specific scenarios that make it difficult to reason about solid solutions that ensure system robustness.
 
-By enabling synchronized access to shared resources, efficient data storage and retrieval, and globally ordered event sequencing, 
-Kahuna offers a new approach to managing distributed workloads. Built on a partitioned architecture coordinated via **Raft Groups**, 
-it delivers scalability, reliability and simplicity, making it a great choice for 
-applications requiring strong consistency and high availability.
+Kahuna is an open-source project aimed at providing out-of-the-box solutions for developers and applications that need to solve common problems related to distributed systems.
+
+It is primarily focused on the following areas: distributed locking, a distributed key/value store and a distributed sequencer.
 
 ### **Distributed Locking**
-Kahuna addresses the challenge of synchronizing access to shared resources across multiple 
-nodes or processes, ensuring consistency and preventing race conditions. Its partitioned locking 
-mechanism ensures efficient coordination for databases, files, and other shared services.
+Kahuna addresses the challenge of synchronizing access to shared resources across multiple nodes or processes, ensuring consistency and preventing race conditions. Its locking mechanism ensures efficient coordination for many use cases.
 
 [More](https://kahunakv.github.io/docs/distributed-locks)
 
@@ -40,6 +36,10 @@ it has been used to refer to doctors, surgeons and dentists,
 as well as priests, ministers, and sorcerers.
 
 Check the [documentation](https://kahunakv.github.io/) for more information on architecture, installation, and usage examples.
+
+> [!WARNING]
+> **BETA SOFTWARE**
+> Kahuna is under heavy development and some features may be unstable!
 
 ## Architecture
 

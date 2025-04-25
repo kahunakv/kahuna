@@ -6,6 +6,9 @@ using Kahuna.Shared.Locks;
 
 namespace Kahuna.Server.Locks;
 
+/// <summary>
+/// A core class responsible for locating the appropriate node or partition to handle lock-related operations.
+/// </summary>
 internal sealed class LockLocator
 {
     private readonly LockManager manager;

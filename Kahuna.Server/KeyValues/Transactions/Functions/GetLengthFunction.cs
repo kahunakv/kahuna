@@ -4,6 +4,12 @@ using Kahuna.Server.ScriptParser;
 
 namespace Kahuna.Server.KeyValues.Transactions.Functions;
 
+/// <summary>
+/// Provides functionality to compute the length of a given argument. The argument must be of type string.
+/// </summary>
+/// <remarks>
+/// This class includes a method to calculate the length of a string value. If the argument type is not a string, an exception is thrown.
+/// </remarks>
 internal static class GetLengthFunction
 {
     internal static KeyValueExpressionResult Execute(NodeAst ast, List<KeyValueExpressionResult> arguments)

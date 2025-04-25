@@ -10,6 +10,11 @@ using Nixie;
 
 namespace Kahuna.Server.Locks;
 
+/// <summary>
+/// The LockReplicator class handles the replication of lock-related requests within a distributed system
+/// using a Raft consensus protocol. This includes processing various types of lock operations such as
+/// acquiring locks, releasing locks, and extending lock durations.
+/// </summary>
 internal sealed class LockReplicator
 {
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
@@ -18,6 +23,12 @@ internal sealed class LockReplicator
 
     private readonly ILogger<IKahuna> logger;
 
+    /// <summary>
+    /// Constructor
+    /// </summary>
+    /// <param name="backgroundWriter"></param>
+    /// <param name="raft"></param>
+    /// <param name="logger"></param>
     public LockReplicator(IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, IRaft raft, ILogger<IKahuna> logger)
     {
         this.backgroundWriter = backgroundWriter;
@@ -25,6 +36,21 @@ internal sealed class LockReplicator
         this.logger = logger;
     }
 
+    /// <summary>
+    /// Replicates a lock-related operation within the distributed system by processing
+    /// the provided log data and invoking the appropriate action based on the lock request type.
+    /// </summary>
+    /// <param name="partitionId">
+    /// The identifier of the partition to which the lock operation belongs.
+    /// </param>
+    /// <param name="log">
+    /// The Raft log entry containing the lock operation data to be replicated.
+    /// </param>
+    /// <returns>
+    /// A boolean value indicating whether the replication operation was successful.
+    /// Returns true if the replication was executed successfully or skipped due to
+    /// empty log data. Returns false if an error occurs during processing.
+    /// </returns>
     public bool Replicate(int partitionId, RaftLog log)
     {
         if (log.LogData is null || log.LogData.Length == 0)

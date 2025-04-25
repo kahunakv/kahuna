@@ -4,6 +4,10 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 
 namespace Kahuna.Server.KeyValues.Transactions.Functions;
 
+/// <summary>
+/// Provides an implementation for the `is_null` function which checks whether the provided argument
+/// is of type NullType.
+/// </summary>
 internal static class IsNullFunction
 {
     internal static KeyValueExpressionResult Execute(NodeAst ast, List<KeyValueExpressionResult> arguments)

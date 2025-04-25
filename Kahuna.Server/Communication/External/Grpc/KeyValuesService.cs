@@ -818,6 +818,91 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return response;
     }
 
+    public override async Task<GrpcStartTransactionResponse> StartTransaction(GrpcStartTransactionRequest request, ServerCallContext context)
+    {
+        return await StartTransactionInternal(request, context);
+    }
+
+    internal async Task<GrpcStartTransactionResponse> StartTransactionInternal(GrpcStartTransactionRequest request, ServerCallContext context)
+    {                
+        if (string.IsNullOrEmpty(request.UniqueId))
+            return new()
+            {
+                Type = GrpcKeyValueResponseType.TypeInvalidInput
+            };
+            
+        HLCTimestamp transactionId = await keyValues.StartTransaction(new()
+        {
+            Locking = (KeyValueTransactionLocking)request.LockingType,
+            Timeout = request.Timeout,
+            AsyncRelease = request.AsyncRelease,
+        });
+
+        GrpcStartTransactionResponse response = new()
+        {
+            Type = GrpcKeyValueResponseType.TypeGot,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C
+        };
+        
+        //if (result.Items.Count > 0)
+        //    response.Items.Add(GetKeyValueItems(result.Items));
+        
+        return response;
+    }
+    
+    public override async Task<GrpcCommitTransactionResponse> CommitTransaction(GrpcCommitTransactionRequest request, ServerCallContext context)
+    {
+        return await CommitTransactionInternal(request, context);
+    }
+
+    internal async Task<GrpcCommitTransactionResponse> CommitTransactionInternal(GrpcCommitTransactionRequest request, ServerCallContext context)
+    {                
+        if (string.IsNullOrEmpty(request.UniqueId))
+            return new()
+            {
+                Type = GrpcKeyValueResponseType.TypeInvalidInput
+            };
+            
+        bool success = await keyValues.CommitTransaction(new(request.TransactionIdPhysical, request.TransactionIdCounter));
+
+        GrpcCommitTransactionResponse response = new()
+        {
+            Type = GrpcKeyValueResponseType.TypeSet
+        };
+        
+        //if (result.Items.Count > 0)
+        //    response.Items.Add(GetKeyValueItems(result.Items));
+        
+        return response;
+    }
+    
+    public override async Task<GrpcRollbackTransactionResponse> RollbackTransaction(GrpcRollbackTransactionRequest request, ServerCallContext context)
+    {
+        return await RollbackTransactionInternal(request, context);
+    }
+
+    internal async Task<GrpcRollbackTransactionResponse> RollbackTransactionInternal(GrpcRollbackTransactionRequest request, ServerCallContext context)
+    {                
+        if (string.IsNullOrEmpty(request.UniqueId))
+            return new()
+            {
+                Type = GrpcKeyValueResponseType.TypeInvalidInput
+            };
+            
+        bool success = await keyValues.RollbackTransaction(new(request.TransactionIdPhysical, request.TransactionIdCounter));
+
+        GrpcRollbackTransactionResponse response = new()
+        {
+            Type = GrpcKeyValueResponseType.TypeSet
+        };
+        
+        //if (result.Items.Count > 0)
+        //    response.Items.Add(GetKeyValueItems(result.Items));
+        
+        return response;
+    }
+
     private static IEnumerable<GrpcKeyValueByPrefixItemResponse> GetKeyValueItems(List<(string, ReadOnlyKeyValueContext)> resultItems)
     {
         foreach ((string key, ReadOnlyKeyValueContext context) in resultItems)

@@ -1,9 +1,7 @@
 
-using System.Text;
 using Kahuna.Client;
 using Kahuna.Client.Communication;
 using Kahuna.Shared.KeyValue;
-using Kahuna.Shared.Locks;
 
 namespace Kahuna.Tests.Client;
 
@@ -942,8 +940,7 @@ public class TestKeyValues
 
         KahunaKeyValue result = await client.SetKeyValue(
             keyName, 
-            "some-value", 
-            0, 
+            "some-value",  
             flags: KeyValueFlags.Set, 
             durability: durability,
             cancellationToken: TestContext.Current.CancellationToken
@@ -954,8 +951,7 @@ public class TestKeyValues
         
         result = await client.SetKeyValue(
             keyName, 
-            "some-value-2", 
-            0, 
+            "some-value-2",             
             flags: KeyValueFlags.Set, 
             durability: durability,
             cancellationToken: TestContext.Current.CancellationToken
@@ -989,8 +985,7 @@ public class TestKeyValues
         
         result = await client.SetKeyValue(
             keyName, 
-            "some-value-3", 
-            0, 
+            "some-value-3",  
             flags: KeyValueFlags.Set, 
             durability: durability,
             cancellationToken: TestContext.Current.CancellationToken
@@ -1089,11 +1084,8 @@ public class TestKeyValues
         (bool success, List<string> items) = await client.GetByPrefix(prefix, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(success);
 
-        foreach (string item in items)
-        {
-            outputHelper.WriteLine(item);
-            Assert.StartsWith(prefix, item);
-        }
+        foreach (string item in items)        
+            Assert.StartsWith(prefix, item);        
 
         Assert.Equal(3, items.Count);
     }

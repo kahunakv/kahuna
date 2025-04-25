@@ -4,6 +4,19 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 
 namespace Kahuna.Server.KeyValues.Transactions.Functions;
 
+/// <summary>
+/// Provides an implementation of the 'min' function that evaluates the minimum
+/// between two numeric arguments of type long or double at runtime.
+/// </summary>
+/// <remarks>
+/// The 'min' function identifies the smaller value between two numeric arguments.
+/// Both arguments must be either a long or a double type. If either argument is
+/// of a non-numeric type, the method throws an exception.
+/// </remarks>
+/// <exception cref="KahunaScriptException">
+/// Thrown if the number of arguments is not exactly two, or if any of the arguments
+/// are not of the expected numeric types (long or double).
+/// </exception>
 internal static class MinFunction
 {
     internal static KeyValueExpressionResult Execute(NodeAst ast, List<KeyValueExpressionResult> arguments)

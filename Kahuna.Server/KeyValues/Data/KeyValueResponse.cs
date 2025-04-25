@@ -4,6 +4,15 @@ using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues;
 
+/// <summary>
+/// Represents a response object for the KeyValueActor operations
+/// </summary>
+/// <remarks>
+/// The <see cref="KeyValueResponse"/> class encapsulates the result of operations performed within the
+/// key-value context. It is designed to handle various response scenarios, including success, errors,
+/// locks, and other specific outcomes. The response may include additional metadata such as the revision
+/// number, timestamp, or context items depending on the operation performed.
+/// </remarks>
 public sealed class KeyValueResponse
 {
     public KeyValueResponseType Type { get; }

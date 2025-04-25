@@ -22,16 +22,39 @@ namespace Kahuna.Server.Persistence.Backend;
 /// </remarks>
 public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
 {
+    /// <summary>
+    /// Represents the maximum number of shards used in the SQLite persistence backend.
+    /// </summary>
+    /// <remarks>
+    /// The <c>MaxShards</c> value determines the number of partitioned storage segments
+    /// within the SQLite persistence system. This value is used to calculate shard indices
+    /// for distributing and managing data effectively. It ensures performance scaling
+    /// by allowing resource segregation based on shard calculations.
+    /// </remarks>
     private const int MaxShards = 8;
-    
+       
     private readonly SemaphoreSlim semaphore = new(1, 1);
-    
+
+    /// <summary>
+    /// Manages a collection of SQLite database connections, organized by shard identifiers.
+    /// </summary>
+    /// <remarks>
+    /// The <c>connections</c> dictionary stores tuples containing a <see cref="ReaderWriterLock"/>
+    /// and a <see cref="SqliteConnection"/> instance for each shard. This structure allows for
+    /// efficient concurrent access and connection management to ensure thread-safe operations
+    /// within the persistence backend.
+    /// </remarks>
     private readonly Dictionary<int, (ReaderWriterLock, SqliteConnection)> connections = new();
     
     private readonly string path;
     
     private readonly string dbRevision;
     
+    /// <summary>
+    /// Constructor
+    /// </summary>
+    /// <param name="path"></param>
+    /// <param name="dbRevision"></param>
     public SqlitePersistenceBackend(string path = ".", string dbRevision = "v1")
     {
         this.path = path;
@@ -164,19 +187,19 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
         try
         {
             const string insert = """
-                                  INSERT INTO locks (resource, owner, expiresPhysical, expiresCounter, fencingToken, state) 
-                                  VALUES (@resource, @owner, @expiresPhysical, @expiresCounter, @fencingToken, @state) 
-                                  ON CONFLICT(resource) DO UPDATE SET 
-                                  owner=@owner, 
-                                  expiresPhysical=@expiresPhysical, 
-                                  expiresCounter=@expiresCounter,
-                                  lastUsedPhysical=@lastUsedPhysical, 
-                                  lastUsedCounter=@lastUsedCounter,
-                                  lastModifiedPhysical=@lastModifiedPhysical, 
-                                  lastModifiedCounter=@lastModifiedCounter,
-                                  fencingToken=@fencingToken, 
-                                  state=@state;
-                                  """;
+              INSERT INTO locks (resource, owner, expiresPhysical, expiresCounter, fencingToken, state) 
+              VALUES (@resource, @owner, @expiresPhysical, @expiresCounter, @fencingToken, @state) 
+              ON CONFLICT(resource) DO UPDATE SET 
+              owner=@owner, 
+              expiresPhysical=@expiresPhysical, 
+              expiresCounter=@expiresCounter,
+              lastUsedPhysical=@lastUsedPhysical, 
+              lastUsedCounter=@lastUsedCounter,
+              lastModifiedPhysical=@lastModifiedPhysical, 
+              lastModifiedCounter=@lastModifiedCounter,
+              fencingToken=@fencingToken, 
+              state=@state;
+              """;
             
             foreach (PersistenceRequestItem item in items)
             {
@@ -421,6 +444,11 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
         return null;
     }
 
+    /// <summary>
+    /// Retrieves the key-value context associated with the specified key name.
+    /// </summary>
+    /// <param name="keyName">The name of the key for which to retrieve the associated KeyValueContext.</param>
+    /// <returns>An instance of <see cref="KeyValueContext"/> if the key exists, or null if no context is found.</returns>
     public KeyValueContext? GetKeyValue(string keyName)
     {
         try

@@ -6,6 +6,11 @@ using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Transactions.Commands;
 
+/// <summary>
+/// Represents a command for assigning variables within a transaction context.
+/// The LetCommand assigns the result of a evaluated right-hand expression to a specified
+/// left-hand variable within the transaction context.
+/// </summary>
 internal sealed class LetCommand : BaseCommand
 {
     public static KeyValueTransactionResult Execute(
@@ -13,12 +18,9 @@ internal sealed class LetCommand : BaseCommand
         NodeAst ast
     )
     {
-        if (ast.leftAst is null)
+        if (ast.leftAst is null || ast.rightAst is null)
             throw new KahunaScriptException("Invalid LET expression", ast.yyline);
-        
-        if (ast.rightAst is null)
-            throw new KahunaScriptException("Invalid LET expression", ast.yyline);
-        
+
         KeyValueExpressionResult result = KeyValueTransactionExpression.Eval(context, ast.rightAst);
         
         context.SetVariable(ast.leftAst, ast.leftAst.yytext!, result);

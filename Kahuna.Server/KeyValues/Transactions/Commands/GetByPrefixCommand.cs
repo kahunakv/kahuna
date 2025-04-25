@@ -7,6 +7,14 @@ using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Transactions.Commands;
 
+/// <summary>
+/// Represents a command that retrieves key-value pairs matching a specified prefix.
+/// </summary>
+/// <remarks>
+/// The <c>GetByPrefixCommand</c> is a transactional command used within the key-value store
+/// system. It facilitates fetching all key-value pairs that share a common prefix key,
+/// executing the asynchronous retrieval via the provided manager and transaction context.
+/// </remarks>
 internal sealed class GetByPrefixCommand : BaseCommand
 {
     public static async Task<KeyValueTransactionResult> Execute(

@@ -3,6 +3,13 @@ using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues;
 
+/// <summary>
+/// Represents a key-value entry in a multi-version concurrency control (MVCC) system.
+/// </summary>
+/// <remarks>
+/// This class acts as a data structure for storing metadata and state related to
+/// a key-value entry, supporting versioning, state tracking, expiration, and modification timestamps.
+/// </remarks>
 public sealed class KeyValueMvccEntry
 {
     /// <summary>

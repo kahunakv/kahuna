@@ -4,6 +4,11 @@ using Kahuna.Server.Diagnostics;
 
 namespace Kahuna.Services;
 
+/// <summary>
+/// The ReplicationService class is a background service responsible for managing the replication process
+/// within a Kahuna cluster. This class handles interactions between the Raft distributed consensus
+/// algorithm and the application's main functionality by subscribing to and responding to Raft events.
+/// </summary>
 public sealed class ReplicationService : BackgroundService //, IDisposable
 {
     private readonly IKahuna kahuna;

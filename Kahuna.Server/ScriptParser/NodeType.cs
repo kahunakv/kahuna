@@ -1,6 +1,9 @@
 
 namespace Kahuna.Server.ScriptParser;
 
+/// <summary>
+/// Represents various types of nodes used in script parsing and execution contexts.
+/// </summary>
 public enum NodeType
 {
     NullType,

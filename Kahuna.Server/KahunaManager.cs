@@ -1,7 +1,5 @@
 
-using Kahuna.Server.Communication.Internode;
 using Nixie;
-using Nixie.Routers;
 
 using Kommander;
 using Kommander.Data;
@@ -17,6 +15,7 @@ using Kahuna.Server.Replication;
 using Kahuna.Server.ScriptParser;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
+using Kahuna.Server.Communication.Internode;
 
 namespace Kahuna;
 
@@ -690,6 +689,16 @@ public sealed class KahunaManager : IKahuna
     public Task<KeyValueGetByPrefixResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability)
     {
         return keyValues.ScanAllByPrefix(prefixKeyName, durability);
+    }
+
+    /// <summary>
+    /// Starts a new interactive transaction with the specified options.
+    /// </summary>
+    /// <param name="options">The options to configure the transaction.</param>
+    /// <returns>Returns the timestamp of the started transaction.</returns>
+    public Task<HLCTimestamp> StartTransaction(KeyValueTransactionOptions options)
+    {
+        return keyValues.StartTransaction(options);
     }
     
     public async Task<bool> OnLogRestored(int partitionId, RaftLog log)

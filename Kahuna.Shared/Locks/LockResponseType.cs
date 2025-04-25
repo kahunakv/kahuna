@@ -1,6 +1,10 @@
 
 namespace Kahuna.Shared.Locks;
 
+/// <summary>
+/// Represents the various response types that can be returned during operations
+/// involving locking mechanisms in the system.
+/// </summary>
 public enum LockResponseType
 {
     Locked = 0,

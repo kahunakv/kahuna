@@ -21,12 +21,36 @@ namespace Kahuna.Server.Persistence.Backend;
 /// </remarks>
 public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
 {
+    /// <summary>
+    /// Represents the maximum allowable size, in bytes, for a serialized message
+    /// within the persistence backend. This limit is applied to both lock and
+    /// key-value messages being processed to ensure they do not exceed memory
+    /// constraints and to maintain efficient performance.
+    /// </summary>
     private const int MaxMessageSize = 1024;
-    
+
+    /// <summary>
+    /// Defines a constant string value used as a marker suffix appended to keys
+    /// within the database operations. This marker is utilized to represent the
+    /// "current" version of an item in RocksDB storage, ensuring unique identification
+    /// of the latest state of a record.
+    /// </summary>
     private const string CurrentMarker = "~CURRENT";
-    
+
+    /// <summary>
+    /// Manages memory streams efficiently by utilizing the RecyclableMemoryStreamManager,
+    /// which is designed to reduce memory fragmentation and improve memory allocation
+    /// performance for I/O operations. This variable is used to acquire recyclable memory
+    /// streams throughout the RocksDbPersistenceBackend implementation to handle operations
+    /// like serialization and deserialization efficiently.
+    /// </summary>
     private static readonly RecyclableMemoryStreamManager manager = new();
-    
+
+    /// <summary>
+    /// Represents the default write options for write operations in the persistence backend.
+    /// Configured with synchronization enabled to ensure durability by flushing changes to disk
+    /// before returning control to the calling code.
+    /// </summary>
     private static readonly WriteOptions DefaultWriteOptions = new WriteOptions().SetSync(true);
     
     private readonly RocksDb db;
@@ -133,7 +157,12 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
         
         batch.Put(index2, serialized, cf: columnFamily);
     }
-    
+
+    /// <summary>
+    /// Stores a collection of key-value pairs and their associated metadata into the persistence backend.
+    /// </summary>
+    /// <param name="items">A list of <see cref="PersistenceRequestItem"/> objects, each representing key-value pairs and metadata to be stored.</param>
+    /// <returns>Returns <c>true</c> if the operation is successfully completed.</returns>
     public bool StoreKeyValues(List<PersistenceRequestItem> items)
     {
         using WriteBatch batch = new();
@@ -163,6 +192,23 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
         return true;
     }
 
+    /// <summary>
+    /// Adds serialized representation of a key-value message to the WriteBatch in RocksDB,
+    /// associating it with specific keys and a column family.
+    /// This method handles the creation of indices for current marker and revision-specific keys.
+    /// </summary>
+    /// <param name="batch">
+    /// The WriteBatch used to batch operations for writing into RocksDB.
+    /// </param>
+    /// <param name="item">
+    /// The persistence request item containing the key and revision data used for creating the entry.
+    /// </param>
+    /// <param name="kvm">
+    /// The RocksDbKeyValueMessage object holding metadata and value to be stored.
+    /// </param>
+    /// <param name="columnFamily">
+    /// The RocksDB column family handle where the key-value pair will be stored.
+    /// </param>
     private static void PutStoreItems(WriteBatch batch, PersistenceRequestItem item, RocksDbKeyValueMessage kvm, ColumnFamilyHandle columnFamily)
     {
         byte[] serialized = Serialize(kvm);
@@ -182,6 +228,14 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
         batch.Put(index2, serialized, cf: columnFamily);
     }
 
+    /// <summary>
+    /// Retrieves the lock context associated with the specified resource.
+    /// </summary>
+    /// <param name="resource">The unique identifier of the resource for which the lock context is being retrieved.</param>
+    /// <returns>
+    /// A <see cref="LockContext"/> instance containing details about the lock if it exists;
+    /// otherwise, null if no lock is associated with the specified resource.
+    /// </returns>
     public LockContext? GetLock(string resource)
     {
         Span<byte> buffer = stackalloc byte[Encoding.UTF8.GetByteCount(resource)];
@@ -212,6 +266,15 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
         return context;
     }
 
+    /// <summary>
+    /// Retrieves the key-value context associated with the specified key name. If the key does not exist,
+    /// the method returns null.
+    /// </summary>
+    /// <param name="keyName">The name of the key to retrieve the associated key-value context.</param>
+    /// <returns>
+    /// A <see cref="KeyValueContext"/> object containing the value, revision, expiration details, and other metadata
+    /// associated with the key, or null if the key does not exist.
+    /// </returns>
     public KeyValueContext? GetKeyValue(string keyName)
     {
         string currentKey = keyName + CurrentMarker;
@@ -245,6 +308,15 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
         return context;
     }
 
+    /// <summary>
+    /// Retrieves a key-value revision based on the specified key name and revision number.
+    /// </summary>
+    /// <param name="keyName">The name of the key to retrieve.</param>
+    /// <param name="revision">The specific revision number of the key to retrieve.</param>
+    /// <returns>
+    /// A <see cref="KeyValueContext"/> object containing the key-value pair metadata and value,
+    /// or <c>null</c> if the key or revision is not found.
+    /// </returns>
     public KeyValueContext? GetKeyValueRevision(string keyName, long revision)
     {
         string keyRevision = string.Concat(keyName, "~", revision);
@@ -278,6 +350,11 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
         return context;
     }
 
+    /// <summary>
+    /// Retrieves a list of key-value pairs that match the specified prefix key.
+    /// </summary>
+    /// <param name="prefixKeyName">The prefix string used to filter and retrieve matching key-value pairs.</param>
+    /// <returns>A list of tuples where each tuple contains a string key and a corresponding <see cref="ReadOnlyKeyValueContext"/> value.</returns>
     public List<(string, ReadOnlyKeyValueContext)> GetKeyValueByPrefix(string prefixKeyName)
     {
         List<(string, ReadOnlyKeyValueContext)> result = [];
@@ -327,6 +404,14 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
         return result;
     }
 
+    /// <summary>
+    /// Serializes a provided <see cref="RocksDbLockMessage"/> instance into a byte array.
+    /// This method ensures that larger messages, in particular those with an Owner
+    /// property exceeding the maximum allowed size, are handled efficiently by utilizing
+    /// a recyclable memory stream.
+    /// </summary>
+    /// <param name="message">The <see cref="RocksDbLockMessage"/> instance to be serialized.</param>
+    /// <returns>A byte array representation of the serialized <see cref="RocksDbLockMessage"/>.</returns>
     private static byte[] Serialize(RocksDbLockMessage message)
     {
         if (!message.Owner.IsEmpty && message.Owner.Length >= MaxMessageSize)
@@ -340,7 +425,14 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
         message.WriteTo(memoryStream);
         return memoryStream.ToArray();
     }
-    
+
+    /// <summary>
+    /// Serializes a given <see cref="RocksDbKeyValueMessage"/> into a byte array representation.
+    /// Allows memory-efficient serialization of message objects, leveraging a memory stream manager
+    /// for large payloads exceeding a predefined size.
+    /// </summary>
+    /// <param name="message">The <see cref="RocksDbKeyValueMessage"/> instance to be serialized. This contains the data to convert into a byte array.</param>
+    /// <returns>A byte array representing the serialized form of the given message.</returns>
     private static byte[] Serialize(RocksDbKeyValueMessage message)
     {
         if (!message.Value.IsEmpty && message.Value.Length >= MaxMessageSize)
@@ -355,6 +447,15 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
         return memoryStream.ToArray();
     }
 
+    /// <summary>
+    /// Converts a serialized byte span into a <see cref="RocksDbLockMessage"/> object.
+    /// This method deserializes the provided byte data, supporting efficient memory
+    /// handling through the use of recyclable memory streams.
+    /// </summary>
+    /// <param name="serializedData">The serialized data represented as a read-only span
+    /// of bytes, which encodes the <see cref="RocksDbLockMessage"/> object.</param>
+    /// <returns>Returns a deserialized instance of <see cref="RocksDbLockMessage"/>
+    /// based on the provided byte data.</returns>
     private static RocksDbLockMessage UnserializeLockMessage(ReadOnlySpan<byte> serializedData)
     {
         if (serializedData.Length >= MaxMessageSize)
@@ -366,7 +467,18 @@ public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
         using RecyclableMemoryStream memoryStream = manager.GetStream(serializedData);
         return RocksDbLockMessage.Parser.ParseFrom(memoryStream);
     }
-    
+
+    /// <summary>
+    /// Converts a serialized byte span into a <see cref="RocksDbKeyValueMessage"/> object.
+    /// This method deserializes the provided binary data into a structured message format
+    /// to facilitate further operations on the key-value store.
+    /// </summary>
+    /// <param name="serializedData">
+    /// A read-only span of bytes representing the serialized data of a key-value message.
+    /// </param>
+    /// <returns>
+    /// An instance of <see cref="RocksDbKeyValueMessage"/> representing the deserialized key-value message.
+    /// </returns>
     private static RocksDbKeyValueMessage UnserializeKeyValueMessage(ReadOnlySpan<byte> serializedData)
     {
         if (serializedData.Length >= MaxMessageSize)

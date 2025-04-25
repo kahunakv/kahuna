@@ -6,6 +6,14 @@ using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Transactions.Commands;
 
+/// <summary>
+/// Represents a command to execute a delete operation within a key-value transaction context.
+/// </summary>
+/// <remarks>
+/// The <c>DeleteCommand</c> is designed to handle the deletion of key-value pairs within
+/// a transactional operation. It inherits from the <c>BaseCommand</c> class, ensuring
+/// consistency with other command types in the transaction system.
+/// </remarks>
 internal sealed class DeleteCommand : BaseCommand
 {
     public static async Task<KeyValueTransactionResult> Execute(

@@ -260,7 +260,7 @@ public class TestKeyValueScripts : BaseCluster
     [Theory, CombinatorialData]
     public async Task TestSetGetSameScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
     {
-        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna _) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
 
         // Persistent tests

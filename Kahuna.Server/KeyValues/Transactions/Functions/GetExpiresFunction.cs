@@ -4,6 +4,14 @@ using Kahuna.Server.ScriptParser;
 
 namespace Kahuna.Server.KeyValues.Transactions.Functions;
 
+/// <summary>
+/// Provides functionality to retrieve the expiration information of a key-value entity.
+/// </summary>
+/// <remarks>
+/// - The class is used as part of the key-value transaction system.
+/// - The function extracts the `Expires` property from the argument provided.
+/// - Throws an exception if an invalid number of arguments is supplied.
+/// </remarks>
 internal static class GetExpiresFunction
 {
     internal static KeyValueExpressionResult Execute(NodeAst ast, List<KeyValueExpressionResult> arguments)

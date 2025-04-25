@@ -271,6 +271,35 @@ public class TestKeyValueTransactions
         Assert.Equal(1, oneFailed);
     }
     
+    [Theory, CombinatorialData]
+    public async Task TestStartTransactionAndRollback(
+        [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType,
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType
+    )
+    {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+
+        await using KahunaTransactionSession session = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Pessimistic },
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
+        string keyName = GetRandomKeyName();
+        
+        Assert.True(session.TransactionId.L > 0);
+
+        KahunaKeyValue result = await session.SetKeyValue(keyName, "some value", cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(result.Success);
+        
+        result = await session.GetKeyValue(keyName, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(result.Success);        
+        Assert.Equal("some value", result.ValueAsString());
+        
+        /// Value shouldn't exist outside the scope of the transaction
+        result = await client.GetKeyValue(keyName, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.False(result.Success);        
+    }
+    
     private KahunaClient GetClientByType(KahunaCommunicationType communicationType, KahunaClientType clientType)
     {
         return clientType switch

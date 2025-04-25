@@ -6,6 +6,9 @@ using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Transactions.Commands;
 
+/// <summary>
+/// Represents a command to check for the existence of a key in the key-value store within a transactional context.
+/// </summary>
 internal sealed class ExistsCommand : BaseCommand
 {
     public static async Task<KeyValueTransactionResult> Execute(

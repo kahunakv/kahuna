@@ -1,5 +1,9 @@
+
 namespace Kahuna.Utils;
 
+/// <summary>
+/// Provides utility methods for handling file and directory paths.
+/// </summary>
 public static class PathUtils
 {
     public static void CreateDirectoryIfNotExists(string path)

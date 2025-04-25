@@ -1,5 +1,8 @@
 namespace Kahuna.Shared.KeyValue;
 
+/// <summary>
+/// Represents the possible response types for key-value operations in the system.
+/// </summary>
 public enum KeyValueResponseType
 {
     Set = 0,

@@ -5,6 +5,16 @@ using Kahuna.Server.ScriptParser;
 
 namespace Kahuna.Server.KeyValues.Transactions.Functions;
 
+/// <summary>
+/// Provides the implementation for the `to_str` function, which converts a given argument to its string representation.
+/// </summary>
+/// <remarks>
+/// This function processes various data types including Long, Double, String, Null, and Boolean, and returns their string equivalents.
+/// Unsupported types will result in an exception.
+/// </remarks>
+/// <exception cref="Kahuna.Server.ScriptParser.KahunaScriptException">
+/// Thrown when the number of arguments is invalid or when the argument type cannot be converted to a string.
+/// </exception>
 internal static class CastToStrFunction
 {
     internal static KeyValueExpressionResult Execute(NodeAst ast, List<KeyValueExpressionResult> arguments)

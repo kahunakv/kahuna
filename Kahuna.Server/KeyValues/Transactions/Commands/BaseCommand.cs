@@ -4,6 +4,10 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 
 namespace Kahuna.Server.KeyValues.Transactions.Commands;
 
+/// <summary>
+/// Serves as the base class for command implementations used in the execution of key-value transactions.
+/// Provides shared functionality and utilities for commands.
+/// </summary>
 internal abstract class BaseCommand
 {
     protected static string GetKeyName(KeyValueTransactionContext context, NodeAst ast)

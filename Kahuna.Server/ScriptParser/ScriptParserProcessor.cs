@@ -15,10 +15,13 @@ internal sealed class ScriptParserProcessor
     private static readonly DefaultObjectPoolProvider ScriptPoolProvider = new();
 
     private readonly ObjectPool<scriptParser> scriptParserPool;
-    
+
+    /// <summary>
+    /// Processes script parsing operations using a pool of reusable script parsers.
+    /// </summary>
     public ScriptParserProcessor(KahunaConfiguration configuration, ILogger<IKahuna> logger)
     {
-         scriptParserPool = ScriptPoolProvider.Create(new ScriptParserObjectPolicy(configuration, logger));
+        scriptParserPool = ScriptPoolProvider.Create(new ScriptParserObjectPolicy(configuration, logger));
     }   
     
     /// <summary>

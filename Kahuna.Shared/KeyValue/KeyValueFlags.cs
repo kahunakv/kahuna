@@ -1,6 +1,9 @@
 
 namespace Kahuna.Shared.KeyValue;
 
+/// <summary>
+/// Represents the set of flags used to determine the behavior of key-value "set" operations.
+/// </summary>
 public enum KeyValueFlags
 {
     None = 0,

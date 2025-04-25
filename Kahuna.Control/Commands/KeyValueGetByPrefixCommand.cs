@@ -11,6 +11,11 @@ using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Control.Commands;
 
+/// <summary>
+/// Provides a command to retrieve key-value pairs from a Kahuna storage system based on a specified prefix.
+/// This class encapsulates the functionality for executing a "GetByPrefix" operation against a given
+/// <see cref="KahunaClient"/> connection.
+/// </summary>
 public static class KeyValueGetByPrefixCommand
 {    
     public static async Task Execute(KahunaClient connection, string optsGet, string? format)
@@ -25,7 +30,7 @@ public static class KeyValueGetByPrefixCommand
             Console.WriteLine("{0}", "-");
         else
         {
-            foreach (var item in items)
+            foreach (string item in items)
                 Console.WriteLine("r{0} {1} {2}", 0, item, "-");
         }
     }

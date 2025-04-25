@@ -3,6 +3,11 @@ using CommandLine;
 
 namespace Kahuna;
 
+/// <summary>
+/// Represents the available command-line options for configuring the Kahuna service.
+/// This class provides a range of configuration parameters, such as host and port bindings,
+/// storage options, and cluster settings, all of which can be used to dictate how the service operates.
+/// </summary>
 public sealed class KahunaCommandLineOptions
 {
     [Option('h', "host", Required = false, HelpText = "Host to bind incoming connections to", Default = "*")]

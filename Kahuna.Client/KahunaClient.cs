@@ -11,6 +11,7 @@ using Kahuna.Client.Communication;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 using Kommander.Diagnostics;
+using Kommander.Time;
 using Microsoft.Extensions.Logging;
 
 // ReSharper disable ConvertToAutoProperty
@@ -333,7 +334,7 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<KahunaLockInfo?> GetLockInfo(string resource, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        return await communication.Get(GetRoundRobinUrl(), resource, durability, cancellationToken).ConfigureAwait(false);
+        return await communication.GetLock(GetRoundRobinUrl(), resource, durability, cancellationToken).ConfigureAwait(false);
     }
     
     /// <summary>
@@ -347,7 +348,8 @@ public class KahunaClient
     public async Task<KahunaKeyValue> SetKeyValue(string key, byte[]? value, int expiryTime = 0, KeyValueFlags flags = KeyValueFlags.Set, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
         (bool success, long revision, int timeElapsedMs) = await communication.TrySetKeyValue(
-            GetRoundRobinUrl(), 
+            GetRoundRobinUrl(),
+            HLCTimestamp.Zero,
             key, 
             value, 
             expiryTime, 
@@ -367,12 +369,20 @@ public class KahunaClient
     /// <param name="expiryTime"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KahunaKeyValue> SetKeyValue(string key, string value, int expiryTime = 0, KeyValueFlags flags = KeyValueFlags.Set, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
+    public async Task<KahunaKeyValue> SetKeyValue(
+        string key, 
+        string value, 
+        int expiryTime = 0, 
+        KeyValueFlags flags = KeyValueFlags.Set, 
+        KeyValueDurability durability = KeyValueDurability.Persistent, 
+        CancellationToken cancellationToken = default
+    )
     {
         byte[] valueBytes = Encoding.UTF8.GetBytes(value);
         
         (bool success, long revision, int timeElapsedMs) = await communication.TrySetKeyValue(
             GetRoundRobinUrl(), 
+            HLCTimestamp.Zero,
             key, 
             valueBytes, 
             expiryTime, 
@@ -395,13 +405,20 @@ public class KahunaClient
     /// <param name="durability">Specifies the durability level of the key-value pair. Default is <c>KeyValueDurability.Persistent</c>.</param>
     /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
     /// <returns>Returns an instance of <c>KahunaKeyValue</c> containing details about the operation.</returns>
-    public async Task<KahunaKeyValue> SetKeyValue(string key, string value, TimeSpan expiryTime, KeyValueFlags flags = KeyValueFlags.Set, KeyValueDurability durability = KeyValueDurability.Persistent,
-        CancellationToken cancellationToken = default)
+    public async Task<KahunaKeyValue> SetKeyValue(
+        string key, 
+        string value, 
+        TimeSpan expiryTime, 
+        KeyValueFlags flags = KeyValueFlags.Set, 
+        KeyValueDurability durability = KeyValueDurability.Persistent,
+        CancellationToken cancellationToken = default
+    )
     {
         byte[] valueBytes = Encoding.UTF8.GetBytes(value);
         
         (bool success, long revision, int timeElapsedMs) = await communication.TrySetKeyValue(
             GetRoundRobinUrl(), 
+            HLCTimestamp.Zero,
             key, 
             valueBytes, 
             (int)expiryTime.TotalMilliseconds, 
@@ -414,7 +431,7 @@ public class KahunaClient
     }
 
     /// <summary>
-    /// Compare-Value-And-Swap (CVAS) operation. Sets the value of a key if the current value is equal to the expected value.
+    /// Compare-Value-And-Swap (CVAS) operation. 
     /// Attempts to compare a specified value with the current value associated with a key
     /// and, if they match, sets the key to a new value with an optional expiry time and durability setting.
     /// </summary>
@@ -428,11 +445,18 @@ public class KahunaClient
     /// An instance of <see cref="KahunaKeyValue"/> that provides details about the operation,
     /// including whether it succeeded, the updated value, revision, and timing information.
     /// </returns>
-    public async Task<KahunaKeyValue> TryCompareValueAndSetKeyValue(string key, byte[] value, byte[] compareValue, int expiryTime = 30000, KeyValueDurability durability = KeyValueDurability.Persistent,
-        CancellationToken cancellationToken = default)
+    public async Task<KahunaKeyValue> TryCompareValueAndSetKeyValue(
+        string key, 
+        byte[] value, 
+        byte[] compareValue, 
+        int expiryTime = 30000, 
+        KeyValueDurability durability = KeyValueDurability.Persistent,
+        CancellationToken cancellationToken = default
+    )
     {
         (bool success, long revision, int timeElapsedMs) = await communication.TryCompareValueAndSetKeyValue(
             GetRoundRobinUrl(), 
+            HLCTimestamp.Zero,
             key, 
             value, 
             compareValue, 
@@ -445,20 +469,35 @@ public class KahunaClient
     }
     
     /// <summary>
-    /// Compare-Value-and-Swap (CVAS) operation. Sets the value of a key if the current value is equal to the expected value
+    /// Compare-Value-and-Swap (CVAS) operation. 
+    /// Attempts to compare a specified value with the current value associated with a key
+    /// and, if they match, sets the key to a new value with an optional expiry time and durability setting.
     /// </summary>
-    /// <param name="key"></param>
-    /// <param name="value"></param>
-    /// <param name="compareValue"></param>
-    /// <param name="expiryTime"></param>
-    /// <param name="durability"></param>
-    /// <returns></returns>
-    public async Task<KahunaKeyValue> TryCompareValueAndSetKeyValue(string key, string value, string compareValue, int expiryTime = 0, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
+    /// <param name="key">The key to be accessed or updated.</param>
+    /// <param name="value">The new value to set if the comparison succeeds.</param>
+    /// <param name="compareValue">The value to compare against the current value associated with the key.</param>
+    /// <param name="expiryTime">The expiration time (in milliseconds) for the key-value pair. Default is 30000 milliseconds.</param>
+    /// <param name="durability">Specifies whether the key-value pair is ephemeral or persistent. Default is persistent.</param>
+    /// <param name="cancellationToken">Token used to propagate notification that operations should be canceled.</param>
+    /// <returns>
+    /// An instance of <see cref="KahunaKeyValue"/> that provides details about the operation,
+    /// including whether it succeeded, the updated value, revision, and timing information.
+    /// </returns>
+    /// <summary>       
+    public async Task<KahunaKeyValue> TryCompareValueAndSetKeyValue(
+        string key, 
+        string value, 
+        string compareValue, 
+        int expiryTime = 0, 
+        KeyValueDurability durability = KeyValueDurability.Persistent, 
+        CancellationToken cancellationToken = default
+    )
     {
         byte[] valueBytes = Encoding.UTF8.GetBytes(value);
         
         (bool success, long revision, int timeElapsedMs) = await communication.TryCompareValueAndSetKeyValue(
             GetRoundRobinUrl(), 
+            HLCTimestamp.Zero,
             key, 
             valueBytes, 
             Encoding.UTF8.GetBytes(compareValue), 
@@ -469,20 +508,30 @@ public class KahunaClient
         
         return new(this, key, success, valueBytes, revision, durability, timeElapsedMs);
     }
-    
+
     /// <summary>
-    /// Compare-Revision-And-Swap (CRAS) operation. Sets the value of a key if the current revision is equal to the expected value
+    /// Compare-Revision-And-Swap (CRAS) operation. 
+    /// Attempts to compare the current revision of a key and set its value if the revision matches the provided value.
     /// </summary>
-    /// <param name="key"></param>
-    /// <param name="value"></param>
-    /// <param name="compareRevision"></param>
-    /// <param name="expiryTime"></param>
-    /// <param name="durability"></param>
-    /// <returns></returns>
-    public async Task<KahunaKeyValue> TryCompareRevisionAndSetKeyValue(string key, byte[]? value, long compareRevision, int expiryTime = 0, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
+    /// <param name="key">The key for which the operation is to be performed.</param>
+    /// <param name="value">The value to set if the revision comparison succeeds.</param>
+    /// <param name="compareRevision">The revision to compare against the current revision of the key.</param>
+    /// <param name="expiryTime">The expiration time in milliseconds for the key-value pair. Defaults to 0, which implies no expiration.</param>
+    /// <param name="durability">Specifies the durability type for the key. Either Persistent or Ephemeral.</param>
+    /// <param name="cancellationToken">Token to observe while waiting for the task to complete. This allows the operation to be canceled.</param>
+    /// <returns>A task that resolves to a <see cref="KahunaKeyValue"/> object representing the result of the operation.</returns>
+    public async Task<KahunaKeyValue> TryCompareRevisionAndSetKeyValue(
+        string key, 
+        byte[]? value, 
+        long compareRevision, 
+        int expiryTime = 0, 
+        KeyValueDurability durability = KeyValueDurability.Persistent,
+        CancellationToken cancellationToken = default
+    )
     {
         (bool success, long revision, int timeElapsedMs) = await communication.TryCompareRevisionAndSetKeyValue(
             GetRoundRobinUrl(), 
+            HLCTimestamp.Zero,
             key, 
             value, 
             compareRevision, 
@@ -493,22 +542,32 @@ public class KahunaClient
         
         return new(this, key, success, value, revision, durability, timeElapsedMs);
     }
-    
+
     /// <summary>
-    /// Compare=Revision-and-Swap (CRAS) operation. Sets the value of a key if the current revision is equal to the expected value
+    /// Compare-Revision-and-Swap (CRAS) operation
+    /// Attempts to compare the current revision of a key with a specified revision and set a new value if they match.
     /// </summary>
-    /// <param name="key"></param>
-    /// <param name="value"></param>
-    /// <param name="compareRevision"></param>
-    /// <param name="expiryTime"></param>
-    /// <param name="durability"></param>
-    /// <returns></returns>
-    public async Task<KahunaKeyValue> TryCompareRevisionAndSetKeyValue(string key, string value, long compareRevision, int expiryTime = 0, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
+    /// <param name="key">The key to be updated.</param>
+    /// <param name="value">The new value to be set.</param>
+    /// <param name="compareRevision">The revision value to compare against.</param>
+    /// <param name="expiryTime">The time-to-live in seconds for the key-value pair. Defaults to 0 for no expiration.</param>
+    /// <param name="durability">The durability level of the key-value pair (Persistent or Ephemeral). Defaults to Persistent.</param>
+    /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+    /// <returns>A <see cref="KahunaKeyValue"/> instance containing information about the operation result, including success status, revision, and elapsed time.</returns>
+    public async Task<KahunaKeyValue> TryCompareRevisionAndSetKeyValue(
+        string key, 
+        string value, 
+        long compareRevision, 
+        int expiryTime = 0, 
+        KeyValueDurability durability = KeyValueDurability.Persistent,
+        CancellationToken cancellationToken = default
+    )
     {
         byte[] valueBytes = Encoding.UTF8.GetBytes(value);
         
         (bool success, long revision, int timeElapsedMs) = await communication.TryCompareRevisionAndSetKeyValue(
-            GetRoundRobinUrl(), 
+            GetRoundRobinUrl(),
+            HLCTimestamp.Zero,
             key, 
             valueBytes, 
             compareRevision, 
@@ -519,30 +578,42 @@ public class KahunaClient
         
         return new(this, key, success, valueBytes, revision, durability, timeElapsedMs);
     }
-    
+
     /// <summary>
-    /// Set key to hold the string value. If key already holds a value, it is overwritten.
+    /// Sets a key-value pair in the storage with optional expiration and durability settings.
+    /// If key already holds a value, it is overwritten.
     /// </summary>
-    /// <param name="key"></param>
-    /// <param name="value"></param>
-    /// <param name="expiry"></param>
-    /// <param name="durability"></param>
-    /// <returns></returns>
-    public async Task<KahunaKeyValue> SetKeyValue(string key, byte[]? value, TimeSpan expiry, KeyValueFlags flags = KeyValueFlags.Set, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
+    /// <param name="key">The key to be stored.</param>
+    /// <param name="value">The value to be associated with the key. Can be null.</param>
+    /// <param name="expiry">The expiration time for the key-value pair. Set to zero for no expiration.</param>
+    /// <param name="flags">Flags indicating conditions for setting the key. Default is 'Set'.</param>
+    /// <param name="durability">Specifies the durability of the key-value pair. Default is 'Persistent'.</param>
+    /// <param name="cancellationToken">A token to cancel the operation if required.</param>
+    /// <returns>A task representing the asynchronous operation. The task result contains the key-value pair information after the operation.</returns>
+    public async Task<KahunaKeyValue> SetKeyValue(
+        string key, 
+        byte[]? value, 
+        TimeSpan expiry, 
+        KeyValueFlags flags = KeyValueFlags.Set, 
+        KeyValueDurability durability = KeyValueDurability.Persistent,
+        CancellationToken cancellationToken = default
+    )
     {
         return await SetKeyValue(key, value, (int)expiry.TotalMilliseconds, flags, durability, cancellationToken).ConfigureAwait(false);
     }
-    
+
     /// <summary>
-    /// Get the value of a key. If the key does not exist success is false and null is returned
+    /// Retrieves a key-value pair from the server. If the key does not exist null is returned
     /// </summary>
-    /// <param name="key"></param>
-    /// <param name="durability"></param>
-    /// <returns></returns>
+    /// <param name="key">The key to identify the requested value.</param>
+    /// <param name="durability">The specified durability level of the key-value pair, default is persistent.</param>
+    /// <param name="cancellationToken">A token to propagate notifications that the operation should be canceled.</param>
+    /// <returns>A task that represents the asynchronous operation, which returns a <see cref="KahunaKeyValue"/> containing the key-value information.</returns>
     public async Task<KahunaKeyValue> GetKeyValue(string key, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
         (bool success, byte[]? value, long revision, int timeElapsedMs) = await communication.TryGetKeyValue(
             GetRoundRobinUrl(), 
+            HLCTimestamp.Zero,
             key, 
             -1, 
             durability, 
@@ -551,17 +622,19 @@ public class KahunaClient
         
         return new(this, key, success, value, revision, durability, timeElapsedMs);
     }
-    
+
     /// <summary>
-    /// Checks if a key does exist
+    /// Checks whether a key exists in the key-value store with the specified durability and returns the associated metadata.
     /// </summary>
-    /// <param name="key"></param>
-    /// <param name="durability"></param>
-    /// <returns></returns>
+    /// <param name="key">The key to check for existence.</param>
+    /// <param name="durability">The durability level to check the key against. Defaults to <see cref="KeyValueDurability.Persistent"/>.</param>
+    /// <param name="cancellationToken">A token to signal request cancellation.</param>
+    /// <returns>A <see cref="KahunaKeyValue"/> object containing the key's metadata, including success status and revision number.</returns>
     public async Task<KahunaKeyValue> ExistsKeyValue(string key, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
         (bool success, long revision, int timeElapsedMs) = await communication.TryExistsKeyValue(
-            GetRoundRobinUrl(), 
+            GetRoundRobinUrl(),
+            HLCTimestamp.Zero,
             key, 
             -1, 
             durability, 
@@ -570,18 +643,21 @@ public class KahunaClient
         
         return new(this, key, success, revision, durability, timeElapsedMs);
     }
-    
+
     /// <summary>
-    /// Get the value of a key at a specific revision. If the key's revision does not exist success is false and null is returned
+    /// Retrieves a key-value pair with a specified revision and durability settings. Get the value of a key at a specific revision.
+    /// If the key's revision does not exist success is false and null is returned
     /// </summary>
-    /// <param name="key"></param>
-    /// <param name="revision"></param>
-    /// <param name="durability"></param>
-    /// <returns></returns>
+    /// <param name="key">The key of the key-value pair to retrieve.</param>
+    /// <param name="revision">The specific revision of the key-value pair to retrieve.</param>
+    /// <param name="durability">The durability level of the key-value store operation. By default, it is set to Persistent.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+    /// <returns>A task that represents the asynchronous operation. The result contains the retrieved key-value pair.</returns>
     public async Task<KahunaKeyValue> GetKeyValueRevision(string key, long revision, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
         (bool success, byte[]? value, long returnRevision, int timeElapsedMs) = await communication.TryGetKeyValue(
             GetRoundRobinUrl(), 
+            HLCTimestamp.Zero,
             key, 
             revision, 
             durability, 
@@ -590,17 +666,19 @@ public class KahunaClient
         
         return new(this, key, success, value, returnRevision, durability, timeElapsedMs);
     }
-    
+
     /// <summary>
-    /// Removes the specified key. A key is ignored if it does not exist.
+    /// Deletes a key-value pair from the storage system using the specified key and durability level.
     /// </summary>
-    /// <param name="key"></param>
-    /// <param name="durability"></param>
-    /// <returns></returns>
+    /// <param name="key">The key identifying the key-value pair to be deleted.</param>
+    /// <param name="durability">The durability level of the operation, either persistent or ephemeral (optional, defaults to persistent).</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests (optional).</param>
+    /// <returns>A <see cref="KahunaKeyValue"/> object containing the result of the delete operation.</returns>
     public async Task<KahunaKeyValue> DeleteKeyValue(string key, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
         (bool success, long revision, int timeElapsedMs) = await communication.TryDeleteKeyValue(
             GetRoundRobinUrl(), 
+            HLCTimestamp.Zero,
             key, 
             durability, 
             cancellationToken
@@ -608,24 +686,25 @@ public class KahunaClient
         
         return new(this, key, success, revision, durability, timeElapsedMs);
     }
-    
+
     /// <summary>
-    /// Set a timeout on key. After the timeout has expired, the key will automatically be deleted
+    /// Extends the expiration time of an existing key-value pair in the storage system.
     /// </summary>
-    /// <param name="key"></param>
-    /// <param name="expiresMs"></param>
-    /// <param name="durability"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
+    /// <param name="key">The key of the key-value pair to be extended.</param>
+    /// <param name="expiresMs">The new expiration time in milliseconds.</param>
+    /// <param name="durability">The desired durability setting for the key-value pair, such as persistent or ephemeral.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+    /// <returns>A <see cref="KahunaKeyValue"/> object representing the result of the extension operation, including success status, revision, and other metadata.</returns>
     public async Task<KahunaKeyValue> ExtendKeyValue(
-        string key, 
-        int expiresMs, 
-        KeyValueDurability durability = KeyValueDurability.Persistent, 
+        string key,
+        int expiresMs,
+        KeyValueDurability durability = KeyValueDurability.Persistent,
         CancellationToken cancellationToken = default
     )
     {
         (bool success, long revision, int timeElapsedMs) = await communication.TryExtendKeyValue(
             GetRoundRobinUrl(), 
+            HLCTimestamp.Zero,
             key, 
             expiresMs, 
             durability, 
@@ -634,24 +713,25 @@ public class KahunaClient
         
         return new(this, key, success, revision, durability, timeElapsedMs);
     }
-    
+
     /// <summary>
-    /// Set a timeout on key. After the timeout has expired, the key will automatically be deleted
+    /// Extends the expiration time of an existing key-value entry in the database.
     /// </summary>
-    /// <param name="key"></param>
-    /// <param name="expiresMs"></param>
-    /// <param name="durability"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
+    /// <param name="key">The key of the key-value entry to extend.</param>
+    /// <param name="expiresMs">The new expiration duration for the key-value entry.</param>
+    /// <param name="durability">The level of durability for the key-value entry. Default is Persistent.</param>
+    /// <param name="cancellationToken">Token used to propagate notification that the operation should be canceled.</param>
+    /// <returns>A task that represents the asynchronous operation. The task result contains the updated key-value entry.</returns>
     public async Task<KahunaKeyValue> ExtendKeyValue(
-        string key, 
-        TimeSpan expiresMs, 
-        KeyValueDurability durability = KeyValueDurability.Persistent, 
+        string key,
+        TimeSpan expiresMs,
+        KeyValueDurability durability = KeyValueDurability.Persistent,
         CancellationToken cancellationToken = default
     )
     {
         (bool success, long revision, int timeElapsedMs) = await communication.TryExtendKeyValue(
             GetRoundRobinUrl(), 
+            HLCTimestamp.Zero,
             key, 
             (int)expiresMs.TotalMilliseconds, 
             durability, 
@@ -659,6 +739,30 @@ public class KahunaClient
         ).ConfigureAwait(false);
         
         return new(this, key, success, revision, durability, timeElapsedMs);
+    }
+    
+    /// <summary>
+    /// Get keys with a specific prefix
+    /// </summary>
+    /// <param name="prefixKey"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public async Task<(bool, List<string>)> GetByPrefix(string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken = default)
+    {
+        return await communication.GetByPrefix(GetRoundRobinUrl(), prefixKey, durability, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Scan all nodes for keys with a specific prefix
+    /// </summary>
+    /// <param name="prefixKey">The prefix to match against stored keys.</param>
+    /// <param name="durability">Specifies the durability level for the operation.</param>
+    /// <param name="cancellationToken">Token to observe while waiting for the task to complete.</param>
+    /// <returns>A tuple containing a success flag and a list of matching keys.</returns>
+    public async Task<(bool, List<string>)> ScanAllByPrefix(string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken = default)
+    {
+        return await communication.ScanAllByPrefix(GetRoundRobinUrl(), prefixKey, durability, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -706,28 +810,25 @@ public class KahunaClient
     {
         return await communication.TryExecuteKeyValueTransactionScript(GetRoundRobinUrl(), script, hash, parameters, cancellationToken).ConfigureAwait(false);
     }
-    
-    /// <summary>
-    /// Get keys with a specific prefix
-    /// </summary>
-    /// <param name="prefixKey"></param>
-    /// <param name="durability"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    public async Task<(bool, List<string>)> GetByPrefix(string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken = default)
-    {
-        return await communication.GetByPrefix(GetRoundRobinUrl(), prefixKey, durability, cancellationToken).ConfigureAwait(false);
-    }
 
     /// <summary>
-    /// Scan all nodes for keys with a specific prefix
+    /// Starts a new transaction session with the specified options.
     /// </summary>
-    /// <param name="prefixKey"></param>
-    /// <param name="durability"></param>
-    /// <returns></returns>
-    public async Task<(bool, List<string>)> ScanAllByPrefix(string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken = default)
+    /// <param name="options">The transaction session options to configure the session behavior.</param>
+    /// <param name="cancellationToken">A cancellation token to observe while waiting for the task to complete.</param>
+    /// <returns>A task that represents the asynchronous operation. The task result contains the initiated transaction session.</returns>
+    public async Task<KahunaTransactionSession> StartTransactionSession(KahunaTransactionOptions options, CancellationToken cancellationToken = default)
     {
-        return await communication.ScanAllByPrefix(GetRoundRobinUrl(), prefixKey, durability, cancellationToken).ConfigureAwait(false);
+        string uniqueId = Guid.NewGuid().ToString();
+
+        (string url, HLCTimestamp transactionId) result = await communication.StartTransactionSession(
+            GetRoundRobinUrl(),
+            uniqueId,
+            options,
+            cancellationToken
+        ).ConfigureAwait(false);
+        
+        return new(this, result.url, uniqueId, result.transactionId);
     }
 
     /// <summary>

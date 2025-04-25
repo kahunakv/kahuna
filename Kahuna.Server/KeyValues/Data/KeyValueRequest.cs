@@ -8,8 +8,14 @@ using Standart.Hash.xxHash;
 namespace Kahuna.Server.KeyValues;
 
 /// <summary>
-/// Represents a request to perform an action on a key-value actor
+/// Represents a request for performing operations on a KeyValue actor
 /// </summary>
+/// <remarks>
+/// The <see cref="KeyValueRequest"/> class is designed to encapsulate all the information
+/// required to perform specific key-value operations. It supports operations such as setting,
+/// comparing, deleting, and managing locks for keys within the store. This request is constructed
+/// with multiple attributes to ensure consistency and control across distributed systems.
+/// </remarks>
 public sealed class KeyValueRequest : IConsistentHashable
 {
     public KeyValueRequestType Type { get; }

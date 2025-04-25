@@ -83,6 +83,12 @@ public interface IKahuna
     public Task<KeyValueGetByPrefixResult> ScanByPrefix(string prefixKeyName, KeyValueDurability durability);
 
     public Task<KeyValueGetByPrefixResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability);
+
+    public Task<HLCTimestamp> StartTransaction(KeyValueTransactionOptions options);       
+    
+    public Task<bool> CommitTransaction(HLCTimestamp timestamp);
+    
+    public Task<bool> RollbackTransaction(HLCTimestamp timestamp);
     
     public Task<bool> OnLogRestored(int partitionId, RaftLog log);
 

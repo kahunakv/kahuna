@@ -94,7 +94,7 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
                 LockRequestType.TryUnlock => await TryUnlock(message),
                 LockRequestType.TryExtendLock => await TryExtendLock(message),
                 LockRequestType.Get => await GetLock(message),
-                _ => new(LockResponseType.Errored)
+                _ => LockStaticResponses.ErroredResponse
             };
         }
         catch (Exception ex)
@@ -112,7 +112,7 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
             );
         }
 
-        return new(LockResponseType.Errored);
+        return LockStaticResponses.ErroredResponse;
     }
 
     /// <summary>
@@ -148,7 +148,7 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
                 return new(LockResponseType.Locked, context.FencingToken);
 
             if (!isExpired)
-                return new(LockResponseType.Busy);
+                return LockStaticResponses.BusyResponse;
         }
         
         LockProposal proposal = new(
@@ -165,7 +165,7 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
         {
             bool success = await PersistAndReplicateLockMessage(message.Type, proposal, currentTime);
             if (!success)
-                return new(LockResponseType.Errored);
+                return LockStaticResponses.ErroredResponse;
         }
         
         context.FencingToken = proposal.FencingToken;
@@ -187,15 +187,15 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
     {
         LockContext? context = await GetLockContext(message.Resource, message.Durability);
         if (context is null || context.State == LockState.Unlocked)
-            return new(LockResponseType.LockDoesNotExist);
+            return LockStaticResponses.DoesNotExistResponse;
 
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
         
         if (context.Expires - currentTime < TimeSpan.Zero)
-            return new(LockResponseType.LockDoesNotExist);
+            return LockStaticResponses.DoesNotExistResponse;
         
         if (!((ReadOnlySpan<byte>)context.Owner).SequenceEqual(message.Owner))
-            return new(LockResponseType.InvalidOwner);
+            return LockStaticResponses.InvalidOwnerResponse;
 
         LockProposal proposal = new(
             message.Resource,
@@ -211,7 +211,7 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
         {
             bool success = await PersistAndReplicateLockMessage(message.Type, proposal, currentTime);
             if (!success)
-                return new(LockResponseType.Errored);
+                return LockStaticResponses.ErroredResponse;
         }
         
         context.Expires = proposal.Expires;
@@ -229,10 +229,10 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
     {
         LockContext? context = await GetLockContext(message.Resource, message.Durability);
         if (context is null || context.State == LockState.Unlocked)
-            return new(LockResponseType.LockDoesNotExist);
+            return LockStaticResponses.DoesNotExistResponse;
 
         if (!((ReadOnlySpan<byte>)context.Owner).SequenceEqual(message.Owner))
-            return new(LockResponseType.InvalidOwner);
+            return LockStaticResponses.InvalidOwnerResponse;
         
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
 
@@ -250,14 +250,14 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
         {
             bool success = await PersistAndReplicateLockMessage(message.Type, proposal, currentTime);
             if (!success)
-                return new(LockResponseType.Errored);
+                return LockStaticResponses.ErroredResponse;
         }
         
         context.Owner = proposal.Owner;
         context.LastUsed = proposal.LastUsed;
         context.State = proposal.State;
 
-        return new(LockResponseType.Unlocked);
+        return LockStaticResponses.UnlockedResponse;;
     }
 
     /// <summary>
@@ -274,7 +274,7 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
 
         if (context.Expires - currentTime < TimeSpan.Zero)
-            return new(LockResponseType.LockDoesNotExist, new ReadOnlyLockContext(null, context?.FencingToken ?? 0, HLCTimestamp.Zero));
+            return new(LockResponseType.LockDoesNotExist, new ReadOnlyLockContext(null, context.FencingToken, HLCTimestamp.Zero));
         
         context.LastUsed = currentTime;
 
@@ -301,9 +301,7 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
                     context.LastUsed = raft.HybridLogicalClock.TrySendOrLocalEvent();
                     locks.Add(resource, context);
                     return context;
-                }
-                
-                return null;
+                }                               
             }
             
             return null;    
