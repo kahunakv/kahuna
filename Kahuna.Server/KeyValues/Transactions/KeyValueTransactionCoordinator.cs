@@ -261,7 +261,11 @@ internal sealed class KeyValueTransactionCoordinator
     public async Task<KeyValueResponseType> CommitTransaction(HLCTimestamp transactionId, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys)
     {
         if (!sessions.TryGetValue(transactionId, out KeyValueTransactionContext? context))
+        {
+            logger.LogWarning("Trying to commit unknown transaction {TransactionId}", transactionId);
+            
             return KeyValueResponseType.Errored;
+        }        
 
         try
         {
@@ -293,10 +297,45 @@ internal sealed class KeyValueTransactionCoordinator
             
             return KeyValueResponseType.Committed;
         }
+        catch (KahunaAbortedException ex)
+        {
+            logger.LogDebug("KahunaAbortedException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            
+            //return new() { Type = KeyValueResponseType.Aborted, Reason = ex.Message };
+            return KeyValueResponseType.Aborted;
+        }
+        catch (TaskCanceledException ex)
+        {
+            logger.LogDebug("TaskCanceledException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            
+            //return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
+            
+            return KeyValueResponseType.Aborted;
+        }
+        catch (OperationCanceledException ex)
+        {
+            logger.LogDebug("OperationCanceledException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            
+            //return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
+            
+            return KeyValueResponseType.Aborted;
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug("OperationCanceledException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            
+            //return new() { Type = KeyValueResponseType.Errored, Reason = ex.GetType().Name + ": " + ex.Message };
+            
+            return KeyValueResponseType.Aborted;
+        }
         finally
         {
-            await ReleaseAcquiredLocks(context);
-        }
+            // Final Step: Release locks
+            if (context.AsyncRelease)
+                _ = ReleaseAcquiredLocks(context);
+            else
+                await ReleaseAcquiredLocks(context);
+        }        
     }
     
     /// <summary>
@@ -308,7 +347,11 @@ internal sealed class KeyValueTransactionCoordinator
     public async Task<KeyValueResponseType> RollbackTransaction(HLCTimestamp transactionId, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys)
     {
         if (!sessions.TryGetValue(transactionId, out KeyValueTransactionContext? context))
+        {
+            logger.LogWarning("Trying to rollback unknown transaction {TransactionId}", transactionId);
+            
             return KeyValueResponseType.Errored;
+        }
 
         try
         {
@@ -330,11 +373,17 @@ internal sealed class KeyValueTransactionCoordinator
 
             logger.LogDebug("Rolled back interactive transaction {TransactionId}", transactionId);
             
+            sessions.TryRemove(transactionId, out _);
+            
             return KeyValueResponseType.RolledBack;
         }
         finally
         {
-            await ReleaseAcquiredLocks(context);
+            // Final Step: Release locks
+            if (context.AsyncRelease)
+                _ = ReleaseAcquiredLocks(context);
+            else
+                await ReleaseAcquiredLocks(context);
         }        
     }
 
@@ -644,7 +693,7 @@ internal sealed class KeyValueTransactionCoordinator
     {
         if (context.LocksAcquired is null || context.ModifiedKeys is null || context.ModifiedKeys.Count == 0)
             return;
-
+               
         // Step 3: Prepare mutations
         (bool success, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>? mutationsPrepared) = await PrepareMutations(
             context, 
@@ -652,14 +701,16 @@ internal sealed class KeyValueTransactionCoordinator
         );
 
         if (mutationsPrepared is null)
-            return;
+            return;               
 
         if (!success)
         {
+            // Step 4.a: Rollback mutations in the case of failures            
             await RollbackMutations(context, mutationsPrepared);
             return;
         }
 
+        // Step 4.b: Prepare mutations of successful preparations
         await CommitMutations(context, mutationsPrepared);
     }
 
@@ -677,6 +728,9 @@ internal sealed class KeyValueTransactionCoordinator
     {
         if (context.LocksAcquired is null || context.ModifiedKeys is null || context.ModifiedKeys.Count == 0)
             return (false, null);
+        
+        if (!context.SetState(KeyValueTransactionState.Preparing, KeyValueTransactionState.Pending))
+            throw new KahunaAbortedException("Failed to set transaction state to Preparing");
         
         HLCTimestamp highestModifiedTime = context.TransactionId;
 
@@ -705,6 +759,9 @@ internal sealed class KeyValueTransactionCoordinator
                 key, durability, 
                 cancellationToken
             );
+            
+            if (!context.SetState(KeyValueTransactionState.Prepared, KeyValueTransactionState.Preparing))
+                throw new KahunaAbortedException("Failed to set transaction state to Prepared");
 
             if (type != KeyValueResponseType.Prepared)
             {
@@ -713,7 +770,7 @@ internal sealed class KeyValueTransactionCoordinator
                 logger.LogWarning("Couldn't propose {Key} {Response}", key, type);
                 
                 return (false, null);
-            }
+            }                       
 
             return (true, [(key, ticketId, durability)]);
         }
@@ -724,6 +781,9 @@ internal sealed class KeyValueTransactionCoordinator
             context.ModifiedKeys.ToList(), 
             cancellationToken
         );
+        
+        if (!context.SetState(KeyValueTransactionState.Prepared, KeyValueTransactionState.Preparing))
+            throw new KahunaAbortedException("Failed to set transaction state to Prepared");
     
         if (proposalResponses.Any(r => r.Item1 != KeyValueResponseType.Prepared))
         {
@@ -738,8 +798,9 @@ internal sealed class KeyValueTransactionCoordinator
             }
 
             context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Couldn't prepare mutations" };
+            
             return (false, preparedMutations);
-        }
+        }               
 
         return (true, proposalResponses.Select(r => (r.Item3, r.Item2, r.Item4)).ToList());
     }
@@ -754,6 +815,9 @@ internal sealed class KeyValueTransactionCoordinator
     {
         if (mutationsPrepared.Count == 0)
             return;
+        
+        if (!context.SetState(KeyValueTransactionState.Committing, KeyValueTransactionState.Prepared))
+            throw new KahunaAbortedException("Failed to set transaction state to Committing");
 
         if (mutationsPrepared.Count == 1)
         {
@@ -763,6 +827,9 @@ internal sealed class KeyValueTransactionCoordinator
             
             if (response != KeyValueResponseType.Committed)
                 logger.LogWarning("CommitMutations: {Type} {Key} {TicketId}", response, key, ticketId);
+            
+            if (!context.SetState(KeyValueTransactionState.Committed, KeyValueTransactionState.Committing))
+                throw new KahunaAbortedException("Failed to set transaction state to Committed");
             
             return;
         }
@@ -774,6 +841,9 @@ internal sealed class KeyValueTransactionCoordinator
             if (response != KeyValueResponseType.Committed)
                 logger.LogWarning("CommitMutations {Type} {Key} {TicketId} {Durability}", response, key, commitIndex, durability);
         }
+        
+        if (!context.SetState(KeyValueTransactionState.Committed, KeyValueTransactionState.Committing))
+            throw new KahunaAbortedException("Failed to set transaction state to Committed");
     }
 
     /// <summary>
@@ -786,6 +856,9 @@ internal sealed class KeyValueTransactionCoordinator
     {
         if (mutationsPrepared.Count == 0)
             return;
+        
+        if (!context.SetState(KeyValueTransactionState.RollingBack, KeyValueTransactionState.Prepared))
+            throw new KahunaAbortedException("Failed to set transaction state to RollingBack");
 
         if (mutationsPrepared.Count == 1)
         {
@@ -796,6 +869,9 @@ internal sealed class KeyValueTransactionCoordinator
             if (response != KeyValueResponseType.RolledBack)
                 logger.LogWarning("RollbackMutations: {Type} {Key} {TicketId}", response, key, ticketId);
             
+            if (!context.SetState(KeyValueTransactionState.RolledBack, KeyValueTransactionState.RollingBack))
+                throw new KahunaAbortedException("Failed to set transaction state to RolledBack");
+            
             return;
         }
         
@@ -803,9 +879,12 @@ internal sealed class KeyValueTransactionCoordinator
         
         foreach ((KeyValueResponseType response, string key, long commitIndex, KeyValueDurability durability) in responses)
         {
-            if (response != KeyValueResponseType.Committed)
+            if (response != KeyValueResponseType.RolledBack)
                 logger.LogWarning("RollbackMutations {Type} {Key} {TicketId} {Durability}", response, key, commitIndex, durability);
         }
+        
+        if (!context.SetState(KeyValueTransactionState.RolledBack, KeyValueTransactionState.RollingBack))
+            throw new KahunaAbortedException("Failed to set transaction state to RolledBack");
     }
 
     /// <summary>

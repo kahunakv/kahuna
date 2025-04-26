@@ -76,19 +76,29 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             
             return KeyValueStaticResponses.ErroredResponse;
         }
+
+        /// A new revision is available in the context which means the transaction was modified
+        if (context.Revision > entry.Revision)
+        {
+            logger.LogWarning("Transaction CommitId={TransactionId} conflicts with Revision={Revision} NewRevision={NewRevision} [3]", message.CommitId, context.Revision, entry.Revision);
+            
+            return KeyValueStaticResponses.ErroredResponse;
+        }
         
+        /// Last modified is higher than the commit id which means the transaction was modified
         if (context.LastModified.CompareTo(message.CommitId) > 0)
         {
-            logger.LogWarning("Transaction CommitId={TransactionId} conflicts with LastModified={LastModified} [3]", message.CommitId, context.LastModified);
+            logger.LogWarning("Transaction CommitId={TransactionId} conflicts with LastModified={LastModified} [4]", message.CommitId, context.LastModified);
             
             return KeyValueStaticResponses.ErroredResponse;
         }
 
+        // Higher transactions has seen the committed value 
         foreach ((HLCTimestamp key, KeyValueMvccEntry _) in context.MvccEntries)
         {
             if (key.CompareTo(message.TransactionId) > 0)
             {
-                logger.LogWarning("Transaction {TransactionId} conflicts with {ExistingTransactionId} [4]", message.TransactionId, key);
+                logger.LogWarning("Transaction {TransactionId} conflicts with {ExistingTransactionId} [5]", message.TransactionId, key);
             
                 return KeyValueStaticResponses.ErroredResponse;
             }

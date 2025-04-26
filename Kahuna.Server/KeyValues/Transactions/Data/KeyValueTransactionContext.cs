@@ -154,6 +154,22 @@ internal sealed class KeyValueTransactionContext
     private Dictionary<string, KeyValueExpressionResult>? Variables { get; set; }
 
     /// <summary>
+    /// Gets or sets the current state of the transaction's execution lifecycle.
+    /// </summary>
+    /// <remarks>
+    /// The <see cref="State"/> property represents the operational status of a key-value transaction at any given moment.
+    /// This includes states such as <c>Pending</c>, <c>Preparing</c>, <c>Prepared</c>, <c>Committing</c>, <c>Committed</c>,
+    /// <c>RollingBack</c>, and <c>RolledBack</c>. The state reflects the progress and actions being performed on the transaction
+    /// and helps coordinate transaction consistency and recovery processes.
+    /// </remarks>
+    private KeyValueTransactionState state = KeyValueTransactionState.Pending;
+    
+    /// <summary>
+    /// Returns the current state of the transaction.
+    /// </summary>
+    public KeyValueTransactionState State => state; 
+
+    /// <summary>
     /// Retrieves a local-scope variable value associated with the specified variable name.
     /// </summary>
     /// <param name="ast">The abstract syntax tree node associated with the variable.</param>
@@ -200,4 +216,15 @@ internal sealed class KeyValueTransactionContext
         
         throw new KahunaScriptException("Undefined parameter: " + ast.yytext!, ast.yyline);
     }
+
+    /// <summary>
+    /// Attempts to update the transaction state to a new state, if it matches the expected current state.
+    /// </summary>
+    /// <param name="newState">The desired new state for the transaction.</param>
+    /// <param name="expectedState">The current state that is required before performing the update.</param>
+    /// <returns>True if the state was successfully updated; otherwise, false.</returns>
+    public bool SetState(KeyValueTransactionState newState, KeyValueTransactionState expectedState)
+    {
+        return expectedState == Interlocked.CompareExchange(ref state, newState, expectedState);
+    }    
 }
