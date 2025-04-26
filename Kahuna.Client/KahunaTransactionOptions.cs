@@ -21,4 +21,9 @@ public sealed class KahunaTransactionOptions
     /// Whether the locks should be released asynchronously.
     /// </summary>
     public bool AsyncRelease { get; set; }
+    
+    /// <summary>
+    /// Whether the transaction should be automatically committed after the session is disposed
+    /// </summary>
+    public bool AutoCommit { get; set; } = true;
 }

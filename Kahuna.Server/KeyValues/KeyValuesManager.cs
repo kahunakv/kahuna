@@ -383,9 +383,13 @@ internal sealed class KeyValuesManager
     /// <param name="keys"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public Task<List<(KeyValueResponseType, string, long, KeyValueDurability)>> LocateAndTryRollbackManyMutations(HLCTimestamp transactionId, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> keys, CancellationToken cancelationToken)
+    public Task<List<(KeyValueResponseType, string, long, KeyValueDurability)>> LocateAndTryRollbackManyMutations(
+        HLCTimestamp transactionId, 
+        List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> keys, 
+        CancellationToken cancellationToken
+    )
     {
-        return locator.LocateAndTryRollbackManyMutations(transactionId, keys, cancelationToken);
+        return locator.LocateAndTryRollbackManyMutations(transactionId, keys, cancellationToken);
     }
 
     /// <summary>
@@ -393,15 +397,69 @@ internal sealed class KeyValuesManager
     /// </summary>
     /// <param name="prefixedKey"></param>
     /// <param name="durability"></param>
-    /// <param name="cancelationToken"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public Task<KeyValueGetByPrefixResult> LocateAndGetByPrefix(HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancelationToken)
+    public Task<KeyValueGetByPrefixResult> LocateAndGetByPrefix(HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        return locator.LocateAndGetByPrefix(transactionId, prefixedKey, durability, cancelationToken);
+        return locator.LocateAndGetByPrefix(transactionId, prefixedKey, durability, cancellationToken);
     }
 
     /// <summary>
-    /// Passes a TrySet request to the keyValueer actor for the given keyValue name.
+    /// Locates the appropriate key-value partition and starts a transaction.
+    /// </summary>
+    /// <param name="options">The options for the key-value transaction.</param>
+    /// <param name="cancellationToken">The cancellation token for the operation.</param>
+    /// <returns>A task representing the asynchronous operation, containing the result of the transaction initiation
+    /// as a tuple consisting of the response type and the associated HLC timestamp.</returns>
+    public Task<(KeyValueResponseType, HLCTimestamp)> LocateAndStartTransaction(KeyValueTransactionOptions options, CancellationToken cancellationToken)
+    {
+        return locator.LocateAndStartTransaction(options, cancellationToken);        
+    }
+
+    /// <summary>
+    /// Attempts to locate and commit a transaction with the specified unique identifier, timestamp,
+    /// acquired locks, and modified keys.
+    /// </summary>
+    /// <param name="uniqueId">The unique identifier of the transaction.</param>
+    /// <param name="timestamp">The timestamp associated with the transaction.</param>
+    /// <param name="acquiredLocks">A list of keys that have been locked during the transaction.</param>
+    /// <param name="modifiedKeys">A list of keys that were modified as part of the transaction.</param>
+    /// <param name="cancellationToken">A token used to monitor for cancellation requests.</param>
+    /// <returns>A task that represents the asynchronous operation, containing the result of the transaction operation.</returns>
+    public Task<KeyValueResponseType> LocateAndCommitTransaction(
+        string uniqueId,
+        HLCTimestamp timestamp,
+        List<KeyValueTransactionModifiedKey> acquiredLocks,
+        List<KeyValueTransactionModifiedKey> modifiedKeys,
+        CancellationToken cancellationToken
+    )
+    {
+        return locator.LocateAndCommitTransaction(uniqueId, timestamp, acquiredLocks, modifiedKeys, cancellationToken);
+    }
+
+    /// <summary>
+    /// Locates and rolls back a transaction identified by a unique ID and timestamp.
+    /// This operation resolves any locks and reverts modifications associated with the transaction.
+    /// </summary>
+    /// <param name="uniqueId">The unique identifier of the transaction to be rolled back.</param>
+    /// <param name="timestamp">The timestamp associated with the transaction.</param>
+    /// <param name="acquiredLocks">A list of keys that were locked during the transaction.</param>
+    /// <param name="modifiedKeys">A list of keys that were modified during the transaction.</param>
+    /// <param name="cancellationToken">A cancellation token to observe while waiting for the task to complete.</param>
+    /// <returns>A task that represents the asynchronous operation, containing the result of the rollback operation as a <see cref="KeyValueResponseType"/>.</returns>
+    public Task<KeyValueResponseType> LocateAndRollbackTransaction(
+        string uniqueId,
+        HLCTimestamp timestamp,
+        List<KeyValueTransactionModifiedKey> acquiredLocks,
+        List<KeyValueTransactionModifiedKey> modifiedKeys,
+        CancellationToken cancellationToken
+    )
+    {
+        return locator.LocateAndRollbackTransaction(uniqueId, timestamp, acquiredLocks, modifiedKeys, cancellationToken);
+    }
+
+    /// <summary>
+    /// Passes a TrySet request to the key/value actor for the given key/value key.
     /// </summary>
     /// <param name="key"></param>
     /// <param name="value"></param>
@@ -1186,7 +1244,7 @@ internal sealed class KeyValuesManager
     /// </summary>
     /// <param name="options">The options for configuring the transaction.</param>
     /// <returns>Returns an <c>HLCTimestamp</c> representing the timestamp of the started transaction.</returns>
-    public Task<HLCTimestamp> StartTransaction(KeyValueTransactionOptions options)
+    public Task<(KeyValueResponseType, HLCTimestamp)> StartTransaction(KeyValueTransactionOptions options)
     {
         return txCoordinator.StartTransaction(options);
     }
@@ -1198,7 +1256,7 @@ internal sealed class KeyValuesManager
     /// <param name="acquiredLocks">List of acquired locks</param> 
     /// <param name="modifiedKeys">List of modified keys</param> 
     /// <returns>A task that represents the asynchronous operation, containing a boolean value that indicates whether the transaction was successfully committed.</returns>
-    public Task<bool> CommitTransaction(
+    public Task<KeyValueResponseType> CommitTransaction(
         HLCTimestamp timestamp, 
         List<KeyValueTransactionModifiedKey> acquiredLocks, 
         List<KeyValueTransactionModifiedKey> modifiedKeys
@@ -1214,7 +1272,7 @@ internal sealed class KeyValuesManager
     /// <param name="acquiredLocks">List of acquired locks</param> 
     /// <param name="modifiedKeys">List of modified keys</param> 
     /// <returns></returns>
-    public Task<bool> RollbackTransaction(
+    public Task<KeyValueResponseType> RollbackTransaction(
         HLCTimestamp timestamp, 
         List<KeyValueTransactionModifiedKey> acquiredLocks, 
         List<KeyValueTransactionModifiedKey> modifiedKeys

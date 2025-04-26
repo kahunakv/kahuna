@@ -985,6 +985,7 @@ public class GrpcCommunication : IKahunaCommunication
             Timeout = txOptions.Timeout,
             LockingType = (GrpcLockingType)txOptions.Locking,
             AsyncRelease = txOptions.AsyncRelease,
+            AutoCommit = txOptions.AutoCommit
         };
 
         int retries = 0;
@@ -1003,7 +1004,7 @@ public class GrpcCommunication : IKahunaCommunication
             if (response is null)
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
-            if (response.Type == GrpcKeyValueResponseType.TypeGot)
+            if (response.Type == GrpcKeyValueResponseType.TypeSet)
                 return new(url, new(response.TransactionIdPhysical, response.TransactionIdCounter)); 
                         
             if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
@@ -1070,7 +1071,7 @@ public class GrpcCommunication : IKahunaCommunication
             if (response is null)
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
-            if (response.Type == GrpcKeyValueResponseType.TypeSet)
+            if (response.Type == GrpcKeyValueResponseType.TypeCommitted)
                 return true; 
                         
             if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
@@ -1137,7 +1138,7 @@ public class GrpcCommunication : IKahunaCommunication
             if (response is null)
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
-            if (response.Type == GrpcKeyValueResponseType.TypeSet)
+            if (response.Type == GrpcKeyValueResponseType.TypeRolledback)
                 return true; 
                         
             if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)

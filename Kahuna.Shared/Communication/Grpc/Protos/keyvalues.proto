@@ -387,13 +387,15 @@ message GrpcStartTransactionRequest
   GrpcLockingType LockingType = 2;
   int32 Timeout = 3;
   bool AsyncRelease = 4;
+  bool AutoCommit = 5;
 }
 
 message GrpcStartTransactionResponse
 {
-  GrpcKeyValueResponseType Type = 1;
-  int64 TransactionIdPhysical = 2;
-  uint32 TransactionIdCounter = 3;
+  optional string ServedFrom = 1;
+  GrpcKeyValueResponseType Type = 2;
+  int64 TransactionIdPhysical = 3;
+  uint32 TransactionIdCounter = 4;
 }
 
 message GrpcCommitTransactionRequest
@@ -422,12 +424,14 @@ message GrpcTransactionModifiedKey
 
 message GrpcCommitTransactionResponse
 {
-  GrpcKeyValueResponseType Type = 1;  
+  optional string ServedFrom = 1;
+  GrpcKeyValueResponseType Type = 2;  
 }
 
 message GrpcRollbackTransactionResponse
 {
-  GrpcKeyValueResponseType Type = 1;  
+  optional string ServedFrom = 1;
+  GrpcKeyValueResponseType Type = 2;  
 }
 
 message GrpcKeyValueByPrefixItemResponse {
@@ -503,6 +507,10 @@ message GrpcBatchServerKeyValueRequest {
     GrpcTryRollbackMutationsRequest TryRollbackMutations = 17;
     GrpcTryRollbackManyMutationsRequest TryRollbackManyMutations = 18;
     GrpcGetByPrefixRequest GetByPrefix = 19;
+    GrpcScanByPrefixRequest ScanByPrefix = 20;
+    GrpcStartTransactionRequest StartTransaction = 21;
+    GrpcCommitTransactionRequest CommitTransaction = 22;
+    GrpcRollbackTransactionRequest RollbackTransaction = 23;
   }
 }
 
@@ -528,6 +536,10 @@ message GrpcBatchServerKeyValueResponse
     GrpcTryRollbackMutationsResponse TryRollbackMutations = 17;
     GrpcTryRollbackManyMutationsResponse TryRollbackManyMutations = 18;
     GrpcGetByPrefixResponse GetByPrefix = 19;
+    GrpcScanByPrefixResponse ScanByPrefix = 20;
+    GrpcStartTransactionResponse StartTransaction = 21;
+    GrpcCommitTransactionResponse CommitTransaction = 22;
+    GrpcRollbackTransactionResponse RollbackTransaction = 23;
   }
 }
 
@@ -566,6 +578,10 @@ enum GrpcServerBatchType {
   SERVER_TRY_ROLLBACK_MUTATIONS = 15;
   SERVER_TRY_ROLLBACK_MANY_MUTATIONS = 16;
   SERVER_TRY_GET_BY_PREFIX = 17;
+  SERVER_TRY_SCAN_BY_PREFIX = 18;
+  SERVER_TRY_START_TRANSACTION = 19;
+  SERVER_TRY_COMMIT_TRANSACTION = 20;
+  SERVER_TRY_ROLLBACK_TRANSACTION = 21;
 }
 
 enum GrpcKeyValueFlags {

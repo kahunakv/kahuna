@@ -43,6 +43,13 @@ internal sealed class GrpcServerBatcherResponse
     
     public GrpcTryRollbackManyMutationsResponse? TryRollbackManyMutations { get; }
     
+    public GrpcStartTransactionResponse? StartTransaction { get; }
+    
+    public GrpcCommitTransactionResponse? CommitTransaction { get; }
+    
+    
+    public GrpcRollbackTransactionResponse? RollbackTransaction { get; }
+    
     public GrpcServerBatcherResponse(GrpcTryLockResponse tryLock)
     {
         TryLock = tryLock;
@@ -141,5 +148,20 @@ internal sealed class GrpcServerBatcherResponse
     public GrpcServerBatcherResponse(GrpcTryRollbackManyMutationsResponse tryRollbackManyMutations)
     {
         TryRollbackManyMutations = tryRollbackManyMutations;
+    }
+    
+    public GrpcServerBatcherResponse(GrpcStartTransactionResponse startTransaction)
+    {
+        StartTransaction = startTransaction;
+    }
+    
+    public GrpcServerBatcherResponse(GrpcCommitTransactionResponse commitTransaction)
+    {
+        CommitTransaction = commitTransaction;
+    }
+    
+    public GrpcServerBatcherResponse(GrpcRollbackTransactionResponse rollbackTransaction)
+    {
+        RollbackTransaction = rollbackTransaction;
     }
 }

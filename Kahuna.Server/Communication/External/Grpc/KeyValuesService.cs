@@ -1045,23 +1045,27 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <param name="context">The server call context associated with the gRPC request.</param>
     /// <returns>A response containing the transaction status and transaction ID (physical and counter).</returns>
     internal async Task<GrpcStartTransactionResponse> StartTransactionInternal(GrpcStartTransactionRequest request, ServerCallContext context)
-    {                
+    {
+        Console.WriteLine("UID={0}", request.UniqueId);   
+        
         if (string.IsNullOrEmpty(request.UniqueId))
             return new()
             {
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
             
-        HLCTimestamp transactionId = await keyValues.StartTransaction(new()
+        (KeyValueResponseType type, HLCTimestamp transactionId) = await keyValues.LocateAndStartTransaction(new()
         {
+            UniqueId = request.UniqueId,
             Locking = (KeyValueTransactionLocking)request.LockingType,
             Timeout = request.Timeout,
             AsyncRelease = request.AsyncRelease,
-        });
+            AutoCommit = request.AutoCommit,
+        }, context.CancellationToken);
 
         GrpcStartTransactionResponse response = new()
         {
-            Type = GrpcKeyValueResponseType.TypeGot,
+            Type = (GrpcKeyValueResponseType)type,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C
         };
@@ -1097,21 +1101,17 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
             
-        bool success = await keyValues.CommitTransaction(
+        KeyValueResponseType type = await keyValues.LocateAndCommitTransaction(
+            request.UniqueId,
             new(request.TransactionIdPhysical, request.TransactionIdCounter),
             GetTransactionAcquiredOrModifiedKeys(request.AcquiredLocks).ToList(),
-            GetTransactionAcquiredOrModifiedKeys(request.ModifiedKeys).ToList()
-        );
-        
-        if (!success)
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.TypeAborted
-            };
+            GetTransactionAcquiredOrModifiedKeys(request.ModifiedKeys).ToList(),
+            context.CancellationToken
+        );               
 
         GrpcCommitTransactionResponse response = new()
         {
-            Type = GrpcKeyValueResponseType.TypeSet
+            Type = (GrpcKeyValueResponseType)type,
         };
         
         //if (result.Items.Count > 0)
@@ -1145,21 +1145,17 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
             
-        bool success = await keyValues.RollbackTransaction(
+        KeyValueResponseType type = await keyValues.LocateAndRollbackTransaction(
+            request.UniqueId,
             new(request.TransactionIdPhysical, request.TransactionIdCounter),
             GetTransactionAcquiredOrModifiedKeys(request.AcquiredLocks).ToList(),
-            GetTransactionAcquiredOrModifiedKeys(request.ModifiedKeys).ToList()
-        );
-
-        if (!success)
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.TypeAborted
-            };
+            GetTransactionAcquiredOrModifiedKeys(request.ModifiedKeys).ToList(),
+            context.CancellationToken
+        );        
 
         GrpcRollbackTransactionResponse response = new()
         {
-            Type = GrpcKeyValueResponseType.TypeSet
+            Type = (GrpcKeyValueResponseType)type,
         };
         
         //if (result.Items.Count > 0)

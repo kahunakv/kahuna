@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Locks;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
@@ -410,5 +411,20 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.GetByPrefix(transactionId, prefixedKey, durability);        
         
         throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public Task<(KeyValueResponseType, HLCTimestamp)> StartTransaction(string leader, KeyValueTransactionOptions options, CancellationToken cancellationToken)
+    {
+        throw new NotImplementedException();
+    }
+
+    public Task<KeyValueResponseType> CommitTransaction(string leader, string uniqueId, HLCTimestamp timestamp, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken)
+    {
+        throw new NotImplementedException();
+    }
+
+    public Task<KeyValueResponseType> RollbackTransaction(string leader, string uniqueId, HLCTimestamp timestamp, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken)
+    {
+        throw new NotImplementedException();
     }
 }

@@ -1,5 +1,6 @@
 
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Locks;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
@@ -7,6 +8,9 @@ using Kommander.Time;
 
 namespace Kahuna.Server.Communication.Internode;
 
+/// <summary>
+/// Provides methods for inter-node communication within a distributed system.
+/// </summary>
 public interface IInterNodeCommunication
 {
     public Task<(LockResponseType, long)> TryLock(string node, string resource, byte[] owner, int expiresMs, LockDurability durability, CancellationToken cancellationToken);
@@ -48,4 +52,10 @@ public interface IInterNodeCommunication
     public Task TryRollbackNodeMutations(string node, HLCTimestamp transactionId, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys, Lock lockSync, List<(KeyValueResponseType type, string key, long, KeyValueDurability durability)> responses, CancellationToken cancellationToken);
     
     public Task<KeyValueGetByPrefixResult> GetByPrefix(string node, HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancelationToken);
+    
+    public Task<(KeyValueResponseType, HLCTimestamp)> StartTransaction(string leader, KeyValueTransactionOptions options, CancellationToken cancellationToken);
+    
+    public Task<KeyValueResponseType> CommitTransaction(string leader, string uniqueId, HLCTimestamp timestamp, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken);
+    
+    public Task<KeyValueResponseType> RollbackTransaction(string leader, string uniqueId, HLCTimestamp timestamp, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken);    
 }

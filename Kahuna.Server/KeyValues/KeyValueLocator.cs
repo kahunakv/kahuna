@@ -11,6 +11,7 @@ using Google.Protobuf.Collections;
 
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues;
@@ -762,6 +763,14 @@ internal sealed class KeyValueLocator
         await interNodeCommunication.TryRollbackNodeMutations(leader, transactionId, xkeys, lockSync, responses, cancelationToken);
     }
 
+    /// <summary>
+    /// Locates the appropriate node for the specified key prefix and retrieves the corresponding key-value items.
+    /// </summary>
+    /// <param name="transactionId">The timestamp of the transaction used for locating and fetching records.</param>
+    /// <param name="prefixedKey">The key prefix used to search and retrieve matching key-value pairs.</param>
+    /// <param name="durability">Specifies the durability requirement for the operation, such as Ephemeral or Persistent.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests during the operation.</param>
+    /// <returns>Returns a <see cref="KeyValueGetByPrefixResult"/> containing the result of the operation with key-value items and response type.</returns>
     public async Task<KeyValueGetByPrefixResult> LocateAndGetByPrefix(HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(prefixedKey))
@@ -779,7 +788,103 @@ internal sealed class KeyValueLocator
         logger.LogDebug("GETPREFIX-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", prefixedKey, partitionId, leader);
         
         return await interNodeCommunication.GetByPrefix(leader, transactionId, prefixedKey, durability, cancellationToken);               
-    }    
+    }
+
+    /// <summary>
+    /// Attempts to locate the appropriate partition leader and starts a transaction based on the provided options.
+    /// </summary>
+    /// <param name="options">The transaction options, including a unique identifier used to determine the partition.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+    /// <returns>A tuple containing the result of the transaction operation (<see cref="KeyValueResponseType"/>),
+    /// and a timestamp (<see cref="HLCTimestamp"/>) indicating when the transaction was processed.</returns>
+    public async Task<(KeyValueResponseType, HLCTimestamp)> LocateAndStartTransaction(KeyValueTransactionOptions options, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(options.UniqueId))
+            return new(KeyValueResponseType.Errored, HLCTimestamp.Zero);
+        
+        int partitionId = raft.GetPartitionKey(options.UniqueId);
+
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+            return await manager.StartTransaction(options);
+            
+        string leader = await raft.WaitForLeader(partitionId, cancellationToken);
+        if (leader == raft.GetLocalEndpoint())
+            return new(KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
+        
+        logger.LogDebug("START-TRANSACTION Redirect {KeyValueName} to leader partition {Partition} at {Leader}", options.UniqueId, partitionId, leader);
+        
+        return await interNodeCommunication.StartTransaction(leader, options, cancellationToken);
+    }
+
+    /// <summary>
+    /// Locates the appropriate partition and commits a transaction associated with the given unique identifier.
+    /// </summary>
+    /// <param name="uniqueId">The unique identifier associated with the transaction.</param>
+    /// <param name="timestamp">The timestamp of the transaction using hybrid logical clock.</param>
+    /// <param name="acquiredLocks">The list of keys that have been locked as part of the transaction.</param>
+    /// <param name="modifiedKeys">The list of keys that have been modified as part of the transaction.</param>
+    /// <param name="cancellationToken">A token to cancel the asynchronous operation.</param>
+    /// <returns>
+    /// A <see cref="KeyValueResponseType"/> indicating the outcome of the transaction operation.
+    /// </returns>
+    public async Task<KeyValueResponseType> LocateAndCommitTransaction(
+        string uniqueId,
+        HLCTimestamp timestamp,
+        List<KeyValueTransactionModifiedKey> acquiredLocks,
+        List<KeyValueTransactionModifiedKey> modifiedKeys,
+        CancellationToken cancellationToken
+    )
+    {
+        if (string.IsNullOrEmpty(uniqueId))
+            return KeyValueResponseType.Errored;
+        
+        int partitionId = raft.GetPartitionKey(uniqueId);
+
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+            return await manager.CommitTransaction(timestamp, acquiredLocks, modifiedKeys);
+            
+        string leader = await raft.WaitForLeader(partitionId, cancellationToken);
+        if (leader == raft.GetLocalEndpoint())
+            return KeyValueResponseType.MustRetry;
+        
+        logger.LogDebug("COMMIT-TRANSACTION Redirect {KeyValueName} to leader partition {Partition} at {Leader}", uniqueId, partitionId, leader);
+        
+        return await interNodeCommunication.CommitTransaction(leader, uniqueId, timestamp, acquiredLocks, modifiedKeys, cancellationToken);
+    }
+
+    /// <summary>
+    /// Locates and rolls back a transaction based on the specified parameters.
+    /// </summary>
+    /// <param name="uniqueId">The unique identifier of the transaction to locate and rollback.</param>
+    /// <param name="timestamp">The timestamp associated with the transaction.</param>
+    /// <param name="acquiredLocks">The list of keys that were locked during the transaction.</param>
+    /// <param name="modifiedKeys">The list of keys that were modified during the transaction.</param>
+    /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+    /// <returns>A <see cref="KeyValueResponseType"/> indicating the result of the operation.</returns>
+    public async Task<KeyValueResponseType> LocateAndRollbackTransaction(
+        string uniqueId,
+        HLCTimestamp timestamp,
+        List<KeyValueTransactionModifiedKey> acquiredLocks,
+        List<KeyValueTransactionModifiedKey> modifiedKeys, 
+        CancellationToken cancellationToken
+    )
+    {
+        if (string.IsNullOrEmpty(uniqueId))
+            return KeyValueResponseType.Errored;
+        
+        int partitionId = raft.GetPartitionKey(uniqueId);
+
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+            return await manager.RollbackTransaction(timestamp, acquiredLocks, modifiedKeys);
+            
+        string leader = await raft.WaitForLeader(partitionId, cancellationToken);
+        if (leader == raft.GetLocalEndpoint())
+            return KeyValueResponseType.MustRetry;
+        
+        logger.LogDebug("ROLLBACK-TRANSACTION Redirect {KeyValueName} to leader partition {Partition} at {Leader}", uniqueId, partitionId, leader);
+        
+        return await interNodeCommunication.RollbackTransaction(leader, uniqueId, timestamp, acquiredLocks, modifiedKeys, cancellationToken);
+    }
 
     /// <summary>
     /// Scans all nodes in the cluster and returns key/value pairs by prefix 

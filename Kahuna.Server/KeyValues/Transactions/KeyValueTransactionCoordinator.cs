@@ -223,7 +223,7 @@ internal sealed class KeyValueTransactionCoordinator
     /// </summary>
     /// <param name="options">The options used to configure the transaction, such as locking, timeout, and release behavior.</param>
     /// <returns>Returns the unique transaction ID of type <see cref="HLCTimestamp"/>.</returns>
-    public async Task<HLCTimestamp> StartTransaction(KeyValueTransactionOptions options)
+    public async Task<(KeyValueResponseType, HLCTimestamp)> StartTransaction(KeyValueTransactionOptions options)
     {
         bool result;
         HLCTimestamp transactionId;        
@@ -248,7 +248,8 @@ internal sealed class KeyValueTransactionCoordinator
         logger.LogDebug("Started interactive transaction {TransactionId}", transactionId);
         
         await Task.CompletedTask;
-        return transactionId;
+        
+        return (KeyValueResponseType.Set, transactionId);
     }
 
     /// <summary>
@@ -257,10 +258,10 @@ internal sealed class KeyValueTransactionCoordinator
     /// <param name="options">The options used to configure the transaction, such as locking, timeout, and release behavior.</param>
     /// <param name="modifiedKeys">List of modified keys</param>  
     /// <returns>Returns the unique transaction ID of type <see cref="HLCTimestamp"/>.</returns>
-    public async Task<bool> CommitTransaction(HLCTimestamp transactionId, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys)
+    public async Task<KeyValueResponseType> CommitTransaction(HLCTimestamp transactionId, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys)
     {
         if (!sessions.TryGetValue(transactionId, out KeyValueTransactionContext? context))
-            return false;
+            return KeyValueResponseType.Errored;
 
         try
         {
@@ -281,14 +282,16 @@ internal sealed class KeyValueTransactionCoordinator
             await TwoPhaseCommit(context, CancellationToken.None);
 
             if (context.Result is null)
-                return false;
+                return KeyValueResponseType.Errored;
                 
             if (context.Result.Type is KeyValueResponseType.Aborted or KeyValueResponseType.Errored)
-                return false;
+                return KeyValueResponseType.Aborted;
             
             logger.LogDebug("Committed interactive transaction {TransactionId}", transactionId);
             
-            return true;
+            sessions.TryRemove(transactionId, out _);
+            
+            return KeyValueResponseType.Committed;
         }
         finally
         {
@@ -302,10 +305,10 @@ internal sealed class KeyValueTransactionCoordinator
     /// <param name="options">The options used to configure the transaction, such as locking, timeout, and release behavior.</param>
     /// <param name="modifiedKeys">List of modified keys</param> 
     /// <returns>Returns the unique transaction ID of type <see cref="HLCTimestamp"/>.</returns>
-    public async Task<bool> RollbackTransaction(HLCTimestamp transactionId, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys)
+    public async Task<KeyValueResponseType> RollbackTransaction(HLCTimestamp transactionId, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys)
     {
         if (!sessions.TryGetValue(transactionId, out KeyValueTransactionContext? context))
-            return false;
+            return KeyValueResponseType.Errored;
 
         try
         {
@@ -326,13 +329,13 @@ internal sealed class KeyValueTransactionCoordinator
             //await TwoPhaseCommit(context, CancellationToken.None);
 
             logger.LogDebug("Rolled back interactive transaction {TransactionId}", transactionId);
+            
+            return KeyValueResponseType.RolledBack;
         }
         finally
         {
             await ReleaseAcquiredLocks(context);
-        }
-
-        return true;
+        }        
     }
 
     /// <summary>

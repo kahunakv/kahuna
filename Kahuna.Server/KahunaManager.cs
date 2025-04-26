@@ -488,6 +488,58 @@ public sealed class KahunaManager : IKahuna
     }
 
     /// <summary>
+    /// Starts a transaction for a key-value operation by locating the appropriate node and setting up the transaction.
+    /// </summary>
+    /// <param name="options">The options specifying the parameters of the transaction.</param>
+    /// <param name="cancelationToken">The token to monitor for cancellation requests.</param>
+    /// <returns>A task that represents the asynchronous operation. The task result contains the response type and the timestamp of the initiated transaction.</returns>
+    public Task<(KeyValueResponseType, HLCTimestamp)> LocateAndStartTransaction(KeyValueTransactionOptions options, CancellationToken cancelationToken)
+    {
+        return keyValues.LocateAndStartTransaction(options, cancelationToken);        
+    }
+
+    /// <summary>
+    /// Commits a transaction by locating required resources and applying all necessary modifications.
+    /// </summary>
+    /// <param name="uniqueId">The unique identifier for the transaction to be committed.</param>
+    /// <param name="timestamp">The timestamp associated with the transaction.</param>
+    /// <param name="acquiredLocks">A list of locks acquired as part of the transaction.</param>
+    /// <param name="modifiedKeys">A list of keys modified as part of the transaction.</param>
+    /// <param name="cancelationToken">A token to monitor for cancellation requests.</param>
+    /// <returns>A task representing the asynchronous operation, with a result of <see cref="KeyValueResponseType"/> indicating the outcome of the transaction commit.</returns>
+    public Task<KeyValueResponseType> LocateAndCommitTransaction(
+        string uniqueId, 
+        HLCTimestamp timestamp, 
+        List<KeyValueTransactionModifiedKey> acquiredLocks, 
+        List<KeyValueTransactionModifiedKey> modifiedKeys,
+        CancellationToken cancelationToken
+    )
+    {
+        return keyValues.LocateAndCommitTransaction(uniqueId, timestamp, acquiredLocks, modifiedKeys, cancelationToken);
+    }
+
+    /// <summary>
+    /// Rolls back a transaction and restores the state of the system to the point
+    /// before the transaction was executed.
+    /// </summary>
+    /// <param name="uniqueId">The unique identifier for the transaction to be rolled back.</param>
+    /// <param name="timestamp">The timestamp associated with the transaction.</param>
+    /// <param name="acquiredLocks">A list of locks acquired during the transaction.</param>
+    /// <param name="modifiedKeys">A list of keys modified during the transaction.</param>
+    /// <param name="cancelationToken">A token to observe for cancellation requests.</param>
+    /// <returns>A <see cref="KeyValueResponseType"/> indicating the result of the rollback operation.</returns>
+    public Task<KeyValueResponseType> LocateAndRollbackTransaction(
+        string uniqueId, 
+        HLCTimestamp timestamp, 
+        List<KeyValueTransactionModifiedKey> acquiredLocks, 
+        List<KeyValueTransactionModifiedKey> modifiedKeys,
+        CancellationToken cancelationToken
+    )
+    {
+        return keyValues.LocateAndRollbackTransaction(uniqueId, timestamp, acquiredLocks, modifiedKeys, cancelationToken);
+    }
+
+    /// <summary>
     /// Set key to hold the string value. If key already holds a value, it is overwritten
     /// </summary>
     /// <param name="key"></param>
@@ -730,7 +782,7 @@ public sealed class KahunaManager : IKahuna
     /// </summary>
     /// <param name="options">The options to configure the transaction.</param>
     /// <returns>Returns the timestamp of the started transaction.</returns>
-    public Task<HLCTimestamp> StartTransaction(KeyValueTransactionOptions options)
+    public Task<(KeyValueResponseType, HLCTimestamp)> StartTransaction(KeyValueTransactionOptions options)
     {
         return keyValues.StartTransaction(options);
     }
@@ -741,7 +793,7 @@ public sealed class KahunaManager : IKahuna
     /// <param name="timestamp">The timestamp associated with the transaction.</param>
     /// <param name="modifiedKeys">The list of keys that were modified as part of the transaction.</param>
     /// <returns>A task that represents the asynchronous operation, containing a boolean indicating whether the transaction commitment was successful.</returns>
-    public Task<bool> CommitTransaction(
+    public Task<KeyValueResponseType> CommitTransaction(
         HLCTimestamp timestamp, 
         List<KeyValueTransactionModifiedKey> acquiredLocks, 
         List<KeyValueTransactionModifiedKey> modifiedKeys
@@ -756,7 +808,7 @@ public sealed class KahunaManager : IKahuna
     /// <param name="timestamp">The timestamp of the transaction to be rolled back.</param>
     /// <param name="modifiedKeys">The list of modified keys associated with the transaction.</param>
     /// <returns>A task that represents the asynchronous operation. The task result contains a boolean indicating whether the rollback succeeded.</returns>
-    public Task<bool> RollbackTransaction(
+    public Task<KeyValueResponseType> RollbackTransaction(
         HLCTimestamp timestamp, 
         List<KeyValueTransactionModifiedKey> acquiredLocks, 
         List<KeyValueTransactionModifiedKey> modifiedKeys

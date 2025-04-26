@@ -280,6 +280,9 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         return tryRollbackMutationsHandler.Execute(message);
     }
 
+    /// <summary>
+    /// Try to collect unused objects in the BTree store
+    /// </summary>
     private void Collect()
     {
         tryCollectHandler.Execute();

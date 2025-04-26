@@ -1,6 +1,10 @@
 # 🦎 Kahuna
 
-<img src="https://github.com/user-attachments/assets/d73a177f-5b9a-4e63-9b8d-9bcf067da002" height="350" alt="kahuna">
+<img src="https://github.com/user-attachments/assets/d73a177f-5b9a-4e63-9b8d-9bcf067da002" height="250" alt="kahuna">
+
+> [!WARNING]
+> **BETA SOFTWARE**
+> Kahuna is under heavy development and some features may be unstable!
 
 Distributed systems can become highly complex due to the many reasons: execution may be non-deterministic, unexpected edge cases, and specific scenarios that make it difficult to reason about solid solutions that ensure system robustness.
 
@@ -36,10 +40,6 @@ it has been used to refer to doctors, surgeons and dentists,
 as well as priests, ministers, and sorcerers.
 
 Check the [documentation](https://kahunakv.github.io/) for more information on architecture, installation, and usage examples.
-
-> [!WARNING]
-> **BETA SOFTWARE**
-> Kahuna is under heavy development and some features may be unstable!
 
 ## Architecture
 

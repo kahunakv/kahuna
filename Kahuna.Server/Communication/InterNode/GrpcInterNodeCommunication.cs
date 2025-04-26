@@ -14,6 +14,7 @@ using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.Locks;
 using Kahuna.Server.Communication.Internode.Grpc;
+using Kahuna.Server.KeyValues.Transactions.Data;
 
 namespace Kahuna.Server.Communication.Internode;
 
@@ -121,6 +122,14 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         return (LockResponseType)remoteResponse.Type;
     }
 
+    /// <summary>
+    /// Requests a distributed lock from the specified node for the given resource.
+    /// </summary>
+    /// <param name="node">The target node to coordinate the lock request.</param>
+    /// <param name="resource">The name or identifier of the resource to be locked.</param>
+    /// <param name="durability">Specifies the durability level of the lock, either ephemeral or persistent.</param>
+    /// <param name="cancellationToken">A token to observe cancellation requests for the operation.</param>
+    /// <returns>A tuple consisting of the lock response type and an optional lock context containing ownership and lock metadata.</returns>
     public async Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(string node, string resource, LockDurability durability, CancellationToken cancellationToken)
     {
         GrpcGetLockRequest request = new()
@@ -153,19 +162,33 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         );
     }
 
+    /// <summary>
+    /// Redirects a set key/value operation to the specified node.
+    /// </summary>
+    /// <param name="node">The target node managing the key-value operation.</param>
+    /// <param name="transactionId">The unique transaction ID represented as an HLC timestamp.</param>
+    /// <param name="key">The key to be set or modified in the distributed store.</param>
+    /// <param name="value">The value to be associated with the specified key, or null if no value is to be set.</param>
+    /// <param name="compareValue">Optional value to compare with the current value for conditional set operations.</param>
+    /// <param name="compareRevision">Optional revision number to compare with the current revision for conditional set operations.</param>
+    /// <param name="flags">Flags specifying the operation type or conditional rules.</param>
+    /// <param name="expiresMs">The time-to-live (TTL) for the key-value pair, in milliseconds.</param>
+    /// <param name="durability">The durability level for the operation, either ephemeral or persistent.</param>
+    /// <param name="cancellationToken">A token to observe cancellation requests for the operation.</param>
+    /// <returns>A tuple consisting of the operation's response type, the revision number of the key-value pair, and the timestamp of the last modification.</returns>
     public async Task<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValue(
-        string node, 
-        HLCTimestamp transactionId, 
-        string key, 
-        byte[]? value, 
-        byte[]? compareValue, 
-        long compareRevision, 
-        KeyValueFlags flags, 
-        int expiresMs, 
-        KeyValueDurability durability, 
+        string node,
+        HLCTimestamp transactionId,
+        string key,
+        byte[]? value,
+        byte[]? compareValue,
+        long compareRevision,
+        KeyValueFlags flags,
+        int expiresMs,
+        KeyValueDurability durability,
         CancellationToken cancellationToken
     )
-    {        
+    {
         GrpcTrySetKeyValueRequest request = new()
         {
             TransactionIdPhysical = transactionId.L,
@@ -197,14 +220,23 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         );
     }
 
+    /// <summary>
+    /// Redirects a delete key/value operation to the specified node.
+    /// </summary>
+    /// <param name="node">The target node where the key-value deletion request is directed.</param>
+    /// <param name="transactionId">The unique transaction identifier for maintaining atomicity across operations.</param>
+    /// <param name="key">The key identifying the specific key-value pair to be deleted.</param>
+    /// <param name="durability">Specifies the durability level of the key-value operation, either ephemeral or persistent.</param>
+    /// <param name="cancelationToken">A token to observe cancellation requests for the operation.</param>
+    /// <returns>A tuple containing the response type of the operation, the updated revision number, and the last modified timestamp for the key.</returns>
     public async Task<(KeyValueResponseType, long, HLCTimestamp)> TryDeleteKeyValue(
-        string node, 
-        HLCTimestamp transactionId, 
-        string key, 
-        KeyValueDurability durability, 
+        string node,
+        HLCTimestamp transactionId,
+        string key,
+        KeyValueDurability durability,
         CancellationToken cancelationToken
     )
-    {        
+    {
         GrpcTryDeleteKeyValueRequest request = new()
         {
             TransactionIdPhysical = transactionId.L,
@@ -227,15 +259,25 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         );
     }
 
+    /// <summary>
+    /// Redirects an extend key/value operation to the specified node.
+    /// </summary>
+    /// <param name="node">The target node where the key-value pair resides.</param>
+    /// <param name="transactionId">The unique transaction identifier, represented by a hybrid logical clock timestamp.</param>
+    /// <param name="key">The key of the key-value pair to be extended.</param>
+    /// <param name="expiresMs">The new expiration time for the key-value pair, in milliseconds.</param>
+    /// <param name="durability">Specifies the durability level of the extension, either ephemeral or persistent.</param>
+    /// <param name="cancelationToken">A token to monitor for cancellation requests during the operation.</param>
+    /// <returns>A tuple containing the key-value response type, the latest revision of the key, and the last modification timestamp.</returns>
     public async Task<(KeyValueResponseType, long, HLCTimestamp)> TryExtendKeyValue(
-        string node, 
-        HLCTimestamp transactionId, 
-        string key, 
-        int expiresMs, 
-        KeyValueDurability durability, 
+        string node,
+        HLCTimestamp transactionId,
+        string key,
+        int expiresMs,
+        KeyValueDurability durability,
         CancellationToken cancelationToken
     )
-    {        
+    {
         GrpcTryExtendKeyValueRequest request = new()
         {
             TransactionIdPhysical = transactionId.L,
@@ -259,12 +301,22 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         );
     }
 
+    /// <summary>
+    /// Redirects a "get" key/value operation to the specified node.
+    /// </summary>
+    /// <param name="node">The target node from which the key's value will be retrieved.</param>
+    /// <param name="transactionId">The transaction identifier used to maintain consistency and ordering.</param>
+    /// <param name="key">The key corresponding to the value being retrieved.</param>
+    /// <param name="revision">The specific revision of the key to fetch.</param>
+    /// <param name="durability">The durability type indicating whether the operation is ephemeral or persistent.</param>
+    /// <param name="cancellationToken">A token to observe any cancellation requests for the operation.</param>
+    /// <returns>A tuple containing the type of key-value response and an optional read-only key-value context with the retrieved value and metadata.</returns>
     public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryGetValue(
-        string node, 
-        HLCTimestamp transactionId, 
-        string key, 
-        long revision, 
-        KeyValueDurability durability, 
+        string node,
+        HLCTimestamp transactionId,
+        string key,
+        long revision,
+        KeyValueDurability durability,
         CancellationToken cancellationToken
     )
     {
@@ -301,12 +353,22 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         ));
     }
 
+    /// <summary>
+    /// Redirects an "exists" key/value operation to the specified node.
+    /// </summary>
+    /// <param name="node">The target node where the operation is to be performed.</param>
+    /// <param name="transactionId">The hybrid logical clock timestamp associated with the transaction.</param>
+    /// <param name="key">The key of the key-value pair to check for existence.</param>
+    /// <param name="revision">The specific revision number of the key-value pair to verify.</param>
+    /// <param name="durability">The durability level to determine if the operation should be ephemeral or persistent.</param>
+    /// <param name="cancellationToken">A cancellation token to signal the operation should be aborted.</param>
+    /// <returns>A tuple containing the key-value response type and an optional read-only context if the key-value pair exists.</returns>
     public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryExistsValue(
-        string node, 
-        HLCTimestamp transactionId, 
-        string key, 
-        long revision, 
-        KeyValueDurability durability, 
+        string node,
+        HLCTimestamp transactionId,
+        string key,
+        long revision,
+        KeyValueDurability durability,
         CancellationToken cancellationToken
     )
     {
@@ -336,18 +398,25 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         ));
     }
 
+    /// <summary>
+    /// Redirects an "acquire-exclusive-lock" key/value operation to the specified node.
+    /// </summary>
+    /// <param name="node">The target node to initiate the lock coordination.</param>
+    /// <param name="transactionId">A high-precision logical clock timestamp identifying the transaction.</param>
+    /// <param name="key">The key or identifier for the resource to be exclusively locked.</param>
+    /// <param name="expiresMs">The duration in milliseconds for which the lock will remain valid unless explicitly released.</param>
+    /// <param name="durability">The desired durability level of the lock, either ephemeral or persistent.</param>
+    /// <param name="cancelationToken">A token to observe cancellation requests for the operation.</param>
+    /// <returns>A tuple containing the type of the response, the key, and the lock's durability level.</returns>
     public async Task<(KeyValueResponseType, string, KeyValueDurability)> TryAcquireExclusiveLock(
-        string node, 
-        HLCTimestamp transactionId, 
-        string key, 
-        int expiresMs, 
-        KeyValueDurability durability, 
+        string node,
+        HLCTimestamp transactionId,
+        string key,
+        int expiresMs,
+        KeyValueDurability durability,
         CancellationToken cancelationToken
     )
-    {
-        //GrpcChannel channel = SharedChannels.GetChannel(node);        
-        //KeyValuer.KeyValuerClient client = new(channel);
-        
+    {        
         GrpcServerBatcher batcher = GetSharedBatcher(node);               
         
         GrpcTryAcquireExclusiveLockRequest request = new()
@@ -367,9 +436,19 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         return ((KeyValueResponseType)remoteResponse.Type, key, durability);
     }
 
+    /// <summary>
+    /// Attempts to acquire exclusive locks on a set of specified keys at a given node.
+    /// </summary>
+    /// <param name="node">The identifier of the target node on which locks need to be acquired.</param>
+    /// <param name="transactionId">The unique transaction ID used to associate the locking operation.</param>
+    /// <param name="xkeys">A list of keys to be locked, each with its expiration time and durability level.</param>
+    /// <param name="lockSync">The synchronization mechanism to ensure thread safety for lock-related operations.</param>
+    /// <param name="responses">A collection used to capture the response types and metadata for each attempted lock.</param>
+    /// <param name="cancelationToken">A token to monitor for cancellation requests during the operation.</param>
+    /// <returns>A task that represents the asynchronous operation of attempting to acquire the specified locks.</returns>
     public async Task TryAcquireNodeExclusiveLocks(
-        string node, 
-        HLCTimestamp transactionId, 
+        string node,
+        HLCTimestamp transactionId,
         List<(string key, int expiresMs, KeyValueDurability durability)> xkeys,
         Lock lockSync,
         List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses,
@@ -682,7 +761,104 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         return new((KeyValueResponseType)remoteResponse.Type, GetReadOnlyItem(remoteResponse.Items));
     }
+
+    public async Task<(KeyValueResponseType, HLCTimestamp)> StartTransaction(string leader, KeyValueTransactionOptions options, CancellationToken cancellationToken)
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(leader);
+        
+        GrpcStartTransactionRequest request = new()
+        {
+            UniqueId = options.UniqueId,        
+            LockingType = (GrpcLockingType)options.Locking,
+            Timeout = options.Timeout,
+            AsyncRelease = options.AsyncRelease,
+            AutoCommit = options.AutoCommit,
+        };
+        
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcStartTransactionResponse remoteResponse = response.StartTransaction!;
+        
+        remoteResponse.ServedFrom = $"https://{leader}";
+        
+        return ((KeyValueResponseType)remoteResponse.Type, new(remoteResponse.TransactionIdPhysical, remoteResponse.TransactionIdCounter));
+    }
+
+    public async Task<KeyValueResponseType> CommitTransaction(
+        string leader, 
+        string uniqueId, 
+        HLCTimestamp timestamp, 
+        List<KeyValueTransactionModifiedKey> acquiredLocks, 
+        List<KeyValueTransactionModifiedKey> modifiedKeys, 
+        CancellationToken cancellationToken
+    )
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(leader);
+        
+        GrpcCommitTransactionRequest request = new()
+        {
+            UniqueId = uniqueId,
+            TransactionIdPhysical = timestamp.L,
+            TransactionIdCounter = timestamp.C            
+        };
+        
+        if (acquiredLocks.Count > 0)
+            request.AcquiredLocks.AddRange(GetArquiredOrModifiedItems(acquiredLocks));
+        
+        if (modifiedKeys.Count > 0)
+            request.ModifiedKeys.AddRange(GetArquiredOrModifiedItems(modifiedKeys));
+        
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcCommitTransactionResponse remoteResponse = response.CommitTransaction!;
+        
+        remoteResponse.ServedFrom = $"https://{leader}";
+        
+        return (KeyValueResponseType)remoteResponse.Type;
+    }    
+
+    public async Task<KeyValueResponseType> RollbackTransaction(
+        string leader, 
+        string uniqueId, 
+        HLCTimestamp timestamp, 
+        List<KeyValueTransactionModifiedKey> acquiredLocks, 
+        List<KeyValueTransactionModifiedKey> modifiedKeys, 
+        CancellationToken cancellationToken
+    )
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(leader);
+        
+        GrpcRollbackTransactionRequest request = new()
+        {
+            UniqueId = uniqueId,
+            TransactionIdPhysical = timestamp.L,
+            TransactionIdCounter = timestamp.C            
+        };
+        
+        if (acquiredLocks.Count > 0)
+            request.AcquiredLocks.AddRange(GetArquiredOrModifiedItems(acquiredLocks));
+        
+        if (modifiedKeys.Count > 0)
+            request.ModifiedKeys.AddRange(GetArquiredOrModifiedItems(modifiedKeys));
+        
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcRollbackTransactionResponse remoteResponse = response.RollbackTransaction!;
+        
+        remoteResponse.ServedFrom = $"https://{leader}";
+        
+        return (KeyValueResponseType)remoteResponse.Type;
+    }
     
+    private static IEnumerable<GrpcTransactionModifiedKey> GetArquiredOrModifiedItems(List<KeyValueTransactionModifiedKey> items)
+    {
+        foreach (KeyValueTransactionModifiedKey item in items)
+        {
+            yield return new()
+            {
+                Key = item.Key,
+                Durability = (GrpcKeyValueDurability) item.Durability,
+            };
+        }
+    }
+
     private static List<(string, ReadOnlyKeyValueContext)> GetReadOnlyItem(RepeatedField<GrpcKeyValueByPrefixItemResponse> remoteResponseItems)
     {
         List<(string, ReadOnlyKeyValueContext)> responses = new(remoteResponseItems.Count);

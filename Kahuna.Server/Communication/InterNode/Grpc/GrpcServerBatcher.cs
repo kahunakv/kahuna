@@ -210,6 +210,33 @@ internal sealed class GrpcServerBatcher
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
+    
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcStartTransactionRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcCommitTransactionRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcRollbackTransactionRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
 
     private Task<GrpcServerBatcherResponse> TryProcessQueue(GrpcServerBatcherItem grpcBatcherItem, TaskCompletionSource<GrpcServerBatcherResponse> promise)
     {
@@ -430,6 +457,21 @@ internal sealed class GrpcServerBatcher
             batchRequest.Type = GrpcServerBatchType.ServerTryRollbackManyMutations;
             batchRequest.TryRollbackManyMutations = itemRequest.TryRollbackManyMutations;
         }
+        else if (itemRequest.StartTransaction is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryStartTransaction;
+            batchRequest.StartTransaction = itemRequest.StartTransaction;
+        }
+        else if (itemRequest.CommitTransaction is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryCommitTransaction;
+            batchRequest.CommitTransaction = itemRequest.CommitTransaction;
+        }
+        else if (itemRequest.RollbackTransaction is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryRollbackTransaction;
+            batchRequest.RollbackTransaction = itemRequest.RollbackTransaction;
+        }
         else
             throw new KahunaServerException("Unknown request type");
 
@@ -523,6 +565,10 @@ internal sealed class GrpcServerBatcher
                     case GrpcServerBatchType.ServerTryExistsKeyValue:
                         item.Promise.SetResult(new(response.TryExistsKeyValue));
                         break;
+                    
+                    case GrpcServerBatchType.ServerTryGetByPrefix:
+                        //item.Promise.SetResult(new(response.GetByPrefix));
+                        break;
 
                     case GrpcServerBatchType.ServerTryExecuteTransactionScript:
                         item.Promise.SetResult(new(response.TryExecuteTransactionScript));
@@ -558,6 +604,26 @@ internal sealed class GrpcServerBatcher
                     
                     case GrpcServerBatchType.ServerTryCommitManyMutations:
                         item.Promise.SetResult(new(response.TryCommitManyMutations));
+                        break;
+                    
+                    case GrpcServerBatchType.ServerTryRollbackMutations:
+                        item.Promise.SetResult(new(response.TryRollbackMutations));
+                        break;
+                    
+                    case GrpcServerBatchType.ServerTryRollbackManyMutations:
+                        item.Promise.SetResult(new(response.TryRollbackManyMutations));
+                        break;
+                    
+                    case GrpcServerBatchType.ServerTryStartTransaction:
+                        item.Promise.SetResult(new(response.StartTransaction));
+                        break;
+                    
+                    case GrpcServerBatchType.ServerTryCommitTransaction:
+                        item.Promise.SetResult(new(response.CommitTransaction));
+                        break;
+                    
+                    case GrpcServerBatchType.ServerTryRollbackTransaction:
+                        item.Promise.SetResult(new(response.RollbackTransaction));
                         break;
 
                     case GrpcServerBatchType.ServerTypeNone:
