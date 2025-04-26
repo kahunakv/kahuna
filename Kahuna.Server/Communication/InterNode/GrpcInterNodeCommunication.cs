@@ -762,9 +762,9 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         return new((KeyValueResponseType)remoteResponse.Type, GetReadOnlyItem(remoteResponse.Items));
     }
 
-    public async Task<(KeyValueResponseType, HLCTimestamp)> StartTransaction(string leader, KeyValueTransactionOptions options, CancellationToken cancellationToken)
+    public async Task<(KeyValueResponseType, HLCTimestamp)> StartTransaction(string node, KeyValueTransactionOptions options, CancellationToken cancellationToken)
     {
-        GrpcServerBatcher batcher = GetSharedBatcher(leader);
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
         
         GrpcStartTransactionRequest request = new()
         {
@@ -778,13 +778,13 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
         GrpcStartTransactionResponse remoteResponse = response.StartTransaction!;
         
-        remoteResponse.ServedFrom = $"https://{leader}";
+        remoteResponse.ServedFrom = $"https://{node}";
         
         return ((KeyValueResponseType)remoteResponse.Type, new(remoteResponse.TransactionIdPhysical, remoteResponse.TransactionIdCounter));
     }
 
     public async Task<KeyValueResponseType> CommitTransaction(
-        string leader, 
+        string node, 
         string uniqueId, 
         HLCTimestamp timestamp, 
         List<KeyValueTransactionModifiedKey> acquiredLocks, 
@@ -792,7 +792,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         CancellationToken cancellationToken
     )
     {
-        GrpcServerBatcher batcher = GetSharedBatcher(leader);
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
         
         GrpcCommitTransactionRequest request = new()
         {
@@ -810,13 +810,13 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
         GrpcCommitTransactionResponse remoteResponse = response.CommitTransaction!;
         
-        remoteResponse.ServedFrom = $"https://{leader}";
+        remoteResponse.ServedFrom = $"https://{node}";
         
         return (KeyValueResponseType)remoteResponse.Type;
     }    
 
     public async Task<KeyValueResponseType> RollbackTransaction(
-        string leader, 
+        string node, 
         string uniqueId, 
         HLCTimestamp timestamp, 
         List<KeyValueTransactionModifiedKey> acquiredLocks, 
@@ -824,7 +824,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         CancellationToken cancellationToken
     )
     {
-        GrpcServerBatcher batcher = GetSharedBatcher(leader);
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
         
         GrpcRollbackTransactionRequest request = new()
         {
@@ -842,7 +842,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
         GrpcRollbackTransactionResponse remoteResponse = response.RollbackTransaction!;
         
-        remoteResponse.ServedFrom = $"https://{leader}";
+        remoteResponse.ServedFrom = $"https://{node}";
         
         return (KeyValueResponseType)remoteResponse.Type;
     }

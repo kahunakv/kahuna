@@ -1046,8 +1046,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns>A response containing the transaction status and transaction ID (physical and counter).</returns>
     internal async Task<GrpcStartTransactionResponse> StartTransactionInternal(GrpcStartTransactionRequest request, ServerCallContext context)
     {
-        Console.WriteLine("UID={0}", request.UniqueId);   
-        
         if (string.IsNullOrEmpty(request.UniqueId))
             return new()
             {

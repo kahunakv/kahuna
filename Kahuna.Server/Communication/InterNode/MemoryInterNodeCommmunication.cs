@@ -413,18 +413,27 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    public Task<(KeyValueResponseType, HLCTimestamp)> StartTransaction(string leader, KeyValueTransactionOptions options, CancellationToken cancellationToken)
+    public async Task<(KeyValueResponseType, HLCTimestamp)> StartTransaction(string node, KeyValueTransactionOptions options, CancellationToken cancellationToken)
     {
-        throw new NotImplementedException();
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))        
+            return await kahunaNode.StartTransaction(options);        
+        
+        throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    public Task<KeyValueResponseType> CommitTransaction(string leader, string uniqueId, HLCTimestamp timestamp, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken)
+    public async Task<KeyValueResponseType> CommitTransaction(string node, string uniqueId, HLCTimestamp timestamp, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken)
     {
-        throw new NotImplementedException();
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))        
+            return await kahunaNode.CommitTransaction(timestamp, acquiredLocks, modifiedKeys);        
+        
+        throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    public Task<KeyValueResponseType> RollbackTransaction(string leader, string uniqueId, HLCTimestamp timestamp, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken)
+    public async Task<KeyValueResponseType> RollbackTransaction(string node, string uniqueId, HLCTimestamp timestamp, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken)
     {
-        throw new NotImplementedException();
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))        
+            return await kahunaNode.RollbackTransaction(timestamp, acquiredLocks, modifiedKeys);
+        
+        throw new KahunaServerException($"The node {node} does not exist.");
     }
 }
