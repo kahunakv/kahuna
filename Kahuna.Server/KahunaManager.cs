@@ -452,6 +452,22 @@ public sealed class KahunaManager : IKahuna
     {
         return keyValues.LocateAndTryRollbackMutations(transactionId, key, ticketId, durability, cancelationToken);
     }
+    
+    /// <summary>
+    /// Locates the leader node for the given keys and executes the TryRollbackMutations request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="keys"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public Task<List<(KeyValueResponseType, string, long, KeyValueDurability)>> LocateAndTryRollbackManyMutations(
+        HLCTimestamp transactionId, 
+        List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> keys, 
+        CancellationToken cancelationToken
+    )
+    {
+        return keyValues.LocateAndTryRollbackManyMutations(transactionId, keys, cancelationToken);
+    }
 
     /// <summary>
     /// Locates the leader node for the given prefix and executes the GetByPrefix request.
@@ -628,30 +644,48 @@ public sealed class KahunaManager : IKahuna
     }
 
     /// <summary>
-    /// 
+    /// Attempts to commit mutations for a specified transaction and key with the given durability.
     /// </summary>
-    /// <param name="transactionId"></param>
-    /// <param name="key"></param>
-    /// <param name="proposalTicketId"></param>
-    /// <param name="durability"></param>
-    /// <returns></returns>
+    /// <param name="transactionId">The timestamp representing the transaction ID.</param>
+    /// <param name="key">The key for which the mutations are being committed.</param>
+    /// <param name="proposalTicketId">The timestamp representing the ID of the proposal ticket.</param>
+    /// <param name="durability">The durability level of the transaction, indicating whether it is ephemeral or persistent.</param>
+    /// <returns>A task representing the asynchronous operation, containing a tuple where the first element is the result of the operation as a <see cref="KeyValueResponseType"/>, and the second element is a long value associated with the operation.</returns>
     public Task<(KeyValueResponseType, long)> TryCommitMutations(
-        HLCTimestamp transactionId, 
-        string key, 
-        HLCTimestamp proposalTicketId, 
+        HLCTimestamp transactionId,
+        string key,
+        HLCTimestamp proposalTicketId,
         KeyValueDurability durability
     )
     {
         return keyValues.TryCommitMutations(transactionId, key, proposalTicketId, durability);
     }
-    
+
     /// <summary>
-    /// Executes a key/value transaction
+    /// Attempts to rollback mutations for a given key, transaction, and proposal ticket.
     /// </summary>
-    /// <param name="script"></param>
-    /// <param name="hash"></param>
-    /// <param name="parameters"></param>
-    /// <returns></returns>
+    /// <param name="transactionId">The unique identifier of the transaction to rollback.</param>
+    /// <param name="key">The key associated with the mutations.</param>
+    /// <param name="proposalTicketId">The identifier of the proposal ticket related to the mutation.</param>
+    /// <param name="durability">The durability level for the operation.</param>
+    /// <returns>A task containing a tuple with the response type and the associated transaction version.</returns>
+    public Task<(KeyValueResponseType, long)> TryRollbackMutations(
+        HLCTimestamp transactionId,
+        string key,
+        HLCTimestamp proposalTicketId,
+        KeyValueDurability durability
+    )
+    {
+        return keyValues.TryRollbackMutations(transactionId, key, proposalTicketId, durability);
+    }
+
+    /// <summary>
+    /// Attempts to execute a transaction script with the provided parameters and returns the result.
+    /// </summary>
+    /// <param name="script">The transaction script to execute, represented as a byte array.</param>
+    /// <param name="hash">An optional hash representing the script for validation or identification purposes.</param>
+    /// <param name="parameters">An optional list of parameters to be passed into the script during execution.</param>
+    /// <returns>A task that represents the asynchronous operation and resolves to the result of the transaction execution.</returns>
     public Task<KeyValueTransactionResult> TryExecuteTransactionScript(byte[] script, string? hash, List<KeyValueParameter>? parameters)
     {
         return keyValues.TryExecuteTx(script, hash, parameters);

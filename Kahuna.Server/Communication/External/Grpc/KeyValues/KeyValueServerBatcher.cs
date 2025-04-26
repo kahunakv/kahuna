@@ -148,13 +148,29 @@ internal sealed class KeyValueServerBatcher
 
                         tasks.Add(TryCommitMutationsDelayed(semaphore, request.RequestId, tryCommitMutationsRequest, responseStream, context));
                     }
-                        break;
+                    break;
                     
                     case GrpcServerBatchType.ServerTryCommitManyMutations:
                     {
                         GrpcTryCommitManyMutationsRequest? tryCommitManyMutationsRequest = request.TryCommitManyMutations;
 
                         tasks.Add(TryCommitManyMutationsDelayed(semaphore, request.RequestId, tryCommitManyMutationsRequest, responseStream, context));
+                    }
+                    break;
+                    
+                    case GrpcServerBatchType.ServerTryRollbackMutations:
+                    {
+                        GrpcTryRollbackMutationsRequest? tryRollbackMutationsRequest = request.TryRollbackMutations;
+
+                        tasks.Add(TryRollbackMutationsDelayed(semaphore, request.RequestId, tryRollbackMutationsRequest, responseStream, context));
+                    }
+                        break;
+                    
+                    case GrpcServerBatchType.ServerTryRollbackManyMutations:
+                    {
+                        GrpcTryRollbackManyMutationsRequest? tryRollbackManyMutationsRequest = request.TryRollbackManyMutations;
+
+                        tasks.Add(TryRollbackManyMutationsDelayed(semaphore, request.RequestId, tryRollbackManyMutationsRequest, responseStream, context));
                     }
                         break;
 
@@ -436,18 +452,58 @@ internal sealed class KeyValueServerBatcher
     private async Task TryCommitManyMutationsDelayed(
         SemaphoreSlim semaphore, 
         int requestId, 
-        GrpcTryCommitManyMutationsRequest tryPrepareManyMutationsRequest, 
+        GrpcTryCommitManyMutationsRequest tryCommitManyMutationsRequest, 
         IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
         ServerCallContext context
     )
     {
-        GrpcTryCommitManyMutationsResponse tryCommitManyMutationsResponse = await service.TryCommitManyMutationsInternal(tryPrepareManyMutationsRequest, context);
+        GrpcTryCommitManyMutationsResponse tryCommitManyMutationsResponse = await service.TryCommitManyMutationsInternal(tryCommitManyMutationsRequest, context);
         
         GrpcBatchServerKeyValueResponse response = new()
         {
             Type = GrpcServerBatchType.ServerTryCommitManyMutations,
             RequestId = requestId,
             TryCommitManyMutations = tryCommitManyMutationsResponse
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+    
+    private async Task TryRollbackMutationsDelayed(
+        SemaphoreSlim semaphore, 
+        int requestId, 
+        GrpcTryRollbackMutationsRequest tryRollbackMutationsRequest, 
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcTryRollbackMutationsResponse tryRollbackMutationsResponse = await service.TryRollbackMutationsInternal(tryRollbackMutationsRequest, context);
+        
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type = GrpcServerBatchType.ServerTryRollbackMutations,
+            RequestId = requestId,
+            TryRollbackMutations = tryRollbackMutationsResponse
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+    
+    private async Task TryRollbackManyMutationsDelayed(
+        SemaphoreSlim semaphore, 
+        int requestId, 
+        GrpcTryRollbackManyMutationsRequest tryRollbackManyMutationsRequest, 
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcTryRollbackManyMutationsResponse tryRollbackManyMutationsResponse = await service.TryRollbackManyMutationsInternal(tryRollbackManyMutationsRequest, context);
+        
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type = GrpcServerBatchType.ServerTryRollbackManyMutations,
+            RequestId = requestId,
+            TryRollbackManyMutations = tryRollbackManyMutationsResponse
         };
 
         await WriteResponseToStream(semaphore, responseStream, response, context);

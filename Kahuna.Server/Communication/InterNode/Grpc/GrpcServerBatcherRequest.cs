@@ -39,6 +39,10 @@ internal sealed class GrpcServerBatcherRequest
     
     public GrpcTryCommitManyMutationsRequest? TryCommitManyMutations { get; }
     
+    public GrpcTryRollbackMutationsRequest? TryRollbackMutations { get; }
+    
+    public GrpcTryRollbackManyMutationsRequest? TryRollbackManyMutations { get; }
+    
     public GrpcServerBatcherRequest(GrpcTryLockRequest tryLock)
     {
         TryLock = tryLock;
@@ -127,5 +131,15 @@ internal sealed class GrpcServerBatcherRequest
     public GrpcServerBatcherRequest(GrpcTryCommitManyMutationsRequest tryCommitManyMutations)
     {
         TryCommitManyMutations = tryCommitManyMutations;
+    }
+    
+    public GrpcServerBatcherRequest(GrpcTryRollbackMutationsRequest tryRollbackMutations)
+    {
+        TryRollbackMutations = tryRollbackMutations;
+    }
+    
+    public GrpcServerBatcherRequest(GrpcTryRollbackManyMutationsRequest tryRollbackManyMutations)
+    {
+        TryRollbackManyMutations = tryRollbackManyMutations;
     }
 }

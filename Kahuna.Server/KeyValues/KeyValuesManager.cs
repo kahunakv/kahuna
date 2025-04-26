@@ -375,6 +375,18 @@ internal sealed class KeyValuesManager
     {
         return locator.LocateAndTryRollbackMutations(transactionId, key, ticketId, durability, cancelationToken);
     }
+    
+    /// <summary>
+    /// Locates the leader node for the given keys and executes the TryRollbackMutations request. 
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="keys"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public Task<List<(KeyValueResponseType, string, long, KeyValueDurability)>> LocateAndTryRollbackManyMutations(HLCTimestamp transactionId, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> keys, CancellationToken cancelationToken)
+    {
+        return locator.LocateAndTryRollbackManyMutations(transactionId, keys, cancelationToken);
+    }
 
     /// <summary>
     /// Locates the leader node for the given prefix and executes the GetByPrefix request.
@@ -639,7 +651,10 @@ internal sealed class KeyValuesManager
     /// <param name="transactionId"></param>
     /// <param name="keys"></param>
     /// <returns></returns>
-    public async Task<List<(KeyValueResponseType, string, KeyValueDurability)>> TryAcquireManyExclusiveLocks(HLCTimestamp transactionId, List<(string key, int expiresMs, KeyValueDurability durability)> keys)
+    public async Task<List<(KeyValueResponseType, string, KeyValueDurability)>> TryAcquireManyExclusiveLocks(
+        HLCTimestamp transactionId, 
+        List<(string key, int expiresMs, KeyValueDurability durability)> keys
+    )
     {
         List<(KeyValueResponseType, string, KeyValueDurability)> responses = new(keys.Count);
         
@@ -723,7 +738,10 @@ internal sealed class KeyValuesManager
     /// <param name="transactionId"></param>
     /// <param name="keys"></param>
     /// <returns></returns>
-    public async Task<List<(KeyValueResponseType, string, KeyValueDurability)>> TryReleaseManyExclusiveLocks(HLCTimestamp transactionId, List<(string key, KeyValueDurability durability)> keys)
+    public async Task<List<(KeyValueResponseType, string, KeyValueDurability)>> TryReleaseManyExclusiveLocks(
+        HLCTimestamp transactionId, 
+        List<(string key, KeyValueDurability durability)> keys
+    )
     {
         List<(KeyValueResponseType, string, KeyValueDurability)> responses = new(keys.Count);
         
@@ -858,7 +876,12 @@ internal sealed class KeyValuesManager
     /// <param name="proposalTicketId"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, long)> TryCommitMutations(HLCTimestamp transactionId, string key, HLCTimestamp proposalTicketId, KeyValueDurability durability)
+    public async Task<(KeyValueResponseType, long)> TryCommitMutations(
+        HLCTimestamp transactionId, 
+        string key, 
+        HLCTimestamp proposalTicketId, 
+        KeyValueDurability durability
+    )
     {
         KeyValueRequest request = new(
             KeyValueRequestType.TryCommitMutations, 
@@ -895,7 +918,10 @@ internal sealed class KeyValuesManager
     /// <param name="proposalTicketId"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)>> TryCommitManyMutations(HLCTimestamp transactionId, List<(string key, HLCTimestamp proposalTicketId, KeyValueDurability durability)> keys)
+    public async Task<List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)>> TryCommitManyMutations(
+        HLCTimestamp transactionId, 
+        List<(string key, HLCTimestamp proposalTicketId, KeyValueDurability durability)> keys
+    )
     {
         Lock sync = new();
         List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> responses = new(keys.Count);
@@ -941,7 +967,12 @@ internal sealed class KeyValuesManager
     /// <param name="proposalTicketId"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, long)> TryRollbackMutations(HLCTimestamp transactionId, string key, HLCTimestamp proposalTicketId, KeyValueDurability durability)
+    public async Task<(KeyValueResponseType, long)> TryRollbackMutations(
+        HLCTimestamp transactionId, 
+        string key, 
+        HLCTimestamp proposalTicketId, 
+        KeyValueDurability durability
+    )
     {
         KeyValueRequest request = new(
             KeyValueRequestType.TryRollbackMutations, 
@@ -968,6 +999,55 @@ internal sealed class KeyValuesManager
             return (KeyValueResponseType.Errored, -1);
         
         return (response.Type, response.Revision);
+    }
+    
+    /// <summary>
+    /// Passes many TryRollback requests to the key/value actor for the given keyValue name.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="proposalTicketId"></param>
+    /// <param name="durability"></param>
+    /// <returns></returns>
+    public async Task<List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)>> TryRollbackManyMutations(
+        HLCTimestamp transactionId, 
+        List<(string key, HLCTimestamp proposalTicketId, KeyValueDurability durability)> keys
+    )
+    {
+        Lock sync = new();
+        List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> responses = new(keys.Count);
+
+        await keys.ForEachAsync(5, async ((string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) key) =>
+        {
+            KeyValueRequest request = new(
+                KeyValueRequestType.TryRollbackMutations,
+                transactionId,
+                HLCTimestamp.Zero,
+                key.key,
+                null,
+                null,
+                -1,
+                KeyValueFlags.None,
+                0,
+                key.proposalTicketId,
+                key.durability
+            );
+
+            KeyValueResponse? response;
+
+            if (key.durability == KeyValueDurability.Ephemeral)
+                response = await ephemeralKeyValuesRouter.Ask(request);
+            else
+                response = await persistentKeyValuesRouter.Ask(request);
+
+            if (response is null)
+                return;
+
+            lock (sync)
+                responses.Add((response.Type, key.key, response.Revision, key.durability));
+        });
+
+        return responses;
     }
 
     /// <summary>

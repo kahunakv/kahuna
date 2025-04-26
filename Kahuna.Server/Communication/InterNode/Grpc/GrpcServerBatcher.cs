@@ -184,7 +184,25 @@ internal sealed class GrpcServerBatcher
         return TryProcessQueue(grpcBatcherItem, promise);
     }
     
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryRollbackMutationsRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
     public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryCommitManyMutationsRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryRollbackManyMutationsRequest message)
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -401,6 +419,16 @@ internal sealed class GrpcServerBatcher
         {
             batchRequest.Type = GrpcServerBatchType.ServerTryCommitManyMutations;
             batchRequest.TryCommitManyMutations = itemRequest.TryCommitManyMutations;
+        }
+        else if (itemRequest.TryRollbackMutations is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryRollbackMutations;
+            batchRequest.TryRollbackMutations = itemRequest.TryRollbackMutations;
+        }
+        else if (itemRequest.TryRollbackManyMutations is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryRollbackManyMutations;
+            batchRequest.TryRollbackManyMutations = itemRequest.TryRollbackManyMutations;
         }
         else
             throw new KahunaServerException("Unknown request type");

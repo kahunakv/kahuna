@@ -16,6 +16,7 @@ service KeyValuer {
   rpc TryCommitMutations (GrpcTryCommitMutationsRequest) returns (GrpcTryCommitMutationsResponse);
   rpc TryCommitManyMutations (GrpcTryCommitManyMutationsRequest) returns (GrpcTryCommitManyMutationsResponse);
   rpc TryRollbackMutations (GrpcTryRollbackMutationsRequest) returns (GrpcTryRollbackMutationsResponse);
+  rpc TryRollbackManyMutations (GrpcTryRollbackManyMutationsRequest) returns (GrpcTryRollbackManyMutationsResponse);
   rpc ScanByPrefix (GrpcScanByPrefixRequest) returns (GrpcScanByPrefixResponse);
   rpc ScanAllByPrefix (GrpcScanAllByPrefixRequest) returns (GrpcScanAllByPrefixResponse);
   rpc GetByPrefix (GrpcGetByPrefixRequest) returns (GrpcGetByPrefixResponse);
@@ -321,6 +322,31 @@ message GrpcTryRollbackMutationsResponse {
   int64 ProposalIndex = 3;
 }
 
+message GrpcTryRollbackManyMutationsRequest {
+  int64 TransactionIdPhysical = 1;
+  uint32 TransactionIdCounter = 2;
+  repeated GrpcTryRollbackManyMutationsRequestItem Items = 3;
+}
+
+message GrpcTryRollbackManyMutationsRequestItem {
+  string Key = 1;
+  int64 ProposalTicketPhysical = 2;
+  uint32 ProposalTicketCounter = 3;
+  GrpcKeyValueDurability Durability = 4;
+}
+
+message GrpcTryRollbackManyMutationsResponse {
+  optional string ServedFrom = 1;
+  repeated GrpcTryRollbackManyMutationsResponseItem Items = 3;
+}
+
+message GrpcTryRollbackManyMutationsResponseItem {
+  GrpcKeyValueResponseType Type = 1;
+  string Key = 2;
+  GrpcKeyValueDurability Durability = 3;
+  int64 ProposalIndex = 4;
+}
+
 message GrpcScanByPrefixRequest {
   string PrefixKey = 1;
   GrpcKeyValueDurability Durability = 2;
@@ -474,7 +500,9 @@ message GrpcBatchServerKeyValueRequest {
     GrpcTryPrepareManyMutationsRequest TryPrepareManyMutations = 14;
     GrpcTryCommitMutationsRequest TryCommitMutations = 15;
     GrpcTryCommitManyMutationsRequest TryCommitManyMutations = 16;
-    GrpcGetByPrefixRequest GetByPrefix = 17;
+    GrpcTryRollbackMutationsRequest TryRollbackMutations = 17;
+    GrpcTryRollbackManyMutationsRequest TryRollbackManyMutations = 18;
+    GrpcGetByPrefixRequest GetByPrefix = 19;
   }
 }
 
@@ -497,7 +525,9 @@ message GrpcBatchServerKeyValueResponse
     GrpcTryPrepareManyMutationsResponse TryPrepareManyMutations = 14;
     GrpcTryCommitMutationsResponse TryCommitMutations = 15;
     GrpcTryCommitManyMutationsResponse TryCommitManyMutations = 16;
-    GrpcGetByPrefixResponse GetByPrefix = 17;
+    GrpcTryRollbackMutationsResponse TryRollbackMutations = 17;
+    GrpcTryRollbackManyMutationsResponse TryRollbackManyMutations = 18;
+    GrpcGetByPrefixResponse GetByPrefix = 19;
   }
 }
 
@@ -533,7 +563,9 @@ enum GrpcServerBatchType {
   SERVER_TRY_PREPARE_MANY_MUTATIONS = 12;
   SERVER_TRY_COMMIT_MUTATIONS = 13;
   SERVER_TRY_COMMIT_MANY_MUTATIONS = 14;
-  SERVER_TRY_GET_BY_PREFIX = 15;
+  SERVER_TRY_ROLLBACK_MUTATIONS = 15;
+  SERVER_TRY_ROLLBACK_MANY_MUTATIONS = 16;
+  SERVER_TRY_GET_BY_PREFIX = 17;
 }
 
 enum GrpcKeyValueFlags {

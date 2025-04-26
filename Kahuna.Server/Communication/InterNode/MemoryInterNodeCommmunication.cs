@@ -350,8 +350,48 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         
         throw new KahunaServerException($"The node {node} does not exist.");
     }
-    
+
     private static void AddToCommitMutationsResponses(
+        ConcurrentBag<(KeyValueResponseType, string, long, KeyValueDurability)> bag, 
+        Lock lockSync, 
+        List<(KeyValueResponseType type, string key, long, KeyValueDurability durability)> responses
+    )
+    {
+        foreach ((KeyValueResponseType type, string key, long commitIndex, KeyValueDurability durability) in bag)
+        {
+            lock (lockSync)
+                responses.Add((type, key, commitIndex, durability));
+        }
+    }
+    
+    public async Task<(KeyValueResponseType, long)> TryRollbackMutations(string node, HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancelationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+            return await kahunaNode.TryRollbackMutations(transactionId, key, ticketId, durability);
+        
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public async Task TryRollbackNodeMutations(string node, HLCTimestamp transactionId, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys, Lock lockSync, List<(KeyValueResponseType type, string key, long, KeyValueDurability durability)> responses, CancellationToken cancellationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            ConcurrentBag<(KeyValueResponseType, string, long, KeyValueDurability)> bag = [];
+
+            foreach ((string key, HLCTimestamp ticketId, KeyValueDurability durability) in xkeys)
+            {
+                (KeyValueResponseType type, long commitIndex) = await kahunaNode.TryRollbackMutations(transactionId, key, ticketId, durability);
+                bag.Add((type, key, commitIndex, durability));
+            }
+
+            AddToRollbackMutationsResponses(bag, lockSync, responses);
+            return;
+        }
+        
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+    
+    private static void AddToRollbackMutationsResponses(
         ConcurrentBag<(KeyValueResponseType, string, long, KeyValueDurability)> bag, 
         Lock lockSync, 
         List<(KeyValueResponseType type, string key, long, KeyValueDurability durability)> responses

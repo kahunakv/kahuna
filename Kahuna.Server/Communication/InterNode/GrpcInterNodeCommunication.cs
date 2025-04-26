@@ -8,12 +8,12 @@ using System.Runtime.InteropServices;
 using System.Collections.Concurrent;
 using Google.Protobuf.Collections;
 
-using Kahuna.Server.Communication.Internode.Grpc;
+using Kahuna.Shared.Locks;
+using Kahuna.Shared.KeyValue;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.Locks;
-using Kahuna.Shared.KeyValue;
-using Kahuna.Shared.Locks;
+using Kahuna.Server.Communication.Internode.Grpc;
 
 namespace Kahuna.Server.Communication.Internode;
 
@@ -595,6 +595,62 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     }
     
     private static IEnumerable<GrpcTryCommitManyMutationsRequestItem> GetCommitRequestItems(List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys)
+    {
+        foreach ((string key, HLCTimestamp ticketId, KeyValueDurability durability) key in xkeys)
+            yield return new()
+            {
+                Key = key.key,
+                ProposalTicketPhysical = key.ticketId.L,
+                ProposalTicketCounter = key.ticketId.C,
+                Durability = (GrpcKeyValueDurability)key.durability
+            };
+    }
+
+    public async Task<(KeyValueResponseType, long)> TryRollbackMutations(string node, HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancelationToken)
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+        
+        GrpcTryRollbackMutationsRequest request = new()
+        {
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
+            Key = key,
+            ProposalTicketPhysical = ticketId.L,
+            ProposalTicketCounter = ticketId.C,
+            Durability = (GrpcKeyValueDurability)durability,
+        };
+        
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcTryRollbackMutationsResponse remoteResponse = response.TryRollbackMutations!;
+        
+        remoteResponse.ServedFrom = $"https://{node}";
+        
+        return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.ProposalIndex);
+    }
+    
+    public async Task TryRollbackNodeMutations(string node, HLCTimestamp transactionId, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys, Lock lockSync, List<(KeyValueResponseType type, string key, long, KeyValueDurability durability)> responses, CancellationToken cancellationToken)
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+            
+        GrpcTryRollbackManyMutationsRequest request = new()
+        {
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C
+        };
+            
+        request.Items.Add(GetRollbackRequestItems(xkeys));
+            
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcTryRollbackManyMutationsResponse remoteResponse = response.TryRollbackManyMutations!;
+
+        lock (lockSync)
+        {
+            foreach (GrpcTryRollbackManyMutationsResponseItem item in remoteResponse.Items)
+                responses.Add(((KeyValueResponseType)item.Type, item.Key, item.ProposalIndex, (KeyValueDurability)item.Durability));
+        }
+    }
+    
+    private static IEnumerable<GrpcTryRollbackManyMutationsRequestItem> GetRollbackRequestItems(List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys)
     {
         foreach ((string key, HLCTimestamp ticketId, KeyValueDurability durability) key in xkeys)
             yield return new()

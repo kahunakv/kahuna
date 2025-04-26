@@ -647,12 +647,15 @@ internal sealed class KeyValueTransactionCoordinator
             context, 
             cancellationToken
         );
-        
-        if (!success)
-            return;
 
         if (mutationsPrepared is null)
             return;
+
+        if (!success)
+        {
+            await RollbackMutations(context, mutationsPrepared);
+            return;
+        }
 
         await CommitMutations(context, mutationsPrepared);
     }
@@ -721,26 +724,29 @@ internal sealed class KeyValueTransactionCoordinator
     
         if (proposalResponses.Any(r => r.Item1 != KeyValueResponseType.Prepared))
         {
+            List<(string, HLCTimestamp, KeyValueDurability)> preparedMutations = [];
+            
             foreach ((KeyValueResponseType, HLCTimestamp, string, KeyValueDurability) proposalResponse in proposalResponses)
             {
                 if (proposalResponse.Item1 == KeyValueResponseType.Prepared)
-                    await manager.LocateAndTryRollbackMutations(context.TransactionId, proposalResponse.Item3, proposalResponse.Item2, proposalResponse.Item4, cancellationToken);
+                    preparedMutations.Add((proposalResponse.Item3, proposalResponse.Item2, proposalResponse.Item4));
 
                 logger.LogWarning("Couldn't propose {Key} {Response}", proposalResponse.Item3, proposalResponse.Item1);
             }
 
             context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Couldn't prepare mutations" };
-            return (false, null);
+            return (false, preparedMutations);
         }
 
         return (true, proposalResponses.Select(r => (r.Item3, r.Item2, r.Item4)).ToList());
     }
-    
+
     /// <summary>
-    /// Send the commit request to all involved nodes.
+    /// Commits the prepared mutations to the key-value store.
     /// </summary>
-    /// <param name="context"></param>
-    /// <param name="mutationsPrepared"></param>
+    /// <param name="context">The transaction context containing transaction-specific information.</param>
+    /// <param name="mutationsPrepared">A list of tuples representing the prepared mutations, including the key, timestamp, and durability level.</param>
+    /// <returns>An asynchronous task representing the commit operation.</returns>
     private async Task CommitMutations(KeyValueTransactionContext context, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> mutationsPrepared)
     {
         if (mutationsPrepared.Count == 0)
@@ -764,6 +770,38 @@ internal sealed class KeyValueTransactionCoordinator
         {
             if (response != KeyValueResponseType.Committed)
                 logger.LogWarning("CommitMutations {Type} {Key} {TicketId} {Durability}", response, key, commitIndex, durability);
+        }
+    }
+
+    /// <summary>
+    /// Rolls back a collection of mutations associated with a given transaction context.
+    /// </summary>
+    /// <param name="context">The transaction context containing the details of the transaction.</param>
+    /// <param name="mutationsPrepared">The list of mutations prepared for rollback, containing key, ticket identifier, and durability details.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    private async Task RollbackMutations(KeyValueTransactionContext context, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> mutationsPrepared)
+    {
+        if (mutationsPrepared.Count == 0)
+            return;
+
+        if (mutationsPrepared.Count == 1)
+        {
+            (string key, HLCTimestamp ticketId, KeyValueDurability durability) = mutationsPrepared.First();
+            
+            (KeyValueResponseType response, long _) = await manager.LocateAndTryRollbackMutations(context.TransactionId, key, ticketId, durability, CancellationToken.None);
+            
+            if (response != KeyValueResponseType.RolledBack)
+                logger.LogWarning("RollbackMutations: {Type} {Key} {TicketId}", response, key, ticketId);
+            
+            return;
+        }
+        
+        List<(KeyValueResponseType, string, long, KeyValueDurability)> responses = await manager.LocateAndTryRollbackManyMutations(context.TransactionId, mutationsPrepared, CancellationToken.None);
+        
+        foreach ((KeyValueResponseType response, string key, long commitIndex, KeyValueDurability durability) in responses)
+        {
+            if (response != KeyValueResponseType.Committed)
+                logger.LogWarning("RollbackMutations {Type} {Key} {TicketId} {Durability}", response, key, commitIndex, durability);
         }
     }
 
@@ -971,7 +1009,7 @@ internal sealed class KeyValueTransactionCoordinator
     }
     
     /// <summary>
-    /// Executes an "for" stmt
+    /// Executes a "for" stmt
     /// </summary>
     /// <param name="context"></param>
     /// <param name="ast"></param>

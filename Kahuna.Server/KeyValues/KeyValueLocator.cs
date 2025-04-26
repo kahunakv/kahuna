@@ -525,7 +525,7 @@ internal sealed class KeyValueLocator
         List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> responses = [];
         
         // Requests to nodes are sent in parallel
-        foreach ((string leader, List<(string key, KeyValueDurability durability)>? xkeys) in acquisitionPlan)
+        foreach ((string leader, List<(string key, KeyValueDurability durability)> xkeys) in acquisitionPlan)
             tasks.Add(TryPrepareNodeMutations(transactionId, commitId, leader, localNode, xkeys, lockSync, responses, cancelationToken));
         
         await Task.WhenAll(tasks);
@@ -626,7 +626,7 @@ internal sealed class KeyValueLocator
         List<(KeyValueResponseType, string, long, KeyValueDurability)> responses = [];
         
         // Requests to nodes are sent in parallel
-        foreach ((string leader, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>? xkeys) in acquisitionPlan)
+        foreach ((string leader, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys) in acquisitionPlan)
             tasks.Add(TryCommitManyMutations(transactionId, leader, localNode, xkeys, lockSync, responses, cancelationToken));
         
         await Task.WhenAll(tasks);
@@ -679,7 +679,7 @@ internal sealed class KeyValueLocator
         int partitionId = raft.GetPartitionKey(key);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
-            return await manager.TryRollbackMutations(transactionId, key, ticketId, durability);
+            return await manager.TryCommitMutations(transactionId, key, ticketId, durability);
             
         string leader = await raft.WaitForLeader(partitionId, cancelationToken);
         if (leader == raft.GetLocalEndpoint())
@@ -687,25 +687,79 @@ internal sealed class KeyValueLocator
         
         logger.LogDebug("ROLLBACK-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
         
-        GrpcChannel channel = SharedChannels.GetChannel(leader);
+        return await interNodeCommunication.TryRollbackMutations(leader, transactionId, key, ticketId, durability, cancelationToken);
+    }
+    
+    /// <summary>
+    /// Locates the leader node for the given keys and executes the TryRollbackManyMutations request.
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="keys"></param>
+    /// <param name="cancelationToken"></param>
+    /// <returns></returns>
+    public async Task<List<(KeyValueResponseType, string, long, KeyValueDurability)>> LocateAndTryRollbackManyMutations(
+        HLCTimestamp transactionId, 
+        List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> keys, 
+        CancellationToken cancelationToken
+    )
+    {
+        string localNode = raft.GetLocalEndpoint();
         
-        KeyValuer.KeyValuerClient client = new(channel);
-        
-        GrpcTryRollbackMutationsRequest request = new()
+        Dictionary<string, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>> acquisitionPlan = [];
+
+        foreach ((string key, HLCTimestamp ticketId, KeyValueDurability durability) key in keys)
         {
-            TransactionIdPhysical = transactionId.L,
-            TransactionIdCounter = transactionId.C,
-            Key = key,
-            ProposalTicketPhysical = ticketId.L,
-            ProposalTicketCounter = ticketId.C,
-            Durability = (GrpcKeyValueDurability)durability,
-        };
+            if (string.IsNullOrEmpty(key.key))
+                return [(KeyValueResponseType.InvalidInput, key.key, 0, key.durability)];
+
+            int partitionId = raft.GetPartitionKey(key.key);
+            string leader = await raft.WaitForLeader(partitionId, cancelationToken);
+            
+            if (acquisitionPlan.TryGetValue(leader, out List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>? list))
+                list.Add(key);
+            else
+                acquisitionPlan[leader] = [key];
+        }
         
-        GrpcTryRollbackMutationsResponse? remoteResponse = await client.TryRollbackMutationsAsync(request, cancellationToken: cancelationToken);
+        Lock lockSync = new();
+        List<Task> tasks = new(acquisitionPlan.Count);
+        List<(KeyValueResponseType, string, long, KeyValueDurability)> responses = [];
         
-        remoteResponse.ServedFrom = $"https://{leader}";
+        // Requests to nodes are sent in parallel
+        foreach ((string leader, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys) in acquisitionPlan)
+            tasks.Add(TryRollbackManyMutations(transactionId, leader, localNode, xkeys, lockSync, responses, cancelationToken));
         
-        return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.ProposalIndex);
+        await Task.WhenAll(tasks);
+
+        return responses;
+    }
+
+    private async Task TryRollbackManyMutations(
+        HLCTimestamp transactionId, 
+        string leader, 
+        string localNode, 
+        List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys,
+        Lock lockSync,
+        List<(KeyValueResponseType, string, long, KeyValueDurability)> responses,
+        CancellationToken cancelationToken
+    )
+    {
+        logger.LogDebug("ROLLBACK-KEYVALUE Redirect {Number} Commit mutations to node {Leader}", xkeys.Count, leader);
+        
+        if (leader == localNode)
+        {
+            List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> commitResponses = await manager.TryRollbackManyMutations(transactionId, xkeys);
+
+            lock (lockSync)
+            {
+                foreach ((KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability) item in commitResponses)
+                    responses.Add((item.type, item.key, item.proposalIndex, item.durability));
+            }
+
+            return;
+        }
+            
+        await interNodeCommunication.TryRollbackNodeMutations(leader, transactionId, xkeys, lockSync, responses, cancelationToken);
     }
 
     public async Task<KeyValueGetByPrefixResult> LocateAndGetByPrefix(HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
