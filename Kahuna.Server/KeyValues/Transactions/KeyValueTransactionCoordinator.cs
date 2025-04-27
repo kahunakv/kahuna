@@ -336,7 +336,7 @@ internal sealed class KeyValueTransactionCoordinator
         }
         finally
         {
-            if (context.State != KeyValueTransactionState.Committed && context.State != KeyValueTransactionState.RolledBack)
+            if (context.Locking == KeyValueTransactionLocking.Pessimistic || (context.State != KeyValueTransactionState.Committed && context.State != KeyValueTransactionState.RolledBack))
             {
                 // Final Step: Release locks
                 if (context.AsyncRelease)
@@ -391,7 +391,7 @@ internal sealed class KeyValueTransactionCoordinator
         }
         finally
         {
-            if (context.State != KeyValueTransactionState.Committed && context.State != KeyValueTransactionState.RolledBack)
+            if (context.Locking == KeyValueTransactionLocking.Pessimistic || context.State != KeyValueTransactionState.Committed && context.State != KeyValueTransactionState.RolledBack)
             {
                 // Final Step: Release locks
                 if (context.AsyncRelease)
@@ -559,7 +559,7 @@ internal sealed class KeyValueTransactionCoordinator
         }
         finally
         {
-            if (context.State != KeyValueTransactionState.Committed && context.State != KeyValueTransactionState.RolledBack)
+            if (context.Locking == KeyValueTransactionLocking.Pessimistic || context.State != KeyValueTransactionState.Committed && context.State != KeyValueTransactionState.RolledBack)
             {
                 // Final Step: Release locks
                 if (context.AsyncRelease)
@@ -647,16 +647,32 @@ internal sealed class KeyValueTransactionCoordinator
         {
             if (context.LocksAcquired is null || context.LocksAcquired.Count == 0)
                 return;
+
+            List<(string, KeyValueDurability)> locksToRelease;
             
-            if (context.LocksAcquired.Count == 1)
+            // Commit or rollback will release locks, we just need the ones that haven't been released yet
+            if (context.ModifiedKeys is null)
+                locksToRelease = context.LocksAcquired.ToList();
+            else
             {
-                (string lockKey, KeyValueDurability durability) = context.LocksAcquired.First();
+                locksToRelease = [];
+                
+                foreach ((string, KeyValueDurability) lockKey in context.LocksAcquired)
+                {
+                    if (!context.ModifiedKeys.Contains(lockKey))
+                        locksToRelease.Add(lockKey);
+                }
+            }
+
+            if (locksToRelease.Count == 1)
+            {
+                (string lockKey, KeyValueDurability durability) = locksToRelease.First();
                 
                 await manager.LocateAndTryReleaseExclusiveLock(context.TransactionId, lockKey, durability, CancellationToken.None);
                 return;
             }
             
-            await manager.LocateAndTryReleaseManyExclusiveLocks(context.TransactionId, context.LocksAcquired.ToList(), CancellationToken.None);
+            await manager.LocateAndTryReleaseManyExclusiveLocks(context.TransactionId, locksToRelease, CancellationToken.None);
         }
         catch (Exception ex)
         {

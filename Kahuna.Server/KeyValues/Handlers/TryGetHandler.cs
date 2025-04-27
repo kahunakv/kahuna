@@ -115,11 +115,14 @@ internal sealed class TryGetHandler : BaseHandler
                 context.MvccEntries.Add(message.TransactionId, entry);
             }
             
+            if (context.Revision > entry.Revision) // early conflict detection
+                return KeyValueStaticResponses.AbortedResponse;
+            
             if (entry.State is KeyValueState.Undefined or KeyValueState.Deleted)
                 return KeyValueStaticResponses.DoesNotExistContextResponse;
             
             if (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
-                return KeyValueStaticResponses.DoesNotExistContextResponse;                      
+                return KeyValueStaticResponses.DoesNotExistContextResponse;
             
             readOnlyKeyValueContext = new(
                 entry.Value, 

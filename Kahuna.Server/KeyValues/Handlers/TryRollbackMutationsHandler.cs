@@ -87,8 +87,7 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
 
         if (message.Durability != KeyValueDurability.Persistent)
         {
-            context.MvccEntries.Remove(message.TransactionId);
-        
+            context.MvccEntries.Remove(message.TransactionId);                   
             context.WriteIntent = null;
             
             return new(KeyValueResponseType.RolledBack);
@@ -96,12 +95,11 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
 
         (bool success, long rollbackIndex) = await RollbackKeyValueMessage(message.Key, message.ProposalTicketId);
         
-        if (!success)
-            return KeyValueStaticResponses.ErroredResponse;
-        
-        context.MvccEntries.Remove(message.TransactionId);
-        
+        context.MvccEntries.Remove(message.TransactionId);                   
         context.WriteIntent = null;
+
+        if (!success)
+            return KeyValueStaticResponses.ErroredResponse;                
         
         return new(KeyValueResponseType.RolledBack, rollbackIndex);
     }

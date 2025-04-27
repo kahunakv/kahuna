@@ -107,6 +107,9 @@ internal sealed class TrySetHandler : BaseHandler
                 
                 context.MvccEntries.Add(message.TransactionId, entry);
             }
+            
+            if (context.Revision > entry.Revision) // early conflict detection
+                return KeyValueStaticResponses.AbortedResponse;
 
             if (entry.State is KeyValueState.Deleted or KeyValueState.Undefined)
             {
@@ -145,6 +148,7 @@ internal sealed class TrySetHandler : BaseHandler
             entry.LastUsed = currentTime;
             entry.LastModified = currentTime;
             entry.State = KeyValueState.Set;
+                       
             
             return new(KeyValueResponseType.Set, entry.Revision, currentTime);
         }

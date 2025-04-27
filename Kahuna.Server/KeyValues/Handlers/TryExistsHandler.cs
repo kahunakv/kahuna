@@ -112,6 +112,9 @@ internal sealed class TryExistsHandler : BaseHandler
             if (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
                 return KeyValueStaticResponses.DoesNotExistContextResponse;
             
+            if (context.Revision > entry.Revision) // early conflict detection
+                return KeyValueStaticResponses.AbortedResponse;
+            
             readOnlyKeyValueContext = new(
                 null, 
                 entry.Revision, 

@@ -62,7 +62,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
 
         if (context.WriteIntent.TransactionId != message.TransactionId)
         {
-            logger.LogWarning("Write intent conflict between {CurrentTransactionId} and {TransactionId}", context.WriteIntent.TransactionId, message.TransactionId);
+            logger.LogWarning("Write intent conflict between {CurrentTransactionId} and {TransactionId}", context.WriteIntent.TransactionId, message.TransactionId);                              
 
             return KeyValueStaticResponses.ErroredResponse;
         }
@@ -70,6 +70,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         if (context.MvccEntries is null)
         {
             logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [1]", message.TransactionId);
+                       
 
             return KeyValueStaticResponses.ErroredResponse;
         }
@@ -77,7 +78,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         if (!context.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? entry))
         {
             logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [2]", message.TransactionId);
-
+                       
             return KeyValueStaticResponses.ErroredResponse;
         }
 
@@ -106,16 +107,19 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             context.LastModified = proposal.LastModified;
             context.State = proposal.State;
             
-            context.MvccEntries.Remove(message.TransactionId);
-        
+            context.MvccEntries.Remove(message.TransactionId);                    
             context.WriteIntent = null;
 
             return new(KeyValueResponseType.Committed, 0);
         }
 
         (bool success, int partitionId, long commitIndex) = await CommitKeyValueMessage(message.Key, message.ProposalTicketId);
-        if (!success)
-            return KeyValueStaticResponses.ErroredResponse;
+        
+        context.MvccEntries.Remove(message.TransactionId);                   
+        context.WriteIntent = null;
+        
+        if (!success)                                
+            return KeyValueStaticResponses.ErroredResponse;        
 
         if (context.Revisions is not null)
             RemoveExpiredRevisions(context, proposal.Revision);
@@ -140,11 +144,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             proposal.LastUsed,
             proposal.LastModified,
             (int)proposal.State
-        ));
-                
-        context.MvccEntries.Remove(message.TransactionId);
-        
-        context.WriteIntent = null;
+        ));                       
 
         return new(KeyValueResponseType.Committed, commitIndex);
     }

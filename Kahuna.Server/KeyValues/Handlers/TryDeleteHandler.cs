@@ -65,6 +65,9 @@ internal sealed class TryDeleteHandler : BaseHandler
                 context.MvccEntries.Add(message.TransactionId, entry);
             }
             
+            if (context.Revision > entry.Revision) // early conflict detection
+                return KeyValueStaticResponses.AbortedResponse;
+            
             if (context.State == KeyValueState.Deleted)
                 return new(KeyValueResponseType.DoesNotExist, entry.Revision);
             

@@ -21,6 +21,8 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// </summary>
 internal sealed class TryPrepareMutationsHandler : BaseHandler
 {
+    private const int DefaultTxCompleteTimeout = 15000;
+    
     public TryPrepareMutationsHandler(
         BTree<string, KeyValueContext> keyValuesStore,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
@@ -110,12 +112,19 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
 
         // in optimistic concurrency, we create the write intent if it doesn't exist
         // this is to ensure that the assigned transaction will win the race
-        context.WriteIntent ??= new()
+        if (context.WriteIntent is null)
         {
-            TransactionId = message.TransactionId,
-            Expires = message.TransactionId + 5000
-        };
-        
+            context.WriteIntent = new()
+            {
+                TransactionId = message.TransactionId,
+                Expires = message.TransactionId + DefaultTxCompleteTimeout
+            };
+        }
+        else
+        {
+            context.WriteIntent.Expires = message.TransactionId + DefaultTxCompleteTimeout;
+        }
+
         if (message.Durability != KeyValueDurability.Persistent)
             return new(KeyValueResponseType.Prepared);
         
@@ -150,10 +159,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
     private async Task<(bool, HLCTimestamp)> PrepareKeyValueMessage(KeyValueRequestType type, KeyValueProposal proposal, HLCTimestamp currentTime)
     {
         if (!raft.Joined)
-            return (true, HLCTimestamp.Zero);
-
-        if (proposal.Key == "test")
-            return (false, HLCTimestamp.Zero);
+            return (true, HLCTimestamp.Zero);        
 
         int partitionId = raft.GetPartitionKey(proposal.Key);
 

@@ -69,6 +69,9 @@ internal sealed class TryExtendHandler : BaseHandler
             if (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
                 return new(KeyValueResponseType.DoesNotExist, context.Revision);
             
+            if (context.Revision > entry.Revision) // early conflict detection
+                return KeyValueStaticResponses.AbortedResponse;
+            
             entry.Expires = currentTime + message.ExpiresMs;
             entry.LastUsed = currentTime;
             entry.LastModified = currentTime;

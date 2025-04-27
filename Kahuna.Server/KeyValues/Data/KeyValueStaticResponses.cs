@@ -23,6 +23,8 @@ internal static class KeyValueStaticResponses
     internal static readonly KeyValueResponse UnlockedResponse = new(KeyValueResponseType.Unlocked);
 
     internal static readonly KeyValueResponse AlreadyLockedResponse = new(KeyValueResponseType.AlreadyLocked);
+    
+    internal static readonly KeyValueResponse AbortedResponse = new(KeyValueResponseType.Aborted);
 
     internal static readonly KeyValueResponse DoesNotExistContextResponse = new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueContext(null, 0, HLCTimestamp.Zero, HLCTimestamp.Zero, HLCTimestamp.Zero, KeyValueState.Undefined));
 }
