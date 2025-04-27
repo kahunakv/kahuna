@@ -1,5 +1,6 @@
 
 using System.Collections.Concurrent;
+using DotNext;
 using Kommander;
 using Kommander.Time;
 
@@ -255,10 +256,15 @@ internal sealed class KeyValueTransactionCoordinator
     /// <summary>
     /// Commits the transaction with the given transaction ID.
     /// </summary>
-    /// <param name="options">The options used to configure the transaction, such as locking, timeout, and release behavior.</param>
-    /// <param name="modifiedKeys">List of modified keys</param>  
-    /// <returns>Returns the unique transaction ID of type <see cref="HLCTimestamp"/>.</returns>
-    public async Task<KeyValueResponseType> CommitTransaction(HLCTimestamp transactionId, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys)
+    /// <param name="transactionId"></param>
+    /// <param name="acquiredLocks"></param>
+    /// <param name="modifiedKeys"></param>
+    /// <returns></returns>
+    public async Task<KeyValueResponseType> CommitTransaction(
+        HLCTimestamp transactionId, 
+        List<KeyValueTransactionModifiedKey> acquiredLocks, 
+        List<KeyValueTransactionModifiedKey> modifiedKeys
+    )
     {
         if (!sessions.TryGetValue(transactionId, out KeyValueTransactionContext? context))
         {
@@ -330,21 +336,29 @@ internal sealed class KeyValueTransactionCoordinator
         }
         finally
         {
-            // Final Step: Release locks
-            if (context.AsyncRelease)
-                _ = ReleaseAcquiredLocks(context);
-            else
-                await ReleaseAcquiredLocks(context);
+            if (context.State != KeyValueTransactionState.Committed && context.State != KeyValueTransactionState.RolledBack)
+            {
+                // Final Step: Release locks
+                if (context.AsyncRelease)
+                    _ = ReleaseAcquiredLocks(context);
+                else
+                    await ReleaseAcquiredLocks(context);
+            }                       
         }        
     }
     
     /// <summary>
     /// Rollbacks the transaction with the given transaction ID.
     /// </summary>
-    /// <param name="options">The options used to configure the transaction, such as locking, timeout, and release behavior.</param>
-    /// <param name="modifiedKeys">List of modified keys</param> 
-    /// <returns>Returns the unique transaction ID of type <see cref="HLCTimestamp"/>.</returns>
-    public async Task<KeyValueResponseType> RollbackTransaction(HLCTimestamp transactionId, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys)
+    /// <param name="transactionId"></param>
+    /// <param name="acquiredLocks"></param>
+    /// <param name="modifiedKeys"></param>
+    /// <returns></returns>
+    public async Task<KeyValueResponseType> RollbackTransaction(
+        HLCTimestamp transactionId, 
+        List<KeyValueTransactionModifiedKey> acquiredLocks, 
+        List<KeyValueTransactionModifiedKey> modifiedKeys
+    )
     {
         if (!sessions.TryGetValue(transactionId, out KeyValueTransactionContext? context))
         {
@@ -367,9 +381,7 @@ internal sealed class KeyValueTransactionCoordinator
                 context.ModifiedKeys.Add((modifiedKey.Key ?? "", modifiedKey.Durability));
             }
 
-            context.Action = KeyValueTransactionAction.Abort;
-
-            //await TwoPhaseCommit(context, CancellationToken.None);
+            context.Action = KeyValueTransactionAction.Abort;            
 
             logger.LogDebug("Rolled back interactive transaction {TransactionId}", transactionId);
             
@@ -379,11 +391,14 @@ internal sealed class KeyValueTransactionCoordinator
         }
         finally
         {
-            // Final Step: Release locks
-            if (context.AsyncRelease)
-                _ = ReleaseAcquiredLocks(context);
-            else
-                await ReleaseAcquiredLocks(context);
+            if (context.State != KeyValueTransactionState.Committed && context.State != KeyValueTransactionState.RolledBack)
+            {
+                // Final Step: Release locks
+                if (context.AsyncRelease)
+                    _ = ReleaseAcquiredLocks(context);
+                else
+                    await ReleaseAcquiredLocks(context);
+            }
         }        
     }
 
@@ -544,11 +559,14 @@ internal sealed class KeyValueTransactionCoordinator
         }
         finally
         {
-            // Final Step: Release locks
-            if (context.AsyncRelease)
-                _ = ReleaseAcquiredLocks(context);
-            else
-                await ReleaseAcquiredLocks(context);
+            if (context.State != KeyValueTransactionState.Committed && context.State != KeyValueTransactionState.RolledBack)
+            {
+                // Final Step: Release locks
+                if (context.AsyncRelease)
+                    _ = ReleaseAcquiredLocks(context);
+                else
+                    await ReleaseAcquiredLocks(context);
+            }
         }
     }
 
@@ -705,13 +723,19 @@ internal sealed class KeyValueTransactionCoordinator
 
         if (!success)
         {
-            // Step 4.a: Rollback mutations in the case of failures            
-            await RollbackMutations(context, mutationsPrepared);
+            // Step 4.a: Rollback mutations in the case of failures
+            if (context.AsyncRelease)
+                _ = RollbackMutations(context, mutationsPrepared);
+            else
+                await RollbackMutations(context, mutationsPrepared);
             return;
         }
 
         // Step 4.b: Prepare mutations of successful preparations
-        await CommitMutations(context, mutationsPrepared);
+        if (context.AsyncRelease)
+            _ = CommitMutations(context, mutationsPrepared);
+        else
+            await CommitMutations(context, mutationsPrepared);
     }
 
     /// <summary>

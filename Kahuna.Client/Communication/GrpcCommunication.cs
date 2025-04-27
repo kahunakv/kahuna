@@ -478,6 +478,7 @@ public class GrpcCommunication : IKahunaCommunication
     {
         GrpcTryGetKeyValueRequest request = new()
         {
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,

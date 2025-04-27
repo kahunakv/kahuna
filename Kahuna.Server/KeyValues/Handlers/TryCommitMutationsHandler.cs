@@ -105,6 +105,10 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             context.LastUsed = proposal.LastUsed;
             context.LastModified = proposal.LastModified;
             context.State = proposal.State;
+            
+            context.MvccEntries.Remove(message.TransactionId);
+        
+            context.WriteIntent = null;
 
             return new(KeyValueResponseType.Committed, 0);
         }
@@ -137,6 +141,10 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             proposal.LastModified,
             (int)proposal.State
         ));
+                
+        context.MvccEntries.Remove(message.TransactionId);
+        
+        context.WriteIntent = null;
 
         return new(KeyValueResponseType.Committed, commitIndex);
     }

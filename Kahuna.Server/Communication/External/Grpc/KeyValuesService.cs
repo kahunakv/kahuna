@@ -1081,6 +1081,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         GrpcStartTransactionResponse response = new()
         {
             Type = (GrpcKeyValueResponseType)type,
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C
         };
