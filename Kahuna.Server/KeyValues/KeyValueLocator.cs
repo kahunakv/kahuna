@@ -946,9 +946,9 @@ internal sealed class KeyValueLocator
         return (item.Key, new(
             value,
             item.Revision,
-            new(item.ExpiresPhysical, item.ExpiresCounter),
-            new(item.LastUsedPhysical, item.LastUsedCounter),
-            new(item.LastModifiedPhysical, item.LastModifiedCounter),
+            new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter),
+            new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter),
+            new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
             (KeyValueState)item.State
         ));
     }

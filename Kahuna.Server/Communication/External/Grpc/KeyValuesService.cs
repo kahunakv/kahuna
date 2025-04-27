@@ -92,7 +92,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             compareValue = request.CompareValue.ToByteArray();
         
         (KeyValueResponseType response, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTrySetKeyValue(
-            new(request.TransactionIdPhysical, request.TransactionIdCounter),
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key, 
             value,
             compareValue,
@@ -107,6 +107,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         {
             Type = (GrpcKeyValueResponseType)response,
             Revision = revision,
+            LastModifiedNode = lastModified.N,
             LastModifiedPhysical = lastModified.L,
             LastModifiedCounter = lastModified.C,
             TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
@@ -141,7 +142,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
         
         (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTryExtendKeyValue(
-            new(request.TransactionIdPhysical, request.TransactionIdCounter),
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key, 
             request.ExpiresMs,
             (KeyValueDurability)request.Durability, 
@@ -152,6 +153,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         {
             Type = (GrpcKeyValueResponseType)type,
             Revision = revision,
+            LastModifiedNode = lastModified.N,
             LastModifiedPhysical = lastModified.L,
             LastModifiedCounter = lastModified.C,
             TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
@@ -186,7 +188,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
         
         (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTryDeleteKeyValue(
-            new(request.TransactionIdPhysical, request.TransactionIdCounter),
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key, 
             (KeyValueDurability)request.Durability, 
             context.CancellationToken
@@ -196,6 +198,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         {
             Type = (GrpcKeyValueResponseType)type,
             Revision = revision,
+            LastModifiedNode = lastModified.N,
             LastModifiedPhysical = lastModified.L,
             LastModifiedCounter = lastModified.C,
             TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
@@ -230,7 +233,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
         
         (KeyValueResponseType type, ReadOnlyKeyValueContext? keyValueContext) = await keyValues.LocateAndTryGetValue(
-            new(request.TransactionIdPhysical, request.TransactionIdCounter),
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key, 
             request.Revision,
             (KeyValueDurability)request.Durability, 
@@ -244,6 +247,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 ServedFrom = "",
                 Type = (GrpcKeyValueResponseType)type,
                 Revision = keyValueContext.Revision,
+                ExpiresNode = keyValueContext.Expires.N,
                 ExpiresPhysical = keyValueContext.Expires.L,
                 ExpiresCounter = keyValueContext.Expires.C,
                 TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
@@ -290,7 +294,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
         
         (KeyValueResponseType type, ReadOnlyKeyValueContext? keyValueContext) = await keyValues.LocateAndTryExistsValue(
-            new(request.TransactionIdPhysical, request.TransactionIdCounter),
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key, 
             request.Revision,
             (KeyValueDurability)request.Durability, 
@@ -304,6 +308,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 ServedFrom = "",
                 Type = (GrpcKeyValueResponseType)type,
                 Revision = keyValueContext.Revision,
+                ExpiresNode = keyValueContext.Expires.N,
                 ExpiresPhysical = keyValueContext.Expires.L,
                 ExpiresCounter = keyValueContext.Expires.C,
                 TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
@@ -345,7 +350,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             };
         
         (KeyValueResponseType type, _, _) = await keyValues.LocateAndTryAcquireExclusiveLock(
-            new(request.TransactionIdPhysical, request.TransactionIdCounter), 
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
             request.Key, 
             request.ExpiresMs, 
             (KeyValueDurability)request.Durability, 
@@ -372,7 +377,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     internal async Task<GrpcTryAcquireManyExclusiveLocksResponse> TryAcquireManyExclusiveLocksInternal(GrpcTryAcquireManyExclusiveLocksRequest request, ServerCallContext context)
     {
         List<(KeyValueResponseType, string, KeyValueDurability)> responses = await keyValues.LocateAndTryAcquireManyExclusiveLocks(
-            new(request.TransactionIdPhysical, request.TransactionIdCounter), 
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
             GetRequestLocksItems(request.Items), 
             context.CancellationToken
         );
@@ -443,7 +448,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             };
         
         (KeyValueResponseType type, string _) = await keyValues.LocateAndTryReleaseExclusiveLock(
-            new(request.TransactionIdPhysical, request.TransactionIdCounter), 
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
             request.Key, 
             (KeyValueDurability)request.Durability, 
             context.CancellationToken
@@ -475,7 +480,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     internal async Task<GrpcTryReleaseManyExclusiveLocksResponse> TryReleaseManyExclusiveLocksInternal(GrpcTryReleaseManyExclusiveLocksRequest request, ServerCallContext context)
     {
         List<(KeyValueResponseType, string, KeyValueDurability)> responses = await keyValues.LocateAndTryReleaseManyExclusiveLocks(
-            new(request.TransactionIdPhysical, request.TransactionIdCounter), 
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
             GetRequestReleaseItems(request.Items), 
             context.CancellationToken
         );
@@ -539,8 +544,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             };
         
         (KeyValueResponseType type, HLCTimestamp proposalTicket, _, _) = await keyValues.LocateAndTryPrepareMutations(
-            new(request.TransactionIdPhysical, request.TransactionIdCounter),
-            new(request.CommitIdPhysical, request.CommitIdCounter),
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
+            new(request.CommitIdNode, request.CommitIdPhysical, request.CommitIdCounter),
             request.Key, 
             (KeyValueDurability)request.Durability, 
             context.CancellationToken
@@ -549,6 +554,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return new()
         {
             Type = (GrpcKeyValueResponseType)type,
+            ProposalTicketNode = proposalTicket.N,
             ProposalTicketPhysical = proposalTicket.L,
             ProposalTicketCounter = proposalTicket.C
         };
@@ -574,8 +580,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     internal async Task<GrpcTryPrepareManyMutationsResponse> TryPrepareManyMutationsInternal(GrpcTryPrepareManyMutationsRequest request, ServerCallContext context)
     {
         List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> responses = await keyValues.LocateAndTryPrepareManyMutations(
-            new(request.TransactionIdPhysical, request.TransactionIdCounter),
-            new(request.CommitIdPhysical, request.CommitIdCounter),
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
+            new(request.CommitIdNode, request.CommitIdPhysical, request.CommitIdCounter),
             GetRequestPrepareItems(request.Items), 
             context.CancellationToken
         );
@@ -646,9 +652,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             };
         
         (KeyValueResponseType type, long commitIndex) = await keyValues.LocateAndTryCommitMutations(
-            new(request.TransactionIdPhysical, request.TransactionIdCounter), 
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
             request.Key, 
-            new(request.ProposalTicketPhysical, request.ProposalTicketCounter),
+            new(request.ProposalTicketNode, request.ProposalTicketPhysical, request.ProposalTicketCounter),
             (KeyValueDurability)request.Durability, 
             context.CancellationToken
         );
@@ -680,7 +686,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     internal async Task<GrpcTryCommitManyMutationsResponse> TryCommitManyMutationsInternal(GrpcTryCommitManyMutationsRequest request, ServerCallContext context)
     {
         List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> responses = await keyValues.LocateAndTryCommitManyMutations(
-            new(request.TransactionIdPhysical, request.TransactionIdCounter), 
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
             GetRequestCommitItems(request.Items), 
             context.CancellationToken
         );
@@ -702,7 +708,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         List<(string key, HLCTimestamp proposalTicketId, KeyValueDurability durability)> rItems = new(requestItems.Count);
         
         foreach (GrpcTryCommitManyMutationsRequestItem item in requestItems)
-            rItems.Add((item.Key, new(item.ProposalTicketPhysical, item.ProposalTicketCounter), (KeyValueDurability)item.Durability));
+            rItems.Add((
+                item.Key, 
+                new(item.ProposalTicketNode, item.ProposalTicketPhysical, item.ProposalTicketCounter), 
+                (KeyValueDurability)item.Durability
+            ));
 
         return rItems;
     }
@@ -750,9 +760,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             };
         
         (KeyValueResponseType type, long rollbackIndex) = await keyValues.LocateAndTryRollbackMutations(
-            new(request.TransactionIdPhysical, request.TransactionIdCounter), 
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
             request.Key, 
-            new(request.ProposalTicketPhysical, request.ProposalTicketCounter),
+            new(request.ProposalTicketNode, request.ProposalTicketPhysical, request.ProposalTicketCounter),
             (KeyValueDurability)request.Durability, 
             context.CancellationToken
         );
@@ -784,7 +794,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     internal async Task<GrpcTryRollbackManyMutationsResponse> TryRollbackManyMutationsInternal(GrpcTryRollbackManyMutationsRequest request, ServerCallContext context)
     {
         List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> responses = await keyValues.LocateAndTryRollbackManyMutations(
-            new(request.TransactionIdPhysical, request.TransactionIdCounter), 
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
             GetRequestRollbackItems(request.Items), 
             context.CancellationToken
         );
@@ -807,7 +817,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         List<(string key, HLCTimestamp proposalTicketId, KeyValueDurability durability)> rItems = new(requestItems.Count);
         
         foreach (GrpcTryRollbackManyMutationsRequestItem item in requestItems)
-            rItems.Add((item.Key, new(item.ProposalTicketPhysical, item.ProposalTicketCounter), (KeyValueDurability)item.Durability));
+            rItems.Add((
+                item.Key, 
+                new(item.ProposalTicketNode, item.ProposalTicketPhysical, item.ProposalTicketCounter),
+                (KeyValueDurability)item.Durability
+            ));
 
         return rItems;
     }
@@ -889,8 +903,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 GrpcTryExecuteTransactionResponseValue responseValue = new()
                 {
                     Revision = value.Revision,
+                    ExpiresNode = value.Expires.N,
                     ExpiresPhysical = value.Expires.L,
                     ExpiresCounter = value.Expires.C,
+                    LastModifiedNode = value.LastModified.N,
                     LastModifiedPhysical = value.LastModified.L,
                     LastModifiedCounter = value.LastModified.C
                 };
@@ -973,7 +989,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             };
             
         KeyValueGetByPrefixResult result = await keyValues.LocateAndGetByPrefix(
-            new(request.TransactionIdPhysical, request.TransactionIdCounter), 
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
             request.PrefixKey, 
             (KeyValueDurability)request.Durability, 
             context.CancellationToken
@@ -1101,7 +1117,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             
         KeyValueResponseType type = await keyValues.LocateAndCommitTransaction(
             request.UniqueId,
-            new(request.TransactionIdPhysical, request.TransactionIdCounter),
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             GetTransactionAcquiredOrModifiedKeys(request.AcquiredLocks).ToList(),
             GetTransactionAcquiredOrModifiedKeys(request.ModifiedKeys).ToList(),
             context.CancellationToken
@@ -1145,7 +1161,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             
         KeyValueResponseType type = await keyValues.LocateAndRollbackTransaction(
             request.UniqueId,
-            new(request.TransactionIdPhysical, request.TransactionIdCounter),
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             GetTransactionAcquiredOrModifiedKeys(request.AcquiredLocks).ToList(),
             GetTransactionAcquiredOrModifiedKeys(request.ModifiedKeys).ToList(),
             context.CancellationToken
@@ -1187,6 +1203,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             {
                 Key = key,
                 Revision = context.Revision,
+                ExpiresNode = context.Expires.N,
                 ExpiresPhysical = context.Expires.L,
                 ExpiresCounter = context.Expires.C,
             };

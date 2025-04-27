@@ -123,7 +123,7 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
     /// <returns></returns>
     private async Task<LockResponse> TryLock(LockRequest message)
     {
-        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
+        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
         if (!locks.TryGetValue(message.Resource, out LockContext? context))
         {
@@ -189,7 +189,7 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
         if (context is null || context.State == LockState.Unlocked)
             return LockStaticResponses.DoesNotExistResponse;
 
-        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
+        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
         
         if (context.Expires - currentTime < TimeSpan.Zero)
             return LockStaticResponses.DoesNotExistResponse;
@@ -234,7 +234,7 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
         if (!((ReadOnlySpan<byte>)context.Owner).SequenceEqual(message.Owner))
             return LockStaticResponses.InvalidOwnerResponse;
         
-        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
+        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
         LockProposal proposal = new(
             message.Resource,
@@ -271,7 +271,7 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
         if (context is null || context.State == LockState.Unlocked)
             return new(LockResponseType.LockDoesNotExist, new ReadOnlyLockContext(null, context?.FencingToken ?? 0, HLCTimestamp.Zero));
 
-        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
+        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
         if (context.Expires - currentTime < TimeSpan.Zero)
             return new(LockResponseType.LockDoesNotExist, new ReadOnlyLockContext(null, context.FencingToken, HLCTimestamp.Zero));
@@ -298,7 +298,7 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
                 context = await raft.ReadThreadPool.EnqueueTask(() => persistenceBackend.GetLock(resource));
                 if (context is not null)
                 {
-                    context.LastUsed = raft.HybridLogicalClock.TrySendOrLocalEvent();
+                    context.LastUsed = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
                     locks.Add(resource, context);
                     return context;
                 }                               
@@ -329,13 +329,17 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
             Type = (int)type,
             Resource = proposal.Resource,
             FencingToken = proposal.FencingToken,
-            ExpireLogical = proposal.Expires.L,
+            ExpireNode = proposal.Expires.N,
+            ExpirePhysical = proposal.Expires.L,
             ExpireCounter = proposal.Expires.C,
-            LastUsedLogical = proposal.LastUsed.L,
+            LastUsedNode = proposal.LastUsed.N,
+            LastUsedPhysical = proposal.LastUsed.L,
             LastUsedCounter = proposal.LastUsed.C,
-            LastModifiedLogical = proposal.LastModified.L,
+            LastModifiedNode = proposal.LastModified.N,
+            LastModifiedPhysical = proposal.LastModified.L,
             LastModifiedCounter = proposal.LastModified.C,
-            TimeLogical = currentTime.L,
+            TimeNode = currentTime.N,
+            TimePhysical = currentTime.L,
             TimeCounter = currentTime.C
         };
 
@@ -377,7 +381,7 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
         
         int number = 0;
         TimeSpan range = TimeSpan.FromMinutes(30);
-        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
+        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
         foreach (KeyValuePair<string, LockContext> key in locks)
         {

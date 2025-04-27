@@ -230,7 +230,7 @@ internal sealed class KeyValueTransactionCoordinator
         
         do
         {
-            transactionId = raft.HybridLogicalClock.SendOrLocalEvent();
+            transactionId = raft.HybridLogicalClock.SendOrLocalEvent(raft.GetLocalNodeId());
             
             KeyValueTransactionContext context = new()
             {
@@ -472,7 +472,7 @@ internal sealed class KeyValueTransactionCoordinator
         cts.CancelAfter(TimeSpan.FromMilliseconds(timeout));
         
         // Need HLC timestamp for the transaction id
-        HLCTimestamp transactionId = raft.HybridLogicalClock.SendOrLocalEvent();
+        HLCTimestamp transactionId = raft.HybridLogicalClock.SendOrLocalEvent(raft.GetLocalNodeId());
         
         KeyValueTransactionContext context = new()
         {
@@ -747,7 +747,7 @@ internal sealed class KeyValueTransactionCoordinator
         }
 
         // Request a new unique timestamp for the transaction
-        HLCTimestamp commitId = raft.HybridLogicalClock.ReceiveEvent(highestModifiedTime);
+        HLCTimestamp commitId = raft.HybridLogicalClock.ReceiveEvent(raft.GetLocalNodeId(), highestModifiedTime);
         
         if (context.ModifiedKeys.Count == 1)
         {
@@ -823,7 +823,13 @@ internal sealed class KeyValueTransactionCoordinator
         {
             (string key, HLCTimestamp ticketId, KeyValueDurability durability) = mutationsPrepared.First();
             
-            (KeyValueResponseType response, long _) = await manager.LocateAndTryCommitMutations(context.TransactionId, key, ticketId, durability, CancellationToken.None);
+            (KeyValueResponseType response, long _) = await manager.LocateAndTryCommitMutations(
+                context.TransactionId, 
+                key, 
+                ticketId, 
+                durability, 
+                CancellationToken.None
+            );
             
             if (response != KeyValueResponseType.Committed)
                 logger.LogWarning("CommitMutations: {Type} {Key} {TicketId}", response, key, ticketId);
@@ -834,7 +840,11 @@ internal sealed class KeyValueTransactionCoordinator
             return;
         }
         
-        List<(KeyValueResponseType, string, long, KeyValueDurability)> responses = await manager.LocateAndTryCommitManyMutations(context.TransactionId, mutationsPrepared, CancellationToken.None);
+        List<(KeyValueResponseType, string, long, KeyValueDurability)> responses = await manager.LocateAndTryCommitManyMutations(
+            context.TransactionId, 
+            mutationsPrepared, 
+            CancellationToken.None
+        );
         
         foreach ((KeyValueResponseType response, string key, long commitIndex, KeyValueDurability durability) in responses)
         {
@@ -864,7 +874,13 @@ internal sealed class KeyValueTransactionCoordinator
         {
             (string key, HLCTimestamp ticketId, KeyValueDurability durability) = mutationsPrepared.First();
             
-            (KeyValueResponseType response, long _) = await manager.LocateAndTryRollbackMutations(context.TransactionId, key, ticketId, durability, CancellationToken.None);
+            (KeyValueResponseType response, long _) = await manager.LocateAndTryRollbackMutations(
+                context.TransactionId, 
+                key, 
+                ticketId, 
+                durability, 
+                CancellationToken.None
+            );
             
             if (response != KeyValueResponseType.RolledBack)
                 logger.LogWarning("RollbackMutations: {Type} {Key} {TicketId}", response, key, ticketId);
@@ -875,7 +891,11 @@ internal sealed class KeyValueTransactionCoordinator
             return;
         }
         
-        List<(KeyValueResponseType, string, long, KeyValueDurability)> responses = await manager.LocateAndTryRollbackManyMutations(context.TransactionId, mutationsPrepared, CancellationToken.None);
+        List<(KeyValueResponseType, string, long, KeyValueDurability)> responses = await manager.LocateAndTryRollbackManyMutations(
+            context.TransactionId, 
+            mutationsPrepared, 
+            CancellationToken.None
+        );
         
         foreach ((KeyValueResponseType response, string key, long commitIndex, KeyValueDurability durability) in responses)
         {

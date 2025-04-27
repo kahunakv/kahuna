@@ -60,12 +60,16 @@ internal abstract class BaseHandler
             Type = (int)type,
             Key = proposal.Key,
             Revision = proposal.Revision,
+            ExpireNode = proposal.Expires.N,
             ExpirePhysical = proposal.Expires.L,
             ExpireCounter = proposal.Expires.C,
+            LastUsedNode = proposal.LastUsed.N,
             LastUsedPhysical = proposal.LastUsed.L,
             LastUsedCounter = proposal.LastUsed.C,
+            LastModifiedNode = proposal.LastModified.N,
             LastModifiedPhysical = proposal.LastModified.L,
             LastModifiedCounter = proposal.LastModified.C,
+            TimeNode = currentTime.N,
             TimePhysical = currentTime.L,
             TimeCounter = currentTime.C
         };
@@ -129,7 +133,7 @@ internal abstract class BaseHandler
                 
                 if (context is not null)
                 {
-                    context.LastUsed = raft.HybridLogicalClock.TrySendOrLocalEvent();
+                    context.LastUsed = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
                     keyValuesStore.Insert(key, context);
                     return context;
                 }

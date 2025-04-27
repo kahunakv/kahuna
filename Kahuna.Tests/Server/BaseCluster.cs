@@ -21,7 +21,8 @@ public abstract class BaseCluster
         
         RaftConfiguration config = new()
         {
-            NodeId = "kahuna1",
+            NodeName = "kahuna1",
+            NodeId = 1,
             Host = "localhost",
             Port = 8001,
             InitialPartitions = partitions,
@@ -73,7 +74,8 @@ public abstract class BaseCluster
         
         RaftConfiguration config = new()
         {
-            NodeId = "kahuna2",
+            NodeName = "kahuna2",
+            NodeId = 2,
             Host = "localhost",
             Port = 8002,
             InitialPartitions = partitions,
@@ -125,7 +127,8 @@ public abstract class BaseCluster
         
         RaftConfiguration config = new()
         {
-            NodeId = "kahuna3",
+            NodeName = "kahuna3",
+            NodeId = 3,
             Host = "localhost",
             Port = 8003,
             InitialPartitions = partitions,

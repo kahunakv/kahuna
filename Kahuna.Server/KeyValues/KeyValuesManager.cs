@@ -1141,7 +1141,7 @@ internal sealed class KeyValuesManager
     /// <exception cref="KahunaServerException"></exception>
     public async Task<KeyValueGetByPrefixResult> ScanByPrefix(string prefixKeyName, KeyValueDurability durability)
     {
-        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
+        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
         
         KeyValueRequest request = new(
             KeyValueRequestType.ScanByPrefix,

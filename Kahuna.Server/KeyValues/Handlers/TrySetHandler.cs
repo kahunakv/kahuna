@@ -29,9 +29,9 @@ internal sealed class TrySetHandler : BaseHandler
         HLCTimestamp currentTime;
         
         if (message.TransactionId == HLCTimestamp.Zero)
-            currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
+            currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
         else
-            currentTime = raft.HybridLogicalClock.ReceiveEvent(message.TransactionId);
+            currentTime = raft.HybridLogicalClock.ReceiveEvent(raft.GetLocalNodeId(), message.TransactionId);
 
         if (!keyValuesStore.TryGetValue(message.Key, out KeyValueContext? context))
         {

@@ -31,7 +31,7 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
         if (message.TransactionId == HLCTimestamp.Zero)
             return KeyValueStaticResponses.ErroredResponse;
         
-        HLCTimestamp currentTime = raft.HybridLogicalClock.ReceiveEvent(message.TransactionId);
+        HLCTimestamp currentTime = raft.HybridLogicalClock.ReceiveEvent(raft.GetLocalNodeId(), message.TransactionId);
 
         if (!keyValuesStore.TryGetValue(message.Key, out KeyValueContext? context))
         {

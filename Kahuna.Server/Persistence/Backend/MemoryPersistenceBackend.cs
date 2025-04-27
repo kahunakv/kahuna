@@ -29,10 +29,10 @@ public class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
             if (locks.TryGetValue(item.Key, out LockContext? lockContext))
             {
                 lockContext.Owner = item.Value;
-                lockContext.Expires = new(item.ExpiresPhysical, item.ExpiresCounter);
+                lockContext.Expires = new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter);
                 lockContext.FencingToken = item.Revision;
-                lockContext.LastUsed = new(item.LastUsedPhysical, item.LastUsedCounter);
-                lockContext.LastModified = new(item.LastModifiedPhysical, item.LastModifiedCounter);
+                lockContext.LastUsed = new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter);
+                lockContext.LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter);
                 lockContext.State = (LockState)item.State;
             }
             else
@@ -41,9 +41,9 @@ public class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
                 {
                     Owner = item.Value,
                     FencingToken = item.Revision,
-                    Expires = new(item.ExpiresPhysical, item.ExpiresCounter),
-                    LastUsed = new(item.LastUsedPhysical, item.LastUsedCounter),
-                    LastModified = new(item.LastModifiedPhysical, item.LastModifiedCounter),
+                    Expires = new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter),
+                    LastUsed = new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter),
+                    LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
                     State = (LockState)item.State
                 });
             }
@@ -65,10 +65,10 @@ public class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
             if (keyValues.TryGetValue(item.Key, out KeyValueContext? keyValueContext))
             {
                 keyValueContext.Value = item.Value;
-                keyValueContext.Expires = new(item.ExpiresPhysical, item.ExpiresCounter);
+                keyValueContext.Expires = new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter);
                 keyValueContext.Revision = item.Revision;
-                keyValueContext.LastUsed = new(item.LastUsedPhysical, item.LastUsedCounter);
-                keyValueContext.LastModified = new(item.LastModifiedPhysical, item.LastModifiedCounter);
+                keyValueContext.LastUsed = new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter);
+                keyValueContext.LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter);
                 keyValueContext.State = (KeyValueState)item.State;
             }
             else
@@ -77,9 +77,9 @@ public class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
                 {
                     Value = item.Value,
                     Revision = item.Revision,
-                    Expires = new(item.ExpiresPhysical, item.ExpiresCounter),
-                    LastUsed = new(item.LastUsedPhysical, item.LastUsedCounter),
-                    LastModified = new(item.LastModifiedPhysical, item.LastModifiedCounter),
+                    Expires = new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter),
+                    LastUsed = new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter),
+                    LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
                     State = (KeyValueState)item.State
                 });
             }
@@ -113,7 +113,7 @@ public class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
     {
         List<(string, ReadOnlyKeyValueContext)> items = [];
         
-        foreach ((string key, KeyValueContext? value) in keyValues)
+        foreach ((string key, KeyValueContext value) in keyValues)
         {
             if (key.StartsWith(prefixKeyName))
             {

@@ -1,7 +1,4 @@
 
-using Kommander;
-using Nixie.Routers;
-
 namespace Kahuna.Server.Persistence;
 
 public sealed class PersistenceRequestItem
@@ -12,13 +9,19 @@ public sealed class PersistenceRequestItem
     
     public long Revision { get; }
     
+    public int ExpiresNode { get; }
+    
     public long ExpiresPhysical { get; }
     
     public uint ExpiresCounter { get; }
     
+    public int LastUsedNode { get; }
+    
     public long LastUsedPhysical { get; }
     
     public uint LastUsedCounter { get; }
+    
+    public int LastModifiedNode { get; }
     
     public long LastModifiedPhysical { get; }
     
@@ -30,10 +33,13 @@ public sealed class PersistenceRequestItem
         string key, 
         byte[]? value, 
         long revision, 
+        int expiresNode,
         long expiresPhysical,
         uint expiresCounter,
+        int lastUsedNode,
         long lastUsedPhysical,
         uint lastUsedCounter,
+        int lastModifiedNode,
         long lastModifiedPhysical,
         uint lastModifiedCounter,
         int state
@@ -42,10 +48,13 @@ public sealed class PersistenceRequestItem
         Key = key;
         Value = value;
         Revision = revision;
+        ExpiresNode = expiresNode;
         ExpiresPhysical = expiresPhysical;
         ExpiresCounter = expiresCounter;
+        LastUsedNode = lastUsedNode;
         LastUsedPhysical = lastUsedPhysical;
         LastUsedCounter = lastUsedCounter;
+        LastModifiedNode = lastModifiedNode;
         LastModifiedPhysical = lastModifiedPhysical;
         LastModifiedCounter = lastModifiedCounter;
         State = state;

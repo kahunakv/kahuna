@@ -33,7 +33,7 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
     private async Task<KeyValueResponse> GetByPrefixEphemeral(KeyValueRequest message)
     {
         List<(string, ReadOnlyKeyValueContext)> items = [];
-        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
+        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
         
         foreach ((string key, KeyValueContext? _) in keyValuesStore.GetByPrefix(message.Key))
         {
@@ -58,7 +58,7 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
     {
         Dictionary<string, ReadOnlyKeyValueContext> items = new();
         
-        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
+        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
         // step 1: we need to check the in-memory store to get the MVCC entry or the latest value
         foreach ((string key, KeyValueContext? _) in keyValuesStore.GetByPrefix(message.Key))

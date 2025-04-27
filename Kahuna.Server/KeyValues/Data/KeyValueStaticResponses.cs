@@ -19,6 +19,8 @@ internal static class KeyValueStaticResponses
     internal static readonly KeyValueResponse ErroredResponse = new(KeyValueResponseType.Errored);
     
     internal static readonly KeyValueResponse LockedResponse = new(KeyValueResponseType.Locked);
+    
+    internal static readonly KeyValueResponse UnlockedResponse = new(KeyValueResponseType.Unlocked);
 
     internal static readonly KeyValueResponse AlreadyLockedResponse = new(KeyValueResponseType.AlreadyLocked);
 

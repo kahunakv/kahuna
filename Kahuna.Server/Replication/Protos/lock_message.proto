@@ -7,12 +7,16 @@ message LockMessage {
   string resource = 2;
   optional bytes owner = 3;
   int64 fencingToken = 4;
-  int64 expireLogical = 5;
-  uint32 expireCounter = 6;
-  int64 lastUsedLogical = 7;
-  uint32 lastUsedCounter = 8;
-  int64 lastModifiedLogical = 9;
-  uint32 lastModifiedCounter = 10;
-  int64 timeLogical = 11;
-  uint32 timeCounter = 12;
+  int32 expireNode = 5;
+  int64 expirePhysical = 6;
+  uint32 expireCounter = 7;
+  int32 lastUsedNode = 8;
+  int64 lastUsedPhysical = 9;
+  uint32 lastUsedCounter = 10;
+  int32 lastModifiedNode = 11;
+  int64 lastModifiedPhysical = 12;
+  uint32 lastModifiedCounter = 13;
+  int32 timeNode = 14;
+  int64 timePhysical = 15;
+  uint32 timeCounter = 16;
 }

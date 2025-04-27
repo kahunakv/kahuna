@@ -5,25 +5,31 @@ package Kahuna.Persistence.Protos;
 message RocksDbLockMessage {
   string resource = 1;
   optional bytes owner = 2;
-  int64 expiresPhysical = 3;
-  uint32 expiresCounter = 4;
-  int64 lastUsedPhysical = 5;
-  uint32 lastUsedCounter = 6;
-  int64 lastModifiedPhysical = 7;
-  uint32 lastModifiedCounter = 8;
-  int64 fencingToken = 9;
-  int32 state = 10;
+  int32 expiresNode = 3;
+  int64 expiresPhysical = 4;
+  uint32 expiresCounter = 5;
+  int32 lastUsedNode = 6;
+  int64 lastUsedPhysical = 7;
+  uint32 lastUsedCounter = 8;
+  int32 lastModifiedNode = 9;
+  int64 lastModifiedPhysical = 10;
+  uint32 lastModifiedCounter = 11;
+  int64 fencingToken = 12;
+  int32 state = 13;
 }
 
 message RocksDbKeyValueMessage {
   string key = 1;
   optional bytes value = 2;
-  int64 expiresPhysical = 3;
-  uint32 expiresCounter = 4;
-  int64 lastUsedPhysical = 5;
-  uint32 lastUsedCounter = 6;
-  int64 lastModifiedPhysical = 7;
-  uint32 lastModifiedCounter = 8;
-  int64 revision = 9;
-  int32 state = 10;
+  int32 expiresNode = 3;
+  int64 expiresPhysical = 4;
+  uint32 expiresCounter = 5;
+  int32 lastUsedNode = 6;
+  int64 lastUsedPhysical = 7;
+  uint32 lastUsedCounter = 8;
+  int32 lastModifiedNode = 9;
+  int64 lastModifiedPhysical = 10;
+  uint32 lastModifiedCounter = 11;
+  int64 revision = 12;
+  int32 state = 13;
 }

@@ -121,32 +121,32 @@ public sealed class KeyValueExpressionResult
         {
             KeyValueExpressionType.NullType => new() { 
                 Type = KeyValueResponseType.Get, 
-                Values = [new() { Value = [], Revision = Revision, Expires = new(Expires, 0) }]
+                Values = [new() { Value = [], Revision = Revision, Expires = new(0, Expires, 0) }]
             },
             KeyValueExpressionType.BoolType => new()
             {
                 Type = KeyValueResponseType.Get,
-                Values = [new() { Value = BoolValue ? "true"u8.ToArray() : "false"u8.ToArray(), Revision = Revision, Expires = new(Expires, 0) }]
+                Values = [new() { Value = BoolValue ? "true"u8.ToArray() : "false"u8.ToArray(), Revision = Revision, Expires = new(0, Expires, 0) }]
             },
             KeyValueExpressionType.LongType => new()
             {
                 Type = KeyValueResponseType.Get, 
-                Values = [new() { Value = Encoding.UTF8.GetBytes(LongValue.ToString()), Revision = Revision, Expires = new(Expires, 0) }]
+                Values = [new() { Value = Encoding.UTF8.GetBytes(LongValue.ToString()), Revision = Revision, Expires = new(0, Expires, 0) }]
             },
             KeyValueExpressionType.DoubleType => new()
             {
                 Type = KeyValueResponseType.Get, 
-                Values = [new() { Value = Encoding.UTF8.GetBytes(DoubleValue.ToString(CultureInfo.InvariantCulture)), Revision = Revision, Expires = new(Expires, 0) }]
+                Values = [new() { Value = Encoding.UTF8.GetBytes(DoubleValue.ToString(CultureInfo.InvariantCulture)), Revision = Revision, Expires = new(0, Expires, 0) }]
             },
             KeyValueExpressionType.StringType => new()
             {
                 Type = KeyValueResponseType.Get, 
-                Values = [new() { Value = StrValue is not null ? Encoding.UTF8.GetBytes(StrValue) : null, Revision = Revision, Expires = new(Expires, 0) }]
+                Values = [new() { Value = StrValue is not null ? Encoding.UTF8.GetBytes(StrValue) : null, Revision = Revision, Expires = new(0, Expires, 0) }]
             },
             KeyValueExpressionType.BytesType => new()
             {
                 Type = KeyValueResponseType.Get, 
-                Values = [new() { Value = BytesValue, Revision = Revision, Expires = new(Expires, 0) }]
+                Values = [new() { Value = BytesValue, Revision = Revision, Expires = new(0, Expires, 0) }]
             },
             KeyValueExpressionType.ArrayType => new()
             {
@@ -162,12 +162,12 @@ public sealed class KeyValueExpressionResult
     {
         return value.Type switch
         {
-            KeyValueExpressionType.NullType => new() { Value = [], Revision = value.Revision, Expires = new(value.Expires, 0) },
-            KeyValueExpressionType.BoolType => new() { Value = value.BoolValue ? "true"u8.ToArray() : "false"u8.ToArray(), Revision = value.Revision, Expires = new(value.Expires, 0) },
-            KeyValueExpressionType.LongType => new() { Value = Encoding.UTF8.GetBytes(value.LongValue.ToString()), Revision = value.Revision, Expires = new(value.Expires, 0) },
-            KeyValueExpressionType.DoubleType => new() { Value = Encoding.UTF8.GetBytes(value.DoubleValue.ToString(CultureInfo.InvariantCulture)), Revision = value.Revision, Expires = new(value.Expires, 0) },
-            KeyValueExpressionType.StringType => new() { Value = value.StrValue is not null ? Encoding.UTF8.GetBytes(value.StrValue) : null, Revision = value.Revision, Expires = new(value.Expires, 0) },
-            KeyValueExpressionType.BytesType => new() { Value = value.BytesValue, Revision = value.Revision, Expires = new(value.Expires, 0) },
+            KeyValueExpressionType.NullType => new() { Value = [], Revision = value.Revision, Expires = new(0, value.Expires, 0) },
+            KeyValueExpressionType.BoolType => new() { Value = value.BoolValue ? "true"u8.ToArray() : "false"u8.ToArray(), Revision = value.Revision, Expires = new(0, value.Expires, 0) },
+            KeyValueExpressionType.LongType => new() { Value = Encoding.UTF8.GetBytes(value.LongValue.ToString()), Revision = value.Revision, Expires = new(0, value.Expires, 0) },
+            KeyValueExpressionType.DoubleType => new() { Value = Encoding.UTF8.GetBytes(value.DoubleValue.ToString(CultureInfo.InvariantCulture)), Revision = value.Revision, Expires = new(0, value.Expires, 0) },
+            KeyValueExpressionType.StringType => new() { Value = value.StrValue is not null ? Encoding.UTF8.GetBytes(value.StrValue) : null, Revision = value.Revision, Expires = new(0, value.Expires, 0) },
+            KeyValueExpressionType.BytesType => new() { Value = value.BytesValue, Revision = value.Revision, Expires = new(0, value.Expires, 0) },
             _ => throw new ArgumentOutOfRangeException()
         };
     }

@@ -39,13 +39,14 @@ WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 // Try to assemble a Kahuna cluster from static discovery
 builder.Services.AddSingleton<IRaft>(services =>
 {
-    if (string.IsNullOrEmpty(opts.RaftNodeId))
-        opts.RaftNodeId = Environment.MachineName;
+    if (string.IsNullOrEmpty(opts.RaftNodeName))
+        opts.RaftNodeName = Environment.MachineName;
 
     ILogger<IRaft> logger = services.GetRequiredService<ILogger<IRaft>>();
     
     RaftConfiguration configuration = new()
     {
+        NodeName = opts.RaftNodeName,
         NodeId = opts.RaftNodeId,
         Host = opts.RaftHost,
         Port = opts.RaftPort,

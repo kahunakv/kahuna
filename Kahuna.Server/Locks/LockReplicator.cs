@@ -96,9 +96,9 @@ internal sealed class LockReplicator
                         lockMessage.Resource,
                         owner,
                         lockMessage.FencingToken,
-                        new(lockMessage.ExpireLogical, lockMessage.ExpireCounter),
-                        new(lockMessage.LastUsedLogical, lockMessage.LastUsedCounter),
-                        new(lockMessage.LastModifiedLogical, lockMessage.LastModifiedCounter),
+                        new(lockMessage.ExpireNode, lockMessage.ExpirePhysical, lockMessage.ExpireCounter),
+                        new(lockMessage.LastUsedNode, lockMessage.LastUsedPhysical, lockMessage.LastUsedCounter),
+                        new(lockMessage.LastModifiedNode, lockMessage.LastModifiedPhysical, lockMessage.LastModifiedCounter),
                         (int)LockState.Locked
                     ));
 
@@ -139,9 +139,9 @@ internal sealed class LockReplicator
                         lockMessage.Resource,
                         owner,
                         lockMessage.FencingToken,
-                        new(lockMessage.ExpireLogical, lockMessage.ExpireCounter),
-                        new(lockMessage.LastUsedLogical, lockMessage.LastUsedCounter),
-                        new(lockMessage.LastModifiedLogical, lockMessage.LastModifiedCounter),
+                        new(lockMessage.ExpireNode, lockMessage.ExpirePhysical, lockMessage.ExpireCounter),
+                        new(lockMessage.LastUsedNode, lockMessage.LastUsedPhysical, lockMessage.LastUsedCounter),
+                        new(lockMessage.LastModifiedNode, lockMessage.LastModifiedPhysical, lockMessage.LastModifiedCounter),
                         (int)LockState.Unlocked
                     ));
                     
@@ -182,9 +182,9 @@ internal sealed class LockReplicator
                         lockMessage.Resource,
                         owner,
                         lockMessage.FencingToken,
-                        new(lockMessage.ExpireLogical, lockMessage.ExpireCounter),
-                        new(lockMessage.LastUsedLogical, lockMessage.LastUsedCounter),
-                        new(lockMessage.LastModifiedLogical, lockMessage.LastModifiedCounter),
+                        new(lockMessage.ExpireNode, lockMessage.ExpirePhysical, lockMessage.ExpireCounter),
+                        new(lockMessage.LastUsedNode, lockMessage.LastUsedPhysical, lockMessage.LastUsedCounter),
+                        new(lockMessage.LastModifiedNode, lockMessage.LastModifiedPhysical, lockMessage.LastModifiedCounter),
                         (int)LockState.Locked
                     ));
 

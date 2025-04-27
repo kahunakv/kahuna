@@ -39,9 +39,9 @@ internal sealed class TryExtendHandler : BaseHandler
         HLCTimestamp currentTime;
         
         if (message.TransactionId == HLCTimestamp.Zero)
-            currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
+            currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
         else
-            currentTime = raft.HybridLogicalClock.ReceiveEvent(message.TransactionId);
+            currentTime = raft.HybridLogicalClock.ReceiveEvent(raft.GetLocalNodeId(), message.TransactionId);
         
         // Temporarily store the value in the MVCC entry if the transaction ID is set
         if (message.TransactionId != HLCTimestamp.Zero)

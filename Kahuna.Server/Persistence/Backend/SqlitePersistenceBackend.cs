@@ -107,11 +107,14 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
             CREATE TABLE IF NOT EXISTS locks (
                 resource STRING PRIMARY KEY, 
                 owner BLOB, 
+                expiresNode INT,
                 expiresPhysical INT,
                 expiresCounter INT, 
-                fencingToken INT, 
+                fencingToken INT,
+                lastUsedNode INT, 
                 lastUsedPhysical INT,
                 lastUsedCounter INT,
+                lastModifiedNode INT,
                 lastModifiedPhysical INT,
                 lastModifiedCounter INT,
                 state INT
@@ -126,10 +129,13 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
                 key STRING,
                 revision INT, 
                 value BLOB, 
+                expiresNode INT,
                 expiresPhysical INT, 
                 expiresCounter INT, 
+                lastUsedNode INT, 
                 lastUsedPhysical INT,
                 lastUsedCounter INT,
+                lastModifiedNode INT,
                 lastModifiedPhysical INT,
                 lastModifiedCounter INT,
                 state INT,
@@ -145,10 +151,12 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
                  key STRING,
                  revision INT, 
                  value BLOB, 
-                 expiresPhysical INT, 
+                 expiresPhysical INT,
                  expiresCounter INT, 
+                 lastUsedNode INT, 
                  lastUsedPhysical INT,
                  lastUsedCounter INT,
+                 lastModifiedNode INT,
                  lastModifiedPhysical INT,
                  lastModifiedCounter INT,
                  state INT,
@@ -187,14 +195,17 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
         try
         {
             const string insert = """
-              INSERT INTO locks (resource, owner, expiresPhysical, expiresCounter, fencingToken, state) 
-              VALUES (@resource, @owner, @expiresPhysical, @expiresCounter, @fencingToken, @state) 
+              INSERT INTO locks (resource, owner, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, lastUsedCounter, lastModifiedNode, lastModifiedPhysical, lastModifiedCounter, fencingToken, state) 
+              VALUES (@resource, @owner, @expiresNode, @expiresPhysical, @expiresCounter, @lastUsedNode, @lastUsedPhysical, @lastUsedCounter, @lastModifiedNode, @lastModifiedPhysical, @lastModifiedCounter, @fencingToken, @state) 
               ON CONFLICT(resource) DO UPDATE SET 
-              owner=@owner, 
+              owner=@owner,
+              expiresNode=@expiresNode,
               expiresPhysical=@expiresPhysical, 
               expiresCounter=@expiresCounter,
+              lastUsedNode=@lastUsedNode,
               lastUsedPhysical=@lastUsedPhysical, 
               lastUsedCounter=@lastUsedCounter,
+              lastModifiedNode=@lastModifiedNode,
               lastModifiedPhysical=@lastModifiedPhysical, 
               lastModifiedCounter=@lastModifiedCounter,
               fencingToken=@fencingToken, 
@@ -218,10 +229,13 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
                     else
                         command.Parameters.AddWithValue("@owner", item.Value);
 
+                    command.Parameters.AddWithValue("@expiresNode", item.ExpiresNode);
                     command.Parameters.AddWithValue("@expiresPhysical", item.ExpiresPhysical);
                     command.Parameters.AddWithValue("@expiresCounter", item.ExpiresCounter);
+                    command.Parameters.AddWithValue("@lastUsedNode", item.LastUsedNode);
                     command.Parameters.AddWithValue("@lastUsedPhysical", item.LastUsedPhysical);
                     command.Parameters.AddWithValue("@lastUsedCounter", item.LastUsedCounter);
+                    command.Parameters.AddWithValue("@lastModifiedNode", item.LastModifiedNode);
                     command.Parameters.AddWithValue("@lastModifiedPhysical", item.LastModifiedPhysical);
                     command.Parameters.AddWithValue("@lastModifiedCounter", item.LastModifiedCounter);
                     command.Parameters.AddWithValue("@fencingToken", item.Revision);
@@ -262,29 +276,35 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
         try
         {
             const string insertKeys = """
-              INSERT INTO keys (key, revision, value, expiresPhysical, expiresCounter, lastUsedPhysical, lastUsedCounter, lastModifiedPhysical, lastModifiedCounter, state) 
-              VALUES (@key, @revision, @value, @expiresPhysical, @expiresCounter, @lastUsedPhysical, @lastUsedCounter, @lastModifiedPhysical, @lastModifiedCounter, @state) 
+              INSERT INTO keys (key, revision, value, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, lastUsedCounter, @lastModifiedNode, lastModifiedPhysical, lastModifiedCounter, state) 
+              VALUES (@key, @revision, @value, @expiresNode, @expiresPhysical, @expiresCounter, @lastUsedNode, @lastUsedPhysical, @lastUsedCounter, @lastModifiedNode, @lastModifiedPhysical, @lastModifiedCounter, @state) 
               ON CONFLICT(key) DO UPDATE SET
               revision=@revision,
               value=@value, 
+              expiresNode=@expiresNode,
               expiresPhysical=@expiresPhysical, 
               expiresCounter=@expiresCounter,
+              lastUsedNode=@lastUsedNode,
               lastUsedPhysical=@lastUsedPhysical, 
               lastUsedCounter=@lastUsedCounter,
+              lastModifiedNode=@lastModifiedNode,
               lastModifiedPhysical=@lastModifiedPhysical, 
               lastModifiedCounter=@lastModifiedCounter, 
               state=@state;
               """;
                     
             const string insertKeyRevisions = """
-              INSERT INTO keys_revisions (key, revision, value, expiresPhysical, expiresCounter, lastUsedPhysical, lastUsedCounter, lastModifiedPhysical, lastModifiedCounter, state) 
-              VALUES (@key, @revision, @value, @expiresPhysical, @expiresCounter, @lastUsedPhysical, @lastUsedCounter, @lastModifiedPhysical, @lastModifiedCounter, @state) 
+              INSERT INTO keys_revisions (key, revision, value, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, lastUsedCounter, lastModifiedNode, lastModifiedPhysical, lastModifiedCounter, state) 
+              VALUES (@key, @revision, @value, @expiresNode, @expiresPhysical, @expiresCounter, @lastUsedNode, @lastUsedPhysical, @lastUsedCounter, @lastModifiedNode, @lastModifiedPhysical, @lastModifiedCounter, @state) 
               ON CONFLICT(key, revision) DO UPDATE SET 
               value=@value, 
+              expiresNode=@expiresNode,
               expiresPhysical=@expiresPhysical, 
               expiresCounter=@expiresCounter,
+              lastUsedNode=@lastUsedNode,    
               lastUsedPhysical=@lastUsedPhysical, 
               lastUsedCounter=@lastUsedCounter,
+              lastModifiedNode=@lastModifiedNode,
               lastModifiedPhysical=@lastModifiedPhysical, 
               lastModifiedCounter=@lastModifiedCounter, 
               state=@state;
@@ -327,10 +347,13 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
                             else
                                 command.Parameters.AddWithValue("@value", item.Value);
 
+                            command.Parameters.AddWithValue("@expiresNode", item.ExpiresNode);
                             command.Parameters.AddWithValue("@expiresPhysical", item.ExpiresPhysical);
                             command.Parameters.AddWithValue("@expiresCounter", item.ExpiresCounter);
+                            command.Parameters.AddWithValue("@lastUsedNode", item.LastUsedNode);
                             command.Parameters.AddWithValue("@lastUsedPhysical", item.LastUsedPhysical);
                             command.Parameters.AddWithValue("@lastUsedCounter", item.LastUsedCounter);
+                            command.Parameters.AddWithValue("@lastModifiedNode", item.LastModifiedNode);
                             command.Parameters.AddWithValue("@lastModifiedPhysical", item.LastModifiedPhysical);
                             command.Parameters.AddWithValue("@lastModifiedCounter", item.LastModifiedCounter);
                             command.Parameters.AddWithValue("@revision", item.Revision);
@@ -349,10 +372,13 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
                             else
                                 command2.Parameters.AddWithValue("@value", item.Value);
 
+                            command2.Parameters.AddWithValue("@expiresNode", item.ExpiresNode);
                             command2.Parameters.AddWithValue("@expiresPhysical", item.ExpiresPhysical);
                             command2.Parameters.AddWithValue("@expiresCounter", item.ExpiresCounter);
+                            command2.Parameters.AddWithValue("@lastUsedNode", item.LastUsedNode);
                             command2.Parameters.AddWithValue("@lastUsedPhysical", item.LastUsedPhysical);
                             command2.Parameters.AddWithValue("@lastUsedCounter", item.LastUsedCounter);
+                            command2.Parameters.AddWithValue("@lastModifiedNode", item.LastModifiedNode);
                             command2.Parameters.AddWithValue("@lastModifiedPhysical", item.LastModifiedPhysical);
                             command2.Parameters.AddWithValue("@lastModifiedCounter", item.LastModifiedCounter);
                             command2.Parameters.AddWithValue("@revision", item.Revision);
@@ -408,8 +434,8 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
                 readerWriterLock.AcquireReaderLock(TimeSpan.FromSeconds(5));
 
                 const string query = """
-                SELECT owner, expiresPhysical, expiresCounter, lastUsedPhysical, lastUsedCounter, 
-                       lastModifiedPhysical, lastModifiedCounter, fencingToken, state                               
+                SELECT owner, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, lastUsedCounter, 
+                       lastModifiedNode, lastModifiedPhysical, lastModifiedCounter, fencingToken, state                               
                 FROM locks
                 WHERE resource = @resource
                 """;
@@ -424,11 +450,23 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
                     return new()
                     {
                         Owner = reader.IsDBNull(0) ? null : (byte[])reader[0],
-                        Expires = new(reader.IsDBNull(1) ? 0 : reader.GetInt64(1), reader.IsDBNull(2) ? 0 : (uint)reader.GetInt64(2)),
-                        LastUsed = new(reader.IsDBNull(3) ? 0 : reader.GetInt64(3), reader.IsDBNull(4) ? 0 : (uint)reader.GetInt64(4)),
-                        LastModified = new(reader.IsDBNull(5) ? 0 : reader.GetInt64(5), reader.IsDBNull(6) ? 0 : (uint)reader.GetInt64(6)),
-                        FencingToken = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
-                        State = reader.IsDBNull(8) ? LockState.Locked : (LockState)reader.GetInt32(8)
+                        Expires = new(
+                            reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+                            reader.IsDBNull(2) ? 0 : reader.GetInt64(2), 
+                            reader.IsDBNull(3) ? 0 : (uint)reader.GetInt64(3)
+                        ),
+                        LastUsed = new(
+                            reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
+                            reader.IsDBNull(5) ? 0 : reader.GetInt64(5), 
+                            reader.IsDBNull(6) ? 0 : (uint)reader.GetInt64(6)
+                        ),
+                        LastModified = new(
+                            reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
+                            reader.IsDBNull(8) ? 0 : reader.GetInt64(8), 
+                            reader.IsDBNull(9) ? 0 : (uint)reader.GetInt64(9)
+                        ),
+                        FencingToken = reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+                        State = reader.IsDBNull(11) ? LockState.Locked : (LockState)reader.GetInt32(11)
                     };
             }
             finally
@@ -462,8 +500,8 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
                 //const string query = "SELECT value, revision, expiresPhysical, expiresCounter, state FROM keys WHERE key = @key AND revision = -1";
                 
                 const string query = """
-                 SELECT value, expiresPhysical, expiresCounter, lastUsedPhysical, lastUsedCounter, 
-                        lastModifiedPhysical, lastModifiedCounter, revision, state                               
+                 SELECT value, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, lastUsedCounter, 
+                        lastModifiedNode, lastModifiedPhysical, lastModifiedCounter, revision, state                               
                  FROM keys
                  WHERE key = @key
                  """;
@@ -478,11 +516,23 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
                     return new()
                     {
                         Value = reader.IsDBNull(0) ? null : (byte[])reader[0],
-                        Expires = new(reader.IsDBNull(1) ? 0 : reader.GetInt64(1), reader.IsDBNull(2) ? 0 : (uint)reader.GetInt64(2)),
-                        LastUsed = new(reader.IsDBNull(3) ? 0 : reader.GetInt64(3), reader.IsDBNull(4) ? 0 : (uint)reader.GetInt64(4)),
-                        LastModified = new(reader.IsDBNull(5) ? 0 : reader.GetInt64(5), reader.IsDBNull(6) ? 0 : (uint)reader.GetInt64(6)),
-                        Revision = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
-                        State = reader.IsDBNull(8) ? KeyValueState.Undefined : (KeyValueState)reader.GetInt32(8)
+                        Expires = new(
+                            reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+                            reader.IsDBNull(2) ? 0 : reader.GetInt64(2), 
+                            reader.IsDBNull(3) ? 0 : (uint)reader.GetInt64(3)
+                        ),
+                        LastUsed = new(
+                            reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
+                            reader.IsDBNull(5) ? 0 : reader.GetInt64(5), 
+                            reader.IsDBNull(6) ? 0 : (uint)reader.GetInt64(6)
+                        ),
+                        LastModified = new(
+                            reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
+                            reader.IsDBNull(8) ? 0 : reader.GetInt64(8), 
+                            reader.IsDBNull(9) ? 0 : (uint)reader.GetInt64(9)
+                        ),
+                        Revision = reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+                        State = reader.IsDBNull(11) ? KeyValueState.Undefined : (KeyValueState)reader.GetInt32(11)
                     };
             }
             finally
@@ -518,8 +568,8 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
                 readerWriterLock.AcquireReaderLock(TimeSpan.FromSeconds(5));
 
                 const string query = """
-                 SELECT value, expiresPhysical, expiresCounter, lastUsedPhysical, lastUsedCounter, 
-                        lastModifiedPhysical, lastModifiedCounter, revision, state                               
+                 SELECT value, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, lastUsedCounter, 
+                        lastModifiedNode, lastModifiedPhysical, lastModifiedCounter, revision, state                               
                  FROM keys_revisions
                  WHERE key = @key AND revision = @revision
                  """;
@@ -535,11 +585,23 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
                     return new()
                     {
                         Value = reader.IsDBNull(0) ? null : (byte[])reader[0],
-                        Expires = new(reader.IsDBNull(1) ? 0 : reader.GetInt64(1), reader.IsDBNull(2) ? 0 : (uint)reader.GetInt64(2)),
-                        LastUsed = new(reader.IsDBNull(3) ? 0 : reader.GetInt64(3), reader.IsDBNull(4) ? 0 : (uint)reader.GetInt64(4)),
-                        LastModified = new(reader.IsDBNull(5) ? 0 : reader.GetInt64(5), reader.IsDBNull(6) ? 0 : (uint)reader.GetInt64(6)),
-                        Revision = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
-                        State = reader.IsDBNull(8) ? KeyValueState.Undefined : (KeyValueState)reader.GetInt32(8)
+                        Expires = new(
+                            reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+                            reader.IsDBNull(2) ? 0 : reader.GetInt64(2), 
+                            reader.IsDBNull(3) ? 0 : (uint)reader.GetInt64(3)
+                        ),
+                        LastUsed = new(
+                            reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
+                            reader.IsDBNull(5) ? 0 : reader.GetInt64(5), 
+                            reader.IsDBNull(6) ? 0 : (uint)reader.GetInt64(6)
+                        ),
+                        LastModified = new(
+                            reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
+                            reader.IsDBNull(8) ? 0 : reader.GetInt64(8), 
+                            reader.IsDBNull(9) ? 0 : (uint)reader.GetInt64(9)
+                        ),
+                        Revision = reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+                        State = reader.IsDBNull(11) ? KeyValueState.Undefined : (KeyValueState)reader.GetInt32(11)
                     };
             }
             finally
@@ -574,8 +636,8 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
             readerWriterLock.AcquireReaderLock(TimeSpan.FromSeconds(5));
 
             const string query = """
-             SELECT key, value, revision, expiresPhysical, expiresCounter, lastUsedPhysical, lastUsedCounter, 
-                    lastModifiedPhysical, lastModifiedCounter, state                               
+             SELECT key, value, revision, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, lastUsedCounter, 
+                    lastModifiedNode, lastModifiedPhysical, lastModifiedCounter, state                               
              FROM keys
              WHERE key LIKE @key
              """;
@@ -591,18 +653,21 @@ public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
                     value: reader.IsDBNull(1) ? null : (byte[])reader[1],
                     revision: reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                     expires: new(
-                        reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                        reader.IsDBNull(4) ? 0 : (uint)reader.GetInt64(4)
+                        reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
+                        reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
+                        reader.IsDBNull(5) ? 0 : (uint)reader.GetInt64(5)
                     ),
                     lastUsed: new(
-                        reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
-                        reader.IsDBNull(6) ? 0 : (uint)reader.GetInt64(6)
-                    ),
-                    lastModified: new(
+                        reader.IsDBNull(6) ? 0 : reader.GetInt32(6),
                         reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
                         reader.IsDBNull(8) ? 0 : (uint)reader.GetInt64(8)
                     ),
-                    state: reader.IsDBNull(9) ? KeyValueState.Undefined : (KeyValueState)reader.GetInt32(9)
+                    lastModified: new(
+                        reader.IsDBNull(9) ? 0 : reader.GetInt32(9),
+                        reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+                        reader.IsDBNull(11) ? 0 : (uint)reader.GetInt64(11)
+                    ),
+                    state: reader.IsDBNull(12) ? KeyValueState.Undefined : (KeyValueState)reader.GetInt32(12)
                 )));
         }
         finally

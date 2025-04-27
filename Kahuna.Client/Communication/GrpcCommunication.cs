@@ -224,7 +224,7 @@ public class GrpcCommunication : IKahunaCommunication
                 throw new KahunaException("Response is null", LockResponseType.Errored);
                 
             if (response.Type == GrpcLockResponseType.LockResponseTypeGot)
-                return new(response.Owner?.ToByteArray(), new(response.ExpiresPhysical, response.ExpiresCounter), response.FencingToken);
+                return new(response.Owner?.ToByteArray(), new(response.ExpiresNode, response.ExpiresPhysical, response.ExpiresCounter), response.FencingToken);
             
             if (++retries >= 5)
                 throw new KahunaException("Retries exhausted.", LockResponseType.Aborted);
@@ -265,6 +265,7 @@ public class GrpcCommunication : IKahunaCommunication
     {
         GrpcTrySetKeyValueRequest request = new()
         {
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
@@ -335,6 +336,7 @@ public class GrpcCommunication : IKahunaCommunication
     {
         GrpcTrySetKeyValueRequest request = new()
         {
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
@@ -404,6 +406,7 @@ public class GrpcCommunication : IKahunaCommunication
     {
         GrpcTrySetKeyValueRequest request = new()
         {
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
@@ -549,6 +552,7 @@ public class GrpcCommunication : IKahunaCommunication
     {
         GrpcTryExistsKeyValueRequest request = new()
         {
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
@@ -608,6 +612,7 @@ public class GrpcCommunication : IKahunaCommunication
     {
         GrpcTryDeleteKeyValueRequest request = new()
         {
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
@@ -668,6 +673,7 @@ public class GrpcCommunication : IKahunaCommunication
     {
         GrpcTryExtendKeyValueRequest request = new()
         {
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
@@ -793,6 +799,7 @@ public class GrpcCommunication : IKahunaCommunication
     {
         GrpcTryAcquireExclusiveLockRequest request = new()
         {
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,             
@@ -847,8 +854,8 @@ public class GrpcCommunication : IKahunaCommunication
                 Key = response.Key,
                 Value = value,
                 Revision = response.Revision,
-                Expires = new(response.ExpiresPhysical, response.ExpiresCounter),
-                LastModified = new(response.LastModifiedPhysical, response.LastModifiedCounter)
+                Expires = new(response.ExpiresNode, response.ExpiresPhysical, response.ExpiresCounter),
+                LastModified = new(response.LastModifiedNode, response.LastModifiedPhysical, response.LastModifiedCounter)
             };
             
             values.Add(responseValue);
@@ -1005,7 +1012,7 @@ public class GrpcCommunication : IKahunaCommunication
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
             if (response.Type == GrpcKeyValueResponseType.TypeSet)
-                return new(url, new(response.TransactionIdPhysical, response.TransactionIdCounter)); 
+                return new(url, new(response.TransactionIdNode, response.TransactionIdPhysical, response.TransactionIdCounter)); 
                         
             if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
                 logger?.LogDebug("Server asked to retry start key/value transaction");
@@ -1045,6 +1052,7 @@ public class GrpcCommunication : IKahunaCommunication
         GrpcCommitTransactionRequest request = new()
         {
             UniqueId = uniqueId,
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
         };
@@ -1112,6 +1120,7 @@ public class GrpcCommunication : IKahunaCommunication
         GrpcRollbackTransactionRequest request = new()
         {
             UniqueId = uniqueId,
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
         };

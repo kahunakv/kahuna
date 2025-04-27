@@ -28,65 +28,72 @@ service KeyValuer {
 }
 
 message GrpcTrySetKeyValueRequest {
-  int64 TransactionIdPhysical = 1;
-  uint32 TransactionIdCounter = 2;
-  string Key = 3;
-  optional bytes Value = 4;
-  optional bytes CompareValue = 5;
-  int64 CompareRevision = 6;
-  GrpcKeyValueFlags Flags = 7;
-  int32 ExpiresMs = 8;
-  GrpcKeyValueDurability Durability = 9;
+  int32 TransactionIdNode = 1;
+  int64 TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter = 3;
+  string Key = 4;
+  optional bytes Value = 5;
+  optional bytes CompareValue = 6;
+  int64 CompareRevision = 7;
+  GrpcKeyValueFlags Flags = 8;
+  int32 ExpiresMs = 9;
+  GrpcKeyValueDurability Durability = 10;
 }
 
 message GrpcTrySetKeyValueResponse {
   optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
   int64 Revision = 3;
-  int64 LastModifiedPhysical = 4;
-  uint32 LastModifiedCounter = 5;
-  int32 TimeElapsedMs = 6;
+  int32 LastModifiedNode = 4;
+  int64 LastModifiedPhysical = 5;
+  uint32 LastModifiedCounter = 6;
+  int32 TimeElapsedMs = 7;
 }
 
 message GrpcTryExtendKeyValueRequest {
-  int64 TransactionIdPhysical = 1;
-  uint32 TransactionIdCounter = 2;
-  string Key = 3;
-  int32 ExpiresMs = 4;
-  GrpcKeyValueDurability Durability = 5;
+  int32 TransactionIdNode = 1;
+  int64 TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter = 3;
+  string Key = 4;
+  int32 ExpiresMs = 5;
+  GrpcKeyValueDurability Durability = 6;
 }
 
 message GrpcTryExtendKeyValueResponse {
   optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
   int64 Revision = 3;
-  int64 LastModifiedPhysical = 4;
-  uint32 LastModifiedCounter = 5;
-  int32 TimeElapsedMs = 6;
+  int32 LastModifiedNode = 4;
+  int64 LastModifiedPhysical = 5;
+  uint32 LastModifiedCounter = 6;
+  int32 TimeElapsedMs = 7;
 }
 
 message GrpcTryDeleteKeyValueRequest {
-  int64 TransactionIdPhysical = 1;
-  uint32 TransactionIdCounter = 2;
-  string Key = 3;
-  GrpcKeyValueDurability Durability = 4;
+  int32 TransactionIdNode = 1;
+  int64 TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter = 3;
+  string Key = 4;
+  GrpcKeyValueDurability Durability = 5;
 }
 
 message GrpcTryDeleteKeyValueResponse {
   optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
   int64 Revision = 3;
-  int64 LastModifiedPhysical = 4;
-  uint32 LastModifiedCounter = 5;
-  int32 TimeElapsedMs = 6;
+  int32 LastModifiedNode = 4;
+  int64 LastModifiedPhysical = 5;
+  uint32 LastModifiedCounter = 6;
+  int32 TimeElapsedMs = 7;
 }
 
 message GrpcTryGetKeyValueRequest {
-  int64 TransactionIdPhysical = 1;
-  uint32 TransactionIdCounter = 2;
-  string Key = 3;
-  int64 Revision = 4;
-  GrpcKeyValueDurability Durability = 5;
+  int32 TransactionIdNode = 1;
+  int64 TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter = 3;
+  string Key = 4;
+  int64 Revision = 5;
+  GrpcKeyValueDurability Durability = 6;
 }
 
 message GrpcTryGetKeyValueResponse {
@@ -94,36 +101,43 @@ message GrpcTryGetKeyValueResponse {
   GrpcKeyValueResponseType Type = 2;
   optional bytes Value = 3;
   int64 Revision = 4;
-  int64 ExpiresPhysical = 5;
-  uint32 ExpiresCounter = 6;
-  int64 LastUsedPhysical = 7;
-  uint32 LastUsedCounter = 8;
-  int64 LastModifiedPhysical = 9;
-  uint32 LastModifiedCounter = 10;
-  GrpcKeyValueState State = 11;
-  int32 TimeElapsedMs = 12;
+  int32 ExpiresNode = 5;
+  int64 ExpiresPhysical = 6;
+  uint32 ExpiresCounter = 7;
+  int32 LastUsedNode = 8;
+  int64 LastUsedPhysical = 9;
+  uint32 LastUsedCounter = 10;
+  int32 LastModifiedNode = 11;
+  int64 LastModifiedPhysical = 12;
+  uint32 LastModifiedCounter = 13;
+  GrpcKeyValueState State = 14;
+  int32 TimeElapsedMs = 15;
 }
 
 message GrpcTryExistsKeyValueRequest {
-  int64 TransactionIdPhysical = 1;
-  uint32 TransactionIdCounter = 2;
-  string Key = 3;
-  int64 Revision = 4;
-  GrpcKeyValueDurability Durability = 5;
+  int32 TransactionIdNode = 1;
+  int64 TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter = 3;
+  string Key = 4;
+  int64 Revision = 5;
+  GrpcKeyValueDurability Durability = 6;
 }
 
 message GrpcTryExistsKeyValueResponse {
   optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
   int64 Revision = 3;
-  int64 ExpiresPhysical = 4;
-  uint32 ExpiresCounter = 5;
-  int64 LastUsedPhysical = 6;
-  uint32 LastUsedCounter = 7;
-  int64 LastModifiedPhysical = 8;
-  uint32 LastModifiedCounter = 9;
-  GrpcKeyValueState State = 10;
-  int32 TimeElapsedMs = 11;
+  int32 ExpiresNode = 4;
+  int64 ExpiresPhysical = 5;
+  uint32 ExpiresCounter = 6;
+  int32 LastUsedNode = 7;
+  int64 LastUsedPhysical = 8;
+  uint32 LastUsedCounter = 9;
+  int32 LastModifiedNode = 10;
+  int64 LastModifiedPhysical = 11;
+  uint32 LastModifiedCounter = 12;
+  GrpcKeyValueState State = 13;
+  int32 TimeElapsedMs = 14;
 }
 
 message GrpcTryExecuteTransactionScriptRequest {
@@ -149,18 +163,21 @@ message GrpcTryExecuteTransactionResponseValue {
   string Key = 1;
   optional bytes Value = 2;
   int64 Revision = 3;
-  int64 ExpiresPhysical = 4;
-  uint32 ExpiresCounter = 5;
-  int64 LastModifiedPhysical = 6;
-  uint32 LastModifiedCounter = 7;
+  int32 ExpiresNode = 4;
+  int64 ExpiresPhysical = 5;
+  uint32 ExpiresCounter = 6;
+  int32 LastModifiedNode = 7;
+  int64 LastModifiedPhysical = 8;
+  uint32 LastModifiedCounter = 9;
 }
 
 message GrpcTryAcquireExclusiveLockRequest {
-  int64 TransactionIdPhysical = 1;
-  uint32 TransactionIdCounter = 2;
-  string Key = 3;
-  int32 ExpiresMs = 4;
-  GrpcKeyValueDurability Durability = 5;
+  int32 TransactionIdNode = 1;
+  int64 TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter = 3;
+  string Key = 4;
+  int32 ExpiresMs = 5;
+  GrpcKeyValueDurability Durability = 6;
 }
 
 message GrpcTryAcquireExclusiveLockResponse {
@@ -169,9 +186,10 @@ message GrpcTryAcquireExclusiveLockResponse {
 }
 
 message GrpcTryAcquireManyExclusiveLocksRequest {
-  int64 TransactionIdPhysical = 1;
-  uint32 TransactionIdCounter = 2;
-  repeated GrpcTryAcquireManyExclusiveLocksRequestItem Items = 3;
+  int32 TransactionIdNode = 1;
+  int64 TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter = 3;
+  repeated GrpcTryAcquireManyExclusiveLocksRequestItem Items = 4;
 }
 
 message GrpcTryAcquireManyExclusiveLocksResponse {
@@ -192,9 +210,10 @@ message GrpcTryAcquireManyExclusiveLocksResponseItem {
 }
 
 message GrpcTryReleaseManyExclusiveLocksRequest {
-  int64 TransactionIdPhysical = 1;
-  uint32 TransactionIdCounter = 2;
-  repeated GrpcTryReleaseManyExclusiveLocksRequestItem Items = 3;
+  int32 TransactionIdNode = 1;
+  int64 TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter = 3;
+  repeated GrpcTryReleaseManyExclusiveLocksRequestItem Items = 4;
 }
 
 message GrpcTryReleaseManyExclusiveLocksResponse {
@@ -214,10 +233,11 @@ message GrpcTryReleaseManyExclusiveLocksResponseItem {
 }
 
 message GrpcTryReleaseExclusiveLockRequest {
-  int64 TransactionIdPhysical = 1;
-  uint32 TransactionIdCounter = 2;
-  string Key = 3;
-  GrpcKeyValueDurability Durability = 4;
+  int32 TransactionIdNode = 1;
+  int64 TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter = 3;
+  string Key = 4;
+  GrpcKeyValueDurability Durability = 5;
 }
 
 message GrpcTryReleaseExclusiveLockResponse {
@@ -226,27 +246,32 @@ message GrpcTryReleaseExclusiveLockResponse {
 }
 
 message GrpcTryPrepareMutationsRequest {
-  int64 TransactionIdPhysical = 1;
-  uint32 TransactionIdCounter = 2;
-  int64 CommitIdPhysical = 3;
-  uint32 CommitIdCounter = 4;
-  string Key = 5;
-  GrpcKeyValueDurability Durability = 6;
+  int32 TransactionIdNode = 1;
+  int64 TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter = 3;
+  int32 CommitIdNode = 4;
+  int64 CommitIdPhysical = 5;
+  uint32 CommitIdCounter = 6;
+  string Key = 7;
+  GrpcKeyValueDurability Durability = 8;
 }
 
 message GrpcTryPrepareMutationsResponse {
   optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
-  int64 ProposalTicketPhysical = 3;
-  uint32 ProposalTicketCounter = 4;
+  int32 ProposalTicketNode = 3;
+  int64 ProposalTicketPhysical = 4;
+  uint32 ProposalTicketCounter = 5;
 }
 
 message GrpcTryPrepareManyMutationsRequest {
-  int64 TransactionIdPhysical = 1;
-  uint32 TransactionIdCounter = 2;
-  int64 CommitIdPhysical = 3;
-  uint32 CommitIdCounter = 4;
-  repeated GrpcTryPrepareManyMutationsRequestItem Items = 5;
+  int32 TransactionIdNode = 1;
+  int64 TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter = 3;
+  int32 CommitIdNode = 4;
+  int64 CommitIdPhysical = 5;
+  uint32 CommitIdCounter = 6;
+  repeated GrpcTryPrepareManyMutationsRequestItem Items = 7;
 }
 
 message GrpcTryPrepareManyMutationsRequestItem {
@@ -263,17 +288,20 @@ message GrpcTryPrepareManyMutationsResponseItem {
   GrpcKeyValueResponseType Type = 1;
   string Key = 2;
   GrpcKeyValueDurability Durability = 3;
-  int64 ProposalTicketPhysical = 4;
-  uint32 ProposalTicketCounter = 5;
+  int32 ProposalTicketNode = 4;
+  int64 ProposalTicketPhysical = 5;
+  uint32 ProposalTicketCounter = 6;
 }
 
 message GrpcTryCommitMutationsRequest {
-  int64 TransactionIdPhysical = 1;
-  uint32 TransactionIdCounter = 2;
-  string Key = 3;
-  int64 ProposalTicketPhysical = 4;
-  uint32 ProposalTicketCounter = 5;
-  GrpcKeyValueDurability Durability = 6;
+  int32 TransactionIdNode = 1;
+  int64 TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter = 3;
+  string Key = 4;
+  int32 ProposalTicketNode = 5;
+  int64 ProposalTicketPhysical = 6;
+  uint32 ProposalTicketCounter = 7;
+  GrpcKeyValueDurability Durability = 8;
 }
 
 message GrpcTryCommitMutationsResponse {
@@ -283,16 +311,18 @@ message GrpcTryCommitMutationsResponse {
 }
 
 message GrpcTryCommitManyMutationsRequest {
-  int64 TransactionIdPhysical = 1;
-  uint32 TransactionIdCounter = 2;
-  repeated GrpcTryCommitManyMutationsRequestItem Items = 3;
+  int32 TransactionIdNode = 1;
+  int64 TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter = 3;
+  repeated GrpcTryCommitManyMutationsRequestItem Items = 4;
 }
 
 message GrpcTryCommitManyMutationsRequestItem {
   string Key = 1;
-  int64 ProposalTicketPhysical = 2;
-  uint32 ProposalTicketCounter = 3;
-  GrpcKeyValueDurability Durability = 4;
+  int32 ProposalTicketNode = 2;
+  int64 ProposalTicketPhysical = 3;
+  uint32 ProposalTicketCounter = 4;
+  GrpcKeyValueDurability Durability = 5;
 }
 
 message GrpcTryCommitManyMutationsResponse {
@@ -308,12 +338,14 @@ message GrpcTryCommitManyMutationsResponseItem {
 }
 
 message GrpcTryRollbackMutationsRequest {
-  int64 TransactionIdPhysical = 1;
-  uint32 TransactionIdCounter = 2;
-  string Key = 3;
-  int64 ProposalTicketPhysical = 4;
-  uint32 ProposalTicketCounter = 5;
-  GrpcKeyValueDurability Durability = 6;
+  int32 TransactionIdNode = 1;
+  int64 TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter = 3;
+  string Key = 4;
+  int32 ProposalTicketNode = 5;
+  int64 ProposalTicketPhysical = 6;
+  uint32 ProposalTicketCounter = 7;
+  GrpcKeyValueDurability Durability = 8;
 }
 
 message GrpcTryRollbackMutationsResponse {
@@ -323,16 +355,18 @@ message GrpcTryRollbackMutationsResponse {
 }
 
 message GrpcTryRollbackManyMutationsRequest {
-  int64 TransactionIdPhysical = 1;
-  uint32 TransactionIdCounter = 2;
-  repeated GrpcTryRollbackManyMutationsRequestItem Items = 3;
+  int32 TransactionIdNode = 1;
+  int64 TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter = 3;
+  repeated GrpcTryRollbackManyMutationsRequestItem Items = 4;
 }
 
 message GrpcTryRollbackManyMutationsRequestItem {
   string Key = 1;
-  int64 ProposalTicketPhysical = 2;
-  uint32 ProposalTicketCounter = 3;
-  GrpcKeyValueDurability Durability = 4;
+  int32 ProposalTicketNode = 2;
+  int64 ProposalTicketPhysical = 3;
+  uint32 ProposalTicketCounter = 4;
+  GrpcKeyValueDurability Durability = 5;
 }
 
 message GrpcTryRollbackManyMutationsResponse {
@@ -359,10 +393,11 @@ message GrpcScanByPrefixResponse {
 }
 
 message GrpcGetByPrefixRequest {
-  int64 TransactionIdPhysical = 1;
-  uint32 TransactionIdCounter = 2;
-  string PrefixKey = 3;
-  GrpcKeyValueDurability Durability = 4;
+  int32 TransactionIdNode = 1;
+  int64 TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter = 3;
+  string PrefixKey = 4;
+  GrpcKeyValueDurability Durability = 5;
 }
 
 message GrpcGetByPrefixResponse {
@@ -394,26 +429,29 @@ message GrpcStartTransactionResponse
 {
   optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
-  int64 TransactionIdPhysical = 3;
-  uint32 TransactionIdCounter = 4;
+  int32 TransactionIdNode = 3;
+  int64 TransactionIdPhysical = 4;
+  uint32 TransactionIdCounter = 5;
 }
 
 message GrpcCommitTransactionRequest
 {
   string UniqueId = 1;
-  int64 TransactionIdPhysical = 2;
-  uint32 TransactionIdCounter = 3;
-  repeated GrpcTransactionModifiedKey AcquiredLocks = 4;
-  repeated GrpcTransactionModifiedKey ModifiedKeys = 5;
+  int32 TransactionIdNode = 2;
+  int64 TransactionIdPhysical = 3;
+  uint32 TransactionIdCounter = 4;
+  repeated GrpcTransactionModifiedKey AcquiredLocks = 5;
+  repeated GrpcTransactionModifiedKey ModifiedKeys = 6;
 }
 
 message GrpcRollbackTransactionRequest
 {
   string UniqueId = 1;
-  int64 TransactionIdPhysical = 2;
-  uint32 TransactionIdCounter = 3;
-  repeated GrpcTransactionModifiedKey AcquiredLocks = 4;
-  repeated GrpcTransactionModifiedKey ModifiedKeys = 5;
+  int32 TransactionIdNode = 2;
+  int64 TransactionIdPhysical = 3;
+  uint32 TransactionIdCounter = 4;
+  repeated GrpcTransactionModifiedKey AcquiredLocks = 5;
+  repeated GrpcTransactionModifiedKey ModifiedKeys = 6;
 }
 
 message GrpcTransactionModifiedKey
@@ -438,13 +476,16 @@ message GrpcKeyValueByPrefixItemResponse {
   string Key = 1;
   optional bytes Value = 2;
   int64 Revision = 3;
+  int32 ExpiresNode = 4;
   int64 ExpiresPhysical = 5;
   uint32 ExpiresCounter = 6;
-  int64 LastUsedPhysical = 7;
-  uint32 LastUsedCounter = 8;
-  int64 LastModifiedPhysical = 9;
-  uint32 LastModifiedCounter = 10;
-  GrpcKeyValueState State = 11;
+  int32 LastUsedNode = 7;
+  int64 LastUsedPhysical = 8;
+  uint32 LastUsedCounter = 9;
+  int32 LastModifiedNode = 10;
+  int64 LastModifiedPhysical = 11;
+  uint32 LastModifiedCounter = 12;
+  GrpcKeyValueState State = 13;
 }
 
 message GrpcBatchClientKeyValueRequest {

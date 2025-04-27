@@ -233,7 +233,7 @@ public static class LocksHandlers
                 Type = type,
                 Owner = lockContext?.Owner,
                 FencingToken = lockContext?.FencingToken ?? 0,
-                Expires = new(lockContext?.Expires.L ?? 0, lockContext?.Expires.C ?? 0),
+                Expires = new(lockContext?.Expires.N ?? 0, lockContext?.Expires.L ?? 0, lockContext?.Expires.C ?? 0),
                 ServedFrom = ""
             };
             

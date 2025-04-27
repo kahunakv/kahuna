@@ -35,7 +35,7 @@ internal sealed class TryCollectHandler : BaseHandler
         
         int number = 0;
         TimeSpan range = TimeSpan.FromMinutes(30);
-        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent();
+        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
         // Step 1: Evict expired keys
         foreach (KeyValuePair<string, KeyValueContext> key in keyValuesStore.GetItems())

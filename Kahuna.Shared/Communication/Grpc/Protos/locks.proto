@@ -55,9 +55,10 @@ message GrpcGetLockResponse {
   optional string ServedFrom = 1;
   GrpcLockResponseType Type = 2;
   optional bytes Owner = 3;
-  int64 ExpiresPhysical = 4;
-  uint32 ExpiresCounter = 5;
-  int64 FencingToken = 6;
+  int32 ExpiresNode = 4;
+  int64 ExpiresPhysical = 5;
+  uint32 ExpiresCounter = 6;
+  int64 FencingToken = 7;
 }
 
 message GrpcBatchClientLockRequest {

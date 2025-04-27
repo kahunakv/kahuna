@@ -157,7 +157,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             new(
                 owner, 
                 remoteResponse.FencingToken,
-                new(remoteResponse.ExpiresPhysical, remoteResponse.ExpiresCounter)
+                new(remoteResponse.ExpiresNode, remoteResponse.ExpiresPhysical, remoteResponse.ExpiresCounter)
             )
         );
     }
@@ -191,6 +191,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     {
         GrpcTrySetKeyValueRequest request = new()
         {
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
@@ -216,7 +217,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         return (
             (KeyValueResponseType)remoteResponse.Type, 
             remoteResponse.Revision, 
-            new(remoteResponse.LastModifiedPhysical, remoteResponse.LastModifiedCounter)
+            new(remoteResponse.LastModifiedNode, remoteResponse.LastModifiedPhysical, remoteResponse.LastModifiedCounter)
         );
     }
 
@@ -239,6 +240,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     {
         GrpcTryDeleteKeyValueRequest request = new()
         {
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
@@ -255,7 +257,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         return (
             (KeyValueResponseType)remoteResponse.Type, 
             remoteResponse.Revision, 
-            new(remoteResponse.LastModifiedPhysical, remoteResponse.LastModifiedCounter)
+            new(remoteResponse.LastModifiedNode, remoteResponse.LastModifiedPhysical, remoteResponse.LastModifiedCounter)
         );
     }
 
@@ -280,6 +282,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     {
         GrpcTryExtendKeyValueRequest request = new()
         {
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
@@ -297,7 +300,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         return (
             (KeyValueResponseType)remoteResponse.Type, 
             remoteResponse.Revision, 
-            new(remoteResponse.LastModifiedPhysical, remoteResponse.LastModifiedCounter)
+            new(remoteResponse.LastModifiedNode, remoteResponse.LastModifiedPhysical, remoteResponse.LastModifiedCounter)
         );
     }
 
@@ -322,6 +325,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     {
         GrpcTryGetKeyValueRequest request = new()
         {
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
@@ -346,9 +350,9 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         return ((KeyValueResponseType)remoteResponse.Type, new(
             value,
             remoteResponse.Revision,
-            new(remoteResponse.ExpiresPhysical, remoteResponse.ExpiresCounter),
-            new(remoteResponse.LastUsedPhysical, remoteResponse.LastUsedCounter),
-            new(remoteResponse.LastModifiedPhysical, remoteResponse.LastModifiedCounter),
+            new(remoteResponse.ExpiresNode, remoteResponse.ExpiresPhysical, remoteResponse.ExpiresCounter),
+            new(remoteResponse.LastUsedNode, remoteResponse.LastUsedPhysical, remoteResponse.LastUsedCounter),
+            new(remoteResponse.LastModifiedNode, remoteResponse.LastModifiedPhysical, remoteResponse.LastModifiedCounter),
             (KeyValueState)remoteResponse.State
         ));
     }
@@ -374,6 +378,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     {
         GrpcTryExistsKeyValueRequest request = new()
         {
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
@@ -421,6 +426,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcTryAcquireExclusiveLockRequest request = new()
         {
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
@@ -459,6 +465,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             
         GrpcTryAcquireManyExclusiveLocksRequest request = new()
         {
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C
         };
@@ -498,6 +505,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcTryReleaseExclusiveLockRequest request = new()
         {
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
@@ -525,6 +533,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             
         GrpcTryReleaseManyExclusiveLocksRequest request = new()
         {
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C
         };
@@ -566,6 +575,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcTryPrepareMutationsRequest request = new()
         {
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             CommitIdPhysical = commitId.L,
@@ -601,8 +611,10 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             
         GrpcTryPrepareManyMutationsRequest request = new()
         {
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
+            CommitIdNode = commitId.N,
             CommitIdPhysical = commitId.L,
             CommitIdCounter = commitId.C,
         };
@@ -635,9 +647,11 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcTryCommitMutationsRequest request = new()
         {
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
+            ProposalTicketNode = ticketId.N,
             ProposalTicketPhysical = ticketId.L,
             ProposalTicketCounter = ticketId.C,
             Durability = (GrpcKeyValueDurability)durability,
@@ -657,6 +671,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             
         GrpcTryCommitManyMutationsRequest request = new()
         {
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C
         };
@@ -679,6 +694,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             yield return new()
             {
                 Key = key.key,
+                ProposalTicketNode = key.ticketId.N,
                 ProposalTicketPhysical = key.ticketId.L,
                 ProposalTicketCounter = key.ticketId.C,
                 Durability = (GrpcKeyValueDurability)key.durability
@@ -691,9 +707,11 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcTryRollbackMutationsRequest request = new()
         {
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
+            ProposalTicketNode = ticketId.N,
             ProposalTicketPhysical = ticketId.L,
             ProposalTicketCounter = ticketId.C,
             Durability = (GrpcKeyValueDurability)durability,
@@ -713,6 +731,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             
         GrpcTryRollbackManyMutationsRequest request = new()
         {
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C
         };
@@ -735,6 +754,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             yield return new()
             {
                 Key = key.key,
+                ProposalTicketNode = key.ticketId.N,
                 ProposalTicketPhysical = key.ticketId.L,
                 ProposalTicketCounter = key.ticketId.C,
                 Durability = (GrpcKeyValueDurability)key.durability
@@ -749,6 +769,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcGetByPrefixRequest request = new()
         {
+            TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             PrefixKey = prefixedKey,
@@ -797,6 +818,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcCommitTransactionRequest request = new()
         {
             UniqueId = uniqueId,
+            TransactionIdNode = timestamp.N,
             TransactionIdPhysical = timestamp.L,
             TransactionIdCounter = timestamp.C            
         };
@@ -829,6 +851,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcRollbackTransactionRequest request = new()
         {
             UniqueId = uniqueId,
+            TransactionIdNode = timestamp.N,
             TransactionIdPhysical = timestamp.L,
             TransactionIdCounter = timestamp.C            
         };

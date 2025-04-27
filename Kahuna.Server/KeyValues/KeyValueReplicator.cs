@@ -89,9 +89,9 @@ internal sealed class KeyValueReplicator
                         keyValueMessage.Key,
                         messageValue,
                         keyValueMessage.Revision,
-                        new(keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
-                        new(keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
-                        new(keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
+                        new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
+                        new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
+                        new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
                         (int)KeyValueState.Set
                     ));
 
@@ -131,9 +131,9 @@ internal sealed class KeyValueReplicator
                         keyValueMessage.Key,
                         messageValue,
                         keyValueMessage.Revision,
-                        new(keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
-                        new(keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
-                        new(keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
+                        new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
+                        new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
+                        new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
                         (int)KeyValueState.Deleted
                     ));
 
@@ -173,9 +173,9 @@ internal sealed class KeyValueReplicator
                         keyValueMessage.Key,
                         messageValue,
                         keyValueMessage.Revision,
-                        new(keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
-                        new(keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
-                        new(keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
+                        new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
+                        new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
+                        new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
                         (int)KeyValueState.Set
                     ));
 

@@ -49,8 +49,11 @@ public sealed class KahunaCommandLineOptions
     [Option("initial-cluster-partitions", Required = false, HelpText = "Initial cluster number of partitions", Default = 128)] // 32
     public int InitialClusterPartitions { get; set; }
     
-    [Option("raft-nodeid", Required = false, HelpText = "Unique name to identify the node in the cluster")]
-    public string RaftNodeId { get; set; } = "";
+    [Option("raft-nodename", Required = false, HelpText = "Unique name to identify the node in the cluster")]
+    public string RaftNodeName { get; set; } = "";
+    
+    [Option("raft-nodeid", Required = false, HelpText = "Unique id to identify the node in the cluster")]
+    public int RaftNodeId { get; set; } = 0;
     
     [Option("raft-host", Required = false, HelpText = "Host to listen for Raft consensus and replication requests", Default = "localhost")]
     public string RaftHost { get; set; } = "localhost";
