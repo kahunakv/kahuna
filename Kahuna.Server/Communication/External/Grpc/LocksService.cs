@@ -179,6 +179,7 @@ public sealed class LocksService : Locker.LockerBase
             Type = (GrpcLockResponseType)type,
             Owner = lockContext?.Owner is not null ? UnsafeByteOperations.UnsafeWrap(lockContext.Owner) : null,
             FencingToken = lockContext?.FencingToken ?? 0,
+            ExpiresNode = lockContext?.Expires.N ?? 0,
             ExpiresPhysical = lockContext?.Expires.L ?? 0,
             ExpiresCounter = lockContext?.Expires.C ?? 0,
             ServedFrom = ""

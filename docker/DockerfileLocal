@@ -26,6 +26,7 @@ COPY certs/development-certificate.pfx /app/certificate.pfx
 # install sqlite to debug
 # RUN apt -y update && apt -y upgrade && apt-get -y install sqlite3
 
+ARG KAHUNA_RAFT_NODENAME
 ARG KAHUNA_RAFT_NODEID
 ARG KAHUNA_RAFT_HOST
 ARG KAHUNA_RAFT_PORT
@@ -34,6 +35,7 @@ ARG KAHUNA_HTTPS_PORTS
 ARG KAHUNA_INITIAL_CLUSTER
 
 ENV DOTNET_SYSTEM_NET_SOCKETS_INLINE_COMPLETIONS=1
+ENV KAHUNA_RAFT_NODENAME="$KAHUNA_RAFT_NODENAME"
 ENV KAHUNA_RAFT_NODEID="$KAHUNA_RAFT_NODEID"
 ENV KAHUNA_RAFT_HOST="$KAHUNA_RAFT_HOST"
 ENV KAHUNA_RAFT_PORT="$KAHUNA_RAFT_PORT"
@@ -49,9 +51,9 @@ mkdir -p /storage/wal/v3
 mkdir -p /storage/data/v1
 mkdir -p /storage/wal/v1
 
-echo "kahuna --raft-nodeid $KAHUNA_RAFT_NODEID --raft-host $KAHUNA_RAFT_HOST --raft-port $KAHUNA_RAFT_PORT --http-ports $KAHUNA_HTTP_PORTS --https-ports $KAHUNA_HTTPS_PORTS --https-certificate /app/certificate.pfx --initial-cluster $KAHUNA_INITIAL_CLUSTER --storage rocksdb --storage-path /storage/data --storage-revision v1 --wal-storage rocksdb --wal-path /storage/wal --wal-revision v3"
+echo "kahuna --raft-nodename $KAHUNA_RAFT_NODENAME --raft-nodeid $KAHUNA_RAFT_NODEID --raft-host $KAHUNA_RAFT_HOST --raft-port $KAHUNA_RAFT_PORT --http-ports $KAHUNA_HTTP_PORTS --https-ports $KAHUNA_HTTPS_PORTS --https-certificate /app/certificate.pfx --initial-cluster $KAHUNA_INITIAL_CLUSTER --storage rocksdb --storage-path /storage/data --storage-revision v1 --wal-storage rocksdb --wal-path /storage/wal --wal-revision v3"
 
-dotnet /app/Kahuna.Server.dll --raft-nodeid $KAHUNA_RAFT_NODEID --raft-host $KAHUNA_RAFT_HOST --raft-port $KAHUNA_RAFT_PORT --http-ports $KAHUNA_HTTP_PORTS --https-ports $KAHUNA_HTTPS_PORTS --https-certificate /app/certificate.pfx --initial-cluster $KAHUNA_INITIAL_CLUSTER --storage rocksdb --storage-path /storage/data --storage-revision v1 --wal-storage rocksdb --wal-path /storage/wal --wal-revision v3
+dotnet /app/Kahuna.Server.dll --raft-nodename $KAHUNA_RAFT_NODENAME --raft-nodeid $KAHUNA_RAFT_NODEID --raft-host $KAHUNA_RAFT_HOST --raft-port $KAHUNA_RAFT_PORT --http-ports $KAHUNA_HTTP_PORTS --https-ports $KAHUNA_HTTPS_PORTS --https-certificate /app/certificate.pfx --initial-cluster $KAHUNA_INITIAL_CLUSTER --storage rocksdb --storage-path /storage/data --storage-revision v1 --wal-storage rocksdb --wal-path /storage/wal --wal-revision v3
 EOT
 
 # when starting the container, run dotnet with the built dll

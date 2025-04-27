@@ -619,6 +619,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             yield return new()
             {
                 Type = (GrpcKeyValueResponseType)type,
+                ProposalTicketNode = ticketId.N,
                 ProposalTicketPhysical = ticketId.L, 
                 ProposalTicketCounter = ticketId.C, 
                 Key = key,

@@ -396,9 +396,9 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         return ((KeyValueResponseType)remoteResponse.Type, new(
             null,
             remoteResponse.Revision,
-            new(remoteResponse.ExpiresPhysical, remoteResponse.ExpiresCounter),
-            new(remoteResponse.LastUsedPhysical, remoteResponse.LastUsedCounter),
-            new(remoteResponse.LastModifiedPhysical, remoteResponse.LastModifiedCounter),
+            new(remoteResponse.ExpiresNode, remoteResponse.ExpiresPhysical, remoteResponse.ExpiresCounter),
+            new(remoteResponse.LastUsedNode, remoteResponse.LastUsedPhysical, remoteResponse.LastUsedCounter),
+            new(remoteResponse.LastModifiedNode, remoteResponse.LastModifiedPhysical, remoteResponse.LastModifiedCounter),
             (KeyValueState)remoteResponse.State
         ));
     }
@@ -578,6 +578,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
+            CommitIdNode = commitId.N,
             CommitIdPhysical = commitId.L,
             CommitIdCounter = commitId.C,
             Key = key,
@@ -591,7 +592,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         return (
             (KeyValueResponseType)remoteResponse.Type, 
-            new(remoteResponse.ProposalTicketPhysical, remoteResponse.ProposalTicketCounter), 
+            new(remoteResponse.ProposalTicketNode, remoteResponse.ProposalTicketPhysical, remoteResponse.ProposalTicketCounter), 
             key, 
             durability
         );
@@ -627,7 +628,12 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         lock (lockSync)
         {
             foreach (GrpcTryPrepareManyMutationsResponseItem item in remoteResponse.Items)
-                responses.Add(((KeyValueResponseType)item.Type, new(item.ProposalTicketPhysical, item.ProposalTicketCounter), item.Key, (KeyValueDurability)item.Durability));
+                responses.Add((
+                    (KeyValueResponseType)item.Type, 
+                    new(item.ProposalTicketNode, item.ProposalTicketPhysical, item.ProposalTicketCounter), 
+                    item.Key, 
+                    (KeyValueDurability)item.Durability
+                ));
         }
     }
     
@@ -801,7 +807,10 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         remoteResponse.ServedFrom = $"https://{node}";
         
-        return ((KeyValueResponseType)remoteResponse.Type, new(remoteResponse.TransactionIdPhysical, remoteResponse.TransactionIdCounter));
+        return (
+            (KeyValueResponseType)remoteResponse.Type, 
+            new(remoteResponse.TransactionIdNode, remoteResponse.TransactionIdPhysical, remoteResponse.TransactionIdCounter)
+        );
     }
 
     public async Task<KeyValueResponseType> CommitTransaction(
@@ -898,9 +907,9 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             responses.Add((kv.Key, new(
                 value, 
                 kv.Revision, 
-                new(kv.ExpiresPhysical, kv.ExpiresCounter),
-                new(kv.LastUsedPhysical, kv.LastUsedCounter),
-                new(kv.LastModifiedPhysical, kv.LastModifiedCounter),
+                new(kv.ExpiresNode, kv.ExpiresPhysical, kv.ExpiresCounter),
+                new(kv.LastUsedNode, kv.LastUsedPhysical, kv.LastUsedCounter),
+                new(kv.LastModifiedNode, kv.LastModifiedPhysical, kv.LastModifiedCounter),
                 (KeyValueState)kv.State
             )));
         }
