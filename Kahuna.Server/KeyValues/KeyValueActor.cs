@@ -6,6 +6,7 @@ using System.Diagnostics;
 using Kahuna.Server.Persistence;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Server.KeyValues.Handlers;
+using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Utils;
 
@@ -102,8 +103,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
 
         try
         {
-            logger.LogDebug(
-                "KeyValueActor Message: {Actor} {Type} Key={Key} {Value} Expires={ExpiresMs} Flags={Flags} Revision={Revision} TxId={TransactionId} {Consistency}",
+            logger.LogKeyValueActorEnter(
                 actorContext.Self.Runner.Name,
                 message.Type,
                 message.Key,
@@ -146,8 +146,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         }
         finally
         {
-            logger.LogDebug(
-                "KeyValueActor Took: {Actor} {Type} Key={Key} Response={Response} Revision={Revision} Time={Elasped}ms",
+            logger.LogKeyValueActorTook(
                 actorContext.Self.Runner.Name,
                 message.Type,
                 message.Key,

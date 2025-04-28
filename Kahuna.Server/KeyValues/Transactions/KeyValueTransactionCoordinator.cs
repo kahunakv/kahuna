@@ -653,7 +653,7 @@ internal sealed class KeyValueTransactionCoordinator
             List<(string, KeyValueDurability)> locksToRelease;
 
             // Commit or rollback will release locks, we just need the ones that haven't been released yet
-            if (context.ModifiedKeys is null)
+            if (context.ModifiedKeys is null || (context.State != KeyValueTransactionState.Committed && context.State != KeyValueTransactionState.RolledBack))
                 locksToRelease = context.LocksAcquired.ToList();
             else
             {

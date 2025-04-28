@@ -740,27 +740,13 @@ public class KahunaTransactionSession : IAsyncDisposable
             {
                 acquiredKeysList = [];
             }
-            
-            List<KeyValueTransactionModifiedKey> modifiedKeysList;
-
-            if (modifiedKeys is not null)
-            {
-                modifiedKeysList = new(modifiedKeys.Count);
-                
-                foreach ((string key, KeyValueDurability durability) in modifiedKeys)
-                    modifiedKeysList.Add(new() { Key = key, Durability = durability});
-            }
-            else
-            {
-                modifiedKeysList = [];
-            }
 
             bool result = await Client.Communication.RollbackTransactionSession(
                 Url,
                 UniqueId,
                 TransactionId,
                 acquiredKeysList,
-                modifiedKeysList,
+                [],
                 cancellationToken
             ).ConfigureAwait(false);
 
