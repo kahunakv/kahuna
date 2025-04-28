@@ -53,15 +53,15 @@ internal sealed class KeyValueTransactionCoordinator
     private readonly KeyValuesManager manager;
 
     private readonly KahunaConfiguration configuration;
-    
+
     private readonly IRaft raft;
 
     private readonly ILogger<IKahuna> logger;
 
     private readonly ScriptParserProcessor scriptParserProcessor;
-    
+
     private readonly ConcurrentDictionary<HLCTimestamp, KeyValueTransactionContext> sessions = new();
-    
+
     /// <summary>
     /// Constructor
     /// </summary>
@@ -100,10 +100,10 @@ internal sealed class KeyValueTransactionCoordinator
 
                 case NodeType.Get:
                     return await GetCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
-                
+
                 case NodeType.GetByPrefix:
                     return await GetByPrefixCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
-                
+
                 case NodeType.Exists:
                     return await ExistsCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
 
@@ -118,7 +118,7 @@ internal sealed class KeyValueTransactionCoordinator
 
                 case NodeType.Eget:
                     return await GetCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
-                
+
                 case NodeType.Eexists:
                     return await ExistsCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
 
@@ -127,7 +127,7 @@ internal sealed class KeyValueTransactionCoordinator
 
                 case NodeType.Eextend:
                     return await ExtendCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
-                
+
                 case NodeType.EgetByPrefix:
                     return await GetByPrefixCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
 
@@ -180,7 +180,7 @@ internal sealed class KeyValueTransactionCoordinator
                 case NodeType.Rollback:
                 case NodeType.Commit:
                     throw new KahunaScriptException("Invalid transaction", ast.yyline);
-                
+
                 default:
                     throw new KahunaScriptException("Unknown command: " + ast.nodeType, ast.yyline);
             }
@@ -190,31 +190,31 @@ internal sealed class KeyValueTransactionCoordinator
         catch (KahunaScriptException ex)
         {
             logger.LogDebug("KahunaScriptException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
-            
+
             return new() { Type = KeyValueResponseType.Errored, Reason = ex.Message + " at line " + ex.Line };
         }
         catch (KahunaAbortedException ex)
         {
             logger.LogDebug("KahunaAbortedException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
-            
+
             return new() { Type = KeyValueResponseType.Aborted, Reason = ex.Message };
         }
         catch (TaskCanceledException ex)
         {
             logger.LogDebug("TaskCanceledException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
-            
+
             return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
         }
         catch (OperationCanceledException ex)
         {
             logger.LogDebug("TaskCanceledException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
-            
+
             return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
         }
         catch (Exception ex)
         {
             logger.LogError("TryExecuteTx: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
-            
+
             return new() { Type = KeyValueResponseType.Errored, Reason = ex.Message };
         }
     }
@@ -227,12 +227,12 @@ internal sealed class KeyValueTransactionCoordinator
     public async Task<(KeyValueResponseType, HLCTimestamp)> StartTransaction(KeyValueTransactionOptions options)
     {
         bool result;
-        HLCTimestamp transactionId;        
-        
+        HLCTimestamp transactionId;
+
         do
         {
             transactionId = raft.HybridLogicalClock.SendOrLocalEvent(raft.GetLocalNodeId());
-            
+
             KeyValueTransactionContext context = new()
             {
                 TransactionId = transactionId,
@@ -247,9 +247,9 @@ internal sealed class KeyValueTransactionCoordinator
         } while (!result);
 
         logger.LogDebug("Started interactive transaction {TransactionId}", transactionId);
-        
+
         await Task.CompletedTask;
-        
+
         return (KeyValueResponseType.Set, transactionId);
     }
 
@@ -261,17 +261,17 @@ internal sealed class KeyValueTransactionCoordinator
     /// <param name="modifiedKeys"></param>
     /// <returns></returns>
     public async Task<KeyValueResponseType> CommitTransaction(
-        HLCTimestamp transactionId, 
-        List<KeyValueTransactionModifiedKey> acquiredLocks, 
+        HLCTimestamp transactionId,
+        List<KeyValueTransactionModifiedKey> acquiredLocks,
         List<KeyValueTransactionModifiedKey> modifiedKeys
     )
     {
         if (!sessions.TryGetValue(transactionId, out KeyValueTransactionContext? context))
         {
             logger.LogWarning("Trying to commit unknown transaction {TransactionId}", transactionId);
-            
+
             return KeyValueResponseType.Errored;
-        }        
+        }
 
         try
         {
@@ -282,56 +282,56 @@ internal sealed class KeyValueTransactionCoordinator
                 context.LocksAcquired ??= [];
                 context.LocksAcquired.Add((acquiredLock.Key ?? "", acquiredLock.Durability));
             }
-            
+
             foreach (KeyValueTransactionModifiedKey modifiedKey in modifiedKeys)
             {
                 context.ModifiedKeys ??= [];
                 context.ModifiedKeys.Add((modifiedKey.Key ?? "", modifiedKey.Durability));
             }
-            
+
             await TwoPhaseCommit(context, CancellationToken.None);
 
             if (context.Result is null)
                 return KeyValueResponseType.Errored;
-                
+
             if (context.Result.Type is KeyValueResponseType.Aborted or KeyValueResponseType.Errored)
                 return KeyValueResponseType.Aborted;
-            
+
             logger.LogDebug("Committed interactive transaction {TransactionId}", transactionId);
-            
+
             sessions.TryRemove(transactionId, out _);
-            
+
             return KeyValueResponseType.Committed;
         }
         catch (KahunaAbortedException ex)
         {
             logger.LogDebug("KahunaAbortedException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
-            
+
             //return new() { Type = KeyValueResponseType.Aborted, Reason = ex.Message };
             return KeyValueResponseType.Aborted;
         }
         catch (TaskCanceledException ex)
         {
             logger.LogDebug("TaskCanceledException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
-            
+
             //return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
-            
+
             return KeyValueResponseType.Aborted;
         }
         catch (OperationCanceledException ex)
         {
             logger.LogDebug("OperationCanceledException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
-            
+
             //return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
-            
+
             return KeyValueResponseType.Aborted;
         }
         catch (Exception ex)
         {
             logger.LogDebug("OperationCanceledException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
-            
+
             //return new() { Type = KeyValueResponseType.Errored, Reason = ex.GetType().Name + ": " + ex.Message };
-            
+
             return KeyValueResponseType.Aborted;
         }
         finally
@@ -343,10 +343,10 @@ internal sealed class KeyValueTransactionCoordinator
                     _ = ReleaseAcquiredLocks(context);
                 else
                     await ReleaseAcquiredLocks(context);
-            }                       
-        }        
+            }
+        }
     }
-    
+
     /// <summary>
     /// Rollbacks the transaction with the given transaction ID.
     /// </summary>
@@ -355,15 +355,15 @@ internal sealed class KeyValueTransactionCoordinator
     /// <param name="modifiedKeys"></param>
     /// <returns></returns>
     public async Task<KeyValueResponseType> RollbackTransaction(
-        HLCTimestamp transactionId, 
-        List<KeyValueTransactionModifiedKey> acquiredLocks, 
+        HLCTimestamp transactionId,
+        List<KeyValueTransactionModifiedKey> acquiredLocks,
         List<KeyValueTransactionModifiedKey> modifiedKeys
     )
     {
         if (!sessions.TryGetValue(transactionId, out KeyValueTransactionContext? context))
         {
             logger.LogWarning("Trying to rollback unknown transaction {TransactionId}", transactionId);
-            
+
             return KeyValueResponseType.Errored;
         }
 
@@ -374,19 +374,19 @@ internal sealed class KeyValueTransactionCoordinator
                 context.LocksAcquired ??= [];
                 context.LocksAcquired.Add((acquiredLock.Key ?? "", acquiredLock.Durability));
             }
-            
+
             foreach (KeyValueTransactionModifiedKey modifiedKey in modifiedKeys)
             {
                 context.ModifiedKeys ??= [];
                 context.ModifiedKeys.Add((modifiedKey.Key ?? "", modifiedKey.Durability));
             }
 
-            context.Action = KeyValueTransactionAction.Abort;            
+            context.Action = KeyValueTransactionAction.Abort;
 
             logger.LogDebug("Rolled back interactive transaction {TransactionId}", transactionId);
-            
+
             sessions.TryRemove(transactionId, out _);
-            
+
             return KeyValueResponseType.RolledBack;
         }
         finally
@@ -399,7 +399,7 @@ internal sealed class KeyValueTransactionCoordinator
                 else
                     await ReleaseAcquiredLocks(context);
             }
-        }        
+        }
     }
 
     /// <summary>
@@ -434,11 +434,11 @@ internal sealed class KeyValueTransactionCoordinator
         bool asyncRelease = false;
         int timeout = configuration.DefaultTransactionTimeout;
         KeyValueTransactionLocking locking = KeyValueTransactionLocking.Pessimistic;
-        
+
         if (optionsAst?.nodeType is NodeType.BeginOptionList or NodeType.BeginOption)
         {
             Dictionary<string, string> options = new();
-            
+
             GetTransactionOptions(optionsAst, options);
 
             if (options.TryGetValue("locking", out string? optionValue))
@@ -450,7 +450,7 @@ internal sealed class KeyValueTransactionCoordinator
                     _ => throw new KahunaScriptException("Unsupported locking option: " + optionValue, optionsAst.yyline)
                 };
             }
-            
+
             if (options.TryGetValue("autoCommit", out optionValue))
             {
                 autoCommit = optionValue switch
@@ -462,7 +462,7 @@ internal sealed class KeyValueTransactionCoordinator
                     _ => throw new KahunaScriptException("Unsupported autoCommit option: " + optionValue, optionsAst.yyline)
                 };
             }
-            
+
             if (options.TryGetValue("asyncRelease", out optionValue))
             {
                 asyncRelease = optionValue switch
@@ -474,21 +474,21 @@ internal sealed class KeyValueTransactionCoordinator
                     _ => throw new KahunaScriptException("Unsupported asyncRelease option: " + optionValue, optionsAst.yyline)
                 };
             }
-            
+
             if (options.TryGetValue("timeout", out optionValue))
             {
                 if (!int.TryParse(optionValue, out timeout))
                     throw new KahunaScriptException("Invalid timeout option: " + timeout, optionsAst.yyline);
             }
         }
-        
+
         using CancellationTokenSource cts = new();
-        
+
         cts.CancelAfter(TimeSpan.FromMilliseconds(timeout));
-        
+
         // Need HLC timestamp for the transaction id
         HLCTimestamp transactionId = raft.HybridLogicalClock.SendOrLocalEvent(raft.GetLocalNodeId());
-        
+
         KeyValueTransactionContext context = new()
         {
             TransactionId = transactionId,
@@ -498,7 +498,7 @@ internal sealed class KeyValueTransactionCoordinator
             Result = new() { Type = KeyValueResponseType.Aborted },
             Parameters = parameters
         };
-        
+
         HashSet<string> ephemeralLocksToAcquire = [];
         HashSet<string> persistentLocksToAcquire = [];
 
@@ -530,31 +530,31 @@ internal sealed class KeyValueTransactionCoordinator
         catch (KahunaScriptException ex)
         {
             logger.LogDebug("KahunaScriptException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
-            
+
             return new() { Type = KeyValueResponseType.Errored, Reason = ex.Message + " at line " + ex.Line };
         }
         catch (KahunaAbortedException ex)
         {
             logger.LogDebug("KahunaAbortedException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
-            
+
             return new() { Type = KeyValueResponseType.Aborted, Reason = ex.Message };
         }
         catch (TaskCanceledException ex)
         {
             logger.LogDebug("TaskCanceledException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
-            
+
             return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
         }
         catch (OperationCanceledException ex)
         {
             logger.LogDebug("OperationCanceledException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
-            
+
             return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
         }
         catch (Exception ex)
         {
             logger.LogDebug("OperationCanceledException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
-            
+
             return new() { Type = KeyValueResponseType.Errored, Reason = ex.GetType().Name + ": " + ex.Message };
         }
         finally
@@ -586,34 +586,36 @@ internal sealed class KeyValueTransactionCoordinator
 
         if (numberLocks == 0)
             return;
-        
+
         context.LocksAcquired = [];
 
         if (numberLocks == 1)
         {
             if (ephemeralLocksToAcquire.Count > 0)
             {
-                (KeyValueResponseType acquireResponse, string keyName, KeyValueDurability durability) = await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, ephemeralLocksToAcquire.First(), timeout + 10, KeyValueDurability.Ephemeral, ctsToken);
-                
-                if (acquireResponse != KeyValueResponseType.Locked) 
+                (KeyValueResponseType acquireResponse, string keyName, KeyValueDurability durability) =
+                    await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, ephemeralLocksToAcquire.First(), timeout + 10, KeyValueDurability.Ephemeral, ctsToken);
+
+                if (acquireResponse != KeyValueResponseType.Locked)
                     throw new KahunaAbortedException("Failed to acquire lock: " + keyName + " " + durability);
 
                 context.LocksAcquired.Add((keyName, durability));
                 return;
             }
-            
+
             if (persistentLocksToAcquire.Count > 0)
             {
-                (KeyValueResponseType acquireResponse, string keyName, KeyValueDurability durability) = await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, persistentLocksToAcquire.First(), timeout + 10, KeyValueDurability.Persistent, ctsToken);
-                
-                if (acquireResponse != KeyValueResponseType.Locked) 
+                (KeyValueResponseType acquireResponse, string keyName, KeyValueDurability durability) =
+                    await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, persistentLocksToAcquire.First(), timeout + 10, KeyValueDurability.Persistent, ctsToken);
+
+                if (acquireResponse != KeyValueResponseType.Locked)
                     throw new KahunaAbortedException("Failed to acquire lock: " + keyName + " " + durability);
 
                 context.LocksAcquired.Add((keyName, durability));
                 return;
             }
         }
-                
+
         List<(string, int, KeyValueDurability)> keysToLock = new(numberLocks);
 
         foreach (string key in ephemeralLocksToAcquire)
@@ -623,7 +625,7 @@ internal sealed class KeyValueTransactionCoordinator
             keysToLock.Add((key, timeout + 10, KeyValueDurability.Persistent));
 
         List<(KeyValueResponseType, string, KeyValueDurability)> lockResponses = await manager.LocateAndTryAcquireManyExclusiveLocks(context.TransactionId, keysToLock, ctsToken);
-        
+
         foreach ((KeyValueResponseType response, string keyName, KeyValueDurability durability) in lockResponses)
         {
             if (response == KeyValueResponseType.Locked)
@@ -649,14 +651,14 @@ internal sealed class KeyValueTransactionCoordinator
                 return;
 
             List<(string, KeyValueDurability)> locksToRelease;
-            
+
             // Commit or rollback will release locks, we just need the ones that haven't been released yet
             if (context.ModifiedKeys is null)
                 locksToRelease = context.LocksAcquired.ToList();
             else
             {
                 locksToRelease = [];
-                
+
                 foreach ((string, KeyValueDurability) lockKey in context.LocksAcquired)
                 {
                     if (!context.ModifiedKeys.Contains(lockKey))
@@ -667,11 +669,11 @@ internal sealed class KeyValueTransactionCoordinator
             if (locksToRelease.Count == 1)
             {
                 (string lockKey, KeyValueDurability durability) = locksToRelease.First();
-                
+
                 await manager.LocateAndTryReleaseExclusiveLock(context.TransactionId, lockKey, durability, CancellationToken.None);
                 return;
             }
-            
+
             await manager.LocateAndTryReleaseManyExclusiveLocks(context.TransactionId, locksToRelease, CancellationToken.None);
         }
         catch (Exception ex)
@@ -705,7 +707,7 @@ internal sealed class KeyValueTransactionCoordinator
 
                     break;
                 }
-                
+
                 case NodeType.BeginOption:
                     if (ast.leftAst?.yytext is null || ast.rightAst?.yytext is null)
                         throw new KahunaScriptException("Invalid BEGIN option", ast.yyline);
@@ -727,15 +729,15 @@ internal sealed class KeyValueTransactionCoordinator
     {
         if (context.LocksAcquired is null || context.ModifiedKeys is null || context.ModifiedKeys.Count == 0)
             return;
-               
+
         // Step 3: Prepare mutations
         (bool success, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>? mutationsPrepared) = await PrepareMutations(
-            context, 
+            context,
             cancellationToken
         );
 
         if (mutationsPrepared is null)
-            return;               
+            return;
 
         if (!success)
         {
@@ -762,16 +764,16 @@ internal sealed class KeyValueTransactionCoordinator
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     private async Task<(bool, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>?)> PrepareMutations(
-        KeyValueTransactionContext context, 
+        KeyValueTransactionContext context,
         CancellationToken cancellationToken
     )
     {
         if (context.LocksAcquired is null || context.ModifiedKeys is null || context.ModifiedKeys.Count == 0)
             return (false, null);
-        
+
         if (!context.SetState(KeyValueTransactionState.Preparing, KeyValueTransactionState.Pending))
             throw new KahunaAbortedException("Failed to set transaction state to Preparing");
-        
+
         HLCTimestamp highestModifiedTime = context.TransactionId;
 
         if (context.ModifiedResult?.Type is KeyValueResponseType.Set or KeyValueResponseType.Extended or KeyValueResponseType.Deleted)
@@ -788,47 +790,47 @@ internal sealed class KeyValueTransactionCoordinator
 
         // Request a new unique timestamp for the transaction
         HLCTimestamp commitId = raft.HybridLogicalClock.ReceiveEvent(raft.GetLocalNodeId(), highestModifiedTime);
-        
+
         if (context.ModifiedKeys.Count == 1)
         {
             (string key, KeyValueDurability durability) = context.ModifiedKeys.First();
-            
+
             (KeyValueResponseType type, HLCTimestamp ticketId, string _, KeyValueDurability _) = await manager.LocateAndTryPrepareMutations(
-                context.TransactionId, 
-                commitId, 
-                key, durability, 
+                context.TransactionId,
+                commitId,
+                key, durability,
                 cancellationToken
             );
-            
+
             if (!context.SetState(KeyValueTransactionState.Prepared, KeyValueTransactionState.Preparing))
                 throw new KahunaAbortedException("Failed to set transaction state to Prepared");
 
             if (type != KeyValueResponseType.Prepared)
             {
                 context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Couldn't prepare mutations" };
-                
+
                 logger.LogWarning("Couldn't propose {Key} {Response}", key, type);
-                
+
                 return (false, null);
-            }                       
+            }
 
             return (true, [(key, ticketId, durability)]);
         }
-        
+
         List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> proposalResponses = await manager.LocateAndTryPrepareManyMutations(
-            context.TransactionId, 
-            commitId, 
-            context.ModifiedKeys.ToList(), 
+            context.TransactionId,
+            commitId,
+            context.ModifiedKeys.ToList(),
             cancellationToken
         );
-        
+
         if (!context.SetState(KeyValueTransactionState.Prepared, KeyValueTransactionState.Preparing))
             throw new KahunaAbortedException("Failed to set transaction state to Prepared");
-    
+
         if (proposalResponses.Any(r => r.Item1 != KeyValueResponseType.Prepared))
         {
             List<(string, HLCTimestamp, KeyValueDurability)> preparedMutations = [];
-            
+
             foreach ((KeyValueResponseType, HLCTimestamp, string, KeyValueDurability) proposalResponse in proposalResponses)
             {
                 if (proposalResponse.Item1 == KeyValueResponseType.Prepared)
@@ -838,9 +840,9 @@ internal sealed class KeyValueTransactionCoordinator
             }
 
             context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Couldn't prepare mutations" };
-            
+
             return (false, preparedMutations);
-        }               
+        }
 
         return (true, proposalResponses.Select(r => (r.Item3, r.Item2, r.Item4)).ToList());
     }
@@ -855,43 +857,43 @@ internal sealed class KeyValueTransactionCoordinator
     {
         if (mutationsPrepared.Count == 0)
             return;
-        
+
         if (!context.SetState(KeyValueTransactionState.Committing, KeyValueTransactionState.Prepared))
             throw new KahunaAbortedException("Failed to set transaction state to Committing");
 
         if (mutationsPrepared.Count == 1)
         {
             (string key, HLCTimestamp ticketId, KeyValueDurability durability) = mutationsPrepared.First();
-            
+
             (KeyValueResponseType response, long _) = await manager.LocateAndTryCommitMutations(
-                context.TransactionId, 
-                key, 
-                ticketId, 
-                durability, 
+                context.TransactionId,
+                key,
+                ticketId,
+                durability,
                 CancellationToken.None
             );
-            
+
             if (response != KeyValueResponseType.Committed)
                 logger.LogWarning("CommitMutations: {Type} {Key} {TicketId}", response, key, ticketId);
-            
+
             if (!context.SetState(KeyValueTransactionState.Committed, KeyValueTransactionState.Committing))
                 throw new KahunaAbortedException("Failed to set transaction state to Committed");
-            
+
             return;
         }
-        
+
         List<(KeyValueResponseType, string, long, KeyValueDurability)> responses = await manager.LocateAndTryCommitManyMutations(
-            context.TransactionId, 
-            mutationsPrepared, 
+            context.TransactionId,
+            mutationsPrepared,
             CancellationToken.None
         );
-        
+
         foreach ((KeyValueResponseType response, string key, long commitIndex, KeyValueDurability durability) in responses)
         {
             if (response != KeyValueResponseType.Committed)
                 logger.LogWarning("CommitMutations {Type} {Key} {TicketId} {Durability}", response, key, commitIndex, durability);
         }
-        
+
         if (!context.SetState(KeyValueTransactionState.Committed, KeyValueTransactionState.Committing))
             throw new KahunaAbortedException("Failed to set transaction state to Committed");
     }
@@ -906,43 +908,43 @@ internal sealed class KeyValueTransactionCoordinator
     {
         if (mutationsPrepared.Count == 0)
             return;
-        
+
         if (!context.SetState(KeyValueTransactionState.RollingBack, KeyValueTransactionState.Prepared))
             throw new KahunaAbortedException("Failed to set transaction state to RollingBack");
 
         if (mutationsPrepared.Count == 1)
         {
             (string key, HLCTimestamp ticketId, KeyValueDurability durability) = mutationsPrepared.First();
-            
+
             (KeyValueResponseType response, long _) = await manager.LocateAndTryRollbackMutations(
-                context.TransactionId, 
-                key, 
-                ticketId, 
-                durability, 
+                context.TransactionId,
+                key,
+                ticketId,
+                durability,
                 CancellationToken.None
             );
-            
+
             if (response != KeyValueResponseType.RolledBack)
                 logger.LogWarning("RollbackMutations: {Type} {Key} {TicketId}", response, key, ticketId);
-            
+
             if (!context.SetState(KeyValueTransactionState.RolledBack, KeyValueTransactionState.RollingBack))
                 throw new KahunaAbortedException("Failed to set transaction state to RolledBack");
-            
+
             return;
         }
-        
+
         List<(KeyValueResponseType, string, long, KeyValueDurability)> responses = await manager.LocateAndTryRollbackManyMutations(
-            context.TransactionId, 
-            mutationsPrepared, 
+            context.TransactionId,
+            mutationsPrepared,
             CancellationToken.None
         );
-        
+
         foreach ((KeyValueResponseType response, string key, long commitIndex, KeyValueDurability durability) in responses)
         {
             if (response != KeyValueResponseType.RolledBack)
                 logger.LogWarning("RollbackMutations {Type} {Key} {TicketId} {Durability}", response, key, commitIndex, durability);
         }
-        
+
         if (!context.SetState(KeyValueTransactionState.RolledBack, KeyValueTransactionState.RollingBack))
             throw new KahunaAbortedException("Failed to set transaction state to RolledBack");
     }
@@ -957,20 +959,27 @@ internal sealed class KeyValueTransactionCoordinator
     /// <exception cref="NotImplementedException"></exception>
     private async Task ExecuteTransactionInternal(KeyValueTransactionContext context, NodeAst ast, CancellationToken cancellationToken)
     {
+        // Multiple sets in a row can be optimized
+        /*if (ast.nodeType == NodeType.StmtList && CanBatchBeSetMany(context, ast))
+        {            
+            context.Result = await SetManyCommand.Execute(manager, context, ast, cancellationToken);
+            return;           
+        }*/
+        
         while (true)
         {
             //Console.WriteLine("AST={0} {1}", ast.nodeType, ast.yyline);
-            
+
             if (context.Status == KeyValueExecutionStatus.Stop)
                 break;
 
             cancellationToken.ThrowIfCancellationRequested();
-            
+
             switch (ast.nodeType)
             {
                 case NodeType.StmtList:
                 {
-                    if (ast.leftAst is not null) 
+                    if (ast.leftAst is not null)
                         await ExecuteTransactionInternal(context, ast.leftAst, cancellationToken);
 
                     if (ast.rightAst is not null)
@@ -981,29 +990,29 @@ internal sealed class KeyValueTransactionCoordinator
 
                     break;
                 }
-                
+
                 case NodeType.If:
                     await ExecuteIf(context, ast, cancellationToken);
                     break;
-                
+
                 case NodeType.For:
                     await ExecuteFor(context, ast, cancellationToken);
                     break;
-                
+
                 case NodeType.Let:
                 {
                     context.Result = LetCommand.Execute(context, ast);
                     break;
                 }
-                
+
                 case NodeType.Set:
                     context.Result = await SetCommand.Execute(manager, context, ast, KeyValueDurability.Persistent, cancellationToken);
                     break;
-                
+
                 case NodeType.Delete:
                     context.Result = await DeleteCommand.Execute(manager, context, ast, KeyValueDurability.Persistent, cancellationToken);
                     break;
-                
+
                 case NodeType.Extend:
                     context.Result = await ExtendCommand.Execute(manager, context, ast, KeyValueDurability.Persistent, cancellationToken);
                     break;
@@ -1013,13 +1022,13 @@ internal sealed class KeyValueTransactionCoordinator
                     context.Result = await GetCommand.Execute(manager, context, ast, KeyValueDurability.Persistent, cancellationToken);
                     break;
                 }
-                
+
                 case NodeType.Exists:
                 {
                     context.Result = await ExistsCommand.Execute(manager, context, ast, KeyValueDurability.Persistent, cancellationToken);
                     break;
                 }
-                
+
                 case NodeType.Eset:
                     context.Result = await SetCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
@@ -1029,56 +1038,56 @@ internal sealed class KeyValueTransactionCoordinator
                     context.Result = await GetCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
                 }
-                
+
                 case NodeType.Eexists:
                 {
                     context.Result = await ExistsCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
                 }
-                
+
                 case NodeType.Edelete:
                     context.Result = await DeleteCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
-                
+
                 case NodeType.Eextend:
                     context.Result = await ExtendCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
-                
+
                 case NodeType.GetByPrefix:
                     context.Result = await GetByPrefixCommand.Execute(manager, context, ast, KeyValueDurability.Persistent, cancellationToken);
                     break;
-                    
+
                 case NodeType.EgetByPrefix:
                     context.Result = await GetByPrefixCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
-                
+
                 case NodeType.Commit:
                     context.Action = KeyValueTransactionAction.Commit;
                     context.Status = KeyValueExecutionStatus.Stop;
                     break;
-                
+
                 case NodeType.Rollback:
                     context.Action = KeyValueTransactionAction.Abort;
                     context.Status = KeyValueExecutionStatus.Stop;
                     break;
-                
+
                 case NodeType.Return:
                     KeyValueTransactionResult? result = ReturnCommand.Execute(context, ast);
                     if (result is not null)
                         context.Result = result;
                     break;
-                
+
                 case NodeType.Sleep:
                     await SleepCommand.Execute(ast, cancellationToken);
                     break;
-                
+
                 case NodeType.Throw:
                     ThrowCommand.Execute(context, ast, cancellationToken);
                     break;
-                
+
                 case NodeType.Begin:
                     throw new KahunaScriptException("Nested transactions are not supported", ast.yyline);
-                
+
                 case NodeType.IntegerType:
                 case NodeType.StringType:
                 case NodeType.FloatType:
@@ -1106,13 +1115,13 @@ internal sealed class KeyValueTransactionCoordinator
                     KeyValueExpressionResult evalResult = KeyValueTransactionExpression.Eval(context, ast);
                     context.Result = evalResult.ToTransactionResult();
                     break;
-                    
+
                 case NodeType.SetNotExists:
                 case NodeType.SetExists:
                 case NodeType.SetCmp:
                 case NodeType.SetCmpRev:
                     break;
-                
+
                 case NodeType.NotSet:
                 case NodeType.NotFound:
                 case NodeType.BeginOptionList:
@@ -1135,21 +1144,21 @@ internal sealed class KeyValueTransactionCoordinator
     {
         if (ast.leftAst is null)
             throw new KahunaScriptException("Invalid IF expression", ast.yyline);
-        
+
         KeyValueExpressionResult expressionResult = KeyValueTransactionExpression.Eval(context, ast.leftAst);
-        
+
         if (expressionResult is { Type: KeyValueExpressionType.BoolType, BoolValue: true })
         {
-            if (ast.rightAst is not null) 
+            if (ast.rightAst is not null)
                 await ExecuteTransactionInternal(context, ast.rightAst, cancellationToken);
-            
+
             return;
         }
-        
-        if (ast.extendedOne is not null) 
+
+        if (ast.extendedOne is not null)
             await ExecuteTransactionInternal(context, ast.extendedOne, cancellationToken);
     }
-    
+
     /// <summary>
     /// Executes a "for" stmt
     /// </summary>
@@ -1160,21 +1169,69 @@ internal sealed class KeyValueTransactionCoordinator
     {
         if (ast.leftAst is null)
             throw new KahunaScriptException("Invalid FOR variable", ast.yyline);
-        
+
         if (ast.rightAst is null)
             throw new KahunaScriptException("Invalid FOR expression", ast.yyline);
-        
+
         KeyValueExpressionResult expressionResult = KeyValueTransactionExpression.Eval(context, ast.rightAst);
-        
+
         if (expressionResult.Type != KeyValueExpressionType.ArrayType || expressionResult.ArrayValue is null)
             throw new KahunaScriptException("FOR expression is not iterable", ast.yyline);
 
         foreach (KeyValueExpressionResult iter in expressionResult.ArrayValue)
         {
             context.SetVariable(ast.leftAst, ast.leftAst.yytext!, iter);
-            
+
             if (ast.extendedOne is not null)
                 await ExecuteTransactionInternal(context, ast.extendedOne, cancellationToken);
         }
     }
+
+    /// <summary>
+    /// Determines whether a batch of operations can involve multiple set operations.
+    /// </summary>
+    /// <param name="context">The transaction context containing data related to the current key-value transaction.</param>
+    /// <param name="ast">The abstract syntax tree (AST) node representing the operations to be analyzed.</param>
+    /// <returns>True if a batch can include multiple set operations; otherwise, false.</returns>
+    private static bool CanBatchBeSetMany(KeyValueTransactionContext context, NodeAst ast)
+    {
+        bool areSets = false;
+
+        while (true)
+        {
+            //Console.Error.WriteLine("AST={0}", ast.nodeType);
+
+            switch (ast.nodeType)
+            {
+                case NodeType.StmtList:
+                {
+                    if (ast.leftAst is not null)
+                    {
+                        if (!CanBatchBeSetMany(context, ast.leftAst))
+                            return false;
+                    }
+                    
+                    if (ast.rightAst is not null)
+                    {
+                        ast = ast.rightAst!;
+                        continue;
+                    }
+
+                    break;
+                }
+                
+                case NodeType.Set:
+                case NodeType.Eset:
+                    areSets = true;
+                    break;
+                
+                default:
+                    return false;
+            }
+
+            break;
+        }
+
+        return areSets;
+    }    
 }

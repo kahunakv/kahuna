@@ -16,6 +16,7 @@ using Kahuna.Server.ScriptParser;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 using Kahuna.Server.Communication.Internode;
+using Kahuna.Shared.Communication.Rest;
 
 namespace Kahuna;
 
@@ -209,6 +210,20 @@ public sealed class KahunaManager : IKahuna
             flags, 
             expiresMs, 
             durability, 
+            cancellationToken
+        );
+    }
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="setManyItems"></param>
+    /// <param name="contextCancellationToken"></param>
+    /// <returns></returns>
+    public Task<List<KahunaSetKeyValueResponse>> LocateAndTrySetManyKeyValue(IEnumerable<KahunaSetKeyValueRequest> setManyItems, CancellationToken cancellationToken)
+    {
+        return keyValues.LocateAndTrySetManyKeyValue(
+            setManyItems, 
             cancellationToken
         );
     }

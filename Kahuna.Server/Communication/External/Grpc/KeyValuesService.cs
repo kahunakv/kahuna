@@ -14,6 +14,7 @@ using Grpc.Core;
 using Kahuna.Communication.External.Grpc.KeyValues;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Kommander.Diagnostics;
 
@@ -112,6 +113,88 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             LastModifiedCounter = lastModified.C,
             TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
         };
+    }
+    
+    /// <summary>
+    /// Attempts to set many key-value pairs.
+    /// </summary>
+    /// <param name="request">The request containing the key-value data to be set.</param>
+    /// <param name="context">The server call context providing information about the call.</param>
+    /// <returns>A task representing the asynchronous operation, with a response indicating the result of the set operation.</returns>
+    public override async Task<GrpcTrySetManyKeyValueResponse> TrySetManyKeyValue(GrpcTrySetManyKeyValueRequest request, ServerCallContext context)
+    {
+        return await TrySetManyKeyValueInternal(request, context);
+    }
+    
+    /// <summary>
+    /// Attempts to set many key-value pairs within the key-value store with additional parameters such as expiration, flags, and durability.
+    /// </summary>
+    /// <param name="request">The request containing the key, value, comparison value, flags, expiration time, durability level, and transaction details.</param>
+    /// <param name="context">The server call context associated with the operation, including cancellation tokens and call metadata.</param>
+    /// <returns>A response indicating the result of the operation, including the response type, revision number, last modified timestamp, and elapsed time in milliseconds.</returns>
+    internal async Task<GrpcTrySetManyKeyValueResponse> TrySetManyKeyValueInternal(GrpcTrySetManyKeyValueRequest request, ServerCallContext context)
+    {       
+        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
+   
+        List<KahunaSetKeyValueResponse> responses = await keyValues.LocateAndTrySetManyKeyValue(
+            GetRequestSetManyItems(request.Items),
+            context.CancellationToken
+        );
+               
+        GrpcTrySetManyKeyValueResponse response = new()        
+        {
+            TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
+        };
+
+        response.Items.AddRange(GetResponseSetManyItems(responses));
+
+        return response;
+    }    
+
+    private static IEnumerable<KahunaSetKeyValueRequest> GetRequestSetManyItems(RepeatedField<GrpcTrySetManyKeyValueRequestItem> items)
+    {                                
+        foreach (GrpcTrySetManyKeyValueRequestItem item in items)
+        {
+            byte[]? value;
+        
+            if (MemoryMarshal.TryGetArray(item.Value.Memory, out ArraySegment<byte> segment))
+                value = segment.Array;
+            else
+                value = item.Value.ToByteArray();
+            
+            byte[]? compareValue;
+            
+            if (MemoryMarshal.TryGetArray(item.CompareValue.Memory, out segment))
+                compareValue = segment.Array;
+            else
+                compareValue = item.CompareValue.ToByteArray();
+            
+            yield return new()
+            {
+                Key = item.Key,
+                Value = value,
+                CompareValue = compareValue,
+                CompareRevision = item.CompareRevision,
+                ExpiresMs = item.ExpiresMs,
+                Flags = (KeyValueFlags)item.Flags,
+                Durability = (KeyValueDurability)item.Durability
+            };
+        }
+    }
+    
+    private static IEnumerable<GrpcTrySetManyKeyValueResponseItem> GetResponseSetManyItems(List<KahunaSetKeyValueResponse> responses)
+    {
+        foreach (KahunaSetKeyValueResponse response in responses)
+        {
+            yield return new()
+            {
+                Type = (GrpcKeyValueResponseType)response.Type,
+                Revision = response.Revision,
+                LastModifiedNode = response.LastModified.N,
+                LastModifiedPhysical = response.LastModified.L,
+                LastModifiedCounter = response.LastModified.C
+            };
+        }
     }
 
     /// <summary>

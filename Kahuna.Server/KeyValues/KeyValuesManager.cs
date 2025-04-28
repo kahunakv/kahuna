@@ -14,6 +14,7 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
+using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues;
@@ -177,6 +178,17 @@ internal sealed class KeyValuesManager
     )
     {
         return locator.LocateAndTrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, cancellationToken);
+    }
+
+    /// <summary>
+    /// Attempts to locate and set multiple key-value pairs in the system.
+    /// </summary>
+    /// <param name="setManyItems">A collection of key-value set requests to be processed.</param>
+    /// <param name="cancellationToken">Token to signal cancellation of the operation.</param>
+    /// <returns>A task that represents the asynchronous operation, containing a list of responses for the key-value set requests.</returns>
+    public Task<List<KahunaSetKeyValueResponse>> LocateAndTrySetManyKeyValue(IEnumerable<KahunaSetKeyValueRequest> setManyItems, CancellationToken cancellationToken)
+    {
+        return locator.LocateAndTrySetManyKeyValue(setManyItems, cancellationToken);
     }
 
     /// <summary>
@@ -505,6 +517,56 @@ internal sealed class KeyValuesManager
             return (KeyValueResponseType.Errored, -1, HLCTimestamp.Zero);
         
         return (response.Type, response.Revision, response.Ticket);
+    }
+
+    /// <summary>
+    /// Attempts to set multiple key-value pairs on the node.
+    /// </summary>
+    /// <param name="items">A list of key-value set requests to be processed.</param>
+    /// <returns>A task that represents the asynchronous operation. The task result contains a list of responses for each set request, indicating the outcome of the operation.</returns>
+    public async Task<List<KahunaSetKeyValueResponse>> SetManyNodeKeyValue(List<KahunaSetKeyValueRequest> items)
+    {
+        //throw new NotImplementedException();
+        
+        Lock sync = new();
+        List<KahunaSetKeyValueResponse> responses = new(items.Count);
+
+        await items.ForEachAsync(5, async (KahunaSetKeyValueRequest item) =>
+        {
+            KeyValueRequest request = new(
+                KeyValueRequestType.TrySet, 
+                item.TransactionId,
+                HLCTimestamp.Zero,
+                item.Key ?? "", 
+                item.Value, 
+                item.CompareValue,
+                item.CompareRevision,
+                item.Flags,
+                item.ExpiresMs, 
+                HLCTimestamp.Zero,
+                item.Durability
+            );
+
+            KeyValueResponse? response;
+            
+            if (item.Durability == KeyValueDurability.Ephemeral)
+                response = await ephemeralKeyValuesRouter.Ask(request);
+            else
+                response = await persistentKeyValuesRouter.Ask(request);
+
+            if (response is null)
+            {
+                responses.Add(new() { Type = KeyValueResponseType.Errored });
+                return;
+            }
+
+            lock (sync)
+                responses.Add(new() { Type = response.Type, Revision = response.Revision, LastModified = response.Ticket });
+            
+            //await Task.CompletedTask;
+        });
+
+        return responses;
     }
     
     /// <summary>
@@ -1279,5 +1341,5 @@ internal sealed class KeyValuesManager
     )
     {
         return txCoordinator.RollbackTransaction(timestamp, acquiredLocks, modifiedKeys);
-    }
+    }    
 }

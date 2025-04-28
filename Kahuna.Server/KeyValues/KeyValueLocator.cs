@@ -12,6 +12,7 @@ using Google.Protobuf.Collections;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues;
@@ -125,6 +126,63 @@ internal sealed class KeyValueLocator
         return response;
     }
     
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="setManyItems"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    /// <exception cref="NotImplementedException"></exception>
+    public async Task<List<KahunaSetKeyValueResponse>> LocateAndTrySetManyKeyValue(IEnumerable<KahunaSetKeyValueRequest> setManyItems, CancellationToken cancellationToken)
+    {                
+        string localNode = raft.GetLocalEndpoint();
+        
+        Dictionary<string, List<KahunaSetKeyValueRequest>> acquisitionPlan = [];
+
+        foreach (KahunaSetKeyValueRequest key in setManyItems)
+        {
+            if (string.IsNullOrEmpty(key.Key))
+                return [new KahunaSetKeyValueResponse { Type = KeyValueResponseType.InvalidInput }];
+
+            int partitionId = raft.GetPartitionKey(key.Key);
+            string leader = await raft.WaitForLeader(partitionId, cancellationToken);
+            
+            if (acquisitionPlan.TryGetValue(leader, out List<KahunaSetKeyValueRequest>? list))
+                list.Add(key);
+            else
+                acquisitionPlan[leader] = [key];
+        }
+        
+        Lock lockSync = new();
+        List<Task> tasks = new(acquisitionPlan.Count);
+        List<KahunaSetKeyValueResponse> responses = [];
+        
+        // Requests to nodes are sent in parallel
+        foreach ((string leader, List<KahunaSetKeyValueRequest> items) in acquisitionPlan)
+            tasks.Add(TrySetManyNodeKeyValue(leader, localNode, items, lockSync, responses, cancellationToken));
+        
+        await Task.WhenAll(tasks);
+
+        return responses;
+    }
+
+    private async Task TrySetManyNodeKeyValue(string leader, string localNode, List<KahunaSetKeyValueRequest> items, Lock lockSync, List<KahunaSetKeyValueResponse> responses, CancellationToken cancellationToken)
+    {
+        logger.LogDebug("SET-MANY-KEYVALUE Redirect {Number} set key/value pairs to node {Leader}", items.Count, leader);
+        
+        if (leader == localNode)
+        {
+            List<KahunaSetKeyValueResponse> acquireResponses = await manager.SetManyNodeKeyValue(items);
+
+            lock (lockSync)            
+                responses.AddRange(acquireResponses);            
+
+            return;
+        }
+            
+        //await interNodeCommunication.TrySetManyNodeKeyValue(leader, transactionId, xkeys, lockSync, responses, cancellationToken);
+    }
+
     /// <summary>
     /// Locates the leader node for the given key and executes the TryDelete request.
     /// </summary>
@@ -951,5 +1009,5 @@ internal sealed class KeyValueLocator
             new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
             (KeyValueState)item.State
         ));
-    }
+    }    
 }

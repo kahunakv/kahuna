@@ -118,12 +118,9 @@ internal sealed class TryGetHandler : BaseHandler
             if (context.Revision > entry.Revision) // early conflict detection
                 return KeyValueStaticResponses.AbortedResponse;
             
-            if (entry.State is KeyValueState.Undefined or KeyValueState.Deleted)
+            if (entry.State is KeyValueState.Undefined or KeyValueState.Deleted || entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
                 return KeyValueStaticResponses.DoesNotExistContextResponse;
-            
-            if (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
-                return KeyValueStaticResponses.DoesNotExistContextResponse;
-            
+
             readOnlyKeyValueContext = new(
                 entry.Value, 
                 entry.Revision, 
@@ -136,15 +133,9 @@ internal sealed class TryGetHandler : BaseHandler
             return new(KeyValueResponseType.Get, readOnlyKeyValueContext);
         }
         
-        if (context is null)
-            return KeyValueStaticResponses.DoesNotExistContextResponse;
-        
-        if (context.State is KeyValueState.Undefined or KeyValueState.Deleted)
+        if (context is null || context.State is KeyValueState.Undefined or KeyValueState.Deleted || context.Expires != HLCTimestamp.Zero && context.Expires - currentTime < TimeSpan.Zero)
             return KeyValueStaticResponses.DoesNotExistContextResponse;
 
-        if (context.Expires != HLCTimestamp.Zero && context.Expires - currentTime < TimeSpan.Zero)
-            return KeyValueStaticResponses.DoesNotExistContextResponse;
-        
         context.LastUsed = currentTime;
 
         readOnlyKeyValueContext = new(

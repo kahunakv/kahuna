@@ -2,6 +2,7 @@ syntax = "proto3";
 
 service KeyValuer {
   rpc TrySetKeyValue (GrpcTrySetKeyValueRequest) returns (GrpcTrySetKeyValueResponse);
+  rpc TrySetManyKeyValue (GrpcTrySetManyKeyValueRequest) returns (GrpcTrySetManyKeyValueResponse);
   rpc TryExtendKeyValue (GrpcTryExtendKeyValueRequest) returns (GrpcTryExtendKeyValueResponse);
   rpc TryDeleteKeyValue (GrpcTryDeleteKeyValueRequest) returns (GrpcTryDeleteKeyValueResponse);
   rpc TryGetKeyValue (GrpcTryGetKeyValueRequest) returns (GrpcTryGetKeyValueResponse);
@@ -48,6 +49,37 @@ message GrpcTrySetKeyValueResponse {
   int64 LastModifiedPhysical = 5;
   uint32 LastModifiedCounter = 6;
   int32 TimeElapsedMs = 7;
+}
+
+message GrpcTrySetManyKeyValueRequest {
+  repeated GrpcTrySetManyKeyValueRequestItem Items = 1;
+}
+
+message GrpcTrySetManyKeyValueRequestItem {
+  int32 TransactionIdNode = 1;
+  int64 TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter = 3;
+  string Key = 4;
+  optional bytes Value = 5;
+  optional bytes CompareValue = 6;
+  int64 CompareRevision = 7;
+  GrpcKeyValueFlags Flags = 8;
+  int32 ExpiresMs = 9;
+  GrpcKeyValueDurability Durability = 10;
+}
+
+message GrpcTrySetManyKeyValueResponse {
+  repeated GrpcTrySetManyKeyValueResponseItem Items = 1;
+  int32 TimeElapsedMs = 7;
+}
+
+message GrpcTrySetManyKeyValueResponseItem {
+  optional string ServedFrom = 1;
+  GrpcKeyValueResponseType Type = 2;
+  int64 Revision = 3;
+  int32 LastModifiedNode = 4;
+  int64 LastModifiedPhysical = 5;
+  uint32 LastModifiedCounter = 6;  
 }
 
 message GrpcTryExtendKeyValueRequest {
@@ -493,17 +525,18 @@ message GrpcBatchClientKeyValueRequest {
   int32 RequestId = 2;
   oneof payload {
     GrpcTrySetKeyValueRequest TrySetKeyValue = 3;
-    GrpcTryGetKeyValueRequest TryGetKeyValue = 4;
-    GrpcTryDeleteKeyValueRequest TryDeleteKeyValue = 5;
-    GrpcTryExtendKeyValueRequest TryExtendKeyValue = 6;
-    GrpcTryExistsKeyValueRequest TryExistsKeyValue = 7;
-    GrpcTryExecuteTransactionScriptRequest TryExecuteTransactionScript = 8;
-    GrpcTryAcquireExclusiveLockRequest TryAcquireExclusiveLock = 9;
-    GrpcGetByPrefixRequest GetByPrefix = 10;
-    GrpcScanAllByPrefixRequest ScanByPrefix = 11;    
-    GrpcStartTransactionRequest StartTransaction = 12;
-    GrpcCommitTransactionRequest CommitTransaction = 13;
-    GrpcRollbackTransactionRequest RollbackTransaction = 14;
+    GrpcTrySetManyKeyValueRequest TrySetManyKeyValue = 4;
+    GrpcTryGetKeyValueRequest TryGetKeyValue = 5;
+    GrpcTryDeleteKeyValueRequest TryDeleteKeyValue = 6;
+    GrpcTryExtendKeyValueRequest TryExtendKeyValue = 7;
+    GrpcTryExistsKeyValueRequest TryExistsKeyValue = 8;
+    GrpcTryExecuteTransactionScriptRequest TryExecuteTransactionScript = 9;
+    GrpcTryAcquireExclusiveLockRequest TryAcquireExclusiveLock = 10;
+    GrpcGetByPrefixRequest GetByPrefix = 11;
+    GrpcScanAllByPrefixRequest ScanByPrefix = 12;    
+    GrpcStartTransactionRequest StartTransaction = 13;
+    GrpcCommitTransactionRequest CommitTransaction = 14;
+    GrpcRollbackTransactionRequest RollbackTransaction = 15;
   }
 }
 
@@ -513,17 +546,18 @@ message GrpcBatchClientKeyValueResponse
   int32 RequestId = 2;
   oneof payload {
     GrpcTrySetKeyValueResponse TrySetKeyValue = 3;
-    GrpcTryGetKeyValueResponse TryGetKeyValue = 4;
-    GrpcTryDeleteKeyValueResponse TryDeleteKeyValue = 5;
-    GrpcTryExtendKeyValueResponse TryExtendKeyValue = 6;
-    GrpcTryExistsKeyValueResponse TryExistsKeyValue = 7;
-    GrpcTryExecuteTransactionScriptResponse TryExecuteTransactionScript = 8;
-    GrpcTryAcquireExclusiveLockResponse TryAcquireExclusiveLock = 9;
-    GrpcGetByPrefixResponse GetByPrefix = 10;
-    GrpcScanAllByPrefixResponse ScanByPrefix = 11;    
-    GrpcStartTransactionResponse StartTransaction = 12;
-    GrpcCommitTransactionResponse CommitTransaction = 13;
-    GrpcRollbackTransactionResponse RollbackTransaction = 14;
+    GrpcTrySetManyKeyValueResponse TrySetManyKeyValue = 4;
+    GrpcTryGetKeyValueResponse TryGetKeyValue = 5;
+    GrpcTryDeleteKeyValueResponse TryDeleteKeyValue = 6;
+    GrpcTryExtendKeyValueResponse TryExtendKeyValue = 7;
+    GrpcTryExistsKeyValueResponse TryExistsKeyValue = 8;
+    GrpcTryExecuteTransactionScriptResponse TryExecuteTransactionScript = 9;
+    GrpcTryAcquireExclusiveLockResponse TryAcquireExclusiveLock = 10;
+    GrpcGetByPrefixResponse GetByPrefix = 11;
+    GrpcScanAllByPrefixResponse ScanByPrefix = 12;    
+    GrpcStartTransactionResponse StartTransaction = 13;
+    GrpcCommitTransactionResponse CommitTransaction = 14;
+    GrpcRollbackTransactionResponse RollbackTransaction = 15;
   }
 }
 
@@ -587,17 +621,18 @@ message GrpcBatchServerKeyValueResponse
 enum GrpcClientBatchType {
   TYPE_NONE = 0;
   TRY_SET_KEY_VALUE = 1;
-  TRY_EXTEND_KEY_VALUE = 2;
-  TRY_DELETE_KEY_VALUE = 3;
-  TRY_GET_KEY_VALUE = 4;
-  TRY_EXISTS_KEY_VALUE = 5;
-  TRY_EXECUTE_TRANSACTION_SCRIPT = 6;  
-  TRY_ACQUIRE_EXCLUSIVE_LOCK = 7;
-  TRY_GET_BY_PREFIX = 8;
-  TRY_SCAN_BY_PREFIX = 9;
-  TRY_START_TRANSACTION = 10;
-  TRY_COMMIT_TRANSACTION = 11;
-  TRY_ROLLBACK_TRANSACTION = 12;
+  TRY_SET_MANY_KEY_VALUE = 2;
+  TRY_EXTEND_KEY_VALUE = 3;
+  TRY_DELETE_KEY_VALUE = 4;
+  TRY_GET_KEY_VALUE = 5;
+  TRY_EXISTS_KEY_VALUE = 6;
+  TRY_EXECUTE_TRANSACTION_SCRIPT = 7;  
+  TRY_ACQUIRE_EXCLUSIVE_LOCK = 8;
+  TRY_GET_BY_PREFIX = 9;
+  TRY_SCAN_BY_PREFIX = 10;
+  TRY_START_TRANSACTION = 11;
+  TRY_COMMIT_TRANSACTION = 12;
+  TRY_ROLLBACK_TRANSACTION = 13;
 }
 
 enum GrpcServerBatchType {

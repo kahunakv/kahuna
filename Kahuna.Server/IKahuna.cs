@@ -5,6 +5,7 @@ using Kommander.Time;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Locks;
+using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 
@@ -29,6 +30,8 @@ public interface IKahuna
     public Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(string resource, LockDurability durability);
 
     public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTrySetKeyValue(HLCTimestamp transactionId, string key, byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken);
+    
+    public Task<List<KahunaSetKeyValueResponse>> LocateAndTrySetManyKeyValue(IEnumerable<KahunaSetKeyValueRequest> setManyItems, CancellationToken cancellationToken);
 
     public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryExistsValue(HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability, CancellationToken cancelationToken);
 
@@ -104,5 +107,5 @@ public interface IKahuna
 
     public Task<bool> OnReplicationReceived(int partitionId, RaftLog log);
 
-    public void OnReplicationError(int partitionId, RaftLog log);
+    public void OnReplicationError(int partitionId, RaftLog log);    
 }
