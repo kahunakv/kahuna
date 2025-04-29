@@ -367,26 +367,29 @@ public class KahunaClient
     /// <param name="requestItems">The collection of key-value pairs to be set in the system.</param>
     /// <param name="cancellationToken">Token to monitor for cancellation requests.</param>
     /// <returns>A task that represents the asynchronous operation.</returns>
-    public async Task SetManyKeyValues(IEnumerable<KahunaSetKeyValueRequestItem> requestItems, CancellationToken cancellationToken = default)
+    public async Task<List<KahunaKeyValue>> SetManyKeyValues(IEnumerable<KahunaSetKeyValueRequestItem> requestItems, CancellationToken cancellationToken = default)
     {
-        await communication.TrySetManyKeyValues(
+        (List<KahunaSetKeyValueResponseItem> items, int timeElapsed) responses = await communication.TrySetManyKeyValues(
             GetRoundRobinUrl(),            
             requestItems,
             cancellationToken
         ).ConfigureAwait(false);
         
-        /*(bool success, long revision, int timeElapsedMs) = await communication.TrySetKeyValue(
-            GetRoundRobinUrl(),
-            HLCTimestamp.Zero,
-            key, 
-            value, 
-            expiryTime, 
-            flags, 
-            durability, 
-            cancellationToken
-        ).ConfigureAwait(false);
-        
-        return new(this, key, success, value, revision, durability, timeElapsedMs);*/
+        List<KahunaKeyValue> responseKeyValues = new(responses.items.Count);
+
+        foreach (KahunaSetKeyValueResponseItem response in responses.items)
+        {
+            responseKeyValues.Add(new(
+                this, 
+                response.Key ?? "", 
+                response.Type == KeyValueResponseType.Set, 
+                response.Revision, 
+                response.Durability, 
+                responses.timeElapsed
+            ));
+        }
+
+        return responseKeyValues;
     }
     
     /// <summary>

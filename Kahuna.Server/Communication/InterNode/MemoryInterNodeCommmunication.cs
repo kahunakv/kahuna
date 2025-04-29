@@ -97,9 +97,59 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    public Task TrySetManyNodeKeyValue(string node, List<KahunaSetKeyValueRequestItem> items, Lock lockSync, List<KahunaSetKeyValueResponseItem> responses, CancellationToken cancellationToken)
+    public async Task TrySetManyNodeKeyValue(
+        string node, 
+        List<KahunaSetKeyValueRequestItem> items, 
+        Lock lockSync, 
+        List<KahunaSetKeyValueResponseItem> responses, 
+        CancellationToken cancellationToken
+    )
     {
-        throw new NotImplementedException();
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            ConcurrentBag<KahunaSetKeyValueResponseItem> bag = [];
+
+            foreach (KahunaSetKeyValueRequestItem item in items)
+            {
+                (KeyValueResponseType, long, HLCTimestamp) resp = await kahunaNode.TrySetKeyValue(
+                    item.TransactionId, 
+                    item.Key ?? "",
+                    item.Value, 
+                    item.CompareValue, 
+                    item.CompareRevision,
+                    item.Flags,
+                    item.ExpiresMs,
+                    item.Durability
+                );
+                
+                bag.Add(new()
+                {
+                    Key = item.Key,
+                    Type = resp.Item1,
+                    Revision = resp.Item2,
+                    LastModified = resp.Item3,
+                    Durability = item.Durability
+                });
+            }
+
+            SetKeyValueLockResponses(bag, lockSync, responses);
+            return;
+        }
+        
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+    
+    private static void SetKeyValueLockResponses(
+        ConcurrentBag<KahunaSetKeyValueResponseItem> bag, 
+        Lock lockSync, 
+        List<KahunaSetKeyValueResponseItem> responses
+    )
+    {
+        foreach (KahunaSetKeyValueResponseItem reponseBag in bag)
+        {
+            lock (lockSync)
+                responses.Add(reponseBag);
+        }
     }
 
     public async Task<(KeyValueResponseType, long, HLCTimestamp)> TryDeleteKeyValue(

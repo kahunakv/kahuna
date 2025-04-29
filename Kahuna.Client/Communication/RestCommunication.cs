@@ -419,7 +419,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value: " + response.Type, response.Type);
     }
 
-    public Task TrySetManyKeyValues(string url, IEnumerable<KahunaSetKeyValueRequestItem> requestItems, CancellationToken cancellationToken)
+    public Task<(List<KahunaSetKeyValueResponseItem>, int)> TrySetManyKeyValues(string url, IEnumerable<KahunaSetKeyValueRequestItem> requestItems, CancellationToken cancellationToken)
     {
         throw new NotImplementedException();
     }

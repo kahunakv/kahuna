@@ -960,11 +960,11 @@ internal sealed class KeyValueTransactionCoordinator
     private async Task ExecuteTransactionInternal(KeyValueTransactionContext context, NodeAst ast, CancellationToken cancellationToken)
     {
         // Multiple sets in a row can be optimized
-        /*if (ast.nodeType == NodeType.StmtList && CanBatchBeSetMany(context, ast))
+        if (ast.nodeType == NodeType.StmtList && CanBatchBeSetMany(context, ast))
         {            
             context.Result = await SetManyCommand.Execute(manager, context, ast, cancellationToken);
             return;           
-        }*/
+        }
         
         while (true)
         {

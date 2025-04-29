@@ -16,34 +16,23 @@ internal sealed class SetManyCommand : BaseCommand
         CancellationToken cancellationToken
     )
     {
-        List<KahunaSetKeyValueRequest> arguments = [];
+        List<KahunaSetKeyValueRequestItem> arguments = [];
 
-        GetSetCalls(context, ast, arguments);       
-        
-        List<Task<(KeyValueResponseType type, long revision, HLCTimestamp lastModified)>> tasks = new(arguments.Count);
-        
-        foreach (KahunaSetKeyValueRequest argument in arguments)
+        GetSetCalls(context, ast, arguments);
+
+        if (arguments.Count == 0)
         {
-            tasks.Add(manager.LocateAndTrySetKeyValue(
-                context.TransactionId,
-                argument.Key ?? "",
-                value: argument.Value,
-                argument.CompareValue,
-                argument.CompareRevision,
-                argument.Flags,
-                argument.ExpiresMs,
-                argument.Durability,
-                cancellationToken
-            ));
+            return new()
+            {
+                Type = KeyValueResponseType.Set
+            };
         }
         
-        (KeyValueResponseType type, long revision, HLCTimestamp lastModified)[] responses = await Task.WhenAll(tasks);
-        
-        //= await 
+        List<KahunaSetKeyValueResponseItem> responses = await manager.LocateAndTrySetManyKeyValue(arguments, cancellationToken);
 
-        foreach ((KeyValueResponseType type, long revision, HLCTimestamp lastModified) response in responses)
+        foreach (KahunaSetKeyValueResponseItem response in responses)
         {
-            switch (response.type)
+            switch (response.Type)
             {                                
                 case KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry:
                     context.Action = KeyValueTransactionAction.Abort;
@@ -53,28 +42,31 @@ internal sealed class SetManyCommand : BaseCommand
             
             context.ModifiedResult = new()
             {
-                Type = response.type,
+                Type = response.Type,
                 Values = [
                     new()
                     {
-                        Key = arguments[0].Key ?? "",
-                        Revision = response.revision,
-                        LastModified = response.lastModified
+                        Key = response.Key ?? "",
+                        Revision = response.Revision,
+                        LastModified = response.LastModified
                     }
                 ]
             };
-        }
-
-        foreach (KahunaSetKeyValueRequest argument in arguments)
-        {
+            
             context.ModifiedKeys ??= [];
-            context.ModifiedKeys.Add((argument.Key ?? "", argument.Durability));
+            context.ModifiedKeys.Add((response.Key ?? "", response.Durability));
         }
+        
+        if (context.ModifiedResult is null)
+            return new()
+            {
+                Type = KeyValueResponseType.Set
+            };
 
-        return context.ModifiedResult!;
+        return context.ModifiedResult;
     }
     
-    private static void GetSetCalls(KeyValueTransactionContext context, NodeAst ast, List<KahunaSetKeyValueRequest> arguments)
+    private static void GetSetCalls(KeyValueTransactionContext context, NodeAst ast, List<KahunaSetKeyValueRequestItem> arguments)
     {
         while (true)
         {
@@ -110,7 +102,7 @@ internal sealed class SetManyCommand : BaseCommand
         }
     }
 
-    private static KahunaSetKeyValueRequest GetSetCall(KeyValueTransactionContext context, NodeAst ast, KeyValueDurability durability)
+    private static KahunaSetKeyValueRequestItem GetSetCall(KeyValueTransactionContext context, NodeAst ast, KeyValueDurability durability)
     {
         if (ast.leftAst?.yytext is null)
             throw new KahunaScriptException("Invalid key", ast.yyline);

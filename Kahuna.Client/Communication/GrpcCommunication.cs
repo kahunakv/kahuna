@@ -305,7 +305,11 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
 
-    public async Task TrySetManyKeyValues(string url, IEnumerable<KahunaSetKeyValueRequestItem> requestItems, CancellationToken cancellationToken)
+    public async Task<(List<KahunaSetKeyValueResponseItem>, int)> TrySetManyKeyValues(
+        string url, 
+        IEnumerable<KahunaSetKeyValueRequestItem> requestItems, 
+        CancellationToken cancellationToken
+    )
     {
         GrpcTrySetManyKeyValueRequest request = new();
         
@@ -322,7 +326,7 @@ public class GrpcCommunication : IKahunaCommunication
         if (response is null)
             throw new KahunaException("Response is null", KeyValueResponseType.Errored);
             
-        
+        return (GetSetManyKeyValueResponseItems(response.Items), response.TimeElapsedMs);
     }
 
     private static IEnumerable<GrpcTrySetManyKeyValueRequestItem> GetSetManyKeyValueRequestItems(IEnumerable<KahunaSetKeyValueRequestItem> requestItems)
@@ -338,6 +342,24 @@ public class GrpcCommunication : IKahunaCommunication
                 Durability = (GrpcKeyValueDurability)item.Durability
             };                       
         }        
+    }
+    
+    private static List<KahunaSetKeyValueResponseItem> GetSetManyKeyValueResponseItems(RepeatedField<GrpcTrySetManyKeyValueResponseItem> grpcReponseItems)
+    {                
+        List<KahunaSetKeyValueResponseItem> responseItems = new(grpcReponseItems.Count);
+        
+        foreach (GrpcTrySetManyKeyValueResponseItem? item in grpcReponseItems)
+        {
+            responseItems.Add(new()
+            {
+                Key = item.Key,
+                Revision = item.Revision,
+                LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
+                Durability = (KeyValueDurability)item.Durability
+            });
+        }
+
+        return responseItems;
     }
 
     /// <summary>

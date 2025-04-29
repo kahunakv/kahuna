@@ -828,7 +828,7 @@ public class TestKeyValues
         string keyName1 = GetRandomKeyName();
         string keyName2 = GetRandomKeyName();
 
-        await client.SetManyKeyValues([
+        List<KahunaKeyValue> responses = await client.SetManyKeyValues([
             new()
             {
                 Key = keyName1,
@@ -843,6 +843,11 @@ public class TestKeyValues
             }                        
         ], cancellationToken: TestContext.Current.CancellationToken);
                
+        Assert.Equal(2, responses.Count);
+        Assert.True(responses[0].Success);
+        Assert.True(responses[1].Success);
+        Assert.Equal(0, responses[0].Revision);
+        Assert.Equal(0, responses[1].Revision);
     }
 
     [Theory, CombinatorialData]

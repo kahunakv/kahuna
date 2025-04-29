@@ -171,6 +171,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             
             yield return new()
             {
+                TransactionId = new(item.TransactionIdNode, item.TransactionIdPhysical, item.TransactionIdCounter),
                 Key = item.Key,
                 Value = value,
                 CompareValue = compareValue,
