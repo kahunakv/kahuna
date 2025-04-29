@@ -9,7 +9,7 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <PackageId>Kahuna.Shared</PackageId>
-        <Version>0.0.8</Version>
+        <Version>0.1.0</Version>
         <Description>.NET shared libries for Kahuna: Distributed locks and reliable key-value store </Description>
         <Authors>Andres Gutierrez</Authors>
         <Company>Andres Gutierrez</Company>
@@ -23,7 +23,7 @@
     </PropertyGroup>
 
     <ItemGroup>        
-	    <PackageReference Include="Kommander" Version="0.9.4" />
+	    <PackageReference Include="Kommander" Version="0.9.5" />
         <PackageReference Include="Grpc.Tools" Version="2.68.1">
             <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
             <PrivateAssets>all</PrivateAssets>

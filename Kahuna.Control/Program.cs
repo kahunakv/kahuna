@@ -12,9 +12,9 @@ using Kahuna.Control;
 using Kahuna.Control.Commands;
 using Spectre.Console;
 
-ParserResult<Options> optsResult = Parser.Default.ParseArguments<Options>(args);
+ParserResult<KahunaControlOptions> optsResult = Parser.Default.ParseArguments<KahunaControlOptions>(args);
 
-Options? opts = optsResult.Value;
+KahunaControlOptions? opts = optsResult.Value;
 if (opts is null)
     return;
 
@@ -75,13 +75,13 @@ if (IsSingleCommand(opts))
     }
 }
 
-await InteractiveConsole.Run(connection);
+await InteractiveConsole.Run(connection, opts);
 return;
 
 /// <summary>
 /// Starts a connection to the Kahuna cluster or load balancer
 /// </summary>
-static Task<KahunaClient> GetConnection(Options opts)
+static Task<KahunaClient> GetConnection(KahunaControlOptions opts)
 {
     string? connectionString = opts.ConnectionSource;
 
@@ -95,27 +95,27 @@ static Task<KahunaClient> GetConnection(Options opts)
     return Task.FromResult(new KahunaClient(connectionPool, null));
 }
 
-static bool IsSingleCommand(Options options)
+static bool IsSingleCommand(KahunaControlOptions kahunaControlOptions)
 {
-    if (!string.IsNullOrEmpty(options.Set))
+    if (!string.IsNullOrEmpty(kahunaControlOptions.Set))
         return true;
     
-    if (!string.IsNullOrEmpty(options.Get))
+    if (!string.IsNullOrEmpty(kahunaControlOptions.Get))
         return true;
     
-    if (!string.IsNullOrEmpty(options.GetByPrefix))
+    if (!string.IsNullOrEmpty(kahunaControlOptions.GetByPrefix))
         return true;
     
-    if (!string.IsNullOrEmpty(options.ScanByPrefix))
+    if (!string.IsNullOrEmpty(kahunaControlOptions.ScanByPrefix))
         return true;
     
-    if (!string.IsNullOrEmpty(options.Lock))
+    if (!string.IsNullOrEmpty(kahunaControlOptions.Lock))
         return true;
     
-    if (!string.IsNullOrEmpty(options.Unlock))
+    if (!string.IsNullOrEmpty(kahunaControlOptions.Unlock))
         return true;
     
-    if (!string.IsNullOrEmpty(options.ExtendLock))
+    if (!string.IsNullOrEmpty(kahunaControlOptions.ExtendLock))
         return true;
 
     return false;

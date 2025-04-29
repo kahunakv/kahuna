@@ -277,27 +277,29 @@ public class TestKeyValueTransactions
         [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType
     )
     {
-        KahunaClient client = GetClientByType(communicationType, clientType);
-
-        await using KahunaTransactionSession session = await client.StartTransactionSession(
-            new() { Locking = KeyValueTransactionLocking.Pessimistic },
-            cancellationToken: TestContext.Current.CancellationToken
-        );
-        
         string keyName = GetRandomKeyName();
         
-        Assert.True(session.TransactionId.L > 0);
+        KahunaClient client = GetClientByType(communicationType, clientType);
 
-        KahunaKeyValue result = await session.SetKeyValue(keyName, "some value", cancellationToken: TestContext.Current.CancellationToken);
-        Assert.True(result.Success);
-        
-        result = await session.GetKeyValue(keyName, cancellationToken: TestContext.Current.CancellationToken);
-        Assert.True(result.Success);        
-        Assert.Equal("some value", result.ValueAsString());
-        
+        {
+            await using KahunaTransactionSession session = await client.StartTransactionSession(
+                new() { Locking = KeyValueTransactionLocking.Pessimistic },
+                cancellationToken: TestContext.Current.CancellationToken
+            );
+
+            Assert.True(session.TransactionId.L > 0);
+
+            KahunaKeyValue result = await session.SetKeyValue(keyName, "some value", cancellationToken: TestContext.Current.CancellationToken);
+            Assert.True(result.Success);
+
+            result = await session.GetKeyValue(keyName, cancellationToken: TestContext.Current.CancellationToken);
+            Assert.True(result.Success);
+            Assert.Equal("some value", result.ValueAsString());
+        }
+
         /// Value shouldn't exist outside the scope of the transaction
-        //result = await client.GetKeyValue(keyName, cancellationToken: TestContext.Current.CancellationToken);
-        //Assert.False(result.Success); 
+        KahunaKeyValue result2 = await client.GetKeyValue(keyName, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.False(result2.Success); 
     }
     
     [Theory, CombinatorialData]
@@ -553,7 +555,173 @@ public class TestKeyValueTransactions
 
         await session2.Commit(TestContext.Current.CancellationToken);
     }
+     
+    [Theory, CombinatorialData]
+    public async Task TestStartTransactionSetExtendKeyAndRollback(
+        [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType,
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType
+    )
+    {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+
+        await using KahunaTransactionSession session = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Pessimistic },
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
+        string keyName = GetRandomKeyName();
+        
+        Assert.True(session.TransactionId.L > 0);
+
+        KahunaKeyValue result = await session.SetKeyValue(keyName, "some value", cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(result.Success);
+        
+        result = await session.GetKeyValue(keyName, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(result.Success);        
+        Assert.Equal("some value", result.ValueAsString());
+        
+        result = await session.ExtendKeyValue(keyName, 500, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(result.Success);
+        
+        await Task.Delay(1000, TestContext.Current.CancellationToken);
+        
+        await session.Rollback(cancellationToken: TestContext.Current.CancellationToken);
+        
+        // Value should exist after commit
+        result = await client.GetKeyValue(keyName, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.False(result.Success);
+    }
     
+    [Theory, CombinatorialData]
+    public async Task TestStartTransactionSetExtendKeyAndCommit(
+        [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType,
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType
+    )
+    {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+
+        await using KahunaTransactionSession session = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Pessimistic },
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
+        string keyName = GetRandomKeyName();
+        
+        Assert.True(session.TransactionId.L > 0);
+
+        KahunaKeyValue result = await session.SetKeyValue(keyName, "some value", cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(result.Success);
+        
+        result = await session.GetKeyValue(keyName, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(result.Success);        
+        Assert.Equal("some value", result.ValueAsString());
+        
+        result = await session.ExtendKeyValue(keyName, 500, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(result.Success);
+        
+        await Task.Delay(1000, TestContext.Current.CancellationToken);
+        
+        await session.Rollback(cancellationToken: TestContext.Current.CancellationToken);
+        
+        // Value should exist after commit
+        result = await client.GetKeyValue(keyName, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.False(result.Success);
+    }
+
+    [Theory, CombinatorialData]
+    public async Task TestRetryableTransactionRollback(
+        [CombinatorialValues(KahunaCommunicationType.Grpc)]
+        KahunaCommunicationType communicationType,
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)]
+        KahunaClientType clientType
+    )
+    {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+
+        KahunaTransactionOptions txOptions = new() { Locking = KeyValueTransactionLocking.Pessimistic };
+        
+        string keyName = GetRandomKeyName();
+
+        await client.RetryableTransaction(txOptions, async (session, cancellationToken) =>
+        {
+            await session.SetKeyValue(keyName, "value1", cancellationToken: cancellationToken);
+
+            await session.Rollback(cancellationToken);
+            
+        }, TestContext.Current.CancellationToken);
+        
+        KahunaKeyValue result = await client.GetKeyValue(keyName, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.False(result.Success);
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestRetryableTransactionCommit(
+        [CombinatorialValues(KahunaCommunicationType.Grpc)]
+        KahunaCommunicationType communicationType,
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)]
+        KahunaClientType clientType
+    )
+    {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+
+        KahunaTransactionOptions txOptions = new() { Locking = KeyValueTransactionLocking.Pessimistic };
+        
+        string keyName = GetRandomKeyName();
+
+        await client.RetryableTransaction(txOptions, async (session, cancellationToken) =>
+        {
+            await session.SetKeyValue(keyName, "value1", cancellationToken: cancellationToken);
+
+            await session.Commit(cancellationToken);
+            
+        }, TestContext.Current.CancellationToken);
+        
+        KahunaKeyValue result = await client.GetKeyValue(keyName, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.False(result.Success);
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestRetryableTransactionRace(
+        [CombinatorialValues(KahunaCommunicationType.Grpc)]
+        KahunaCommunicationType communicationType,
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)]
+        KahunaClientType clientType
+    )
+    {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+        
+        string keyName = GetRandomKeyName();
+        
+        await client.SetKeyValue(keyName, "0", cancellationToken: TestContext.Current.CancellationToken);
+
+        List<Task> tasks = [];
+        
+        for (int i = 0; i < 10; i++)
+            tasks.Add(ExecuteRetryableConcurrently(client, i, keyName));
+        
+        await Task.WhenAll(tasks);
+        
+        KahunaKeyValue result = await client.GetKeyValue(keyName, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(result.Success);
+        //Assert.
+    }
+
+    private static async Task ExecuteRetryableConcurrently(KahunaClient client, int i, string keyName)
+    {
+        KahunaTransactionOptions txOptions = new() { Locking = KeyValueTransactionLocking.Pessimistic };
+        
+        await client.RetryableTransaction(txOptions, async (session, cancellationToken) =>
+        {
+            KahunaKeyValue currentKeyValue = await session.GetKeyValue(keyName, cancellationToken: cancellationToken);
+                
+            if (currentKeyValue.ValueAsLong() < i)
+                await session.SetKeyValue(keyName, i.ToString(), cancellationToken: cancellationToken);
+
+            await session.Commit(cancellationToken);
+            
+        }, TestContext.Current.CancellationToken);
+    }
+
     private KahunaClient GetClientByType(KahunaCommunicationType communicationType, KahunaClientType clientType)
     {
         return clientType switch

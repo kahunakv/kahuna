@@ -8,10 +8,13 @@ namespace Kahuna.Control;
 /// provides a variety of optional parameters to customize the behavior
 /// of the kahuna-cli tool.
 /// </summary>
-public sealed class Options
+public sealed class KahunaControlOptions
 {
     [Option('c', "connection-source", Required = false, HelpText = "Set the connection string")]
     public string? ConnectionSource { get; set; }
+
+    [Option('t', "default-timeout", Required = false, HelpText = "Sets the default client-side timeout in seconds")]
+    public int DefaultTimeout { get; set; } = 10;
     
     [Option("format", Required = false, HelpText = "Defines the output format (console, json)")]
     public string? Format { get; set; }

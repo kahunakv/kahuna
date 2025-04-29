@@ -27,12 +27,12 @@ namespace Kahuna.Control;
 /// </summary>
 public static class InteractiveConsole
 {
-    public static async Task Run(KahunaClient connection)
+    public static async Task Run(KahunaClient connection, KahunaControlOptions options)
     {
         Assembly assembly = Assembly.GetExecutingAssembly();
         FileVersionInfo fvi = FileVersionInfo.GetVersionInfo(assembly.Location);
         
-        AnsiConsole.MarkupLine("[green]Kahuna Shell {0} (alpha)[/]\n", fvi.FileMajorPart + "." + fvi.FileMinorPart + "." + fvi.FileBuildPart);
+        AnsiConsole.MarkupLine("[green]Kahuna Shell {0} (beta)[/]\n", fvi.FileMajorPart + "." + fvi.FileMinorPart + "." + fvi.FileBuildPart);
 
         string historyPath = string.Concat(Path.GetTempPath(), Path.PathSeparator, "kahuna.history.json");
         List<string> history = await GetHistory(historyPath);
@@ -239,7 +239,7 @@ public static class InteractiveConsole
                 
                 if (commandTrim.StartsWith("run ", StringComparison.InvariantCultureIgnoreCase))
                 {
-                    await LoadAndRunScript(connection, scripts, history, commandTrim);
+                    await LoadAndRunScript(connection, scripts, history, commandTrim, options);
                     continue;
                 }
                 
@@ -291,7 +291,7 @@ public static class InteractiveConsole
                     continue;
                 }
 
-                await RunCommand(connection, scripts, history, commandTrim);
+                await RunCommand(connection, scripts, history, commandTrim, options);
             }
             catch (Exception ex)
             {
@@ -516,18 +516,28 @@ public static class InteractiveConsole
     /// <param name="scripts">A dictionary containing available transaction scripts keyed by their name.</param>
     /// <param name="history">A list storing the history of successfully executed commands.</param>
     /// <param name="commandTrim">The input command to be executed, trimmed of any extraneous whitespace.</param>
+    /// <param name="options"></param>
     /// <returns>A task representing the asynchronous operation.</returns>
-    private static async Task RunCommand(KahunaClient connection, Dictionary<string, KahunaTransactionScript> scripts, List<string> history, string commandTrim)
+    private static async Task RunCommand(KahunaClient connection,
+        Dictionary<string, KahunaTransactionScript> scripts,
+        List<string> history,
+        string commandTrim, 
+        KahunaControlOptions options
+    )
     {
-        //ValueStopwatch stopwatch = ValueStopwatch.StartNew();
-
         if (!scripts.TryGetValue(commandTrim, out KahunaTransactionScript? script))
         {
             script = connection.LoadTransactionScript(commandTrim);
             scripts.Add(commandTrim, script);
         }
         
-        KahunaKeyValueTransactionResult result = await script.Run();
+        using CancellationTokenSource cts = new();
+        
+        //Console.WriteLine(options.DefaultTimeout);
+        
+        cts.CancelAfter(TimeSpan.FromSeconds(options.DefaultTimeout));
+        
+        KahunaKeyValueTransactionResult result = await script.Run(cancellationToken: cts.Token);
                 
         switch (result.Type)
         {
@@ -690,7 +700,13 @@ public static class InteractiveConsole
     /// <param name="history">A list of previous commands executed during the session.</param>
     /// <param name="commandTrim">The trimmed command string that contains the script file path.</param>
     /// <returns>A task representing the asynchronous execution of the script.</returns>
-    private static async Task LoadAndRunScript(KahunaClient connection, Dictionary<string, KahunaTransactionScript> scripts, List<string> history, string commandTrim)
+    private static async Task LoadAndRunScript(
+        KahunaClient connection, 
+        Dictionary<string, KahunaTransactionScript> scripts, 
+        List<string> history, 
+        string commandTrim,
+        KahunaControlOptions options
+    )
     {
         string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
         
@@ -708,7 +724,7 @@ public static class InteractiveConsole
         {
             AnsiConsole.MarkupLine("[purple]{0}[/]", Markup.Escape(scriptText));
 
-            await RunCommand(connection, scripts, history, scriptText);
+            await RunCommand(connection, scripts, history, scriptText, options);
         }
         catch (Exception ex)
         {
@@ -722,9 +738,6 @@ public static class InteractiveConsole
             return "(null)";
 
         string str = Encoding.UTF8.GetString(result.Value);
-        if (string.IsNullOrEmpty(str)) 
-            return "(empty str)";
-
-        return str;
+        return string.IsNullOrEmpty(str) ? "(empty str)" : str;
     }
 }

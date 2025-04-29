@@ -13,6 +13,7 @@ using Kahuna.Shared.Locks;
 using Kommander.Diagnostics;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
+using Polly.Contrib.WaitAndRetry;
 
 // ReSharper disable ConvertToAutoProperty
 // ReSharper disable ConvertToAutoPropertyWhenPossible
@@ -370,7 +371,7 @@ public class KahunaClient
     public async Task<List<KahunaKeyValue>> SetManyKeyValues(IEnumerable<KahunaSetKeyValueRequestItem> requestItems, CancellationToken cancellationToken = default)
     {
         (List<KahunaSetKeyValueResponseItem> items, int timeElapsed) responses = await communication.TrySetManyKeyValues(
-            GetRoundRobinUrl(),            
+            GetRoundRobinUrl(),
             requestItems,
             cancellationToken
         ).ConfigureAwait(false);
@@ -860,6 +861,48 @@ public class KahunaClient
         ).ConfigureAwait(false);
         
         return new(this, result.url, uniqueId, result.transactionId, options.Locking);
+    }
+
+    /// <summary>
+    /// Executes a transaction with retry logic.
+    /// </summary>
+    /// <param name="options"></param>
+    /// <param name="retryCallback"></param>
+    /// <param name="cancellationToken"></param>
+    /// <exception cref="KahunaException"></exception>
+    public async Task RetryableTransaction(
+        KahunaTransactionOptions options, 
+        Func<KahunaTransactionSession, CancellationToken, Task> retryCallback, 
+        CancellationToken cancellationToken = default
+    )
+    {
+        IEnumerable<TimeSpan> backoffDelays = Backoff.DecorrelatedJitterBackoffV2(
+            medianFirstRetryDelay: TimeSpan.FromMilliseconds(50),
+            retryCount: 5
+        );
+        
+        foreach (TimeSpan timeSpan in backoffDelays)
+        {
+            await using KahunaTransactionSession session = await StartTransactionSession(options, cancellationToken).ConfigureAwait(false);
+            
+            try
+            {
+                await retryCallback(session, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            catch (KahunaException ex)
+            {
+                if (ex.KeyValueErrorCode is KeyValueResponseType.Aborted or KeyValueResponseType.MustRetry or KeyValueResponseType.AlreadyLocked)
+                {
+                    await Task.Delay(timeSpan, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                throw;
+            }
+        }
+
+        throw new KahunaException("Transaction aborted", KeyValueResponseType.Aborted);
     }
 
     /// <summary>

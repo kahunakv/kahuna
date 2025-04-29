@@ -87,6 +87,32 @@ public class KahunaKeyValue
     }
     
     /// <summary>
+    /// Converts the stored binary value to its long representation
+    /// Throws exception if the value is not set or cannot be parsed as a long.
+    /// </summary>
+    /// <returns>A string representation of the binary value, or null if the value is unavailable.</returns>
+    public long ValueAsLong()
+    {
+        if (Value is null || !long.TryParse(Encoding.ASCII.GetString(Value), out long result))
+            throw new KahunaException("Value cannot be casted to long", KeyValueResponseType.InvalidInput);
+
+        return result;
+    }
+    
+    /// <summary>
+    /// Converts the stored binary value to its long representation
+    /// Throws exception if the value is not set or cannot be parsed as a long.
+    /// </summary>
+    /// <returns>A string representation of the binary value, or null if the value is unavailable.</returns>
+    public bool ValueAsBool()
+    {
+        if (Value is null || !bool.TryParse(Encoding.ASCII.GetString(Value), out bool result))
+            throw new KahunaException("Value cannot be casted to long", KeyValueResponseType.InvalidInput);
+
+        return result;
+    }
+    
+    /// <summary>
     /// Try to extend the expiration of the key by the specified duration.
     /// Returns true if the key expiration was successfully extended, false otherwise. 
     /// </summary>

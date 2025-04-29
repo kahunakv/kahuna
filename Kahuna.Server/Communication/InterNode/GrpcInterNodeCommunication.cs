@@ -44,7 +44,14 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     /// <param name="durability">Specifies the durability level of the lock, either ephemeral or persistent.</param>
     /// <param name="cancellationToken">A token to observe cancellation requests for the operation.</param>
     /// <returns>A tuple consisting of the lock response type and a fencing token to validate lock state.</returns>
-    public async Task<(LockResponseType, long)> TryLock(string node, string resource, byte[] owner, int expiresMs, LockDurability durability, CancellationToken cancellationToken)
+    public async Task<(LockResponseType, long)> TryLock(
+        string node, 
+        string resource, 
+        byte[] owner, 
+        int expiresMs, 
+        LockDurability durability, 
+        CancellationToken cancellationToken
+    )
     {
         GrpcTryLockRequest request = new()
         {
@@ -75,7 +82,14 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     /// <param name="durability">Specifies the durability level of the lock, either ephemeral or persistent.</param>
     /// <param name="cancellationToken">A token to observe cancellation requests for the operation.</param>
     /// <returns>A tuple containing the lock response type and an updated fencing token to validate the extended lock's state.</returns>
-    public async Task<(LockResponseType, long)> TryExtendLock(string node, string resource, byte[] owner, int expiresMs, LockDurability durability, CancellationToken cancellationToken)
+    public async Task<(LockResponseType, long)> TryExtendLock(
+        string node, 
+        string resource, 
+        byte[] owner, 
+        int expiresMs, 
+        LockDurability durability, 
+        CancellationToken cancellationToken
+    )
     {
         GrpcExtendLockRequest request = new()
         {
@@ -104,7 +118,13 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     /// <param name="durability">Specifies the durability level of the lock, either ephemeral or persistent.</param>
     /// <param name="cancellationToken">A token to observe cancellation requests for the operation.</param>
     /// <returns>The response type indicating the result of the unlock operation.</returns>
-    public async Task<LockResponseType> TryUnlock(string node, string resource, byte[] owner, LockDurability durability, CancellationToken cancellationToken)
+    public async Task<LockResponseType> TryUnlock(
+        string node, 
+        string resource, 
+        byte[] owner, 
+        LockDurability durability, 
+        CancellationToken cancellationToken
+    )
     {
         GrpcUnlockRequest request = new()
         {
@@ -131,7 +151,12 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     /// <param name="durability">Specifies the durability level of the lock, either ephemeral or persistent.</param>
     /// <param name="cancellationToken">A token to observe cancellation requests for the operation.</param>
     /// <returns>A tuple consisting of the lock response type and an optional lock context containing ownership and lock metadata.</returns>
-    public async Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(string node, string resource, LockDurability durability, CancellationToken cancellationToken)
+    public async Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(
+        string node, 
+        string resource, 
+        LockDurability durability, 
+        CancellationToken cancellationToken
+    )
     {
         GrpcGetLockRequest request = new()
         {
@@ -222,7 +247,21 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         );
     }
 
-    public async Task TrySetManyNodeKeyValue(string node, List<KahunaSetKeyValueRequestItem> items, Lock lockSync, List<KahunaSetKeyValueResponseItem> responses, CancellationToken cancellationToken)
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="node"></param>
+    /// <param name="items"></param>
+    /// <param name="lockSync"></param>
+    /// <param name="responses"></param>
+    /// <param name="cancellationToken"></param>
+    public async Task TrySetManyNodeKeyValue(
+        string node, 
+        List<KahunaSetKeyValueRequestItem> items, 
+        Lock lockSync, 
+        List<KahunaSetKeyValueResponseItem> responses, 
+        CancellationToken cancellationToken
+    )
     {
         GrpcTrySetManyKeyValueRequest request = new();
             
@@ -247,6 +286,11 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         }
     }
 
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="items"></param>
+    /// <returns></returns>
     private static IEnumerable<GrpcTrySetManyKeyValueRequestItem> GetSetManyRequestItems(List<KahunaSetKeyValueRequestItem> items)
     {
         foreach (KahunaSetKeyValueRequestItem item in items)
@@ -280,7 +324,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     /// <param name="transactionId">The unique transaction identifier for maintaining atomicity across operations.</param>
     /// <param name="key">The key identifying the specific key-value pair to be deleted.</param>
     /// <param name="durability">Specifies the durability level of the key-value operation, either ephemeral or persistent.</param>
-    /// <param name="cancelationToken">A token to observe cancellation requests for the operation.</param>
+    /// <param name="cancellationToken">A token to observe cancellation requests for the operation.</param>
     /// <returns>A tuple containing the response type of the operation, the updated revision number, and the last modified timestamp for the key.</returns>
     public async Task<(KeyValueResponseType, long, HLCTimestamp)> TryDeleteKeyValue(
         string node,
@@ -321,7 +365,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     /// <param name="key">The key of the key-value pair to be extended.</param>
     /// <param name="expiresMs">The new expiration time for the key-value pair, in milliseconds.</param>
     /// <param name="durability">Specifies the durability level of the extension, either ephemeral or persistent.</param>
-    /// <param name="cancelationToken">A token to monitor for cancellation requests during the operation.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests during the operation.</param>
     /// <returns>A tuple containing the key-value response type, the latest revision of the key, and the last modification timestamp.</returns>
     public async Task<(KeyValueResponseType, long, HLCTimestamp)> TryExtendKeyValue(
         string node,
@@ -463,7 +507,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     /// <param name="key">The key or identifier for the resource to be exclusively locked.</param>
     /// <param name="expiresMs">The duration in milliseconds for which the lock will remain valid unless explicitly released.</param>
     /// <param name="durability">The desired durability level of the lock, either ephemeral or persistent.</param>
-    /// <param name="cancelationToken">A token to observe cancellation requests for the operation.</param>
+    /// <param name="cancellationToken">A token to observe cancellation requests for the operation.</param>
     /// <returns>A tuple containing the type of the response, the key, and the lock's durability level.</returns>
     public async Task<(KeyValueResponseType, string, KeyValueDurability)> TryAcquireExclusiveLock(
         string node,
@@ -502,7 +546,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     /// <param name="xkeys">A list of keys to be locked, each with its expiration time and durability level.</param>
     /// <param name="lockSync">The synchronization mechanism to ensure thread safety for lock-related operations.</param>
     /// <param name="responses">A collection used to capture the response types and metadata for each attempted lock.</param>
-    /// <param name="cancelationToken">A token to monitor for cancellation requests during the operation.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests during the operation.</param>
     /// <returns>A task that represents the asynchronous operation of attempting to acquire the specified locks.</returns>
     public async Task TryAcquireNodeExclusiveLocks(
         string node,
@@ -699,7 +743,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             };
     }
 
-    public async Task<(KeyValueResponseType, long)> TryCommitMutations(string node, HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, long)> TryCommitMutations(string node, HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
         
@@ -759,7 +803,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             };
     }
 
-    public async Task<(KeyValueResponseType, long)> TryRollbackMutations(string node, HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, long)> TryRollbackMutations(string node, HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
         
@@ -819,7 +863,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             };
     }
     
-    public async Task<KeyValueGetByPrefixResult> GetByPrefix(string node, HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancelationToken)
+    public async Task<KeyValueGetByPrefixResult> GetByPrefix(string node, HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcChannel channel = SharedChannels.GetChannel(node);
         
@@ -834,7 +878,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcKeyValueDurability)durability,
         };
         
-        GrpcGetByPrefixResponse? remoteResponse = await client.GetByPrefixAsync(request, cancellationToken: cancelationToken);
+        GrpcGetByPrefixResponse? remoteResponse = await client.GetByPrefixAsync(request, cancellationToken: cancellationToken);
         
         remoteResponse.ServedFrom = $"https://{node}";
         

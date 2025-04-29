@@ -27,8 +27,6 @@ Console.WriteLine(" |   < (_| | | | | |_| | | | | (_| |");
 Console.WriteLine(" |_|\\_\\__,_|_| |_|\\__,_|_| |_|\\__,_|");
 Console.WriteLine("");
 
-//Console.WriteLine("{0}", Unsafe.SizeOf<GrpcServerBatcherItem>());
-
 ParserResult<KahunaCommandLineOptions> optsResult = Parser.Default.ParseArguments<KahunaCommandLineOptions>(args);
 
 KahunaCommandLineOptions? opts = optsResult.Value;
