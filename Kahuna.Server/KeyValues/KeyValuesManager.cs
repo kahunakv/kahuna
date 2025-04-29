@@ -197,7 +197,7 @@ internal sealed class KeyValuesManager
     /// <param name="cancellationToken">Token to signal cancellation of the operation.</param>
     /// <returns>A task that represents the asynchronous operation, containing a list of responses for the key-value set requests.</returns>
     public Task<List<KahunaSetKeyValueResponseItem>> LocateAndTrySetManyKeyValue(
-        IEnumerable<KahunaSetKeyValueRequestItem> setManyItems, 
+        List<KahunaSetKeyValueRequestItem> setManyItems, 
         CancellationToken cancellationToken
     )
     {

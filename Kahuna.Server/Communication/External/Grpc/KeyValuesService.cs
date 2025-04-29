@@ -151,8 +151,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return response;
     }    
 
-    private static IEnumerable<KahunaSetKeyValueRequestItem> GetRequestSetManyItems(RepeatedField<GrpcTrySetManyKeyValueRequestItem> items)
-    {                                
+    private static List<KahunaSetKeyValueRequestItem> GetRequestSetManyItems(RepeatedField<GrpcTrySetManyKeyValueRequestItem> items)
+    {                 
+        List<KahunaSetKeyValueRequestItem> requestItems = new(items.Count);
+        
         foreach (GrpcTrySetManyKeyValueRequestItem item in items)
         {
             byte[]? value;
@@ -169,7 +171,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             else
                 compareValue = item.CompareValue.ToByteArray();
             
-            yield return new()
+            requestItems.Add(new()
             {
                 TransactionId = new(item.TransactionIdNode, item.TransactionIdPhysical, item.TransactionIdCounter),
                 Key = item.Key,
@@ -179,8 +181,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 ExpiresMs = item.ExpiresMs,
                 Flags = (KeyValueFlags)item.Flags,
                 Durability = (KeyValueDurability)item.Durability
-            };
+            });
         }
+
+        return requestItems;
     }
     
     private static IEnumerable<GrpcTrySetManyKeyValueResponseItem> GetResponseSetManyItems(List<KahunaSetKeyValueResponseItem> responses)

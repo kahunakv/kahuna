@@ -234,7 +234,7 @@ public sealed class KahunaManager : IKahuna
     /// <param name="setManyItems"></param>
     /// <param name="contextCancellationToken"></param>
     /// <returns></returns>
-    public Task<List<KahunaSetKeyValueResponseItem>> LocateAndTrySetManyKeyValue(IEnumerable<KahunaSetKeyValueRequestItem> setManyItems, CancellationToken cancellationToken)
+    public Task<List<KahunaSetKeyValueResponseItem>> LocateAndTrySetManyKeyValue(List<KahunaSetKeyValueRequestItem> setManyItems, CancellationToken cancellationToken)
     {
         return keyValues.LocateAndTrySetManyKeyValue(
             setManyItems, 

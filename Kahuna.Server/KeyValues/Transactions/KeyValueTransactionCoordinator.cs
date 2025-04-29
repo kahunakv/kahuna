@@ -960,10 +960,15 @@ internal sealed class KeyValueTransactionCoordinator
     private async Task ExecuteTransactionInternal(KeyValueTransactionContext context, NodeAst ast, CancellationToken cancellationToken)
     {
         // Multiple sets in a row can be optimized
-        if (ast.nodeType == NodeType.StmtList && CanBatchBeSetMany(context, ast))
+        if (ast.nodeType == NodeType.StmtList)
         {            
-            context.Result = await SetManyCommand.Execute(manager, context, ast, cancellationToken);
-            return;           
+            HashSet<(string, KeyValueDurability)> keys = [];
+            
+            if (CanBatchBeSetMany(context, ast, keys))
+            {
+                context.Result = await SetManyCommand.Execute(manager, context, ast, cancellationToken);
+                return;
+            }
         }
         
         while (true)
@@ -1192,10 +1197,11 @@ internal sealed class KeyValueTransactionCoordinator
     /// </summary>
     /// <param name="context">The transaction context containing data related to the current key-value transaction.</param>
     /// <param name="ast">The abstract syntax tree (AST) node representing the operations to be analyzed.</param>
+    /// <param name="keys"></param>
     /// <returns>True if a batch can include multiple set operations; otherwise, false.</returns>
-    private static bool CanBatchBeSetMany(KeyValueTransactionContext context, NodeAst ast)
+    private static bool CanBatchBeSetMany(KeyValueTransactionContext context, NodeAst ast, HashSet<(string, KeyValueDurability)> keys)
     {
-        bool areSets = false;
+        bool areSets = false;        
 
         while (true)
         {
@@ -1207,7 +1213,7 @@ internal sealed class KeyValueTransactionCoordinator
                 {
                     if (ast.leftAst is not null)
                     {
-                        if (!CanBatchBeSetMany(context, ast.leftAst))
+                        if (!CanBatchBeSetMany(context, ast.leftAst, keys))
                             return false;
                     }
                     
@@ -1221,7 +1227,22 @@ internal sealed class KeyValueTransactionCoordinator
                 }
                 
                 case NodeType.Set:
+                    if (ast.leftAst?.yytext is null)
+                        return false;
+
+                    if (!keys.Add((ast.leftAst.yytext!, KeyValueDurability.Persistent)))
+                        return false;
+
+                    areSets = true;
+                    break;
+                
                 case NodeType.Eset:
+                    if (ast.leftAst?.yytext is null)
+                        return false;
+
+                    if (!keys.Add((ast.leftAst.yytext!, KeyValueDurability.Ephemeral)))
+                        return false;
+
                     areSets = true;
                     break;
                 

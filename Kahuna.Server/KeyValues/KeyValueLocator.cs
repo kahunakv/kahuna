@@ -134,7 +134,7 @@ internal sealed class KeyValueLocator
     /// <returns></returns>
     /// <exception cref="NotImplementedException"></exception>
     public async Task<List<KahunaSetKeyValueResponseItem>> LocateAndTrySetManyKeyValue(
-        IEnumerable<KahunaSetKeyValueRequestItem> setManyItems, 
+        List<KahunaSetKeyValueRequestItem> setManyItems, 
         CancellationToken cancellationToken
     )
     {                
@@ -158,7 +158,7 @@ internal sealed class KeyValueLocator
         
         Lock lockSync = new();
         List<Task> tasks = new(acquisitionPlan.Count);
-        List<KahunaSetKeyValueResponseItem> responses = [];
+        List<KahunaSetKeyValueResponseItem> responses = new(setManyItems.Count);
         
         // Requests to nodes are sent in parallel
         foreach ((string leader, List<KahunaSetKeyValueRequestItem> items) in acquisitionPlan)
@@ -384,7 +384,7 @@ internal sealed class KeyValueLocator
         
         Lock lockSync = new();
         List<Task> tasks = new(acquisitionPlan.Count);
-        List<(KeyValueResponseType, string, KeyValueDurability)> responses = [];
+        List<(KeyValueResponseType, string, KeyValueDurability)> responses = new(keys.Count);
         
         // Requests to nodes are sent in parallel
         foreach ((string leader, List<(string key, int expiresMs, KeyValueDurability durability)> xkeys) in acquisitionPlan)
@@ -483,7 +483,7 @@ internal sealed class KeyValueLocator
         
         Lock lockSync = new();
         List<Task> tasks = new(acquisitionPlan.Count);
-        List<(KeyValueResponseType, string, KeyValueDurability)> responses = [];
+        List<(KeyValueResponseType, string, KeyValueDurability)> responses = new(keys.Count);
         
         // Requests to nodes are sent in parallel
         foreach ((string leader, List<(string key, KeyValueDurability durability)> xkeys) in acquisitionPlan)
@@ -591,7 +591,7 @@ internal sealed class KeyValueLocator
         
         Lock lockSync = new();
         List<Task> tasks = new(acquisitionPlan.Count);
-        List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> responses = [];
+        List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> responses = new(keys.Count);
         
         // Requests to nodes are sent in parallel
         foreach ((string leader, List<(string key, KeyValueDurability durability)> xkeys) in acquisitionPlan)
@@ -692,7 +692,7 @@ internal sealed class KeyValueLocator
         
         Lock lockSync = new();
         List<Task> tasks = new(acquisitionPlan.Count);
-        List<(KeyValueResponseType, string, long, KeyValueDurability)> responses = [];
+        List<(KeyValueResponseType, string, long, KeyValueDurability)> responses = new(keys.Count);
         
         // Requests to nodes are sent in parallel
         foreach ((string leader, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys) in acquisitionPlan)
@@ -792,7 +792,7 @@ internal sealed class KeyValueLocator
         
         Lock lockSync = new();
         List<Task> tasks = new(acquisitionPlan.Count);
-        List<(KeyValueResponseType, string, long, KeyValueDurability)> responses = [];
+        List<(KeyValueResponseType, string, long, KeyValueDurability)> responses = new(keys.Count);
         
         // Requests to nodes are sent in parallel
         foreach ((string leader, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys) in acquisitionPlan)
