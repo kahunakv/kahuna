@@ -436,6 +436,11 @@ internal sealed class GrpcBatcher
             batchRequest.Type = GrpcClientBatchType.TrySetKeyValue;
             batchRequest.TrySetKeyValue = itemRequest.TrySetKeyValue;
         }
+        if (itemRequest.TrySetManyKeyValues is not null)
+        {
+            batchRequest.Type = GrpcClientBatchType.TrySetManyKeyValue;
+            batchRequest.TrySetManyKeyValue = itemRequest.TrySetManyKeyValues;
+        }
         else if (itemRequest.TryGetKeyValue is not null)
         {
             batchRequest.Type = GrpcClientBatchType.TryGetKeyValue;

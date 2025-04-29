@@ -13,6 +13,8 @@ internal sealed class GrpcServerBatcherResponse
     
     public GrpcTrySetKeyValueResponse? TrySetKeyValue { get; }
     
+    public GrpcTrySetManyKeyValueResponse? TrySetManyKeyValue { get; }
+    
     public GrpcTryGetKeyValueResponse? TryGetKeyValue { get; }
     
     public GrpcTryDeleteKeyValueResponse? TryDeleteKeyValue { get; }
@@ -73,6 +75,11 @@ internal sealed class GrpcServerBatcherResponse
     public GrpcServerBatcherResponse(GrpcTrySetKeyValueResponse trySetKeyValue)
     {
         TrySetKeyValue = trySetKeyValue;
+    }
+
+    public GrpcServerBatcherResponse(GrpcTrySetManyKeyValueResponse trySetManyKeyValue)
+    {
+        TrySetManyKeyValue = trySetManyKeyValue;
     }
     
     public GrpcServerBatcherResponse(GrpcTryGetKeyValueResponse tryGetKeyValue)

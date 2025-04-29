@@ -1,6 +1,9 @@
 
 namespace Kahuna.Server.Persistence;
 
+/// <summary>
+/// 
+/// </summary>
 public sealed class PersistenceRequestItem
 {
     public string Key { get; }

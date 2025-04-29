@@ -76,6 +76,15 @@ internal sealed class GrpcServerBatcher
         return TryProcessQueue(grpcBatcherItem, promise);
     }
     
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcTrySetManyKeyValueRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
     public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryGetKeyValueRequest message)
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -261,7 +270,7 @@ internal sealed class GrpcServerBatcher
             {
                 do
                 {
-                    List<GrpcServerBatcherItem> messages = [];
+                    List<GrpcServerBatcherItem> messages = GrpcServerBatcherPool.Rent(2);
                     
                     while (inbox.TryDequeue(out GrpcServerBatcherItem message))
                         messages.Add(message);
@@ -305,11 +314,11 @@ internal sealed class GrpcServerBatcher
                     case GrpcServerBatcherItemType.Locks:
                         await RunLockBatch(sharedStreaming, request);
                         break;
-                    
+
                     case GrpcServerBatcherItemType.KeyValues:
                         await RunKeyValueBatch(sharedStreaming, request);
                         break;
-                    
+
                     default:
                         throw new KahunaServerException("Unknown request type: " + request.Type);
                 }
@@ -319,8 +328,12 @@ internal sealed class GrpcServerBatcher
         {
             foreach (GrpcServerBatcherItem request in requests)
                 request.Promise.SetException(ex);
-            
+
             Console.WriteLine("{0}", ex.Message);
+        }
+        finally
+        {
+            GrpcServerBatcherPool.Return(requests);
         }
     }
 
@@ -381,6 +394,11 @@ internal sealed class GrpcServerBatcher
         {
             batchRequest.Type = GrpcServerBatchType.ServerTrySetKeyValue;
             batchRequest.TrySetKeyValue = itemRequest.TrySetKeyValue;
+        }
+        else if (itemRequest.TrySetManyKeyValue is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTrySetManyKeyValue;
+            batchRequest.TrySetManyKeyValue = itemRequest.TrySetManyKeyValue;
         }
         else if (itemRequest.TryGetKeyValue is not null)
         {
@@ -549,6 +567,10 @@ internal sealed class GrpcServerBatcher
                     case GrpcServerBatchType.ServerTrySetKeyValue:
                         item.Promise.SetResult(new(response.TrySetKeyValue));
                         break;
+                    
+                    case GrpcServerBatchType.ServerTrySetManyKeyValue:
+                        item.Promise.SetResult(new(response.TrySetManyKeyValue));
+                        break;
 
                     case GrpcServerBatchType.ServerTryGetKeyValue:
                         item.Promise.SetResult(new(response.TryGetKeyValue));
@@ -627,6 +649,7 @@ internal sealed class GrpcServerBatcher
                         break;
 
                     case GrpcServerBatchType.ServerTypeNone:
+                    case GrpcServerBatchType.ServerTryScanByPrefix:
                     default:
                         item.Promise.SetException(new KahunaServerException("Unknown response type: " + response.Type));
                         break;

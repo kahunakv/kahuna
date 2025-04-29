@@ -221,6 +221,57 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         );
     }
 
+    public async Task TrySetManyNodeKeyValue(string node, List<KahunaSetKeyValueRequestItem> items, Lock lockSync, List<KahunaSetKeyValueResponseItem> responses, CancellationToken cancellationToken)
+    {
+        GrpcTrySetManyKeyValueRequest request = new();
+            
+        request.Items.Add(GetSetManyRequestItems(items));
+        
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+        
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcTrySetManyKeyValueResponse remoteResponse = response.TrySetManyKeyValue!;
+
+        lock (lockSync)
+        {
+            foreach (GrpcTrySetManyKeyValueResponseItem item in remoteResponse.Items)
+                responses.Add(new()
+                {
+                    Key = item.Key, 
+                    Type = (KeyValueResponseType)item.Type, 
+                    Revision = item.Revision, 
+                    LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
+                    Durability = (KeyValueDurability)item.Durability,
+                });
+        }
+    }
+
+    private static IEnumerable<GrpcTrySetManyKeyValueRequestItem> GetSetManyRequestItems(List<KahunaSetKeyValueRequestItem> items)
+    {
+        foreach (KahunaSetKeyValueRequestItem item in items)
+        {
+            GrpcTrySetManyKeyValueRequestItem grpcItem = new()
+            {
+                TransactionIdNode = item.TransactionId.N,
+                TransactionIdPhysical = item.TransactionId.L,
+                TransactionIdCounter = item.TransactionId.C,
+                Key = item.Key,
+                CompareRevision = item.CompareRevision,
+                Flags = (GrpcKeyValueFlags) item.Flags,
+                ExpiresMs = item.ExpiresMs,
+                Durability = (GrpcKeyValueDurability) item.Durability
+            };
+
+            if (item.Value is not null)
+                grpcItem.Value = UnsafeByteOperations.UnsafeWrap(item.Value);
+
+            if (item.CompareValue is not null)
+                grpcItem.CompareValue = UnsafeByteOperations.UnsafeWrap(item.CompareValue);
+
+            yield return grpcItem;
+        }
+    }
+
     /// <summary>
     /// Redirects a delete key/value operation to the specified node.
     /// </summary>

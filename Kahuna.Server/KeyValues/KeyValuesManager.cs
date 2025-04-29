@@ -14,11 +14,17 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
+using Kahuna.Server.ScriptParser;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues;
 
+/// <summary>
+/// Manages key-value operations with support for distributed systems, replication, consistency,
+/// and durability. This class interacts with various components such as Raft for consensus,
+/// persistence backends, and inter-node communication in a distributed environment.
+/// </summary>
 internal sealed class KeyValuesManager
 {
     private readonly ActorSystem actorSystem;
@@ -32,6 +38,8 @@ internal sealed class KeyValuesManager
     private readonly KeyValueLocator locator;
     
     private readonly KeyValueTransactionCoordinator txCoordinator;
+    
+    private readonly IActorRef<ScriptParserEvicterActor, ScriptParserEvicterRequest> scriptParserEvicter;
 
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
 
@@ -72,6 +80,8 @@ internal sealed class KeyValuesManager
         this.logger = logger;
 
         this.persistenceBackend = persistenceBackend;
+        
+        scriptParserEvicter = actorSystem.Spawn<ScriptParserEvicterActor, ScriptParserEvicterRequest>("script-parser-evicter", logger);
         
         ephemeralKeyValuesRouter = GetEphemeralRouter(configuration);
         persistentKeyValuesRouter = GetConsistentRouter(configuration);

@@ -98,6 +98,13 @@ public class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
         return keyValues.GetValueOrDefault(keyName);
     }
 
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="keyName"></param>
+    /// <param name="revision"></param>
+    /// <returns></returns>
+    /// <exception cref="NotImplementedException"></exception>
     public KeyValueContext? GetKeyValueRevision(string keyName, long revision)
     {
         throw new NotImplementedException();

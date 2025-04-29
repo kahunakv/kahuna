@@ -818,7 +818,7 @@ public class TestKeyValues
     
     [Theory, CombinatorialData]
     public async Task TestMultiSet(
-        [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
+        [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )

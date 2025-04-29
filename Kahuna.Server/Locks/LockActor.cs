@@ -19,6 +19,9 @@ namespace Kahuna.Server.Locks;
 /// </summary>
 public sealed class LockActor : IActor<LockRequest, LockResponse>
 {
+    /// <summary>
+    /// 
+    /// </summary>
     private const int CollectThreshold = 1000;
     
     private readonly IActorContext<LockActor, LockRequest, LockResponse> actorContext;

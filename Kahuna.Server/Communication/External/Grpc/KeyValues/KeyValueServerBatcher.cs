@@ -54,13 +54,13 @@ internal sealed class KeyValueServerBatcher
                     }
                     break;
                     
-                    /*case GrpcServerBatchType.ServerTrySetManyKeyValue:
+                    case GrpcServerBatchType.ServerTrySetManyKeyValue:
                     {
-                        GrpcTrySetKeyValueRequest? setKeyRequest = request.TrySetKeyValue;
+                        GrpcTrySetManyKeyValueRequest? setKeyRequest = request.TrySetManyKeyValue;
 
-                        tasks.Add(TrySetKeyValueServerDelayed(semaphore, request.RequestId, setKeyRequest, responseStream, context));
+                        tasks.Add(TrySetManyKeyValueServerDelayed(semaphore, request.RequestId, setKeyRequest, responseStream, context));
                     }
-                    break;*/
+                    break;
 
                     case GrpcServerBatchType.ServerTryGetKeyValue:
                     {
@@ -238,6 +238,26 @@ internal sealed class KeyValueServerBatcher
             Type = GrpcServerBatchType.ServerTrySetKeyValue,
             RequestId = requestId,
             TrySetKeyValue = trySetResponse
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+    
+    private async Task TrySetManyKeyValueServerDelayed(
+        SemaphoreSlim semaphore, 
+        int requestId, 
+        GrpcTrySetManyKeyValueRequest setKeyRequest, 
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcTrySetManyKeyValueResponse trySetManyResponse = await service.TrySetManyKeyValueInternal(setKeyRequest, context);
+        
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type = GrpcServerBatchType.ServerTrySetManyKeyValue,
+            RequestId = requestId,
+            TrySetManyKeyValue = trySetManyResponse
         };
 
         await WriteResponseToStream(semaphore, responseStream, response, context);

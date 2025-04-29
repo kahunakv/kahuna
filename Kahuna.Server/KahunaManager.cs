@@ -25,13 +25,29 @@ namespace Kahuna;
 /// </summary>
 public sealed class KahunaManager : IKahuna
 {
+    /// <summary>
+    /// Represents the core actor system used for managing actor-based concurrency within the KahunaManager.
+    /// Manages the lifecycle and communication of actor instances used throughout the system.
+    /// Provides the infrastructure for creating and handling actors like BackgroundWriterActor and ScriptParserEvicterActor.
+    /// </summary>
     private readonly ActorSystem actorSystem;
-    
+
+    /// <summary>
+    /// Manages distributed locking mechanisms within the KahunaManager.
+    /// Provides functionality for acquiring, extending, and releasing locks
+    /// in a distributed system, ensuring proper synchronization and consistency.
+    /// Acts as the primary interface for lock-related operations, delegating the
+    /// underlying execution to the LockManager class.
+    /// </summary>
     private readonly LockManager locks;
 
+    /// <summary>
+    /// Manages key-value storage operations in KahunaManager, including the setting,
+    /// retrieval, and existence checks of key-value pairs. Provides methods to handle
+    /// concurrency, durability, and transactional requirements for key-value interactions.
+    /// Acts as a centralized component for key-value operations within the Kahuna system.
+    /// </summary>
     private readonly KeyValuesManager keyValues;
-
-    private readonly IActorRef<ScriptParserEvicterActor, ScriptParserEvicterRequest> scriptParserEvicter;
     
     /// <summary>
     /// Constructor
@@ -52,8 +68,6 @@ public sealed class KahunaManager : IKahuna
             persistenceBackend, 
             logger
         );
-
-        scriptParserEvicter = actorSystem.Spawn<ScriptParserEvicterActor, ScriptParserEvicterRequest>("script-parser-evicter", logger);
         
         this.locks = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);
         this.keyValues = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);

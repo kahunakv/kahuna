@@ -133,7 +133,10 @@ internal sealed class KeyValueLocator
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     /// <exception cref="NotImplementedException"></exception>
-    public async Task<List<KahunaSetKeyValueResponseItem>> LocateAndTrySetManyKeyValue(IEnumerable<KahunaSetKeyValueRequestItem> setManyItems, CancellationToken cancellationToken)
+    public async Task<List<KahunaSetKeyValueResponseItem>> LocateAndTrySetManyKeyValue(
+        IEnumerable<KahunaSetKeyValueRequestItem> setManyItems, 
+        CancellationToken cancellationToken
+    )
     {                
         string localNode = raft.GetLocalEndpoint();
         
@@ -187,7 +190,7 @@ internal sealed class KeyValueLocator
             return;
         }
             
-        //await interNodeCommunication.TrySetManyNodeKeyValue(leader, transactionId, xkeys, lockSync, responses, cancellationToken);
+        await interNodeCommunication.TrySetManyNodeKeyValue(leader, items, lockSync, responses, cancellationToken);
     }
 
     /// <summary>
