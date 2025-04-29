@@ -13,7 +13,8 @@ internal sealed class GrpcServerSharedStreaming
     
     public GrpcServerSharedStreaming(
         AsyncDuplexStreamingCall<GrpcBatchServerLockRequest, GrpcBatchServerLockResponse> lockStreaming,
-        AsyncDuplexStreamingCall<GrpcBatchServerKeyValueRequest, GrpcBatchServerKeyValueResponse> keyValueStreaming)
+        AsyncDuplexStreamingCall<GrpcBatchServerKeyValueRequest, GrpcBatchServerKeyValueResponse> keyValueStreaming
+    )
     {
         LockStreaming = lockStreaming;
         KeyValueStreaming = keyValueStreaming;

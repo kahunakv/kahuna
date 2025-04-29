@@ -305,6 +305,41 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
 
+    public async Task TrySetManyKeyValues(string url, IEnumerable<KahunaSetKeyValueRequestItem> requestItems, CancellationToken cancellationToken)
+    {
+        GrpcTrySetManyKeyValueRequest request = new();
+        
+        request.Items.AddRange(GetSetManyKeyValueRequestItems(requestItems));
+        
+        GrpcBatcher batcher = GetSharedBatcher(url);
+        
+        if (cancellationToken.IsCancellationRequested)
+            throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
+
+        GrpcBatcherResponse batchResponse = await batcher.Enqueue(request);
+        GrpcTrySetManyKeyValueResponse? response = batchResponse.TrySetManyKeyValues;
+
+        if (response is null)
+            throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+            
+        
+    }
+
+    private static IEnumerable<GrpcTrySetManyKeyValueRequestItem> GetSetManyKeyValueRequestItems(IEnumerable<KahunaSetKeyValueRequestItem> requestItems)
+    {                
+        foreach (KahunaSetKeyValueRequestItem item in requestItems)
+        {
+            yield return new()
+            {
+                Key = item.Key,
+                Value = item.Value is not null ? UnsafeByteOperations.UnsafeWrap(item.Value) : null,
+                ExpiresMs = item.ExpiresMs,
+                Flags = (GrpcKeyValueFlags)item.Flags,
+                Durability = (GrpcKeyValueDurability)item.Durability
+            };                       
+        }        
+    }
+
     /// <summary>
     /// Attempts to compare the current value associated with a key in a distributed key-value store and set it to a new value if the comparison matches.
     /// </summary>

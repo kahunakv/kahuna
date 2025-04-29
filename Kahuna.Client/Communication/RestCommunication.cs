@@ -419,6 +419,11 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value: " + response.Type, response.Type);
     }
 
+    public Task TrySetManyKeyValues(string url, IEnumerable<KahunaSetKeyValueRequestItem> requestItems, CancellationToken cancellationToken)
+    {
+        throw new NotImplementedException();
+    }
+
     /// <summary>
     /// Attempts to compare the specified value with an existing key's value and set a new value if they match.
     /// </summary>

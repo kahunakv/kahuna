@@ -1,4 +1,5 @@
 
+using System.Text;
 using Kahuna.Client;
 using Kahuna.Client.Communication;
 using Kahuna.Shared.KeyValue;
@@ -813,6 +814,35 @@ public class TestKeyValues
         result = await client.GetKeyValue(keyName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Null(result.Value);
         Assert.Equal(0, result.Revision);
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestMultiSet(
+        [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+        
+        string keyName1 = GetRandomKeyName();
+        string keyName2 = GetRandomKeyName();
+
+        await client.SetManyKeyValues([
+            new()
+            {
+                Key = keyName1,
+                Value = "some-value 1"u8.ToArray(),                
+                Durability = durability
+            },
+            new()
+            {
+                Key = keyName2,
+                Value = "some-valu 2e"u8.ToArray(),                
+                Durability = durability
+            }                        
+        ], cancellationToken: TestContext.Current.CancellationToken);
+               
     }
 
     [Theory, CombinatorialData]

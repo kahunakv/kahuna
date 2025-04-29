@@ -133,21 +133,21 @@ internal sealed class KeyValueLocator
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     /// <exception cref="NotImplementedException"></exception>
-    public async Task<List<KahunaSetKeyValueResponse>> LocateAndTrySetManyKeyValue(IEnumerable<KahunaSetKeyValueRequest> setManyItems, CancellationToken cancellationToken)
+    public async Task<List<KahunaSetKeyValueResponseItem>> LocateAndTrySetManyKeyValue(IEnumerable<KahunaSetKeyValueRequestItem> setManyItems, CancellationToken cancellationToken)
     {                
         string localNode = raft.GetLocalEndpoint();
         
-        Dictionary<string, List<KahunaSetKeyValueRequest>> acquisitionPlan = [];
+        Dictionary<string, List<KahunaSetKeyValueRequestItem>> acquisitionPlan = [];
 
-        foreach (KahunaSetKeyValueRequest key in setManyItems)
+        foreach (KahunaSetKeyValueRequestItem key in setManyItems)
         {
             if (string.IsNullOrEmpty(key.Key))
-                return [new KahunaSetKeyValueResponse { Type = KeyValueResponseType.InvalidInput }];
+                return [new KahunaSetKeyValueResponseItem { Key = key.Key, Type = KeyValueResponseType.InvalidInput, Durability = key.Durability }];
 
             int partitionId = raft.GetPartitionKey(key.Key);
             string leader = await raft.WaitForLeader(partitionId, cancellationToken);
             
-            if (acquisitionPlan.TryGetValue(leader, out List<KahunaSetKeyValueRequest>? list))
+            if (acquisitionPlan.TryGetValue(leader, out List<KahunaSetKeyValueRequestItem>? list))
                 list.Add(key);
             else
                 acquisitionPlan[leader] = [key];
@@ -155,10 +155,10 @@ internal sealed class KeyValueLocator
         
         Lock lockSync = new();
         List<Task> tasks = new(acquisitionPlan.Count);
-        List<KahunaSetKeyValueResponse> responses = [];
+        List<KahunaSetKeyValueResponseItem> responses = [];
         
         // Requests to nodes are sent in parallel
-        foreach ((string leader, List<KahunaSetKeyValueRequest> items) in acquisitionPlan)
+        foreach ((string leader, List<KahunaSetKeyValueRequestItem> items) in acquisitionPlan)
             tasks.Add(TrySetManyNodeKeyValue(leader, localNode, items, lockSync, responses, cancellationToken));
         
         await Task.WhenAll(tasks);
@@ -166,13 +166,20 @@ internal sealed class KeyValueLocator
         return responses;
     }
 
-    private async Task TrySetManyNodeKeyValue(string leader, string localNode, List<KahunaSetKeyValueRequest> items, Lock lockSync, List<KahunaSetKeyValueResponse> responses, CancellationToken cancellationToken)
+    private async Task TrySetManyNodeKeyValue(
+        string leader, 
+        string localNode, 
+        List<KahunaSetKeyValueRequestItem> items, 
+        Lock lockSync, 
+        List<KahunaSetKeyValueResponseItem> responses, 
+        CancellationToken cancellationToken
+    )
     {
         logger.LogDebug("SET-MANY-KEYVALUE Redirect {Number} set key/value pairs to node {Leader}", items.Count, leader);
         
         if (leader == localNode)
         {
-            List<KahunaSetKeyValueResponse> acquireResponses = await manager.SetManyNodeKeyValue(items);
+            List<KahunaSetKeyValueResponseItem> acquireResponses = await manager.SetManyNodeKeyValue(items);
 
             lock (lockSync)            
                 responses.AddRange(acquireResponses);            

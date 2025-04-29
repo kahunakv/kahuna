@@ -136,7 +136,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     {       
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
    
-        List<KahunaSetKeyValueResponse> responses = await keyValues.LocateAndTrySetManyKeyValue(
+        List<KahunaSetKeyValueResponseItem> responses = await keyValues.LocateAndTrySetManyKeyValue(
             GetRequestSetManyItems(request.Items),
             context.CancellationToken
         );
@@ -151,7 +151,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return response;
     }    
 
-    private static IEnumerable<KahunaSetKeyValueRequest> GetRequestSetManyItems(RepeatedField<GrpcTrySetManyKeyValueRequestItem> items)
+    private static IEnumerable<KahunaSetKeyValueRequestItem> GetRequestSetManyItems(RepeatedField<GrpcTrySetManyKeyValueRequestItem> items)
     {                                
         foreach (GrpcTrySetManyKeyValueRequestItem item in items)
         {
@@ -182,17 +182,19 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         }
     }
     
-    private static IEnumerable<GrpcTrySetManyKeyValueResponseItem> GetResponseSetManyItems(List<KahunaSetKeyValueResponse> responses)
+    private static IEnumerable<GrpcTrySetManyKeyValueResponseItem> GetResponseSetManyItems(List<KahunaSetKeyValueResponseItem> responses)
     {
-        foreach (KahunaSetKeyValueResponse response in responses)
+        foreach (KahunaSetKeyValueResponseItem response in responses)
         {
             yield return new()
             {
                 Type = (GrpcKeyValueResponseType)response.Type,
+                Key = response.Key,
                 Revision = response.Revision,
                 LastModifiedNode = response.LastModified.N,
                 LastModifiedPhysical = response.LastModified.L,
-                LastModifiedCounter = response.LastModified.C
+                LastModifiedCounter = response.LastModified.C,
+                Durability = (GrpcKeyValueDurability)response.Durability
             };
         }
     }

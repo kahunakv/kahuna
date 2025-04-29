@@ -360,6 +360,34 @@ public class KahunaClient
         
         return new(this, key, success, value, revision, durability, timeElapsedMs);
     }
+
+    /// <summary>
+    /// Sets multiple key-value pairs in the Kahuna system.
+    /// </summary>
+    /// <param name="requestItems">The collection of key-value pairs to be set in the system.</param>
+    /// <param name="cancellationToken">Token to monitor for cancellation requests.</param>
+    /// <returns>A task that represents the asynchronous operation.</returns>
+    public async Task SetManyKeyValues(IEnumerable<KahunaSetKeyValueRequestItem> requestItems, CancellationToken cancellationToken = default)
+    {
+        await communication.TrySetManyKeyValues(
+            GetRoundRobinUrl(),            
+            requestItems,
+            cancellationToken
+        ).ConfigureAwait(false);
+        
+        /*(bool success, long revision, int timeElapsedMs) = await communication.TrySetKeyValue(
+            GetRoundRobinUrl(),
+            HLCTimestamp.Zero,
+            key, 
+            value, 
+            expiryTime, 
+            flags, 
+            durability, 
+            cancellationToken
+        ).ConfigureAwait(false);
+        
+        return new(this, key, success, value, revision, durability, timeElapsedMs);*/
+    }
     
     /// <summary>
     /// Set key to hold the string value. If key already holds a value, it is overwritten

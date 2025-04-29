@@ -186,7 +186,10 @@ internal sealed class KeyValuesManager
     /// <param name="setManyItems">A collection of key-value set requests to be processed.</param>
     /// <param name="cancellationToken">Token to signal cancellation of the operation.</param>
     /// <returns>A task that represents the asynchronous operation, containing a list of responses for the key-value set requests.</returns>
-    public Task<List<KahunaSetKeyValueResponse>> LocateAndTrySetManyKeyValue(IEnumerable<KahunaSetKeyValueRequest> setManyItems, CancellationToken cancellationToken)
+    public Task<List<KahunaSetKeyValueResponseItem>> LocateAndTrySetManyKeyValue(
+        IEnumerable<KahunaSetKeyValueRequestItem> setManyItems, 
+        CancellationToken cancellationToken
+    )
     {
         return locator.LocateAndTrySetManyKeyValue(setManyItems, cancellationToken);
     }
@@ -524,14 +527,14 @@ internal sealed class KeyValuesManager
     /// </summary>
     /// <param name="items">A list of key-value set requests to be processed.</param>
     /// <returns>A task that represents the asynchronous operation. The task result contains a list of responses for each set request, indicating the outcome of the operation.</returns>
-    public async Task<List<KahunaSetKeyValueResponse>> SetManyNodeKeyValue(List<KahunaSetKeyValueRequest> items)
+    public async Task<List<KahunaSetKeyValueResponseItem>> SetManyNodeKeyValue(List<KahunaSetKeyValueRequestItem> items)
     {
         //throw new NotImplementedException();
         
         Lock sync = new();
-        List<KahunaSetKeyValueResponse> responses = new(items.Count);
+        List<KahunaSetKeyValueResponseItem> responses = new(items.Count);
 
-        await items.ForEachAsync(5, async (KahunaSetKeyValueRequest item) =>
+        await items.ForEachAsync(5, async (KahunaSetKeyValueRequestItem item) =>
         {
             KeyValueRequest request = new(
                 KeyValueRequestType.TrySet, 
@@ -561,7 +564,14 @@ internal sealed class KeyValuesManager
             }
 
             lock (sync)
-                responses.Add(new() { Type = response.Type, Revision = response.Revision, LastModified = response.Ticket });
+                responses.Add(new()
+                {
+                    Key = item.Key ?? "", 
+                    Type = response.Type, 
+                    Revision = response.Revision, 
+                    LastModified = response.Ticket,
+                    Durability = item.Durability
+                });
             
             //await Task.CompletedTask;
         });

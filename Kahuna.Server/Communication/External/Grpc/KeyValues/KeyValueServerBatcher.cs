@@ -53,6 +53,14 @@ internal sealed class KeyValueServerBatcher
                         tasks.Add(TrySetKeyValueServerDelayed(semaphore, request.RequestId, setKeyRequest, responseStream, context));
                     }
                     break;
+                    
+                    /*case GrpcServerBatchType.ServerTrySetManyKeyValue:
+                    {
+                        GrpcTrySetKeyValueRequest? setKeyRequest = request.TrySetKeyValue;
+
+                        tasks.Add(TrySetKeyValueServerDelayed(semaphore, request.RequestId, setKeyRequest, responseStream, context));
+                    }
+                    break;*/
 
                     case GrpcServerBatchType.ServerTryGetKeyValue:
                     {
@@ -199,6 +207,8 @@ internal sealed class KeyValueServerBatcher
                     break;
 
                     case GrpcServerBatchType.ServerTypeNone:
+                    case GrpcServerBatchType.ServerTryGetByPrefix:
+                    case GrpcServerBatchType.ServerTryScanByPrefix:
                     default:                                                
                         logger.LogError("Unknown batch Server request type: {Type}", request.Type);
                         break;

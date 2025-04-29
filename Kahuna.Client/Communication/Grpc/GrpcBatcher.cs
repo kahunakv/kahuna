@@ -99,13 +99,27 @@ internal sealed class GrpcBatcher
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
-
+    
     /// <summary>
     /// Adds a key-value set request to the batch queue and processes it accordingly.
     /// </summary>
     /// <param name="message">The key-value set request to be enqueued.</param>
     /// <returns>A task representing the asynchronous operation, containing the response for the processed request.</returns>
     public Task<GrpcBatcherResponse> Enqueue(GrpcTrySetKeyValueRequest message)
+    {
+        TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
+    /// <summary>
+    /// Adds a key-value set request to the batch queue and processes it accordingly.
+    /// </summary>
+    /// <param name="message">The key-value set request to be enqueued.</param>
+    /// <returns>A task representing the asynchronous operation, containing the response for the processed request.</returns>
+    public Task<GrpcBatcherResponse> Enqueue(GrpcTrySetManyKeyValueRequest message)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -473,6 +487,10 @@ internal sealed class GrpcBatcher
             {
                 case GrpcClientBatchType.TrySetKeyValue:
                     item.Promise.SetResult(new(response.TrySetKeyValue));
+                    break;
+                
+                case GrpcClientBatchType.TrySetManyKeyValue:
+                    item.Promise.SetResult(new(response.TrySetManyKeyValue));
                     break;
                         
                 case GrpcClientBatchType.TryGetKeyValue:

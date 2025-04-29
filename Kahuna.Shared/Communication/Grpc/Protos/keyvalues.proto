@@ -76,10 +76,12 @@ message GrpcTrySetManyKeyValueResponse {
 message GrpcTrySetManyKeyValueResponseItem {
   optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
-  int64 Revision = 3;
-  int32 LastModifiedNode = 4;
-  int64 LastModifiedPhysical = 5;
-  uint32 LastModifiedCounter = 6;  
+  string Key = 3;
+  int64 Revision = 4;
+  int32 LastModifiedNode = 5;
+  int64 LastModifiedPhysical = 6;
+  uint32 LastModifiedCounter = 7;
+  GrpcKeyValueDurability Durability = 8;
 }
 
 message GrpcTryExtendKeyValueRequest {
