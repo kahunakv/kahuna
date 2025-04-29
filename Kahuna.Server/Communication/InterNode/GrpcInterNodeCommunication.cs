@@ -56,7 +56,8 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        
         GrpcTryLockResponse remoteResponse = response.TryLock!;
         
         remoteResponse.ServedFrom = $"https://{node}";
@@ -86,7 +87,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcExtendLockResponse remoteResponse = response.ExtendLock!;
         
         remoteResponse.ServedFrom = $"https://{node}";
@@ -114,7 +115,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcUnlockResponse remoteResponse = response.Unlock!;
         
         remoteResponse.ServedFrom = $"https://{node}";
@@ -140,7 +141,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcGetLockResponse remoteResponse = response.GetLock!;
         
         if (remoteResponse.Type != GrpcLockResponseType.LockResponseTypeGot)
@@ -209,7 +210,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);
                        
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTrySetKeyValueResponse remoteResponse = response.TrySetKeyValue!;
         
         remoteResponse.ServedFrom = $"https://{node}";
@@ -229,7 +230,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTrySetManyKeyValueResponse remoteResponse = response.TrySetManyKeyValue!;
 
         lock (lockSync)
@@ -286,7 +287,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         HLCTimestamp transactionId,
         string key,
         KeyValueDurability durability,
-        CancellationToken cancelationToken
+        CancellationToken cancellationToken
     )
     {
         GrpcTryDeleteKeyValueRequest request = new()
@@ -300,7 +301,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTryDeleteKeyValueResponse remoteResponse = response.TryDeleteKeyValue!;
         
         remoteResponse.ServedFrom = $"https://{node}";
@@ -328,7 +329,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         string key,
         int expiresMs,
         KeyValueDurability durability,
-        CancellationToken cancelationToken
+        CancellationToken cancellationToken
     )
     {
         GrpcTryExtendKeyValueRequest request = new()
@@ -343,7 +344,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTryExtendKeyValueResponse remoteResponse = response.TryExtendKeyValue!;
         
         remoteResponse.ServedFrom = $"https://{node}";
@@ -386,7 +387,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);               
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTryGetKeyValueResponse remoteResponse = response.TryGetKeyValue!;
         
         remoteResponse.ServedFrom = $"https://{node}";
@@ -439,7 +440,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTryExistsKeyValueResponse remoteResponse = response.TryExistsKeyValue!;
         
         remoteResponse.ServedFrom = $"https://{node}";
@@ -470,7 +471,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         string key,
         int expiresMs,
         KeyValueDurability durability,
-        CancellationToken cancelationToken
+        CancellationToken cancellationToken
     )
     {        
         GrpcServerBatcher batcher = GetSharedBatcher(node);               
@@ -485,7 +486,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcKeyValueDurability)durability,
         };
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTryAcquireExclusiveLockResponse remoteResponse = response.TryAcquireExclusiveLock!;
         
         remoteResponse.ServedFrom = $"https://{node}";
@@ -509,7 +510,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         List<(string key, int expiresMs, KeyValueDurability durability)> xkeys,
         Lock lockSync,
         List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses,
-        CancellationToken cancelationToken
+        CancellationToken cancellationToken
     )
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
@@ -523,7 +524,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             
         request.Items.Add(GetAcquireLockRequestItems(xkeys));
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTryAcquireManyExclusiveLocksResponse remoteResponse = response.TryAcquireManyExclusiveLocks!;
 
         lock (lockSync)
@@ -549,7 +550,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         HLCTimestamp transactionId, 
         string key, 
         KeyValueDurability durability, 
-        CancellationToken cancelationToken
+        CancellationToken cancellationToken
     )
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
@@ -563,7 +564,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcKeyValueDurability)durability,
         };
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTryReleaseExclusiveLockResponse remoteResponse = response.TryReleaseExclusiveLock!;
         
         remoteResponse.ServedFrom = $"https://{node}";

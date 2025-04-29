@@ -1,14 +1,28 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
+        <OutputType>Library</OutputType>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <IsPackable>true</IsPackable>
         <TargetFramework>net8.0</TargetFramework>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
+        <PackageId>Kahuna.Shared</PackageId>
+        <Version>0.0.8</Version>
+        <Description>.NET shared libries for Kahuna: Distributed locks and reliable key-value store </Description>
+        <Authors>Andres Gutierrez</Authors>
+        <Company>Andres Gutierrez</Company>
+        <InvariantGlobalization>true</InvariantGlobalization>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <PackageDescription>.NET client for Kahuna: Distributed locks and reliable key-value store</PackageDescription>
+        <PackageProjectUrl>https://github.com/kahunakv/kahuna</PackageProjectUrl>
+        <RepositoryUrl>https://github.com/kahunakv/kahuna</RepositoryUrl>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <PackageTags>distributed lock;locks;redlock;raft;consensus;paxos;distributed consensus;leader election;zookeeper</PackageTags>
     </PropertyGroup>
 
-    <ItemGroup>
-        <!--<PackageReference Include="Google.Protobuf" Version="3.30.0" />
-        <PackageReference Include="Grpc.Net.Client" Version="2.67.0" />-->
+    <ItemGroup>        
 	    <PackageReference Include="Kommander" Version="0.9.4" />
         <PackageReference Include="Grpc.Tools" Version="2.68.1">
             <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
@@ -35,5 +49,12 @@
     <!--<ItemGroup>
         <ProjectReference Include="..\Kommander\Kommander.csproj" />
     </ItemGroup> -->
+    
+    <ItemGroup>
+        <None Include="../README.md">
+            <Pack>True</Pack>
+            <PackagePath>\</PackagePath>
+        </None>
+    </ItemGroup>
 
 </Project>

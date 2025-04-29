@@ -67,7 +67,13 @@ public class GrpcCommunication : IKahunaCommunication
         
         do
         {
-            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            GrpcBatcherResponse batchResponse;
+                              
+            if (cancellationToken == CancellationToken.None)
+               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            else
+               batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            
             response = batchResponse.TryLock;
 
             if (response is null)
@@ -118,7 +124,13 @@ public class GrpcCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
             
-            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            GrpcBatcherResponse batchResponse;
+                              
+            if (cancellationToken == CancellationToken.None)
+               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            else
+               batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            
             response = batchResponse.Unlock;
 
             if (response is null)
@@ -171,7 +183,13 @@ public class GrpcCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
             
-            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            GrpcBatcherResponse batchResponse;
+                              
+            if (cancellationToken == CancellationToken.None)
+               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            else
+               batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            
             response = batchResponse.ExtendLock;
 
             if (response is null)
@@ -210,15 +228,23 @@ public class GrpcCommunication : IKahunaCommunication
         int retries = 0;
         GrpcGetLockResponse? response;
         
-        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
-        Locker.LockerClient client = new(channel);
+        GrpcBatcher batcher = GetSharedBatcher(url);
         
         do
         {
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
         
-            response = await client.GetLockAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+            //response = await client.GetLockAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+            
+            GrpcBatcherResponse batchResponse;
+                              
+            if (cancellationToken == CancellationToken.None)
+               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            else
+               batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            
+            response = batchResponse.GetLock;
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
@@ -285,7 +311,13 @@ public class GrpcCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
 
-            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request);
+            GrpcBatcherResponse batchResponse;
+                              
+            if (cancellationToken == CancellationToken.None)
+               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            else
+               batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            
             response = batchResponse.TrySetKeyValue;
 
             if (response is null)
@@ -320,7 +352,13 @@ public class GrpcCommunication : IKahunaCommunication
         if (cancellationToken.IsCancellationRequested)
             throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
 
-        GrpcBatcherResponse batchResponse = await batcher.Enqueue(request);
+        GrpcBatcherResponse batchResponse;
+                              
+        if (cancellationToken == CancellationToken.None)
+           batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+        else
+           batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            
         GrpcTrySetManyKeyValueResponse? response = batchResponse.TrySetManyKeyValues;
 
         if (response is null)
@@ -414,7 +452,13 @@ public class GrpcCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);                   
             
-            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request);
+            GrpcBatcherResponse batchResponse;
+                              
+            if (cancellationToken == CancellationToken.None)
+               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            else
+               batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            
             response = batchResponse.TrySetKeyValue;
 
             if (response is null)
@@ -483,8 +527,14 @@ public class GrpcCommunication : IKahunaCommunication
         {
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
+            
+            GrpcBatcherResponse batchResponse;
                               
-            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request);
+            if (cancellationToken == CancellationToken.None)
+               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            else
+               batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            
             response = batchResponse.TrySetKeyValue;
 
             if (response is null)
@@ -553,7 +603,13 @@ public class GrpcCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);                   
             
-            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request);
+            GrpcBatcherResponse batchResponse;
+                
+            if (cancellationToken == CancellationToken.None)
+               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            else
+               batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            
             response = batchResponse.TryGetKeyValue;
 
             if (response is null)
@@ -628,7 +684,13 @@ public class GrpcCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
         
-            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request);
+            GrpcBatcherResponse batchResponse;
+                
+            if (cancellationToken == CancellationToken.None)
+               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            else
+                batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            
             response = batchResponse.TryExistsKeyValue;
 
             if (response is null)
@@ -687,7 +749,13 @@ public class GrpcCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);                   
             
-            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request);
+            GrpcBatcherResponse batchResponse;
+                
+            if (cancellationToken == CancellationToken.None)
+               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            else
+                batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            
             response = batchResponse.TryDeleteKeyValue;
 
             if (response is null)
@@ -749,7 +817,13 @@ public class GrpcCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
         
-            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            GrpcBatcherResponse batchResponse;
+                
+            if (cancellationToken == CancellationToken.None)
+               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            else
+                batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            
             response = batchResponse.TryExtendKeyValue;
 
             if (response is null)
@@ -810,7 +884,13 @@ public class GrpcCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
             
-            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            GrpcBatcherResponse batchResponse;
+                
+            if (cancellationToken == CancellationToken.None)
+               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            else
+                batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            
             response = batchResponse.TryExecuteTransactionScript;
 
             if (response is null)
@@ -874,7 +954,13 @@ public class GrpcCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
         
-            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            GrpcBatcherResponse batchResponse;
+                
+            if (cancellationToken == CancellationToken.None)
+               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            else
+                batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            
             response = batchResponse.TryAcquireExclusiveLock;
 
             if (response is null)
@@ -954,7 +1040,13 @@ public class GrpcCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
         
-            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            GrpcBatcherResponse batchResponse;
+                
+            if (cancellationToken == CancellationToken.None)
+               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            else
+                batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            
             response = batchResponse.GetByPrefix;
 
             if (response is null)
@@ -1006,7 +1098,13 @@ public class GrpcCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);                   
             
-            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            GrpcBatcherResponse batchResponse;
+                
+            if (cancellationToken == CancellationToken.None)
+               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            else
+                batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            
             response = batchResponse.ScanByPrefix;
 
             if (response is null)
@@ -1063,7 +1161,13 @@ public class GrpcCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);                   
             
-            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            GrpcBatcherResponse batchResponse;
+                
+            if (cancellationToken == CancellationToken.None)
+               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            else
+                batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            
             response = batchResponse.StartTransaction;
 
             if (response is null)
@@ -1131,7 +1235,13 @@ public class GrpcCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);                   
             
-            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            GrpcBatcherResponse batchResponse;
+                
+            if (cancellationToken == CancellationToken.None)
+               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            else
+                batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            
             response = batchResponse.CommitTransaction;
 
             if (response is null)
@@ -1199,7 +1309,13 @@ public class GrpcCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);                   
             
-            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            GrpcBatcherResponse batchResponse;
+                
+            if (cancellationToken == CancellationToken.None)
+               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            else
+                batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            
             response = batchResponse.RollbackTransaction;
 
             if (response is null)
@@ -1222,7 +1338,11 @@ public class GrpcCommunication : IKahunaCommunication
     private static IEnumerable<GrpcTransactionModifiedKey> GetTransactionAcquiredOrModifiedKeys(List<KeyValueTransactionModifiedKey> modifiedKeys)
     {
         foreach (KeyValueTransactionModifiedKey modifiedKey in modifiedKeys)
-            yield return new() { Key = modifiedKey.Key, Durability = (GrpcKeyValueDurability)modifiedKey.Durability };
+            yield return new()
+            {
+                Key = modifiedKey.Key, 
+                Durability = (GrpcKeyValueDurability)modifiedKey.Durability
+            };
     }
 
     private static IEnumerable<GrpcKeyValueParameter> GetTransactionParameters(List<KeyValueParameter> parameters)
