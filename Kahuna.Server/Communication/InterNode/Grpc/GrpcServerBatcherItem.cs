@@ -5,7 +5,7 @@ namespace Kahuna.Server.Communication.Internode.Grpc;
 /// Represents an item in the gRPC server batcher, which encapsulates information about a specific request,
 /// its type, associated ID, and the task completion source to handle the response.
 /// </summary>
-internal sealed class GrpcServerBatcherItem
+internal readonly struct GrpcServerBatcherItem
 {
     /// <summary>
     /// Batch type

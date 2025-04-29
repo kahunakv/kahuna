@@ -17,6 +17,11 @@ namespace Kahuna.Client.Communication;
 /// </summary>
 internal sealed class GrpcSharedStreaming
 {
+    /// <summary>
+    /// Provides a lightweight synchronization mechanism used to control concurrent access
+    /// to shared resources in the context of gRPC-based streaming operations. Ensures that
+    /// only one operation writes at a time within the scope of the shared streaming calls.
+    /// </summary>
     public SemaphoreSlim Semaphore { get; } = new(1, 1);
 
     /// <summary>

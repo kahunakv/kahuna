@@ -13,7 +13,7 @@ namespace Kahuna.Client.Communication;
 /// This class encapsulates metadata and request/response information
 /// for efficient batch processing of different gRPC operation types.
 /// </summary>
-internal sealed class GrpcBatcherItem
+internal readonly struct GrpcBatcherItem
 {
     /// <summary>
     /// Type of batching

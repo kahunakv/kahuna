@@ -25,20 +25,54 @@ namespace Kahuna.Client.Communication;
 /// </summary>
 internal sealed class GrpcBatcher
 {
+    /// <summary>
+    /// Represents a thread-safe collection of gRPC channels categorized by a unique URL.
+    /// The channels are lazily initialized and used to manage connections in a way that optimizes resource utilization.
+    /// </summary>
     private static readonly ConcurrentDictionary<string, Lazy<List<GrpcChannel>>> channels = new();
-    
+
+    /// <summary>
+    /// A thread-safe dictionary that maps a unique host URL to a lazily initialized collection of gRPC shared streaming objects.
+    /// The collection allows batching and multiplexing of gRPC requests to optimize resource utilization and reduce the overhead of creating new streams.
+    /// </summary>
     private static readonly ConcurrentDictionary<string, Lazy<List<GrpcSharedStreaming>>> streamings = new();
-    
+
+    /// <summary>
+    /// Represents a thread-safe dictionary mapping unique request IDs to their corresponding batcher items.
+    /// This dictionary is used to track and manage the lifecycle of batched gRPC requests.
+    /// </summary>
     private static readonly ConcurrentDictionary<int, GrpcBatcherItem> requestRefs = new();
-    
+
+    /// <summary>
+    /// Represents a static counter used to generate unique request identifiers in a thread-safe manner.
+    /// Each request processed by the GrpcBatcher is assigned an incrementing value from this counter
+    /// to ensure consistent tracking of individual operations.
+    /// </summary>
     private static int requestId;
 
+    /// <summary>
+    /// Represents the URL associated with the gRPC communication endpoint.
+    /// This is used to establish a connection with the specified host for batching and streaming requests.
+    /// </summary>
     private readonly string url;
-    
+
+    /// <summary>
+    /// Represents a thread-safe queue used to temporarily store instances of <see cref="GrpcBatcherItem"/>
+    /// for batched processing within the gRPC communication layer. The queue ensures efficient message
+    /// handling and processing by maintaining the order of incoming items and supporting concurrent operations.
+    /// </summary>
     private readonly ConcurrentQueue<GrpcBatcherItem> inbox = new();
-    
+
+    /// <summary>
+    /// Indicates whether the batching process is active or idle.
+    /// Used in conjunction with interlocked operations to ensure thread-safe state management during batch processing.
+    /// </summary>
     private int processing = 1;
 
+    /// <summary>
+    /// Efficiently batches and processes gRPC requests to a specified host using bidirectional streaming.
+    /// Reduces connection and HTTP/2 stream overhead by multiplexing multiple operations over a single stream.
+    /// </summary>
     public GrpcBatcher(string url)
     {
         this.url = url;
@@ -255,9 +289,9 @@ internal sealed class GrpcBatcher
             {
                 do
                 {
-                    List<GrpcBatcherItem> messages = [];
+                    List<GrpcBatcherItem> messages = GrpcBatcherPool.Rent(2);
                     
-                    while (inbox.TryDequeue(out GrpcBatcherItem? message))
+                    while (inbox.TryDequeue(out GrpcBatcherItem message))
                         messages.Add(message);
 
                     if (messages.Count > 0)
@@ -304,11 +338,11 @@ internal sealed class GrpcBatcher
                     case GrpcBatcherItemType.Locks:
                         await RunLocksBatch(sharedStreaming, request);
                         break;
-                    
+
                     case GrpcBatcherItemType.KeyValues:
                         await RunKeyValueBatch(sharedStreaming, request);
                         break;
-                    
+
                     case GrpcBatcherItemType.Sequences:
                     default:
                         throw new KahunaException("Unknown batch type", LockResponseType.Errored);
@@ -320,9 +354,13 @@ internal sealed class GrpcBatcher
             foreach (GrpcBatcherItem request in requests)
             {
                 requestRefs.TryRemove(request.RequestId, out _);
-                
+
                 request.Promise.SetException(ex);
             }
+        }
+        finally
+        {
+            GrpcBatcherPool.Return(requests);
         }
     }
 
@@ -477,7 +515,7 @@ internal sealed class GrpcBatcher
     {
         await foreach (GrpcBatchClientKeyValueResponse response in streaming.ResponseStream.ReadAllAsync())
         {
-            if (!requestRefs.TryGetValue(response.RequestId, out GrpcBatcherItem? item))
+            if (!requestRefs.TryGetValue(response.RequestId, out GrpcBatcherItem item))
             {
                 Console.WriteLine("Request not found " + response.RequestId);
                 continue;
@@ -556,7 +594,7 @@ internal sealed class GrpcBatcher
     {
         await foreach (GrpcBatchClientLockResponse response in streaming.ResponseStream.ReadAllAsync())
         {
-            if (!requestRefs.TryGetValue(response.RequestId, out GrpcBatcherItem? item))
+            if (!requestRefs.TryGetValue(response.RequestId, out GrpcBatcherItem item))
             {
                 Console.WriteLine("Request not found " + response.RequestId);
                 continue;

@@ -1,9 +1,8 @@
 ﻿
 using Nixie;
 using System.Net;
-using System.Runtime.CompilerServices;
-using CommandLine;
 using Flurl.Http;
+using CommandLine;
 
 using Kahuna;
 using Kahuna.Services;
@@ -11,7 +10,7 @@ using Kahuna.Server.Configuration;
 using Kahuna.Communication.External.Grpc;
 using Kahuna.Communication.External.Rest;
 using Kahuna.Server.Communication.Internode;
-using Kahuna.Server.Locks;
+
 using Kommander;
 using Kommander.Time;
 using Kommander.WAL;
@@ -27,6 +26,8 @@ Console.WriteLine(" | |/ / _` | '_ \\| | | | '_ \\ / _` |");
 Console.WriteLine(" |   < (_| | | | | |_| | | | | (_| |");
 Console.WriteLine(" |_|\\_\\__,_|_| |_|\\__,_|_| |_|\\__,_|");
 Console.WriteLine("");
+
+//Console.WriteLine("{0}", Unsafe.SizeOf<GrpcServerBatcherItem>());
 
 ParserResult<KahunaCommandLineOptions> optsResult = Parser.Default.ParseArguments<KahunaCommandLineOptions>(args);
 

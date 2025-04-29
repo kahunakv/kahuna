@@ -19,42 +19,147 @@ namespace Kahuna.Server.KeyValues;
 /// </summary>
 public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
 {
+    /// <summary>
+    /// Represents the threshold for triggering a collection operation in the actor.
+    /// Once the specified number of operations has been reached, a collection process
+    /// is initiated to manage resources, such as potentially clearing cached or temporary data.
+    /// </summary>
     private const int CollectThreshold = 1000;
-    
+
+    /// <summary>
+    /// Provides the execution context for the KeyValueActor, enabling interaction
+    /// with the underlying actor framework. This context facilitates message handling,
+    /// scheduling, and coordination for the actor's operations.
+    /// </summary>
     private readonly IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext;
-    
+
+    /// <summary>
+    /// Stores and manages key-value pairs in memory with efficient retrieval and modification operations.
+    /// Utilizes a B-tree data structure to provide scalable performance for large datasets. This
+    /// in-memory store is used as a primary cache, with further data coordination to disk
+    /// or external systems when necessary. All operations leverage the underlying B-tree
+    /// to maintain ordered keys and ensure quick lookups, inserts, updates, and deletions.
+    /// </summary>
     private readonly BTree<string, KeyValueContext> keyValuesStore = new(32);
 
+    /// <summary>
+    /// Provides logging capabilities for the KeyValueActor class. This logger is used to
+    /// record diagnostic information, errors, and other relevant events related to the
+    /// operation and behavior of the actor.
+    /// </summary>
     private readonly ILogger<IKahuna> logger;
 
+    /// <summary>
+    /// Represents the count of remaining operations before a specific action, such as a resource collection, is triggered.
+    /// This variable is decremented with each completed operation and resets once the threshold is reached,
+    /// initiating the corresponding action to maintain efficient resource management or consistency.
+    /// </summary>
     private int operations = CollectThreshold;
 
+    /// <summary>
+    /// Represents the handler responsible for processing "set" operations on key-value pairs.
+    /// This handler ensures that key-value pairs are stored into the data structures,
+    /// adhering to the consistency model and persisting the changes as required for durability.
+    /// </summary>
     private readonly TrySetHandler trySetHandler;
-    
+
+    /// <summary>
+    /// Handles the "extend" operation for key/value pairs in the actor system.
+    /// This field initializes a handler responsible for extending the lease or lifetime
+    /// of a key/value pair, ensuring the operation's logic and persistence are appropriately managed.
+    /// </summary>
     private readonly TryExtendHandler tryExtendHandler;
-    
+
+    /// <summary>
+    /// Responsible for handling delete operations on key/value pairs within the actor.
+    /// This handler processes delete requests and interacts with the in-memory cache, disk storage,
+    /// and other subsystems to ensure consistent and reliable deletion of data, adhering to the actor's requirements.
+    /// </summary>
     private readonly TryDeleteHandler tryDeleteHandler;
 
+    /// <summary>
+    /// Responsible for handling key retrieval operations within the actor.
+    /// This handler attempts to fetch the value associated with a specified key, leveraging the in-memory cache if possible.
+    /// If the key is not available in memory, the handler interacts with the persistence backend to retrieve the data.
+    /// Ensures consistency and reliability of key retrieval processes in distributed environments.
+    /// </summary>
     private readonly TryGetHandler tryGetHandler;
-    
+
+    /// <summary>
+    /// Handles operations for retrieving key/value pairs that match a specified prefix.
+    /// This handler processes requests to extract subsets of stored entries efficiently
+    /// and in a consistent manner.
+    /// </summary>
     private readonly TryGetByPrefixHandler tryGetByPrefixHandler;
-    
+
+    /// <summary>
+    /// Handles operations for scanning keys in the key-value store with a specified prefix.
+    /// This handler is responsible for efficiently retrieving all key-value pairs
+    /// that match a given prefix, leveraging both in-memory cache and disk-based storage
+    /// when necessary. The operation ensures consistency and adheres to the actor's
+    /// linearizable consistency guarantees for data integrity.
+    /// </summary>
     private readonly TryScanByPrefixHandler tryScanByPrefixHandler;
-    
+
+    /// <summary>
+    /// Handles requests to verify the existence of a specific key within the key-value store.
+    /// It operates by checking both the in-memory cache and the persistent backend storage
+    /// to determine if a given key exists. This handler is utilized for operations requiring
+    /// a consistent check for key presence while integrating with the system's persistence
+    /// and consistency mechanisms.
+    /// </summary>
     private readonly TryExistsHandler tryExistsHandler;
 
+    /// <summary>
+    /// Manages the operation to attempt acquiring an exclusive lock on a key
+    /// within the key-value store. This handler ensures that only one client
+    /// can hold an exclusive lock on a particular key at any given time,
+    /// enforcing mutual exclusion for operations that require this level
+    /// of access control.
+    /// </summary>
     private readonly TryAcquireExclusiveLockHandler tryAcquireExclusiveLockHandler;
-    
+
+    /// <summary>
+    /// Handles the operation of releasing an exclusive lock within the key-value actor system.
+    /// This is employed when an exclusive lock, previously acquired on a key, must be relinquished to allow
+    /// other operations or actors to access the key.
+    /// </summary>
     private readonly TryReleaseExclusiveLockHandler tryReleaseExclusiveLockHandler;
 
+    /// <summary>
+    /// Handles the preparation phase for mutations in the key/value store in the Two-Phase-Commit (2PC) protocol.
+    /// This component ensures that any necessary preconditions, validations and conflict resolution
+    /// for mutations are met before executing them, contributing to data integrity and consistency within the system.
+    /// </summary>
     private readonly TryPrepareMutationsHandler tryPrepareMutationsHandler;
-    
+
+    /// <summary>
+    /// Responsible for handling the commit of mutation operations in the Two-Phase-Commit (2PC) protocol.
+    /// This handler ensures that all specified mutations are processed and stored correctly,
+    /// maintaining the consistency and durability of key/value pairs. It is typically invoked
+    /// when a transaction or batch of operations needs to be finalized and persisted.
+    /// </summary>
     private readonly TryCommitMutationsHandler tryCommitMutationsHandler;
 
+    /// <summary>
+    /// Handles the operation of rolling back a set of mutations in the key-value store.
+    /// Responsible for ensuring that any changes made during a transactional scope
+    /// are reverted in cases where the transaction cannot be successfully completed.
+    /// </summary>
     private readonly TryRollbackMutationsHandler tryRollbackMutationsHandler;
 
+    /// <summary>
+    /// Handles the process of collecting and managing key/value resources within the actor.
+    /// This handler is responsible for triggering cleanup or optimization tasks, such as
+    /// consolidating cached data or freeing unneeded resources to maintain efficient operation.
+    /// </summary>
     private readonly TryCollectHandler tryCollectHandler;
 
+    /// <summary>
+    /// A high-resolution timer used to measure the time elapsed during the handling of requests within the actor.
+    /// The stopwatch is utilized to record and log the duration of operations, aiding in performance monitoring
+    /// and diagnostics for the KeyValueActor.
+    /// </summary>
     private readonly Stopwatch stopwatch = Stopwatch.StartNew();
 
     /// <summary>

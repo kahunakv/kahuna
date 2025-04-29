@@ -263,7 +263,7 @@ internal sealed class GrpcServerBatcher
                 {
                     List<GrpcServerBatcherItem> messages = [];
                     
-                    while (inbox.TryDequeue(out GrpcServerBatcherItem? message))
+                    while (inbox.TryDequeue(out GrpcServerBatcherItem message))
                         messages.Add(message);
 
                     if (messages.Count > 0)
@@ -493,7 +493,7 @@ internal sealed class GrpcServerBatcher
         {
             await foreach (GrpcBatchServerLockResponse response in streaming.ResponseStream.ReadAllAsync())
             {
-                if (!requestRefs.TryGetValue(response.RequestId, out GrpcServerBatcherItem? item))
+                if (!requestRefs.TryGetValue(response.RequestId, out GrpcServerBatcherItem item))
                 {
                     Console.WriteLine("Request not found " + response.RequestId);
                     continue;
@@ -538,7 +538,7 @@ internal sealed class GrpcServerBatcher
         {
             await foreach (GrpcBatchServerKeyValueResponse response in streaming.ResponseStream.ReadAllAsync())
             {
-                if (!requestRefs.TryGetValue(response.RequestId, out GrpcServerBatcherItem? item))
+                if (!requestRefs.TryGetValue(response.RequestId, out GrpcServerBatcherItem item))
                 {
                     Console.WriteLine("Request not found " + response.RequestId);
                     continue;
