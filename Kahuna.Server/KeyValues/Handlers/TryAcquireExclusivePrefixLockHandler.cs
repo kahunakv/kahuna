@@ -16,15 +16,14 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// </summary>
 /// <see cref="BaseHandler"/>
 internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
-{
-    public TryAcquireExclusivePrefixLockHandler(
-        BTree<string, KeyValueContext> keyValuesStore,
+{        
+    public TryAcquireExclusivePrefixLockHandler(BTree<string, KeyValueContext> keyValuesStore,
+        Dictionary<string, KeyValueWriteIntent> locksByPrefix,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
         KahunaConfiguration configuration,
-        ILogger<IKahuna> logger
-    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger)
+        ILogger<IKahuna> logger) : base(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger)
     {
         
     }
@@ -36,135 +35,63 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
     /// <returns></returns>
     public async Task<KeyValueResponse> Execute(KeyValueRequest message)
     {
-        if (message.Durability == KeyValueDurability.Ephemeral)
-            return await LockByPrefixEphemeral(message);
-        
-        return await LockByPrefixPersistent(message);
-    }
-    
-    /// <summary>
-    /// Queries the key-value store for entries matching the specified prefix in an ephemeral context.
-    /// </summary>
-    /// <param name="message"></param>
-    /// <returns></returns>
-    private async Task<KeyValueResponse> LockByPrefixEphemeral(KeyValueRequest message)
-    {        
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
         
-        foreach ((string key, KeyValueContext? _) in keyValuesStore.GetByPrefix(message.Key))
+        // Check if the prefix is already locked by the current transaction
+        if (locksByPrefix.TryGetValue(message.Key, out KeyValueWriteIntent? writeIntent))
         {
-            KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability);     
-            
-            if (response.Type == KeyValueResponseType.DoesNotExist)
-                continue;
-            
-            if 
+            if (writeIntent.TransactionId == message.TransactionId) 
+                return KeyValueStaticResponses.LockedResponse;
 
-            if (response.Type != KeyValueResponseType.Get)
-                return new(response.Type);
-        }        
-                
-        return new(KeyValueResponseType.Locked);
-    }
-    
-    private async Task<KeyValueResponse> Get(HLCTimestamp currentTime, HLCTimestamp transactionId, string key, KeyValueDurability durability, ReadOnlyKeyValueContext? keyValueContext = null)
-    {
-        KeyValueContext? context = await GetKeyValueContext(key, durability, keyValueContext);
-
-        ReadOnlyKeyValueContext readOnlyKeyValueContext;
-        
-        if (context?.WriteIntent != null && context.WriteIntent.TransactionId != transactionId)
-            return new(KeyValueResponseType.MustRetry, 0);
-
-        // TransactionId is provided so we keep a MVCC entry for it
-        if (transactionId != HLCTimestamp.Zero)
-        {
-            if (context is null)
-            {
-                context = new() { State = KeyValueState.Undefined, Revision = -1 };
-                keyValuesStore.Insert(key, context);
-            }
-            
-            context.MvccEntries ??= new();
-
-            if (!context.MvccEntries.TryGetValue(transactionId, out KeyValueMvccEntry? entry))
-            {
-                entry = new()
-                {
-                    Value = context.Value, 
-                    Revision = context.Revision, 
-                    Expires = context.Expires, 
-                    LastUsed = context.LastUsed,
-                    LastModified = context.LastModified,
-                    State = context.State
-                };
-
-                context.MvccEntries.Add(transactionId, entry);
-            }
-            
-            if (context.Revision > entry.Revision) // early conflict detection
-                return KeyValueStaticResponses.AbortedResponse;
-            
-            if (entry.State is KeyValueState.Undefined or KeyValueState.Deleted || entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
-                return KeyValueStaticResponses.DoesNotExistContextResponse;
-
-            readOnlyKeyValueContext = new(
-                entry.Value, 
-                entry.Revision, 
-                entry.Expires, 
-                entry.LastUsed, 
-                entry.LastModified, 
-                context.State
-            );
-
-            return new(KeyValueResponseType.Get, readOnlyKeyValueContext);
+            // Locked by another transaction but check if the lease is still active
+            if (writeIntent.Expires != HLCTimestamp.Zero && writeIntent.Expires - currentTime > TimeSpan.Zero)
+                return KeyValueStaticResponses.AlreadyLockedResponse;
         }
-
-        if (context is null || context.State == KeyValueState.Deleted || context.Expires != HLCTimestamp.Zero && context.Expires - currentTime < TimeSpan.Zero)
-            return KeyValueStaticResponses.DoesNotExistContextResponse;
-
-        context.LastUsed = currentTime;
-
-        readOnlyKeyValueContext = new(
-            context.Value, 
-            context.Revision, 
-            context.Expires, 
-            context.LastUsed, 
-            context.LastModified, 
-            context.State
-        );
-
-        return new(KeyValueResponseType.Get, readOnlyKeyValueContext);
-    } 
-
-    public async Task<KeyValueResponse> Execute(KeyValueRequest message)
-    {
-        if (message.TransactionId == HLCTimestamp.Zero)
-            return KeyValueStaticResponses.ErroredResponse;
+        
+        if (message.Durability == KeyValueDurability.Ephemeral)
+            return LockByPrefixEphemeral(currentTime, message);
+        
+        //return await LockByPrefixPersistent(message);
 
         await Task.CompletedTask;
         
-        /*HLCTimestamp currentTime = raft.HybridLogicalClock.ReceiveEvent(raft.GetLocalNodeId(), message.TransactionId);
-
-        if (!keyValuesStore.TryGetValue(message.Key, out KeyValueContext? context))
+        return KeyValueStaticResponses.ErroredResponse;
+    }
+    
+    /// <summary>
+    /// Locks entries matching the specified prefix in an ephemeral durability.
+    /// Even keys that do not exist or are deleted will be locked.
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
+    private KeyValueResponse LockByPrefixEphemeral(HLCTimestamp currentTime, KeyValueRequest message)
+    {        
+        if (message.TransactionId == HLCTimestamp.Zero)
+            return KeyValueStaticResponses.ErroredResponse;               
+        
+        foreach ((string key, KeyValueContext context) in keyValuesStore.GetByPrefix(message.Key))
         {
-            KeyValueContext? newContext = null;
+            KeyValueResponse response = TryLock(currentTime, message.TransactionId, key, message.ExpiresMs, context);                                                    
 
-            /// Try to retrieve KeyValue context from persistence
-            if (message.Durability == KeyValueDurability.Persistent)
-                newContext = await raft.ReadThreadPool.EnqueueTask(() => PersistenceBackend.GetKeyValue(message.Key));
-
-            newContext ??= new() { State = KeyValueState.Undefined, Revision = -1 };
-            
-            context = newContext;
-
-            keyValuesStore.Insert(message.Key, newContext);
+            if (response.Type != KeyValueResponseType.Locked)
+                return response;
         }
 
+        locksByPrefix.Add(message.Key, new()
+        {
+            TransactionId = message.TransactionId,
+            Expires = message.TransactionId + message.ExpiresMs
+        });
+                
+        return KeyValueStaticResponses.LockedResponse;
+    }
+    
+    private KeyValueResponse TryLock(HLCTimestamp currentTime, HLCTimestamp transactionId, string key, int expiresMs, KeyValueContext context)
+    {                               
         if (context.WriteIntent is not null)
         {
             // if the transactionId is the same owner no need to acquire the lock
-            if (context.WriteIntent.TransactionId == message.TransactionId) 
+            if (context.WriteIntent.TransactionId == transactionId) 
                 return KeyValueStaticResponses.LockedResponse;
 
             // Check if the lease is still active
@@ -174,12 +101,12 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
 
         context.WriteIntent = new()
         {
-            TransactionId = message.TransactionId,
-            Expires = message.TransactionId + message.ExpiresMs,
-        };
+            TransactionId = transactionId,
+            Expires = transactionId + expiresMs,
+        };        
         
-        logger.LogDebug("Assigned {Key} write intent to TxId={TransactionId}", message.Key, message.TransactionId);*/
+        logger.LogDebug("Assigned {Key} write intent to TxId={TransactionId}", key, transactionId);
         
         return KeyValueStaticResponses.LockedResponse;
-    }
+    }     
 }

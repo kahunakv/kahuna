@@ -23,14 +23,13 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
 {
     private const int DefaultTxCompleteTimeout = 15000;
     
-    public TryPrepareMutationsHandler(
-        BTree<string, KeyValueContext> keyValuesStore,
+    public TryPrepareMutationsHandler(BTree<string, KeyValueContext> keyValuesStore,
+        Dictionary<string, KeyValueWriteIntent> locksByPrefix,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
         KahunaConfiguration configuration,
-        ILogger<IKahuna> logger
-    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger)
+        ILogger<IKahuna> logger) : base(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger)
     {
         
     }
@@ -111,8 +110,10 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         if (entry.State == KeyValueState.Undefined)
             return new(KeyValueResponseType.Prepared);
 
-        // in optimistic concurrency, we create the write intent if it doesn't exist
-        // this is to ensure that the assigned transaction will win the race
+        // In optimistic concurrency, we create the write intent if it doesn't exist
+        // this is to ensure that the assigned transaction will win the race.
+        // The write intent lease will by extended by DefaultTxCompleteTimeout
+        // it will give the transaction enough time to commit or rollback
         if (context.WriteIntent is null)
         {
             context.WriteIntent = new()

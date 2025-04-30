@@ -18,14 +18,13 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// </remarks>
 internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
 {
-    public TryScanByPrefixFromDiskHandler(
-        BTree<string, KeyValueContext> keyValuesStore,
+    public TryScanByPrefixFromDiskHandler(BTree<string, KeyValueContext> keyValuesStore,
+        Dictionary<string, KeyValueWriteIntent> locksByPrefix,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
         KahunaConfiguration configuration,
-        ILogger<IKahuna> logger
-    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger)
+        ILogger<IKahuna> logger) : base(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger)
     {
         
     }

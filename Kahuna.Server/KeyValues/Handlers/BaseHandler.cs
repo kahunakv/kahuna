@@ -28,6 +28,8 @@ internal abstract class BaseHandler
     protected readonly IPersistenceBackend PersistenceBackend;
 
     protected readonly BTree<string, KeyValueContext> keyValuesStore;
+    
+    protected readonly Dictionary<string, KeyValueWriteIntent> locksByPrefix;
 
     protected readonly KahunaConfiguration configuration;
 
@@ -37,6 +39,7 @@ internal abstract class BaseHandler
     
     protected BaseHandler(
         BTree<string, KeyValueContext> keyValuesStore,
+        Dictionary<string, KeyValueWriteIntent> locksByPrefix,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
@@ -44,10 +47,11 @@ internal abstract class BaseHandler
         ILogger<IKahuna> logger
     )
     {
+        this.keyValuesStore = keyValuesStore;
+        this.locksByPrefix = locksByPrefix;
         this.backgroundWriter = backgroundWriter;
         this.raft = raft;
-        this.PersistenceBackend = persistenceBackend;
-        this.keyValuesStore = keyValuesStore;
+        this.PersistenceBackend = persistenceBackend;        
         this.configuration = configuration;
         this.logger = logger;
     }
@@ -134,6 +138,7 @@ internal abstract class BaseHandler
                 else
                     context = new()
                     {
+                        Bucket = GetBucket(key),
                         Value = readKeyValueContext.Value,
                         Revision = readKeyValueContext.Revision,
                         Expires = readKeyValueContext.Expires,
@@ -155,7 +160,13 @@ internal abstract class BaseHandler
         
         return context;
     }
-    
+
+    protected static string? GetBucket(string key)
+    {
+        int index = key.LastIndexOf('/');
+        return index == -1 ? null : key[..index];
+    }
+
     protected void RemoveExpiredRevisions(KeyValueContext context, long refRevision)
     {
         if (context.Revisions is null)

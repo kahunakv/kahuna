@@ -11,6 +11,11 @@ namespace Kahuna.Server.KeyValues;
 public sealed class KeyValueContext
 {
     /// <summary>
+    /// The current bucket of the key if any
+    /// </summary>
+    public string? Bucket { get; set; }
+    
+    /// <summary>
     /// The current value of the key.
     /// </summary>
     public byte[]? Value { get; set; }

@@ -26,14 +26,13 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// </example>
 internal sealed class TryRollbackMutationsHandler : BaseHandler
 {
-    public TryRollbackMutationsHandler(
-        BTree<string, KeyValueContext> keyValuesStore,
+    public TryRollbackMutationsHandler(BTree<string, KeyValueContext> keyValuesStore,
+        Dictionary<string, KeyValueWriteIntent> locksByPrefix,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
         KahunaConfiguration configuration,
-        ILogger<IKahuna> logger
-    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger)
+        ILogger<IKahuna> logger) : base(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger)
     {
         
     }

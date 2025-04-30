@@ -15,14 +15,13 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// </summary>
 internal sealed class TryExistsHandler : BaseHandler
 {
-    public TryExistsHandler(
-        BTree<string, KeyValueContext> keyValuesStore,
+    public TryExistsHandler(BTree<string, KeyValueContext> keyValuesStore,
+        Dictionary<string, KeyValueWriteIntent> locksByPrefix,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
         KahunaConfiguration configuration,
-        ILogger<IKahuna> logger
-    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger)
+        ILogger<IKahuna> logger) : base(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger)
     {
         
     }
@@ -78,16 +77,26 @@ internal sealed class TryExistsHandler : BaseHandler
             return KeyValueStaticResponses.DoesNotExistContextResponse; 
         }
         
-        if (context?.WriteIntent != null && context.WriteIntent.TransactionId != message.TransactionId)
-            return new(KeyValueResponseType.MustRetry, 0);
-
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        
+        // Validate if there's an exclusive key acquired on the lock and whether it is expired
+        // if we find expired write intents we can remove it to allow new transactions to proceed
+        if (context?.WriteIntent != null)
+        {
+            if (context.WriteIntent.TransactionId != message.TransactionId)
+            {
+                if (context.WriteIntent.Expires - currentTime > TimeSpan.Zero)                
+                    return new(KeyValueResponseType.MustRetry, 0);
+                
+                context.WriteIntent = null;
+            }
+        }        
 
         if (message.TransactionId != HLCTimestamp.Zero)
         {
             if (context is null)
             {
-                context = new() { State = KeyValueState.Undefined, Revision = -1 };
+                context = new() { Bucket = GetBucket(message.Key), State = KeyValueState.Undefined, Revision = -1 };
                 keyValuesStore.Insert(message.Key, context);
             }
             

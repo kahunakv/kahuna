@@ -20,14 +20,13 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// </remarks>
 internal sealed class TryGetHandler : BaseHandler
 {
-    public TryGetHandler(
-        BTree<string, KeyValueContext> keyValuesStore,
+    public TryGetHandler(BTree<string, KeyValueContext> keyValuesStore,
+        Dictionary<string, KeyValueWriteIntent> locksByPrefix,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
         KahunaConfiguration configuration,
-        ILogger<IKahuna> logger
-    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger)
+        ILogger<IKahuna> logger) : base(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger)
     {
         
     }
@@ -86,17 +85,27 @@ internal sealed class TryGetHandler : BaseHandler
             return KeyValueStaticResponses.DoesNotExistContextResponse; 
         }
         
-        if (context?.WriteIntent != null && context.WriteIntent.TransactionId != message.TransactionId)
-            return new(KeyValueResponseType.MustRetry, 0);
-
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        
+        // Validate if there's an exclusive key acquired on the lock and whether it is expired
+        // if we find expired write intents we can remove it to allow new transactions to proceed
+        if (context?.WriteIntent != null)
+        {
+            if (context.WriteIntent.TransactionId != message.TransactionId)
+            {
+                if (context.WriteIntent.Expires - currentTime > TimeSpan.Zero)                
+                    return new(KeyValueResponseType.MustRetry, 0);
+                
+                context.WriteIntent = null;
+            }
+        }         
 
         // TransactionId is provided so we keep a MVCC entry for it
         if (message.TransactionId != HLCTimestamp.Zero)
         {
             if (context is null)
             {
-                context = new() { State = KeyValueState.Undefined, Revision = -1 };
+                context = new() { Bucket = GetBucket(message.Key), State = KeyValueState.Undefined, Revision = -1 };
                 keyValuesStore.Insert(message.Key, context);
             }
             
@@ -120,7 +129,7 @@ internal sealed class TryGetHandler : BaseHandler
             if (context.Revision > entry.Revision) // early conflict detection
                 return KeyValueStaticResponses.AbortedResponse;
             
-            if (entry.State is KeyValueState.Undefined or KeyValueState.Deleted || entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
+            if (entry.State is KeyValueState.Undefined or KeyValueState.Deleted || (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero))
                 return KeyValueStaticResponses.DoesNotExistContextResponse;
 
             readOnlyKeyValueContext = new(
@@ -135,7 +144,7 @@ internal sealed class TryGetHandler : BaseHandler
             return new(KeyValueResponseType.Get, readOnlyKeyValueContext);
         }
         
-        if (context is null || context.State is KeyValueState.Undefined or KeyValueState.Deleted || context.Expires != HLCTimestamp.Zero && context.Expires - currentTime < TimeSpan.Zero)
+        if (context is null || context.State is KeyValueState.Undefined or KeyValueState.Deleted || (context.Expires != HLCTimestamp.Zero && context.Expires - currentTime < TimeSpan.Zero))
             return KeyValueStaticResponses.DoesNotExistContextResponse;
 
         context.LastUsed = currentTime;

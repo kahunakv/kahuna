@@ -12,14 +12,13 @@ namespace Kahuna.Server.KeyValues.Handlers;
 
 internal sealed class TryGetByPrefixHandler : BaseHandler
 {
-    public TryGetByPrefixHandler(
-        BTree<string, KeyValueContext> keyValuesStore,
+    public TryGetByPrefixHandler(BTree<string, KeyValueContext> keyValuesStore,
+        Dictionary<string, KeyValueWriteIntent> locksByPrefix,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
         KahunaConfiguration configuration,
-        ILogger<IKahuna> logger
-    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger)
+        ILogger<IKahuna> logger) : base(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger)
     {
         
     }
@@ -138,7 +137,7 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
         {
             if (context is null)
             {
-                context = new() { State = KeyValueState.Undefined, Revision = -1 };
+                context = new() { Bucket = GetBucket(key), State = KeyValueState.Undefined, Revision = -1 };
                 keyValuesStore.Insert(key, context);
             }
             

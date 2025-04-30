@@ -16,14 +16,13 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// <see cref="BaseHandler"/>
 internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
 {
-    public TryAcquireExclusiveLockHandler(
-        BTree<string, KeyValueContext> keyValuesStore,
+    public TryAcquireExclusiveLockHandler(BTree<string, KeyValueContext> keyValuesStore,
+        Dictionary<string, KeyValueWriteIntent> locksByPrefix,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
         KahunaConfiguration configuration,
-        ILogger<IKahuna> logger
-    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger)
+        ILogger<IKahuna> logger) : base(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger)
     {
         
     }
@@ -43,7 +42,7 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
             if (message.Durability == KeyValueDurability.Persistent)
                 newContext = await raft.ReadThreadPool.EnqueueTask(() => PersistenceBackend.GetKeyValue(message.Key));
 
-            newContext ??= new() { State = KeyValueState.Undefined, Revision = -1 };
+            newContext ??= new() { Bucket = GetBucket(message.Key), State = KeyValueState.Undefined, Revision = -1 };
             
             context = newContext;
 

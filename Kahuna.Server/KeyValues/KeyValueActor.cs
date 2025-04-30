@@ -2,6 +2,7 @@
 using Nixie;
 using Kommander;
 using System.Diagnostics;
+using Google.Protobuf;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.Persistence;
 using Kahuna.Shared.KeyValue;
@@ -41,6 +42,13 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// to maintain ordered keys and ensure quick lookups, inserts, updates, and deletions.
     /// </summary>
     private readonly BTree<string, KeyValueContext> keyValuesStore = new(32);
+    
+    /// <summary>
+    /// Stores write intents for key prefixes. This ensure consistent reads for operations like
+    /// "get by prefix". If a write intent is present, only the transaction holding the write intent
+    /// can add/modify/delete the keys in the prefix.
+    /// </summary>
+    private readonly Dictionary<string, KeyValueWriteIntent> locksByPrefix = new();
 
     /// <summary>
     /// Provides logging capabilities for the KeyValueActor class. This logger is used to
@@ -124,6 +132,15 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// of access control.
     /// </summary>
     private readonly TryAcquireExclusiveLockHandler tryAcquireExclusiveLockHandler;
+    
+    /// <summary>
+    /// Manages the operation to attempt acquiring an exclusive lock on a group of keys
+    /// by prefix within the key-value store. This handler ensures that only one client
+    /// can hold an exclusive lock on a particular prefix at any given time,
+    /// enforcing mutual exclusion for operations that require this level
+    /// of access control. Since the prefix is locked, no new keys can be added on this prefix.
+    /// </summary>
+    private readonly TryAcquireExclusivePrefixLockHandler tryAcquireExclusivePrefixLockHandler;
 
     /// <summary>
     /// Handles the operation of releasing an exclusive lock within the key-value actor system.
@@ -186,20 +203,21 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         this.actorContext = actorContext;
         this.logger = logger;
 
-        trySetHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryExtendHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryDeleteHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryGetHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryScanByPrefixHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryScanByPrefixFromDiskHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryGetByPrefixHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryExistsHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryAcquireExclusiveLockHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryReleaseExclusiveLockHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryPrepareMutationsHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryCommitMutationsHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryRollbackMutationsHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryCollectHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        trySetHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryExtendHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryDeleteHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryGetHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryScanByPrefixHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryScanByPrefixFromDiskHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryGetByPrefixHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryExistsHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryAcquireExclusiveLockHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryAcquireExclusivePrefixLockHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryReleaseExclusiveLockHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryPrepareMutationsHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryCommitMutationsHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryRollbackMutationsHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryCollectHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
     }
 
     /// <summary>
@@ -244,6 +262,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.TryGet => await TryGet(message),
                 KeyValueRequestType.TryExists => await TryExists(message),
                 KeyValueRequestType.TryAcquireExclusiveLock => await TryAcquireExclusiveLock(message),
+                KeyValueRequestType.TryAcquireExclusivePrefixLock => await TryAcquireExclusivePrefixLock(message),
                 KeyValueRequestType.TryReleaseExclusiveLock => await TryReleaseExclusiveLock(message),
                 KeyValueRequestType.TryPrepareMutations => await TryPrepareMutations(message),
                 KeyValueRequestType.TryCommitMutations => await TryCommitMutations(message),
@@ -363,6 +382,16 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private Task<KeyValueResponse> TryAcquireExclusiveLock(KeyValueRequest message)
     {
         return tryAcquireExclusiveLockHandler.Execute(message);
+    }
+    
+    /// <summary>
+    /// Acquires an exclusive lock on group of keys prefixed by the given prefix
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
+    private Task<KeyValueResponse> TryAcquireExclusivePrefixLock(KeyValueRequest message)
+    {
+        return tryAcquireExclusivePrefixLockHandler.Execute(message);
     }
     
     /// <summary>

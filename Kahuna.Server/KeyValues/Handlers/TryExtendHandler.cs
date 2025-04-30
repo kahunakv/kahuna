@@ -16,14 +16,13 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// <seealso cref="BaseHandler"/>
 internal sealed class TryExtendHandler : BaseHandler
 {
-    public TryExtendHandler(
-        BTree<string, KeyValueContext> keyValuesStore,
+    public TryExtendHandler(BTree<string, KeyValueContext> keyValuesStore,
+        Dictionary<string, KeyValueWriteIntent> locksByPrefix,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
         KahunaConfiguration configuration,
-        ILogger<IKahuna> logger
-    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger)
+        ILogger<IKahuna> logger) : base(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger)
     {
         
     }
@@ -35,15 +34,25 @@ internal sealed class TryExtendHandler : BaseHandler
         if (context is null)
             return KeyValueStaticResponses.DoesNotExistResponse;
         
-        if (context.WriteIntent is not null && context.WriteIntent.TransactionId != message.TransactionId)
-            return new(KeyValueResponseType.MustRetry, 0);
-        
         HLCTimestamp currentTime;
         
         if (message.TransactionId == HLCTimestamp.Zero)
             currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
         else
             currentTime = raft.HybridLogicalClock.ReceiveEvent(raft.GetLocalNodeId(), message.TransactionId);
+        
+        // Validate if there's an exclusive key acquired on the lock and whether it is expired
+        // if we find expired write intents we can remove it to allow new transactions to proceed
+        if (context.WriteIntent is not null)
+        {
+            if (context.WriteIntent.TransactionId != message.TransactionId)
+            {
+                if (context.WriteIntent.Expires - currentTime > TimeSpan.Zero)                
+                    return new(KeyValueResponseType.MustRetry, 0);
+                
+                context.WriteIntent = null;
+            }
+        }
         
         // Temporarily store the value in the MVCC entry if the transaction ID is set
         if (message.TransactionId != HLCTimestamp.Zero)

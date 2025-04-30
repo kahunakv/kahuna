@@ -3,24 +3,23 @@ using Nixie;
 using Kommander;
 using Kommander.Time;
 
+using Kahuna.Utils;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
-using Kahuna.Utils;
 
 namespace Kahuna.Server.KeyValues.Handlers;
 
 internal sealed class TrySetHandler : BaseHandler
 {        
-    public TrySetHandler(
-        BTree<string, KeyValueContext> keyValuesStore,
+    public TrySetHandler(BTree<string, KeyValueContext> keyValuesStore,
+        Dictionary<string, KeyValueWriteIntent> locksByPrefix,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
         KahunaConfiguration configuration,
-        ILogger<IKahuna> logger
-    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger)
+        ILogger<IKahuna> logger) : base(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger)
     {
         
     }
@@ -67,7 +66,7 @@ internal sealed class TrySetHandler : BaseHandler
                 }
             }
 
-            newContext ??= new() { State = KeyValueState.Undefined, Revision = -1 };
+            newContext ??= new() { Bucket = GetBucket(message.Key), State = KeyValueState.Undefined, Revision = -1 };
             
             context = newContext;
             
@@ -84,8 +83,18 @@ internal sealed class TrySetHandler : BaseHandler
             }
         }
         
-        if (context.WriteIntent is not null && context.WriteIntent.TransactionId != message.TransactionId)
-            return new(KeyValueResponseType.MustRetry, 0);
+        // Validate if there's an exclusive key acquired on the lock and whether it is expired
+        // if we find expired write intents we can remove it to allow new transactions to proceed
+        if (context.WriteIntent != null)
+        {
+            if (context.WriteIntent.TransactionId != message.TransactionId)
+            {
+                if (context.WriteIntent.Expires - currentTime > TimeSpan.Zero)                
+                    return new(KeyValueResponseType.MustRetry, 0);
+                
+                context.WriteIntent = null;
+            }
+        }
 
         HLCTimestamp newExpires = message.ExpiresMs > 0 ? (currentTime + message.ExpiresMs) : HLCTimestamp.Zero;
         
