@@ -677,7 +677,7 @@ public class TestKeyValueTransactions
         }, TestContext.Current.CancellationToken);
         
         KahunaKeyValue result = await client.GetKeyValue(keyName, cancellationToken: TestContext.Current.CancellationToken);
-        Assert.False(result.Success);
+        Assert.True(result.Success);
     }
     
     [Theory, CombinatorialData]

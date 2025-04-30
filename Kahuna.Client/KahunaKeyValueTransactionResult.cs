@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Text;
 using Kommander.Time;
 using Kahuna.Shared.KeyValue;
 
@@ -56,6 +57,22 @@ public class KahunaKeyValueTransactionResult
                 return null;
 
             return Values[0].Value;
+        }
+    }
+    
+    public string? FirstValueAsString
+    {
+        get
+        {
+            if (Values is null || Values.Count == 0)
+                return null;
+
+            byte[]? rawValue = Values[0].Value;
+
+            if (rawValue is null)
+                return null;
+            
+            return Encoding.UTF8.GetString(rawValue);
         }
     }
 }

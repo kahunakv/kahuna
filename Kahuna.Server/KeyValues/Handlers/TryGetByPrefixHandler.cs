@@ -22,6 +22,11 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
 
     }
 
+    /// <summary>
+    /// Executes the get by prefix request
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
     public async Task<KeyValueResponse> Execute(KeyValueRequest message)
     {
         if (message.Durability == KeyValueDurability.Ephemeral)
@@ -30,6 +35,11 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
         return await GetByPrefixPersistent(message);
     }
 
+    /// <summary>
+    /// Queries the key-value store for entries matching the specified prefix in an ephemeral context.
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
     private async Task<KeyValueResponse> GetByPrefixEphemeral(KeyValueRequest message)
     {
         List<(string, ReadOnlyKeyValueContext)> items = [];
@@ -54,6 +64,11 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
         return new(KeyValueResponseType.Get, items);
     }
 
+    /// <summary>
+    /// Queries the key-value store for entries matching the specified prefix in a persistent context.
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
     private async Task<KeyValueResponse> GetByPrefixPersistent(KeyValueRequest message)
     {
         Dictionary<string, ReadOnlyKeyValueContext> items = new();
