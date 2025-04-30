@@ -139,6 +139,8 @@ internal static class KeyValueTransactionExpression
             case NodeType.Throw:
             case NodeType.GetByPrefix:
             case NodeType.EgetByPrefix:
+            case NodeType.ScanByPrefix:
+            case NodeType.EscanByPrefix:
             default:
                 throw new NotImplementedException();
         }

@@ -292,9 +292,35 @@ internal sealed class KeyValuesManager
     /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, string, KeyValueDurability)> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancelationToken)
+    public Task<(KeyValueResponseType, string, KeyValueDurability)> LocateAndTryAcquireExclusiveLock(
+        HLCTimestamp transactionId, 
+        string key, 
+        int expiresMs, 
+        KeyValueDurability durability, 
+        CancellationToken cancelationToken
+    )
     {
         return locator.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, durability, cancelationToken);
+    }
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="prefixKey"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public Task<KeyValueResponseType> LocateAndTryAcquireExclusivePrefixLock(
+        HLCTimestamp transactionId,
+        string prefixKey,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        return locator.LocateAndTryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability, cancellationToken);
     }
     
     /// <summary>
@@ -304,7 +330,11 @@ internal sealed class KeyValuesManager
     /// <param name="keys"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public Task<List<(KeyValueResponseType, string, KeyValueDurability)>> LocateAndTryAcquireManyExclusiveLocks(HLCTimestamp transactionId, List<(string key, int expiresMs, KeyValueDurability durability)> keys, CancellationToken cancelationToken)
+    public Task<List<(KeyValueResponseType, string, KeyValueDurability)>> LocateAndTryAcquireManyExclusiveLocks(
+        HLCTimestamp transactionId, 
+        List<(string key, int expiresMs, KeyValueDurability durability)> keys, 
+        CancellationToken cancelationToken
+    )
     {
         return locator.LocateAndTryAcquireManyExclusiveLocks(transactionId, keys, cancelationToken);
     }
@@ -796,6 +826,43 @@ internal sealed class KeyValuesManager
     }
     
     /// <summary>
+    /// Passes a TryAcquireExclusivePrefixLock request to the key/value actor to lock a range of keys by the specified prefix
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="durability"></param>
+    /// <returns></returns>
+    public async Task<KeyValueResponseType> TryAcquireExclusivePrefixLock(HLCTimestamp transactionId, string prefixKey, int expiresMs, KeyValueDurability durability)
+    {
+        KeyValueRequest request = new(
+            KeyValueRequestType.TryAcquireExclusivePrefixLock, 
+            transactionId, 
+            HLCTimestamp.Zero,
+            prefixKey, 
+            null, 
+            null,
+            -1,
+            KeyValueFlags.None,
+            expiresMs, 
+            HLCTimestamp.Zero,
+            durability
+        );
+
+        KeyValueResponse? response;
+        
+        if (durability == KeyValueDurability.Ephemeral)
+            response = await ephemeralKeyValuesRouter.Ask(request);
+        else
+            response = await persistentKeyValuesRouter.Ask(request);
+        
+        if (response is null)
+            return KeyValueResponseType.Errored;
+        
+        return response.Type;
+    }
+    
+    /// <summary>
     /// Passes a TryAcquireExclusiveLock request to the key/value actor for the given keys.
     /// </summary>
     /// <param name="transactionId"></param>
@@ -1216,9 +1283,9 @@ internal sealed class KeyValuesManager
     /// <param name="prefixKeyName"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public Task<KeyValueGetByPrefixResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability)
+    public Task<KeyValueGetByPrefixResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        return locator.ScanAllByPrefix(prefixKeyName, durability);
+        return locator.ScanAllByPrefix(prefixKeyName, durability, cancellationToken);
     }
 
     /// <summary>
@@ -1230,12 +1297,10 @@ internal sealed class KeyValuesManager
     /// <returns></returns>
     /// <exception cref="KahunaServerException"></exception>
     public async Task<KeyValueGetByPrefixResult> ScanByPrefix(string prefixKeyName, KeyValueDurability durability)
-    {
-        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
-        
+    {                
         KeyValueRequest request = new(
             KeyValueRequestType.ScanByPrefix,
-            currentTime,
+            HLCTimestamp.Zero, 
             HLCTimestamp.Zero,
             prefixKeyName,
             null,
@@ -1288,6 +1353,40 @@ internal sealed class KeyValuesManager
         }
 
         throw new KahunaServerException("Unknown durability");
+    }
+    
+    /// <summary>
+    /// Scans the current node and returns key/value pairs by prefix
+    /// The returned values aren't consistent, they can contain stale data
+    /// </summary>
+    /// <param name="prefixKeyName"></param>    
+    /// <returns></returns>
+    /// <exception cref="KahunaServerException"></exception>
+    public async Task<KeyValueGetByPrefixResult> ScanByPrefixFromDisk(string prefixKeyName)
+    {                
+        KeyValueRequest request = new(
+            KeyValueRequestType.ScanByPrefixFromDisk,
+            HLCTimestamp.Zero, 
+            HLCTimestamp.Zero,
+            prefixKeyName,
+            null,
+            null,
+            -1,
+            KeyValueFlags.None,
+            0,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Persistent
+        );
+
+        KeyValueResponse? response = await persistentKeyValuesRouter.Ask(request);
+
+        if (response is null)
+            return new(KeyValueResponseType.Errored, []);
+        
+        if (response is { Type: KeyValueResponseType.Get, Items: not null })
+            return new(response.Type, response.Items); 
+        
+        return new(response.Type, []);
     }
 
     /// <summary>

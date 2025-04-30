@@ -68,6 +68,8 @@ public static class InteractiveConsole
                 "cmprev",
                 "by",
                 "prefix",
+                "scan",
+                "escan",
                 // control structures or operators
                 "not",
                 "let",

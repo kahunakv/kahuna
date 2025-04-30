@@ -121,6 +121,24 @@ internal sealed class GrpcServerBatcher
         return TryProcessQueue(grpcBatcherItem, promise);
     }
     
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcGetByPrefixRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcScanByPrefixRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }       
+    
     public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryExecuteTransactionScriptRequest message)
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -420,6 +438,16 @@ internal sealed class GrpcServerBatcher
             batchRequest.Type = GrpcServerBatchType.ServerTryExistsKeyValue;
             batchRequest.TryExistsKeyValue = itemRequest.TryExistsKeyValue;
         }
+        else if (itemRequest.GetByPrefix is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryGetByPrefix;
+            batchRequest.GetByPrefix = itemRequest.GetByPrefix;
+        }
+        else if (itemRequest.ScanByPrefix is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryScanByPrefix;
+            batchRequest.ScanByPrefix = itemRequest.ScanByPrefix;
+        }
         else if (itemRequest.TryExecuteTransactionScript is not null)
         {
             batchRequest.Type = GrpcServerBatchType.ServerTryExecuteTransactionScript;
@@ -589,7 +617,11 @@ internal sealed class GrpcServerBatcher
                         break;
                     
                     case GrpcServerBatchType.ServerTryGetByPrefix:
-                        //item.Promise.SetResult(new(response.GetByPrefix));
+                        item.Promise.SetResult(new(response.GetByPrefix));
+                        break;
+                    
+                    case GrpcServerBatchType.ServerTryScanByPrefix:
+                        item.Promise.SetResult(new(response.ScanByPrefix));
                         break;
 
                     case GrpcServerBatchType.ServerTryExecuteTransactionScript:
@@ -648,8 +680,7 @@ internal sealed class GrpcServerBatcher
                         item.Promise.SetResult(new(response.RollbackTransaction));
                         break;
 
-                    case GrpcServerBatchType.ServerTypeNone:
-                    case GrpcServerBatchType.ServerTryScanByPrefix:
+                    case GrpcServerBatchType.ServerTypeNone:                    
                     default:
                         item.Promise.SetException(new KahunaServerException("Unknown response type: " + response.Type));
                         break;

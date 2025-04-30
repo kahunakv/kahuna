@@ -30,4 +30,6 @@ public sealed class KahunaConfiguration
     public TimeSpan CacheEntryTtl { get; set; }
     
     public int CacheEntriesToRemove { get; set; }
+    
+    public int DirtyObjectsWriterDelay { get; set; }
 }

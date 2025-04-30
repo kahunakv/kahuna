@@ -631,7 +631,7 @@ namespace QUT.GplexBuffers
         {
             string command = option.ToUpperInvariant();
             if (command.StartsWith("CodePage:", StringComparison.OrdinalIgnoreCase))
-                command = command[9..];
+                command = command.Substring(9);
             try
             {
                 if (command.Equals("RAW"))

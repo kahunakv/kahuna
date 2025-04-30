@@ -28,7 +28,7 @@
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TDOUBLEQUALS
 %token TBEGIN TROLLBACK TCOMMIT TLET TSET TGET TESET TEGET TDELETE TEDELETE TEXTEND TEEXTEND TEXISTS TEEXISTS
 %token TIF TELSE TTHEN TEND TNX TXX TEX TCMP TCMPREV TTHROW TFOUND TFOR TDO TIN
-%token TRETURN TSLEEP TDIGIT TFLOAT TSTRING TIDENTIFIER TESCIDENTIFIER TPLACEHOLDER TTRUE TFALSE TNULL TAT TPREFIX TBY
+%token TRETURN TSLEEP TDIGIT TFLOAT TSTRING TIDENTIFIER TESCIDENTIFIER TPLACEHOLDER TTRUE TFALSE TNULL TAT TSCAN TESCAN TPREFIX TBY
 
 %%
 
@@ -48,6 +48,8 @@ stmt    : set_stmt { $$.n = $1.n; $$.l = $1.l; }
         | eextend_stmt { $$.n = $1.n; $$.l = $1.l; }
         | get_by_prefix_stmt { $$.n = $1.n; $$.l = $1.l; }
         | eget_by_prefix_stmt { $$.n = $1.n; $$.l = $1.l; }
+        | scan_by_prefix_stmt { $$.n = $1.n; $$.l = $1.l; }
+        | escan_by_prefix_stmt { $$.n = $1.n; $$.l = $1.l; }
         | let_stmt { $$.n = $1.n; $$.l = $1.l; }
         | for_stmt { $$.n = $1.n; $$.l = $1.l; }
         | if_stmt { $$.n = $1.n; $$.l = $1.l; } 
@@ -125,7 +127,15 @@ get_by_prefix_stmt : TGET TBY TPREFIX key_name { $$.n = new(NodeType.GetByPrefix
                    
 eget_by_prefix_stmt : TEGET TBY TPREFIX key_name { $$.n = new(NodeType.EgetByPrefix, $4.n, null, null, null, null, null, null, $1.l); }    
                    | TLET identifier TEQUALS TEGET TBY TPREFIX key_name { $$.n = new(NodeType.EgetByPrefix, $7.n, $2.n, null, null, null, null, null, $1.l); }
-                   ;            
+                   ;
+                   
+scan_by_prefix_stmt : TSCAN TBY TPREFIX key_name { $$.n = new(NodeType.ScanByPrefix, $4.n, null, null, null, null, null, null, $1.l); }
+                   | TLET identifier TEQUALS TSCAN TBY TPREFIX key_name { $$.n = new(NodeType.ScanByPrefix, $7.n, $2.n, null, null, null, null, null, $1.l); }    
+                   ;
+                   
+escan_by_prefix_stmt : TESCAN TBY TPREFIX key_name { $$.n = new(NodeType.EscanByPrefix, $4.n, null, null, null, null, null, null, $1.l); }    
+                   | TLET identifier TEQUALS TESCAN TBY TPREFIX key_name { $$.n = new(NodeType.EscanByPrefix, $7.n, $2.n, null, null, null, null, null, $1.l); }
+                   ;                                 
             
 key_name : identifier { $$.n = $1.n; $$.l = $1.l; }
          | placeholder  { $$.n = $1.n; $$.l = $1.l; }

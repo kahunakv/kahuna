@@ -42,6 +42,8 @@ TFound          (F|f)(O|o)(U|u)(N|n)(D|d)
 TNull           (N|n)(U|u)(L|l)(L|l)
 TAtWord         (A|a)(T|t)
 TNotWord        (N|n)(O|o)(T|t)
+TScan           (S|s)(C|c)(A|a)(N|n)
+TEScan          (E|e)(S|s)(C|c)(A|a)(N|n)
 TBy             (B|b)(Y|y)
 TPrefix         (P|p)(R|r)(E|e)(F|f)(I|i)(X|x)
 LParen          \(
@@ -228,6 +230,10 @@ TAnd            &&
 {TAt} { yylval.l = yyline; return (int)Token.TAT; }
 
 {TAtWord} { yylval.l = yyline; return (int)Token.TAT; }
+
+{TScan} { yylval.l = yyline; return (int)Token.TSCAN; }
+
+{TEScan} { yylval.l = yyline; return (int)Token.TESCAN; }
 
 {TBy} { yylval.l = yyline; return (int)Token.TBY; }
 

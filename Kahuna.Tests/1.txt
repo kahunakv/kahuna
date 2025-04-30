@@ -1,0 +1,13 @@
+  Determining projects to restore...
+  All projects are up-to-date for restore.
+  Kahuna.Shared -> /Users/andresgutierrez/kahuna/Kahuna.Shared/bin/Debug/net8.0/Kahuna.Shared.dll
+  Kahuna.Client -> /Users/andresgutierrez/kahuna/Kahuna.Client/bin/Debug/net8.0/Kahuna.Client.dll
+  Kahuna.Server -> /Users/andresgutierrez/kahuna/Kahuna.Server/bin/Debug/net9.0/Kahuna.Server.dll
+  Kahuna.Tests -> /Users/andresgutierrez/kahuna/Kahuna.Tests/bin/Debug/net9.0/Kahuna.Tests.dll
+Test run for /Users/andresgutierrez/kahuna/Kahuna.Tests/bin/Debug/net9.0/Kahuna.Tests.dll (.NETCoreApp,Version=v9.0)
+VSTest version 17.12.0 (x64)
+
+Starting test execution, please wait...
+A total of 1 test files matched the specified pattern.
+
+Passed!  - Failed:     0, Passed:     4, Skipped:     0, Total:     4, Duration: 20 s - Kahuna.Tests.dll (net9.0)

@@ -10,6 +10,7 @@ service KeyValuer {
   rpc TryExecuteTransactionScript (GrpcTryExecuteTransactionScriptRequest) returns (GrpcTryExecuteTransactionScriptResponse);
   rpc TryAcquireExclusiveLock (GrpcTryAcquireExclusiveLockRequest) returns (GrpcTryAcquireExclusiveLockResponse);
   rpc TryAcquireManyExclusiveLocks (GrpcTryAcquireManyExclusiveLocksRequest) returns (GrpcTryAcquireManyExclusiveLocksResponse);
+  rpc TryAcquireExclusivePrefixLock (GrpcTryAcquireExclusivePrefixLockRequest) returns (GrpcTryAcquireExclusivePrefixLockResponse);
   rpc TryReleaseExclusiveLock (GrpcTryReleaseExclusiveLockRequest) returns (GrpcTryReleaseExclusiveLockResponse);
   rpc TryReleaseManyExclusiveLocks (GrpcTryReleaseManyExclusiveLocksRequest) returns (GrpcTryReleaseManyExclusiveLocksResponse);
   rpc TryPrepareMutations (GrpcTryPrepareMutationsRequest) returns (GrpcTryPrepareMutationsResponse);
@@ -215,6 +216,20 @@ message GrpcTryAcquireExclusiveLockRequest {
 }
 
 message GrpcTryAcquireExclusiveLockResponse {
+  optional string ServedFrom = 1;
+  GrpcKeyValueResponseType Type = 2;
+}
+
+message GrpcTryAcquireExclusivePrefixLockRequest {
+  int32 TransactionIdNode = 1;
+  int64 TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter = 3;
+  string Key = 4;
+  int32 ExpiresMs = 5;
+  GrpcKeyValueDurability Durability = 6;
+}
+
+message GrpcTryAcquireExclusivePrefixLockResponse {
   optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
 }
@@ -556,7 +571,7 @@ message GrpcBatchClientKeyValueResponse
     GrpcTryExecuteTransactionScriptResponse TryExecuteTransactionScript = 9;
     GrpcTryAcquireExclusiveLockResponse TryAcquireExclusiveLock = 10;
     GrpcGetByPrefixResponse GetByPrefix = 11;
-    GrpcScanAllByPrefixResponse ScanByPrefix = 12;    
+    GrpcScanAllByPrefixResponse ScanByPrefix = 12;
     GrpcStartTransactionResponse StartTransaction = 13;
     GrpcCommitTransactionResponse CommitTransaction = 14;
     GrpcRollbackTransactionResponse RollbackTransaction = 15;

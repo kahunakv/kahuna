@@ -14,10 +14,13 @@ public enum KeyValueRequestType
     TryGet,
     TryExists,
     TryAcquireExclusiveLock,
+    TryAcquireExclusivePrefixLock,
     TryReleaseExclusiveLock,
+    TryReleaseExclusivePrefixLock,
     TryPrepareMutations,
     TryCommitMutations,
     TryRollbackMutations,
     ScanByPrefix,
+    ScanByPrefixFromDisk,
     GetByPrefix
 }

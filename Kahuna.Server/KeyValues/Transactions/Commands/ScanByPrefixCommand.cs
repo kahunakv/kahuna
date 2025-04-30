@@ -1,21 +1,22 @@
 
 using System.Text;
-using Kahuna.Shared.KeyValue;
-using Kahuna.Server.ScriptParser;
 using Kahuna.Server.KeyValues.Transactions.Data;
-using Kommander.Time;
+using Kahuna.Server.ScriptParser;
+using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues.Transactions.Commands;
 
 /// <summary>
-/// Represents a command that retrieves key-value pairs matching a specified prefix.
+/// Represents a command that scans all nodes in the cluster to locate key-value pairs matching a specified prefix.
 /// </summary>
 /// <remarks>
-/// The <c>GetByPrefixCommand</c> is a transactional command used within the key-value store
-/// system. It facilitates fetching all key-value pairs that share a common prefix key,
+/// The <c>ScanByPrefixCommand</c> is a non-transactional command used within the key-value store
+/// system. It facilitates fetching all key-value pairs that share a common prefix key by scanning
+/// all nodes and workers in the cluster.
+/// It isn't recommended to use this command in a transaction context, as it may lead to slow execution.
 /// executing the asynchronous retrieval via the provided manager and transaction context.
 /// </remarks>
-internal sealed class GetByPrefixCommand : BaseCommand
+internal sealed class ScanByPrefixCommand : BaseCommand
 {
     public static async Task<KeyValueTransactionResult> Execute(
         KeyValuesManager manager,
@@ -36,9 +37,8 @@ internal sealed class GetByPrefixCommand : BaseCommand
             context.LocksAcquired.Add((keyName, durability));
         }*/
                        
-        KeyValueGetByPrefixResult response = await manager.LocateAndGetByPrefix(
-            context.TransactionId,
-            keyName,            
+        KeyValueGetByPrefixResult response = await manager.ScanAllByPrefix(            
+            keyName,
             durability,
             cancellationToken
         );

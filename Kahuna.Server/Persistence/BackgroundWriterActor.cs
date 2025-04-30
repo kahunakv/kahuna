@@ -2,6 +2,7 @@
 using Nixie;
 using Kommander;
 using System.Diagnostics;
+using Kahuna.Server.Configuration;
 using Kahuna.Server.Persistence.Backend;
 using Polly.Contrib.WaitAndRetry;
 
@@ -31,6 +32,8 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
     private readonly IPersistenceBackend persistenceBackend;
 
+    private readonly KahunaConfiguration configuration;
+
     private readonly ILogger<IKahuna> logger;
     
     private readonly Queue<BackgroundWriteRequest> dirtyLocks = new();
@@ -51,19 +54,21 @@ public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         IActorContext<BackgroundWriterActor, BackgroundWriteRequest> context,
         IRaft raft,
         IPersistenceBackend persistenceBackend,
+        KahunaConfiguration configuration,
         ILogger<IKahuna> logger
     )
     {
         this.raft = raft;
         this.persistenceBackend = persistenceBackend;
+        this.configuration = configuration;
         this.logger = logger;
         
         context.ActorSystem.StartPeriodicTimer(
             context.Self,
-            "flush-locks",
+            "flush-diry-objects",
             new(BackgroundWriteType.Flush),
             TimeSpan.FromSeconds(5),
-            TimeSpan.FromMilliseconds(200)
+            TimeSpan.FromMilliseconds(configuration.DirtyObjectsWriterDelay)
         );
     }
     

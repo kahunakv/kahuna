@@ -103,6 +103,9 @@ internal sealed class KeyValueTransactionCoordinator
 
                 case NodeType.GetByPrefix:
                     return await GetByPrefixCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
+                
+                case NodeType.ScanByPrefix:
+                    return await ScanByPrefixCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
 
                 case NodeType.Exists:
                     return await ExistsCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
@@ -130,6 +133,9 @@ internal sealed class KeyValueTransactionCoordinator
 
                 case NodeType.EgetByPrefix:
                     return await GetByPrefixCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
+                
+                case NodeType.EscanByPrefix:
+                    return await ScanByPrefixCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
 
                 case NodeType.Begin:
                     return await ExecuteTransaction(ast.leftAst!, ast.rightAst, parameters, false);

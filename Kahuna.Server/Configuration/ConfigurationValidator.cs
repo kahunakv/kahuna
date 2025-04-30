@@ -26,6 +26,7 @@ public static class ConfigurationValidator
             ScriptCacheExpiration = TimeSpan.FromSeconds(opts.ScriptCacheExpiration),
             CacheEntryTtl = TimeSpan.FromSeconds(opts.CacheEntryTtl),
             CacheEntriesToRemove = opts.CacheEntriesToRemove,
+            DirtyObjectsWriterDelay = opts.DirtyObjectsWriterDelay
         };
         
         if (!string.IsNullOrEmpty(configuration.HttpsCertificate))

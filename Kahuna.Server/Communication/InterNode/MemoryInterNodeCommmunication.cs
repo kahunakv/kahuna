@@ -732,6 +732,23 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// 
     /// </summary>
     /// <param name="node"></param>
+    /// <param name="prefixedKey"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    /// <exception cref="KahunaServerException"></exception>
+    public async Task<KeyValueGetByPrefixResult> ScanByPrefix(string node, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))        
+            return await kahunaNode.ScanByPrefix(prefixedKey, durability);        
+        
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="node"></param>
     /// <param name="options"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>

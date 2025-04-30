@@ -66,6 +66,7 @@ public sealed class KahunaManager : IKahuna
             "background-writer", 
             raft, 
             persistenceBackend, 
+            configuration,
             logger
         );
         
@@ -249,17 +250,17 @@ public sealed class KahunaManager : IKahuna
     /// <param name="key"></param>
     /// <param name="revision"></param>
     /// <param name="durability"></param>
-    /// <param name="cancelationToken"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryGetValue(
         HLCTimestamp transactionId, 
         string key, 
         long revision, 
         KeyValueDurability durability, 
-        CancellationToken cancelationToken
+        CancellationToken cancellationToken
     )
     {
-        return keyValues.LocateAndTryGetValue(transactionId, key, revision, durability, cancelationToken);
+        return keyValues.LocateAndTryGetValue(transactionId, key, revision, durability, cancellationToken);
     }
     
     /// <summary>
@@ -269,17 +270,17 @@ public sealed class KahunaManager : IKahuna
     /// <param name="key"></param>
     /// <param name="revision"></param>
     /// <param name="durability"></param>
-    /// <param name="cancelationToken"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryExistsValue(
         HLCTimestamp transactionId, 
         string key, 
         long revision, 
         KeyValueDurability durability, 
-        CancellationToken cancelationToken
+        CancellationToken cancellationToken
     )
     {
-        return keyValues.LocateAndTryExistsValue(transactionId, key, revision, durability, cancelationToken);
+        return keyValues.LocateAndTryExistsValue(transactionId, key, revision, durability, cancellationToken);
     }
 
     /// <summary>
@@ -327,17 +328,37 @@ public sealed class KahunaManager : IKahuna
     /// <param name="key"></param>
     /// <param name="expiresMs"></param>
     /// <param name="durability"></param>
-    /// <param name="cancelationToken"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public Task<(KeyValueResponseType, string, KeyValueDurability)> LocateAndTryAcquireExclusiveLock(
         HLCTimestamp transactionId, 
         string key, 
         int expiresMs, 
         KeyValueDurability durability, 
-        CancellationToken cancelationToken
+        CancellationToken cancellationToken
     )
     {
-        return keyValues.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, durability, cancelationToken);
+        return keyValues.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, durability, cancellationToken);
+    }
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="prefixKey"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public Task<KeyValueResponseType> LocateAndTryAcquireExclusivePrefixLock(
+        HLCTimestamp transactionId,
+        string prefixKey,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        return keyValues.LocateAndTryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability, cancellationToken);
     }
 
     /// <summary>
@@ -345,15 +366,15 @@ public sealed class KahunaManager : IKahuna
     /// </summary>
     /// <param name="transactionId"></param>
     /// <param name="keys"></param>
-    /// <param name="cancelationToken"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public Task<List<(KeyValueResponseType, string, KeyValueDurability)>> LocateAndTryAcquireManyExclusiveLocks(
         HLCTimestamp transactionId,
         List<(string key, int expiresMs, KeyValueDurability durability)> keys, 
-        CancellationToken cancelationToken
+        CancellationToken cancellationToken
     )
     {
-        return keyValues.LocateAndTryAcquireManyExclusiveLocks(transactionId, keys, cancelationToken);
+        return keyValues.LocateAndTryAcquireManyExclusiveLocks(transactionId, keys, cancellationToken);
     }
 
     /// <summary>
@@ -362,16 +383,16 @@ public sealed class KahunaManager : IKahuna
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
     /// <param name="durability"></param>
-    /// <param name="cancelationToken"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public Task<(KeyValueResponseType, string)> LocateAndTryReleaseExclusiveLock(
         HLCTimestamp transactionId, 
         string key, 
         KeyValueDurability durability, 
-        CancellationToken cancelationToken
+        CancellationToken cancellationToken
     )
     {
-        return keyValues.LocateAndTryReleaseExclusiveLock(transactionId, key, durability, cancelationToken);
+        return keyValues.LocateAndTryReleaseExclusiveLock(transactionId, key, durability, cancellationToken);
     }
     
     /// <summary>
@@ -379,15 +400,15 @@ public sealed class KahunaManager : IKahuna
     /// </summary>
     /// <param name="transactionId"></param>
     /// <param name="keys"></param>
-    /// <param name="cancelationToken"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public Task<List<(KeyValueResponseType, string, KeyValueDurability)>> LocateAndTryReleaseManyExclusiveLocks(
         HLCTimestamp transactionId, 
         List<(string key, KeyValueDurability durability)> keys, 
-        CancellationToken cancelationToken
+        CancellationToken cancellationToken
     )
     {
-        return keyValues.LocateAndTryReleaseManyExclusiveLocks(transactionId, keys, cancelationToken);
+        return keyValues.LocateAndTryReleaseManyExclusiveLocks(transactionId, keys, cancellationToken);
     }
 
     /// <summary>
@@ -397,17 +418,17 @@ public sealed class KahunaManager : IKahuna
     /// <param name="commitId"></param> 
     /// <param name="key"></param>
     /// <param name="durability"></param>
-    /// <param name="cancelationToken"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> LocateAndTryPrepareMutations(
         HLCTimestamp transactionId,
         HLCTimestamp commitId,
         string key, 
         KeyValueDurability durability, 
-        CancellationToken cancelationToken
+        CancellationToken cancellationToken
     )
     {
-        return keyValues.LocateAndTryPrepareMutations(transactionId, commitId, key, durability, cancelationToken);
+        return keyValues.LocateAndTryPrepareMutations(transactionId, commitId, key, durability, cancellationToken);
     }
 
     /// <summary>
@@ -416,16 +437,16 @@ public sealed class KahunaManager : IKahuna
     /// <param name="transactionId"></param>
     /// <param name="commitId"></param> 
     /// <param name="keys"></param>
-    /// <param name="cancelationToken"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public Task<List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> LocateAndTryPrepareManyMutations(
         HLCTimestamp transactionId,
         HLCTimestamp commitId,
         List<(string key, KeyValueDurability durability)> keys, 
-        CancellationToken cancelationToken
+        CancellationToken cancellationToken
     )
     {
-        return keyValues.LocateAndTryPrepareManyMutations(transactionId, commitId, keys, cancelationToken);
+        return keyValues.LocateAndTryPrepareManyMutations(transactionId, commitId, keys, cancellationToken);
     }
 
     /// <summary>
@@ -434,17 +455,17 @@ public sealed class KahunaManager : IKahuna
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
     /// <param name="durability"></param>
-    /// <param name="cancelationToken"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public Task<(KeyValueResponseType, long)> LocateAndTryCommitMutations(
         HLCTimestamp transactionId, 
         string key, 
         HLCTimestamp ticketId, 
         KeyValueDurability durability, 
-        CancellationToken cancelationToken
+        CancellationToken cancellationToken
     )
     {
-        return keyValues.LocateAndTryCommitMutations(transactionId, key, ticketId, durability, cancelationToken);
+        return keyValues.LocateAndTryCommitMutations(transactionId, key, ticketId, durability, cancellationToken);
     }
 
     /// <summary>
@@ -452,15 +473,15 @@ public sealed class KahunaManager : IKahuna
     /// </summary>
     /// <param name="transactionId"></param>
     /// <param name="keys"></param>
-    /// <param name="cancelationToken"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public Task<List<(KeyValueResponseType, string, long, KeyValueDurability)>> LocateAndTryCommitManyMutations(
         HLCTimestamp transactionId, 
         List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> keys, 
-        CancellationToken cancelationToken
+        CancellationToken cancellationToken
     )
     {
-        return keyValues.LocateAndTryCommitManyMutations(transactionId, keys, cancelationToken);
+        return keyValues.LocateAndTryCommitManyMutations(transactionId, keys, cancellationToken);
     }
     
     /// <summary>
@@ -469,17 +490,17 @@ public sealed class KahunaManager : IKahuna
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
     /// <param name="durability"></param>
-    /// <param name="cancelationToken"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public Task<(KeyValueResponseType, long)> LocateAndTryRollbackMutations(
         HLCTimestamp transactionId, 
         string key, 
         HLCTimestamp ticketId, 
         KeyValueDurability durability, 
-        CancellationToken cancelationToken
+        CancellationToken cancellationToken
     )
     {
-        return keyValues.LocateAndTryRollbackMutations(transactionId, key, ticketId, durability, cancelationToken);
+        return keyValues.LocateAndTryRollbackMutations(transactionId, key, ticketId, durability, cancellationToken);
     }
     
     /// <summary>
@@ -487,15 +508,15 @@ public sealed class KahunaManager : IKahuna
     /// </summary>
     /// <param name="transactionId"></param>
     /// <param name="keys"></param>
-    /// <param name="cancelationToken"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public Task<List<(KeyValueResponseType, string, long, KeyValueDurability)>> LocateAndTryRollbackManyMutations(
         HLCTimestamp transactionId, 
         List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> keys, 
-        CancellationToken cancelationToken
+        CancellationToken cancellationToken
     )
     {
-        return keyValues.LocateAndTryRollbackManyMutations(transactionId, keys, cancelationToken);
+        return keyValues.LocateAndTryRollbackManyMutations(transactionId, keys, cancellationToken);
     }
 
     /// <summary>
@@ -504,27 +525,27 @@ public sealed class KahunaManager : IKahuna
     /// <param name="transactionId"></param>
     /// <param name="prefixedKey"></param>
     /// <param name="durability"></param>
-    /// <param name="cancelationToken"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public Task<KeyValueGetByPrefixResult> LocateAndGetByPrefix(
         HLCTimestamp transactionId, 
         string prefixedKey, 
         KeyValueDurability durability, 
-        CancellationToken cancelationToken
+        CancellationToken cancellationToken
     )
     {
-        return keyValues.LocateAndGetByPrefix(transactionId, prefixedKey, durability, cancelationToken);
+        return keyValues.LocateAndGetByPrefix(transactionId, prefixedKey, durability, cancellationToken);
     }
 
     /// <summary>
     /// Starts a transaction for a key-value operation by locating the appropriate node and setting up the transaction.
     /// </summary>
     /// <param name="options">The options specifying the parameters of the transaction.</param>
-    /// <param name="cancelationToken">The token to monitor for cancellation requests.</param>
+    /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
     /// <returns>A task that represents the asynchronous operation. The task result contains the response type and the timestamp of the initiated transaction.</returns>
-    public Task<(KeyValueResponseType, HLCTimestamp)> LocateAndStartTransaction(KeyValueTransactionOptions options, CancellationToken cancelationToken)
+    public Task<(KeyValueResponseType, HLCTimestamp)> LocateAndStartTransaction(KeyValueTransactionOptions options, CancellationToken cancellationToken)
     {
-        return keyValues.LocateAndStartTransaction(options, cancelationToken);        
+        return keyValues.LocateAndStartTransaction(options, cancellationToken);        
     }
 
     /// <summary>
@@ -534,17 +555,17 @@ public sealed class KahunaManager : IKahuna
     /// <param name="timestamp">The timestamp associated with the transaction.</param>
     /// <param name="acquiredLocks">A list of locks acquired as part of the transaction.</param>
     /// <param name="modifiedKeys">A list of keys modified as part of the transaction.</param>
-    /// <param name="cancelationToken">A token to monitor for cancellation requests.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
     /// <returns>A task representing the asynchronous operation, with a result of <see cref="KeyValueResponseType"/> indicating the outcome of the transaction commit.</returns>
     public Task<KeyValueResponseType> LocateAndCommitTransaction(
         string uniqueId, 
         HLCTimestamp timestamp, 
         List<KeyValueTransactionModifiedKey> acquiredLocks, 
         List<KeyValueTransactionModifiedKey> modifiedKeys,
-        CancellationToken cancelationToken
+        CancellationToken cancellationToken
     )
     {
-        return keyValues.LocateAndCommitTransaction(uniqueId, timestamp, acquiredLocks, modifiedKeys, cancelationToken);
+        return keyValues.LocateAndCommitTransaction(uniqueId, timestamp, acquiredLocks, modifiedKeys, cancellationToken);
     }
 
     /// <summary>
@@ -555,17 +576,17 @@ public sealed class KahunaManager : IKahuna
     /// <param name="timestamp">The timestamp associated with the transaction.</param>
     /// <param name="acquiredLocks">A list of locks acquired during the transaction.</param>
     /// <param name="modifiedKeys">A list of keys modified during the transaction.</param>
-    /// <param name="cancelationToken">A token to observe for cancellation requests.</param>
+    /// <param name="cancellationToken">A token to observe for cancellation requests.</param>
     /// <returns>A <see cref="KeyValueResponseType"/> indicating the result of the rollback operation.</returns>
     public Task<KeyValueResponseType> LocateAndRollbackTransaction(
         string uniqueId, 
         HLCTimestamp timestamp, 
         List<KeyValueTransactionModifiedKey> acquiredLocks, 
         List<KeyValueTransactionModifiedKey> modifiedKeys,
-        CancellationToken cancelationToken
+        CancellationToken cancellationToken
     )
     {
-        return keyValues.LocateAndRollbackTransaction(uniqueId, timestamp, acquiredLocks, modifiedKeys, cancelationToken);
+        return keyValues.LocateAndRollbackTransaction(uniqueId, timestamp, acquiredLocks, modifiedKeys, cancellationToken);
     }
 
     /// <summary>
@@ -801,9 +822,9 @@ public sealed class KahunaManager : IKahuna
     /// <param name="prefixKeyName"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public Task<KeyValueGetByPrefixResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability)
+    public Task<KeyValueGetByPrefixResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        return keyValues.ScanAllByPrefix(prefixKeyName, durability);
+        return keyValues.ScanAllByPrefix(prefixKeyName, durability, cancellationToken);
     }
 
     /// <summary>

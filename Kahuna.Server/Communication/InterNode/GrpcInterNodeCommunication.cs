@@ -863,11 +863,18 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             };
     }
     
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="node"></param>
+    /// <param name="transactionId"></param>
+    /// <param name="prefixedKey"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
     public async Task<KeyValueGetByPrefixResult> GetByPrefix(string node, HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        GrpcChannel channel = SharedChannels.GetChannel(node);
-        
-        KeyValuer.KeyValuerClient client = new(channel);
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
         
         GrpcGetByPrefixRequest request = new()
         {
@@ -878,13 +885,59 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcKeyValueDurability)durability,
         };
         
-        GrpcGetByPrefixResponse? remoteResponse = await client.GetByPrefixAsync(request, cancellationToken: cancellationToken);
+        GrpcServerBatcherResponse batchResponse;
+                              
+        if (cancellationToken == CancellationToken.None)
+           batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+        else
+           batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+       
+        GrpcGetByPrefixResponse remoteResponse = batchResponse.GetByPrefix!;
+        
+        remoteResponse.ServedFrom = $"https://{node}";
+        
+        return new((KeyValueResponseType)remoteResponse.Type, GetReadOnlyItem(remoteResponse.Items));
+    }
+    
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="node"></param>    
+    /// <param name="prefixedKey"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public async Task<KeyValueGetByPrefixResult> ScanByPrefix(string node, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+        
+        GrpcScanByPrefixRequest request = new()
+        {            
+            PrefixKey = prefixedKey,
+            Durability = (GrpcKeyValueDurability)durability,
+        };
+        
+        GrpcServerBatcherResponse batchResponse;
+                              
+        if (cancellationToken == CancellationToken.None)
+           batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+        else
+           batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+       
+        GrpcScanByPrefixResponse remoteResponse = batchResponse.ScanByPrefix!;
         
         remoteResponse.ServedFrom = $"https://{node}";
         
         return new((KeyValueResponseType)remoteResponse.Type, GetReadOnlyItem(remoteResponse.Items));
     }
 
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="node"></param>
+    /// <param name="options"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
     public async Task<(KeyValueResponseType, HLCTimestamp)> StartTransaction(string node, KeyValueTransactionOptions options, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
@@ -909,6 +962,16 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         );
     }
 
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="node"></param>
+    /// <param name="uniqueId"></param>
+    /// <param name="timestamp"></param>
+    /// <param name="acquiredLocks"></param>
+    /// <param name="modifiedKeys"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
     public async Task<KeyValueResponseType> CommitTransaction(
         string node, 
         string uniqueId, 
@@ -942,6 +1005,16 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         return (KeyValueResponseType)remoteResponse.Type;
     }    
 
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="node"></param>
+    /// <param name="uniqueId"></param>
+    /// <param name="timestamp"></param>
+    /// <param name="acquiredLocks"></param>
+    /// <param name="modifiedKeys"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
     public async Task<KeyValueResponseType> RollbackTransaction(
         string node, 
         string uniqueId, 

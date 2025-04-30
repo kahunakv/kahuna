@@ -162,6 +162,8 @@ internal sealed class KeyValueLockHelper : BaseCommand
                 case NodeType.NullType:
                 case NodeType.GetByPrefix:
                 case NodeType.EgetByPrefix:
+                case NodeType.ScanByPrefix:
+                case NodeType.EscanByPrefix:
                 case NodeType.Range:
                     break;
                 

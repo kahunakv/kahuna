@@ -431,7 +431,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <param name="request">The request containing the key, transaction details, expiration time, and durability level.</param>
     /// <param name="context">The server call context that provides access to information about the RPC call.</param>
     /// <returns>A task that represents the asynchronous operation. The task result contains a response indicating whether the lock acquisition attempt succeeded or failed.</returns>
-    internal async Task<GrpcTryAcquireExclusiveLockResponse> TryAcquireExclusiveLockInternal(GrpcTryAcquireExclusiveLockRequest request, ServerCallContext context)
+    internal async Task<GrpcTryAcquireExclusiveLockResponse> TryAcquireExclusiveLockInternal(
+        GrpcTryAcquireExclusiveLockRequest request, 
+        ServerCallContext context
+    )
     {
         if (string.IsNullOrEmpty(request.Key))
             return new()
@@ -443,6 +446,48 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
             request.Key, 
             request.ExpiresMs, 
+            (KeyValueDurability)request.Durability, 
+            context.CancellationToken
+        );
+
+        return new()
+        {
+            Type = (GrpcKeyValueResponseType)type
+        };
+    }
+    
+    /// <summary>
+    /// Attempts to acquire an exclusive lock on group of key-value resource prefixed by the given prefix key.
+    /// </summary>
+    /// <param name="request">The request containing details about the lock acquisition operation.</param>
+    /// <param name="context">The context of the server call.</param>
+    /// <returns>A response indicating the result of the lock acquisition attempt.</returns>
+    public override async Task<GrpcTryAcquireExclusivePrefixLockResponse> TryAcquireExclusivePrefixLock(
+        GrpcTryAcquireExclusivePrefixLockRequest request, 
+        ServerCallContext context
+    )
+    {
+        return await TryAcquireExclusivePrefixLockInternal(request, context);
+    }
+
+    /// <summary>
+    /// Attempts to acquire an exclusive lock on a group of key-value pairs prefixed by the given key with the specified expiration and durability settings.
+    /// </summary>
+    /// <param name="request">The request containing the key, transaction details, expiration time, and durability level.</param>
+    /// <param name="context">The server call context that provides access to information about the RPC call.</param>
+    /// <returns>A task that represents the asynchronous operation. The task result contains a response indicating whether the lock acquisition attempt succeeded or failed.</returns>
+    internal async Task<GrpcTryAcquireExclusivePrefixLockResponse> TryAcquireExclusivePrefixLockInternal(GrpcTryAcquireExclusivePrefixLockRequest request, ServerCallContext context)
+    {
+        if (string.IsNullOrEmpty(request.Key))
+            return new()
+            {
+                Type = GrpcKeyValueResponseType.TypeInvalidInput
+            };
+        
+        (KeyValueResponseType type, _, _) = await keyValues.LocateAndTryAcquireExclusiveLock(
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
+            request.Key, 
+            request.ExpiresMs,
             (KeyValueDurability)request.Durability, 
             context.CancellationToken
         );
@@ -966,9 +1011,16 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             };
         
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
+        
+        byte[] script;
+        
+        if (MemoryMarshal.TryGetArray(request.Script.Memory, out ArraySegment<byte> segment))
+            script = segment.Array ?? request.Script.ToByteArray();
+        else
+            script = request.Script.ToByteArray();
             
         KeyValueTransactionResult result = await keyValues.TryExecuteTransactionScript(
-            request.Script.ToByteArray(), 
+            script, 
             request.Hash, 
             GetParameters(request.Parameters)
         );
@@ -1015,44 +1067,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         response.Values.AddRange(values);
         
         return response;
-    }
-
-    /// <summary>
-    /// Scans for key-value pairs based on a specified prefix.
-    /// </summary>
-    /// <param name="request">The request containing the prefix and relevant parameters for the scan operation.</param>
-    /// <param name="context">The context for the server-side call, providing information such as deadlines and cancellation details.</param>
-    /// <returns>A task representing the asynchronous operation, which resolves to a <see cref="GrpcScanByPrefixResponse"/> containing the scan results.</returns>
-    public override async Task<GrpcScanByPrefixResponse> ScanByPrefix(GrpcScanByPrefixRequest request, ServerCallContext context)
-    {
-        return await ScanByPrefixInternal(request, context);
-    }
-
-    /// <summary>
-    /// Handles the internal logic for scanning key-value items by a given prefix.
-    /// </summary>
-    /// <param name="request">The request containing the prefix key and other parameters for the scan operation.</param>
-    /// <param name="context">The server call context for the gRPC operation.</param>
-    /// <returns>A task representing the asynchronous operation, containing the response with the scanned key-value items.</returns>
-    internal async Task<GrpcScanByPrefixResponse> ScanByPrefixInternal(GrpcScanByPrefixRequest request, ServerCallContext context)
-    {
-        if (request.PrefixKey is null)
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.TypeInvalidInput
-            };
-            
-        KeyValueGetByPrefixResult result = await keyValues.ScanByPrefix(request.PrefixKey, (KeyValueDurability) request.Durability);
-
-        GrpcScanByPrefixResponse response = new()
-        {
-            Type = GrpcKeyValueResponseType.TypeGot,
-        };
-        
-        response.Items.Add(GetKeyValueItems(result.Items));
-        
-        return response;
-    }
+    }    
 
     /// <summary>
     /// Retrieves key-value pairs matching a specific prefix.
@@ -1097,6 +1112,43 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
     
     /// <summary>
+    /// Scans for key-value pairs based on a specified prefix.
+    /// </summary>
+    /// <param name="request">The request containing the prefix and relevant parameters for the scan operation.</param>
+    /// <param name="context">The context for the server-side call, providing information such as deadlines and cancellation details.</param>
+    /// <returns>A task representing the asynchronous operation, which resolves to a <see cref="GrpcScanByPrefixResponse"/> containing the scan results.</returns>
+    public override async Task<GrpcScanByPrefixResponse> ScanByPrefix(GrpcScanByPrefixRequest request, ServerCallContext context)
+    {
+        return await ScanByPrefixInternal(request, context);
+    }
+
+    /// <summary>
+    /// Handles the internal logic for scanning key-value items by a given prefix.
+    /// </summary>
+    /// <param name="request">The request containing the prefix key and other parameters for the scan operation.</param>
+    /// <param name="context">The server call context for the gRPC operation.</param>
+    /// <returns>A task representing the asynchronous operation, containing the response with the scanned key-value items.</returns>
+    internal async Task<GrpcScanByPrefixResponse> ScanByPrefixInternal(GrpcScanByPrefixRequest request, ServerCallContext context)
+    {
+        if (request.PrefixKey is null)
+            return new()
+            {
+                Type = GrpcKeyValueResponseType.TypeInvalidInput
+            };
+            
+        KeyValueGetByPrefixResult result = await keyValues.ScanByPrefix(request.PrefixKey, (KeyValueDurability) request.Durability);
+
+        GrpcScanByPrefixResponse response = new()
+        {
+            Type = GrpcKeyValueResponseType.TypeGot,
+        };
+        
+        response.Items.Add(GetKeyValueItems(result.Items));
+        
+        return response;
+    }
+    
+    /// <summary>
     /// Scans all nodes in the cluster and returns key/value pairs by prefix
     /// </summary>
     /// <param name="request"></param>
@@ -1121,7 +1173,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
             
-        KeyValueGetByPrefixResult result = await keyValues.ScanAllByPrefix(request.PrefixKey, (KeyValueDurability) request.Durability);
+        KeyValueGetByPrefixResult result = await keyValues.ScanAllByPrefix(request.PrefixKey, (KeyValueDurability) request.Durability, context.CancellationToken);
 
         GrpcScanAllByPrefixResponse response = new()
         {

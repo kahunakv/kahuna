@@ -89,5 +89,8 @@ public sealed class KahunaCommandLineOptions
     public int CacheEntryTtl { get; set; } = 1800; // 30 minutes
     
     [Option("cache-entries-to-remove", Required = false, HelpText = "Maximum number of cache entries to remove per eviction process", Default = 100)]
-    public int CacheEntriesToRemove { get; set; } = 100; // 30 minutes
+    public int CacheEntriesToRemove { get; set; } = 100;
+    
+    [Option("dirty-objects-writer-delay", Required = false, HelpText = "Specifies how often the dirty object writer flushes ti disk (in milliseconds)", Default = 200)]
+    public int DirtyObjectsWriterDelay { get; set; } = 200;
 }

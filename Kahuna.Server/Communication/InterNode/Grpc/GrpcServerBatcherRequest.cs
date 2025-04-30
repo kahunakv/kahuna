@@ -23,6 +23,10 @@ internal sealed class GrpcServerBatcherRequest
     
     public GrpcTryExistsKeyValueRequest? TryExistsKeyValue { get; }
     
+    public GrpcGetByPrefixRequest? GetByPrefix { get; }
+    
+    public GrpcScanByPrefixRequest? ScanByPrefix { get; }
+    
     public GrpcTryExecuteTransactionScriptRequest? TryExecuteTransactionScript { get; }
     
     public GrpcTryAcquireExclusiveLockRequest? TryAcquireExclusiveLock { get; }
@@ -99,6 +103,16 @@ internal sealed class GrpcServerBatcherRequest
     public GrpcServerBatcherRequest(GrpcTryExistsKeyValueRequest tryExistsKeyValue)
     {
         TryExistsKeyValue = tryExistsKeyValue;
+    }
+    
+    public GrpcServerBatcherRequest(GrpcGetByPrefixRequest getByPrefix)
+    {
+        GetByPrefix = getByPrefix;
+    }
+    
+    public GrpcServerBatcherRequest(GrpcScanByPrefixRequest scanByPrefix)
+    {
+        ScanByPrefix = scanByPrefix;
     }
     
     public GrpcServerBatcherRequest(GrpcTryExecuteTransactionScriptRequest tryExecuteTransactionScript)

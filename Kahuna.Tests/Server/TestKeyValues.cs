@@ -28,7 +28,7 @@ public class TestKeyValues : BaseCluster
         kahunaLogger = loggerFactory.CreateLogger<IKahuna>();
     }
 
-    private static string GetRandomLockName()
+    private static string GetRandomValue()
     {
         return Guid.NewGuid().ToString("N")[..10];
     }
@@ -42,8 +42,8 @@ public class TestKeyValues : BaseCluster
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) = await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
 
-        string keyName = GetRandomLockName();
-        byte[] valueA = Encoding.UTF8.GetBytes(GetRandomLockName());
+        string keyName = GetRandomValue();
+        byte[] valueA = Encoding.UTF8.GetBytes(GetRandomValue());
 
         (KeyValueResponseType response, long revision, _) = await kahuna1.LocateAndTrySetKeyValue(HLCTimestamp.Zero, keyName, valueA, null, -1, KeyValueFlags.Set, 0, durability, TestContext.Current.CancellationToken);
         Assert.Equal(KeyValueResponseType.Set, response);
@@ -64,5 +64,158 @@ public class TestKeyValues : BaseCluster
         Assert.Equal(1, revision);
 
         await LeaveCluster(node1, node2, node3);
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestGetByPrefix(
+        [CombinatorialValues("memory")] string storage,
+        [CombinatorialValues(8, 16)] int partitions,
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) = await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+        
+        string prefix = GetRandomValue();
+
+        string keyName = prefix + "/" + GetRandomValue();
+        byte[] value = Encoding.UTF8.GetBytes(GetRandomValue());
+
+        (KeyValueResponseType response, long revision, _) = await kahuna1.LocateAndTrySetKeyValue(HLCTimestamp.Zero, keyName, value, null, -1, KeyValueFlags.Set, 0, durability, TestContext.Current.CancellationToken);
+        Assert.Equal(KeyValueResponseType.Set, response);
+        Assert.Equal(0, revision);
+        
+        keyName = prefix + "/" + GetRandomValue();
+        value = Encoding.UTF8.GetBytes(GetRandomValue());
+        
+        (response, revision, _) = await kahuna2.LocateAndTrySetKeyValue(HLCTimestamp.Zero, keyName, value, null, -1, KeyValueFlags.Set, 0, durability, TestContext.Current.CancellationToken);
+        Assert.Equal(KeyValueResponseType.Set, response);
+        Assert.Equal(0, revision);
+        
+        keyName = prefix + "/" + GetRandomValue();
+        value = Encoding.UTF8.GetBytes(GetRandomValue());
+        
+        (response, revision, _) = await kahuna3.LocateAndTrySetKeyValue(HLCTimestamp.Zero, keyName, value, null, -1, KeyValueFlags.Set, 0, durability, TestContext.Current.CancellationToken);
+        Assert.Equal(KeyValueResponseType.Set, response);
+        Assert.Equal(0, revision);
+        
+        KeyValueGetByPrefixResult result = await kahuna1.LocateAndGetByPrefix(HLCTimestamp.Zero, prefix, durability, TestContext.Current.CancellationToken);
+        Assert.Equal(3, result.Items.Count);
+        
+        keyName = prefix + "/" + GetRandomValue();
+        value = Encoding.UTF8.GetBytes(GetRandomValue());
+        
+        (response, revision, _) = await kahuna2.LocateAndTrySetKeyValue(HLCTimestamp.Zero, keyName, value, null, -1, KeyValueFlags.Set, 0, durability, TestContext.Current.CancellationToken);
+        Assert.Equal(KeyValueResponseType.Set, response);
+        Assert.Equal(0, revision);
+        
+        result = await kahuna1.LocateAndGetByPrefix(HLCTimestamp.Zero, prefix, durability, TestContext.Current.CancellationToken);
+        Assert.Equal(4, result.Items.Count);
+
+        ValidateGetByPrefixItems(prefix, result.Items);
+        
+        keyName = prefix + "/" + GetRandomValue();
+        value = Encoding.UTF8.GetBytes(GetRandomValue());
+        
+        (response, revision, _) = await kahuna2.LocateAndTrySetKeyValue(HLCTimestamp.Zero, keyName, value, null, -1, KeyValueFlags.Set, 0, durability, TestContext.Current.CancellationToken);
+        Assert.Equal(KeyValueResponseType.Set, response);
+        Assert.Equal(0, revision);
+        
+        result = await kahuna1.LocateAndGetByPrefix(HLCTimestamp.Zero, prefix, durability, TestContext.Current.CancellationToken);
+        Assert.Equal(5, result.Items.Count);
+        
+        ValidateGetByPrefixItems(prefix, result.Items);
+        
+        (response, revision, _) = await kahuna2.LocateAndTryDeleteKeyValue(HLCTimestamp.Zero, keyName, durability, TestContext.Current.CancellationToken);
+        Assert.Equal(KeyValueResponseType.Deleted, response);
+        Assert.Equal(0, revision);
+        
+        result = await kahuna1.LocateAndGetByPrefix(HLCTimestamp.Zero, prefix, durability, TestContext.Current.CancellationToken);
+        Assert.Equal(4, result.Items.Count);
+        
+        ValidateGetByPrefixItems(prefix, result.Items);
+
+        await LeaveCluster(node1, node2, node3);
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestScanByPrefix(
+        [CombinatorialValues("memory")] string storage,
+        [CombinatorialValues(8, 16)] int partitions,
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) = await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+        
+        string prefix = GetRandomValue();
+
+        string keyName = prefix + GetRandomValue();
+        byte[] value = Encoding.UTF8.GetBytes(GetRandomValue());
+
+        (KeyValueResponseType response, long revision, _) = await kahuna1.LocateAndTrySetKeyValue(HLCTimestamp.Zero, keyName, value, null, -1, KeyValueFlags.Set, 0, durability, TestContext.Current.CancellationToken);
+        Assert.Equal(KeyValueResponseType.Set, response);
+        Assert.Equal(0, revision);
+        
+        keyName = prefix + GetRandomValue();
+        value = Encoding.UTF8.GetBytes(GetRandomValue());
+        
+        (response, revision, _) = await kahuna2.LocateAndTrySetKeyValue(HLCTimestamp.Zero, keyName, value, null, -1, KeyValueFlags.Set, 0, durability, TestContext.Current.CancellationToken);
+        Assert.Equal(KeyValueResponseType.Set, response);
+        Assert.Equal(0, revision);
+        
+        keyName = prefix + GetRandomValue();
+        value = Encoding.UTF8.GetBytes(GetRandomValue());
+        
+        (response, revision, _) = await kahuna3.LocateAndTrySetKeyValue(HLCTimestamp.Zero, keyName, value, null, -1, KeyValueFlags.Set, 0, durability, TestContext.Current.CancellationToken);
+        Assert.Equal(KeyValueResponseType.Set, response);
+        Assert.Equal(0, revision);
+        
+        KeyValueGetByPrefixResult result = await kahuna1.ScanAllByPrefix(prefix, durability, TestContext.Current.CancellationToken);
+        Assert.Equal(3, result.Items.Count);
+        
+        keyName = prefix + GetRandomValue();
+        value = Encoding.UTF8.GetBytes(GetRandomValue());
+        
+        (response, revision, _) = await kahuna2.LocateAndTrySetKeyValue(HLCTimestamp.Zero, keyName, value, null, -1, KeyValueFlags.Set, 0, durability, TestContext.Current.CancellationToken);
+        Assert.Equal(KeyValueResponseType.Set, response);
+        Assert.Equal(0, revision);
+        
+        result = await kahuna1.ScanAllByPrefix(prefix, durability, TestContext.Current.CancellationToken);
+        Assert.Equal(4, result.Items.Count);
+
+        ValidateGetByPrefixItems(prefix, result.Items);
+        
+        keyName = prefix + GetRandomValue();
+        value = Encoding.UTF8.GetBytes(GetRandomValue());
+        
+        (response, revision, _) = await kahuna3.LocateAndTrySetKeyValue(HLCTimestamp.Zero, keyName, value, null, -1, KeyValueFlags.Set, 0, durability, TestContext.Current.CancellationToken);
+        Assert.Equal(KeyValueResponseType.Set, response);
+        Assert.Equal(0, revision);
+        
+        result = await kahuna2.ScanAllByPrefix(prefix, durability, TestContext.Current.CancellationToken);
+        Assert.Equal(5, result.Items.Count);
+        
+        ValidateGetByPrefixItems(prefix, result.Items);
+        
+        (response, revision, _) = await kahuna2.LocateAndTryDeleteKeyValue(HLCTimestamp.Zero, keyName, durability, TestContext.Current.CancellationToken);
+        Assert.Equal(KeyValueResponseType.Deleted, response);
+        Assert.Equal(0, revision);
+        
+        result = await kahuna3.ScanAllByPrefix(prefix, durability, TestContext.Current.CancellationToken);
+        Assert.Equal(4, result.Items.Count);
+        
+        ValidateGetByPrefixItems(prefix, result.Items);
+
+        await LeaveCluster(node1, node2, node3);
+    }
+
+    private static void ValidateGetByPrefixItems(string prefix, List<(string, ReadOnlyKeyValueContext)> resultItems)
+    {
+        foreach ((string key, ReadOnlyKeyValueContext value) in resultItems)
+        {
+            Assert.StartsWith(prefix, key);
+            Assert.Equal(0, value.Revision);
+            Assert.NotNull(value.Value);
+            Assert.Equal(10, value.Value.Length);
+        }
     }
 }

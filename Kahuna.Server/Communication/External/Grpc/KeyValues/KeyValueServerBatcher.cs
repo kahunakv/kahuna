@@ -182,6 +182,22 @@ internal sealed class KeyValueServerBatcher
                     }
                     break;
                     
+                    case GrpcServerBatchType.ServerTryGetByPrefix:
+                    {
+                        GrpcGetByPrefixRequest? tryGetByPrefixRequest = request.GetByPrefix;
+
+                        tasks.Add(GetByPrefixDelayed(semaphore, request.RequestId, tryGetByPrefixRequest, responseStream, context));
+                    }
+                    break;
+                    
+                    case GrpcServerBatchType.ServerTryScanByPrefix:
+                    {
+                        GrpcScanByPrefixRequest? tryScanByPrefixRequest = request.ScanByPrefix;
+
+                        tasks.Add(ScanByPrefixDelayed(semaphore, request.RequestId, tryScanByPrefixRequest, responseStream, context));
+                    }
+                    break;
+                    
                     case GrpcServerBatchType.ServerTryStartTransaction:
                     {
                         GrpcStartTransactionRequest? startTransactionRequest = request.StartTransaction;
@@ -207,9 +223,7 @@ internal sealed class KeyValueServerBatcher
                     break;
 
                     case GrpcServerBatchType.ServerTypeNone:
-                    case GrpcServerBatchType.ServerTryGetByPrefix:
-                    case GrpcServerBatchType.ServerTryScanByPrefix:
-                    default:                                                
+                    default:
                         logger.LogError("Unknown batch Server request type: {Type}", request.Type);
                         break;
                 }
@@ -563,6 +577,46 @@ internal sealed class KeyValueServerBatcher
         await WriteResponseToStream(semaphore, responseStream, response, context);
     }
     
+    private async Task GetByPrefixDelayed(
+        SemaphoreSlim semaphore, 
+        int requestId, 
+        GrpcGetByPrefixRequest getByPrefixRequest, 
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcGetByPrefixResponse getByPrefixResponse = await service.GetByPrefixInternal(getByPrefixRequest, context);
+        
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type = GrpcServerBatchType.ServerTryGetByPrefix,
+            RequestId = requestId,
+            GetByPrefix = getByPrefixResponse
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+    
+    private async Task ScanByPrefixDelayed(
+        SemaphoreSlim semaphore, 
+        int requestId, 
+        GrpcScanByPrefixRequest scanByPrefixRequest, 
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcScanByPrefixResponse scanByPrefixResponse = await service.ScanByPrefixInternal(scanByPrefixRequest, context);
+        
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type = GrpcServerBatchType.ServerTryScanByPrefix,
+            RequestId = requestId,
+            ScanByPrefix = scanByPrefixResponse
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+       
     private async Task StartTransactionDelayed(
         SemaphoreSlim semaphore, 
         int requestId, 

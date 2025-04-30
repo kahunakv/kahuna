@@ -1,18 +1,13 @@
 
 using Kommander;
 using Kommander.Time;
-using Kommander.Communication.Grpc;
 using Kommander.Diagnostics;
 
-using Grpc.Net.Client;
 using System.Collections.Concurrent;
-using System.Runtime.InteropServices;
-using Google.Protobuf.Collections;
 
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Transactions.Data;
-using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues;
@@ -80,12 +75,9 @@ internal sealed class KeyValueLocator
         CancellationToken cancellationToken
     )
     {
-        if (string.IsNullOrEmpty(key))
+        if (string.IsNullOrEmpty(key) || expiresMs < 0)
             return (KeyValueResponseType.InvalidInput, 0, HLCTimestamp.Zero);
-        
-        if (expiresMs < 0)
-            return (KeyValueResponseType.InvalidInput, 0, HLCTimestamp.Zero);
-        
+
         int partitionId = raft.GetPartitionKey(key);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
@@ -349,6 +341,40 @@ internal sealed class KeyValueLocator
         logger.LogDebug("ACQUIRE-LOCK-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
         
         return await interNodeCommunication.TryAcquireExclusiveLock(leader, transactionId, key, expiresMs, durability, cancelationToken);
+    }
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="prefixKey"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public async Task<KeyValueResponseType> LocateAndTryAcquireExclusivePrefixLock(
+        HLCTimestamp transactionId,
+        string prefixKey,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        if (string.IsNullOrEmpty(prefixKey))
+            return KeyValueResponseType.InvalidInput;
+        
+        int partitionId = raft.GetPrefixPartitionKey(prefixKey);
+
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+            return await manager.TryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability);
+            
+        string leader = await raft.WaitForLeader(partitionId, cancellationToken);
+        if (leader == raft.GetLocalEndpoint())
+            return KeyValueResponseType.MustRetry;
+        
+        logger.LogDebug("ACQUIRE-PREFIX-LOCK-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", prefixKey, partitionId, leader);
+        
+        return KeyValueResponseType.MustRetry;
     }
     
     /// <summary>
@@ -955,69 +981,69 @@ internal sealed class KeyValueLocator
     }
 
     /// <summary>
-    /// Scans all nodes in the cluster and returns key/value pairs by prefix 
+    /// Scans all nodes in the cluster and returns key/value pairs by prefix
     /// </summary>
     /// <param name="prefixKeyName"></param>
     /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<KeyValueGetByPrefixResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability)
+    public async Task<KeyValueGetByPrefixResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        ConcurrentBag<(string, ReadOnlyKeyValueContext)> unionItems = [];
+        ConcurrentDictionary<string, ReadOnlyKeyValueContext> unionItems = [];
         
         KeyValueGetByPrefixResult items = await manager.ScanByPrefix(prefixKeyName, durability);
+
+        if (items.Type == KeyValueResponseType.Get)
+        {
+            foreach ((string, ReadOnlyKeyValueContext) item in items.Items)
+                unionItems.TryAdd(item.Item1, item.Item2);
+        }
 
         IList<RaftNode> nodes = raft.GetNodes();
         
         List<Task> tasks = new(nodes.Count);
-        
+
         foreach (RaftNode node in nodes)
-            tasks.Add(NodeScanByPrefix(unionItems, node, prefixKeyName, durability));
+            tasks.Add(NodeScanByPrefix(unionItems, node, prefixKeyName, durability, cancellationToken));
         
-        await Task.WhenAll(tasks);
-        
-        foreach ((string, ReadOnlyKeyValueContext) item in unionItems)
-            items.Items.Add(item);
+        await Task.WhenAll(tasks);               
 
-        return items;
-    }
-
-    private static async Task NodeScanByPrefix(ConcurrentBag<(string, ReadOnlyKeyValueContext)> unionItems, RaftNode node, string prefixKeyName, KeyValueDurability durability)
-    {                
-        GrpcChannel channel = SharedChannels.GetChannel(node.Endpoint);
-            
-        GrpcScanByPrefixRequest request = new()
+        if (durability == KeyValueDurability.Persistent)
         {
-            PrefixKey = prefixKeyName,
-            Durability = (GrpcKeyValueDurability)durability,
-        };
-            
-        KeyValuer.KeyValuerClient client = new(channel);
+            KeyValueGetByPrefixResult result = await manager.ScanByPrefixFromDisk(prefixKeyName);
 
-        GrpcScanByPrefixResponse? response = await client.ScanByPrefixAsync(request);
-
-        if (response.Type == GrpcKeyValueResponseType.TypeGot)
-        {
-            foreach (GrpcKeyValueByPrefixItemResponse item in response.Items)
-                unionItems.Add(ScanByPrefixItems(item));
+            if (items.Type == KeyValueResponseType.Get)
+            {
+                foreach ((string, ReadOnlyKeyValueContext) item in result.Items)
+                    unionItems.TryAdd(item.Item1, item.Item2);
+            }
         }
-    }
 
-    private static (string, ReadOnlyKeyValueContext) ScanByPrefixItems(GrpcKeyValueByPrefixItemResponse item)
+        return new(KeyValueResponseType.Get, unionItems.Select(kv => (kv.Key, kv.Value)).ToList());
+    }
+    
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="unionItems"></param>
+    /// <param name="node"></param>
+    /// <param name="prefixKeyName"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    private async Task NodeScanByPrefix(
+        ConcurrentDictionary<string, ReadOnlyKeyValueContext> unionItems, 
+        RaftNode node, 
+        string prefixKeyName, 
+        KeyValueDurability durability, 
+        CancellationToken cancellationToken
+    )
     {
-        byte[]? value;
-            
-        if (MemoryMarshal.TryGetArray(item.Value.Memory, out ArraySegment<byte> segment))
-            value = segment.Array;
-        else
-            value = item.Value.ToByteArray();
+        KeyValueGetByPrefixResult response = await interNodeCommunication.ScanByPrefix(node.Endpoint, prefixKeyName, durability, cancellationToken);
         
-        return (item.Key, new(
-            value,
-            item.Revision,
-            new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter),
-            new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter),
-            new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
-            (KeyValueState)item.State
-        ));
+        if (response.Type == KeyValueResponseType.Get)
+        {
+            foreach ((string, ReadOnlyKeyValueContext) item in response.Items)
+                unionItems.TryAdd(item.Item1, item.Item2);
+        }
     }    
 }

@@ -505,6 +505,10 @@ internal sealed class GrpcBatcher
 
             await sharedStreaming.KeyValueStreaming.RequestStream.WriteAsync(batchRequest);
         }
+        catch (RpcException ex) when (ex.StatusCode == StatusCode.Unavailable)
+        {
+            Console.WriteLine("Disconnected. Recreating channel...");
+        }
         finally
         {
             sharedStreaming.Semaphore.Release();
@@ -597,39 +601,46 @@ internal sealed class GrpcBatcher
     /// <param name="streaming">The asynchronous duplex streaming call containing lock request and response messages.</param>
     private static async Task ReadLockMessages(AsyncDuplexStreamingCall<GrpcBatchClientLockRequest, GrpcBatchClientLockResponse> streaming)
     {
-        await foreach (GrpcBatchClientLockResponse response in streaming.ResponseStream.ReadAllAsync())
+        try
         {
-            if (!requestRefs.TryGetValue(response.RequestId, out GrpcBatcherItem item))
+            await foreach (GrpcBatchClientLockResponse response in streaming.ResponseStream.ReadAllAsync())
             {
-                Console.WriteLine("Request not found " + response.RequestId);
-                continue;
-            }
-            
-            switch (response.Type)
-            {
-                case GrpcLockClientBatchType.TypeTryLock:
-                    item.Promise.SetResult(new(response.TryLock));
-                    break;
-                
-                case GrpcLockClientBatchType.TypeUnlock:
-                    item.Promise.SetResult(new(response.Unlock));
-                    break;
-                
-                case GrpcLockClientBatchType.TypeExtendLock:
-                    item.Promise.SetResult(new(response.ExtendLock));
-                    break;
-                
-                case GrpcLockClientBatchType.TypeGetLock:
-                    item.Promise.SetResult(new(response.GetLock));
-                    break;
-                        
-                case GrpcLockClientBatchType.TypeNone:
-                default:
-                    item.Promise.SetException(new KahunaException("Unknown response type: " + response.Type,LockResponseType.Errored));
-                    break;
-            }
+                if (!requestRefs.TryGetValue(response.RequestId, out GrpcBatcherItem item))
+                {
+                    Console.WriteLine("Request not found " + response.RequestId);
+                    continue;
+                }
 
-            requestRefs.TryRemove(response.RequestId, out _);
+                switch (response.Type)
+                {
+                    case GrpcLockClientBatchType.TypeTryLock:
+                        item.Promise.SetResult(new(response.TryLock));
+                        break;
+
+                    case GrpcLockClientBatchType.TypeUnlock:
+                        item.Promise.SetResult(new(response.Unlock));
+                        break;
+
+                    case GrpcLockClientBatchType.TypeExtendLock:
+                        item.Promise.SetResult(new(response.ExtendLock));
+                        break;
+
+                    case GrpcLockClientBatchType.TypeGetLock:
+                        item.Promise.SetResult(new(response.GetLock));
+                        break;
+
+                    case GrpcLockClientBatchType.TypeNone:
+                    default:
+                        item.Promise.SetException(new KahunaException("Unknown response type: " + response.Type, LockResponseType.Errored));
+                        break;
+                }
+
+                requestRefs.TryRemove(response.RequestId, out _);
+            }
+        }
+        catch (RpcException ex) when (ex.StatusCode == StatusCode.Unavailable)
+        {
+            // Reconnect or retry
         }
     }
 
@@ -692,6 +703,16 @@ internal sealed class GrpcBatcher
     }
 
     private static List<GrpcChannel> CreateSharedChannels(string url)
+    {                
+        List<GrpcChannel> urlChannels = new(2);
+        
+        for (int i = 0; i < 2; i++)       
+            urlChannels.Add(CreateChannelInternal(url));        
+
+        return urlChannels;
+    }
+
+    private static GrpcChannel CreateChannelInternal(string url)
     {
         SslClientAuthenticationOptions sslOptions = new()
         {
@@ -705,7 +726,7 @@ internal sealed class GrpcBatcher
             PooledConnectionIdleTimeout = Timeout.InfiniteTimeSpan,
             KeepAlivePingDelay = TimeSpan.FromSeconds(30),
             KeepAlivePingTimeout = TimeSpan.FromSeconds(10),
-            EnableMultipleHttp2Connections = true
+            EnableMultipleHttp2Connections = true,            
         };
         
         MethodConfig defaultMethodConfig = new()
@@ -720,17 +741,11 @@ internal sealed class GrpcBatcher
                 RetryableStatusCodes = { StatusCode.Unavailable }
             }
         };
-        
-        List<GrpcChannel> urlChannels = new(2);
-        
-        for (int i = 0; i < 2; i++)
-        {
-            urlChannels.Add(GrpcChannel.ForAddress(url, new() {
-                HttpHandler = handler,
-                ServiceConfig = new() { MethodConfigs = { defaultMethodConfig } }
-            }));
-        }
 
-        return urlChannels;
+        return GrpcChannel.ForAddress(url, new()
+        {
+            HttpHandler = handler,
+            ServiceConfig = new() { MethodConfigs = { defaultMethodConfig } }
+        });
     }
 }

@@ -110,7 +110,14 @@ public sealed class LockManager
         List<IActorRef<LockActor, LockRequest, LockResponse>> ephemeralInstances = new(configuration.LocksWorkers);
 
         for (int i = 0; i < configuration.LocksWorkers; i++)
-            ephemeralInstances.Add(actorSystem.Spawn<LockActor, LockRequest, LockResponse>("ephemeral-lock-" + i, backgroundWriter, persistenceBackend, raft, logger));
+            ephemeralInstances.Add(actorSystem.Spawn<LockActor, LockRequest, LockResponse>(
+                "ephemeral-lock-" + i, 
+                backgroundWriter, 
+                persistenceBackend, 
+                raft,
+                configuration,
+                logger
+            ));
 
         return actorSystem.CreateConsistentHashRouter(ephemeralInstances);
     }
@@ -130,7 +137,14 @@ public sealed class LockManager
         List<IActorRef<LockActor, LockRequest, LockResponse>> persistentInstances = new(configuration.LocksWorkers);
 
         for (int i = 0; i < configuration.LocksWorkers; i++)
-            persistentInstances.Add(actorSystem.Spawn<LockActor, LockRequest, LockResponse>("persistent-lock-" + i, backgroundWriter, persistenceBackend, raft, logger));
+            persistentInstances.Add(actorSystem.Spawn<LockActor, LockRequest, LockResponse>(
+                "persistent-lock-" + i, 
+                backgroundWriter, 
+                persistenceBackend, 
+                raft,
+                configuration,
+                logger
+            ));
         
         return actorSystem.CreateConsistentHashRouter(persistentInstances);
     }
