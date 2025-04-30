@@ -1,6 +1,6 @@
 
 using Google.Protobuf;
-
+using Kahuna.Server.Configuration;
 using Nixie;
 using Kommander;
 using Kommander.Time;
@@ -28,10 +28,11 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
+        KahunaConfiguration configuration,
         ILogger<IKahuna> logger
-    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger)
+    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger)
     {
-
+        
     }
 
     public async Task<KeyValueResponse> Execute(KeyValueRequest message)

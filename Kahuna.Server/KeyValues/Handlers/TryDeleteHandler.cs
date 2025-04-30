@@ -1,4 +1,5 @@
 
+using Kahuna.Server.Configuration;
 using Nixie;
 
 using Kommander;
@@ -23,10 +24,11 @@ internal sealed class TryDeleteHandler : BaseHandler
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
+        KahunaConfiguration configuration,
         ILogger<IKahuna> logger
-    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger)
+    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger)
     {
-
+        
     }
 
     public async Task<KeyValueResponse> Execute(KeyValueRequest message)

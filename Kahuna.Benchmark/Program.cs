@@ -14,7 +14,7 @@ using Kahuna.Shared.Locks;
 Console.WriteLine("Kahuna Benchmark");
 
 const int numberOfTasks = 750;
-const int MaxTokens = 5_000;
+const int MaxTokens = 15_000;
 
 List<string> tokens = new(MaxTokens);
 
@@ -39,16 +39,17 @@ List<Task> tasks = new(numberOfTasks);
 
 Stopwatch stopwatch = Stopwatch.StartNew();
 
-for (int j = 0; j < 10; j++)
+for (int j = 0; j < 2000; j++)
 {
     tasks.Clear();
 
     for (int i = 0; i < numberOfTasks; i++)
     {
-        int remainder = i % 7;
+        int remainder = (i + 1) % 8;
         
         switch (remainder)
         {
+            case 7:
             case 6:
             case 5:
             case 4:
@@ -79,6 +80,9 @@ for (int j = 0; j < 10; j++)
         Console.WriteLine($"Warm Up: {stopwatch.Elapsed}");
     else
         Console.WriteLine($"[{(j - 2) + 1}] Total time: {stopwatch.Elapsed}");
+
+    if ((j + 1) % 10 == 0)
+      await Task.Delay(5000);
 
     stopwatch.Restart();
 }

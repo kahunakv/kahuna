@@ -107,7 +107,13 @@ internal sealed class KeyValuesManager
         logger.LogDebug("Starting {Workers} ephemeral key/value workers", configuration.KeyValueWorkers);
 
         for (int i = 0; i < configuration.KeyValueWorkers; i++)
-            ephemeralInstances.Add(actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>("ephemeral-keyvalue-" + i, backgroundWriter, persistenceBackend, raft, logger));
+            ephemeralInstances.Add(actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                "ephemeral-keyvalue-" + i, backgroundWriter, 
+                persistenceBackend, 
+                raft,
+                configuration,
+                logger
+            ));
 
         return actorSystem.CreateConsistentHashRouter(ephemeralInstances);
     }
@@ -126,7 +132,13 @@ internal sealed class KeyValuesManager
         logger.LogDebug("Starting {Workers} persistent key/value workers", configuration.KeyValueWorkers);
 
         for (int i = 0; i < configuration.KeyValueWorkers; i++)
-            persistentInstances.Add(actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>("persistent-keyvalue-" + i, backgroundWriter, persistenceBackend, raft, logger));
+            persistentInstances.Add(actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                "persistent-keyvalue-" + i, backgroundWriter, 
+                persistenceBackend, 
+                raft, 
+                configuration,
+                logger
+            ));
         
         return actorSystem.CreateConsistentHashRouter(persistentInstances);
     }
@@ -539,8 +551,6 @@ internal sealed class KeyValuesManager
     /// <returns>A task that represents the asynchronous operation. The task result contains a list of responses for each set request, indicating the outcome of the operation.</returns>
     public async Task<List<KahunaSetKeyValueResponseItem>> SetManyNodeKeyValue(List<KahunaSetKeyValueRequestItem> items)
     {
-        //throw new NotImplementedException();
-        
         Lock sync = new();
         List<KahunaSetKeyValueResponseItem> responses = new(items.Count);
 
@@ -958,11 +968,11 @@ internal sealed class KeyValuesManager
     }
     
     /// <summary>
-    /// Passes a TryPrepare request to the key/value actor for the given keys.
+    /// Passes many TryPrepare requests to the key/value actor for the given keys.
     /// </summary>
     /// <param name="transactionId"></param>
-    /// <param name="key"></param>
-    /// <param name="durability"></param>
+    /// <param name="commitId"></param>
+    /// <param name="keys"></param>
     /// <returns></returns>
     public async Task<List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> TryPrepareManyMutations(
         HLCTimestamp transactionId,
@@ -1054,9 +1064,7 @@ internal sealed class KeyValuesManager
     /// Passes many TryCommit requests to the key/value actor for the given keyValue name.
     /// </summary>
     /// <param name="transactionId"></param>
-    /// <param name="key"></param>
-    /// <param name="proposalTicketId"></param>
-    /// <param name="durability"></param>
+    /// <param name="keys"></param>
     /// <returns></returns>
     public async Task<List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)>> TryCommitManyMutations(
         HLCTimestamp transactionId, 

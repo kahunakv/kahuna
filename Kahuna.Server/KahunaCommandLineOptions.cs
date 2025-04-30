@@ -78,4 +78,16 @@ public sealed class KahunaCommandLineOptions
     
     [Option("write-io-threads", Required = false, HelpText = "Write I/O threads", Default = 8)]
     public int WriteIOThreads { get; set; } = 8;
+
+    [Option("script-cache-expiration", Required = false, HelpText = "Script cache expiration (in seconds)", Default = 600)]
+    public int ScriptCacheExpiration { get; set; } = 600;
+
+    [Option("revisions-to-cache", Required = false, HelpText = "Number of revisions to keep cached in memory", Default = 4)]
+    public int RevisionsToKeepCached { get; set; } = 4;
+
+    [Option("cache-entry-ttl", Required = false, HelpText = "Maximum age of cache entries before eviction (in seconds)", Default = 1800)]
+    public int CacheEntryTtl { get; set; } = 1800; // 30 minutes
+    
+    [Option("cache-entries-to-remove", Required = false, HelpText = "Maximum number of cache entries to remove per eviction process", Default = 100)]
+    public int CacheEntriesToRemove { get; set; } = 100; // 30 minutes
 }

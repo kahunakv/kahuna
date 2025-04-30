@@ -4,7 +4,7 @@ using Kommander;
 using Kommander.Time;
 using Google.Protobuf;
 using System.Diagnostics;
-
+using Kahuna.Server.Configuration;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
@@ -22,7 +22,7 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
     /// <summary>
     /// 
     /// </summary>
-    private const int CollectThreshold = 1000;
+    private const int CollectThreshold = 500;
     
     private readonly IActorContext<LockActor, LockRequest, LockResponse> actorContext;
 
@@ -31,6 +31,8 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
     private readonly IPersistenceBackend persistenceBackend;
 
     private readonly IRaft raft;
+    
+    private readonly KahunaConfiguration configuration;
 
     private readonly Dictionary<string, LockContext> locks = new();
     
@@ -46,13 +48,17 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
     /// Constructor
     /// </summary>
     /// <param name="actorContext"></param>
+    /// <param name="backgroundWriter"></param>
+    /// <param name="persistenceBackend"></param>
     /// <param name="raft"></param>
+    /// <param name="configuration"></param>
     /// <param name="logger"></param>
     public LockActor(
         IActorContext<LockActor, LockRequest, LockResponse> actorContext,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft, 
+        KahunaConfiguration configuration,
         ILogger<IKahuna> logger
     )
     {
@@ -60,6 +66,7 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
         this.backgroundWriter = backgroundWriter;
         this.persistenceBackend = persistenceBackend;
         this.raft = raft;
+        this.configuration = configuration;
         this.logger = logger;
     }
 
@@ -379,11 +386,12 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
 
     private void Collect()
     {
-        if (locks.Count < 2000)
+        int count = locks.Count;
+        if (count < 200)
             return;
         
         int number = 0;
-        TimeSpan range = TimeSpan.FromMinutes(30);
+        TimeSpan range = configuration.CacheEntryTtl;
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
         foreach (KeyValuePair<string, LockContext> key in locks)
@@ -394,16 +402,15 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
             keysToEvict.Add(key.Key);
             number++;
             
-            if (number > 100)
+            if (number > configuration.CacheEntriesToRemove)
                 break;
         }
 
         foreach (string key in keysToEvict)
-        {
             locks.Remove(key);
-            
-            Console.WriteLine("Removed {0}", key);
-        }
+        
+        if (keysToEvict.Count > 0)
+            logger.LogDebug("Evicted {Count} key/value pairs", keysToEvict.Count);
         
         keysToEvict.Clear();
     }

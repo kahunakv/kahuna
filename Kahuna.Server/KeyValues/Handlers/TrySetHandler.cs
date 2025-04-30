@@ -3,6 +3,7 @@ using Nixie;
 using Kommander;
 using Kommander.Time;
 
+using Kahuna.Server.Configuration;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
@@ -17,8 +18,9 @@ internal sealed class TrySetHandler : BaseHandler
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
+        KahunaConfiguration configuration,
         ILogger<IKahuna> logger
-    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger)
+    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger)
     {
         
     }
@@ -211,3 +213,4 @@ internal sealed class TrySetHandler : BaseHandler
         return new(KeyValueResponseType.Set, context.Revision);
     }   
 }
+

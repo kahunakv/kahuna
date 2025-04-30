@@ -1,5 +1,6 @@
 
 using Google.Protobuf;
+using Kahuna.Server.Configuration;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
@@ -12,8 +13,14 @@ using Nixie;
 
 namespace Kahuna.Server.KeyValues.Handlers;
 
+/// <summary>
+/// Base class for handling key/value operations.
+/// </summary>
 internal abstract class BaseHandler
 {
+    /// <summary>
+    /// Represents the background writer actor reference.
+    /// </summary>
     protected readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
     
     protected readonly IRaft raft;
@@ -21,6 +28,8 @@ internal abstract class BaseHandler
     protected readonly IPersistenceBackend PersistenceBackend;
 
     protected readonly BTree<string, KeyValueContext> keyValuesStore;
+
+    protected readonly KahunaConfiguration configuration;
 
     protected readonly ILogger<IKahuna> logger;
     
@@ -31,6 +40,7 @@ internal abstract class BaseHandler
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
+        KahunaConfiguration configuration,
         ILogger<IKahuna> logger
     )
     {
@@ -38,6 +48,7 @@ internal abstract class BaseHandler
         this.raft = raft;
         this.PersistenceBackend = persistenceBackend;
         this.keyValuesStore = keyValuesStore;
+        this.configuration = configuration;
         this.logger = logger;
     }
     
@@ -152,8 +163,8 @@ internal abstract class BaseHandler
             
         foreach (KeyValuePair<long, byte[]?> kv in context.Revisions)
         {
-            if (kv.Key < (refRevision - 4))                
-                revisionsToRemove.Add(kv.Key);                
+            if (kv.Key < (refRevision - configuration.RevisionsToKeepCached))                
+                revisionsToRemove.Add(kv.Key);
         }
 
         if (revisionsToRemove.Count > 0)

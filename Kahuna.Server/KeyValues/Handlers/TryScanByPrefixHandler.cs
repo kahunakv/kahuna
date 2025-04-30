@@ -1,4 +1,5 @@
 
+using Kahuna.Server.Configuration;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
@@ -16,9 +17,6 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// This handler iterates over the key-value store, filters entries that match the given prefix, discards expired entries,
 /// and returns the filtered entries in lexicographical order. 
 /// </remarks>
-/// <threadsafety>
-/// This class is intended for use in a multi-threaded actor context, ensuring encapsulated access to shared resources.
-/// </threadsafety>
 internal sealed class TryScanByPrefixHandler : BaseHandler
 {
     public TryScanByPrefixHandler(
@@ -26,10 +24,11 @@ internal sealed class TryScanByPrefixHandler : BaseHandler
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
+        KahunaConfiguration configuration,
         ILogger<IKahuna> logger
-    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger)
+    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger)
     {
-
+        
     }
 
     /// <summary>

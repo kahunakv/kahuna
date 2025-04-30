@@ -23,7 +23,9 @@ public static class ConfigurationValidator
             StoragePath = opts.StoragePath,
             StorageRevision = opts.StorageRevision,
             DefaultTransactionTimeout = opts.DefaultTransactionTimeout,
-            ScriptCacheExpiration = TimeSpan.FromMinutes(10)
+            ScriptCacheExpiration = TimeSpan.FromSeconds(opts.ScriptCacheExpiration),
+            CacheEntryTtl = TimeSpan.FromSeconds(opts.CacheEntryTtl),
+            CacheEntriesToRemove = opts.CacheEntriesToRemove,
         };
         
         if (!string.IsNullOrEmpty(configuration.HttpsCertificate))

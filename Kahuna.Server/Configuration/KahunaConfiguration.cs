@@ -24,4 +24,10 @@ public sealed class KahunaConfiguration
     public TimeSpan ScriptCacheExpiration { get; set; }
     
     public int DefaultTransactionTimeout { get; set; }
+    
+    public int RevisionsToKeepCached { get; set; }
+    
+    public TimeSpan CacheEntryTtl { get; set; }
+    
+    public int CacheEntriesToRemove { get; set; }
 }

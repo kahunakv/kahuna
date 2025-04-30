@@ -1,4 +1,5 @@
 
+using Kahuna.Server.Configuration;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
@@ -20,12 +21,9 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// It also supports persistence operations for cases requiring data durability.
 /// </remarks>
 /// <example>
-/// This class is typically invoked as part of the key-value actor's workflow when a rollback request
+/// This class is typically invoked as part of the Two Phase Commit (2PC) workflow when a rollback request
 /// is received. It interacts with the <c>KeyValueContext</c>, persistence systems, and logs any relevant warnings or errors.
 /// </example>
-/// <threadsafety>
-/// Instances of this class are expected to be thread-safe as they may operate concurrently within an actor-based system.
-/// </threadsafety>
 internal sealed class TryRollbackMutationsHandler : BaseHandler
 {
     public TryRollbackMutationsHandler(
@@ -33,10 +31,11 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
+        KahunaConfiguration configuration,
         ILogger<IKahuna> logger
-    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger)
+    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger)
     {
-
+        
     }
 
     public async Task<KeyValueResponse> Execute(KeyValueRequest message)

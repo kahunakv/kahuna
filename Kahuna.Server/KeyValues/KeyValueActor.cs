@@ -2,7 +2,7 @@
 using Nixie;
 using Kommander;
 using System.Diagnostics;
-
+using Kahuna.Server.Configuration;
 using Kahuna.Server.Persistence;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Server.KeyValues.Handlers;
@@ -24,7 +24,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// Once the specified number of operations has been reached, a collection process
     /// is initiated to manage resources, such as potentially clearing cached or temporary data.
     /// </summary>
-    private const int CollectThreshold = 1000;
+    private const int CollectThreshold = 500;
 
     /// <summary>
     /// Provides the execution context for the KeyValueActor, enabling interaction
@@ -173,25 +173,26 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
+        KahunaConfiguration configuration,
         ILogger<IKahuna> logger
     )
     {
         this.actorContext = actorContext;
         this.logger = logger;
 
-        trySetHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
-        tryExtendHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
-        tryDeleteHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
-        tryGetHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
-        tryScanByPrefixHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
-        tryGetByPrefixHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
-        tryExistsHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
-        tryAcquireExclusiveLockHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
-        tryReleaseExclusiveLockHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
-        tryPrepareMutationsHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
-        tryCommitMutationsHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
-        tryRollbackMutationsHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
-        tryCollectHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger);
+        trySetHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryExtendHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryDeleteHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryGetHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryScanByPrefixHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryGetByPrefixHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryExistsHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryAcquireExclusiveLockHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryReleaseExclusiveLockHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryPrepareMutationsHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryCommitMutationsHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryRollbackMutationsHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryCollectHandler = new(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger);
     }
 
     /// <summary>
@@ -219,6 +220,8 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 message.TransactionId,
                 message.Durability
             );
+            
+            // Console.WriteLine("{0}", operations);
 
             if (--operations == 0)
             {

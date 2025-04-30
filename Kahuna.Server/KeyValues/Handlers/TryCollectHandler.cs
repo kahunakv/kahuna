@@ -1,4 +1,5 @@
 
+using Kahuna.Server.Configuration;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Utils;
@@ -22,25 +23,27 @@ internal sealed class TryCollectHandler : BaseHandler
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
+        KahunaConfiguration configuration,
         ILogger<IKahuna> logger
-    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, logger)
+    ) : base(keyValuesStore, backgroundWriter, persistenceBackend, raft, configuration, logger)
     {
-
+        
     }
 
     public void Execute()
     {
-        if (keyValuesStore.Count < 200)
+        int count = keyValuesStore.Count;
+        if (count < 200)
             return;
-        
+
         int number = 0;
-        TimeSpan range = TimeSpan.FromMinutes(30);
+        TimeSpan range = configuration.CacheEntryTtl;
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
         // Step 1: Evict expired keys
         foreach (KeyValuePair<string, KeyValueContext> key in keyValuesStore.GetItems())
         {
-            if (number >= 100)
+            if (number >= configuration.CacheEntriesToRemove)
                 break;
             
             if (key.Value.WriteIntent is not null)
@@ -59,7 +62,7 @@ internal sealed class TryCollectHandler : BaseHandler
         // Step 2: Evict deleted keys
         foreach (KeyValuePair<string, KeyValueContext> key in keyValuesStore.GetItems())
         {
-            if (number >= 100)
+            if (number >= configuration.CacheEntriesToRemove)
                 break;
             
             if (key.Value.WriteIntent is not null)
@@ -75,7 +78,7 @@ internal sealed class TryCollectHandler : BaseHandler
         // Step 3: Evict keys that haven't been used in a while
         foreach (KeyValuePair<string, KeyValueContext> key in keyValuesStore.GetItems())
         {
-            if (number >= 100)
+            if (number >= configuration.CacheEntriesToRemove)
                 break;
             
             if (key.Value.WriteIntent is not null)
@@ -89,11 +92,10 @@ internal sealed class TryCollectHandler : BaseHandler
         }
 
         foreach (string key in keysToEvict)
-        {
             keyValuesStore.Remove(key);
-            
-            logger.LogDebug("Evicted {Key}", key);
-        }
+        
+        if (keysToEvict.Count > 0)
+            logger.LogDebug("Evicted {Count} key/value pairs", keysToEvict.Count);
         
         keysToEvict.Clear();
         
