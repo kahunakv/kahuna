@@ -374,7 +374,7 @@ internal sealed class KeyValueLocator
         
         logger.LogDebug("ACQUIRE-PREFIX-LOCK-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", prefixKey, partitionId, leader);
         
-        return KeyValueResponseType.MustRetry;
+        return await interNodeCommunication.TryAcquireExclusivePrefixLock(leader, transactionId, prefixKey, expiresMs, durability, cancellationToken);
     }
     
     /// <summary>
@@ -474,6 +474,40 @@ internal sealed class KeyValueLocator
         logger.LogDebug("RELEASE-LOCK-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
         
         return await interNodeCommunication.TryReleaseExclusiveLock(leader, transactionId, key, durability, cancellationToken);
+    }
+    
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="prefixKey"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public async Task<KeyValueResponseType> LocateAndTryReleaseExclusivePrefixLock(
+        HLCTimestamp transactionId,
+        string prefixKey,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        if (string.IsNullOrEmpty(prefixKey))
+            return KeyValueResponseType.InvalidInput;
+        
+        int partitionId = raft.GetPrefixPartitionKey(prefixKey);
+
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+            return await manager.TryReleaseExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability);
+            
+        string leader = await raft.WaitForLeader(partitionId, cancellationToken);
+        if (leader == raft.GetLocalEndpoint())
+            return KeyValueResponseType.MustRetry;
+        
+        logger.LogDebug("RELEASE-PREFIX-LOCK-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", prefixKey, partitionId, leader);
+        
+        return await interNodeCommunication.TryAcquireExclusivePrefixLock(leader, transactionId, prefixKey, expiresMs, durability, cancellationToken);
     }
     
     /// <summary>

@@ -157,6 +157,15 @@ internal sealed class GrpcServerBatcher
         return TryProcessQueue(grpcBatcherItem, promise);
     }
     
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryAcquireExclusivePrefixLockRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
     public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryAcquireManyExclusiveLocksRequest message)
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -167,6 +176,15 @@ internal sealed class GrpcServerBatcher
     }
     
     public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryReleaseExclusiveLockRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+    
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryReleaseExclusivePrefixLockRequest message)
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -458,6 +476,11 @@ internal sealed class GrpcServerBatcher
             batchRequest.Type = GrpcServerBatchType.ServerTryAcquireExclusiveLock;
             batchRequest.TryAcquireExclusiveLock = itemRequest.TryAcquireExclusiveLock;
         }
+        else if (itemRequest.TryAcquireExclusivePrefixLock is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryAcquireExclusivePrefixLock;
+            batchRequest.TryAcquireExclusivePrefixLock = itemRequest.TryAcquireExclusivePrefixLock;
+        }
         else if (itemRequest.TryAcquireManyExclusiveLocks is not null)
         {
             batchRequest.Type = GrpcServerBatchType.ServerTryAcquireManyExclusiveLocks;
@@ -467,6 +490,11 @@ internal sealed class GrpcServerBatcher
         {
             batchRequest.Type = GrpcServerBatchType.ServerTryReleaseExclusiveLock;
             batchRequest.TryReleaseExclusiveLock = itemRequest.TryReleaseExclusiveLock;
+        }
+        else if (itemRequest.TryReleaseExclusivePrefixLock is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryReleaseExclusivePrefixLock;
+            batchRequest.TryReleaseExclusivePrefixLock = itemRequest.TryReleaseExclusivePrefixLock;
         }
         else if (itemRequest.TryReleaseManyExclusiveLocks is not null)
         {
@@ -630,6 +658,10 @@ internal sealed class GrpcServerBatcher
                     
                     case GrpcServerBatchType.ServerTryAcquireExclusiveLock:
                         item.Promise.SetResult(new(response.TryAcquireExclusiveLock));
+                        break;
+                    
+                    case GrpcServerBatchType.ServerTryAcquireExclusivePrefixLock:
+                        item.Promise.SetResult(new(response.TryAcquireExclusivePrefixLock));
                         break;
                     
                     case GrpcServerBatchType.ServerTryAcquireManyExclusiveLocks:

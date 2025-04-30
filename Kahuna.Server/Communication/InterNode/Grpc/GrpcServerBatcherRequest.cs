@@ -31,9 +31,13 @@ internal sealed class GrpcServerBatcherRequest
     
     public GrpcTryAcquireExclusiveLockRequest? TryAcquireExclusiveLock { get; }
     
+    public GrpcTryAcquireExclusivePrefixLockRequest? TryAcquireExclusivePrefixLock { get; }
+    
     public GrpcTryAcquireManyExclusiveLocksRequest? TryAcquireManyExclusiveLocks { get; }
     
     public GrpcTryReleaseExclusiveLockRequest? TryReleaseExclusiveLock { get; }
+    
+    public GrpcTryReleaseExclusivePrefixLockRequest? TryReleaseExclusivePrefixLock { get; }
     
     public GrpcTryReleaseManyExclusiveLocksRequest? TryReleaseManyExclusiveLocks { get; }
     
@@ -125,6 +129,11 @@ internal sealed class GrpcServerBatcherRequest
         TryAcquireExclusiveLock = tryAcquireExclusiveLock;
     }
     
+    public GrpcServerBatcherRequest(GrpcTryAcquireExclusivePrefixLockRequest tryAcquireExclusivePrefixLock)
+    {
+        TryAcquireExclusivePrefixLock = tryAcquireExclusivePrefixLock;
+    }
+    
     public GrpcServerBatcherRequest(GrpcTryAcquireManyExclusiveLocksRequest tryAcquireManyExclusiveLocks)
     {
         TryAcquireManyExclusiveLocks = tryAcquireManyExclusiveLocks;
@@ -133,6 +142,11 @@ internal sealed class GrpcServerBatcherRequest
     public GrpcServerBatcherRequest(GrpcTryReleaseExclusiveLockRequest tryReleaseExclusiveLock)
     {
         TryReleaseExclusiveLock = tryReleaseExclusiveLock;
+    }
+    
+    public GrpcServerBatcherRequest(GrpcTryReleaseExclusivePrefixLockRequest tryReleaseExclusivePrefixLock)
+    {
+        TryReleaseExclusivePrefixLock = tryReleaseExclusivePrefixLock;
     }
     
     public GrpcServerBatcherRequest(GrpcTryReleaseManyExclusiveLocksRequest tryReleaseManyExclusiveLocks)

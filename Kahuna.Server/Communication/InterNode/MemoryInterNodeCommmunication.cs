@@ -357,7 +357,23 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         
         throw new KahunaServerException($"The node {node} does not exist.");
     }
-    
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="node"></param>
+    /// <param name="transactionId"></param>
+    /// <param name="prefixKey"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    /// <exception cref="NotImplementedException"></exception>
+    public Task<KeyValueResponseType> TryAcquireExclusivePrefixLock(string node, HLCTimestamp transactionId, string prefixKey, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        throw new NotImplementedException();
+    }
+
     /// <summary>
     /// 
     /// </summary>
@@ -426,6 +442,22 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.TryReleaseExclusiveLock(transactionId, key, durability);
         
         throw new KahunaServerException($"The node {node} does not exist.");
+    }
+    
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="node"></param>
+    /// <param name="transactionId"></param>
+    /// <param name="prefixKey"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    /// <exception cref="NotImplementedException"></exception>
+    public Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(string node, HLCTimestamp transactionId, string prefixKey, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        throw new NotImplementedException();
     }
 
     /// <summary>

@@ -109,12 +109,18 @@ internal sealed class KeyValueTransactionContext
     /// </summary>
     /// <remarks>
     /// The <see cref="LocksAcquired"/> property maintains a collection of unique keys and their
-    /// respective durability levels that have been locked while processing a transaction.
-    /// This property helps ensure the proper management of locking mechanisms across
-    /// multiple commands in a transaction and prevents conflicting modifications to
-    /// shared resources.
+    /// respective durability levels that have been locked while processing a transaction.    
     /// </remarks>
     public HashSet<(string, KeyValueDurability)>? LocksAcquired { get; set; }
+    
+    /// <summary>
+    /// Tracks the set of prefix locks acquired during the execution of a transaction.
+    /// </summary>
+    /// <remarks>
+    /// The <see cref="PrefixLocksAcquired"/> property maintains a collection of unique prefix keys and their
+    /// respective durability levels that have been locked while processing a transaction.    
+    /// </remarks>
+    public HashSet<(string, KeyValueDurability)>? PrefixLocksAcquired { get; set; }
 
     /// <summary>
     /// Gets or sets the collection of keys modified during the transaction along with their durability specification.

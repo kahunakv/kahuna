@@ -31,9 +31,13 @@ internal sealed class GrpcServerBatcherResponse
     
     public GrpcTryAcquireExclusiveLockResponse? TryAcquireExclusiveLock { get; }
     
+    public GrpcTryAcquireExclusivePrefixLockResponse? TryAcquireExclusivePrefixLock { get; }
+    
     public GrpcTryAcquireManyExclusiveLocksResponse? TryAcquireManyExclusiveLocks { get; }
     
     public GrpcTryReleaseExclusiveLockResponse? TryReleaseExclusiveLock { get; }
+    
+    public GrpcTryReleaseExclusivePrefixLockResponse? TryReleaseExclusivePrefixLock { get; }
     
     public GrpcTryReleaseManyExclusiveLocksResponse? TryReleaseManyExclusiveLocks { get; }
     
@@ -126,6 +130,11 @@ internal sealed class GrpcServerBatcherResponse
         TryAcquireExclusiveLock = tryAcquireExclusiveLock;
     }
     
+    public GrpcServerBatcherResponse(GrpcTryAcquireExclusivePrefixLockResponse tryAcquireExclusivePrefixLock)
+    {
+        TryAcquireExclusivePrefixLock = tryAcquireExclusivePrefixLock;
+    }
+    
     public GrpcServerBatcherResponse(GrpcTryAcquireManyExclusiveLocksResponse tryAcquireManyExclusiveLocks)
     {
         TryAcquireManyExclusiveLocks = tryAcquireManyExclusiveLocks;
@@ -134,6 +143,11 @@ internal sealed class GrpcServerBatcherResponse
     public GrpcServerBatcherResponse(GrpcTryReleaseExclusiveLockResponse tryReleaseExclusiveLock)
     {
         TryReleaseExclusiveLock = tryReleaseExclusiveLock;
+    }
+    
+    public GrpcServerBatcherResponse(GrpcTryReleaseExclusivePrefixLockResponse tryReleaseExclusivePrefixLock)
+    {
+        TryReleaseExclusivePrefixLock = tryReleaseExclusivePrefixLock;
     }
     
     public GrpcServerBatcherResponse(GrpcTryReleaseManyExclusiveLocksResponse tryReleaseManyExclusiveLocks)

@@ -12,6 +12,7 @@ service KeyValuer {
   rpc TryAcquireManyExclusiveLocks (GrpcTryAcquireManyExclusiveLocksRequest) returns (GrpcTryAcquireManyExclusiveLocksResponse);
   rpc TryAcquireExclusivePrefixLock (GrpcTryAcquireExclusivePrefixLockRequest) returns (GrpcTryAcquireExclusivePrefixLockResponse);
   rpc TryReleaseExclusiveLock (GrpcTryReleaseExclusiveLockRequest) returns (GrpcTryReleaseExclusiveLockResponse);
+  rpc TryReleaseExclusivePrefixLock (GrpcTryReleaseExclusivePrefixLockRequest) returns (GrpcTryReleaseExclusivePrefixLockResponse);
   rpc TryReleaseManyExclusiveLocks (GrpcTryReleaseManyExclusiveLocksRequest) returns (GrpcTryReleaseManyExclusiveLocksResponse);
   rpc TryPrepareMutations (GrpcTryPrepareMutationsRequest) returns (GrpcTryPrepareMutationsResponse);
   rpc TryPrepareManyMutations (GrpcTryPrepareManyMutationsRequest) returns (GrpcTryPrepareManyMutationsResponse);
@@ -224,7 +225,7 @@ message GrpcTryAcquireExclusivePrefixLockRequest {
   int32 TransactionIdNode = 1;
   int64 TransactionIdPhysical = 2;
   uint32 TransactionIdCounter = 3;
-  string Key = 4;
+  string PrefixKey = 4;
   int32 ExpiresMs = 5;
   GrpcKeyValueDurability Durability = 6;
 }
@@ -290,6 +291,20 @@ message GrpcTryReleaseExclusiveLockRequest {
 }
 
 message GrpcTryReleaseExclusiveLockResponse {
+  optional string ServedFrom = 1;
+  GrpcKeyValueResponseType Type = 2;
+}
+
+message GrpcTryReleaseExclusivePrefixLockRequest {
+  int32 TransactionIdNode = 1;
+  int64 TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter = 3;
+  string PrefixKey = 4;
+  int32 ExpiresMs = 5;
+  GrpcKeyValueDurability Durability = 6;
+}
+
+message GrpcTryReleaseExclusivePrefixLockResponse {
   optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
 }
@@ -589,21 +604,23 @@ message GrpcBatchServerKeyValueRequest {
     GrpcTryExtendKeyValueRequest TryExtendKeyValue = 8;
     GrpcTryExistsKeyValueRequest TryExistsKeyValue = 9;
     GrpcTryExecuteTransactionScriptRequest TryExecuteTransactionScript = 10;
-    GrpcTryAcquireExclusiveLockRequest TryAcquireExclusiveLock = 11;   
-    GrpcTryAcquireManyExclusiveLocksRequest TryAcquireManyExclusiveLocks = 12;
-    GrpcTryReleaseExclusiveLockRequest TryReleaseExclusiveLock = 13;
-    GrpcTryReleaseManyExclusiveLocksRequest TryReleaseManyExclusiveLocks = 14;
-    GrpcTryPrepareMutationsRequest TryPrepareMutations = 15;
-    GrpcTryPrepareManyMutationsRequest TryPrepareManyMutations = 16;
-    GrpcTryCommitMutationsRequest TryCommitMutations = 17;
-    GrpcTryCommitManyMutationsRequest TryCommitManyMutations = 18;
-    GrpcTryRollbackMutationsRequest TryRollbackMutations = 19;
-    GrpcTryRollbackManyMutationsRequest TryRollbackManyMutations = 20;
-    GrpcGetByPrefixRequest GetByPrefix = 21;
-    GrpcScanByPrefixRequest ScanByPrefix = 22;
-    GrpcStartTransactionRequest StartTransaction = 23;
-    GrpcCommitTransactionRequest CommitTransaction = 24;
-    GrpcRollbackTransactionRequest RollbackTransaction = 25;
+    GrpcTryAcquireExclusiveLockRequest TryAcquireExclusiveLock = 11;
+    GrpcTryAcquireExclusivePrefixLockRequest TryAcquireExclusivePrefixLock = 12;
+    GrpcTryAcquireManyExclusiveLocksRequest TryAcquireManyExclusiveLocks = 13;
+    GrpcTryReleaseExclusiveLockRequest TryReleaseExclusiveLock = 14;
+    GrpcTryReleaseExclusivePrefixLockRequest TryReleaseExclusivePrefixLock = 15;
+    GrpcTryReleaseManyExclusiveLocksRequest TryReleaseManyExclusiveLocks = 16;
+    GrpcTryPrepareMutationsRequest TryPrepareMutations = 17;
+    GrpcTryPrepareManyMutationsRequest TryPrepareManyMutations = 18;
+    GrpcTryCommitMutationsRequest TryCommitMutations = 19;
+    GrpcTryCommitManyMutationsRequest TryCommitManyMutations = 20;
+    GrpcTryRollbackMutationsRequest TryRollbackMutations = 21;
+    GrpcTryRollbackManyMutationsRequest TryRollbackManyMutations = 22;
+    GrpcGetByPrefixRequest GetByPrefix = 23;
+    GrpcScanByPrefixRequest ScanByPrefix = 24;
+    GrpcStartTransactionRequest StartTransaction = 25;
+    GrpcCommitTransactionRequest CommitTransaction = 26;
+    GrpcRollbackTransactionRequest RollbackTransaction = 27;
   }
 }
 
@@ -620,20 +637,22 @@ message GrpcBatchServerKeyValueResponse
     GrpcTryExistsKeyValueResponse TryExistsKeyValue = 8;
     GrpcTryExecuteTransactionScriptResponse TryExecuteTransactionScript = 9;
     GrpcTryAcquireExclusiveLockResponse TryAcquireExclusiveLock = 10;
-    GrpcTryAcquireManyExclusiveLocksResponse TryAcquireManyExclusiveLocks = 11;
-    GrpcTryReleaseExclusiveLockResponse TryReleaseExclusiveLock = 12;
-    GrpcTryReleaseManyExclusiveLocksResponse TryReleaseManyExclusiveLocks = 13;
-    GrpcTryPrepareMutationsResponse TryPrepareMutations = 14;
-    GrpcTryPrepareManyMutationsResponse TryPrepareManyMutations = 15;
-    GrpcTryCommitMutationsResponse TryCommitMutations = 16;
-    GrpcTryCommitManyMutationsResponse TryCommitManyMutations = 17;
-    GrpcTryRollbackMutationsResponse TryRollbackMutations = 18;
-    GrpcTryRollbackManyMutationsResponse TryRollbackManyMutations = 19;
-    GrpcGetByPrefixResponse GetByPrefix = 20;
-    GrpcScanByPrefixResponse ScanByPrefix = 21;
-    GrpcStartTransactionResponse StartTransaction = 22;
-    GrpcCommitTransactionResponse CommitTransaction = 23;
-    GrpcRollbackTransactionResponse RollbackTransaction = 24;
+    GrpcTryAcquireExclusivePrefixLockResponse TryAcquireExclusivePrefixLock = 11;
+    GrpcTryAcquireManyExclusiveLocksResponse TryAcquireManyExclusiveLocks = 12;
+    GrpcTryReleaseExclusiveLockResponse TryReleaseExclusiveLock = 13;
+    GrpcTryReleaseExclusivePrefixLockResponse TryReleaseExclusivePrefixLock = 14;
+    GrpcTryReleaseManyExclusiveLocksResponse TryReleaseManyExclusiveLocks = 15;
+    GrpcTryPrepareMutationsResponse TryPrepareMutations = 16;
+    GrpcTryPrepareManyMutationsResponse TryPrepareManyMutations = 17;
+    GrpcTryCommitMutationsResponse TryCommitMutations = 18;
+    GrpcTryCommitManyMutationsResponse TryCommitManyMutations = 19;
+    GrpcTryRollbackMutationsResponse TryRollbackMutations = 20;
+    GrpcTryRollbackManyMutationsResponse TryRollbackManyMutations = 21;
+    GrpcGetByPrefixResponse GetByPrefix = 22;
+    GrpcScanByPrefixResponse ScanByPrefix = 23;
+    GrpcStartTransactionResponse StartTransaction = 24;
+    GrpcCommitTransactionResponse CommitTransaction = 25;
+    GrpcRollbackTransactionResponse RollbackTransaction = 26;
   }
 }
 
@@ -664,20 +683,22 @@ enum GrpcServerBatchType {
   SERVER_TRY_EXISTS_KEY_VALUE = 7;
   SERVER_TRY_EXECUTE_TRANSACTION_SCRIPT = 8; 
   SERVER_TRY_ACQUIRE_EXCLUSIVE_LOCK = 9;
-  SERVER_TRY_ACQUIRE_MANY_EXCLUSIVE_LOCKS = 10;
-  SERVER_TRY_RELEASE_EXCLUSIVE_LOCK = 11;
-  SERVER_TRY_RELEASE_MANY_EXCLUSIVE_LOCKS = 12;
-  SERVER_TRY_PREPARE_MUTATIONS = 13;
-  SERVER_TRY_PREPARE_MANY_MUTATIONS = 14;
-  SERVER_TRY_COMMIT_MUTATIONS = 15;
-  SERVER_TRY_COMMIT_MANY_MUTATIONS = 16;
-  SERVER_TRY_ROLLBACK_MUTATIONS = 17;
-  SERVER_TRY_ROLLBACK_MANY_MUTATIONS = 18;
-  SERVER_TRY_GET_BY_PREFIX = 19;
-  SERVER_TRY_SCAN_BY_PREFIX = 20;
-  SERVER_TRY_START_TRANSACTION = 21;
-  SERVER_TRY_COMMIT_TRANSACTION = 22;
-  SERVER_TRY_ROLLBACK_TRANSACTION = 23;
+  SERVER_TRY_ACQUIRE_EXCLUSIVE_PREFIX_LOCK = 10;
+  SERVER_TRY_ACQUIRE_MANY_EXCLUSIVE_LOCKS = 11;
+  SERVER_TRY_RELEASE_EXCLUSIVE_LOCK = 12;
+  SERVER_TRY_RELEASE_EXCLUSIVE_PREFIX_LOCK = 13;
+  SERVER_TRY_RELEASE_MANY_EXCLUSIVE_LOCKS = 14;
+  SERVER_TRY_PREPARE_MUTATIONS = 15;
+  SERVER_TRY_PREPARE_MANY_MUTATIONS = 16;
+  SERVER_TRY_COMMIT_MUTATIONS = 17;
+  SERVER_TRY_COMMIT_MANY_MUTATIONS = 18;
+  SERVER_TRY_ROLLBACK_MUTATIONS = 19;
+  SERVER_TRY_ROLLBACK_MANY_MUTATIONS = 20;
+  SERVER_TRY_GET_BY_PREFIX = 21;
+  SERVER_TRY_SCAN_BY_PREFIX = 22;
+  SERVER_TRY_START_TRANSACTION = 23;
+  SERVER_TRY_COMMIT_TRANSACTION = 24;
+  SERVER_TRY_ROLLBACK_TRANSACTION = 25;
 }
 
 enum GrpcKeyValueFlags {

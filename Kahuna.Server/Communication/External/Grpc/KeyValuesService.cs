@@ -478,15 +478,15 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns>A task that represents the asynchronous operation. The task result contains a response indicating whether the lock acquisition attempt succeeded or failed.</returns>
     internal async Task<GrpcTryAcquireExclusivePrefixLockResponse> TryAcquireExclusivePrefixLockInternal(GrpcTryAcquireExclusivePrefixLockRequest request, ServerCallContext context)
     {
-        if (string.IsNullOrEmpty(request.Key))
+        if (string.IsNullOrEmpty(request.PrefixKey))
             return new()
             {
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
         
-        (KeyValueResponseType type, _, _) = await keyValues.LocateAndTryAcquireExclusiveLock(
+        KeyValueResponseType type = await keyValues.LocateAndTryAcquireExclusivePrefixLock(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
-            request.Key, 
+            request.PrefixKey, 
             request.ExpiresMs,
             (KeyValueDurability)request.Durability, 
             context.CancellationToken
@@ -509,6 +509,12 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return await TryAcquireManyExclusiveLocksInternal(request, context);
     }
 
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="request"></param>
+    /// <param name="context"></param>
+    /// <returns></returns>
     internal async Task<GrpcTryAcquireManyExclusiveLocksResponse> TryAcquireManyExclusiveLocksInternal(GrpcTryAcquireManyExclusiveLocksRequest request, ServerCallContext context)
     {
         List<(KeyValueResponseType, string, KeyValueDurability)> responses = await keyValues.LocateAndTryAcquireManyExclusiveLocks(
@@ -531,7 +537,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <param name="items">A collection of gRPC exclusive lock request items to be processed.</param>
     /// <returns>A list of tuples with each tuple containing a key, expiration time in milliseconds,
     /// and durability type derived from the input collection.</returns>
-    private static List<(string key, int expiresMs, KeyValueDurability durability)> GetRequestLocksItems(RepeatedField<GrpcTryAcquireManyExclusiveLocksRequestItem> items)
+    private static List<(string key, int expiresMs, KeyValueDurability durability)> GetRequestLocksItems(
+        RepeatedField<GrpcTryAcquireManyExclusiveLocksRequestItem> items
+    )
     {
         List<(string key, int expiresMs, KeyValueDurability durability)> rItems = new(items.Count);
         
@@ -546,7 +554,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// </summary>
     /// <param name="responses">A list of tuples containing the key-value response type, key, and durability information.</param>
     /// <returns>An enumerable collection of gRPC response items corresponding to the provided key-value responses.</returns>
-    private static IEnumerable<GrpcTryAcquireManyExclusiveLocksResponseItem> GetResponseLocksItems(List<(KeyValueResponseType, string, KeyValueDurability)> responses)
+    private static IEnumerable<GrpcTryAcquireManyExclusiveLocksResponseItem> GetResponseLocksItems(
+        List<(KeyValueResponseType, string, KeyValueDurability)> responses
+    )
     {
         foreach ((KeyValueResponseType response, string key, KeyValueDurability durability) in responses)
             yield return new()
@@ -596,12 +606,57 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
     
     /// <summary>
+    /// Attempts to release an exclusive lock on group of key-value resource prefixed by the given prefix key.
+    /// </summary>
+    /// <param name="request">The request containing details about the lock acquisition operation.</param>
+    /// <param name="context">The context of the server call.</param>
+    /// <returns>A response indicating the result of the lock acquisition attempt.</returns>
+    public override async Task<GrpcTryReleaseExclusivePrefixLockResponse> TryReleaseExclusivePrefixLock(
+        GrpcTryReleaseExclusivePrefixLockRequest request, 
+        ServerCallContext context
+    )
+    {
+        return await TryReleaseExclusivePrefixLockInternal(request, context);
+    }
+
+    /// <summary>
+    /// Attempts to release an exclusive lock on a group of key-value pairs prefixed by the given key with the specified expiration and durability settings.
+    /// </summary>
+    /// <param name="request">The request containing the key, transaction details, expiration time, and durability level.</param>
+    /// <param name="context">The server call context that provides access to information about the RPC call.</param>
+    /// <returns>A task that represents the asynchronous operation. The task result contains a response indicating whether the lock acquisition attempt succeeded or failed.</returns>
+    internal async Task<GrpcTryReleaseExclusivePrefixLockResponse> TryReleaseExclusivePrefixLockInternal(GrpcTryReleaseExclusivePrefixLockRequest request, ServerCallContext context)
+    {
+        if (string.IsNullOrEmpty(request.PrefixKey))
+            return new()
+            {
+                Type = GrpcKeyValueResponseType.TypeInvalidInput
+            };
+        
+        KeyValueResponseType type = await keyValues.LocateAndTryReleaseExclusivePrefixLock(
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
+            request.PrefixKey, 
+            request.ExpiresMs,
+            (KeyValueDurability)request.Durability, 
+            context.CancellationToken
+        );
+
+        return new()
+        {
+            Type = (GrpcKeyValueResponseType)type
+        };
+    }
+    
+    /// <summary>
     /// Receives requests for the key/value "ReleaseManyExclusiveLocks" service 
     /// </summary>
     /// <param name="request"></param>
     /// <param name="context"></param>
     /// <returns></returns>
-    public override async Task<GrpcTryReleaseManyExclusiveLocksResponse> TryReleaseManyExclusiveLocks(GrpcTryReleaseManyExclusiveLocksRequest request, ServerCallContext context)
+    public override async Task<GrpcTryReleaseManyExclusiveLocksResponse> TryReleaseManyExclusiveLocks(
+        GrpcTryReleaseManyExclusiveLocksRequest request, 
+        ServerCallContext context
+    )
     {
         return await TryReleaseManyExclusiveLocksInternal(request, context);
     }

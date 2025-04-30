@@ -50,6 +50,8 @@ namespace Kahuna.Server.KeyValues.Transactions;
 /// </summary>
 internal sealed class KeyValueTransactionCoordinator
 {
+    private const int ExtraLockingDelay = 10;
+    
     private readonly KeyValuesManager manager;
 
     private readonly KahunaConfiguration configuration;
@@ -507,16 +509,33 @@ internal sealed class KeyValueTransactionCoordinator
 
         HashSet<string> ephemeralLocksToAcquire = [];
         HashSet<string> persistentLocksToAcquire = [];
+        HashSet<string> ephemeralPrefixLocksToAcquire = [];
+        HashSet<string> persistentPrefixLocksToAcquire = [];
 
         // Acquire all locks in advance for pessimistic locking
         if (locking == KeyValueTransactionLocking.Pessimistic)
-            KeyValueLockHelper.GetLocksToAcquire(context, ast, ephemeralLocksToAcquire, persistentLocksToAcquire);
+            KeyValueLockHelper.GetLocksToAcquire(
+                context, 
+                ast, 
+                ephemeralLocksToAcquire, 
+                persistentLocksToAcquire,
+                ephemeralPrefixLocksToAcquire,
+                persistentPrefixLocksToAcquire
+            );
 
         try
         {
             // Step 1: Acquire locks in advance for pessimistic locking
             if (locking == KeyValueTransactionLocking.Pessimistic)
-                await AcquireLocksPessimistically(context, ephemeralLocksToAcquire, persistentLocksToAcquire, timeout, cts.Token);
+                await AcquireLocksPessimistically(
+                    context, 
+                    ephemeralLocksToAcquire, 
+                    persistentLocksToAcquire, 
+                    ephemeralPrefixLocksToAcquire,
+                    persistentPrefixLocksToAcquire,
+                    timeout, 
+                    cts.Token
+                );
 
             // Step 2: Execute transaction
             await ExecuteTransactionInternal(context, ast, cts.Token);
@@ -586,8 +605,45 @@ internal sealed class KeyValueTransactionCoordinator
     /// <param name="timeout"></param>
     /// <param name="ctsToken"></param>
     /// <exception cref="KahunaAbortedException"></exception>
-    private async Task AcquireLocksPessimistically(KeyValueTransactionContext context, HashSet<string> ephemeralLocksToAcquire, HashSet<string> persistentLocksToAcquire, int timeout, CancellationToken ctsToken)
+    private async Task AcquireLocksPessimistically(
+        KeyValueTransactionContext context, 
+        HashSet<string> ephemeralLocksToAcquire, 
+        HashSet<string> persistentLocksToAcquire, 
+        HashSet<string> ephemeralPrefixLocksToAcquire,
+        HashSet<string> persistentPrefixLocksToAcquire,
+        int timeout, 
+        CancellationToken ctsToken
+    )
     {
+        
+        foreach (string prefixKey in ephemeralPrefixLocksToAcquire)
+        {
+            KeyValueResponseType acquirePrefixResponse = await manager.LocateAndTryAcquireExclusivePrefixLock(
+                context.TransactionId,
+                prefixKey,
+                timeout + ExtraLockingDelay,
+                KeyValueDurability.Ephemeral, 
+                ctsToken
+            );
+            
+            if (acquirePrefixResponse != KeyValueResponseType.Locked)
+                throw new KahunaAbortedException("Failed to acquire prefix lock: " + prefixKey + " " + KeyValueDurability.Ephemeral);
+        }
+        
+        foreach (string prefixKey in persistentPrefixLocksToAcquire)
+        {
+            KeyValueResponseType acquirePrefixResponse = await manager.LocateAndTryAcquireExclusivePrefixLock(
+                context.TransactionId,
+                prefixKey,
+                timeout + ExtraLockingDelay,
+                KeyValueDurability.Persistent, 
+                ctsToken
+            );
+            
+            if (acquirePrefixResponse != KeyValueResponseType.Locked)
+                throw new KahunaAbortedException("Failed to acquire prefix lock: " + prefixKey + " " + KeyValueDurability.Persistent);
+        }
+        
         int numberLocks = ephemeralLocksToAcquire.Count + persistentLocksToAcquire.Count;
 
         if (numberLocks == 0)
@@ -599,8 +655,13 @@ internal sealed class KeyValueTransactionCoordinator
         {
             if (ephemeralLocksToAcquire.Count > 0)
             {
-                (KeyValueResponseType acquireResponse, string keyName, KeyValueDurability durability) =
-                    await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, ephemeralLocksToAcquire.First(), timeout + 10, KeyValueDurability.Ephemeral, ctsToken);
+                (KeyValueResponseType acquireResponse, string keyName, KeyValueDurability durability) = await manager.LocateAndTryAcquireExclusiveLock(
+                    context.TransactionId, 
+                    ephemeralLocksToAcquire.First(), 
+                    timeout + ExtraLockingDelay, 
+                    KeyValueDurability.Ephemeral, 
+                    ctsToken
+                );
 
                 if (acquireResponse != KeyValueResponseType.Locked)
                     throw new KahunaAbortedException("Failed to acquire lock: " + keyName + " " + durability);
@@ -625,10 +686,10 @@ internal sealed class KeyValueTransactionCoordinator
         List<(string, int, KeyValueDurability)> keysToLock = new(numberLocks);
 
         foreach (string key in ephemeralLocksToAcquire)
-            keysToLock.Add((key, timeout + 10, KeyValueDurability.Ephemeral));
+            keysToLock.Add((key, timeout + ExtraLockingDelay, KeyValueDurability.Ephemeral));
 
         foreach (string key in persistentLocksToAcquire)
-            keysToLock.Add((key, timeout + 10, KeyValueDurability.Persistent));
+            keysToLock.Add((key, timeout + ExtraLockingDelay, KeyValueDurability.Persistent));
 
         List<(KeyValueResponseType, string, KeyValueDurability)> lockResponses = await manager.LocateAndTryAcquireManyExclusiveLocks(context.TransactionId, keysToLock, ctsToken);
 

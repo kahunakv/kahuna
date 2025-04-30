@@ -424,7 +424,7 @@ public sealed class LocksService : Locker.LockerBase
         }
         catch (IOException ex)
         {
-            logger.LogDebug("IOException: {Message}", ex.Message);
+            logger.LogTrace("IOException: {Message}", ex.Message);
         }
     }
     

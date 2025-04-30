@@ -539,6 +539,46 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     }
 
     /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="node"></param>
+    /// <param name="transactionId"></param>
+    /// <param name="prefixKey"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    /// <exception cref="NotImplementedException"></exception>
+    public async Task<KeyValueResponseType> TryAcquireExclusivePrefixLock(
+        string node, 
+        HLCTimestamp transactionId, 
+        string prefixKey, 
+        int expiresMs, 
+        KeyValueDurability durability, 
+        CancellationToken cancellationToken
+    )
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);               
+        
+        GrpcTryAcquireExclusivePrefixLockRequest request = new()
+        {
+            TransactionIdNode = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
+            PrefixKey = prefixKey,
+            ExpiresMs = expiresMs,
+            Durability = (GrpcKeyValueDurability)durability,
+        };
+        
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcTryAcquireExclusivePrefixLockResponse remoteResponse = response.TryAcquireExclusivePrefixLock!;
+        
+        remoteResponse.ServedFrom = $"https://{node}";
+
+        return (KeyValueResponseType)remoteResponse.Type;
+    }
+
+    /// <summary>
     /// Attempts to acquire exclusive locks on a set of specified keys at a given node.
     /// </summary>
     /// <param name="node">The identifier of the target node on which locks need to be acquired.</param>
@@ -614,6 +654,35 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         remoteResponse.ServedFrom = $"https://{node}";
         
         return ((KeyValueResponseType)remoteResponse.Type, key);
+    }
+    
+    public async Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(
+        string node, 
+        HLCTimestamp transactionId, 
+        string prefixKey, 
+        int expiresMs, 
+        KeyValueDurability durability, 
+        CancellationToken cancellationToken
+    )
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);               
+        
+        GrpcTryReleaseExclusivePrefixLockRequest request = new()
+        {
+            TransactionIdNode = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
+            PrefixKey = prefixKey,
+            ExpiresMs = expiresMs,
+            Durability = (GrpcKeyValueDurability)durability,
+        };
+        
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcTryReleaseExclusivePrefixLockResponse remoteResponse = response.TryReleaseExclusivePrefixLock!;
+        
+        remoteResponse.ServedFrom = $"https://{node}";
+
+        return (KeyValueResponseType)remoteResponse.Type;
     }
 
     public async Task TryReleaseNodeExclusiveLocks(

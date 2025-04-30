@@ -33,7 +33,7 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    public async Task<KeyValueResponse> Execute(KeyValueRequest message)
+    public KeyValueResponse Execute(KeyValueRequest message)
     {
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
         
@@ -44,27 +44,25 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
                 return KeyValueStaticResponses.LockedResponse;
 
             // Locked by another transaction but check if the lease is still active
-            if (writeIntent.Expires != HLCTimestamp.Zero && writeIntent.Expires - currentTime > TimeSpan.Zero)
-                return KeyValueStaticResponses.AlreadyLockedResponse;
+            if (writeIntent.Expires != HLCTimestamp.Zero && writeIntent.Expires - currentTime > TimeSpan.Zero)            
+                return KeyValueStaticResponses.AlreadyLockedResponse;            
+            
+            // The lock is expired, remove it
+            locksByPrefix.Remove(message.Key);
         }
-        
-        if (message.Durability == KeyValueDurability.Ephemeral)
-            return LockByPrefixEphemeral(currentTime, message);
-        
-        //return await LockByPrefixPersistent(message);
-
-        await Task.CompletedTask;
-        
-        return KeyValueStaticResponses.ErroredResponse;
+                
+        return LockExistingKeysByPrefix(currentTime, message);               
     }
     
     /// <summary>
     /// Locks entries matching the specified prefix in an ephemeral durability.
-    /// Even keys that do not exist or are deleted will be locked.
+    /// Even keys that do not exist or are deleted will be locked because the prefix lock
+    /// works as predicate locking for the group of keys.
     /// </summary>
+    /// <param name="currentTime"></param> 
     /// <param name="message"></param>
     /// <returns></returns>
-    private KeyValueResponse LockByPrefixEphemeral(HLCTimestamp currentTime, KeyValueRequest message)
+    private KeyValueResponse LockExistingKeysByPrefix(HLCTimestamp currentTime, KeyValueRequest message)
     {        
         if (message.TransactionId == HLCTimestamp.Zero)
             return KeyValueStaticResponses.ErroredResponse;               
@@ -84,7 +82,7 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
         });
                 
         return KeyValueStaticResponses.LockedResponse;
-    }
+    }           
     
     private KeyValueResponse TryLock(HLCTimestamp currentTime, HLCTimestamp transactionId, string key, int expiresMs, KeyValueContext context)
     {                               
@@ -95,7 +93,7 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
                 return KeyValueStaticResponses.LockedResponse;
 
             // Check if the lease is still active
-            if (context.WriteIntent.Expires != HLCTimestamp.Zero && context.WriteIntent.Expires - currentTime > TimeSpan.Zero)
+            if (context.WriteIntent.Expires != HLCTimestamp.Zero && context.WriteIntent.Expires - currentTime > TimeSpan.Zero)            
                 return KeyValueStaticResponses.AlreadyLockedResponse;
         }
 

@@ -354,6 +354,26 @@ internal sealed class KeyValuesManager
     }
     
     /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="prefixKey"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public Task<KeyValueResponseType> LocateAndTryReleaseExclusivePrefixLock(
+        HLCTimestamp transactionId,
+        string prefixKey,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        return locator.LocateAndTryReleaseExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability, cancellationToken);
+    }
+    
+    /// <summary>
     /// Locates the leader node for the given keys and executes the TryReleaseManyExclusiveLocks requests
     /// </summary>
     /// <param name="transactionId"></param>
@@ -947,6 +967,43 @@ internal sealed class KeyValuesManager
             return (KeyValueResponseType.Errored, key);
         
         return (response.Type, key);
+    }
+    
+    /// <summary>
+    /// Passes a TryReleaseExclusivePrefixLock request to the key/value actor to lock a range of keys by the specified prefix
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="key"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="durability"></param>
+    /// <returns></returns>
+    public async Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(HLCTimestamp transactionId, string prefixKey, int expiresMs, KeyValueDurability durability)
+    {
+        KeyValueRequest request = new(
+            KeyValueRequestType.TryReleaseExclusivePrefixLock, 
+            transactionId, 
+            HLCTimestamp.Zero,
+            prefixKey, 
+            null, 
+            null,
+            -1,
+            KeyValueFlags.None,
+            expiresMs, 
+            HLCTimestamp.Zero,
+            durability
+        );
+
+        KeyValueResponse? response;
+        
+        if (durability == KeyValueDurability.Ephemeral)
+            response = await ephemeralKeyValuesRouter.Ask(request);
+        else
+            response = await persistentKeyValuesRouter.Ask(request);
+        
+        if (response is null)
+            return KeyValueResponseType.Errored;
+        
+        return response.Type;
     }
     
     /// <summary>

@@ -20,7 +20,14 @@ internal sealed class KeyValueLockHelper : BaseCommand
     /// <param name="persistentLocks"></param>
     /// <exception cref="KahunaScriptException"></exception>
     /// <exception cref="ArgumentOutOfRangeException"></exception>
-    internal static void GetLocksToAcquire(KeyValueTransactionContext context, NodeAst ast, HashSet<string> ephemeralLocks, HashSet<string> persistentLocks)
+    internal static void GetLocksToAcquire(
+        KeyValueTransactionContext context, 
+        NodeAst ast, 
+        HashSet<string> ephemeralLocks, 
+        HashSet<string> persistentLocks,
+        HashSet<string> ephemeralPrefixLocksToAcquire,
+        HashSet<string> persistentPrefixLocksToAcquire
+    )
     {
         while (true)
         {
@@ -31,7 +38,7 @@ internal sealed class KeyValueLockHelper : BaseCommand
                 case NodeType.StmtList:
                 {
                     if (ast.leftAst is not null) 
-                        GetLocksToAcquire(context, ast.leftAst, ephemeralLocks, persistentLocks);
+                        GetLocksToAcquire(context, ast.leftAst, ephemeralLocks, persistentLocks, ephemeralPrefixLocksToAcquire, persistentPrefixLocksToAcquire);
 
                     if (ast.rightAst is not null)
                     {
@@ -44,19 +51,24 @@ internal sealed class KeyValueLockHelper : BaseCommand
                 
                 case NodeType.Begin:
                     if (ast.leftAst is not null) 
-                        GetLocksToAcquire(context, ast.leftAst, ephemeralLocks, persistentLocks);
+                        GetLocksToAcquire(context, ast.leftAst, ephemeralLocks, persistentLocks, ephemeralPrefixLocksToAcquire, persistentPrefixLocksToAcquire);
                     break;
                 
                 case NodeType.If:
                 {
                     if (ast.rightAst is not null) 
-                        GetLocksToAcquire(context, ast.rightAst, ephemeralLocks, persistentLocks);
+                        GetLocksToAcquire(context, ast.rightAst, ephemeralLocks, persistentLocks, ephemeralPrefixLocksToAcquire, persistentPrefixLocksToAcquire);
                     
                     if (ast.extendedOne is not null) 
-                        GetLocksToAcquire(context, ast.extendedOne, ephemeralLocks, persistentLocks);
+                        GetLocksToAcquire(context, ast.extendedOne, ephemeralLocks, persistentLocks, ephemeralPrefixLocksToAcquire, persistentPrefixLocksToAcquire);
 
                     break;
                 }
+                
+                case NodeType.For:
+                    if (ast.extendedOne is not null) 
+                        GetLocksToAcquire(context, ast.extendedOne, ephemeralLocks, persistentLocks, ephemeralPrefixLocksToAcquire, persistentPrefixLocksToAcquire);
+                    break;
                 
                 case NodeType.Set:
                     if (ast.leftAst is null)
@@ -114,11 +126,20 @@ internal sealed class KeyValueLockHelper : BaseCommand
                         throw new KahunaScriptException("Invalid DELETE expression", ast.yyline);
                     
                     ephemeralLocks.Add(GetKeyName(context, ast.leftAst));
+                    break;                               
+                
+                case NodeType.GetByPrefix:
+                    if (ast.leftAst is null)
+                        throw new KahunaScriptException("Invalid GET BY PREFIX expression", ast.yyline);
+                    
+                    persistentPrefixLocksToAcquire.Add(GetKeyName(context, ast.leftAst));
                     break;
                 
-                case NodeType.For:
-                    if (ast.extendedOne is not null) 
-                        GetLocksToAcquire(context, ast.extendedOne, ephemeralLocks, persistentLocks);
+                case NodeType.EgetByPrefix:
+                    if (ast.leftAst is null)
+                        throw new KahunaScriptException("Invalid GET BY PREFIX expression", ast.yyline);
+                    
+                    ephemeralPrefixLocksToAcquire.Add(GetKeyName(context, ast.leftAst));
                     break;
                 
                 case NodeType.IntegerType:
@@ -159,9 +180,7 @@ internal sealed class KeyValueLockHelper : BaseCommand
                 case NodeType.Eexists:
                 case NodeType.BeginOptionList:
                 case NodeType.BeginOption:
-                case NodeType.NullType:
-                case NodeType.GetByPrefix:
-                case NodeType.EgetByPrefix:
+                case NodeType.NullType:                
                 case NodeType.ScanByPrefix:
                 case NodeType.EscanByPrefix:
                 case NodeType.Range:

@@ -396,6 +396,26 @@ public sealed class KahunaManager : IKahuna
     }
     
     /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="prefixKey"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public Task<KeyValueResponseType> LocateAndTryReleaseExclusivePrefixLock(
+        HLCTimestamp transactionId,
+        string prefixKey,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        return keyValues.LocateAndTryReleaseExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability, cancellationToken);
+    }
+    
+    /// <summary>
     /// Locates the leader node for the given keysx and executes the TryReleaseExclusiveLock request. 
     /// </summary>
     /// <param name="transactionId"></param>

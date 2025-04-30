@@ -262,8 +262,9 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.TryGet => await TryGet(message),
                 KeyValueRequestType.TryExists => await TryExists(message),
                 KeyValueRequestType.TryAcquireExclusiveLock => await TryAcquireExclusiveLock(message),
-                KeyValueRequestType.TryAcquireExclusivePrefixLock => await TryAcquireExclusivePrefixLock(message),
+                KeyValueRequestType.TryAcquireExclusivePrefixLock => TryAcquireExclusivePrefixLock(message),
                 KeyValueRequestType.TryReleaseExclusiveLock => await TryReleaseExclusiveLock(message),
+                KeyValueRequestType.TryReleaseExclusivePrefixLock => TryAcquireExclusivePrefixLock(message),
                 KeyValueRequestType.TryPrepareMutations => await TryPrepareMutations(message),
                 KeyValueRequestType.TryCommitMutations => await TryCommitMutations(message),
                 KeyValueRequestType.TryRollbackMutations => await TryRollbackMutations(message),
@@ -389,7 +390,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private Task<KeyValueResponse> TryAcquireExclusivePrefixLock(KeyValueRequest message)
+    private KeyValueResponse TryAcquireExclusivePrefixLock(KeyValueRequest message)
     {
         return tryAcquireExclusivePrefixLockHandler.Execute(message);
     }

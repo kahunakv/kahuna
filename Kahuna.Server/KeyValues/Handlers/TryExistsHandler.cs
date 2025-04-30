@@ -117,12 +117,9 @@ internal sealed class TryExistsHandler : BaseHandler
                 context.MvccEntries.Add(message.TransactionId, entry);
             }
             
-            if (entry.State is KeyValueState.Undefined or KeyValueState.Deleted)
+            if (entry.State is KeyValueState.Undefined or KeyValueState.Deleted || (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero))
                 return KeyValueStaticResponses.DoesNotExistContextResponse;
-            
-            if (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
-                return KeyValueStaticResponses.DoesNotExistContextResponse;
-            
+
             if (context.Revision > entry.Revision) // early conflict detection
                 return KeyValueStaticResponses.AbortedResponse;
             
@@ -138,15 +135,9 @@ internal sealed class TryExistsHandler : BaseHandler
             return new(KeyValueResponseType.Exists, readOnlyKeyValueContext);
         }
         
-        if (context is null)
-            return KeyValueStaticResponses.DoesNotExistContextResponse;
-        
-        if (context.State is KeyValueState.Undefined or KeyValueState.Deleted)
+        if (context is null || context.State is KeyValueState.Undefined or KeyValueState.Deleted || (context.Expires != HLCTimestamp.Zero && context.Expires - currentTime < TimeSpan.Zero))
             return KeyValueStaticResponses.DoesNotExistContextResponse;
 
-        if (context.Expires != HLCTimestamp.Zero && context.Expires - currentTime < TimeSpan.Zero)
-            return KeyValueStaticResponses.DoesNotExistContextResponse;
-        
         context.LastUsed = currentTime;
 
         readOnlyKeyValueContext = new(

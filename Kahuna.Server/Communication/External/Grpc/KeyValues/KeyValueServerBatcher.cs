@@ -110,6 +110,14 @@ internal sealed class KeyValueServerBatcher
                     }
                     break;
                     
+                    case GrpcServerBatchType.ServerTryAcquireExclusivePrefixLock:
+                    {
+                        GrpcTryAcquireExclusivePrefixLockRequest? tryAcquireExclusivePrefixLockRequest = request.TryAcquireExclusivePrefixLock;
+
+                        tasks.Add(TryAcquireExclusivePrefixLockDelayed(semaphore, request.RequestId, tryAcquireExclusivePrefixLockRequest, responseStream, context));
+                    }
+                    break;
+                    
                     case GrpcServerBatchType.ServerTryAcquireManyExclusiveLocks:
                     {
                         GrpcTryAcquireManyExclusiveLocksRequest? tryAcquireManyExclusiveLocksRequest = request.TryAcquireManyExclusiveLocks;
@@ -392,6 +400,26 @@ internal sealed class KeyValueServerBatcher
             Type = GrpcServerBatchType.ServerTryAcquireExclusiveLock,
             RequestId = requestId,
             TryAcquireExclusiveLock = tryExecuteTransactionResponse
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+    
+    private async Task TryAcquireExclusivePrefixLockDelayed(
+        SemaphoreSlim semaphore, 
+        int requestId, 
+        GrpcTryAcquireExclusivePrefixLockRequest tryExecuteTransactionRequest, 
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcTryAcquireExclusivePrefixLockResponse tryExecuteTransactionResponse = await service.TryAcquireExclusivePrefixLockInternal(tryExecuteTransactionRequest, context);
+        
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type = GrpcServerBatchType.ServerTryAcquireExclusivePrefixLock,
+            RequestId = requestId,
+            TryAcquireExclusivePrefixLock = tryExecuteTransactionResponse
         };
 
         await WriteResponseToStream(semaphore, responseStream, response, context);
