@@ -635,8 +635,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         
         KeyValueResponseType type = await keyValues.LocateAndTryReleaseExclusivePrefixLock(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
-            request.PrefixKey, 
-            request.ExpiresMs,
+            request.PrefixKey,
             (KeyValueDurability)request.Durability, 
             context.CancellationToken
         );

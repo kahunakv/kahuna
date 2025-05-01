@@ -615,94 +615,104 @@ internal sealed class KeyValueTransactionCoordinator
         CancellationToken ctsToken
     )
     {
-        
-        foreach (string prefixKey in ephemeralPrefixLocksToAcquire)
-        {
-            KeyValueResponseType acquirePrefixResponse = await manager.LocateAndTryAcquireExclusivePrefixLock(
-                context.TransactionId,
-                prefixKey,
-                timeout + ExtraLockingDelay,
-                KeyValueDurability.Ephemeral, 
-                ctsToken
-            );
-            
-            if (acquirePrefixResponse != KeyValueResponseType.Locked)
-                throw new KahunaAbortedException("Failed to acquire prefix lock: " + prefixKey + " " + KeyValueDurability.Ephemeral);
-        }
-        
-        foreach (string prefixKey in persistentPrefixLocksToAcquire)
-        {
-            KeyValueResponseType acquirePrefixResponse = await manager.LocateAndTryAcquireExclusivePrefixLock(
-                context.TransactionId,
-                prefixKey,
-                timeout + ExtraLockingDelay,
-                KeyValueDurability.Persistent, 
-                ctsToken
-            );
-            
-            if (acquirePrefixResponse != KeyValueResponseType.Locked)
-                throw new KahunaAbortedException("Failed to acquire prefix lock: " + prefixKey + " " + KeyValueDurability.Persistent);
-        }
-        
-        int numberLocks = ephemeralLocksToAcquire.Count + persistentLocksToAcquire.Count;
+        int numberLocks = ephemeralPrefixLocksToAcquire.Count + persistentPrefixLocksToAcquire.Count;
 
-        if (numberLocks == 0)
-            return;
-
-        context.LocksAcquired = [];
-
-        if (numberLocks == 1)
+        if (numberLocks > 0)
         {
-            if (ephemeralLocksToAcquire.Count > 0)
+            context.PrefixLocksAcquired = new(numberLocks);
+
+            foreach (string prefixKey in ephemeralPrefixLocksToAcquire)
             {
-                (KeyValueResponseType acquireResponse, string keyName, KeyValueDurability durability) = await manager.LocateAndTryAcquireExclusiveLock(
-                    context.TransactionId, 
-                    ephemeralLocksToAcquire.First(), 
-                    timeout + ExtraLockingDelay, 
-                    KeyValueDurability.Ephemeral, 
+                KeyValueResponseType acquirePrefixResponse = await manager.LocateAndTryAcquireExclusivePrefixLock(
+                    context.TransactionId,
+                    prefixKey,
+                    timeout + ExtraLockingDelay,
+                    KeyValueDurability.Ephemeral,
                     ctsToken
                 );
 
-                if (acquireResponse != KeyValueResponseType.Locked)
-                    throw new KahunaAbortedException("Failed to acquire lock: " + keyName + " " + durability);
+                if (acquirePrefixResponse != KeyValueResponseType.Locked)
+                    throw new KahunaAbortedException("Failed to acquire prefix lock: " + prefixKey + " " + KeyValueDurability.Ephemeral);
 
-                context.LocksAcquired.Add((keyName, durability));
-                return;
+                context.PrefixLocksAcquired.Add((prefixKey, KeyValueDurability.Ephemeral));
             }
 
-            if (persistentLocksToAcquire.Count > 0)
+            foreach (string prefixKey in persistentPrefixLocksToAcquire)
             {
-                (KeyValueResponseType acquireResponse, string keyName, KeyValueDurability durability) =
-                    await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, persistentLocksToAcquire.First(), timeout + 10, KeyValueDurability.Persistent, ctsToken);
+                KeyValueResponseType acquirePrefixResponse = await manager.LocateAndTryAcquireExclusivePrefixLock(
+                    context.TransactionId,
+                    prefixKey,
+                    timeout + ExtraLockingDelay,
+                    KeyValueDurability.Persistent,
+                    ctsToken
+                );
 
-                if (acquireResponse != KeyValueResponseType.Locked)
-                    throw new KahunaAbortedException("Failed to acquire lock: " + keyName + " " + durability);
-
-                context.LocksAcquired.Add((keyName, durability));
-                return;
+                if (acquirePrefixResponse != KeyValueResponseType.Locked)
+                    throw new KahunaAbortedException("Failed to acquire prefix lock: " + prefixKey + " " + KeyValueDurability.Persistent);
+                
+                context.PrefixLocksAcquired.Add((prefixKey, KeyValueDurability.Persistent));
             }
         }
 
-        List<(string, int, KeyValueDurability)> keysToLock = new(numberLocks);
+        numberLocks = ephemeralLocksToAcquire.Count + persistentLocksToAcquire.Count;
 
-        foreach (string key in ephemeralLocksToAcquire)
-            keysToLock.Add((key, timeout + ExtraLockingDelay, KeyValueDurability.Ephemeral));
-
-        foreach (string key in persistentLocksToAcquire)
-            keysToLock.Add((key, timeout + ExtraLockingDelay, KeyValueDurability.Persistent));
-
-        List<(KeyValueResponseType, string, KeyValueDurability)> lockResponses = await manager.LocateAndTryAcquireManyExclusiveLocks(context.TransactionId, keysToLock, ctsToken);
-
-        foreach ((KeyValueResponseType response, string keyName, KeyValueDurability durability) in lockResponses)
+        if (numberLocks > 0)
         {
-            if (response == KeyValueResponseType.Locked)
-                context.LocksAcquired.Add((keyName, durability));
-        }
+            context.LocksAcquired = new(numberLocks);
 
-        foreach ((KeyValueResponseType response, string keyName, KeyValueDurability durability) in lockResponses)
-        {
-            if (response != KeyValueResponseType.Locked)
-                throw new KahunaAbortedException("Failed to acquire lock: " + keyName + " " + durability);
+            if (numberLocks == 1)
+            {
+                if (ephemeralLocksToAcquire.Count > 0)
+                {
+                    (KeyValueResponseType acquireResponse, string keyName, KeyValueDurability durability) = await manager.LocateAndTryAcquireExclusiveLock(
+                        context.TransactionId,
+                        ephemeralLocksToAcquire.First(),
+                        timeout + ExtraLockingDelay,
+                        KeyValueDurability.Ephemeral,
+                        ctsToken
+                    );
+
+                    if (acquireResponse != KeyValueResponseType.Locked)
+                        throw new KahunaAbortedException("Failed to acquire lock: " + keyName + " " + durability);
+
+                    context.LocksAcquired.Add((keyName, durability));
+                    return;
+                }
+
+                if (persistentLocksToAcquire.Count > 0)
+                {
+                    (KeyValueResponseType acquireResponse, string keyName, KeyValueDurability durability) =
+                        await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, persistentLocksToAcquire.First(), timeout + 10, KeyValueDurability.Persistent, ctsToken);
+
+                    if (acquireResponse != KeyValueResponseType.Locked)
+                        throw new KahunaAbortedException("Failed to acquire lock: " + keyName + " " + durability);
+
+                    context.LocksAcquired.Add((keyName, durability));
+                    return;
+                }
+            }
+
+            List<(string, int, KeyValueDurability)> keysToLock = new(numberLocks);
+
+            foreach (string key in ephemeralLocksToAcquire)
+                keysToLock.Add((key, timeout + ExtraLockingDelay, KeyValueDurability.Ephemeral));
+
+            foreach (string key in persistentLocksToAcquire)
+                keysToLock.Add((key, timeout + ExtraLockingDelay, KeyValueDurability.Persistent));
+
+            List<(KeyValueResponseType, string, KeyValueDurability)> lockResponses = await manager.LocateAndTryAcquireManyExclusiveLocks(context.TransactionId, keysToLock, ctsToken);
+
+            foreach ((KeyValueResponseType response, string keyName, KeyValueDurability durability) in lockResponses)
+            {
+                if (response == KeyValueResponseType.Locked)
+                    context.LocksAcquired.Add((keyName, durability));
+            }
+
+            foreach ((KeyValueResponseType response, string keyName, KeyValueDurability durability) in lockResponses)
+            {
+                if (response != KeyValueResponseType.Locked)
+                    throw new KahunaAbortedException("Failed to acquire lock: " + keyName + " " + durability);
+            }
         }
     }
 
@@ -714,34 +724,40 @@ internal sealed class KeyValueTransactionCoordinator
     {
         try
         {
-            if (context.LocksAcquired is null || context.LocksAcquired.Count == 0)
-                return;
-
-            List<(string, KeyValueDurability)> locksToRelease;
-
-            // Commit or rollback will release locks, we just need the ones that haven't been released yet
-            if (context.ModifiedKeys is null || (context.State != KeyValueTransactionState.Committed && context.State != KeyValueTransactionState.RolledBack))
-                locksToRelease = context.LocksAcquired.ToList();
-            else
+            if (context.PrefixLocksAcquired is not null && context.PrefixLocksAcquired.Count > 0)
             {
-                locksToRelease = [];
+                foreach ((string prefixKey, KeyValueDurability durability) in context.PrefixLocksAcquired)
+                    await manager.LocateAndTryReleaseExclusivePrefixLock(context.TransactionId, prefixKey, durability, CancellationToken.None);
+            }
+            
+            if (context.LocksAcquired is not null && context.LocksAcquired.Count > 0)
+            {
+                List<(string, KeyValueDurability)> locksToRelease;
 
-                foreach ((string, KeyValueDurability) lockKey in context.LocksAcquired)
+                // Commit or rollback will release locks, we just need the ones that haven't been released yet
+                if (context.ModifiedKeys is null || (context.State != KeyValueTransactionState.Committed && context.State != KeyValueTransactionState.RolledBack))
+                    locksToRelease = context.LocksAcquired.ToList();
+                else
                 {
-                    if (!context.ModifiedKeys.Contains(lockKey))
-                        locksToRelease.Add(lockKey);
+                    locksToRelease = [];
+
+                    foreach ((string, KeyValueDurability) lockKey in context.LocksAcquired)
+                    {
+                        if (!context.ModifiedKeys.Contains(lockKey))
+                            locksToRelease.Add(lockKey);
+                    }
                 }
+
+                if (locksToRelease.Count == 1)
+                {
+                    (string lockKey, KeyValueDurability durability) = locksToRelease.First();
+
+                    await manager.LocateAndTryReleaseExclusiveLock(context.TransactionId, lockKey, durability, CancellationToken.None);
+                    return;
+                }
+
+                await manager.LocateAndTryReleaseManyExclusiveLocks(context.TransactionId, locksToRelease, CancellationToken.None);
             }
-
-            if (locksToRelease.Count == 1)
-            {
-                (string lockKey, KeyValueDurability durability) = locksToRelease.First();
-
-                await manager.LocateAndTryReleaseExclusiveLock(context.TransactionId, lockKey, durability, CancellationToken.None);
-                return;
-            }
-
-            await manager.LocateAndTryReleaseManyExclusiveLocks(context.TransactionId, locksToRelease, CancellationToken.None);
         }
         catch (Exception ex)
         {

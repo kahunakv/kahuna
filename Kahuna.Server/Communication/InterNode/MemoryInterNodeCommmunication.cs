@@ -368,10 +368,19 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    /// <exception cref="NotImplementedException"></exception>
-    public Task<KeyValueResponseType> TryAcquireExclusivePrefixLock(string node, HLCTimestamp transactionId, string prefixKey, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<KeyValueResponseType> TryAcquireExclusivePrefixLock(
+        string node, 
+        HLCTimestamp transactionId,
+        string prefixKey, 
+        int expiresMs, 
+        KeyValueDurability durability, 
+        CancellationToken cancellationToken
+    )
     {
-        throw new NotImplementedException();
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+            return await kahunaNode.TryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability);
+        
+        throw new KahunaServerException($"The node {node} does not exist.");
     }
 
     /// <summary>
@@ -455,9 +464,18 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     /// <exception cref="NotImplementedException"></exception>
-    public Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(string node, HLCTimestamp transactionId, string prefixKey, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(
+        string node, 
+        HLCTimestamp transactionId, 
+        string prefixKey, 
+        KeyValueDurability durability, 
+        CancellationToken cancellationToken
+    )
     {
-        throw new NotImplementedException();
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+            return await kahunaNode.TryReleaseExclusivePrefixLock(transactionId, prefixKey, durability);
+        
+        throw new KahunaServerException($"The node {node} does not exist.");
     }
 
     /// <summary>

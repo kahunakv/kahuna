@@ -672,6 +672,10 @@ internal sealed class GrpcServerBatcher
                         item.Promise.SetResult(new(response.TryReleaseExclusiveLock));
                         break;
                     
+                    case GrpcServerBatchType.ServerTryReleaseExclusivePrefixLock:
+                        item.Promise.SetResult(new(response.TryReleaseExclusivePrefixLock));
+                        break;
+                    
                     case GrpcServerBatchType.ServerTryReleaseManyExclusiveLocks:
                         item.Promise.SetResult(new(response.TryReleaseManyExclusiveLocks));
                         break;

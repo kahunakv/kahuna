@@ -64,6 +64,17 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         
             return KeyValueStaticResponses.ErroredResponse;
         }
+        
+        if (context.Bucket is not null && locksByPrefix.TryGetValue(context.Bucket, out KeyValueWriteIntent? intent))
+        {
+            if (intent.TransactionId != message.TransactionId)
+            {
+                if (intent.Expires - message.CommitId > TimeSpan.Zero)
+                    return new(KeyValueResponseType.MustRetry, 0);
+            
+                locksByPrefix.Remove(context.Bucket);
+            }
+        }
 
         if (context.MvccEntries is null)
         {

@@ -150,6 +150,11 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private readonly TryReleaseExclusiveLockHandler tryReleaseExclusiveLockHandler;
 
     /// <summary>
+    /// 
+    /// </summary>
+    private readonly TryReleaseExclusivePrefixLockHandler tryReleaseExclusivePrefixLockHandler;
+
+    /// <summary>
     /// Handles the preparation phase for mutations in the key/value store in the Two-Phase-Commit (2PC) protocol.
     /// This component ensures that any necessary preconditions, validations and conflict resolution
     /// for mutations are met before executing them, contributing to data integrity and consistency within the system.
@@ -214,6 +219,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         tryAcquireExclusiveLockHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
         tryAcquireExclusivePrefixLockHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
         tryReleaseExclusiveLockHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryReleaseExclusivePrefixLockHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
         tryPrepareMutationsHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
         tryCommitMutationsHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
         tryRollbackMutationsHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
@@ -264,7 +270,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.TryAcquireExclusiveLock => await TryAcquireExclusiveLock(message),
                 KeyValueRequestType.TryAcquireExclusivePrefixLock => TryAcquireExclusivePrefixLock(message),
                 KeyValueRequestType.TryReleaseExclusiveLock => await TryReleaseExclusiveLock(message),
-                KeyValueRequestType.TryReleaseExclusivePrefixLock => TryAcquireExclusivePrefixLock(message),
+                KeyValueRequestType.TryReleaseExclusivePrefixLock => TryReleaseExclusivePrefixLock(message),
                 KeyValueRequestType.TryPrepareMutations => await TryPrepareMutations(message),
                 KeyValueRequestType.TryCommitMutations => await TryCommitMutations(message),
                 KeyValueRequestType.TryRollbackMutations => await TryRollbackMutations(message),
@@ -403,6 +409,16 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private Task<KeyValueResponse> TryReleaseExclusiveLock(KeyValueRequest message)
     {
         return tryReleaseExclusiveLockHandler.Execute(message);
+    }
+    
+    /// <summary>
+    /// Releases any acquired exclusive lock on a group of keys prefixed by the given prefix
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
+    private KeyValueResponse? TryReleaseExclusivePrefixLock(KeyValueRequest message)
+    {
+        return tryReleaseExclusivePrefixLockHandler.Execute(message);
     }
     
     /// <summary>

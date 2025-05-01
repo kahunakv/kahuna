@@ -189,8 +189,9 @@ internal sealed class KeyValueRestorer
                 case KeyValueRequestType.TryRollbackMutations:
                 case KeyValueRequestType.ScanByPrefix:
                 case KeyValueRequestType.GetByPrefix:
-                    break;
-                
+                case KeyValueRequestType.TryAcquireExclusivePrefixLock:
+                case KeyValueRequestType.TryReleaseExclusivePrefixLock:
+                case KeyValueRequestType.ScanByPrefixFromDisk:
                 default:
                     logger.LogError("KeyValueRestorer: Unknown restore message type: {Type}", keyValueMessage.Type);
                     break;

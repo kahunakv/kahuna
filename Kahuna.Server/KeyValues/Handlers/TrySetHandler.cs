@@ -95,6 +95,19 @@ internal sealed class TrySetHandler : BaseHandler
                 context.WriteIntent = null;
             }
         }
+        
+        // Validate if there's a prefix lock acquired on the bucket
+        // if we find expired write intents we can remove it to allow new transactions to proceed
+        if (context.Bucket is not null && locksByPrefix.TryGetValue(context.Bucket, out KeyValueWriteIntent? intent))
+        {
+            if (intent.TransactionId != message.TransactionId)
+            {
+                if (intent.Expires - currentTime > TimeSpan.Zero)
+                    return new(KeyValueResponseType.MustRetry, 0);
+            
+                locksByPrefix.Remove(context.Bucket);
+            }
+        }
 
         HLCTimestamp newExpires = message.ExpiresMs > 0 ? (currentTime + message.ExpiresMs) : HLCTimestamp.Zero;
         

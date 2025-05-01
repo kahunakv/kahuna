@@ -365,12 +365,11 @@ internal sealed class KeyValuesManager
     public Task<KeyValueResponseType> LocateAndTryReleaseExclusivePrefixLock(
         HLCTimestamp transactionId,
         string prefixKey,
-        int expiresMs,
         KeyValueDurability durability,
         CancellationToken cancellationToken
     )
     {
-        return locator.LocateAndTryReleaseExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability, cancellationToken);
+        return locator.LocateAndTryReleaseExclusivePrefixLock(transactionId, prefixKey, durability, cancellationToken);
     }
     
     /// <summary>
@@ -853,7 +852,12 @@ internal sealed class KeyValuesManager
     /// <param name="expiresMs"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KeyValueResponseType> TryAcquireExclusivePrefixLock(HLCTimestamp transactionId, string prefixKey, int expiresMs, KeyValueDurability durability)
+    public async Task<KeyValueResponseType> TryAcquireExclusivePrefixLock(
+        HLCTimestamp transactionId, 
+        string prefixKey, 
+        int expiresMs, 
+        KeyValueDurability durability
+    )
     {
         KeyValueRequest request = new(
             KeyValueRequestType.TryAcquireExclusivePrefixLock, 
@@ -974,10 +978,9 @@ internal sealed class KeyValuesManager
     /// </summary>
     /// <param name="transactionId"></param>
     /// <param name="key"></param>
-    /// <param name="expiresMs"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(HLCTimestamp transactionId, string prefixKey, int expiresMs, KeyValueDurability durability)
+    public async Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability)
     {
         KeyValueRequest request = new(
             KeyValueRequestType.TryReleaseExclusivePrefixLock, 
@@ -988,7 +991,7 @@ internal sealed class KeyValuesManager
             null,
             -1,
             KeyValueFlags.None,
-            expiresMs, 
+            0, 
             HLCTimestamp.Zero,
             durability
         );

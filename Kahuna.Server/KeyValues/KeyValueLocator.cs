@@ -488,7 +488,6 @@ internal sealed class KeyValueLocator
     public async Task<KeyValueResponseType> LocateAndTryReleaseExclusivePrefixLock(
         HLCTimestamp transactionId,
         string prefixKey,
-        int expiresMs,
         KeyValueDurability durability,
         CancellationToken cancellationToken
     )
@@ -499,7 +498,7 @@ internal sealed class KeyValueLocator
         int partitionId = raft.GetPrefixPartitionKey(prefixKey);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
-            return await manager.TryReleaseExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability);
+            return await manager.TryReleaseExclusivePrefixLock(transactionId, prefixKey, durability);
             
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
@@ -507,7 +506,7 @@ internal sealed class KeyValueLocator
         
         logger.LogDebug("RELEASE-PREFIX-LOCK-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", prefixKey, partitionId, leader);
         
-        return await interNodeCommunication.TryAcquireExclusivePrefixLock(leader, transactionId, prefixKey, expiresMs, durability, cancellationToken);
+        return await interNodeCommunication.TryReleaseExclusivePrefixLock(leader, transactionId, prefixKey, durability, cancellationToken);
     }
     
     /// <summary>

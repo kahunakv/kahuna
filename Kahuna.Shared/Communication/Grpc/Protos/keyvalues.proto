@@ -300,8 +300,7 @@ message GrpcTryReleaseExclusivePrefixLockRequest {
   int64 TransactionIdPhysical = 2;
   uint32 TransactionIdCounter = 3;
   string PrefixKey = 4;
-  int32 ExpiresMs = 5;
-  GrpcKeyValueDurability Durability = 6;
+  GrpcKeyValueDurability Durability = 5;
 }
 
 message GrpcTryReleaseExclusivePrefixLockResponse {

@@ -656,11 +656,20 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         return ((KeyValueResponseType)remoteResponse.Type, key);
     }
     
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="node"></param>
+    /// <param name="transactionId"></param>
+    /// <param name="prefixKey"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
     public async Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(
         string node, 
         HLCTimestamp transactionId, 
         string prefixKey, 
-        int expiresMs, 
         KeyValueDurability durability, 
         CancellationToken cancellationToken
     )
@@ -673,7 +682,6 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             PrefixKey = prefixKey,
-            ExpiresMs = expiresMs,
             Durability = (GrpcKeyValueDurability)durability,
         };
         
@@ -685,6 +693,15 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         return (KeyValueResponseType)remoteResponse.Type;
     }
 
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="node"></param>
+    /// <param name="transactionId"></param>
+    /// <param name="xkeys"></param>
+    /// <param name="lockSync"></param>
+    /// <param name="responses"></param>
+    /// <param name="cancellationToken"></param>
     public async Task TryReleaseNodeExclusiveLocks(
         string node, 
         HLCTimestamp transactionId, 

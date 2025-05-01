@@ -56,6 +56,19 @@ internal sealed class TryDeleteHandler : BaseHandler
                 context.WriteIntent = null;
             }
         }
+        
+        // Validate if there's a prefix lock acquired on the bucket
+        // if we find expired write intents we can remove it to allow new transactions to proceed
+        if (context.Bucket is not null && locksByPrefix.TryGetValue(context.Bucket, out KeyValueWriteIntent? intent))
+        {
+            if (intent.TransactionId != message.TransactionId)
+            {
+                if (intent.Expires - currentTime > TimeSpan.Zero)
+                    return new(KeyValueResponseType.MustRetry, 0);
+            
+                locksByPrefix.Remove(context.Bucket);
+            }
+        }
 
         // Temporarily store the value in the MVCC entry if the transaction ID is set
         if (message.TransactionId != HLCTimestamp.Zero)

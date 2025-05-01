@@ -134,6 +134,14 @@ internal sealed class KeyValueServerBatcher
                     }
                     break;
                     
+                    case GrpcServerBatchType.ServerTryReleaseExclusivePrefixLock:
+                    {
+                        GrpcTryReleaseExclusivePrefixLockRequest? tryReleaseExclusivePrefixLockRequest = request.TryReleaseExclusivePrefixLock;
+
+                        tasks.Add(TryReleaseExclusivePrefixLockDelayed(semaphore, request.RequestId, tryReleaseExclusivePrefixLockRequest, responseStream, context));
+                    }
+                        break;
+                    
                     case GrpcServerBatchType.ServerTryReleaseManyExclusiveLocks:
                     {
                         GrpcTryReleaseManyExclusiveLocksRequest? tryReleaseManyExclusiveLocksRequest = request.TryReleaseManyExclusiveLocks;
@@ -460,6 +468,26 @@ internal sealed class KeyValueServerBatcher
             Type = GrpcServerBatchType.ServerTryReleaseExclusiveLock,
             RequestId = requestId,
             TryReleaseExclusiveLock = tryReleaseExclusiveLockResponse
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+    
+    private async Task TryReleaseExclusivePrefixLockDelayed(
+        SemaphoreSlim semaphore, 
+        int requestId, 
+        GrpcTryReleaseExclusivePrefixLockRequest tryReleaseExclusivePrefixLockRequest, 
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcTryReleaseExclusivePrefixLockResponse tryReleaseExclusivePrefixLockResponse = await service.TryReleaseExclusivePrefixLockInternal(tryReleaseExclusivePrefixLockRequest, context);
+        
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type = GrpcServerBatchType.ServerTryReleaseExclusivePrefixLock,
+            RequestId = requestId,
+            TryReleaseExclusivePrefixLock = tryReleaseExclusivePrefixLockResponse
         };
 
         await WriteResponseToStream(semaphore, responseStream, response, context);

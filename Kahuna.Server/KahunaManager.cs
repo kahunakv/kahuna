@@ -400,19 +400,17 @@ public sealed class KahunaManager : IKahuna
     /// </summary>
     /// <param name="transactionId"></param>
     /// <param name="prefixKey"></param>
-    /// <param name="expiresMs"></param>
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public Task<KeyValueResponseType> LocateAndTryReleaseExclusivePrefixLock(
         HLCTimestamp transactionId,
         string prefixKey,
-        int expiresMs,
         KeyValueDurability durability,
         CancellationToken cancellationToken
     )
     {
-        return keyValues.LocateAndTryReleaseExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability, cancellationToken);
+        return keyValues.LocateAndTryReleaseExclusivePrefixLock(transactionId, prefixKey, durability, cancellationToken);
     }
     
     /// <summary>
@@ -730,7 +728,20 @@ public sealed class KahunaManager : IKahuna
     {
         return keyValues.TryAcquireExclusiveLock(transactionId, key, expiresMs, durability);
     }
-    
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="prefixKey"></param>
+    /// <param name="expiresMs"></param>
+    /// <param name="durability"></param>
+    /// <returns></returns>
+    public Task<KeyValueResponseType> TryAcquireExclusivePrefixLock(HLCTimestamp transactionId, string prefixKey, int expiresMs, KeyValueDurability durability)
+    {
+        return keyValues.TryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability);
+    }
+
     /// <summary>
     /// 
     /// </summary>
@@ -745,6 +756,18 @@ public sealed class KahunaManager : IKahuna
     )
     {
         return keyValues.TryReleaseExclusiveLock(transactionId, key, durability);
+    }
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="transactionId"></param>
+    /// <param name="prefixKey"></param>
+    /// <param name="durability"></param>
+    /// <returns></returns>
+    public Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability)
+    {
+        return keyValues.TryReleaseExclusivePrefixLock(transactionId, prefixKey, durability);
     }
 
     /// <summary>

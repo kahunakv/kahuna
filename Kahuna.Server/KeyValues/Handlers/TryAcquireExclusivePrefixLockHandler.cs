@@ -29,12 +29,15 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
     }
     
     /// <summary>
-    /// Executes the get by prefix request
+    /// Executes the acquire exclusive prefix lock request.
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
     public KeyValueResponse Execute(KeyValueRequest message)
     {
+        if (message.TransactionId == HLCTimestamp.Zero)
+            return KeyValueStaticResponses.ErroredResponse;
+        
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
         
         // Check if the prefix is already locked by the current transaction
@@ -64,9 +67,6 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
     /// <returns></returns>
     private KeyValueResponse LockExistingKeysByPrefix(HLCTimestamp currentTime, KeyValueRequest message)
     {        
-        if (message.TransactionId == HLCTimestamp.Zero)
-            return KeyValueStaticResponses.ErroredResponse;               
-        
         foreach ((string key, KeyValueContext context) in keyValuesStore.GetByPrefix(message.Key))
         {
             KeyValueResponse response = TryLock(currentTime, message.TransactionId, key, message.ExpiresMs, context);                                                    
