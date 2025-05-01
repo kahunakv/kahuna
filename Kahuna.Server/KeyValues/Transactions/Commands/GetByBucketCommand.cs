@@ -11,11 +11,11 @@ namespace Kahuna.Server.KeyValues.Transactions.Commands;
 /// Represents a command that retrieves key-value pairs matching a specified prefix.
 /// </summary>
 /// <remarks>
-/// The <c>GetByPrefixCommand</c> is a transactional command used within the key-value store
+/// The <c>GetByBucketCommand</c> is a transactional command used within the key-value store
 /// system. It facilitates fetching all key-value pairs that share a common prefix key,
 /// executing the asynchronous retrieval via the provided manager and transaction context.
 /// </remarks>
-internal sealed class GetByPrefixCommand : BaseCommand
+internal sealed class GetByBucketCommand : BaseCommand
 {
     public static async Task<KeyValueTransactionResult> Execute(
         KeyValuesManager manager,
@@ -36,7 +36,7 @@ internal sealed class GetByPrefixCommand : BaseCommand
             context.LocksAcquired.Add((keyName, durability));
         }*/
                        
-        KeyValueGetByPrefixResult response = await manager.LocateAndGetByPrefix(
+        KeyValueGetByBucketResult response = await manager.LocateAndGetByBucket(
             context.TransactionId,
             keyName,            
             durability,

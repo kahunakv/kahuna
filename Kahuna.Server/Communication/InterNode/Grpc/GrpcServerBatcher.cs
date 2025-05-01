@@ -121,7 +121,7 @@ internal sealed class GrpcServerBatcher
         return TryProcessQueue(grpcBatcherItem, promise);
     }
     
-    public Task<GrpcServerBatcherResponse> Enqueue(GrpcGetByPrefixRequest message)
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcGetByBucketRequest message)
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -456,10 +456,10 @@ internal sealed class GrpcServerBatcher
             batchRequest.Type = GrpcServerBatchType.ServerTryExistsKeyValue;
             batchRequest.TryExistsKeyValue = itemRequest.TryExistsKeyValue;
         }
-        else if (itemRequest.GetByPrefix is not null)
+        else if (itemRequest.GetByBucket is not null)
         {
-            batchRequest.Type = GrpcServerBatchType.ServerTryGetByPrefix;
-            batchRequest.GetByPrefix = itemRequest.GetByPrefix;
+            batchRequest.Type = GrpcServerBatchType.ServerTryGetByBucket;
+            batchRequest.GetByBucket = itemRequest.GetByBucket;
         }
         else if (itemRequest.ScanByPrefix is not null)
         {
@@ -644,8 +644,8 @@ internal sealed class GrpcServerBatcher
                         item.Promise.SetResult(new(response.TryExistsKeyValue));
                         break;
                     
-                    case GrpcServerBatchType.ServerTryGetByPrefix:
-                        item.Promise.SetResult(new(response.GetByPrefix));
+                    case GrpcServerBatchType.ServerTryGetByBucket:
+                        item.Promise.SetResult(new(response.GetByBucket));
                         break;
                     
                     case GrpcServerBatchType.ServerTryScanByPrefix:

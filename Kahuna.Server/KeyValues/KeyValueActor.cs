@@ -45,7 +45,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     
     /// <summary>
     /// Stores write intents for key prefixes. This ensure consistent reads for operations like
-    /// "get by prefix". If a write intent is present, only the transaction holding the write intent
+    /// "get by bucket". If a write intent is present, only the transaction holding the write intent
     /// can add/modify/delete the keys in the prefix.
     /// </summary>
     private readonly Dictionary<string, KeyValueWriteIntent> locksByPrefix = new();
@@ -98,7 +98,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// This handler processes requests to extract subsets of stored entries efficiently
     /// and in a consistent manner.
     /// </summary>
-    private readonly TryGetByPrefixHandler tryGetByPrefixHandler;
+    private readonly TryGetByBucketHandler tryGetByBucketHandler;
 
     /// <summary>
     /// Handles operations for scanning keys in the key-value store with a specified prefix.
@@ -214,7 +214,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         tryGetHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
         tryScanByPrefixHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
         tryScanByPrefixFromDiskHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryGetByPrefixHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        tryGetByBucketHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
         tryExistsHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
         tryAcquireExclusiveLockHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
         tryAcquireExclusivePrefixLockHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
@@ -274,7 +274,7 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.TryPrepareMutations => await TryPrepareMutations(message),
                 KeyValueRequestType.TryCommitMutations => await TryCommitMutations(message),
                 KeyValueRequestType.TryRollbackMutations => await TryRollbackMutations(message),
-                KeyValueRequestType.GetByPrefix => await GetByPrefix(message),
+                KeyValueRequestType.GetByBucket => await GetByBucket(message),
                 KeyValueRequestType.ScanByPrefix => await ScanByPrefix(message),
                 KeyValueRequestType.ScanByPrefixFromDisk => await ScanByPrefixFromDisk(message),
                 _ => KeyValueStaticResponses.ErroredResponse
@@ -366,9 +366,9 @@ public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private Task<KeyValueResponse> GetByPrefix(KeyValueRequest message)
+    private Task<KeyValueResponse> GetByBucket(KeyValueRequest message)
     {
-        return tryGetByPrefixHandler.Execute(message);
+        return tryGetByBucketHandler.Execute(message);
     }
     
     /// <summary>

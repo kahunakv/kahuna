@@ -10,9 +10,9 @@ using Nixie;
 
 namespace Kahuna.Server.KeyValues.Handlers;
 
-internal sealed class TryGetByPrefixHandler : BaseHandler
+internal sealed class TryGetByBucketHandler : BaseHandler
 {
-    public TryGetByPrefixHandler(BTree<string, KeyValueContext> keyValuesStore,
+    public TryGetByBucketHandler(BTree<string, KeyValueContext> keyValuesStore,
         Dictionary<string, KeyValueWriteIntent> locksByPrefix,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IPersistenceBackend persistenceBackend,
@@ -24,16 +24,16 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
     }
 
     /// <summary>
-    /// Executes the get by prefix request
+    /// Executes the get by bucket request
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
     public async Task<KeyValueResponse> Execute(KeyValueRequest message)
     {
         if (message.Durability == KeyValueDurability.Ephemeral)
-            return await GetByPrefixEphemeral(message);
+            return await GetByBucketEphemeral(message);
         
-        return await GetByPrefixPersistent(message);
+        return await GetByBucketPersistent(message);
     }
 
     /// <summary>
@@ -41,12 +41,12 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private async Task<KeyValueResponse> GetByPrefixEphemeral(KeyValueRequest message)
+    private async Task<KeyValueResponse> GetByBucketEphemeral(KeyValueRequest message)
     {
         List<(string, ReadOnlyKeyValueContext)> items = [];
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
         
-        foreach ((string key, KeyValueContext? _) in keyValuesStore.GetByPrefix(message.Key))
+        foreach ((string key, KeyValueContext? _) in keyValuesStore.GetByBucket(message.Key))
         {
             KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability);     
             
@@ -70,14 +70,14 @@ internal sealed class TryGetByPrefixHandler : BaseHandler
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private async Task<KeyValueResponse> GetByPrefixPersistent(KeyValueRequest message)
+    private async Task<KeyValueResponse> GetByBucketPersistent(KeyValueRequest message)
     {
         Dictionary<string, ReadOnlyKeyValueContext> items = new();
         
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
         // step 1: we need to check the in-memory store to get the MVCC entry or the latest value
-        foreach ((string key, KeyValueContext? _) in keyValuesStore.GetByPrefix(message.Key))
+        foreach ((string key, KeyValueContext? _) in keyValuesStore.GetByBucket(message.Key))
         {
             KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability);
 

@@ -40,7 +40,7 @@ internal sealed class TryScanByPrefixHandler : BaseHandler
         List<(string, ReadOnlyKeyValueContext)> items = [];
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
         
-        foreach ((string key, KeyValueContext? _) in keyValuesStore.GetByPrefix(message.Key))
+        foreach ((string key, KeyValueContext? _) in keyValuesStore.GetByBucket(message.Key))
         {
             KeyValueResponse response = await Get(currentTime, key, message.Durability);     
             

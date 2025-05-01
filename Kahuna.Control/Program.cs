@@ -38,15 +38,15 @@ if (IsSingleCommand(opts))
             return;
         }
 
-        if (!string.IsNullOrEmpty(opts.GetByPrefix))
+        if (!string.IsNullOrEmpty(opts.GetByBucket))
         {
-            await KeyValueGetByPrefixCommand.Execute(connection, opts.GetByPrefix, format);
+            await KeyValueGetByBucketCommand.Execute(connection, opts.GetByBucket, format);
             return;
         }
 
         if (!string.IsNullOrEmpty(opts.ScanByPrefix))
         {
-            await KeyValueGetByPrefixCommand.Execute(connection, opts.ScanByPrefix, format);
+            await KeyValueGetByBucketCommand.Execute(connection, opts.ScanByPrefix, format);
             return;
         }
 
@@ -103,7 +103,7 @@ static bool IsSingleCommand(KahunaControlOptions kahunaControlOptions)
     if (!string.IsNullOrEmpty(kahunaControlOptions.Get))
         return true;
     
-    if (!string.IsNullOrEmpty(kahunaControlOptions.GetByPrefix))
+    if (!string.IsNullOrEmpty(kahunaControlOptions.GetByBucket))
         return true;
     
     if (!string.IsNullOrEmpty(kahunaControlOptions.ScanByPrefix))

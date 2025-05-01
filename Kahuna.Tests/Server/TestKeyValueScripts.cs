@@ -709,7 +709,7 @@ public class TestKeyValueScripts : BaseCluster
     }
     
     [Theory, CombinatorialData]
-    public async Task TestSetGetByPrefixExecuteScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    public async Task TestSetGetByBucketExecuteScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
@@ -726,7 +726,7 @@ public class TestKeyValueScripts : BaseCluster
 
         //await Task.Delay(1000);
         
-        script = "GET BY PREFIX `my-prefix`";
+        script = "get by bucket `my-prefix`";
 
         resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);

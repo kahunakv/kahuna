@@ -54,7 +54,7 @@ public sealed class KeyValueResponse
     public ReadOnlyKeyValueContext? Context { get; }
     
     /// <summary>
-    /// Used in the 'get by prefix' operation to return all the found values.
+    /// Used in the 'get by bucket' operation to return all the found values.
     /// </summary>
     public List<(string, ReadOnlyKeyValueContext)>? Items { get; }
     

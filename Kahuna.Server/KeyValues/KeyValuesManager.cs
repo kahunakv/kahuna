@@ -479,15 +479,15 @@ internal sealed class KeyValuesManager
     }
 
     /// <summary>
-    /// Locates the leader node for the given prefix and executes the GetByPrefix request.
+    /// Locates the leader node for the given prefix and executes the GetByBucket request.
     /// </summary>
     /// <param name="prefixedKey"></param>
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public Task<KeyValueGetByPrefixResult> LocateAndGetByPrefix(HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    public Task<KeyValueGetByBucketResult> LocateAndGetByBucket(HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        return locator.LocateAndGetByPrefix(transactionId, prefixedKey, durability, cancellationToken);
+        return locator.LocateAndGetByBucket(transactionId, prefixedKey, durability, cancellationToken);
     }
 
     /// <summary>
@@ -1343,7 +1343,7 @@ internal sealed class KeyValuesManager
     /// <param name="prefixKeyName"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public Task<KeyValueGetByPrefixResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability, CancellationToken cancellationToken)
+    public Task<KeyValueGetByBucketResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         return locator.ScanAllByPrefix(prefixKeyName, durability, cancellationToken);
     }
@@ -1356,7 +1356,7 @@ internal sealed class KeyValuesManager
     /// <param name="durability"></param>
     /// <returns></returns>
     /// <exception cref="KahunaServerException"></exception>
-    public async Task<KeyValueGetByPrefixResult> ScanByPrefix(string prefixKeyName, KeyValueDurability durability)
+    public async Task<KeyValueGetByBucketResult> ScanByPrefix(string prefixKeyName, KeyValueDurability durability)
     {                
         KeyValueRequest request = new(
             KeyValueRequestType.ScanByPrefix,
@@ -1378,7 +1378,7 @@ internal sealed class KeyValuesManager
         {
             List<Task<KeyValueResponse?>> tasks = new(ephemeralInstances.Count);
             
-            // Ephemeral GetByPrefix does a brute force search on every ephemeral actor
+            // Ephemeral GetByBucket does a brute force search on every ephemeral actor
             foreach (IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actor in ephemeralInstances)
                 tasks.Add(actor.Ask(request));
             
@@ -1397,7 +1397,7 @@ internal sealed class KeyValuesManager
         {
             List<Task<KeyValueResponse?>> tasks = new(persistentInstances.Count);
             
-            // Persistent GetByPrefix does a brute force search on every persistent actor
+            // Persistent GetByBucket does a brute force search on every persistent actor
             foreach (IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actor in persistentInstances)
                 tasks.Add(actor.Ask(request));
             
@@ -1422,7 +1422,7 @@ internal sealed class KeyValuesManager
     /// <param name="prefixKeyName"></param>    
     /// <returns></returns>
     /// <exception cref="KahunaServerException"></exception>
-    public async Task<KeyValueGetByPrefixResult> ScanByPrefixFromDisk(string prefixKeyName)
+    public async Task<KeyValueGetByBucketResult> ScanByPrefixFromDisk(string prefixKeyName)
     {                
         KeyValueRequest request = new(
             KeyValueRequestType.ScanByPrefixFromDisk,
@@ -1456,10 +1456,10 @@ internal sealed class KeyValuesManager
     /// <param name="prefixKeyName"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KeyValueGetByPrefixResult> GetByPrefix(HLCTimestamp transactionId, string prefixKeyName, KeyValueDurability durability)
+    public async Task<KeyValueGetByBucketResult> GetByBucket(HLCTimestamp transactionId, string prefixKeyName, KeyValueDurability durability)
     {
         KeyValueRequest request = new(
-            KeyValueRequestType.GetByPrefix,
+            KeyValueRequestType.GetByBucket,
             transactionId,
             HLCTimestamp.Zero,
             prefixKeyName,

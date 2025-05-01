@@ -82,7 +82,7 @@ public sealed class KeyValueRequest : IConsistentHashable
 
     public int GetHash()
     {
-        if (Type is KeyValueRequestType.GetByPrefix or KeyValueRequestType.ScanByPrefix)
+        if (Type is KeyValueRequestType.GetByBucket or KeyValueRequestType.ScanByPrefix)
             return (int)HashUtils.SimpleHash(Key);
         
         return (int)HashUtils.InversePrefixedStaticHash(Key, '/');

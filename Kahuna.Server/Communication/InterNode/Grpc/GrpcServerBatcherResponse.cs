@@ -23,7 +23,7 @@ internal sealed class GrpcServerBatcherResponse
 
     public GrpcTryExistsKeyValueResponse? TryExistsKeyValue { get; }
     
-    public GrpcGetByPrefixResponse? GetByPrefix { get; }
+    public GrpcGetByBucketResponse? GetByBucket { get; }
     
     public GrpcScanByPrefixResponse? ScanByPrefix { get; }
     
@@ -110,9 +110,9 @@ internal sealed class GrpcServerBatcherResponse
         TryExistsKeyValue = tryExistsKeyValue;
     }
     
-    public GrpcServerBatcherResponse(GrpcGetByPrefixResponse getByPrefix)
+    public GrpcServerBatcherResponse(GrpcGetByBucketResponse getByBucket)
     {
-        GetByPrefix = getByPrefix;
+        GetByBucket = getByBucket;
     }
     
     public GrpcServerBatcherResponse(GrpcScanByPrefixResponse scanByPrefix)

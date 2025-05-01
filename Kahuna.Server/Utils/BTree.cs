@@ -221,11 +221,11 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     /// <param name="prefix">The prefix to match against the keys in the B-Tree. Only keys that begin with this prefix will be included in the results.</param>
     /// <returns>A collection of key-value pairs where the keys start with the specified prefix, retrieved in lexicographical order.</returns>
     /// <exception cref="InvalidOperationException">Thrown when TKey is not of type string, as the operation is only valid for string-type keys.</exception>
-    public IEnumerable<KeyValuePair<TKey, TValue>> GetByPrefix(string prefix)
+    public IEnumerable<KeyValuePair<TKey, TValue>> GetByBucket(string prefix)
     {
         // only valid when TKey is string
         if (typeof(TKey) != typeof(string))
-            throw new InvalidOperationException("GetByPrefix only supported for BTree<string, TValue>");
+            throw new InvalidOperationException("GetByBucket only supported for BTree<string, TValue>");
 
         Node<TKey, TValue>? temp = Root;
         if (temp is null)

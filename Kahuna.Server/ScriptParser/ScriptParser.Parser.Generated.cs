@@ -3,8 +3,8 @@
 // (see accompanying GPPGcopyright.rtf)
 
 // GPPG version 1.5.3
-// DateTime: 4/30/2025 10:02:46 AM
-// Input file <ScriptParser/ScriptParser.Language.grammar.y - 4/30/2025 10:02:16 AM>
+// DateTime: 5/1/2025 11:10:52 AM
+// Input file <ScriptParser/ScriptParser.Language.grammar.y - 5/1/2025 11:10:35 AM>
 
 // options: no-lines gplex
 
@@ -28,7 +28,8 @@ internal enum Token {error=2,EOF=3,TDOUBLEDOT=4,TOR=5,TAND=6,
     TEX=49,TCMP=50,TCMPREV=51,TTHROW=52,TFOUND=53,TFOR=54,
     TDO=55,TIN=56,TRETURN=57,TSLEEP=58,TDIGIT=59,TFLOAT=60,
     TSTRING=61,TIDENTIFIER=62,TESCIDENTIFIER=63,TPLACEHOLDER=64,TTRUE=65,TFALSE=66,
-    TNULL=67,TAT=68,TSCAN=69,TESCAN=70,TPREFIX=71,TBY=72};
+    TNULL=67,TAT=68,TSCAN=69,TESCAN=70,TPREFIX=71,TBUCKET=72,
+    TBY=73};
 
 internal partial struct ValueType
 { 
@@ -66,7 +67,7 @@ internal partial class scriptParser: ShiftReduceParser<ValueType, LexLocation>
   private static string[] nonTerms = new string[] {
       "stmt_list", "$accept", "stmt", "set_stmt", "eset_stmt", "get_stmt", "eget_stmt", 
       "exists_stmt", "eexists_stmt", "delete_stmt", "edelete_stmt", "extend_stmt", 
-      "eextend_stmt", "get_by_prefix_stmt", "eget_by_prefix_stmt", "scan_by_prefix_stmt", 
+      "eextend_stmt", "get_by_bucket_stmt", "eget_by_bucket_stmt", "scan_by_prefix_stmt", 
       "escan_by_prefix_stmt", "let_stmt", "for_stmt", "if_stmt", "begin_stmt", 
       "commit_stmt", "rollback_stmt", "return_stmt", "sleep_stmt", "throw_stmt", 
       "key_name", "expression", "set_cmp", "int", "set_not_exists", "identifier", 
@@ -173,28 +174,28 @@ internal partial class scriptParser: ShiftReduceParser<ValueType, LexLocation>
     states[95] = new State(-41);
     states[96] = new State(-42);
     states[97] = new State(-6);
-    states[98] = new State(new int[]{72,102,62,65,64,67,61,72},new int[]{-27,99,-32,83,-33,84,-34,85});
+    states[98] = new State(new int[]{73,102,62,65,64,67,61,72},new int[]{-27,99,-32,83,-33,84,-34,85});
     states[99] = new State(new int[]{68,100,3,-43,33,-43,35,-43,34,-43,32,-43,36,-43,41,-43,42,-43,37,-43,38,-43,39,-43,40,-43,69,-43,70,-43,54,-43,43,-43,29,-43,31,-43,30,-43,57,-43,58,-43,52,-43,46,-43,44,-43});
     states[100] = new State(new int[]{59,11},new int[]{-30,101});
     states[101] = new State(-45);
-    states[102] = new State(new int[]{71,103});
+    states[102] = new State(new int[]{72,103});
     states[103] = new State(new int[]{62,65,64,67,61,72},new int[]{-27,104,-32,83,-33,84,-34,85});
     states[104] = new State(-63);
     states[105] = new State(new int[]{62,65},new int[]{-32,106});
     states[106] = new State(new int[]{9,107});
     states[107] = new State(new int[]{34,108,36,115,41,122,42,126,69,130,70,134,20,49,22,53,62,65,64,67,59,11,60,70,61,72,65,74,66,75,67,77},new int[]{-28,138,-38,56,-32,57,-33,66,-30,68,-39,69,-34,71,-40,73,-41,76});
-    states[108] = new State(new int[]{72,112,62,65,64,67,61,72},new int[]{-27,109,-32,83,-33,84,-34,85});
+    states[108] = new State(new int[]{73,112,62,65,64,67,61,72},new int[]{-27,109,-32,83,-33,84,-34,85});
     states[109] = new State(new int[]{68,110,3,-44,33,-44,35,-44,34,-44,32,-44,36,-44,41,-44,42,-44,37,-44,38,-44,39,-44,40,-44,69,-44,70,-44,54,-44,43,-44,29,-44,31,-44,30,-44,57,-44,58,-44,52,-44,46,-44,44,-44});
     states[110] = new State(new int[]{59,11},new int[]{-30,111});
     states[111] = new State(-46);
-    states[112] = new State(new int[]{71,113});
+    states[112] = new State(new int[]{72,113});
     states[113] = new State(new int[]{62,65,64,67,61,72},new int[]{-27,114,-32,83,-33,84,-34,85});
     states[114] = new State(-64);
-    states[115] = new State(new int[]{72,119,62,65,64,67,61,72},new int[]{-27,116,-32,83,-33,84,-34,85});
+    states[115] = new State(new int[]{73,119,62,65,64,67,61,72},new int[]{-27,116,-32,83,-33,84,-34,85});
     states[116] = new State(new int[]{68,117,3,-48,33,-48,35,-48,34,-48,32,-48,36,-48,41,-48,42,-48,37,-48,38,-48,39,-48,40,-48,69,-48,70,-48,54,-48,43,-48,29,-48,31,-48,30,-48,57,-48,58,-48,52,-48,46,-48,44,-48});
     states[117] = new State(new int[]{59,11},new int[]{-30,118});
     states[118] = new State(-50);
-    states[119] = new State(new int[]{71,120});
+    states[119] = new State(new int[]{72,120});
     states[120] = new State(new int[]{62,65,64,67,61,72},new int[]{-27,121,-32,83,-33,84,-34,85});
     states[121] = new State(-66);
     states[122] = new State(new int[]{62,65,64,67,61,72},new int[]{-27,123,-32,83,-33,84,-34,85});
@@ -205,21 +206,21 @@ internal partial class scriptParser: ShiftReduceParser<ValueType, LexLocation>
     states[127] = new State(new int[]{68,128,3,-56,33,-56,35,-56,34,-56,32,-56,36,-56,41,-56,42,-56,37,-56,38,-56,39,-56,40,-56,69,-56,70,-56,54,-56,43,-56,29,-56,31,-56,30,-56,57,-56,58,-56,52,-56,46,-56,44,-56});
     states[128] = new State(new int[]{59,11},new int[]{-30,129});
     states[129] = new State(-58);
-    states[130] = new State(new int[]{72,131});
+    states[130] = new State(new int[]{73,131});
     states[131] = new State(new int[]{71,132});
     states[132] = new State(new int[]{62,65,64,67,61,72},new int[]{-27,133,-32,83,-33,84,-34,85});
     states[133] = new State(-68);
-    states[134] = new State(new int[]{72,135});
+    states[134] = new State(new int[]{73,135});
     states[135] = new State(new int[]{71,136});
     states[136] = new State(new int[]{62,65,64,67,61,72},new int[]{-27,137,-32,83,-33,84,-34,85});
     states[137] = new State(-70);
     states[138] = new State(new int[]{9,18,11,20,10,22,12,24,13,26,14,28,15,30,6,32,5,34,16,36,17,38,18,40,19,42,4,44,21,46,3,-74,33,-74,35,-74,34,-74,32,-74,36,-74,41,-74,42,-74,37,-74,38,-74,39,-74,40,-74,69,-74,70,-74,54,-74,43,-74,29,-74,31,-74,30,-74,57,-74,58,-74,52,-74,46,-74,44,-74});
     states[139] = new State(-7);
-    states[140] = new State(new int[]{72,144,62,65,64,67,61,72},new int[]{-27,141,-32,83,-33,84,-34,85});
+    states[140] = new State(new int[]{73,144,62,65,64,67,61,72},new int[]{-27,141,-32,83,-33,84,-34,85});
     states[141] = new State(new int[]{68,142,3,-47,33,-47,35,-47,34,-47,32,-47,36,-47,41,-47,42,-47,37,-47,38,-47,39,-47,40,-47,69,-47,70,-47,54,-47,43,-47,29,-47,31,-47,30,-47,57,-47,58,-47,52,-47,46,-47,44,-47});
     states[142] = new State(new int[]{59,11},new int[]{-30,143});
     states[143] = new State(-49);
-    states[144] = new State(new int[]{71,145});
+    states[144] = new State(new int[]{72,145});
     states[145] = new State(new int[]{62,65,64,67,61,72},new int[]{-27,146,-32,83,-33,84,-34,85});
     states[146] = new State(-65);
     states[147] = new State(-8);
@@ -249,12 +250,12 @@ internal partial class scriptParser: ShiftReduceParser<ValueType, LexLocation>
     states[171] = new State(-14);
     states[172] = new State(-15);
     states[173] = new State(-16);
-    states[174] = new State(new int[]{72,175});
+    states[174] = new State(new int[]{73,175});
     states[175] = new State(new int[]{71,176});
     states[176] = new State(new int[]{62,65,64,67,61,72},new int[]{-27,177,-32,83,-33,84,-34,85});
     states[177] = new State(-67);
     states[178] = new State(-17);
-    states[179] = new State(new int[]{72,180});
+    states[179] = new State(new int[]{73,180});
     states[180] = new State(new int[]{71,181});
     states[181] = new State(new int[]{62,65,64,67,61,72},new int[]{-27,182,-32,83,-33,84,-34,85});
     states[182] = new State(-69);
@@ -377,14 +378,14 @@ internal partial class scriptParser: ShiftReduceParser<ValueType, LexLocation>
     rules[60] = new Rule(-11, new int[]{38,-27});
     rules[61] = new Rule(-12, new int[]{39,-27,-30});
     rules[62] = new Rule(-13, new int[]{40,-27,-30});
-    rules[63] = new Rule(-14, new int[]{34,72,71,-27});
-    rules[64] = new Rule(-14, new int[]{32,-32,9,34,72,71,-27});
-    rules[65] = new Rule(-15, new int[]{36,72,71,-27});
-    rules[66] = new Rule(-15, new int[]{32,-32,9,36,72,71,-27});
-    rules[67] = new Rule(-16, new int[]{69,72,71,-27});
-    rules[68] = new Rule(-16, new int[]{32,-32,9,69,72,71,-27});
-    rules[69] = new Rule(-17, new int[]{70,72,71,-27});
-    rules[70] = new Rule(-17, new int[]{32,-32,9,70,72,71,-27});
+    rules[63] = new Rule(-14, new int[]{34,73,72,-27});
+    rules[64] = new Rule(-14, new int[]{32,-32,9,34,73,72,-27});
+    rules[65] = new Rule(-15, new int[]{36,73,72,-27});
+    rules[66] = new Rule(-15, new int[]{32,-32,9,36,73,72,-27});
+    rules[67] = new Rule(-16, new int[]{69,73,71,-27});
+    rules[68] = new Rule(-16, new int[]{32,-32,9,69,73,71,-27});
+    rules[69] = new Rule(-17, new int[]{70,73,71,-27});
+    rules[70] = new Rule(-17, new int[]{32,-32,9,70,73,71,-27});
     rules[71] = new Rule(-27, new int[]{-32});
     rules[72] = new Rule(-27, new int[]{-33});
     rules[73] = new Rule(-27, new int[]{-34});
@@ -500,10 +501,10 @@ internal partial class scriptParser: ShiftReduceParser<ValueType, LexLocation>
       case 13: // stmt -> eextend_stmt
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
         break;
-      case 14: // stmt -> get_by_prefix_stmt
+      case 14: // stmt -> get_by_bucket_stmt
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
         break;
-      case 15: // stmt -> eget_by_prefix_stmt
+      case 15: // stmt -> eget_by_bucket_stmt
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
         break;
       case 16: // stmt -> scan_by_prefix_stmt
@@ -647,17 +648,17 @@ internal partial class scriptParser: ShiftReduceParser<ValueType, LexLocation>
       case 62: // eextend_stmt -> TEEXTEND, key_name, int
 { CurrentSemanticValue.n = new(NodeType.Eextend, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
         break;
-      case 63: // get_by_prefix_stmt -> TGET, TBY, TPREFIX, key_name
-{ CurrentSemanticValue.n = new(NodeType.GetByPrefix, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+      case 63: // get_by_bucket_stmt -> TGET, TBY, TBUCKET, key_name
+{ CurrentSemanticValue.n = new(NodeType.GetByBucket, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
         break;
-      case 64: // get_by_prefix_stmt -> TLET, identifier, TEQUALS, TGET, TBY, TPREFIX, key_name
-{ CurrentSemanticValue.n = new(NodeType.GetByPrefix, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-6].n, null, null, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+      case 64: // get_by_bucket_stmt -> TLET, identifier, TEQUALS, TGET, TBY, TBUCKET, key_name
+{ CurrentSemanticValue.n = new(NodeType.GetByBucket, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-6].n, null, null, null, null, null, ValueStack[ValueStack.Depth-7].l); }
         break;
-      case 65: // eget_by_prefix_stmt -> TEGET, TBY, TPREFIX, key_name
-{ CurrentSemanticValue.n = new(NodeType.EgetByPrefix, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+      case 65: // eget_by_bucket_stmt -> TEGET, TBY, TBUCKET, key_name
+{ CurrentSemanticValue.n = new(NodeType.EGetByBucket, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
         break;
-      case 66: // eget_by_prefix_stmt -> TLET, identifier, TEQUALS, TEGET, TBY, TPREFIX, key_name
-{ CurrentSemanticValue.n = new(NodeType.EgetByPrefix, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-6].n, null, null, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+      case 66: // eget_by_bucket_stmt -> TLET, identifier, TEQUALS, TEGET, TBY, TBUCKET, key_name
+{ CurrentSemanticValue.n = new(NodeType.EGetByBucket, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-6].n, null, null, null, null, null, ValueStack[ValueStack.Depth-7].l); }
         break;
       case 67: // scan_by_prefix_stmt -> TSCAN, TBY, TPREFIX, key_name
 { CurrentSemanticValue.n = new(NodeType.ScanByPrefix, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }

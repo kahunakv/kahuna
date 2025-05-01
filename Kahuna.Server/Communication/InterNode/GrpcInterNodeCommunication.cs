@@ -958,11 +958,11 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<KeyValueGetByPrefixResult> GetByPrefix(string node, HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<KeyValueGetByBucketResult> GetByBucket(string node, HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
         
-        GrpcGetByPrefixRequest request = new()
+        GrpcGetByBucketRequest request = new()
         {
             TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
@@ -978,7 +978,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         else
            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
        
-        GrpcGetByPrefixResponse remoteResponse = batchResponse.GetByPrefix!;
+        GrpcGetByBucketResponse remoteResponse = batchResponse.GetByBucket!;
         
         remoteResponse.ServedFrom = $"https://{node}";
         
@@ -993,7 +993,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<KeyValueGetByPrefixResult> ScanByPrefix(string node, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<KeyValueGetByBucketResult> ScanByPrefix(string node, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
         

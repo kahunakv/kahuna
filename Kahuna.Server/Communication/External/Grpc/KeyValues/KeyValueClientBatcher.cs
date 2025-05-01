@@ -98,11 +98,11 @@ internal sealed class KeyValueClientBatcher
                     }
                     break;
                     
-                    case GrpcClientBatchType.TryGetByPrefix:
+                    case GrpcClientBatchType.TryGetByBucket:
                     {
-                        GrpcGetByPrefixRequest? getByPrefixRequest = request.GetByPrefix;
+                        GrpcGetByBucketRequest? GetByBucketRequest = request.GetByBucket;
 
-                        tasks.Add(TryGetByPrefixDelayed(semaphore, request.RequestId, getByPrefixRequest, responseStream, context));
+                        tasks.Add(TryGetByBucketDelayed(semaphore, request.RequestId, GetByBucketRequest, responseStream, context));
                     }
                     break;
                     
@@ -313,21 +313,21 @@ internal sealed class KeyValueClientBatcher
         await WriteResponseToStream(semaphore, responseStream, response, context);              
     }
     
-    private async Task TryGetByPrefixDelayed(
+    private async Task TryGetByBucketDelayed(
         SemaphoreSlim semaphore, 
         int requestId, 
-        GrpcGetByPrefixRequest getByPrefixRequest, 
+        GrpcGetByBucketRequest GetByBucketRequest, 
         IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream,
         ServerCallContext context
     )
     {
-        GrpcGetByPrefixResponse getByPrefixResponse = await service.GetByPrefixInternal(getByPrefixRequest, context);
+        GrpcGetByBucketResponse GetByBucketResponse = await service.GetByBucketInternal(GetByBucketRequest, context);
         
         GrpcBatchClientKeyValueResponse response = new()
         {
-            Type = GrpcClientBatchType.TryGetByPrefix,
+            Type = GrpcClientBatchType.TryGetByBucket,
             RequestId = requestId,
-            GetByPrefix = getByPrefixResponse
+            GetByBucket = GetByBucketResponse
         };
 
         await WriteResponseToStream(semaphore, responseStream, response, context);             

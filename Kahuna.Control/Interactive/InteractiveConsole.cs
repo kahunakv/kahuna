@@ -68,6 +68,7 @@ public static class InteractiveConsole
                 "cmprev",
                 "by",
                 "prefix",
+                "bucket",
                 "scan",
                 "escan",
                 // control structures or operators

@@ -190,7 +190,7 @@ internal sealed class KeyValueReplicator
                 case KeyValueRequestType.TryCommitMutations:
                 case KeyValueRequestType.TryRollbackMutations:
                 case KeyValueRequestType.ScanByPrefix:
-                case KeyValueRequestType.GetByPrefix:
+                case KeyValueRequestType.GetByBucket:
                 case KeyValueRequestType.TryAcquireExclusivePrefixLock:
                 case KeyValueRequestType.TryReleaseExclusivePrefixLock:
                 case KeyValueRequestType.ScanByPrefixFromDisk:

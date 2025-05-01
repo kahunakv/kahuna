@@ -59,7 +59,7 @@ internal sealed class TryReleaseExclusivePrefixLockHandler : BaseHandler
     /// <returns></returns>
     private void ReleaseExistingLocksByPrefix(HLCTimestamp currentTime, KeyValueRequest message)
     {
-        foreach ((string key, KeyValueContext context) in keyValuesStore.GetByPrefix(message.Key))
+        foreach ((string key, KeyValueContext context) in keyValuesStore.GetByBucket(message.Key))
             TryReleaseLock( message.TransactionId, context);                                                    
     }           
     

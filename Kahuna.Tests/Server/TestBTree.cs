@@ -319,7 +319,7 @@ public class TestBTree
         items = btree.GetItems("services/008", "services/010");
         Assert.Equal(2, items.Count());
         
-        items = btree.GetByPrefix("services");
+        items = btree.GetByBucket("services");
         Assert.Equal(9, items.Count());
         
         Assert.Equal(9, btree.Count);
@@ -360,10 +360,10 @@ public class TestBTree
         items = btree.GetItems("services/008", "services/010");
         Assert.Equal(2, items.Count());*/
         
-        items = btree.GetByPrefix("services");
+        items = btree.GetByBucket("services");
         Assert.Equal(100, items.Count());
         
-        items = btree.GetByPrefix("config");
+        items = btree.GetByBucket("config");
         Assert.Equal(100, items.Count());
         
         Assert.Equal(200, btree.Count);

@@ -128,16 +128,16 @@ internal sealed class KeyValueLockHelper : BaseCommand
                     ephemeralLocks.Add(GetKeyName(context, ast.leftAst));
                     break;                               
                 
-                case NodeType.GetByPrefix:
+                case NodeType.GetByBucket:
                     if (ast.leftAst is null)
-                        throw new KahunaScriptException("Invalid GET BY PREFIX expression", ast.yyline);
+                        throw new KahunaScriptException("Invalid get by bucket expression", ast.yyline);
                     
                     persistentPrefixLocksToAcquire.Add(GetKeyName(context, ast.leftAst));
                     break;
                 
-                case NodeType.EgetByPrefix:
+                case NodeType.EGetByBucket:
                     if (ast.leftAst is null)
-                        throw new KahunaScriptException("Invalid GET BY PREFIX expression", ast.yyline);
+                        throw new KahunaScriptException("Invalid get by bucket expression", ast.yyline);
                     
                     ephemeralPrefixLocksToAcquire.Add(GetKeyName(context, ast.leftAst));
                     break;

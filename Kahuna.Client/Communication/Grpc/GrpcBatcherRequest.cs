@@ -34,7 +34,7 @@ internal sealed class GrpcBatcherRequest
     
     public GrpcTryAcquireExclusiveLockRequest? TryAcquireExclusiveLock { get; }
     
-    public GrpcGetByPrefixRequest? GetByPrefix { get; }
+    public GrpcGetByBucketRequest? GetByBucket { get; }
     
     public GrpcScanAllByPrefixRequest? ScanByPrefix { get; }
     
@@ -104,9 +104,9 @@ internal sealed class GrpcBatcherRequest
         TryAcquireExclusiveLock = tryAcquireExclusiveLock;
     }
     
-    public GrpcBatcherRequest(GrpcGetByPrefixRequest getByPrefix)
+    public GrpcBatcherRequest(GrpcGetByBucketRequest getByBucket)
     {
-        GetByPrefix = getByPrefix;
+        GetByBucket = getByBucket;
     }
     
     public GrpcBatcherRequest(GrpcScanAllByPrefixRequest scanByPrefix)

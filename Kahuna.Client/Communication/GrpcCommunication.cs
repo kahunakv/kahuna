@@ -1022,16 +1022,16 @@ public class GrpcCommunication : IKahunaCommunication
     /// <exception cref="KahunaException">
     /// Thrown if the operation fails or encounters an error while attempting to retrieve keys by prefix.
     /// </exception>
-    public async Task<List<KeyValueGetByPrefixItem>> GetByPrefix(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<List<KeyValueGetByBucketItem>> GetByBucket(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        GrpcGetByPrefixRequest request = new()
+        GrpcGetByBucketRequest request = new()
         {
             PrefixKey = prefixKey,
             Durability = (GrpcKeyValueDurability)durability
         };
 
         int retries = 0;
-        GrpcGetByPrefixResponse? response;
+        GrpcGetByBucketResponse? response;
         
         GrpcBatcher batcher = GetSharedBatcher(url);
         
@@ -1047,13 +1047,13 @@ public class GrpcCommunication : IKahunaCommunication
             else
                 batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
             
-            response = batchResponse.GetByPrefix;
+            response = batchResponse.GetByBucket;
 
             if (response is null)
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
             
             if (response.Type == GrpcKeyValueResponseType.TypeGot)
-                return response.Items.Select(x => new KeyValueGetByPrefixItem()
+                return response.Items.Select(x => new KeyValueGetByBucketItem()
                 {
                     Key = x.Key,
                     Value = x.Value.ToByteArray(),
@@ -1086,7 +1086,7 @@ public class GrpcCommunication : IKahunaCommunication
     /// A tuple containing a boolean indicating success or failure, and a list of keys that match the specified prefix.
     /// </returns>
     /// <exception cref="KahunaException">Thrown if the scan operation encounters an error or fails to complete successfully.</exception>
-    public async Task<List<KeyValueGetByPrefixItem>> ScanAllByPrefix(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<List<KeyValueGetByBucketItem>> ScanAllByPrefix(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcScanAllByPrefixRequest request = new()
         {
@@ -1117,7 +1117,7 @@ public class GrpcCommunication : IKahunaCommunication
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
             
             if (response.Type == GrpcKeyValueResponseType.TypeGot)
-                return response.Items.Select(x => new KeyValueGetByPrefixItem()
+                return response.Items.Select(x => new KeyValueGetByBucketItem()
                 {
                     Key = x.Key,
                     Value = x.Value.ToByteArray(),

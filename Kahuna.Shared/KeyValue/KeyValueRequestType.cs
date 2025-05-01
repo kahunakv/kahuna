@@ -22,5 +22,5 @@ public enum KeyValueRequestType
     TryRollbackMutations,
     ScanByPrefix,
     ScanByPrefixFromDisk,
-    GetByPrefix
+    GetByBucket
 }

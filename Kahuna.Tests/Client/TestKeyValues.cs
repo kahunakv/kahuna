@@ -1088,7 +1088,7 @@ public class TestKeyValues
     }
     
     [Theory, CombinatorialData]
-    public async Task TestGetByPrefix(
+    public async Task TestGetByBucket(
         [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
@@ -1112,7 +1112,7 @@ public class TestKeyValues
 
         await Task.Delay(1000, cancellationToken: TestContext.Current.CancellationToken);
         
-        List<KahunaKeyValue> items = await client.GetByPrefix(prefix, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
+        List<KahunaKeyValue> items = await client.GetByBucket(prefix, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         
         foreach (KahunaKeyValue item in items)
         {
@@ -1124,7 +1124,7 @@ public class TestKeyValues
     }
     
     [Theory, CombinatorialData]
-    public async Task TestGetByPrefixUnknown(
+    public async Task TestGetByBucketUnknown(
         [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
@@ -1134,7 +1134,7 @@ public class TestKeyValues
         
         string prefix = GetRandomKeyName();
         
-        List<KahunaKeyValue> items = await client.GetByPrefix(prefix, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
+        List<KahunaKeyValue> items = await client.GetByBucket(prefix, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Empty(items);
     }
     

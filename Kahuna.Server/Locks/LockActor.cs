@@ -36,6 +36,8 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
 
     private readonly Dictionary<string, LockContext> locks = new();
     
+    private readonly Dictionary<int, LockProposal> proposals = new();
+    
     private readonly HashSet<string> keysToEvict = [];
 
     private readonly ILogger<IKahuna> logger;

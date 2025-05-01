@@ -32,7 +32,7 @@ public sealed class KahunaControlOptions
     public string? Value { get; set; }
     
     [Option("get-by-prefix", Required = false, HelpText = "Executes a 'get-by-prefix' command")]
-    public string? GetByPrefix { get; set; }
+    public string? GetByBucket { get; set; }
     
     [Option("scan-by-prefix", Required = false, HelpText = "Executes a 'scan-by-prefix' command")]
     public string? ScanByPrefix { get; set; }

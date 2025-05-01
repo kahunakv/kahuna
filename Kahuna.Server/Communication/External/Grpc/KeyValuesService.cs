@@ -1129,9 +1129,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <param name="request">The request containing the prefix to match against.</param>
     /// <param name="context">The gRPC server call context.</param>
     /// <returns>A response containing the key-value pairs that match the specified prefix.</returns>
-    public override async Task<GrpcGetByPrefixResponse> GetByPrefix(GrpcGetByPrefixRequest request, ServerCallContext context)
+    public override async Task<GrpcGetByBucketResponse> GetByBucket(GrpcGetByBucketRequest request, ServerCallContext context)
     {
-        return await GetByPrefixInternal(request, context);
+        return await GetByBucketInternal(request, context);
     }
 
     /// <summary>
@@ -1140,7 +1140,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <param name="request">The request containing the prefix key and additional parameters for the operation.</param>
     /// <param name="context">The server call context for managing RPC settings and cancellation.</param>
     /// <returns>A task that represents the asynchronous operation, returning a response with the matching key-value pairs or an error type.</returns>
-    internal async Task<GrpcGetByPrefixResponse> GetByPrefixInternal(GrpcGetByPrefixRequest request, ServerCallContext context)
+    internal async Task<GrpcGetByBucketResponse> GetByBucketInternal(GrpcGetByBucketRequest request, ServerCallContext context)
     {
         if (request.PrefixKey is null)
             return new()
@@ -1148,14 +1148,14 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
             
-        KeyValueGetByPrefixResult result = await keyValues.LocateAndGetByPrefix(
+        KeyValueGetByBucketResult result = await keyValues.LocateAndGetByBucket(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
             request.PrefixKey, 
             (KeyValueDurability)request.Durability, 
             context.CancellationToken
         );
 
-        GrpcGetByPrefixResponse response = new()
+        GrpcGetByBucketResponse response = new()
         {
             Type = (GrpcKeyValueResponseType)result.Type
         };
@@ -1190,7 +1190,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
             
-        KeyValueGetByPrefixResult result = await keyValues.ScanByPrefix(request.PrefixKey, (KeyValueDurability) request.Durability);
+        KeyValueGetByBucketResult result = await keyValues.ScanByPrefix(request.PrefixKey, (KeyValueDurability) request.Durability);
 
         GrpcScanByPrefixResponse response = new()
         {
@@ -1227,7 +1227,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
             
-        KeyValueGetByPrefixResult result = await keyValues.ScanAllByPrefix(request.PrefixKey, (KeyValueDurability) request.Durability, context.CancellationToken);
+        KeyValueGetByBucketResult result = await keyValues.ScanAllByPrefix(request.PrefixKey, (KeyValueDurability) request.Durability, context.CancellationToken);
 
         GrpcScanAllByPrefixResponse response = new()
         {

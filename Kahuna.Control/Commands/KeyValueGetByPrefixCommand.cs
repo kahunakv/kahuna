@@ -13,14 +13,14 @@ namespace Kahuna.Control.Commands;
 
 /// <summary>
 /// Provides a command to retrieve key-value pairs from a Kahuna storage system based on a specified prefix.
-/// This class encapsulates the functionality for executing a "GetByPrefix" operation against a given
+/// This class encapsulates the functionality for executing a "GetByBucket" operation against a given
 /// <see cref="KahunaClient"/> connection.
 /// </summary>
-public static class KeyValueGetByPrefixCommand
+public static class KeyValueGetByBucketCommand
 {    
     public static async Task Execute(KahunaClient connection, string optsGet, string? format)
     {                
-        List<KahunaKeyValue> kv = await connection.GetByPrefix(
+        List<KahunaKeyValue> kv = await connection.GetByBucket(
             optsGet,
             KeyValueDurability.Persistent, 
             CancellationToken.None

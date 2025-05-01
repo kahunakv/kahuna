@@ -137,8 +137,8 @@ internal static class KeyValueTransactionExpression
             case NodeType.BeginOption:
             case NodeType.Sleep:
             case NodeType.Throw:
-            case NodeType.GetByPrefix:
-            case NodeType.EgetByPrefix:
+            case NodeType.GetByBucket:
+            case NodeType.EGetByBucket:
             case NodeType.ScanByPrefix:
             case NodeType.EscanByPrefix:
             default:

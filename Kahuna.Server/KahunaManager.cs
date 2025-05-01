@@ -538,21 +538,21 @@ public sealed class KahunaManager : IKahuna
     }
 
     /// <summary>
-    /// Locates the leader node for the given prefix and executes the GetByPrefix request.
+    /// Locates the leader node for the given prefix and executes the GetByBucket request.
     /// </summary>
     /// <param name="transactionId"></param>
     /// <param name="prefixedKey"></param>
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public Task<KeyValueGetByPrefixResult> LocateAndGetByPrefix(
+    public Task<KeyValueGetByBucketResult> LocateAndGetByBucket(
         HLCTimestamp transactionId, 
         string prefixedKey, 
         KeyValueDurability durability, 
         CancellationToken cancellationToken
     )
     {
-        return keyValues.LocateAndGetByPrefix(transactionId, prefixedKey, durability, cancellationToken);
+        return keyValues.LocateAndGetByBucket(transactionId, prefixedKey, durability, cancellationToken);
     }
 
     /// <summary>
@@ -842,7 +842,7 @@ public sealed class KahunaManager : IKahuna
     /// <param name="prefixKeyName"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public Task<KeyValueGetByPrefixResult> ScanByPrefix(string prefixKeyName, KeyValueDurability durability)
+    public Task<KeyValueGetByBucketResult> ScanByPrefix(string prefixKeyName, KeyValueDurability durability)
     {
         return keyValues.ScanByPrefix(prefixKeyName, durability);
     }
@@ -854,9 +854,9 @@ public sealed class KahunaManager : IKahuna
     /// <param name="prefixKeyName"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public Task<KeyValueGetByPrefixResult> GetByPrefix(HLCTimestamp transactionId, string prefixKeyName, KeyValueDurability durability)
+    public Task<KeyValueGetByBucketResult> GetByBucket(HLCTimestamp transactionId, string prefixKeyName, KeyValueDurability durability)
     {
-        return keyValues.GetByPrefix(transactionId, prefixKeyName, durability);
+        return keyValues.GetByBucket(transactionId, prefixKeyName, durability);
     }
     
     /// <summary>
@@ -865,7 +865,7 @@ public sealed class KahunaManager : IKahuna
     /// <param name="prefixKeyName"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public Task<KeyValueGetByPrefixResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability, CancellationToken cancellationToken)
+    public Task<KeyValueGetByBucketResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         return keyValues.ScanAllByPrefix(prefixKeyName, durability, cancellationToken);
     }

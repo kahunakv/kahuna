@@ -67,7 +67,7 @@ public class TestKeyValues : BaseCluster
     }
     
     [Theory, CombinatorialData]
-    public async Task TestGetByPrefix(
+    public async Task TestGetByBucket(
         [CombinatorialValues("memory")] string storage,
         [CombinatorialValues(8, 16)] int partitions,
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
@@ -98,7 +98,7 @@ public class TestKeyValues : BaseCluster
         Assert.Equal(KeyValueResponseType.Set, response);
         Assert.Equal(0, revision);
         
-        KeyValueGetByPrefixResult result = await kahuna1.LocateAndGetByPrefix(HLCTimestamp.Zero, prefix, durability, TestContext.Current.CancellationToken);
+        KeyValueGetByBucketResult result = await kahuna1.LocateAndGetByBucket(HLCTimestamp.Zero, prefix, durability, TestContext.Current.CancellationToken);
         Assert.Equal(3, result.Items.Count);
         
         keyName = prefix + "/" + GetRandomValue();
@@ -108,10 +108,10 @@ public class TestKeyValues : BaseCluster
         Assert.Equal(KeyValueResponseType.Set, response);
         Assert.Equal(0, revision);
         
-        result = await kahuna1.LocateAndGetByPrefix(HLCTimestamp.Zero, prefix, durability, TestContext.Current.CancellationToken);
+        result = await kahuna1.LocateAndGetByBucket(HLCTimestamp.Zero, prefix, durability, TestContext.Current.CancellationToken);
         Assert.Equal(4, result.Items.Count);
 
-        ValidateGetByPrefixItems(prefix, result.Items);
+        ValidateGetByBucketItems(prefix, result.Items);
         
         keyName = prefix + "/" + GetRandomValue();
         value = Encoding.UTF8.GetBytes(GetRandomValue());
@@ -120,19 +120,19 @@ public class TestKeyValues : BaseCluster
         Assert.Equal(KeyValueResponseType.Set, response);
         Assert.Equal(0, revision);
         
-        result = await kahuna1.LocateAndGetByPrefix(HLCTimestamp.Zero, prefix, durability, TestContext.Current.CancellationToken);
+        result = await kahuna1.LocateAndGetByBucket(HLCTimestamp.Zero, prefix, durability, TestContext.Current.CancellationToken);
         Assert.Equal(5, result.Items.Count);
         
-        ValidateGetByPrefixItems(prefix, result.Items);
+        ValidateGetByBucketItems(prefix, result.Items);
         
         (response, revision, _) = await kahuna2.LocateAndTryDeleteKeyValue(HLCTimestamp.Zero, keyName, durability, TestContext.Current.CancellationToken);
         Assert.Equal(KeyValueResponseType.Deleted, response);
         Assert.Equal(0, revision);
         
-        result = await kahuna1.LocateAndGetByPrefix(HLCTimestamp.Zero, prefix, durability, TestContext.Current.CancellationToken);
+        result = await kahuna1.LocateAndGetByBucket(HLCTimestamp.Zero, prefix, durability, TestContext.Current.CancellationToken);
         Assert.Equal(4, result.Items.Count);
         
-        ValidateGetByPrefixItems(prefix, result.Items);
+        ValidateGetByBucketItems(prefix, result.Items);
 
         await LeaveCluster(node1, node2, node3);
     }
@@ -169,7 +169,7 @@ public class TestKeyValues : BaseCluster
         Assert.Equal(KeyValueResponseType.Set, response);
         Assert.Equal(0, revision);
         
-        KeyValueGetByPrefixResult result = await kahuna1.ScanAllByPrefix(prefix, durability, TestContext.Current.CancellationToken);
+        KeyValueGetByBucketResult result = await kahuna1.ScanAllByPrefix(prefix, durability, TestContext.Current.CancellationToken);
         Assert.Equal(3, result.Items.Count);
         
         keyName = prefix + GetRandomValue();
@@ -182,7 +182,7 @@ public class TestKeyValues : BaseCluster
         result = await kahuna1.ScanAllByPrefix(prefix, durability, TestContext.Current.CancellationToken);
         Assert.Equal(4, result.Items.Count);
 
-        ValidateGetByPrefixItems(prefix, result.Items);
+        ValidateGetByBucketItems(prefix, result.Items);
         
         keyName = prefix + GetRandomValue();
         value = Encoding.UTF8.GetBytes(GetRandomValue());
@@ -194,7 +194,7 @@ public class TestKeyValues : BaseCluster
         result = await kahuna2.ScanAllByPrefix(prefix, durability, TestContext.Current.CancellationToken);
         Assert.Equal(5, result.Items.Count);
         
-        ValidateGetByPrefixItems(prefix, result.Items);
+        ValidateGetByBucketItems(prefix, result.Items);
         
         (response, revision, _) = await kahuna2.LocateAndTryDeleteKeyValue(HLCTimestamp.Zero, keyName, durability, TestContext.Current.CancellationToken);
         Assert.Equal(KeyValueResponseType.Deleted, response);
@@ -203,12 +203,12 @@ public class TestKeyValues : BaseCluster
         result = await kahuna3.ScanAllByPrefix(prefix, durability, TestContext.Current.CancellationToken);
         Assert.Equal(4, result.Items.Count);
         
-        ValidateGetByPrefixItems(prefix, result.Items);
+        ValidateGetByBucketItems(prefix, result.Items);
 
         await LeaveCluster(node1, node2, node3);
     }
 
-    private static void ValidateGetByPrefixItems(string prefix, List<(string, ReadOnlyKeyValueContext)> resultItems)
+    private static void ValidateGetByBucketItems(string prefix, List<(string, ReadOnlyKeyValueContext)> resultItems)
     {
         foreach ((string key, ReadOnlyKeyValueContext value) in resultItems)
         {

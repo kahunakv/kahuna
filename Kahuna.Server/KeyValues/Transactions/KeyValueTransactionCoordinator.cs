@@ -103,8 +103,8 @@ internal sealed class KeyValueTransactionCoordinator
                 case NodeType.Get:
                     return await GetCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
 
-                case NodeType.GetByPrefix:
-                    return await GetByPrefixCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
+                case NodeType.GetByBucket:
+                    return await GetByBucketCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
                 
                 case NodeType.ScanByPrefix:
                     return await ScanByPrefixCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Persistent, CancellationToken.None);
@@ -133,8 +133,8 @@ internal sealed class KeyValueTransactionCoordinator
                 case NodeType.Eextend:
                     return await ExtendCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
 
-                case NodeType.EgetByPrefix:
-                    return await GetByPrefixCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
+                case NodeType.EGetByBucket:
+                    return await GetByBucketCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
                 
                 case NodeType.EscanByPrefix:
                     return await ScanByPrefixCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
@@ -1141,12 +1141,12 @@ internal sealed class KeyValueTransactionCoordinator
                     context.Result = await ExtendCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
 
-                case NodeType.GetByPrefix:
-                    context.Result = await GetByPrefixCommand.Execute(manager, context, ast, KeyValueDurability.Persistent, cancellationToken);
+                case NodeType.GetByBucket:
+                    context.Result = await GetByBucketCommand.Execute(manager, context, ast, KeyValueDurability.Persistent, cancellationToken);
                     break;
 
-                case NodeType.EgetByPrefix:
-                    context.Result = await GetByPrefixCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
+                case NodeType.EGetByBucket:
+                    context.Result = await GetByBucketCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
 
                 case NodeType.Commit:

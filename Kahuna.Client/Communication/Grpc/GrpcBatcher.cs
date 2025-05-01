@@ -221,7 +221,7 @@ internal sealed class GrpcBatcher
         return TryProcessQueue(grpcBatcherItem, promise);
     }
     
-    public Task<GrpcBatcherResponse> Enqueue(GrpcGetByPrefixRequest message)
+    public Task<GrpcBatcherResponse> Enqueue(GrpcGetByBucketRequest message)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -471,10 +471,10 @@ internal sealed class GrpcBatcher
             batchRequest.Type = GrpcClientBatchType.TryExecuteTransactionScript;
             batchRequest.TryExecuteTransactionScript = itemRequest.TryExecuteTransactionScript;
         }
-        else if (itemRequest.GetByPrefix is not null)
+        else if (itemRequest.GetByBucket is not null)
         {
-            batchRequest.Type = GrpcClientBatchType.TryGetByPrefix;
-            batchRequest.GetByPrefix = itemRequest.GetByPrefix;
+            batchRequest.Type = GrpcClientBatchType.TryGetByBucket;
+            batchRequest.GetByBucket = itemRequest.GetByBucket;
         }
         else if (itemRequest.ScanByPrefix is not null)
         {
@@ -564,8 +564,8 @@ internal sealed class GrpcBatcher
                     item.Promise.SetResult(new(response.TryExecuteTransactionScript));
                     break;
                 
-                case GrpcClientBatchType.TryGetByPrefix:
-                    item.Promise.SetResult(new(response.GetByPrefix));
+                case GrpcClientBatchType.TryGetByBucket:
+                    item.Promise.SetResult(new(response.GetByBucket));
                     break;
                 
                 case GrpcClientBatchType.TryScanByPrefix:

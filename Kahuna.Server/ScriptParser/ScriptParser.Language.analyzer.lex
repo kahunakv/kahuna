@@ -45,6 +45,7 @@ TNotWord        (N|n)(O|o)(T|t)
 TScan           (S|s)(C|c)(A|a)(N|n)
 TEScan          (E|e)(S|s)(C|c)(A|a)(N|n)
 TBy             (B|b)(Y|y)
+TBucket         (B|b)(U|u)(C|c)(K|k)(E|e)(T|t)
 TPrefix         (P|p)(R|r)(E|e)(F|f)(I|i)(X|x)
 LParen          \(
 RParen          \)
@@ -238,6 +239,8 @@ TAnd            &&
 {TBy} { yylval.l = yyline; return (int)Token.TBY; }
 
 {TPrefix} { yylval.l = yyline; return (int)Token.TPREFIX; }
+
+{TBucket} { yylval.l = yyline; return (int)Token.TBUCKET; }
 
 {Identifier} { yylval.l = yyline; yylval.s = yytext; return (int)Token.TIDENTIFIER; }
 

@@ -770,10 +770,10 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     /// <exception cref="KahunaServerException"></exception>
-    public async Task<KeyValueGetByPrefixResult> GetByPrefix(string node, HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<KeyValueGetByBucketResult> GetByBucket(string node, HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))        
-            return await kahunaNode.GetByPrefix(transactionId, prefixedKey, durability);        
+            return await kahunaNode.GetByBucket(transactionId, prefixedKey, durability);        
         
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -787,7 +787,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     /// <exception cref="KahunaServerException"></exception>
-    public async Task<KeyValueGetByPrefixResult> ScanByPrefix(string node, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<KeyValueGetByBucketResult> ScanByPrefix(string node, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))        
             return await kahunaNode.ScanByPrefix(prefixedKey, durability);        

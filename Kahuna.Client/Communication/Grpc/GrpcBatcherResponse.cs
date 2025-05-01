@@ -34,7 +34,7 @@ internal sealed class GrpcBatcherResponse
     
     public GrpcTryExecuteTransactionScriptResponse? TryExecuteTransactionScript { get; }     
     
-    public GrpcGetByPrefixResponse? GetByPrefix { get; }
+    public GrpcGetByBucketResponse? GetByBucket { get; }
     
     public GrpcScanAllByPrefixResponse? ScanByPrefix { get; }
     
@@ -104,9 +104,9 @@ internal sealed class GrpcBatcherResponse
         TryExecuteTransactionScript = tryExecuteTransactionScript;
     }
     
-    public GrpcBatcherResponse(GrpcGetByPrefixResponse getByPrefix)
+    public GrpcBatcherResponse(GrpcGetByBucketResponse getByBucket)
     {
-        GetByPrefix = getByPrefix;
+        GetByBucket = getByBucket;
     }
     
     public GrpcBatcherResponse(GrpcScanAllByPrefixResponse scanByPrefix)

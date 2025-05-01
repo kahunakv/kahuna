@@ -510,7 +510,7 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
          ESET `services/hello` 'value'
          ESET `services/hello1` 'value'
          ESET `services/hello2` 'value'
-         LET x = EGET BY PREFIX `services`
+         LET x = Eget by bucket `services`
          RETURN count(x)
          """;
 

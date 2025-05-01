@@ -780,13 +780,13 @@ public class KahunaClient
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<List<KahunaKeyValue>> GetByPrefix(string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken = default)
+    public async Task<List<KahunaKeyValue>> GetByBucket(string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken = default)
     {
-        List<KeyValueGetByPrefixItem> kv = await communication.GetByPrefix(GetRoundRobinUrl(), prefixKey, durability, cancellationToken).ConfigureAwait(false);
+        List<KeyValueGetByBucketItem> kv = await communication.GetByBucket(GetRoundRobinUrl(), prefixKey, durability, cancellationToken).ConfigureAwait(false);
         
         List<KahunaKeyValue> result = new(kv.Count);
         
-        foreach (KeyValueGetByPrefixItem item in kv)
+        foreach (KeyValueGetByBucketItem item in kv)
             result.Add(new(this, item.Key ?? "", true, item.Value, item.Revision, durability, 0));
 
         return result;
@@ -801,11 +801,11 @@ public class KahunaClient
     /// <returns>A tuple containing a success flag and a list of matching keys.</returns>
     public async Task<List<KahunaKeyValue>> ScanAllByPrefix(string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken = default)
     {
-        List<KeyValueGetByPrefixItem> kv = await communication.ScanAllByPrefix(GetRoundRobinUrl(), prefixKey, durability, cancellationToken).ConfigureAwait(false);
+        List<KeyValueGetByBucketItem> kv = await communication.ScanAllByPrefix(GetRoundRobinUrl(), prefixKey, durability, cancellationToken).ConfigureAwait(false);
         
         List<KahunaKeyValue> result = new(kv.Count);
         
-        foreach (KeyValueGetByPrefixItem item in kv)
+        foreach (KeyValueGetByBucketItem item in kv)
             result.Add(new(this, item.Key ?? "", true, item.Value, item.Revision, durability, 0));
 
         return result;

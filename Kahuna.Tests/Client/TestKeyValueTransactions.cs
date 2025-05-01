@@ -281,7 +281,7 @@ public class TestKeyValueTransactions
 
         int oneFailed = 0;
 
-        List<KahunaKeyValue> doctors = await client.GetByPrefix(
+        List<KahunaKeyValue> doctors = await client.GetByBucket(
             "doctors", 
             KeyValueDurability.Persistent, 
             cancellationToken: TestContext.Current.CancellationToken
@@ -294,7 +294,7 @@ public class TestKeyValueTransactions
         await client.SetKeyValue("doctors/alice", "true", durability: KeyValueDurability.Persistent, cancellationToken: TestContext.Current.CancellationToken);
 
         const string script1 = """
-           let oncall = get by prefix 'doctors'
+           let oncall = get by bucket 'doctors'
            if count(oncall) = 2 then
               set 'doctors/alice' false ex 10000
            else
@@ -303,7 +303,7 @@ public class TestKeyValueTransactions
            """;
         
         const string script2 = """
-           let oncall = get by prefix 'doctors'
+           let oncall = get by bucket 'doctors'
            if count(oncall) = 2 then
               set @doctor false ex 10000
            else
@@ -339,7 +339,7 @@ public class TestKeyValueTransactions
         
         Assert.Equal(1, oneFailed);
         
-        doctors = await client.GetByPrefix(
+        doctors = await client.GetByBucket(
             "doctors", 
             KeyValueDurability.Persistent, 
             cancellationToken: TestContext.Current.CancellationToken

@@ -37,7 +37,7 @@ internal sealed class ScanByPrefixCommand : BaseCommand
             context.LocksAcquired.Add((keyName, durability));
         }*/
                        
-        KeyValueGetByPrefixResult response = await manager.ScanAllByPrefix(            
+        KeyValueGetByBucketResult response = await manager.ScanAllByPrefix(            
             keyName,
             durability,
             cancellationToken

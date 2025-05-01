@@ -4,7 +4,7 @@ using System.Text.Json.Serialization;
 
 namespace Kahuna.Shared.KeyValue;
 
-public class KeyValueGetByPrefixItem
+public class KeyValueGetByBucketItem
 {
     [JsonPropertyName("key")]
     public string? Key { get; set; }

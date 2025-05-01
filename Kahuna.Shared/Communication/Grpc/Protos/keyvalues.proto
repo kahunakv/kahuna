@@ -22,7 +22,7 @@ service KeyValuer {
   rpc TryRollbackManyMutations (GrpcTryRollbackManyMutationsRequest) returns (GrpcTryRollbackManyMutationsResponse);
   rpc ScanByPrefix (GrpcScanByPrefixRequest) returns (GrpcScanByPrefixResponse);
   rpc ScanAllByPrefix (GrpcScanAllByPrefixRequest) returns (GrpcScanAllByPrefixResponse);
-  rpc GetByPrefix (GrpcGetByPrefixRequest) returns (GrpcGetByPrefixResponse);
+  rpc GetByBucket (GrpcGetByBucketRequest) returns (GrpcGetByBucketResponse);
   rpc StartTransaction (GrpcStartTransactionRequest) returns (GrpcStartTransactionResponse);
   rpc CommitTransaction (GrpcCommitTransactionRequest) returns (GrpcCommitTransactionResponse);
   rpc RollbackTransaction (GrpcRollbackTransactionRequest) returns (GrpcRollbackTransactionResponse);
@@ -455,7 +455,7 @@ message GrpcScanByPrefixResponse {
   repeated GrpcKeyValueByPrefixItemResponse Items = 3;
 }
 
-message GrpcGetByPrefixRequest {
+message GrpcGetByBucketRequest {
   int32 TransactionIdNode = 1;
   int64 TransactionIdPhysical = 2;
   uint32 TransactionIdCounter = 3;
@@ -463,7 +463,7 @@ message GrpcGetByPrefixRequest {
   GrpcKeyValueDurability Durability = 5;
 }
 
-message GrpcGetByPrefixResponse {
+message GrpcGetByBucketResponse {
   optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
   repeated GrpcKeyValueByPrefixItemResponse Items = 3;
@@ -563,7 +563,7 @@ message GrpcBatchClientKeyValueRequest {
     GrpcTryExistsKeyValueRequest TryExistsKeyValue = 8;
     GrpcTryExecuteTransactionScriptRequest TryExecuteTransactionScript = 9;
     GrpcTryAcquireExclusiveLockRequest TryAcquireExclusiveLock = 10;
-    GrpcGetByPrefixRequest GetByPrefix = 11;
+    GrpcGetByBucketRequest GetByBucket = 11;
     GrpcScanAllByPrefixRequest ScanByPrefix = 12;    
     GrpcStartTransactionRequest StartTransaction = 13;
     GrpcCommitTransactionRequest CommitTransaction = 14;
@@ -584,7 +584,7 @@ message GrpcBatchClientKeyValueResponse
     GrpcTryExistsKeyValueResponse TryExistsKeyValue = 8;
     GrpcTryExecuteTransactionScriptResponse TryExecuteTransactionScript = 9;
     GrpcTryAcquireExclusiveLockResponse TryAcquireExclusiveLock = 10;
-    GrpcGetByPrefixResponse GetByPrefix = 11;
+    GrpcGetByBucketResponse GetByBucket = 11;
     GrpcScanAllByPrefixResponse ScanByPrefix = 12;
     GrpcStartTransactionResponse StartTransaction = 13;
     GrpcCommitTransactionResponse CommitTransaction = 14;
@@ -615,7 +615,7 @@ message GrpcBatchServerKeyValueRequest {
     GrpcTryCommitManyMutationsRequest TryCommitManyMutations = 20;
     GrpcTryRollbackMutationsRequest TryRollbackMutations = 21;
     GrpcTryRollbackManyMutationsRequest TryRollbackManyMutations = 22;
-    GrpcGetByPrefixRequest GetByPrefix = 23;
+    GrpcGetByBucketRequest GetByBucket = 23;
     GrpcScanByPrefixRequest ScanByPrefix = 24;
     GrpcStartTransactionRequest StartTransaction = 25;
     GrpcCommitTransactionRequest CommitTransaction = 26;
@@ -647,7 +647,7 @@ message GrpcBatchServerKeyValueResponse
     GrpcTryCommitManyMutationsResponse TryCommitManyMutations = 19;
     GrpcTryRollbackMutationsResponse TryRollbackMutations = 20;
     GrpcTryRollbackManyMutationsResponse TryRollbackManyMutations = 21;
-    GrpcGetByPrefixResponse GetByPrefix = 22;
+    GrpcGetByBucketResponse GetByBucket = 22;
     GrpcScanByPrefixResponse ScanByPrefix = 23;
     GrpcStartTransactionResponse StartTransaction = 24;
     GrpcCommitTransactionResponse CommitTransaction = 25;
@@ -665,7 +665,7 @@ enum GrpcClientBatchType {
   TRY_EXISTS_KEY_VALUE = 6;
   TRY_EXECUTE_TRANSACTION_SCRIPT = 7;  
   TRY_ACQUIRE_EXCLUSIVE_LOCK = 8;
-  TRY_GET_BY_PREFIX = 9;
+  TRY_GET_BY_BUCKET = 9;
   TRY_SCAN_BY_PREFIX = 10;
   TRY_START_TRANSACTION = 11;
   TRY_COMMIT_TRANSACTION = 12;
@@ -693,7 +693,7 @@ enum GrpcServerBatchType {
   SERVER_TRY_COMMIT_MANY_MUTATIONS = 18;
   SERVER_TRY_ROLLBACK_MUTATIONS = 19;
   SERVER_TRY_ROLLBACK_MANY_MUTATIONS = 20;
-  SERVER_TRY_GET_BY_PREFIX = 21;
+  SERVER_TRY_GET_BY_BUCKET = 21;
   SERVER_TRY_SCAN_BY_PREFIX = 22;
   SERVER_TRY_START_TRANSACTION = 23;
   SERVER_TRY_COMMIT_TRANSACTION = 24;

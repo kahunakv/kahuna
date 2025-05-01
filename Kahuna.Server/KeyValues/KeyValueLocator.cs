@@ -897,8 +897,8 @@ internal sealed class KeyValueLocator
     /// <param name="prefixedKey">The key prefix used to search and retrieve matching key-value pairs.</param>
     /// <param name="durability">Specifies the durability requirement for the operation, such as Ephemeral or Persistent.</param>
     /// <param name="cancellationToken">A token to monitor for cancellation requests during the operation.</param>
-    /// <returns>Returns a <see cref="KeyValueGetByPrefixResult"/> containing the result of the operation with key-value items and response type.</returns>
-    public async Task<KeyValueGetByPrefixResult> LocateAndGetByPrefix(HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    /// <returns>Returns a <see cref="KeyValueGetByBucketResult"/> containing the result of the operation with key-value items and response type.</returns>
+    public async Task<KeyValueGetByBucketResult> LocateAndGetByBucket(HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(prefixedKey))
             return new(KeyValueResponseType.Errored, []);
@@ -906,7 +906,7 @@ internal sealed class KeyValueLocator
         int partitionId = raft.GetPrefixPartitionKey(prefixedKey);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
-            return await manager.GetByPrefix(transactionId, prefixedKey, durability);
+            return await manager.GetByBucket(transactionId, prefixedKey, durability);
             
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
@@ -914,7 +914,7 @@ internal sealed class KeyValueLocator
         
         logger.LogDebug("GETPREFIX-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", prefixedKey, partitionId, leader);
         
-        return await interNodeCommunication.GetByPrefix(leader, transactionId, prefixedKey, durability, cancellationToken);               
+        return await interNodeCommunication.GetByBucket(leader, transactionId, prefixedKey, durability, cancellationToken);               
     }
 
     /// <summary>
@@ -1020,11 +1020,11 @@ internal sealed class KeyValueLocator
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<KeyValueGetByPrefixResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<KeyValueGetByBucketResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         ConcurrentDictionary<string, ReadOnlyKeyValueContext> unionItems = [];
         
-        KeyValueGetByPrefixResult items = await manager.ScanByPrefix(prefixKeyName, durability);
+        KeyValueGetByBucketResult items = await manager.ScanByPrefix(prefixKeyName, durability);
 
         if (items.Type == KeyValueResponseType.Get)
         {
@@ -1043,7 +1043,7 @@ internal sealed class KeyValueLocator
 
         if (durability == KeyValueDurability.Persistent)
         {
-            KeyValueGetByPrefixResult result = await manager.ScanByPrefixFromDisk(prefixKeyName);
+            KeyValueGetByBucketResult result = await manager.ScanByPrefixFromDisk(prefixKeyName);
 
             if (items.Type == KeyValueResponseType.Get)
             {
@@ -1071,7 +1071,7 @@ internal sealed class KeyValueLocator
         CancellationToken cancellationToken
     )
     {
-        KeyValueGetByPrefixResult response = await interNodeCommunication.ScanByPrefix(node.Endpoint, prefixKeyName, durability, cancellationToken);
+        KeyValueGetByBucketResult response = await interNodeCommunication.ScanByPrefix(node.Endpoint, prefixKeyName, durability, cancellationToken);
         
         if (response.Type == KeyValueResponseType.Get)
         {

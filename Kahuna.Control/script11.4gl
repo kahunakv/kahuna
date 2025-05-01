@@ -1,5 +1,5 @@
 
-let x = get by prefix `services`
+let x = get by bucket `services`
 
 for p in x do
   return p

@@ -28,7 +28,7 @@
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TDOUBLEQUALS
 %token TBEGIN TROLLBACK TCOMMIT TLET TSET TGET TESET TEGET TDELETE TEDELETE TEXTEND TEEXTEND TEXISTS TEEXISTS
 %token TIF TELSE TTHEN TEND TNX TXX TEX TCMP TCMPREV TTHROW TFOUND TFOR TDO TIN
-%token TRETURN TSLEEP TDIGIT TFLOAT TSTRING TIDENTIFIER TESCIDENTIFIER TPLACEHOLDER TTRUE TFALSE TNULL TAT TSCAN TESCAN TPREFIX TBY
+%token TRETURN TSLEEP TDIGIT TFLOAT TSTRING TIDENTIFIER TESCIDENTIFIER TPLACEHOLDER TTRUE TFALSE TNULL TAT TSCAN TESCAN TPREFIX TBUCKET TBY
 
 %%
 
@@ -46,8 +46,8 @@ stmt    : set_stmt { $$.n = $1.n; $$.l = $1.l; }
         | edelete_stmt { $$.n = $1.n; $$.l = $1.l; }
         | extend_stmt { $$.n = $1.n; $$.l = $1.l; }
         | eextend_stmt { $$.n = $1.n; $$.l = $1.l; }
-        | get_by_prefix_stmt { $$.n = $1.n; $$.l = $1.l; }
-        | eget_by_prefix_stmt { $$.n = $1.n; $$.l = $1.l; }
+        | get_by_bucket_stmt { $$.n = $1.n; $$.l = $1.l; }
+        | eget_by_bucket_stmt { $$.n = $1.n; $$.l = $1.l; }
         | scan_by_prefix_stmt { $$.n = $1.n; $$.l = $1.l; }
         | escan_by_prefix_stmt { $$.n = $1.n; $$.l = $1.l; }
         | let_stmt { $$.n = $1.n; $$.l = $1.l; }
@@ -121,12 +121,12 @@ extend_stmt : TEXTEND key_name int { $$.n = new(NodeType.Extend, $2.n, $3.n, nul
 eextend_stmt : TEEXTEND key_name int { $$.n = new(NodeType.Eextend, $2.n, $3.n, null, null, null, null, null, $1.l); }
             ;
             
-get_by_prefix_stmt : TGET TBY TPREFIX key_name { $$.n = new(NodeType.GetByPrefix, $4.n, null, null, null, null, null, null, $1.l); }
-                   | TLET identifier TEQUALS TGET TBY TPREFIX key_name { $$.n = new(NodeType.GetByPrefix, $7.n, $2.n, null, null, null, null, null, $1.l); }    
+get_by_bucket_stmt : TGET TBY TBUCKET key_name { $$.n = new(NodeType.GetByBucket, $4.n, null, null, null, null, null, null, $1.l); }
+                   | TLET identifier TEQUALS TGET TBY TBUCKET key_name { $$.n = new(NodeType.GetByBucket, $7.n, $2.n, null, null, null, null, null, $1.l); }    
                    ;
                    
-eget_by_prefix_stmt : TEGET TBY TPREFIX key_name { $$.n = new(NodeType.EgetByPrefix, $4.n, null, null, null, null, null, null, $1.l); }    
-                   | TLET identifier TEQUALS TEGET TBY TPREFIX key_name { $$.n = new(NodeType.EgetByPrefix, $7.n, $2.n, null, null, null, null, null, $1.l); }
+eget_by_bucket_stmt : TEGET TBY TBUCKET key_name { $$.n = new(NodeType.EGetByBucket, $4.n, null, null, null, null, null, null, $1.l); }    
+                   | TLET identifier TEQUALS TEGET TBY TBUCKET key_name { $$.n = new(NodeType.EGetByBucket, $7.n, $2.n, null, null, null, null, null, $1.l); }
                    ;
                    
 scan_by_prefix_stmt : TSCAN TBY TPREFIX key_name { $$.n = new(NodeType.ScanByPrefix, $4.n, null, null, null, null, null, null, $1.l); }

@@ -630,11 +630,11 @@ public class KahunaTransactionSession : IAsyncDisposable
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<List<KahunaKeyValue>> GetByPrefix(string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken = default)
+    public async Task<List<KahunaKeyValue>> GetByBucket(string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken = default)
     {
         /// @todo try to acquire lock on prefixKey
         
-        List<KeyValueGetByPrefixItem> kv = await Client.Communication.GetByPrefix(
+        List<KeyValueGetByBucketItem> kv = await Client.Communication.GetByBucket(
             Url, 
             prefixKey, 
             durability, 
@@ -643,7 +643,7 @@ public class KahunaTransactionSession : IAsyncDisposable
         
         List<KahunaKeyValue> result = new(kv.Count);
         
-        foreach (KeyValueGetByPrefixItem item in kv)
+        foreach (KeyValueGetByBucketItem item in kv)
             result.Add(new(Client, item.Key ?? "", true, item.Value, item.Revision, durability, 0));
 
         return result;
