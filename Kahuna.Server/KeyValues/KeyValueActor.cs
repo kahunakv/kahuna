@@ -18,7 +18,7 @@ namespace Kahuna.Server.KeyValues;
 /// The actor maintains an in-memory cache and if a key is not found, it attempts to retrieve it from disk.
 /// Operations with Linearizable consistency persist all modifications to disk.
 /// </summary>
-public sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
+internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
 {
     /// <summary>
     /// Represents the threshold for triggering a collection operation in the actor.

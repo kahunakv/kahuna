@@ -5,6 +5,7 @@ using Kommander.Time;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Locks;
+using Kahuna.Server.Locks.Data;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;

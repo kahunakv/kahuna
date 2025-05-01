@@ -13,6 +13,7 @@ using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
 using Kahuna.Server.Communication.Internode;
+using Kahuna.Server.Locks.Data;
 
 namespace Kahuna.Server.Locks;
 
@@ -22,7 +23,7 @@ namespace Kahuna.Server.Locks;
 /// including acquiring, extending, releasing, and querying locks. Additionally, it
 /// handles replication and log restoration events to maintain consistency across nodes.
 /// </summary>
-public sealed class LockManager
+internal sealed class LockManager
 {
     private readonly ActorSystem actorSystem;
 
@@ -37,6 +38,11 @@ public sealed class LockManager
     /// and other background tasks required by the LockManager.
     /// </summary>
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
+
+    /// <summary>
+    /// 
+    /// </summary>
+    private readonly IActorRef<LockProposalActor, LockProposalRequest> proposalActor;
 
     /// <summary>
     /// A router responsible for managing and dispatching ephemeral lock-related requests
@@ -88,11 +94,19 @@ public sealed class LockManager
         
         locator = new(this, configuration, raft, interNodeCommunication, logger);
         
+        proposalActor = actorSystem.Spawn<LockProposalActor, LockProposalRequest>(
+            "proposal-actor", 
+            raft, 
+            persistenceBackend, 
+            configuration,
+            logger
+        );
+        
         ephemeralLocksRouter = GetEphemeralRouter(persistenceBackend, configuration);
         persistentLocksRouter = GetPersistentRouter(persistenceBackend, configuration);
         
         restorer = new(backgroundWriter, raft, logger);
-        replicator = new(backgroundWriter, raft, logger);
+        replicator = new(backgroundWriter, raft, logger);                
     }
 
     /// <summary>
@@ -113,7 +127,8 @@ public sealed class LockManager
             ephemeralInstances.Add(actorSystem.Spawn<LockActor, LockRequest, LockResponse>(
                 "ephemeral-lock-" + i, 
                 backgroundWriter, 
-                persistenceBackend, 
+                proposalActor,
+                persistenceBackend,                 
                 raft,
                 configuration,
                 logger
@@ -140,7 +155,8 @@ public sealed class LockManager
             persistentInstances.Add(actorSystem.Spawn<LockActor, LockRequest, LockResponse>(
                 "persistent-lock-" + i, 
                 backgroundWriter, 
-                persistenceBackend, 
+                proposalActor,
+                persistenceBackend,                 
                 raft,
                 configuration,
                 logger
@@ -249,7 +265,8 @@ public sealed class LockManager
             resource, 
             owner, 
             expiresMs, 
-            durability
+            durability,
+            0
         );
 
         LockResponse? response;
@@ -280,7 +297,8 @@ public sealed class LockManager
             resource, 
             owner, 
             expiresMs, 
-            durability
+            durability,
+            0
         );
 
         LockResponse? response;
@@ -310,7 +328,8 @@ public sealed class LockManager
             resource, 
             owner, 
             0, 
-            durability
+            durability,
+            0
         );
 
         LockResponse? response;
@@ -339,7 +358,8 @@ public sealed class LockManager
             resource, 
             null, 
             0, 
-            durability
+            durability,
+            0
         );
 
         LockResponse? response;

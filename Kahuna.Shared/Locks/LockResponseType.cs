@@ -12,6 +12,7 @@ public enum LockResponseType
     Extended = 2,
     Unlocked = 3,
     Got = 4,
+    WaitingForReplication = 10,
     Errored = 99,
     InvalidInput = 100,
     MustRetry = 101,

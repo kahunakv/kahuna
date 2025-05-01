@@ -1,12 +1,12 @@
 
 using Kahuna.Shared.Locks;
 
-namespace Kahuna.Server.Locks;
+namespace Kahuna.Server.Locks.Data;
 
 /// <summary>
 /// Represents the response of the operation on the locker actor
 /// </summary>
-public sealed class LockResponse
+internal sealed class LockResponse
 {
     /// <summary>
     /// Gets the type of the lock response. This indicates the outcome of a lock-related operation,

@@ -2,6 +2,7 @@
 using Kahuna.Server.Locks;
 using Kahuna.Server.KeyValues;
 using System.Collections.Concurrent;
+using Kahuna.Server.Locks.Data;
 using Kommander.Time;
 
 namespace Kahuna.Server.Persistence.Backend;
@@ -10,7 +11,7 @@ namespace Kahuna.Server.Persistence.Backend;
 /// Provides an in-memory implementation of the <see cref="IPersistenceBackend"/> interface
 /// to store locks and key-value pairs without the use of persistent storage.
 /// </summary>
-public class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
+internal class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
 {
     private readonly ConcurrentDictionary<string, LockContext> locks = new();
     

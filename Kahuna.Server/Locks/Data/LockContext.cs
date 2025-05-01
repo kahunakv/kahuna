@@ -1,13 +1,13 @@
 
 using Kommander.Time;
 
-namespace Kahuna.Server.Locks;
+namespace Kahuna.Server.Locks.Data;
 
 /// <summary>
 /// Represents the context of a lock, encapsulating the state, owner, expiration, and other
 /// relevant metadata associated with a specific lock resource.
 /// </summary>
-public sealed class LockContext
+internal sealed class LockContext
 {
     /// <summary>
     /// The current owner of the lock.
@@ -38,4 +38,9 @@ public sealed class LockContext
     /// Current state of the key
     /// </summary>
     public LockState State { get; set; } = LockState.Locked;
+    
+    /// <summary>
+    /// 
+    /// </summary>
+    public LockWriteIntent? WriteIntent { get; set; }
 }

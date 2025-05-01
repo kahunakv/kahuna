@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using Kahuna.Server.Locks.Data;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;

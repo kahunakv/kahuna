@@ -6,6 +6,7 @@ using Kahuna.Persistence.Protos;
 using RocksDbSharp;
 using Google.Protobuf;
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.Locks.Data;
 using Microsoft.IO;
 
 namespace Kahuna.Server.Persistence.Backend;
@@ -19,7 +20,7 @@ namespace Kahuna.Server.Persistence.Backend;
 /// such as key-values and locks. The implementation ensures efficient read-write operations
 /// and transactional support using RocksDB capabilities.
 /// </remarks>
-public class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
+internal class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
 {
     /// <summary>
     /// Represents the maximum allowable size, in bytes, for a serialized message

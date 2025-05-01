@@ -9,5 +9,6 @@ public enum LockRequestType
     TryLock,
     TryExtendLock,
     TryUnlock,
-    Get
+    Get,
+    CompleteProposal
 }

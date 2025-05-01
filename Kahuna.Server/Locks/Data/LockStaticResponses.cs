@@ -1,7 +1,7 @@
 
 using Kahuna.Shared.Locks;
 
-namespace Kahuna.Server.Locks;
+namespace Kahuna.Server.Locks.Data;
 
 /// <summary>
 /// Provides a set of pre-defined static responses for lock-related operations within the locking mechanism.
@@ -22,4 +22,6 @@ internal static class LockStaticResponses
     internal static readonly LockResponse InvalidOwnerResponse = new(LockResponseType.InvalidOwner);
     
     internal static readonly LockResponse UnlockedResponse = new(LockResponseType.Unlocked);
+    
+    internal static readonly LockResponse WaitingForReplication = new(LockResponseType.WaitingForReplication);
 }

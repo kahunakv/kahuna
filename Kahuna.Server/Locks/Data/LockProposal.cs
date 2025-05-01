@@ -1,7 +1,7 @@
 
 using Kommander.Time;
 
-namespace Kahuna.Server.Locks;
+namespace Kahuna.Server.Locks.Data;
 
 /// <summary>
 /// Represents a proposal for a lock operation in the system.

@@ -15,6 +15,7 @@ using Kahuna.Server.KeyValues;
 using Kahuna.Server.Locks;
 using Kahuna.Server.Communication.Internode.Grpc;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.Locks.Data;
 
 namespace Kahuna.Server.Communication.Internode;
 

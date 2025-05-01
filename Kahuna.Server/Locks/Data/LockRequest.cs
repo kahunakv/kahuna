@@ -3,7 +3,7 @@ using Kahuna.Shared.Locks;
 using Nixie.Routers;
 using Standart.Hash.xxHash;
 
-namespace Kahuna.Server.Locks;
+namespace Kahuna.Server.Locks.Data;
 
 /// <summary>
 /// Represents a request to perform locking operations on a specific resource.
@@ -70,6 +70,11 @@ public sealed class LockRequest : IConsistentHashable
     public LockDurability Durability { get; }
     
     /// <summary>
+    /// 
+    /// </summary>
+    public int ProposalId { get; }
+    
+    /// <summary>
     /// Constructor
     /// </summary>
     /// <param name="type"></param>
@@ -77,13 +82,15 @@ public sealed class LockRequest : IConsistentHashable
     /// <param name="owner"></param>
     /// <param name="expiresMs"></param>
     /// <param name="durability"></param>
-    public LockRequest(LockRequestType type, string resource, byte[]? owner, int expiresMs, LockDurability durability)
+    // <param name="proposalId"></param>
+    public LockRequest(LockRequestType type, string resource, byte[]? owner, int expiresMs, LockDurability durability, int proposalId)
     {
         Type = type;
         Resource = resource;
         Owner = owner;
         ExpiresMs = expiresMs;
         Durability = durability;
+        ProposalId = proposalId;;
     }
 
     /// <summary>

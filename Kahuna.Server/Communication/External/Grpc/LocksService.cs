@@ -6,6 +6,7 @@ using Kahuna.Server.Configuration;
 using Kahuna.Server.Locks;
 using Kahuna.Shared.Locks;
 using System.Runtime.InteropServices;
+using Kahuna.Server.Locks.Data;
 
 namespace Kahuna.Communication.External.Grpc;
 

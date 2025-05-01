@@ -2,6 +2,7 @@
 using Kommander;
 
 using Kahuna.Server.Locks;
+using Kahuna.Server.Locks.Data;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.Locks;
 

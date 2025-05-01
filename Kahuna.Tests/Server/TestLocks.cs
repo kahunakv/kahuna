@@ -1,5 +1,6 @@
 using System.Text;
 using Kahuna.Server.Locks;
+using Kahuna.Server.Locks.Data;
 using Kommander;
 using Kahuna.Shared.Locks;
 using Microsoft.Extensions.Logging;

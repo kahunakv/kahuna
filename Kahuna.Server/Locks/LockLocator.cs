@@ -2,6 +2,7 @@
 using Kahuna.Server.Communication.Internode;
 using Kommander;
 using Kahuna.Server.Configuration;
+using Kahuna.Server.Locks.Data;
 using Kahuna.Shared.Locks;
 
 namespace Kahuna.Server.Locks;

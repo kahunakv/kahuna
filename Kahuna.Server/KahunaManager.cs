@@ -16,6 +16,7 @@ using Kahuna.Server.ScriptParser;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 using Kahuna.Server.Communication.Internode;
+using Kahuna.Server.Locks.Data;
 using Kahuna.Shared.Communication.Rest;
 
 namespace Kahuna;

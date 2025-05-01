@@ -23,7 +23,7 @@
     </PropertyGroup>
 
     <ItemGroup>        
-	    <PackageReference Include="Kommander" Version="0.9.5" />
+	    <PackageReference Include="Kommander" Version="0.9.6" />
         <PackageReference Include="Grpc.Tools" Version="2.68.1">
             <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
             <PrivateAssets>all</PrivateAssets>

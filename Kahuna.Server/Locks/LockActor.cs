@@ -5,6 +5,7 @@ using Kommander.Time;
 using Google.Protobuf;
 using System.Diagnostics;
 using Kahuna.Server.Configuration;
+using Kahuna.Server.Locks.Data;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
@@ -17,8 +18,10 @@ namespace Kahuna.Server.Locks;
 /// Actor to manage lock operations on resources
 /// It ensures linearizable and serializable access to the resources on the same bucket
 /// </summary>
-public sealed class LockActor : IActor<LockRequest, LockResponse>
+internal sealed class LockActor : IActor<LockRequest, LockResponse>
 {
+    private static int proposalId = int.MinValue;
+    
     /// <summary>
     /// 
     /// </summary>
@@ -27,6 +30,8 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
     private readonly IActorContext<LockActor, LockRequest, LockResponse> actorContext;
 
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
+
+    private readonly IActorRef<LockProposalActor, LockProposalRequest> proposalActor;
 
     private readonly IPersistenceBackend persistenceBackend;
 
@@ -58,6 +63,7 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
     public LockActor(
         IActorContext<LockActor, LockRequest, LockResponse> actorContext,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
+        IActorRef<LockProposalActor, LockProposalRequest> proposalActor,
         IPersistenceBackend persistenceBackend,
         IRaft raft, 
         KahunaConfiguration configuration,
@@ -66,6 +72,7 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
     {
         this.actorContext = actorContext;
         this.backgroundWriter = backgroundWriter;
+        this.proposalActor = proposalActor;
         this.persistenceBackend = persistenceBackend;
         this.raft = raft;
         this.configuration = configuration;
@@ -106,6 +113,7 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
                 LockRequestType.TryUnlock => await TryUnlock(message),
                 LockRequestType.TryExtendLock => await TryExtendLock(message),
                 LockRequestType.Get => await GetLock(message),
+                LockRequestType.CompleteProposal => CompleteProposal(message),
                 _ => LockStaticResponses.ErroredResponse
             };
         }
@@ -125,6 +133,34 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
         }
 
         return LockStaticResponses.ErroredResponse;
+    }
+
+    private LockResponse CompleteProposal(LockRequest message)
+    {
+        if (!locks.TryGetValue(message.Resource, out LockContext? context))
+        {
+            logger.LogWarning("LockActor/CompleteProposal: Lock not found for resource {Resource}", message.Resource);
+            
+            return LockStaticResponses.DoesNotExistResponse;
+        }
+
+        if (context.WriteIntent is null)
+        {
+            logger.LogWarning("LockActor/CompleteProposal: Couldn't find an active write intent on resource {Resource}", message.Resource);
+            
+            return LockStaticResponses.DoesNotExistResponse;
+        }
+
+        if (context.WriteIntent.ProposalId != message.ProposalId)
+        {
+            logger.LogWarning("LockActor/CompleteProposal: Current write intent on resource {Resource} doesn't match passed id {Current} {Passed}", message.Resource, context.WriteIntent.ProposalId, message.ProposalId);
+            
+            return LockStaticResponses.DoesNotExistResponse;
+        }
+
+        context.WriteIntent = null;
+
+        return new(LockResponseType.Locked);
     }
 
     /// <summary>
@@ -175,9 +211,21 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
 
         if (message.Durability == LockDurability.Persistent)
         {
-            bool success = await PersistAndReplicateLockMessage(message.Type, proposal, currentTime);
-            if (!success)
-                return LockStaticResponses.ErroredResponse;
+            //bool success = await PersistAndReplicateLockMessage(message.Type, proposal, currentTime);
+            //if (!success)
+            //    return LockStaticResponses.ErroredResponse;                       
+            
+            int currentProposalId = Interlocked.Increment(ref proposalId);
+
+            context.WriteIntent = new() { ProposalId = currentProposalId, Expires = currentTime + 10000 };
+            
+            proposals.Add(currentProposalId, proposal);
+            
+            proposalActor.Send(new(currentProposalId, proposal, actorContext.Self, actorContext.Reply!.Value));
+
+            actorContext.ByPassReply = true;
+            
+            return LockStaticResponses.WaitingForReplication;
         }
         
         context.FencingToken = proposal.FencingToken;
@@ -260,9 +308,9 @@ public sealed class LockActor : IActor<LockRequest, LockResponse>
 
         if (message.Durability == LockDurability.Persistent)
         {
-            bool success = await PersistAndReplicateLockMessage(message.Type, proposal, currentTime);
-            if (!success)
-                return LockStaticResponses.ErroredResponse;
+            //bool success = await PersistAndReplicateLockMessage(message.Type, proposal, currentTime);
+            //if (!success)
+            //   return LockStaticResponses.ErroredResponse;
         }
         
         context.Owner = proposal.Owner;

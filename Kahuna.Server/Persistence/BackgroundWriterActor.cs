@@ -20,7 +20,7 @@ namespace Kahuna.Server.Persistence;
 /// and executes operations based on the request type. It supports queueing locks and key-value write
 /// requests, as well as flushing data at scheduled intervals.
 /// </remarks>
-public sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
+internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 {
     private const int WriteRetries = 5;
     

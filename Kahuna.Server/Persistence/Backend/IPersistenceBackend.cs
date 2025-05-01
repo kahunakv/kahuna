@@ -1,6 +1,7 @@
 
 using Kahuna.Server.Locks;
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.Locks.Data;
 
 namespace Kahuna.Server.Persistence.Backend;
 
@@ -8,7 +9,7 @@ namespace Kahuna.Server.Persistence.Backend;
 /// Defines an interface for persistence backend implementations, providing methods
 /// for storing and retrieving locks and key-value pairs from a persistent storage system.
 /// </summary>
-public interface IPersistenceBackend
+internal interface IPersistenceBackend
 {
     public bool StoreLocks(List<PersistenceRequestItem> items);
 

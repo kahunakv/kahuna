@@ -4,6 +4,7 @@ using Kommander;
 using Kahuna.Server.KeyValues;
 using Microsoft.Data.Sqlite;
 using System.Collections.Generic;
+using Kahuna.Server.Locks.Data;
 
 namespace Kahuna.Server.Persistence.Backend;
 
@@ -20,7 +21,7 @@ namespace Kahuna.Server.Persistence.Backend;
 /// The class also implements IDisposable to ensure proper handling and release of resources
 /// like database connections and locks.
 /// </remarks>
-public class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
+internal class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
 {
     /// <summary>
     /// Represents the maximum number of shards used in the SQLite persistence backend.
