@@ -630,16 +630,23 @@ public class KahunaTransactionSession : IAsyncDisposable
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<(bool, List<string>)> GetByPrefix(string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken = default)
+    public async Task<List<KahunaKeyValue>> GetByPrefix(string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken = default)
     {
         /// @todo try to acquire lock on prefixKey
         
-        return await Client.Communication.GetByPrefix(
+        List<KeyValueGetByPrefixItem> kv = await Client.Communication.GetByPrefix(
             Url, 
             prefixKey, 
             durability, 
             cancellationToken
         ).ConfigureAwait(false);
+        
+        List<KahunaKeyValue> result = new(kv.Count);
+        
+        foreach (KeyValueGetByPrefixItem item in kv)
+            result.Add(new(Client, item.Key ?? "", true, item.Value, item.Revision, durability, 0));
+
+        return result;
     }
 
     /// <summary>

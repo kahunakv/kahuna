@@ -1022,7 +1022,7 @@ public class GrpcCommunication : IKahunaCommunication
     /// <exception cref="KahunaException">
     /// Thrown if the operation fails or encounters an error while attempting to retrieve keys by prefix.
     /// </exception>
-    public async Task<(bool, List<string>)> GetByPrefix(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<List<KeyValueGetByPrefixItem>> GetByPrefix(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcGetByPrefixRequest request = new()
         {
@@ -1053,10 +1053,16 @@ public class GrpcCommunication : IKahunaCommunication
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
             
             if (response.Type == GrpcKeyValueResponseType.TypeGot)
-                return (true, response.Items.Select(x => x.Key).ToList());
+                return response.Items.Select(x => new KeyValueGetByPrefixItem()
+                {
+                    Key = x.Key,
+                    Value = x.Value.ToByteArray(),
+                    Revision = x.Revision,
+                    LastModified = new(x.LastModifiedNode, x.LastModifiedPhysical, x.LastModifiedCounter)
+                }).ToList();
             
             if (response.Type == GrpcKeyValueResponseType.TypeDoesNotExist)
-                return (false, []);
+                return [];
             
             if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
                 logger?.LogDebug("Server asked to retry get key/value by prefix");
@@ -1080,7 +1086,7 @@ public class GrpcCommunication : IKahunaCommunication
     /// A tuple containing a boolean indicating success or failure, and a list of keys that match the specified prefix.
     /// </returns>
     /// <exception cref="KahunaException">Thrown if the scan operation encounters an error or fails to complete successfully.</exception>
-    public async Task<(bool, List<string>)> ScanAllByPrefix(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<List<KeyValueGetByPrefixItem>> ScanAllByPrefix(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcScanAllByPrefixRequest request = new()
         {
@@ -1111,10 +1117,16 @@ public class GrpcCommunication : IKahunaCommunication
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
             
             if (response.Type == GrpcKeyValueResponseType.TypeGot)
-                return (true, response.Items.Select(x => x.Key).ToList());
+                return response.Items.Select(x => new KeyValueGetByPrefixItem()
+                {
+                    Key = x.Key,
+                    Value = x.Value.ToByteArray(),
+                    Revision = x.Revision,
+                    LastModified = new(x.LastModifiedNode, x.LastModifiedPhysical, x.LastModifiedCounter)
+                }).ToList();
             
             if (response.Type == GrpcKeyValueResponseType.TypeDoesNotExist)
-                return (false, []);
+                return [];
             
             if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
                 logger?.LogDebug("Server asked to retry scan key/value by prefix");

@@ -780,9 +780,16 @@ public class KahunaClient
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<(bool, List<string>)> GetByPrefix(string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken = default)
+    public async Task<List<KahunaKeyValue>> GetByPrefix(string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken = default)
     {
-        return await communication.GetByPrefix(GetRoundRobinUrl(), prefixKey, durability, cancellationToken).ConfigureAwait(false);
+        List<KeyValueGetByPrefixItem> kv = await communication.GetByPrefix(GetRoundRobinUrl(), prefixKey, durability, cancellationToken).ConfigureAwait(false);
+        
+        List<KahunaKeyValue> result = new(kv.Count);
+        
+        foreach (KeyValueGetByPrefixItem item in kv)
+            result.Add(new(this, item.Key ?? "", true, item.Value, item.Revision, durability, 0));
+
+        return result;
     }
 
     /// <summary>
@@ -792,9 +799,16 @@ public class KahunaClient
     /// <param name="durability">Specifies the durability level for the operation.</param>
     /// <param name="cancellationToken">Token to observe while waiting for the task to complete.</param>
     /// <returns>A tuple containing a success flag and a list of matching keys.</returns>
-    public async Task<(bool, List<string>)> ScanAllByPrefix(string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken = default)
+    public async Task<List<KahunaKeyValue>> ScanAllByPrefix(string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken = default)
     {
-        return await communication.ScanAllByPrefix(GetRoundRobinUrl(), prefixKey, durability, cancellationToken).ConfigureAwait(false);
+        List<KeyValueGetByPrefixItem> kv = await communication.ScanAllByPrefix(GetRoundRobinUrl(), prefixKey, durability, cancellationToken).ConfigureAwait(false);
+        
+        List<KahunaKeyValue> result = new(kv.Count);
+        
+        foreach (KeyValueGetByPrefixItem item in kv)
+            result.Add(new(this, item.Key ?? "", true, item.Value, item.Revision, durability, 0));
+
+        return result;
     }
 
     /// <summary>

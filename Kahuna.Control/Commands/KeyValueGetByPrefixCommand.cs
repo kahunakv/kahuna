@@ -20,7 +20,7 @@ public static class KeyValueGetByPrefixCommand
 {    
     public static async Task Execute(KahunaClient connection, string optsGet, string? format)
     {                
-        (bool success, List<string> items) = await connection.GetByPrefix(
+        List<KahunaKeyValue> kv = await connection.GetByPrefix(
             optsGet,
             KeyValueDurability.Persistent, 
             CancellationToken.None
@@ -30,8 +30,8 @@ public static class KeyValueGetByPrefixCommand
             Console.WriteLine("{0}", "-");
         else
         {
-            foreach (string item in items)
-                Console.WriteLine("r{0} {1} {2}", 0, item, "-");
+            foreach (var item in kv)
+                Console.WriteLine("r{0} {1} {2}", item.Revision, item.Key, item.ValueAsString() ?? "-");
         }
     }
 }

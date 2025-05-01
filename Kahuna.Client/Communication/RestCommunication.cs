@@ -943,12 +943,12 @@ public class RestCommunication : IKahunaCommunication
         throw new NotImplementedException();
     }
 
-    public Task<(bool, List<string>)> GetByPrefix(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    public Task<List<KeyValueGetByPrefixItem>> GetByPrefix(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         throw new NotImplementedException();
     }
 
-    public Task<(bool, List<string>)> ScanAllByPrefix(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    public Task<List<KeyValueGetByPrefixItem>> ScanAllByPrefix(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         throw new NotImplementedException();
     }

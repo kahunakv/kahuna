@@ -1064,9 +1064,7 @@ public class TestKeyValues
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        (bool success, List<string> items) = await client.ScanAllByPrefix(prefix, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
-        Assert.True(success);
-        
+        List<KahunaKeyValue> items = await client.ScanAllByPrefix(prefix, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(3, items.Count);
     }
     
@@ -1085,9 +1083,7 @@ public class TestKeyValues
         Assert.True(result.Success);
         Assert.Equal(0, result.Revision);
         
-        (bool success, List<string> items) = await client.ScanAllByPrefix(randomKey, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
-        Assert.True(success);
-        
+        List<KahunaKeyValue> items = await client.ScanAllByPrefix(randomKey, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Single(items);
     }
     
@@ -1116,11 +1112,13 @@ public class TestKeyValues
 
         await Task.Delay(1000, cancellationToken: TestContext.Current.CancellationToken);
         
-        (bool success, List<string> items) = await client.GetByPrefix(prefix, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
-        Assert.True(success);
-
-        foreach (string item in items)        
-            Assert.StartsWith(prefix, item);        
+        List<KahunaKeyValue> items = await client.GetByPrefix(prefix, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
+        
+        foreach (KahunaKeyValue item in items)
+        {
+            Assert.True(item.Success);
+            Assert.StartsWith(prefix, item.Key);
+        }
 
         Assert.Equal(3, items.Count);
     }
@@ -1136,9 +1134,7 @@ public class TestKeyValues
         
         string prefix = GetRandomKeyName();
         
-        (bool success, List<string> items) = await client.GetByPrefix(prefix, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
-        Assert.True(success);
-
+        List<KahunaKeyValue> items = await client.GetByPrefix(prefix, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Empty(items);
     }
     

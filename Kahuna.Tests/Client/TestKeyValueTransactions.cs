@@ -272,6 +272,85 @@ public class TestKeyValueTransactions
     }
     
     [Theory, CombinatorialData]
+    public async Task TestWriteSkewAnomaly(
+        [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType,
+        [CombinatorialValues(KahunaClientType.SingleEndpoint)] KahunaClientType clientType
+    )
+    {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+
+        int oneFailed = 0;
+
+        List<KahunaKeyValue> doctors = await client.GetByPrefix(
+            "doctors", 
+            KeyValueDurability.Persistent, 
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
+        foreach (KahunaKeyValue doctor in doctors)
+            await doctor.Delete(cancellationToken: TestContext.Current.CancellationToken);
+        
+        await client.SetKeyValue("doctors/bob", "true", durability: KeyValueDurability.Persistent, cancellationToken: TestContext.Current.CancellationToken);
+        await client.SetKeyValue("doctors/alice", "true", durability: KeyValueDurability.Persistent, cancellationToken: TestContext.Current.CancellationToken);
+
+        const string script1 = """
+           let oncall = get by prefix 'doctors'
+           if count(oncall) = 2 then
+              set 'doctors/alice' false ex 10000
+           else
+              throw 'no both doctors on call'
+           end 
+           """;
+        
+        const string script2 = """
+           let oncall = get by prefix 'doctors'
+           if count(oncall) = 2 then
+              set @doctor false ex 10000
+           else
+              throw 'no both doctors on call'
+           end
+           """;
+
+        try
+        {
+            await Task.WhenAll(
+                client.ExecuteKeyValueTransactionScript(
+                    script1,
+                    null, 
+                    [new() { Key = "@doctor", Value = "doctors/alice" }], 
+                    cancellationToken: TestContext.Current.CancellationToken
+                ),
+                client.ExecuteKeyValueTransactionScript(
+                    script2,
+                    null, 
+                    [new() { Key = "@doctor", Value = "doctors/bob" }],
+                    cancellationToken: TestContext.Current.CancellationToken
+                )
+            );
+            
+            Assert.False(true);
+        }
+        catch (KahunaException e)
+        {
+            oneFailed++;
+            
+            Assert.Equal(KeyValueResponseType.Aborted, e.KeyValueErrorCode);
+        }
+        
+        Assert.Equal(1, oneFailed);
+        
+        doctors = await client.GetByPrefix(
+            "doctors", 
+            KeyValueDurability.Persistent, 
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+        
+        Assert.Equal(2, doctors.Count);
+        Assert.Single(doctors, x => x.ValueAsString() == "true");
+        Assert.Single(doctors, x => x.ValueAsString() == "false");
+    }
+    
+    [Theory, CombinatorialData]
     public async Task TestStartTransactionAndRollback(
         [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType,
         [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType
