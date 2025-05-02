@@ -292,17 +292,28 @@ internal sealed class LockManager
             null
         );
 
-        LockResponse? response;
+        for (int i = 0; i < 3; i++)
+        {
+            LockResponse? response;
+
+            if (durability == LockDurability.Ephemeral)
+                response = await ephemeralLocksRouter.Ask(request);
+            else
+                response = await persistentLocksRouter.Ask(request);
+
+            if (response is null)
+                return (LockResponseType.Errored, 0);
+
+            if (response.Type == LockResponseType.MustRetry)
+            {
+                await Task.Delay(1);
+                continue;
+            }
+
+            return (response.Type, response.FencingToken);
+        }
         
-        if (durability == LockDurability.Ephemeral)
-            response = await ephemeralLocksRouter.Ask(request);
-        else
-            response = await persistentLocksRouter.Ask(request);
-        
-        if (response is null)
-            return (LockResponseType.Errored, 0);
-        
-        return (response.Type, response.FencingToken);
+        return (LockResponseType.MustRetry, 0);
     }
     
     /// <summary>
@@ -326,17 +337,28 @@ internal sealed class LockManager
             null
         );
 
-        LockResponse? response;
-        
-        if (durability == LockDurability.Ephemeral)
-            response = await ephemeralLocksRouter.Ask(request);
-        else
-            response = await persistentLocksRouter.Ask(request);
+        for (int i = 0; i < 3; i++)
+        {
+            LockResponse? response;
 
-        if (response is null)
-            return (LockResponseType.Errored, 0);
+            if (durability == LockDurability.Ephemeral)
+                response = await ephemeralLocksRouter.Ask(request);
+            else
+                response = await persistentLocksRouter.Ask(request);
+
+            if (response is null)
+                return (LockResponseType.Errored, 0);
+
+            if (response.Type == LockResponseType.MustRetry)
+            {
+                await Task.Delay(1);
+                continue;
+            }
+
+            return (response.Type, response.FencingToken);
+        }
         
-        return (response.Type, response.FencingToken);
+        return (LockResponseType.MustRetry, 0);
     }
 
     /// <summary>
