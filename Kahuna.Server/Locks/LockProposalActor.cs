@@ -8,6 +8,7 @@ using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
 using Kahuna.Shared.Locks;
+using Kommander.Time;
 
 namespace Kahuna.Server.Locks;
 
@@ -33,7 +34,6 @@ internal sealed class LockProposalActor : IActor<LockProposalRequest>
         this.persistenceBackend = persistenceBackend;
         this.configuration = configuration;
         this.logger = logger;
-               
     }
     
     public async Task Receive(LockProposalRequest message)
@@ -41,14 +41,13 @@ internal sealed class LockProposalActor : IActor<LockProposalRequest>
         if (!raft.Joined)
             return;
         
-        var proposal = message.Proposal;
-
+        LockProposal proposal = message.Proposal;
+        HLCTimestamp currentTime = message.Timestamp;
         int partitionId = raft.GetPartitionKey(proposal.Resource);
 
         LockMessage lockMessage = new()
         {
-            //Type = (int)type,
-            Type = (int)LockRequestType.TryLock,
+            Type = (int)message.Type,
             Resource = proposal.Resource,
             FencingToken = proposal.FencingToken,
             ExpireNode = proposal.Expires.N,
@@ -60,9 +59,9 @@ internal sealed class LockProposalActor : IActor<LockProposalRequest>
             LastModifiedNode = proposal.LastModified.N,
             LastModifiedPhysical = proposal.LastModified.L,
             LastModifiedCounter = proposal.LastModified.C,
-            //TimeNode = currentTime.N,
-            //TimePhysical = currentTime.L,
-            //TimeCounter = currentTime.C
+            TimeNode = currentTime.N,
+            TimePhysical = currentTime.L,
+            TimeCounter = currentTime.C
         };
 
         if (proposal.Owner is not null)
@@ -73,10 +72,6 @@ internal sealed class LockProposalActor : IActor<LockProposalRequest>
             ReplicationTypes.Locks,
             ReplicationSerializer.Serialize(lockMessage)
         );
-               
-        ActorMessageReply<LockRequest, LockResponse> reply = message.ActorContextReply;
-        
-        reply.Promise.SetResult(new LockResponse(LockResponseType.Locked, proposal.FencingToken));
         
         IActorRef<LockActor, LockRequest, LockResponse> lockActor = message.LockActor;
         
@@ -85,31 +80,13 @@ internal sealed class LockProposalActor : IActor<LockProposalRequest>
             proposal.Resource, 
             null, 
             0, 
-            LockDurability.Ephemeral,
-            message.ProposalId
+            LockDurability.Ephemeral, // @todo: this should be the same as the original proposal
+            message.ProposalId,
+            partitionId,
+            message.Promise
         ));
 
         if (!result.Success)
-        {
             logger.LogWarning("Failed to replicate lock {Resource} Partition={Partition} Status={Status} Ticket={Ticket}", proposal.Resource, partitionId, result.Status, result.TicketId);
-            
-            return;
-        }
-        
-        Console.WriteLine("Lock proposal replicated successfully.");
-
-        /*backgroundWriter.Send(new(
-            BackgroundWriteType.QueueStoreLock,
-            partitionId,
-            proposal.Resource, 
-            proposal.Owner, 
-            proposal.FencingToken,
-            proposal.Expires,
-            proposal.LastUsed,
-            proposal.LastModified,
-            (int)proposal.State
-        ));
-
-        return result.Success;*/
     }        
 }

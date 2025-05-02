@@ -8,7 +8,7 @@ namespace Kahuna.Server.Locks.Data;
 /// <summary>
 /// Represents a request to perform locking operations on a specific resource.
 /// </summary>
-public sealed class LockRequest : IConsistentHashable
+internal sealed class LockRequest : IConsistentHashable
 {
     /// <summary>
     /// Gets the type of the lock request being issued. The value indicates the operation
@@ -75,6 +75,16 @@ public sealed class LockRequest : IConsistentHashable
     public int ProposalId { get; }
     
     /// <summary>
+    /// 
+    /// </summary>
+    public int PartitionId { get; }
+    
+    /// <summary>
+    /// 
+    /// </summary>
+    public TaskCompletionSource<LockResponse?>? Promise { get; }
+
+    /// <summary>
     /// Constructor
     /// </summary>
     /// <param name="type"></param>
@@ -82,15 +92,30 @@ public sealed class LockRequest : IConsistentHashable
     /// <param name="owner"></param>
     /// <param name="expiresMs"></param>
     /// <param name="durability"></param>
-    // <param name="proposalId"></param>
-    public LockRequest(LockRequestType type, string resource, byte[]? owner, int expiresMs, LockDurability durability, int proposalId)
+    /// <param name="proposalId"></param>
+    /// <param name="messagePromise"></param>
+    /// <param name="proposalId"></param>
+    /// <param name="partitionId"></param> 
+    /// <param name="promise"></param> 
+    public LockRequest(
+        LockRequestType type, 
+        string resource, 
+        byte[]? owner, 
+        int expiresMs, 
+        LockDurability durability, 
+        int proposalId, 
+        int partitionId,
+        TaskCompletionSource<LockResponse?>? promise
+    )
     {
         Type = type;
         Resource = resource;
         Owner = owner;
         ExpiresMs = expiresMs;
         Durability = durability;
-        ProposalId = proposalId;;
+        ProposalId = proposalId;
+        PartitionId = partitionId;
+        Promise = promise;
     }
 
     /// <summary>

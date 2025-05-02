@@ -42,7 +42,7 @@ internal sealed class LockManager
     /// <summary>
     /// 
     /// </summary>
-    private readonly IActorRef<LockProposalActor, LockProposalRequest> proposalActor;
+    private readonly IActorRef<BalancingActor<LockProposalActor, LockProposalRequest>, LockProposalRequest> proposalRouter;
 
     /// <summary>
     /// A router responsible for managing and dispatching ephemeral lock-related requests
@@ -62,10 +62,19 @@ internal sealed class LockManager
     /// </summary>
     private readonly IActorRef<ConsistentHashActor<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> persistentLocksRouter;
 
+    /// <summary>
+    /// 
+    /// </summary>
     private readonly LockLocator locator;
     
+    /// <summary>
+    /// 
+    /// </summary>
     private readonly LockRestorer restorer;
 
+    /// <summary>
+    /// 
+    /// </summary>
     private readonly LockReplicator replicator;
     
     /// <summary>
@@ -94,14 +103,7 @@ internal sealed class LockManager
         
         locator = new(this, configuration, raft, interNodeCommunication, logger);
         
-        proposalActor = actorSystem.Spawn<LockProposalActor, LockProposalRequest>(
-            "proposal-actor", 
-            raft, 
-            persistenceBackend, 
-            configuration,
-            logger
-        );
-        
+        proposalRouter = GetProposalRouter(persistenceBackend, configuration);
         ephemeralLocksRouter = GetEphemeralRouter(persistenceBackend, configuration);
         persistentLocksRouter = GetPersistentRouter(persistenceBackend, configuration);
         
@@ -127,7 +129,7 @@ internal sealed class LockManager
             ephemeralInstances.Add(actorSystem.Spawn<LockActor, LockRequest, LockResponse>(
                 "ephemeral-lock-" + i, 
                 backgroundWriter, 
-                proposalActor,
+                proposalRouter,
                 persistenceBackend,                 
                 raft,
                 configuration,
@@ -155,7 +157,7 @@ internal sealed class LockManager
             persistentInstances.Add(actorSystem.Spawn<LockActor, LockRequest, LockResponse>(
                 "persistent-lock-" + i, 
                 backgroundWriter, 
-                proposalActor,
+                proposalRouter,
                 persistenceBackend,                 
                 raft,
                 configuration,
@@ -163,6 +165,25 @@ internal sealed class LockManager
             ));
         
         return actorSystem.CreateConsistentHashRouter(persistentInstances);
+    }
+
+    private IActorRef<BalancingActor<LockProposalActor, LockProposalRequest>, LockProposalRequest> GetProposalRouter(
+        IPersistenceBackend persistenceBackend, 
+        KahunaConfiguration configuration
+    )
+    {
+        List<IActorRef<LockProposalActor, LockProposalRequest>> proposalInstances = new(64);
+
+        for (int i = 0; i < configuration.LocksWorkers; i++)
+            proposalInstances.Add(actorSystem.Spawn<LockProposalActor, LockProposalRequest>(
+                "proposal-lock-" + i, 
+                raft, 
+                persistenceBackend, 
+                configuration,
+                logger
+            ));
+        
+        return actorSystem.Spawn<BalancingActor<LockProposalActor, LockProposalRequest>, LockProposalRequest>(null, proposalInstances);
     }
     
     /// <summary>
@@ -266,7 +287,9 @@ internal sealed class LockManager
             owner, 
             expiresMs, 
             durability,
-            0
+            0,
+            0,
+            null
         );
 
         LockResponse? response;
@@ -298,7 +321,9 @@ internal sealed class LockManager
             owner, 
             expiresMs, 
             durability,
-            0
+            0,
+            0,
+            null
         );
 
         LockResponse? response;
@@ -329,7 +354,9 @@ internal sealed class LockManager
             owner, 
             0, 
             durability,
-            0
+            0,
+            0,
+            null
         );
 
         LockResponse? response;
@@ -359,7 +386,9 @@ internal sealed class LockManager
             null, 
             0, 
             durability,
-            0
+            0,
+            0,
+            null
         );
 
         LockResponse? response;

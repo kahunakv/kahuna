@@ -1,5 +1,6 @@
 
 using Kommander.Time;
+using Kahuna.Shared.Locks;
 
 namespace Kahuna.Server.Locks.Data;
 
@@ -11,6 +12,8 @@ namespace Kahuna.Server.Locks.Data;
 /// </summary>
 public sealed class LockProposal
 {
+    public LockRequestType Type { get; }
+    
     public string Resource { get; } 
     
     public byte[]? Owner { get; } 
@@ -26,6 +29,7 @@ public sealed class LockProposal
     public LockState State { get; }
     
     public LockProposal(
+        LockRequestType type,
         string resource, 
         byte[]? owner, 
         long fencingToken,
@@ -35,6 +39,7 @@ public sealed class LockProposal
         LockState state
     )
     {
+        Type = type;
         Resource = resource;
         Owner = owner;
         FencingToken = fencingToken;

@@ -46,8 +46,8 @@ public sealed class KahunaCommandLineOptions
     [Option("initial-cluster", Required = false, HelpText = "Initial cluster configuration for static discovery")]
     public IEnumerable<string>? InitialCluster { get; set; }
 
-    [Option("initial-cluster-partitions", Required = false, HelpText = "Initial cluster number of partitions", Default = 128)] // 32
-    public int InitialClusterPartitions { get; set; }
+    [Option("initial-cluster-partitions", Required = false, HelpText = "Initial cluster number of partitions", Default = 256)] // 32
+    public int InitialClusterPartitions { get; set; } = 256;
     
     [Option("raft-nodename", Required = false, HelpText = "Unique name to identify the node in the cluster")]
     public string RaftNodeName { get; set; } = "";
@@ -70,14 +70,14 @@ public sealed class KahunaCommandLineOptions
     [Option("background-writer-workers", Required = false, HelpText = "Number of background writers workers", Default = 1)]
     public int BackgroundWritersWorkers { get; set; } = 1;
     
-    [Option("default-transaction-timeout", Required = false, HelpText = "Default transaction timeout in milliseconds", Default = 5000)]
+    [Option("default-transaction-timeout", Required = false, HelpText = "Default transaction timeout (in milliseconds)", Default = 5000)]
     public int DefaultTransactionTimeout { get; set; } = 5000;
     
-    [Option("read-io-threads", Required = false, HelpText = "Read I/O threads", Default = 16)]
-    public int ReadIOThreads { get; set; } = 16;
+    [Option("read-io-threads", Required = false, HelpText = "Read I/O threads", Default = 8)]
+    public int ReadIOThreads { get; set; } = 8;
     
-    [Option("write-io-threads", Required = false, HelpText = "Write I/O threads", Default = 8)]
-    public int WriteIOThreads { get; set; } = 8;
+    [Option("write-io-threads", Required = false, HelpText = "Write I/O threads", Default = 16)]
+    public int WriteIOThreads { get; set; } = 16;
 
     [Option("script-cache-expiration", Required = false, HelpText = "Script cache expiration (in seconds)", Default = 600)]
     public int ScriptCacheExpiration { get; set; } = 600;

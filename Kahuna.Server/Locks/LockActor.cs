@@ -11,6 +11,7 @@ using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
 using Kahuna.Shared.Locks;
+using Nixie.Routers;
 
 namespace Kahuna.Server.Locks;
 
@@ -20,6 +21,8 @@ namespace Kahuna.Server.Locks;
 /// </summary>
 internal sealed class LockActor : IActor<LockRequest, LockResponse>
 {
+    private const int ProposalWaitTimeout = 10000;
+    
     private static int proposalId = int.MinValue;
     
     /// <summary>
@@ -31,7 +34,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
 
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
 
-    private readonly IActorRef<LockProposalActor, LockProposalRequest> proposalActor;
+    private readonly IActorRef<BalancingActor<LockProposalActor, LockProposalRequest>, LockProposalRequest> proposalRouter;
 
     private readonly IPersistenceBackend persistenceBackend;
 
@@ -63,7 +66,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
     public LockActor(
         IActorContext<LockActor, LockRequest, LockResponse> actorContext,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        IActorRef<LockProposalActor, LockProposalRequest> proposalActor,
+        IActorRef<BalancingActor<LockProposalActor, LockProposalRequest>, LockProposalRequest> proposalRouter,
         IPersistenceBackend persistenceBackend,
         IRaft raft, 
         KahunaConfiguration configuration,
@@ -72,7 +75,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
     {
         this.actorContext = actorContext;
         this.backgroundWriter = backgroundWriter;
-        this.proposalActor = proposalActor;
+        this.proposalRouter = proposalRouter;
         this.persistenceBackend = persistenceBackend;
         this.raft = raft;
         this.configuration = configuration;
@@ -135,34 +138,6 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         return LockStaticResponses.ErroredResponse;
     }
 
-    private LockResponse CompleteProposal(LockRequest message)
-    {
-        if (!locks.TryGetValue(message.Resource, out LockContext? context))
-        {
-            logger.LogWarning("LockActor/CompleteProposal: Lock not found for resource {Resource}", message.Resource);
-            
-            return LockStaticResponses.DoesNotExistResponse;
-        }
-
-        if (context.WriteIntent is null)
-        {
-            logger.LogWarning("LockActor/CompleteProposal: Couldn't find an active write intent on resource {Resource}", message.Resource);
-            
-            return LockStaticResponses.DoesNotExistResponse;
-        }
-
-        if (context.WriteIntent.ProposalId != message.ProposalId)
-        {
-            logger.LogWarning("LockActor/CompleteProposal: Current write intent on resource {Resource} doesn't match passed id {Current} {Passed}", message.Resource, context.WriteIntent.ProposalId, message.ProposalId);
-            
-            return LockStaticResponses.DoesNotExistResponse;
-        }
-
-        context.WriteIntent = null;
-
-        return new(LockResponseType.Locked);
-    }
-
     /// <summary>
     /// Looks for a lock on the resource and tries to lock it
     /// Check for the owner and expiration time
@@ -200,6 +175,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         }
         
         LockProposal proposal = new(
+            message.Type,
             message.Resource,
             message.Owner,
             context.FencingToken + 1,
@@ -210,23 +186,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         );
 
         if (message.Durability == LockDurability.Persistent)
-        {
-            //bool success = await PersistAndReplicateLockMessage(message.Type, proposal, currentTime);
-            //if (!success)
-            //    return LockStaticResponses.ErroredResponse;                       
-            
-            int currentProposalId = Interlocked.Increment(ref proposalId);
-
-            context.WriteIntent = new() { ProposalId = currentProposalId, Expires = currentTime + 10000 };
-            
-            proposals.Add(currentProposalId, proposal);
-            
-            proposalActor.Send(new(currentProposalId, proposal, actorContext.Self, actorContext.Reply!.Value));
-
-            actorContext.ByPassReply = true;
-            
-            return LockStaticResponses.WaitingForReplication;
-        }
+            return CreateProposal(message, context, proposal, currentTime);
         
         context.FencingToken = proposal.FencingToken;
         context.Owner = proposal.Owner;
@@ -258,6 +218,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
             return LockStaticResponses.InvalidOwnerResponse;
 
         LockProposal proposal = new(
+            message.Type,
             message.Resource,
             context.Owner,
             context.FencingToken,
@@ -268,11 +229,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         );
 
         if (message.Durability == LockDurability.Persistent)
-        {
-            bool success = await PersistAndReplicateLockMessage(message.Type, proposal, currentTime);
-            if (!success)
-                return LockStaticResponses.ErroredResponse;
-        }
+            return CreateProposal(message, context, proposal, currentTime);
         
         context.Expires = proposal.Expires;
         context.LastUsed = proposal.LastUsed;
@@ -297,6 +254,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
         LockProposal proposal = new(
+            message.Type,
             message.Resource,
             null,
             context.FencingToken,
@@ -307,17 +265,13 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         );
 
         if (message.Durability == LockDurability.Persistent)
-        {
-            //bool success = await PersistAndReplicateLockMessage(message.Type, proposal, currentTime);
-            //if (!success)
-            //   return LockStaticResponses.ErroredResponse;
-        }
+            return CreateProposal(message, context, proposal, currentTime);
         
         context.Owner = proposal.Owner;
         context.LastUsed = proposal.LastUsed;
         context.State = proposal.State;
 
-        return LockStaticResponses.UnlockedResponse;;
+        return LockStaticResponses.UnlockedResponse;
     }
 
     /// <summary>
@@ -370,70 +324,6 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         return context;
     }
 
-    /// <summary>
-    /// Persists and replicates lock message to the Raft cluster
-    /// </summary>
-    /// <param name="type"></param>
-    /// <param name="proposal"></param>
-    /// <param name="currentTime"></param>
-    /// <returns></returns>
-    private async Task<bool> PersistAndReplicateLockMessage(LockRequestType type, LockProposal proposal, HLCTimestamp currentTime)
-    {
-        if (!raft.Joined)
-            return true;
-
-        int partitionId = raft.GetPartitionKey(proposal.Resource);
-
-        LockMessage lockMessage = new()
-        {
-            Type = (int)type,
-            Resource = proposal.Resource,
-            FencingToken = proposal.FencingToken,
-            ExpireNode = proposal.Expires.N,
-            ExpirePhysical = proposal.Expires.L,
-            ExpireCounter = proposal.Expires.C,
-            LastUsedNode = proposal.LastUsed.N,
-            LastUsedPhysical = proposal.LastUsed.L,
-            LastUsedCounter = proposal.LastUsed.C,
-            LastModifiedNode = proposal.LastModified.N,
-            LastModifiedPhysical = proposal.LastModified.L,
-            LastModifiedCounter = proposal.LastModified.C,
-            TimeNode = currentTime.N,
-            TimePhysical = currentTime.L,
-            TimeCounter = currentTime.C
-        };
-
-        if (proposal.Owner is not null)
-            lockMessage.Owner = UnsafeByteOperations.UnsafeWrap(proposal.Owner);
-
-        RaftReplicationResult result = await raft.ReplicateLogs(
-            partitionId,
-            ReplicationTypes.Locks,
-            ReplicationSerializer.Serialize(lockMessage)
-        );
-
-        if (!result.Success)
-        {
-            logger.LogWarning("Failed to replicate lock {Resource} Partition={Partition} Status={Status} Ticket={Ticket}", proposal.Resource, partitionId, result.Status, result.TicketId);
-            
-            return false;
-        }
-
-        backgroundWriter.Send(new(
-            BackgroundWriteType.QueueStoreLock,
-            partitionId,
-            proposal.Resource, 
-            proposal.Owner, 
-            proposal.FencingToken,
-            proposal.Expires,
-            proposal.LastUsed,
-            proposal.LastModified,
-            (int)proposal.State
-        ));
-
-        return result.Success;
-    }
-
     private void Collect()
     {
         int count = locks.Count;
@@ -463,5 +353,125 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
             logger.LogDebug("Evicted {Count} key/value pairs", keysToEvict.Count);
         
         keysToEvict.Clear();
+    }
+
+    /// <summary>
+    /// Creates a proposal for a lock operation and sends it to the proposal actor for replication.
+    /// </summary>
+    /// <param name="message"></param>
+    /// <param name="context"></param>
+    /// <param name="proposal"></param>
+    /// <param name="currentTime"></param>
+    /// <returns></returns>
+    private LockResponse CreateProposal(LockRequest message, LockContext context, LockProposal proposal, HLCTimestamp currentTime)
+    {
+        if (!actorContext.Reply.HasValue)
+            return LockStaticResponses.ErroredResponse;
+            
+        int currentProposalId = Interlocked.Increment(ref proposalId);
+
+        context.WriteIntent = new()
+        {
+            ProposalId = currentProposalId, 
+            Expires = currentTime + ProposalWaitTimeout
+        };
+            
+        proposals.Add(currentProposalId, proposal);
+            
+        proposalRouter.Send(new(
+            message.Type,
+            currentProposalId, 
+            proposal, 
+            actorContext.Self, 
+            actorContext.Reply.Value.Promise,
+            currentTime
+        ));
+
+        actorContext.ByPassReply = true;
+            
+        return LockStaticResponses.WaitingForReplication;
+    }
+    
+    /// <summary>
+    /// Completes a lock proposal by updating the lock context with the proposal's state.
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
+    /// <exception cref="ArgumentOutOfRangeException"></exception>
+    private LockResponse CompleteProposal(LockRequest message)
+    {
+        if (!locks.TryGetValue(message.Resource, out LockContext? context))
+        {
+            logger.LogWarning("LockActor/CompleteProposal: Lock not found for resource {Resource}", message.Resource);
+            
+            return LockStaticResponses.DoesNotExistResponse;
+        }
+
+        if (context.WriteIntent is null)
+        {
+            logger.LogWarning("LockActor/CompleteProposal: Couldn't find an active write intent on resource {Resource}", message.Resource);
+            
+            return LockStaticResponses.DoesNotExistResponse;
+        }
+
+        if (context.WriteIntent.ProposalId != message.ProposalId)
+        {
+            logger.LogWarning("LockActor/CompleteProposal: Current write intent on resource {Resource} doesn't match passed id {Current} {Passed}", message.Resource, context.WriteIntent.ProposalId, message.ProposalId);
+            
+            return LockStaticResponses.DoesNotExistResponse;
+        }
+
+        if (!proposals.TryGetValue(message.ProposalId, out LockProposal? proposal))
+        {
+            logger.LogWarning("LockActor/CompleteProposal: Proposal on resource {Resource} doesn't exist {ProposalId}", message.Resource, message.ProposalId);
+            
+            return LockStaticResponses.DoesNotExistResponse;
+        }
+        
+        context.FencingToken = proposal.FencingToken;
+        context.Owner = proposal.Owner;
+        context.Expires = proposal.Expires;
+        context.LastUsed = proposal.LastUsed;
+        context.State = proposal.State;
+        
+        backgroundWriter.Send(new(
+            BackgroundWriteType.QueueStoreLock,
+            -1, // partitionId
+            proposal.Resource, 
+            proposal.Owner, 
+            proposal.FencingToken,
+            proposal.Expires,
+            proposal.LastUsed,
+            proposal.LastModified,
+            (int)proposal.State
+        ));
+
+        context.WriteIntent = null;
+        proposals.Remove(message.ProposalId);
+
+        if (message.Promise is not null)
+        {
+            switch (proposal.Type)
+            {
+                case LockRequestType.TryLock:
+                    message.Promise.TrySetResult(new(LockResponseType.Locked, context.FencingToken));
+                    break;
+                
+                case LockRequestType.TryExtendLock:
+                    message.Promise.TrySetResult(new(LockResponseType.Extended, context.FencingToken));
+                    break;
+                
+                case LockRequestType.TryUnlock:
+                    message.Promise.TrySetResult(LockStaticResponses.UnlockedResponse);
+                    break;
+
+                case LockRequestType.Get:
+                case LockRequestType.CompleteProposal:
+                default:
+                    throw new NotImplementedException();
+            }
+        }
+
+        return new(LockResponseType.Locked);
     }
 }

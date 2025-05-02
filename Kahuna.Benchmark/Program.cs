@@ -13,7 +13,7 @@ using Kahuna.Shared.Locks;
 
 Console.WriteLine("Kahuna Benchmark");
 
-const int numberOfTasks = 750;
+const int numberOfTasks = 250;
 const int MaxTokens = 15_000;
 
 List<string> tokens = new(MaxTokens);
@@ -45,7 +45,7 @@ for (int j = 0; j < 2000; j++)
 
     for (int i = 0; i < numberOfTasks; i++)
     {
-        int remainder = (i + 1) % 8;
+        /*int remainder = (i + 1) % 8;
         
         switch (remainder)
         {
@@ -71,7 +71,9 @@ for (int j = 0; j < 2000; j++)
             case 0:
                 tasks.Add(DeleteKeyConcurrently(locks));
                 break;                
-        }               
+        }*/
+        
+        tasks.Add(AcquireLockConcurrently(locks));
     }
 
     await Task.WhenAll(tasks);
@@ -82,7 +84,7 @@ for (int j = 0; j < 2000; j++)
         Console.WriteLine($"[{(j - 2) + 1}] Total time: {stopwatch.Elapsed}");
 
     if ((j + 1) % 10 == 0)
-      await Task.Delay(5000);
+        await Task.Delay(5000);
 
     stopwatch.Restart();
 }
@@ -108,8 +110,8 @@ async Task AcquireLockConcurrently(KahunaClient locksx)
         if (!kahunaLock.IsAcquired)
             throw new KahunaException("Not acquired " + lockName, LockResponseType.Busy);
 
-        if (kahunaLock.FencingToken > 1)
-            Console.WriteLine("Got repeated token " + kahunaLock.FencingToken);
+        //if (kahunaLock.FencingToken > 1)
+        //    Console.WriteLine("Got repeated token " + kahunaLock.FencingToken);
     }
     catch (KahunaException ex)
     {
