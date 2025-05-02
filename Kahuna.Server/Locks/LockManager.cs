@@ -172,7 +172,7 @@ internal sealed class LockManager
         KahunaConfiguration configuration
     )
     {
-        List<IActorRef<LockProposalActor, LockProposalRequest>> proposalInstances = new(64);
+        List<IActorRef<LockProposalActor, LockProposalRequest>> proposalInstances = new(configuration.LocksWorkers);
 
         for (int i = 0; i < configuration.LocksWorkers; i++)
             proposalInstances.Add(actorSystem.Spawn<LockProposalActor, LockProposalRequest>(
