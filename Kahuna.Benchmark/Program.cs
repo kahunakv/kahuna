@@ -16,6 +16,8 @@ Console.WriteLine("Kahuna Benchmark");
 const int numberOfTasks = 250;
 const int MaxTokens = 15_000;
 
+int current = 0;
+
 List<string> tokens = new(MaxTokens);
 
 for (int k = 0; k < MaxTokens; k++)
@@ -39,7 +41,7 @@ List<Task> tasks = new(numberOfTasks);
 
 Stopwatch stopwatch = Stopwatch.StartNew();
 
-for (int j = 0; j < 2000; j++)
+for (int j = 0; j < 5; j++)
 {
     tasks.Clear();
 
@@ -96,14 +98,14 @@ async Task AcquireLockConcurrently(KahunaClient locksx)
     try
     {
         using CancellationTokenSource cts = new();
-        cts.CancelAfter(TimeSpan.FromSeconds(5));
+        cts.CancelAfter(TimeSpan.FromSeconds(15));
 
         string lockName = GetRandomLockNameFromList(tokens);
 
         await using KahunaLock kahunaLock = await locksx.GetOrCreateLock(
             lockName,
             expiry: TimeSpan.FromSeconds(30),
-            durability: LockDurability.Ephemeral,
+            durability: LockDurability.Persistent,
             cancellationToken: cts.Token
         );
 
@@ -128,7 +130,7 @@ async Task SetKeyConcurrently(KahunaClient keyValues)
     try
     {
         using CancellationTokenSource cts = new();
-        cts.CancelAfter(TimeSpan.FromSeconds(5));
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
 
         string key = GetRandomLockNameFromList(tokens);
         string value = GetRandomLockNameFromList(tokens);
@@ -302,7 +304,12 @@ static string GetRandomLockName()
     return NanoidDotNet.Nanoid.Generate();
 }
 
-static string GetRandomLockNameFromList(List<string> tokens)
+string GetRandomLockNameFromList(List<string> tokensp)
 {
-    return tokens[Random.Shared.Next(0, MaxTokens)];
+    //return tokens[Random.Shared.Next(0, MaxTokens)];
+    int c = Interlocked.Increment(ref current);
+    if (c > MaxTokens)
+        c = 0;
+    
+    return tokensp[c];
 }

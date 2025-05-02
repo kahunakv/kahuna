@@ -46,8 +46,8 @@ public sealed class KahunaCommandLineOptions
     [Option("initial-cluster", Required = false, HelpText = "Initial cluster configuration for static discovery")]
     public IEnumerable<string>? InitialCluster { get; set; }
 
-    [Option("initial-cluster-partitions", Required = false, HelpText = "Initial cluster number of partitions", Default = 256)] // 32
-    public int InitialClusterPartitions { get; set; } = 256;
+    [Option("initial-cluster-partitions", Required = false, HelpText = "Initial cluster number of partitions", Default = 128)] // 32
+    public int InitialClusterPartitions { get; set; } = 128;
     
     [Option("raft-nodename", Required = false, HelpText = "Unique name to identify the node in the cluster")]
     public string RaftNodeName { get; set; } = "";
