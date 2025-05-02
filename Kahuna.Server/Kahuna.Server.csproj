@@ -24,7 +24,6 @@
 <ItemGroup>
   <Folder Include="Cluster\" />
   <Folder Include="Communication\External\" />
-  <Folder Include="Locks\Logging\" />
 </ItemGroup>
 
   <ItemGroup>

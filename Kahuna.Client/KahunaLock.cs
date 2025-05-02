@@ -62,7 +62,7 @@ public sealed class KahunaLock : IAsyncDisposable
     /// Gets the owner of the lock as a string representation.
     /// If the lock owner information is available, it returns the owner's string value; otherwise, an empty string.
     /// </summary>
-    public string? OwnerAsString => owner is not null ? Encoding.UTF8.GetString(owner) : "";
+    public string OwnerAsString => owner is not null ? Encoding.UTF8.GetString(owner) : "";
 
     /// <summary>
     /// Constructor
@@ -172,7 +172,7 @@ public sealed class KahunaLock : IAsyncDisposable
     /// <returns>
     /// A JSON string representation of the lock's state.
     /// </returns>
-    public string? ToJson()
+    public string ToJson()
     {
         return JsonSerializer.Serialize(new
         {

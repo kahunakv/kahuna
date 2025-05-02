@@ -22,10 +22,19 @@ namespace Kahuna.Server.Persistence;
 /// </remarks>
 internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 {
+    /// <summary>
+    /// In case of failure, the number of retries to write the data to the persistence backend.
+    /// </summary>
     private const int WriteRetries = 5;
     
+    /// <summary>
+    /// Maximum number of items to be written in a single batch.
+    /// </summary>
     private const int MaxBatchSize = 1024;
     
+    /// <summary>
+    /// Maximum size of a packet to be written in a single batch.
+    /// </summary>
     private const int MaxPacketSize = 1024 * 512;
     
     private readonly IRaft raft;
@@ -36,19 +45,37 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
     private readonly ILogger<IKahuna> logger;
     
+    /// <summary>
+    /// Dirty locks that need to be written to the persistence backend.
+    /// </summary>
     private readonly Queue<BackgroundWriteRequest> dirtyLocks = new();
     
+    /// <summary>
+    /// Dirty key-values that need to be written to the persistence backend.
+    /// </summary>
     private readonly Queue<BackgroundWriteRequest> dirtyKeyValues = new();
     
+    /// <summary>
+    /// Partition IDs that are being tracked for checkpointing.
+    /// </summary>
     private readonly Dictionary<int, DateTime> partitionIds = [];
     
     private readonly Stopwatch stopwatch = Stopwatch.StartNew();
     
+    /// <summary>
+    /// If a write fails, these lock items are kept in memory until the next write attempt.
+    /// </summary>
     private List<PersistenceRequestItem>? pendingLockItems;
     
+    /// <summary>
+    /// If a write fails, these key/value items are kept in memory until the next write attempt.
+    /// </summary>
     private List<PersistenceRequestItem>? pendingKeyValuesItems;
     
-    private bool pendingCheckpoint = true;
+    /// <summary>
+    /// Whether a checkpoint operation is pending.
+    /// </summary>
+    private bool pendingCheckpoint;
     
     public BackgroundWriterActor(
         IActorContext<BackgroundWriterActor, BackgroundWriteRequest> context,

@@ -40,7 +40,7 @@ internal sealed class LockContext
     public LockState State { get; set; } = LockState.Locked;
     
     /// <summary>
-    /// 
+    /// Locks with persistent durability are temporarily marked for writing 
     /// </summary>
     public LockWriteIntent? WriteIntent { get; set; }
 }

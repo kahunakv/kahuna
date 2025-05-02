@@ -306,7 +306,7 @@ internal sealed class LockManager
 
             if (response.Type == LockResponseType.MustRetry)
             {
-                await Task.Delay(1);
+                await Task.Delay(i + 1);
                 continue;
             }
 
@@ -351,7 +351,7 @@ internal sealed class LockManager
 
             if (response.Type == LockResponseType.MustRetry)
             {
-                await Task.Delay(1);
+                await Task.Delay(i + 1);
                 continue;
             }
 
@@ -381,17 +381,28 @@ internal sealed class LockManager
             null
         );
 
-        LockResponse? response;
+        for (int i = 0; i < 3; i++)
+        {
+            LockResponse? response;
+
+            if (durability == LockDurability.Ephemeral)
+                response = await ephemeralLocksRouter.Ask(request);
+            else
+                response = await persistentLocksRouter.Ask(request);
+
+            if (response is null)
+                return LockResponseType.Errored;
+
+            if (response.Type == LockResponseType.MustRetry)
+            {
+                await Task.Delay(i + 1);
+                continue;
+            }
+
+            return response.Type;
+        }
         
-        if (durability == LockDurability.Ephemeral)
-            response = await ephemeralLocksRouter.Ask(request);
-        else
-            response = await persistentLocksRouter.Ask(request);
-        
-        if (response is null)
-            return LockResponseType.Errored;
-        
-        return response.Type;
+        return LockResponseType.MustRetry;
     }
     
     /// <summary>

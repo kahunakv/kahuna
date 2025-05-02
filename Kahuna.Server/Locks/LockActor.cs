@@ -8,6 +8,7 @@ using Kommander.Time;
 using System.Diagnostics;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.Locks.Data;
+using Kahuna.Server.Locks.Logging;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.Locks;
@@ -93,8 +94,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         
         try
         {
-            logger.LogDebug(
-                "LockActor Message: {Actor} {Type} {Resource} {Owner} {ExpiresMs} {Durability}", 
+            logger.LogLocksActorEnter( 
                 actorContext.Self.Runner.Name, 
                 message.Type, 
                 message.Resource, 
@@ -116,6 +116,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
                 LockRequestType.TryExtendLock => await TryExtendLock(message),
                 LockRequestType.Get => await GetLock(message),
                 LockRequestType.CompleteProposal => CompleteProposal(message),
+                LockRequestType.ReleaseProposal => ReleaseProposal(message),
                 _ => LockStaticResponses.ErroredResponse
             };
         }
@@ -125,8 +126,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         }
         finally
         {
-            logger.LogDebug(
-                "LockActor Took: {Actor} {Type} Key={Key} Time={Elasped}ms",
+            logger.LogLocksActorTook(                
                 actorContext.Self.Runner.Name,
                 message.Type,
                 message.Resource,
@@ -411,7 +411,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    /// <exception cref="ArgumentOutOfRangeException"></exception>
+    /// <exception cref="NotImplementedException"></exception>
     private LockResponse CompleteProposal(LockRequest message)
     {
         if (!locks.TryGetValue(message.Resource, out LockContext? context))
@@ -482,10 +482,65 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
 
             case LockRequestType.Get:
             case LockRequestType.CompleteProposal:
+            case LockRequestType.ReleaseProposal:
             default:
                 throw new NotImplementedException();
         }
         
+        return LockStaticResponses.ErroredResponse;
+    }
+    
+    /// <summary>
+    /// Completes a lock proposal by updating the lock context with the proposal's state.
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>    
+    private LockResponse ReleaseProposal(LockRequest message)
+    {
+        if (!locks.TryGetValue(message.Resource, out LockContext? context))
+        {
+            logger.LogWarning("LockActor/ReleaseProposal: Lock not found for resource {Resource}", message.Resource);
+            
+            message.Promise?.TrySetResult(LockStaticResponses.ErroredResponse);
+
+            return LockStaticResponses.DoesNotExistResponse;
+        }
+
+        if (context.WriteIntent is null)
+        {
+            logger.LogWarning("LockActor/ReleaseProposal: Couldn't find an active write intent on resource {Resource}", message.Resource);
+            
+            message.Promise?.TrySetResult(LockStaticResponses.ErroredResponse);
+
+            return LockStaticResponses.DoesNotExistResponse;
+        }
+
+        if (context.WriteIntent.ProposalId != message.ProposalId)
+        {
+            logger.LogWarning("LockActor/ReleaseProposal: Current write intent on resource {Resource} doesn't match passed id {Current} {Passed}", message.Resource, context.WriteIntent.ProposalId, message.ProposalId);
+            
+            message.Promise?.TrySetResult(LockStaticResponses.ErroredResponse);
+
+            return LockStaticResponses.DoesNotExistResponse;
+        }
+
+        if (!proposals.ContainsKey(message.ProposalId))
+        {
+            logger.LogWarning("LockActor/ReleaseProposal: Proposal on resource {Resource} doesn't exist {ProposalId}", message.Resource, message.ProposalId);
+
+            message.Promise?.TrySetResult(LockStaticResponses.ErroredResponse);
+
+            return LockStaticResponses.DoesNotExistResponse;
+        }        
+
+        context.WriteIntent = null;
+        proposals.Remove(message.ProposalId);
+
+        if (message.Promise is null)
+            return new(LockResponseType.Locked);
+        
+        message.Promise.TrySetResult(LockStaticResponses.ErroredResponse);
+                
         return LockStaticResponses.ErroredResponse;
     }
 }

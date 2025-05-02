@@ -78,6 +78,18 @@ internal sealed class LockProposalActor : IActor<LockProposalRequest>
         if (!result.Success)
         {
             logger.LogWarning("Failed to replicate lock {Resource} Partition={Partition} Status={Status} Ticket={Ticket}", proposal.Resource, partitionId, result.Status, result.TicketId);
+            
+            lockActor.Send(new(
+                LockRequestType.ReleaseProposal, 
+                proposal.Resource, 
+                null, 
+                0, 
+                proposal.Durability,
+                message.ProposalId,
+                partitionId,
+                message.Promise
+            ));
+            
             return;
         }
 

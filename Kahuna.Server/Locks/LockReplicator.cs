@@ -193,8 +193,10 @@ internal sealed class LockReplicator
                 }
 
                 case LockRequestType.Get:
+                case LockRequestType.CompleteProposal:
+                case LockRequestType.ReleaseProposal:
                     break;
-
+                
                 default:
                     logger.LogError("Unknown replication message type: {Type}", lockMessage.Type);
                     break;

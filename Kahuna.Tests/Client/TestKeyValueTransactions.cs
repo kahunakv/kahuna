@@ -553,7 +553,7 @@ public class TestKeyValueTransactions
         KahunaKeyValue av1 = await session1.GetKeyValue(keyNameA, cancellationToken: TestContext.Current.CancellationToken);
         KahunaKeyValue bv1 = await session1.GetKeyValue(keyNameB, cancellationToken: TestContext.Current.CancellationToken);
         
-        if (int.Parse(av1.ValueAsString() ?? "0") + int.Parse(bv1.ValueAsString() ?? "0") == 20)
+        if (av1.ValueAsLong() + bv1.ValueAsLong() == 20)
             await session1.SetKeyValue(keyNameA, "0", cancellationToken: TestContext.Current.CancellationToken);
 
         await session1.Commit(cancellationToken: TestContext.Current.CancellationToken);
@@ -569,7 +569,7 @@ public class TestKeyValueTransactions
         KahunaKeyValue av2 = await session2.GetKeyValue(keyNameA, cancellationToken: TestContext.Current.CancellationToken);
         KahunaKeyValue bv2 = await session2.GetKeyValue(keyNameB, cancellationToken: TestContext.Current.CancellationToken);
         
-        if (int.Parse(av2.ValueAsString() ?? "0") + int.Parse(bv2.ValueAsString() ?? "0") == 20)
+        if (av2.ValueAsLong() + bv2.ValueAsLong() == 20)
             await session2.SetKeyValue(keyNameA, "0", cancellationToken: TestContext.Current.CancellationToken);
 
         await session2.Commit(cancellationToken: TestContext.Current.CancellationToken);

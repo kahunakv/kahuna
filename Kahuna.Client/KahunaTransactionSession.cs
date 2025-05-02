@@ -39,7 +39,7 @@ public class KahunaTransactionSession : IAsyncDisposable
     /// Gets or sets the locking mechanism used within the current KahunaTransactionSession.
     /// This property determines whether the transaction operates under a pessimistic or optimistic locking strategy, influencing how data consistency and concurrency are managed.
     /// </summary>
-    private KeyValueTransactionLocking Locking { get; set; } = KeyValueTransactionLocking.Pessimistic;
+    private KeyValueTransactionLocking Locking { get; set; }
 
     /// <summary>
     /// Gets or sets the current status of the transaction session.
@@ -669,7 +669,7 @@ public class KahunaTransactionSession : IAsyncDisposable
             if (Status != KahunaTransactionStatus.Pending)
                 throw new KahunaException("Cannot commit a transaction that is not pending.", KeyValueResponseType.Errored);
             
-            List<KeyValueTransactionModifiedKey> acquiredLocksList;;
+            List<KeyValueTransactionModifiedKey> acquiredLocksList;
 
             if (acquiredLocks is not null)
             {
@@ -734,7 +734,7 @@ public class KahunaTransactionSession : IAsyncDisposable
             if (Status != KahunaTransactionStatus.Pending)
                 throw new KahunaException("Cannot rollback a transaction that is not pending.", KeyValueResponseType.Errored);
             
-            List<KeyValueTransactionModifiedKey> acquiredKeysList;;
+            List<KeyValueTransactionModifiedKey> acquiredKeysList;
 
             if (acquiredLocks is not null)
             {
