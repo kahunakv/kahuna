@@ -703,10 +703,11 @@ enum GrpcServerBatchType {
 enum GrpcKeyValueFlags {
   NONE = 0;
   SET = 1;
-  SET_IF_EXISTS = 2;
-  SET_IF_NOT_EXISTS = 3;
-  SET_IF_EQUAL_TO_VALUE = 4;
-  SET_IF_EQUAL_TO_REVISION = 5;
+  SET_NO_REVISION = 2;
+  SET_IF_EXISTS = 4;
+  SET_IF_NOT_EXISTS = 8;
+  SET_IF_EQUAL_TO_VALUE = 16;
+  SET_IF_EQUAL_TO_REVISION = 32;
 }
 
 enum GrpcKeyValueResponseType {

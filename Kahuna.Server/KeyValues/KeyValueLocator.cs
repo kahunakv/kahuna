@@ -123,8 +123,7 @@ internal sealed class KeyValueLocator
     /// </summary>
     /// <param name="setManyItems"></param>
     /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    /// <exception cref="NotImplementedException"></exception>
+    /// <returns></returns>    
     public async Task<List<KahunaSetKeyValueResponseItem>> LocateAndTrySetManyKeyValue(
         List<KahunaSetKeyValueRequestItem> setManyItems, 
         CancellationToken cancellationToken

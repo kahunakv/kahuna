@@ -152,7 +152,7 @@ internal sealed class TrySetHandler : BaseHandler
             
             // logger.LogDebug("Key={0} Flags={1} Rev={2} CmpRev={3}", message.Key, message.Flags, entry.Revision, message.CompareRevision);
             
-            switch (message.Flags)
+            /*switch (message.Flags)
             {
                 case KeyValueFlags.SetIfExists when !exists:
                 case KeyValueFlags.SetIfNotExists when exists:
@@ -162,17 +162,25 @@ internal sealed class TrySetHandler : BaseHandler
 
                 case KeyValueFlags.None:
                 case KeyValueFlags.Set:
+                case KeyValueFlags.SetNoRevision:
                 default:
                     break;
-            }
+            }*/ 
+            
+            if (
+                (message.Flags & KeyValueFlags.SetIfExists) != 0 && !exists || 
+                (message.Flags & KeyValueFlags.SetIfNotExists) != 0 && exists || 
+                (message.Flags & KeyValueFlags.SetIfEqualToValue) != 0 && !((ReadOnlySpan<byte>)entry.Value).SequenceEqual(message.CompareValue) || 
+                (message.Flags & KeyValueFlags.SetIfEqualToRevision) != 0 && entry.Revision != message.CompareRevision
+              )
+                return new(KeyValueResponseType.NotSet, entry.Revision, entry.LastModified);
 
             entry.Value = message.Value;
             entry.Expires = newExpires;
             entry.Revision++;
             entry.LastUsed = currentTime;
             entry.LastModified = currentTime;
-            entry.State = KeyValueState.Set;
-                       
+            entry.State = KeyValueState.Set;                       
             
             return new(KeyValueResponseType.Set, entry.Revision, currentTime);
         }
@@ -188,7 +196,7 @@ internal sealed class TrySetHandler : BaseHandler
                 message.CompareRevision
             );*/
         
-        switch (message.Flags)
+        /*switch (message.Flags)
         {
             case KeyValueFlags.SetIfExists when !exists:
             case KeyValueFlags.SetIfNotExists when exists:
@@ -200,7 +208,15 @@ internal sealed class TrySetHandler : BaseHandler
             case KeyValueFlags.Set:
             default:
                 break;
-        }
+        }*/
+        
+        if (
+            (message.Flags & KeyValueFlags.SetIfExists) != 0 && !exists || 
+            (message.Flags & KeyValueFlags.SetIfNotExists) != 0 && exists || 
+            (message.Flags & KeyValueFlags.SetIfEqualToValue) != 0 && !((ReadOnlySpan<byte>)context.Value).SequenceEqual(message.CompareValue) || 
+            (message.Flags & KeyValueFlags.SetIfEqualToRevision) != 0 && context.Revision != message.CompareRevision
+        )
+            return new(KeyValueResponseType.NotSet, context.Revision, context.LastModified);
         
         KeyValueProposal proposal = new(
             message.Key,
