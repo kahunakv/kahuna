@@ -249,7 +249,7 @@ internal sealed class KeyValueServerBatcher
         }
         catch (IOException ex)
         {
-            logger.LogDebug("IOException: {Message}", ex.Message);
+            logger.LogTrace("IOException: {Message}", ex.Message);
         }
     }
 

@@ -1,17 +1,16 @@
 
 using Nixie;
+using Nixie.Routers;
+
 using Kommander;
 using Kommander.Time;
-using Google.Protobuf;
+
 using System.Diagnostics;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.Locks.Data;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
-using Kahuna.Server.Replication;
-using Kahuna.Server.Replication.Protos;
 using Kahuna.Shared.Locks;
-using Nixie.Routers;
 
 namespace Kahuna.Server.Locks;
 
@@ -146,8 +145,6 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
     /// <returns></returns>
     private async Task<LockResponse> TryLock(LockRequest message)
     {
-        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
-
         if (!locks.TryGetValue(message.Resource, out LockContext? context))
         {
             LockContext? newContext = null;
@@ -162,6 +159,11 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
             
             locks.Add(message.Resource, newContext);
         }
+        
+        if (context.WriteIntent is not null)
+            return LockStaticResponses.MustRetryResponse;
+        
+        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
         
         if (context.Owner is not null)
         {
@@ -182,7 +184,8 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
             currentTime + message.ExpiresMs,
             currentTime,
             currentTime,
-            LockState.Locked
+            LockState.Locked,
+            message.Durability
         );
 
         if (message.Durability == LockDurability.Persistent)
@@ -208,6 +211,9 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         LockContext? context = await GetLockContext(message.Resource, message.Durability);
         if (context is null || context.State == LockState.Unlocked)
             return LockStaticResponses.DoesNotExistResponse;
+        
+        if (context.WriteIntent is not null)
+            return LockStaticResponses.MustRetryResponse;
 
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
         
@@ -225,7 +231,8 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
             currentTime + message.ExpiresMs,
             currentTime,
             currentTime,
-            context.State
+            context.State,
+            message.Durability
         );
 
         if (message.Durability == LockDurability.Persistent)
@@ -247,6 +254,9 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         LockContext? context = await GetLockContext(message.Resource, message.Durability);
         if (context is null || context.State == LockState.Unlocked)
             return LockStaticResponses.DoesNotExistResponse;
+        
+        if (context.WriteIntent is not null)
+            return LockStaticResponses.MustRetryResponse;
 
         if (!((ReadOnlySpan<byte>)context.Owner).SequenceEqual(message.Owner))
             return LockStaticResponses.InvalidOwnerResponse;
@@ -261,7 +271,8 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
             context.Expires,
             currentTime,
             currentTime,
-            LockState.Unlocked
+            LockState.Unlocked,
+            message.Durability
         );
 
         if (message.Durability == LockDurability.Persistent)
@@ -284,6 +295,9 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         LockContext? context = await GetLockContext(message.Resource, message.Durability);
         if (context is null || context.State == LockState.Unlocked)
             return new(LockResponseType.LockDoesNotExist, new ReadOnlyLockContext(null, context?.FencingToken ?? 0, HLCTimestamp.Zero));
+        
+        if (context.WriteIntent is not null)
+            return LockStaticResponses.MustRetryResponse;
 
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
@@ -391,7 +405,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
             
         return LockStaticResponses.WaitingForReplication;
     }
-    
+
     /// <summary>
     /// Completes a lock proposal by updating the lock context with the proposal's state.
     /// </summary>
@@ -403,42 +417,42 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         if (!locks.TryGetValue(message.Resource, out LockContext? context))
         {
             logger.LogWarning("LockActor/CompleteProposal: Lock not found for resource {Resource}", message.Resource);
-            
+
             return LockStaticResponses.DoesNotExistResponse;
         }
 
         if (context.WriteIntent is null)
         {
             logger.LogWarning("LockActor/CompleteProposal: Couldn't find an active write intent on resource {Resource}", message.Resource);
-            
+
             return LockStaticResponses.DoesNotExistResponse;
         }
 
         if (context.WriteIntent.ProposalId != message.ProposalId)
         {
             logger.LogWarning("LockActor/CompleteProposal: Current write intent on resource {Resource} doesn't match passed id {Current} {Passed}", message.Resource, context.WriteIntent.ProposalId, message.ProposalId);
-            
+
             return LockStaticResponses.DoesNotExistResponse;
         }
 
         if (!proposals.TryGetValue(message.ProposalId, out LockProposal? proposal))
         {
             logger.LogWarning("LockActor/CompleteProposal: Proposal on resource {Resource} doesn't exist {ProposalId}", message.Resource, message.ProposalId);
-            
+
             return LockStaticResponses.DoesNotExistResponse;
         }
-        
+
         context.FencingToken = proposal.FencingToken;
         context.Owner = proposal.Owner;
         context.Expires = proposal.Expires;
         context.LastUsed = proposal.LastUsed;
         context.State = proposal.State;
-        
+
         backgroundWriter.Send(new(
             BackgroundWriteType.QueueStoreLock,
-            -1, // partitionId
-            proposal.Resource, 
-            proposal.Owner, 
+            message.PartitionId,
+            proposal.Resource,
+            proposal.Owner,
             proposal.FencingToken,
             proposal.Expires,
             proposal.LastUsed,
@@ -449,29 +463,29 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         context.WriteIntent = null;
         proposals.Remove(message.ProposalId);
 
-        if (message.Promise is not null)
+        if (message.Promise is null)
+            return new(LockResponseType.Locked);
+
+        switch (proposal.Type)
         {
-            switch (proposal.Type)
-            {
-                case LockRequestType.TryLock:
-                    message.Promise.TrySetResult(new(LockResponseType.Locked, context.FencingToken));
-                    break;
-                
-                case LockRequestType.TryExtendLock:
-                    message.Promise.TrySetResult(new(LockResponseType.Extended, context.FencingToken));
-                    break;
-                
-                case LockRequestType.TryUnlock:
-                    message.Promise.TrySetResult(LockStaticResponses.UnlockedResponse);
-                    break;
+            case LockRequestType.TryLock:
+                message.Promise.TrySetResult(new(LockResponseType.Locked, context.FencingToken));
+                break;
 
-                case LockRequestType.Get:
-                case LockRequestType.CompleteProposal:
-                default:
-                    throw new NotImplementedException();
-            }
+            case LockRequestType.TryExtendLock:
+                message.Promise.TrySetResult(new(LockResponseType.Extended, context.FencingToken));
+                break;
+
+            case LockRequestType.TryUnlock:
+                message.Promise.TrySetResult(LockStaticResponses.UnlockedResponse);
+                break;
+
+            case LockRequestType.Get:
+            case LockRequestType.CompleteProposal:
+            default:
+                throw new NotImplementedException();
         }
-
-        return new(LockResponseType.Locked);
+        
+        return LockStaticResponses.ErroredResponse;
     }
 }

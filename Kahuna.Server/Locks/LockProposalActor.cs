@@ -74,19 +74,22 @@ internal sealed class LockProposalActor : IActor<LockProposalRequest>
         );
         
         IActorRef<LockActor, LockRequest, LockResponse> lockActor = message.LockActor;
-        
+
+        if (!result.Success)
+        {
+            logger.LogWarning("Failed to replicate lock {Resource} Partition={Partition} Status={Status} Ticket={Ticket}", proposal.Resource, partitionId, result.Status, result.TicketId);
+            return;
+        }
+
         lockActor.Send(new(
             LockRequestType.CompleteProposal, 
             proposal.Resource, 
             null, 
             0, 
-            LockDurability.Ephemeral, // @todo: this should be the same as the original proposal
+            proposal.Durability,
             message.ProposalId,
             partitionId,
             message.Promise
         ));
-
-        if (!result.Success)
-            logger.LogWarning("Failed to replicate lock {Resource} Partition={Partition} Status={Status} Ticket={Ticket}", proposal.Resource, partitionId, result.Status, result.TicketId);
     }        
 }

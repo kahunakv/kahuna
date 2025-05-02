@@ -28,6 +28,8 @@ public sealed class LockProposal
     
     public LockState State { get; }
     
+    public LockDurability Durability { get; }
+    
     public LockProposal(
         LockRequestType type,
         string resource, 
@@ -36,7 +38,8 @@ public sealed class LockProposal
         HLCTimestamp expires, 
         HLCTimestamp lastUsed,
         HLCTimestamp lastModified,
-        LockState state
+        LockState state,
+        LockDurability durability
     )
     {
         Type = type;
@@ -47,5 +50,6 @@ public sealed class LockProposal
         LastUsed = lastUsed;
         LastModified = lastModified;
         State = state;
+        Durability = durability;
     }
 }
