@@ -12,13 +12,7 @@ namespace Kahuna.Server.KeyValues.Handlers;
 
 internal sealed class TryGetByBucketHandler : BaseHandler
 {
-    public TryGetByBucketHandler(BTree<string, KeyValueContext> keyValuesStore,
-        Dictionary<string, KeyValueWriteIntent> locksByPrefix,
-        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        IPersistenceBackend persistenceBackend,
-        IRaft raft,
-        KahunaConfiguration configuration,
-        ILogger<IKahuna> logger) : base(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger)
+    public TryGetByBucketHandler(KeyValueContext context) : base(context)
     {
         
     }
@@ -43,10 +37,10 @@ internal sealed class TryGetByBucketHandler : BaseHandler
     /// <returns></returns>
     private async Task<KeyValueResponse> GetByBucketEphemeral(KeyValueRequest message)
     {
-        List<(string, ReadOnlyKeyValueContext)> items = [];
-        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        List<(string, ReadOnlyKeyValueEntry)> items = [];
+        HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
         
-        foreach ((string key, KeyValueContext? _) in keyValuesStore.GetByBucket(message.Key))
+        foreach ((string key, KeyValueEntry? _) in context.Store.GetByBucket(message.Key))
         {
             KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability);     
             
@@ -72,12 +66,12 @@ internal sealed class TryGetByBucketHandler : BaseHandler
     /// <returns></returns>
     private async Task<KeyValueResponse> GetByBucketPersistent(KeyValueRequest message)
     {
-        Dictionary<string, ReadOnlyKeyValueContext> items = new();
+        Dictionary<string, ReadOnlyKeyValueEntry> items = new();
         
-        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
 
         // step 1: we need to check the in-memory store to get the MVCC entry or the latest value
-        foreach ((string key, KeyValueContext? _) in keyValuesStore.GetByBucket(message.Key))
+        foreach ((string key, KeyValueEntry? _) in context.Store.GetByBucket(message.Key))
         {
             KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability);
 
@@ -99,14 +93,14 @@ internal sealed class TryGetByBucketHandler : BaseHandler
 
         // step 2: we join the in-memory store with the disk store
         // @todo we probably want to cache this in an mvcc entry
-        List<(string, ReadOnlyKeyValueContext)> itemsFromDisk = await raft.ReadThreadPool.EnqueueTask(() => PersistenceBackend.GetKeyValueByPrefix(message.Key));
+        List<(string, ReadOnlyKeyValueEntry)> itemsFromDisk = await context.Raft.ReadThreadPool.EnqueueTask(() => context.PersistenceBackend.GetKeyValueByPrefix(message.Key));
         
-        foreach ((string key, ReadOnlyKeyValueContext readOnlyKeyValueContext) in itemsFromDisk)
+        foreach ((string key, ReadOnlyKeyValueEntry readOnlyKeyValueEntry) in itemsFromDisk)
         {
             if (items.ContainsKey(key))
                 continue;
             
-            KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability, readOnlyKeyValueContext);
+            KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability, readOnlyKeyValueEntry);
             
             if (response.Type == KeyValueResponseType.DoesNotExist)
                 continue;
@@ -116,84 +110,90 @@ internal sealed class TryGetByBucketHandler : BaseHandler
         }
 
         // step 3: make sure the items are sorted in lexicographical order
-        List<(string Key, ReadOnlyKeyValueContext Value)> itemsToReturn = items.Select(kv => (kv.Key, kv.Value)).ToList();
+        List<(string Key, ReadOnlyKeyValueEntry Value)> itemsToReturn = items.Select(kv => (kv.Key, kv.Value)).ToList();
         
         itemsToReturn.Sort(EnsureLexicographicalOrder);
                 
         return new(KeyValueResponseType.Get, itemsToReturn);
     }
 
-    private async Task<KeyValueResponse> Get(HLCTimestamp currentTime, HLCTimestamp transactionId, string key, KeyValueDurability durability, ReadOnlyKeyValueContext? keyValueContext = null)
+    private async Task<KeyValueResponse> Get(
+        HLCTimestamp currentTime, 
+        HLCTimestamp transactionId, 
+        string key, 
+        KeyValueDurability durability, 
+        ReadOnlyKeyValueEntry? keyValueEntry = null
+    )
     {
-        KeyValueContext? context = await GetKeyValueContext(key, durability, keyValueContext);
+        KeyValueEntry? entry = await GetKeyValueEntry(key, durability, keyValueEntry);
 
-        ReadOnlyKeyValueContext readOnlyKeyValueContext;
+        ReadOnlyKeyValueEntry readOnlyKeyValueEntry;
         
-        if (context?.WriteIntent != null && context.WriteIntent.TransactionId != transactionId)
+        if (entry?.WriteIntent != null && entry.WriteIntent.TransactionId != transactionId)
             return new(KeyValueResponseType.MustRetry, 0);
 
         // TransactionId is provided so we keep a MVCC entry for it
         if (transactionId != HLCTimestamp.Zero)
         {
-            if (context is null)
+            if (entry is null)
             {
-                context = new() { Bucket = GetBucket(key), State = KeyValueState.Undefined, Revision = -1 };
-                keyValuesStore.Insert(key, context);
+                entry = new() { Bucket = GetBucket(key), State = KeyValueState.Undefined, Revision = -1 };
+                context.Store.Insert(key, entry);
             }
             
-            context.MvccEntries ??= new();
+            entry.MvccEntries ??= new();
 
-            if (!context.MvccEntries.TryGetValue(transactionId, out KeyValueMvccEntry? entry))
+            if (!entry.MvccEntries.TryGetValue(transactionId, out KeyValueMvccEntry? mvccEntry))
             {
-                entry = new()
+                mvccEntry = new()
                 {
-                    Value = context.Value, 
-                    Revision = context.Revision, 
-                    Expires = context.Expires, 
-                    LastUsed = context.LastUsed,
-                    LastModified = context.LastModified,
-                    State = context.State
+                    Value = entry.Value, 
+                    Revision = entry.Revision, 
+                    Expires = entry.Expires, 
+                    LastUsed = entry.LastUsed,
+                    LastModified = entry.LastModified,
+                    State = entry.State
                 };
 
-                context.MvccEntries.Add(transactionId, entry);
+                entry.MvccEntries.Add(transactionId, mvccEntry);
             }
             
-            if (context.Revision > entry.Revision) // early conflict detection
+            if (entry.Revision > mvccEntry.Revision) // early conflict detection
                 return KeyValueStaticResponses.AbortedResponse;
             
-            if (entry.State is KeyValueState.Undefined or KeyValueState.Deleted || entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
+            if (mvccEntry.State is KeyValueState.Undefined or KeyValueState.Deleted || mvccEntry.Expires != HLCTimestamp.Zero && mvccEntry.Expires - currentTime < TimeSpan.Zero)
                 return KeyValueStaticResponses.DoesNotExistContextResponse;
 
-            readOnlyKeyValueContext = new(
-                entry.Value, 
-                entry.Revision, 
-                entry.Expires, 
-                entry.LastUsed, 
-                entry.LastModified, 
-                context.State
+            readOnlyKeyValueEntry = new(
+                mvccEntry.Value, 
+                mvccEntry.Revision, 
+                mvccEntry.Expires, 
+                mvccEntry.LastUsed, 
+                mvccEntry.LastModified, 
+                entry.State
             );
 
-            return new(KeyValueResponseType.Get, readOnlyKeyValueContext);
+            return new(KeyValueResponseType.Get, readOnlyKeyValueEntry);
         }
 
-        if (context is null || context.State == KeyValueState.Deleted || context.Expires != HLCTimestamp.Zero && context.Expires - currentTime < TimeSpan.Zero)
+        if (entry is null || entry.State == KeyValueState.Deleted || entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
             return KeyValueStaticResponses.DoesNotExistContextResponse;
 
-        context.LastUsed = currentTime;
+        entry.LastUsed = currentTime;
 
-        readOnlyKeyValueContext = new(
-            context.Value, 
-            context.Revision, 
-            context.Expires, 
-            context.LastUsed, 
-            context.LastModified, 
-            context.State
+        readOnlyKeyValueEntry = new(
+            entry.Value, 
+            entry.Revision, 
+            entry.Expires, 
+            entry.LastUsed, 
+            entry.LastModified, 
+            entry.State
         );
 
-        return new(KeyValueResponseType.Get, readOnlyKeyValueContext);
+        return new(KeyValueResponseType.Get, readOnlyKeyValueEntry);
     } 
     
-    private static int EnsureLexicographicalOrder((string, ReadOnlyKeyValueContext) x, (string, ReadOnlyKeyValueContext) y)
+    private static int EnsureLexicographicalOrder((string, ReadOnlyKeyValueEntry) x, (string, ReadOnlyKeyValueEntry) y)
     {
         return string.Compare(x.Item1, y.Item1, StringComparison.Ordinal);
     }

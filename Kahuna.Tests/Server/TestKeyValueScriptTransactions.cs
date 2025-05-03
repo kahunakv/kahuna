@@ -328,7 +328,7 @@ public class TestKeyValueScriptTransactions : BaseCluster
         );
         Assert.Equal(KeyValueResponseType.Committed, response);
         
-        (type, ReadOnlyKeyValueContext? context) = await kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, "pp1", -1, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+        (type, ReadOnlyKeyValueEntry? context) = await kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, "pp1", -1, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
         Assert.Equal(KeyValueResponseType.Get, type);
         Assert.NotNull(context);
         Assert.NotNull(context.Value);
@@ -387,7 +387,7 @@ public class TestKeyValueScriptTransactions : BaseCluster
         
         Assert.Equal(KeyValueResponseType.Committed, response);
         
-        (type, ReadOnlyKeyValueContext? context) = await kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, "pp1", -1, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+        (type, ReadOnlyKeyValueEntry? context) = await kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, "pp1", -1, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
         Assert.Equal(KeyValueResponseType.Get, type);
         Assert.NotNull(context);
         Assert.NotNull(context.Value);
@@ -441,7 +441,7 @@ public class TestKeyValueScriptTransactions : BaseCluster
         
         Assert.Equal(KeyValueResponseType.RolledBack, response);
         
-        (type, ReadOnlyKeyValueContext? _) = await kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, "pp1", -1, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+        (type, ReadOnlyKeyValueEntry? _) = await kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, "pp1", -1, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
         Assert.Equal(KeyValueResponseType.DoesNotExist, type);        
         
         await LeaveCluster(node1, node2, node3);
@@ -497,7 +497,7 @@ public class TestKeyValueScriptTransactions : BaseCluster
         
         Assert.Equal(KeyValueResponseType.RolledBack, response);
         
-        (type, ReadOnlyKeyValueContext? _) = await kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, "pp1", -1, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+        (type, ReadOnlyKeyValueEntry? _) = await kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, "pp1", -1, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
         Assert.Equal(KeyValueResponseType.DoesNotExist, type);        
         
         (type, _) = await kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, "pp2", -1, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);

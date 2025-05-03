@@ -51,12 +51,12 @@ public sealed class KeyValueResponse
     /// It encapsulates metadata or supplementary information relevant to the request, such as conditions
     /// or detailed operation state. This property can return null if no context is associated with the response.
     /// </remarks>
-    public ReadOnlyKeyValueContext? Context { get; }
+    public ReadOnlyKeyValueEntry? Context { get; }
     
     /// <summary>
     /// Used in the 'get by bucket' operation to return all the found values.
     /// </summary>
-    public List<(string, ReadOnlyKeyValueContext)>? Items { get; }
+    public List<(string, ReadOnlyKeyValueEntry)>? Items { get; }
     
     /// <summary>
     /// Construtor
@@ -86,13 +86,13 @@ public sealed class KeyValueResponse
         Ticket = ticket;
     }
     
-    public KeyValueResponse(KeyValueResponseType type, ReadOnlyKeyValueContext? context)
+    public KeyValueResponse(KeyValueResponseType type, ReadOnlyKeyValueEntry? context)
     {
         Type = type;
         Context = context;
     }
     
-    public KeyValueResponse(KeyValueResponseType type, List<(string, ReadOnlyKeyValueContext)> items)
+    public KeyValueResponse(KeyValueResponseType type, List<(string, ReadOnlyKeyValueEntry)> items)
     {
         Type = type;
         Items = items;

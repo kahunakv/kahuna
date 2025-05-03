@@ -20,7 +20,7 @@ namespace Kahuna.Server.Persistence.Backend;
 /// such as key-values and locks. The implementation ensures efficient read-write operations
 /// and transactional support using RocksDB capabilities.
 /// </remarks>
-internal class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
+internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
 {
     /// <summary>
     /// Represents the maximum allowable size, in bytes, for a serialized message
@@ -273,10 +273,10 @@ internal class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
     /// </summary>
     /// <param name="keyName">The name of the key to retrieve the associated key-value context.</param>
     /// <returns>
-    /// A <see cref="KeyValueContext"/> object containing the value, revision, expiration details, and other metadata
+    /// A <see cref="KeyValueEntry"/> object containing the value, revision, expiration details, and other metadata
     /// associated with the key, or null if the key does not exist.
     /// </returns>
-    public KeyValueContext? GetKeyValue(string keyName)
+    public KeyValueEntry? GetKeyValue(string keyName)
     {
         string currentKey = keyName + CurrentMarker;
         
@@ -296,7 +296,7 @@ internal class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
         else
             messageValue = message.Value.ToByteArray();
 
-        KeyValueContext context = new()
+        KeyValueEntry entry = new()
         {
             Value = messageValue,
             Revision = message.Revision,
@@ -306,7 +306,7 @@ internal class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
             State = (KeyValueState)message.State,
         };
 
-        return context;
+        return entry;
     }
 
     /// <summary>
@@ -315,10 +315,10 @@ internal class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
     /// <param name="keyName">The name of the key to retrieve.</param>
     /// <param name="revision">The specific revision number of the key to retrieve.</param>
     /// <returns>
-    /// A <see cref="KeyValueContext"/> object containing the key-value pair metadata and value,
+    /// A <see cref="KeyValueEntry"/> object containing the key-value pair metadata and value,
     /// or <c>null</c> if the key or revision is not found.
     /// </returns>
-    public KeyValueContext? GetKeyValueRevision(string keyName, long revision)
+    public KeyValueEntry? GetKeyValueRevision(string keyName, long revision)
     {
         string keyRevision = string.Concat(keyName, "~", revision);
         
@@ -338,7 +338,7 @@ internal class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
         else
             messageValue = message.Value.ToByteArray();
 
-        KeyValueContext context = new()
+        KeyValueEntry entry = new()
         {
             Value = messageValue,
             Revision = message.Revision,
@@ -348,17 +348,17 @@ internal class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
             State = (KeyValueState)message.State,
         };
 
-        return context;
+        return entry;
     }
 
     /// <summary>
     /// Retrieves a list of key-value pairs that match the specified prefix key.
     /// </summary>
     /// <param name="prefixKeyName">The prefix string used to filter and retrieve matching key-value pairs.</param>
-    /// <returns>A list of tuples where each tuple contains a string key and a corresponding <see cref="ReadOnlyKeyValueContext"/> value.</returns>
-    public List<(string, ReadOnlyKeyValueContext)> GetKeyValueByPrefix(string prefixKeyName)
+    /// <returns>A list of tuples where each tuple contains a string key and a corresponding <see cref="ReadOnlyKeyValueEntry"/> value.</returns>
+    public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName)
     {
-        List<(string, ReadOnlyKeyValueContext)> result = [];
+        List<(string, ReadOnlyKeyValueEntry)> result = [];
         
         Span<byte> buffer = stackalloc byte[Encoding.UTF8.GetByteCount(prefixKeyName)];
         Encoding.UTF8.GetBytes(prefixKeyName.AsSpan(), buffer);

@@ -22,17 +22,11 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// </remarks>
 /// <example>
 /// This class is typically invoked as part of the Two Phase Commit (2PC) workflow when a rollback request
-/// is received. It interacts with the <c>KeyValueContext</c>, persistence systems, and logs any relevant warnings or errors.
+/// is received. 
 /// </example>
 internal sealed class TryRollbackMutationsHandler : BaseHandler
 {
-    public TryRollbackMutationsHandler(BTree<string, KeyValueContext> keyValuesStore,
-        Dictionary<string, KeyValueWriteIntent> locksByPrefix,
-        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        IPersistenceBackend persistenceBackend,
-        IRaft raft,
-        KahunaConfiguration configuration,
-        ILogger<IKahuna> logger) : base(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger)
+    public TryRollbackMutationsHandler(KeyValueContext context) : base(context)
     {
         
     }
@@ -41,60 +35,60 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
     {
         if (message.TransactionId == HLCTimestamp.Zero)
         {
-            logger.LogWarning("Cannot rollback mutations for missing transaction id");
+            context.Logger.LogWarning("Cannot rollback mutations for missing transaction id");
             
             return KeyValueStaticResponses.ErroredResponse;
         }
 
-        KeyValueContext? context = await GetKeyValueContext(message.Key, message.Durability);
+        KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability);
 
-        if (context is null)
+        if (entry is null)
         {
-            logger.LogWarning("Key/Value context is missing for {TransactionId}", message.TransactionId);
+            context.Logger.LogWarning("Key/Value context is missing for {TransactionId}", message.TransactionId);
             
             return KeyValueStaticResponses.ErroredResponse;
         }
 
-        if (context.WriteIntent is null)
+        if (entry.WriteIntent is null)
         {
-            logger.LogWarning("Write intent is missing for {TransactionId}", message.TransactionId);
+            context.Logger.LogWarning("Write intent is missing for {TransactionId}", message.TransactionId);
             
             return KeyValueStaticResponses.ErroredResponse;
         }
 
-        if (context.WriteIntent.TransactionId != message.TransactionId)
+        if (entry.WriteIntent.TransactionId != message.TransactionId)
         {
-            logger.LogWarning("Write intent conflict between {CurrentTransactionId} and {TransactionId}", context.WriteIntent.TransactionId, message.TransactionId);
+            context.Logger.LogWarning("Write intent conflict between {CurrentTransactionId} and {TransactionId}", entry.WriteIntent.TransactionId, message.TransactionId);
             
             return KeyValueStaticResponses.ErroredResponse;
         }
 
-        if (context.MvccEntries is null)
+        if (entry.MvccEntries is null)
         {
-            logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [1]", message.TransactionId);
+            context.Logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [1]", message.TransactionId);
             
             return KeyValueStaticResponses.ErroredResponse;
         }
 
-        if (!context.MvccEntries.ContainsKey(message.TransactionId))
+        if (!entry.MvccEntries.ContainsKey(message.TransactionId))
         {
-            logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [2]", message.TransactionId);
+            context.Logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [2]", message.TransactionId);
             
             return KeyValueStaticResponses.ErroredResponse;
         }
 
         if (message.Durability != KeyValueDurability.Persistent)
         {
-            context.MvccEntries.Remove(message.TransactionId);                   
-            context.WriteIntent = null;
+            entry.MvccEntries.Remove(message.TransactionId);                   
+            entry.WriteIntent = null;
             
             return new(KeyValueResponseType.RolledBack);
         }
 
         (bool success, long rollbackIndex) = await RollbackKeyValueMessage(message.Key, message.ProposalTicketId);
         
-        context.MvccEntries.Remove(message.TransactionId);                   
-        context.WriteIntent = null;
+        entry.MvccEntries.Remove(message.TransactionId);                   
+        entry.WriteIntent = null;
 
         if (!success)
             return KeyValueStaticResponses.ErroredResponse;                
@@ -110,24 +104,24 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
     /// <returns></returns>
     private async Task<(bool, long)> RollbackKeyValueMessage(string key, HLCTimestamp proposalTicketId)
     {
-        if (!raft.Joined)
+        if (!context.Raft.Joined)
             return (true, 0);
 
-        int partitionId = raft.GetPartitionKey(key);
+        int partitionId = context.Raft.GetPartitionKey(key);
 
-        (bool success, RaftOperationStatus status, long logIndex) = await raft.RollbackLogs(
+        (bool success, RaftOperationStatus status, long logIndex) = await context.Raft.RollbackLogs(
             partitionId,
             proposalTicketId
         );
 
         if (!success)
         {
-            logger.LogWarning("Failed to rollback key/value {Key} Partition={Partition} Status={Status}", key, partitionId, status);
+            context.Logger.LogWarning("Failed to rollback key/value {Key} Partition={Partition} Status={Status}", key, partitionId, status);
             
             return (false, 0);
         }
         
-        logger.LogDebug("Successfully rolled back key/value {Key} Partition={Partition} ProposalIndex={ProposalIndex}", key, partitionId, logIndex);
+        context.Logger.LogDebug("Successfully rolled back key/value {Key} Partition={Partition} ProposalIndex={ProposalIndex}", key, partitionId, logIndex);
 
         return (success, logIndex);
     }

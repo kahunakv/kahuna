@@ -304,7 +304,7 @@ internal sealed class LockManager
             if (response is null)
                 return (LockResponseType.Errored, 0);
 
-            if (response.Type == LockResponseType.MustRetry)
+            if (response.Type == LockResponseType.WaitingForReplication)
             {
                 await Task.Delay(i + 1);
                 continue;
@@ -349,7 +349,7 @@ internal sealed class LockManager
             if (response is null)
                 return (LockResponseType.Errored, 0);
 
-            if (response.Type == LockResponseType.MustRetry)
+            if (response.Type == LockResponseType.WaitingForReplication)
             {
                 await Task.Delay(i + 1);
                 continue;
@@ -393,7 +393,7 @@ internal sealed class LockManager
             if (response is null)
                 return LockResponseType.Errored;
 
-            if (response.Type == LockResponseType.MustRetry)
+            if (response.Type == LockResponseType.WaitingForReplication)
             {
                 await Task.Delay(i + 1);
                 continue;

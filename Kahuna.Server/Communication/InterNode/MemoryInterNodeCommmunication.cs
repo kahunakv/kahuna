@@ -292,7 +292,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     /// <exception cref="KahunaServerException"></exception>
-    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryGetValue(
+    public async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(
         string node, 
         HLCTimestamp transactionId, 
         string key, 
@@ -318,7 +318,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     /// <exception cref="KahunaServerException"></exception>
-    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryExistsValue(
+    public async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryExistsValue(
         string node, 
         HLCTimestamp transactionId, 
         string key, 

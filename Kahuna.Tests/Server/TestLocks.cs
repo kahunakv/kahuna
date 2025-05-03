@@ -251,7 +251,7 @@ public class TestLocks : BaseCluster
 
         // One should succeed, others should be busy
         int lockedCount = results.Count(r => r.Item1 == LockResponseType.Locked);
-        int busyCount = results.Count(r => r.Item1 == LockResponseType.Busy);
+        int busyCount = results.Count(r => r.Item1 is LockResponseType.Busy or LockResponseType.MustRetry);
 
         Assert.Equal(1, lockedCount);
         Assert.Equal(2, busyCount);

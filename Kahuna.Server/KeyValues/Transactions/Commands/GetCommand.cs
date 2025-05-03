@@ -41,7 +41,7 @@ internal sealed class GetCommand : BaseCommand
         if (ast.extendedOne is not null)
             compareRevision = int.Parse(ast.extendedOne.yytext!);
         
-        (KeyValueResponseType type, ReadOnlyKeyValueContext? readOnlyContext) = await manager.LocateAndTryGetValue(
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? readOnlyContext) = await manager.LocateAndTryGetValue(
             context.TransactionId,
             keyName,
             compareRevision,

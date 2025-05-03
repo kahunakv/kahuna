@@ -25,13 +25,7 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// <seealso cref="BaseHandler"/>
 internal sealed class TryCommitMutationsHandler : BaseHandler
 {
-    public TryCommitMutationsHandler(BTree<string, KeyValueContext> keyValuesStore,
-        Dictionary<string, KeyValueWriteIntent> locksByPrefix,
-        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        IPersistenceBackend persistenceBackend,
-        IRaft raft,
-        KahunaConfiguration configuration,
-        ILogger<IKahuna> logger) : base(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger)
+    public TryCommitMutationsHandler(KeyValueContext context) : base(context)
     {
         
     }
@@ -40,102 +34,102 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
     {
         if (message.TransactionId == HLCTimestamp.Zero)
         {
-            logger.LogWarning("Cannot commit mutations for missing transaction id");
+            context.Logger.LogWarning("Cannot commit mutations for missing transaction id");
 
             return KeyValueStaticResponses.ErroredResponse;
         }
 
-        KeyValueContext? context = await GetKeyValueContext(message.Key, message.Durability);
+        KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability);
 
-        if (context is null)
+        if (entry is null)
         {
-            logger.LogWarning("Key/Value context is missing for {TransactionId}", message.TransactionId);
+            context.Logger.LogWarning("Key/Value context is missing for {TransactionId}", message.TransactionId);
 
             return KeyValueStaticResponses.ErroredResponse;
         }
 
-        if (context.WriteIntent is null)
+        if (entry.WriteIntent is null)
         {
-            logger.LogWarning("Write intent is missing for {TransactionId}", message.TransactionId);
+            context.Logger.LogWarning("Write intent is missing for {TransactionId}", message.TransactionId);
 
             return KeyValueStaticResponses.ErroredResponse;
         }
 
-        if (context.WriteIntent.TransactionId != message.TransactionId)
+        if (entry.WriteIntent.TransactionId != message.TransactionId)
         {
-            logger.LogWarning("Write intent conflict between {CurrentTransactionId} and {TransactionId}", context.WriteIntent.TransactionId, message.TransactionId);                              
+            context.Logger.LogWarning("Write intent conflict between {CurrentTransactionId} and {TransactionId}", entry.WriteIntent.TransactionId, message.TransactionId);                              
 
             return KeyValueStaticResponses.ErroredResponse;
         }
 
-        if (context.MvccEntries is null)
+        if (entry.MvccEntries is null)
         {
-            logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [1]", message.TransactionId);
-                       
+            context.Logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [1]", message.TransactionId);                       
 
             return KeyValueStaticResponses.ErroredResponse;
         }
 
-        if (!context.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? entry))
+        if (!entry.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? mvccEntry))
         {
-            logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [2]", message.TransactionId);
+            context.Logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [2]", message.TransactionId);
                        
             return KeyValueStaticResponses.ErroredResponse;
         }
 
         KeyValueProposal proposal = new(
             message.Key,
-            entry.Value,
-            entry.Revision,
-            entry.Expires,
-            entry.LastUsed,
-            entry.LastModified,
-            entry.State
+            mvccEntry.Value,
+            mvccEntry.Revision,
+            false,
+            mvccEntry.Expires,
+            mvccEntry.LastUsed,
+            mvccEntry.LastModified,
+            mvccEntry.State
         );
 
         if (message.Durability != KeyValueDurability.Persistent)
         {
-            if (context.Revisions is not null)
-                RemoveExpiredRevisions(context, proposal.Revision);
+            if (entry.Revisions is not null)
+                RemoveExpiredRevisions(entry, proposal.Revision);
 
-            context.Revisions ??= new();
-            context.Revisions.Add(context.Revision, context.Value);
+            entry.Revisions ??= new();
+            entry.Revisions.Add(entry.Revision, entry.Value);
 
-            context.Value = proposal.Value;
-            context.Expires = proposal.Expires;
-            context.Revision = proposal.Revision;
-            context.LastUsed = proposal.LastUsed;
-            context.LastModified = proposal.LastModified;
-            context.State = proposal.State;
+            entry.Value = proposal.Value;
+            entry.Expires = proposal.Expires;
+            entry.Revision = proposal.Revision;
+            entry.LastUsed = proposal.LastUsed;
+            entry.LastModified = proposal.LastModified;
+            entry.State = proposal.State;
             
-            context.MvccEntries.Remove(message.TransactionId);                    
-            context.WriteIntent = null;
+            entry.MvccEntries.Remove(message.TransactionId);                    
+            entry.WriteIntent = null;
 
             return new(KeyValueResponseType.Committed, 0);
         }
 
         (bool success, int partitionId, long commitIndex) = await CommitKeyValueMessage(message.Key, message.ProposalTicketId);
         
-        context.MvccEntries.Remove(message.TransactionId);                   
-        context.WriteIntent = null;
+        entry.MvccEntries.Remove(message.TransactionId);                   
+        entry.WriteIntent = null;
         
         if (!success)                                
             return KeyValueStaticResponses.ErroredResponse;        
 
-        if (context.Revisions is not null)
-            RemoveExpiredRevisions(context, proposal.Revision);
+        if (entry.Revisions is not null)
+            RemoveExpiredRevisions(entry, proposal.Revision);
                
-        context.Revisions ??= new();
-        context.Revisions.Add(context.Revision, context.Value);
+        entry.Revisions ??= new();
+        entry.Revisions.Add(entry.Revision, entry.Value);
 
-        context.Value = proposal.Value;
-        context.Expires = proposal.Expires;
-        context.Revision = proposal.Revision;
-        context.LastUsed = proposal.LastUsed;
-        context.LastModified = proposal.LastModified;
-        context.State = proposal.State;
+        entry.Value = proposal.Value;
+        entry.Expires = proposal.Expires;
+        entry.Revision = proposal.Revision;
+        entry.LastUsed = proposal.LastUsed;
+        entry.LastModified = proposal.LastModified;
+        entry.State = proposal.State;
         
-        backgroundWriter.Send(new(
+        context.BackgroundWriter.Send(new(
             BackgroundWriteType.QueueStoreKeyValue,
             partitionId,
             proposal.Key,
@@ -158,24 +152,24 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
     /// <returns></returns>
     private async Task<(bool, int, long)> CommitKeyValueMessage(string key, HLCTimestamp proposalTicketId)
     {
-        if (!raft.Joined)
+        if (!context.Raft.Joined)
             return (true, -1, 0);
 
-        int partitionId = raft.GetPartitionKey(key);
+        int partitionId = context.Raft.GetPartitionKey(key);
 
-        (bool success, RaftOperationStatus status, long commitLogId) = await raft.CommitLogs(
+        (bool success, RaftOperationStatus status, long commitLogId) = await context.Raft.CommitLogs(
             partitionId,
             proposalTicketId
         );
 
         if (!success)
         {
-            logger.LogWarning("Failed to commit key/value {Key} Partition={Partition} Status={Status}", key, partitionId, status);
+            context.Logger.LogWarning("Failed to commit key/value {Key} Partition={Partition} Status={Status}", key, partitionId, status);
 
             return (false, -1, 0);
         }               
 
-        logger.LogDebug("Successfully commmitted key/value {Key} Partition={Partition} ProposalIndex={ProposalIndex}", key, partitionId, commitLogId);
+        context.Logger.LogDebug("Successfully commmitted key/value {Key} Partition={Partition} ProposalIndex={ProposalIndex}", key, partitionId, commitLogId);
 
         return (success, partitionId, commitLogId);
     }

@@ -19,13 +19,7 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// </remarks>
 internal sealed class TryScanByPrefixHandler : BaseHandler
 {
-    public TryScanByPrefixHandler(BTree<string, KeyValueContext> keyValuesStore,
-        Dictionary<string, KeyValueWriteIntent> locksByPrefix,
-        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        IPersistenceBackend persistenceBackend,
-        IRaft raft,
-        KahunaConfiguration configuration,
-        ILogger<IKahuna> logger) : base(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger)
+    public TryScanByPrefixHandler(KeyValueContext context) : base(context)
     {
         
     }
@@ -37,10 +31,10 @@ internal sealed class TryScanByPrefixHandler : BaseHandler
     /// <returns></returns>
     public async Task<KeyValueResponse> Execute(KeyValueRequest message)
     {
-        List<(string, ReadOnlyKeyValueContext)> items = [];
-        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        List<(string, ReadOnlyKeyValueEntry)> items = [];
+        HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
         
-        foreach ((string key, KeyValueContext? _) in keyValuesStore.GetByBucket(message.Key))
+        foreach ((string key, KeyValueEntry? _) in context.Store.GetByBucket(message.Key))
         {
             KeyValueResponse response = await Get(currentTime, key, message.Durability);     
             
@@ -54,22 +48,22 @@ internal sealed class TryScanByPrefixHandler : BaseHandler
         return new(KeyValueResponseType.Get, items);
     }        
 
-    private async Task<KeyValueResponse> Get(HLCTimestamp currentTime, string key, KeyValueDurability durability, ReadOnlyKeyValueContext? keyValueContext = null)
+    private async Task<KeyValueResponse> Get(HLCTimestamp currentTime, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? keyValueEntry = null)
     {
-        KeyValueContext? context = await GetKeyValueContext(key, durability, keyValueContext);
+        KeyValueEntry? entry = await GetKeyValueEntry(key, durability, keyValueEntry);
 
-        if (context is null || context.State == KeyValueState.Deleted || context.Expires != HLCTimestamp.Zero && context.Expires - currentTime < TimeSpan.Zero)
+        if (entry is null || entry.State == KeyValueState.Deleted || entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
             return KeyValueStaticResponses.DoesNotExistContextResponse;
 
-        ReadOnlyKeyValueContext readOnlyKeyValueContext = new(
-            context.Value, 
-            context.Revision, 
-            context.Expires, 
-            context.LastUsed, 
-            context.LastModified, 
-            context.State
+        ReadOnlyKeyValueEntry readOnlyKeyValueEntry = new(
+            entry.Value, 
+            entry.Revision, 
+            entry.Expires, 
+            entry.LastUsed, 
+            entry.LastModified, 
+            entry.State
         );
 
-        return new(KeyValueResponseType.Get, readOnlyKeyValueContext);
+        return new(KeyValueResponseType.Get, readOnlyKeyValueEntry);
     }       
 }

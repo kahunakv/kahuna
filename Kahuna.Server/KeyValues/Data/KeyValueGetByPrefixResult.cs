@@ -10,9 +10,9 @@ public sealed class KeyValueGetByBucketResult
 {
     public KeyValueResponseType Type { get; }
     
-    public List<(string, ReadOnlyKeyValueContext)> Items { get; }
+    public List<(string, ReadOnlyKeyValueEntry)> Items { get; }
     
-    public KeyValueGetByBucketResult(KeyValueResponseType type, List<(string, ReadOnlyKeyValueContext)> items)
+    public KeyValueGetByBucketResult(KeyValueResponseType type, List<(string, ReadOnlyKeyValueEntry)> items)
     {
         Type = type;
         Items = items;

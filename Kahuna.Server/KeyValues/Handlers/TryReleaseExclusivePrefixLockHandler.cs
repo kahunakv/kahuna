@@ -12,13 +12,7 @@ namespace Kahuna.Server.KeyValues.Handlers;
 
 internal sealed class TryReleaseExclusivePrefixLockHandler : BaseHandler
 {        
-    public TryReleaseExclusivePrefixLockHandler(BTree<string, KeyValueContext> keyValuesStore,
-        Dictionary<string, KeyValueWriteIntent> locksByPrefix,
-        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        IPersistenceBackend persistenceBackend,
-        IRaft raft,
-        KahunaConfiguration configuration,
-        ILogger<IKahuna> logger) : base(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger)
+    public TryReleaseExclusivePrefixLockHandler(KeyValueContext context) : base(context)
     {
         
     }
@@ -33,16 +27,16 @@ internal sealed class TryReleaseExclusivePrefixLockHandler : BaseHandler
         if (message.TransactionId == HLCTimestamp.Zero)
             return KeyValueStaticResponses.ErroredResponse;
         
-        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
         
         // Check if the prefix is already locked by the current transaction
-        if (locksByPrefix.TryGetValue(message.Key, out KeyValueWriteIntent? writeIntent))
+        if (context.LocksByPrefix.TryGetValue(message.Key, out KeyValueWriteIntent? writeIntent))
         {
             if (writeIntent.TransactionId == message.TransactionId)
             {
                 ReleaseExistingLocksByPrefix(currentTime, message);
                 
-                locksByPrefix.Remove(message.Key);
+                context.LocksByPrefix.Remove(message.Key);
             }
         }
 
@@ -59,17 +53,17 @@ internal sealed class TryReleaseExclusivePrefixLockHandler : BaseHandler
     /// <returns></returns>
     private void ReleaseExistingLocksByPrefix(HLCTimestamp currentTime, KeyValueRequest message)
     {
-        foreach ((string key, KeyValueContext context) in keyValuesStore.GetByBucket(message.Key))
-            TryReleaseLock( message.TransactionId, context);                                                    
+        foreach ((string key, KeyValueEntry entry) in context.Store.GetByBucket(message.Key))
+            TryReleaseLock( message.TransactionId, entry);                                                    
     }           
     
-    private static void TryReleaseLock(HLCTimestamp transactionId, KeyValueContext context)
+    private static void TryReleaseLock(HLCTimestamp transactionId, KeyValueEntry entry)
     {                               
-        if (context.WriteIntent is not null)
+        if (entry.WriteIntent is not null)
         {
             // if the transactionId is the same owner no need to acquire the lock
-            if (context.WriteIntent.TransactionId == transactionId)
-                context.WriteIntent = null;
+            if (entry.WriteIntent.TransactionId == transactionId)
+                entry.WriteIntent = null;
         }
     }     
 }

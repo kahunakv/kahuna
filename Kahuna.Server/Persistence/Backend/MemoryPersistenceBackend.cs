@@ -11,11 +11,11 @@ namespace Kahuna.Server.Persistence.Backend;
 /// Provides an in-memory implementation of the <see cref="IPersistenceBackend"/> interface
 /// to store locks and key-value pairs without the use of persistent storage.
 /// </summary>
-internal class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
+internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
 {
     private readonly ConcurrentDictionary<string, LockContext> locks = new();
     
-    private readonly ConcurrentDictionary<string, KeyValueContext> keyValues = new();
+    private readonly ConcurrentDictionary<string, KeyValueEntry> keyValues = new();
 
     /// <summary>
     /// Stores locks in the persistence backend. Updates existing locks or adds new ones
@@ -63,7 +63,7 @@ internal class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
     {
         foreach (PersistenceRequestItem item in items)
         {
-            if (keyValues.TryGetValue(item.Key, out KeyValueContext? keyValueContext))
+            if (keyValues.TryGetValue(item.Key, out KeyValueEntry? keyValueContext))
             {
                 keyValueContext.Value = item.Value;
                 keyValueContext.Expires = new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter);
@@ -94,7 +94,7 @@ internal class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
         return locks.GetValueOrDefault(resource);
     }
 
-    public KeyValueContext? GetKeyValue(string keyName)
+    public KeyValueEntry? GetKeyValue(string keyName)
     {
         return keyValues.GetValueOrDefault(keyName);
     }
@@ -106,7 +106,7 @@ internal class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
     /// <param name="revision"></param>
     /// <returns></returns>
     /// <exception cref="NotImplementedException"></exception>
-    public KeyValueContext? GetKeyValueRevision(string keyName, long revision)
+    public KeyValueEntry? GetKeyValueRevision(string keyName, long revision)
     {
         throw new NotImplementedException();
     }
@@ -116,12 +116,12 @@ internal class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
     /// The values are returned in a read-only context.
     /// </summary>
     /// <param name="prefixKeyName">The prefix used to filter keys in the key-value store.</param>
-    /// <returns>Returns a list of tuples where each tuple contains a key and its associated <see cref="ReadOnlyKeyValueContext"/>.</returns>
-    public List<(string, ReadOnlyKeyValueContext)> GetKeyValueByPrefix(string prefixKeyName)
+    /// <returns>Returns a list of tuples where each tuple contains a key and its associated <see cref="ReadOnlyKeyValueEntry"/>.</returns>
+    public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName)
     {
-        List<(string, ReadOnlyKeyValueContext)> items = [];
+        List<(string, ReadOnlyKeyValueEntry)> items = [];
         
-        foreach ((string key, KeyValueContext value) in keyValues)
+        foreach ((string key, KeyValueEntry value) in keyValues)
         {
             if (key.StartsWith(prefixKeyName))
             {

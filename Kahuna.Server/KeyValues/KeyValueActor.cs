@@ -41,7 +41,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// or external systems when necessary. All operations leverage the underlying B-tree
     /// to maintain ordered keys and ensure quick lookups, inserts, updates, and deletions.
     /// </summary>
-    private readonly BTree<string, KeyValueContext> keyValuesStore = new(32);
+    private readonly BTree<string, KeyValueEntry> keyValuesStore = new(32);
     
     /// <summary>
     /// Stores write intents for key prefixes. This ensure consistent reads for operations like
@@ -207,23 +207,25 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     {
         this.actorContext = actorContext;
         this.logger = logger;
+        
+        KeyValueContext context = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
 
-        trySetHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryExtendHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryDeleteHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryGetHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryScanByPrefixHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryScanByPrefixFromDiskHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryGetByBucketHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryExistsHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryAcquireExclusiveLockHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryAcquireExclusivePrefixLockHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryReleaseExclusiveLockHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryReleaseExclusivePrefixLockHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryPrepareMutationsHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryCommitMutationsHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryRollbackMutationsHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
-        tryCollectHandler = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        trySetHandler = new(context);
+        tryExtendHandler = new(context);
+        tryDeleteHandler = new(context);
+        tryGetHandler = new(context);
+        tryScanByPrefixHandler = new(context);
+        tryScanByPrefixFromDiskHandler = new(context);
+        tryGetByBucketHandler = new(context);
+        tryExistsHandler = new(context);
+        tryAcquireExclusiveLockHandler = new(context);
+        tryAcquireExclusivePrefixLockHandler = new(context);
+        tryReleaseExclusiveLockHandler = new(context);
+        tryReleaseExclusivePrefixLockHandler = new(context);
+        tryPrepareMutationsHandler = new(context);
+        tryCommitMutationsHandler = new(context);
+        tryRollbackMutationsHandler = new(context);
+        tryCollectHandler = new(context);
     }
 
     /// <summary>
@@ -416,7 +418,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private KeyValueResponse? TryReleaseExclusivePrefixLock(KeyValueRequest message)
+    private KeyValueResponse TryReleaseExclusivePrefixLock(KeyValueRequest message)
     {
         return tryReleaseExclusivePrefixLockHandler.Execute(message);
     }

@@ -18,13 +18,7 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// </remarks>
 internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
 {
-    public TryScanByPrefixFromDiskHandler(BTree<string, KeyValueContext> keyValuesStore,
-        Dictionary<string, KeyValueWriteIntent> locksByPrefix,
-        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        IPersistenceBackend persistenceBackend,
-        IRaft raft,
-        KahunaConfiguration configuration,
-        ILogger<IKahuna> logger) : base(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger)
+    public TryScanByPrefixFromDiskHandler(KeyValueContext context) : base(context)
     {
         
     }
@@ -36,21 +30,21 @@ internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
     /// <returns></returns>
     public async Task<KeyValueResponse> Execute(KeyValueRequest message)
     {
-        Dictionary<string, ReadOnlyKeyValueContext> items = new();
+        Dictionary<string, ReadOnlyKeyValueEntry> items = new();
                 
-        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
         
-        List<(string, ReadOnlyKeyValueContext)> itemsFromDisk = await raft.ReadThreadPool.EnqueueTask(() => PersistenceBackend.GetKeyValueByPrefix(message.Key));
+        List<(string, ReadOnlyKeyValueEntry)> itemsFromDisk = await context.Raft.ReadThreadPool.EnqueueTask(() => context.PersistenceBackend.GetKeyValueByPrefix(message.Key));
         
-        foreach ((string key, ReadOnlyKeyValueContext readOnlyKeyValueContext) in itemsFromDisk)
+        foreach ((string key, ReadOnlyKeyValueEntry readOnlyKeyValueEntry) in itemsFromDisk)
         {
             if (items.ContainsKey(key))
                 continue;
             
-            if (readOnlyKeyValueContext.State == KeyValueState.Deleted || readOnlyKeyValueContext.Expires != HLCTimestamp.Zero && readOnlyKeyValueContext.Expires - currentTime < TimeSpan.Zero)
+            if (readOnlyKeyValueEntry.State == KeyValueState.Deleted || readOnlyKeyValueEntry.Expires != HLCTimestamp.Zero && readOnlyKeyValueEntry.Expires - currentTime < TimeSpan.Zero)
                 continue;
                         
-            items.Add(key, readOnlyKeyValueContext);
+            items.Add(key, readOnlyKeyValueEntry);
         }                             
                 
         return new(KeyValueResponseType.Get, items.Select(kv => (kv.Key, kv.Value)).ToList());

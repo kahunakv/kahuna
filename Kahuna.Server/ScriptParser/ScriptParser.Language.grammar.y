@@ -27,7 +27,7 @@
 %token LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV LBRACE RBRACE LSQUAREBRACE RSQUAREBRACE
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TDOUBLEQUALS
 %token TBEGIN TROLLBACK TCOMMIT TLET TSET TGET TESET TEGET TDELETE TEDELETE TEXTEND TEEXTEND TEXISTS TEEXISTS
-%token TIF TELSE TTHEN TEND TNX TXX TEX TCMP TCMPREV TTHROW TFOUND TFOR TDO TIN
+%token TIF TELSE TTHEN TEND TNX TXX TEX TCMP TCMPREV TNOREV TTHROW TFOUND TFOR TDO TIN
 %token TRETURN TSLEEP TDIGIT TFLOAT TSTRING TIDENTIFIER TESCIDENTIFIER TPLACEHOLDER TTRUE TFALSE TNULL TAT TSCAN TESCAN TPREFIX TBUCKET TBY
 
 %%
@@ -62,28 +62,39 @@ stmt    : set_stmt { $$.n = $1.n; $$.l = $1.l; }
         ;
 
 set_stmt : TSET key_name expression { $$.n = new(NodeType.Set, $2.n, $3.n, null, null, null, null, null, $1.l); }         
-          | TSET key_name expression set_cmp { $$.n = new(NodeType.Set, $2.n, $3.n, null, null, $4.n, null, null, $1.l); }
-          | TSET key_name expression TEX int { $$.n = new(NodeType.Set, $2.n, $3.n, $5.n, null, null, null, null, $1.l); }
-          | TSET key_name expression set_cmp TEX int { $$.n = new(NodeType.Set, $2.n, $3.n, $6.n, null, $4.n, null, null, $1.l); }
-          | TSET key_name expression TEX int set_not_exists { $$.n = new(NodeType.Set, $2.n, $3.n, $5.n, $6.n, null, null, null, $1.l); }
-          | TSET key_name expression set_not_exists { $$.n = new(NodeType.Set, $2.n, $3.n, null, $4.n, null, null, null, $1.l); }
+          | TSET key_name expression set_flags { $$.n = new(NodeType.Set, $2.n, $3.n, $4.n, null, null, null, null, $1.l); }          
           ; 
+          
+eset_stmt : TESET key_name expression { $$.n = new(NodeType.Eset, $2.n, $3.n, null, null, null, null, null, $1.l); }         
+          | TESET key_name expression set_flags { $$.n = new(NodeType.Eset, $2.n, $3.n, $4.n, null, null, null, null, $1.l); }          
+          ;
+          
+set_flags : set_flags set_flag { $$.n = new(NodeType.SetFlagsList, $1.n, $2.n, null, null, null, null, null, $1.l); }
+          | set_flag { $$.n = $1.n; $$.l = $1.l; }
+          ;
+          
+set_flag : set_not_exists { $$.n = $1.n; $$.l = $1.l; }
+         | set_exists { $$.n = $1.n; $$.l = $1.l; } 
+         | set_cmp { $$.n = $1.n; $$.l = $1.l; }
+         | set_expires { $$.n = $1.n; $$.l = $1.l; }
+         | set_no_rev { $$.n = $1.n; $$.l = $1.l; }
+         ;
          
-set_not_exists : TNX { $$.n = new(NodeType.SetNotExists, null, null, null, null, null, null, null, $1.l); }
-               | TXX { $$.n = new(NodeType.SetExists, null, null, null, null, null, null, null, $1.l); }
+set_not_exists : TNX { $$.n = new(NodeType.SetNotExists, null, null, null, null, null, null, null, $1.l); }                
                ;
+               
+set_exists : TXX { $$.n = new(NodeType.SetExists, null, null, null, null, null, null, null, $1.l); }                
+           ;
                
 set_cmp : TCMP expression { $$.n = new(NodeType.SetCmp, $2.n, null, null, null, null, null, null, $1.l); }
         | TCMPREV expression { $$.n = new(NodeType.SetCmpRev, $2.n, null, null, null, null, null, null, $1.l); }                 
         ;
          
-eset_stmt : TESET key_name expression { $$.n = new(NodeType.Eset, $2.n, $3.n, null, null, null, null, null, $1.l); }         
-          | TESET key_name expression set_cmp { $$.n = new(NodeType.Eset, $2.n, $3.n, null, null, $4.n, null, null, $1.l); }
-          | TESET key_name expression TEX int { $$.n = new(NodeType.Eset, $2.n, $3.n, $5.n, null, null, null, null, $1.l); }
-          | TESET key_name expression set_cmp TEX int { $$.n = new(NodeType.Eset, $2.n, $3.n, $6.n, null, $4.n, null, null, $1.l); }
-          | TESET key_name expression TEX int set_not_exists { $$.n = new(NodeType.Eset, $2.n, $3.n, $5.n, $6.n, null, null, null, $1.l); }
-          | TESET key_name expression set_not_exists { $$.n = new(NodeType.Eset, $2.n, $3.n, null, $4.n, null, null, null, $1.l); }
-          ;                  
+set_expires : TEX expression { $$.n = new(NodeType.SetEx, $2.n, null, null, null, null, null, null, $1.l); }
+           ;
+           
+set_no_rev : TNOREV { $$.n = new(NodeType.SetNoRev, null, null, null, null, null, null, null, $1.l); }
+          ;
          
 get_stmt : TGET key_name { $$.n = new(NodeType.Get, $2.n, null, null, null, null, null, null, $1.l); }
          | TLET identifier TEQUALS TGET key_name { $$.n = new(NodeType.Get, $5.n, $2.n, null, null, null, null, null, $1.l); }

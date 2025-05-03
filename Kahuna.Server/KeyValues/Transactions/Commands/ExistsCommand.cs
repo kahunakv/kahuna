@@ -38,7 +38,7 @@ internal sealed class ExistsCommand : BaseCommand
         if (ast.extendedOne is not null)
             compareRevision = int.Parse(ast.extendedOne.yytext!);
         
-        (KeyValueResponseType type, ReadOnlyKeyValueContext? readOnlyContext) = await manager.LocateAndTryExistsValue(
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? readOnlyContext) = await manager.LocateAndTryExistsValue(
             context.TransactionId,
             keyName,
             compareRevision,

@@ -322,7 +322,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
         
-        (KeyValueResponseType type, ReadOnlyKeyValueContext? keyValueContext) = await keyValues.LocateAndTryGetValue(
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? keyValueContext) = await keyValues.LocateAndTryGetValue(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key, 
             request.Revision,
@@ -383,7 +383,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
         
-        (KeyValueResponseType type, ReadOnlyKeyValueContext? keyValueContext) = await keyValues.LocateAndTryExistsValue(
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? keyValueContext) = await keyValues.LocateAndTryExistsValue(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key, 
             request.Revision,
@@ -1393,9 +1393,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// </summary>
     /// <param name="resultItems">A list containing key-value pairs and their associated context.</param>
     /// <returns>A collection of gRPC key-value prefix item responses.</returns>
-    private static IEnumerable<GrpcKeyValueByPrefixItemResponse> GetKeyValueItems(List<(string, ReadOnlyKeyValueContext)> resultItems)
+    private static IEnumerable<GrpcKeyValueByPrefixItemResponse> GetKeyValueItems(List<(string, ReadOnlyKeyValueEntry)> resultItems)
     {
-        foreach ((string key, ReadOnlyKeyValueContext context) in resultItems)
+        foreach ((string key, ReadOnlyKeyValueEntry context) in resultItems)
         {
             GrpcKeyValueByPrefixItemResponse response = new()
             {

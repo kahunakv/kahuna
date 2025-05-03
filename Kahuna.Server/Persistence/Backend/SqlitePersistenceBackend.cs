@@ -21,7 +21,7 @@ namespace Kahuna.Server.Persistence.Backend;
 /// The class also implements IDisposable to ensure proper handling and release of resources
 /// like database connections and locks.
 /// </remarks>
-internal class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
+internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
 {
     /// <summary>
     /// Represents the maximum number of shards used in the SQLite persistence backend.
@@ -487,8 +487,8 @@ internal class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
     /// Retrieves the key-value context associated with the specified key name.
     /// </summary>
     /// <param name="keyName">The name of the key for which to retrieve the associated KeyValueContext.</param>
-    /// <returns>An instance of <see cref="KeyValueContext"/> if the key exists, or null if no context is found.</returns>
-    public KeyValueContext? GetKeyValue(string keyName)
+    /// <returns>An instance of <see cref="KeyValueEntry"/> if the key exists, or null if no context is found.</returns>
+    public KeyValueEntry? GetKeyValue(string keyName)
     {
         try
         {
@@ -555,10 +555,10 @@ internal class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
     /// <param name="keyName">The name of the key to retrieve the context for.</param>
     /// <param name="revision">The specific revision of the key-value pair to retrieve.</param>
     /// <returns>
-    /// A <see cref="KeyValueContext"/> representing the key-value pair context for the specified key and revision,
+    /// A <see cref="KeyValueEntry"/> representing the key-value pair context for the specified key and revision,
     /// or null if the key or specific revision does not exist.
     /// </returns>
-    public KeyValueContext? GetKeyValueRevision(string keyName, long revision)
+    public KeyValueEntry? GetKeyValueRevision(string keyName, long revision)
     {
         try
         {
@@ -624,11 +624,11 @@ internal class SqlitePersistenceBackend : IPersistenceBackend, IDisposable
     /// <param name="prefixKeyName">The prefix of the keys to filter and retrieve.</param>
     /// <returns>
     /// A list of tuples, where each tuple contains a key as a string and its associated
-    /// <see cref="ReadOnlyKeyValueContext"/> representing the value.
+    /// <see cref="ReadOnlyKeyValueEntry"/> representing the value.
     /// </returns>
-    public List<(string, ReadOnlyKeyValueContext)> GetKeyValueByPrefix(string prefixKeyName)
+    public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName)
     {
-        List<(string, ReadOnlyKeyValueContext)> results = [];
+        List<(string, ReadOnlyKeyValueEntry)> results = [];
         
         (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabase(prefixKeyName);
         

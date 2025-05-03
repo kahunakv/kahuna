@@ -17,13 +17,7 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// <see cref="BaseHandler"/>
 internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
 {        
-    public TryAcquireExclusivePrefixLockHandler(BTree<string, KeyValueContext> keyValuesStore,
-        Dictionary<string, KeyValueWriteIntent> locksByPrefix,
-        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        IPersistenceBackend persistenceBackend,
-        IRaft raft,
-        KahunaConfiguration configuration,
-        ILogger<IKahuna> logger) : base(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger)
+    public TryAcquireExclusivePrefixLockHandler(KeyValueContext context) : base(context)
     {
         
     }
@@ -35,10 +29,10 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
     /// <returns></returns>
     public KeyValueResponse Execute(KeyValueRequest message)
     {
-        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
         
         // Check if the prefix is already locked by the current transaction
-        if (locksByPrefix.TryGetValue(message.Key, out KeyValueWriteIntent? writeIntent))
+        if (context.LocksByPrefix.TryGetValue(message.Key, out KeyValueWriteIntent? writeIntent))
         {
             if (writeIntent.TransactionId == message.TransactionId) 
                 return KeyValueStaticResponses.LockedResponse;
@@ -48,7 +42,7 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
                 return KeyValueStaticResponses.AlreadyLockedResponse;            
             
             // The lock is expired, remove it
-            locksByPrefix.Remove(message.Key);
+            context.LocksByPrefix.Remove(message.Key);
         }
                 
         return LockExistingKeysByPrefix(currentTime, message);               
@@ -67,15 +61,15 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
         if (message.TransactionId == HLCTimestamp.Zero)
             return KeyValueStaticResponses.ErroredResponse;               
         
-        foreach ((string key, KeyValueContext context) in keyValuesStore.GetByBucket(message.Key))
+        foreach ((string key, KeyValueEntry entry) in context.Store.GetByBucket(message.Key))
         {
-            KeyValueResponse response = TryLock(currentTime, message.TransactionId, key, message.ExpiresMs, context);                                                    
+            KeyValueResponse response = TryLock(currentTime, message.TransactionId, key, message.ExpiresMs, entry);                                                    
 
             if (response.Type != KeyValueResponseType.Locked)
                 return response;
         }
 
-        locksByPrefix.Add(message.Key, new()
+        context.LocksByPrefix.Add(message.Key, new()
         {
             TransactionId = message.TransactionId,
             Expires = message.TransactionId + message.ExpiresMs
@@ -84,26 +78,26 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
         return KeyValueStaticResponses.LockedResponse;
     }           
     
-    private KeyValueResponse TryLock(HLCTimestamp currentTime, HLCTimestamp transactionId, string key, int expiresMs, KeyValueContext context)
+    private KeyValueResponse TryLock(HLCTimestamp currentTime, HLCTimestamp transactionId, string key, int expiresMs, KeyValueEntry entry)
     {                               
-        if (context.WriteIntent is not null)
+        if (entry.WriteIntent is not null)
         {
             // if the transactionId is the same owner no need to acquire the lock
-            if (context.WriteIntent.TransactionId == transactionId) 
+            if (entry.WriteIntent.TransactionId == transactionId) 
                 return KeyValueStaticResponses.LockedResponse;
 
             // Check if the lease is still active
-            if (context.WriteIntent.Expires != HLCTimestamp.Zero && context.WriteIntent.Expires - currentTime > TimeSpan.Zero)            
+            if (entry.WriteIntent.Expires != HLCTimestamp.Zero && entry.WriteIntent.Expires - currentTime > TimeSpan.Zero)            
                 return KeyValueStaticResponses.AlreadyLockedResponse;
         }
 
-        context.WriteIntent = new()
+        entry.WriteIntent = new()
         {
             TransactionId = transactionId,
             Expires = transactionId + expiresMs,
         };        
         
-        logger.LogDebug("Assigned {Key} write intent to TxId={TransactionId}", key, transactionId);
+        context.Logger.LogDebug("Assigned {Key} write intent to TxId={TransactionId}", key, transactionId);
         
         return KeyValueStaticResponses.LockedResponse;
     }     

@@ -54,7 +54,7 @@ internal sealed class SetCommand : BaseCommand
         long compareRevision = 0;
         byte[]? compareValue = null;
 
-        if (ast.extendedThree is not null)
+        /*if (ast.extendedThree is not null)
         {
             if (ast.extendedThree.leftAst is null)
                 throw new KahunaScriptException("Invalid SET cmp/cmprev", ast.yyline);
@@ -71,7 +71,7 @@ internal sealed class SetCommand : BaseCommand
                     compareRevision = KeyValueTransactionExpression.Eval(context, ast.extendedThree.leftAst).ToLong();
                     break;
             }
-        }
+        }*/
 
         KeyValueExpressionResult result = KeyValueTransactionExpression.Eval(context, ast.rightAst);
         
@@ -126,5 +126,34 @@ internal sealed class SetCommand : BaseCommand
                 }
             ]
         };
+    }
+    
+    private static void GetSetFlags(KeyValueTransactionContext context, NodeAst ast, List<KeyValueExpressionResult> arguments)
+    {
+        while (true)
+        {
+            switch (ast.nodeType)
+            {
+                case NodeType.ArgumentList:
+                {
+                    if (ast.leftAst is not null)
+                        GetFuncCallArguments(context, ast.leftAst, arguments);
+
+                    if (ast.rightAst is not null)
+                    {
+                        ast = ast.rightAst!;
+                        continue;
+                    }
+
+                    break;
+                }
+                
+                default:
+                    arguments.Add(KeyValueTransactionExpression.Eval(context, ast));
+                    break;
+            }
+
+            break;
+        }
     }
 }

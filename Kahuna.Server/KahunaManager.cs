@@ -253,7 +253,7 @@ public sealed class KahunaManager : IKahuna
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryGetValue(
+    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
         HLCTimestamp transactionId, 
         string key, 
         long revision, 
@@ -273,7 +273,7 @@ public sealed class KahunaManager : IKahuna
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryExistsValue(
+    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryExistsValue(
         HLCTimestamp transactionId, 
         string key, 
         long revision, 
@@ -684,7 +684,7 @@ public sealed class KahunaManager : IKahuna
     /// <param name="revision"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryGetValue(
+    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(
         HLCTimestamp transactionId, 
         string key, 
         long revision, 
@@ -702,7 +702,7 @@ public sealed class KahunaManager : IKahuna
     /// <param name="revision"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryExistsValue(
+    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryExistsValue(
         HLCTimestamp transactionId, 
         string key, 
         long revision, 

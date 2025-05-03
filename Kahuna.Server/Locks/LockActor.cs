@@ -161,7 +161,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         }
         
         if (context.WriteIntent is not null)
-            return LockStaticResponses.MustRetryResponse;
+            return LockStaticResponses.WaitingForReplication;
         
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
         
@@ -213,7 +213,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
             return LockStaticResponses.DoesNotExistResponse;
         
         if (context.WriteIntent is not null)
-            return LockStaticResponses.MustRetryResponse;
+            return LockStaticResponses.WaitingForReplication;
 
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
         
@@ -256,7 +256,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
             return LockStaticResponses.DoesNotExistResponse;
         
         if (context.WriteIntent is not null)
-            return LockStaticResponses.MustRetryResponse;
+            return LockStaticResponses.WaitingForReplication;
 
         if (!((ReadOnlySpan<byte>)context.Owner).SequenceEqual(message.Owner))
             return LockStaticResponses.InvalidOwnerResponse;
@@ -297,7 +297,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
             return new(LockResponseType.LockDoesNotExist, new ReadOnlyLockContext(null, context?.FencingToken ?? 0, HLCTimestamp.Zero));
         
         if (context.WriteIntent is not null)
-            return LockStaticResponses.MustRetryResponse;
+            return LockStaticResponses.WaitingForReplication;
 
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 

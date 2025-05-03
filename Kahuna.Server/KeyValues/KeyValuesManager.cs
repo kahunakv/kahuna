@@ -225,7 +225,7 @@ internal sealed class KeyValuesManager
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryGetValue(
+    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
         HLCTimestamp transactionId, 
         string key,
         long revision, 
@@ -245,7 +245,7 @@ internal sealed class KeyValuesManager
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryExistsValue(
+    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryExistsValue(
         HLCTimestamp transactionId, 
         string key,
         long revision, 
@@ -732,7 +732,7 @@ internal sealed class KeyValuesManager
     /// <param name="key"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryGetValue(
+    public async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(
         HLCTimestamp transactionId, 
         string key,
         long revision,
@@ -773,7 +773,7 @@ internal sealed class KeyValuesManager
     /// <param name="key"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryExistsValue(
+    public async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryExistsValue(
         HLCTimestamp transactionId, 
         string key,
         long revision,
@@ -1372,7 +1372,7 @@ internal sealed class KeyValuesManager
             durability
         );
         
-        List<(string, ReadOnlyKeyValueContext)> items = [];
+        List<(string, ReadOnlyKeyValueEntry)> items = [];
         
         if (durability == KeyValueDurability.Ephemeral)
         {

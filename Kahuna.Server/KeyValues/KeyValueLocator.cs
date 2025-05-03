@@ -252,7 +252,7 @@ internal sealed class KeyValueLocator
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryGetValue(
+    public async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
         HLCTimestamp transactionId, 
         string key, 
         long revision,
@@ -274,7 +274,7 @@ internal sealed class KeyValueLocator
 
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
         
-        (KeyValueResponseType, ReadOnlyKeyValueContext?) response = await interNodeCommunication.TryGetValue(leader, transactionId, key, revision, durability, cancellationToken);
+        (KeyValueResponseType, ReadOnlyKeyValueEntry?) response = await interNodeCommunication.TryGetValue(leader, transactionId, key, revision, durability, cancellationToken);
         
         logger.LogDebug("GET-KEYVALUE Redirected {KeyValueName} to leader partition {Partition} at {Leader} Time={Elapsed}ms", key, partitionId, leader, stopwatch.GetElapsedMilliseconds());
 
@@ -289,7 +289,7 @@ internal sealed class KeyValueLocator
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> LocateAndTryExistsValue(
+    public async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryExistsValue(
         HLCTimestamp transactionId, 
         string key, 
         long revision,
@@ -1021,13 +1021,13 @@ internal sealed class KeyValueLocator
     /// <returns></returns>
     public async Task<KeyValueGetByBucketResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        ConcurrentDictionary<string, ReadOnlyKeyValueContext> unionItems = [];
+        ConcurrentDictionary<string, ReadOnlyKeyValueEntry> unionItems = [];
         
         KeyValueGetByBucketResult items = await manager.ScanByPrefix(prefixKeyName, durability);
 
         if (items.Type == KeyValueResponseType.Get)
         {
-            foreach ((string, ReadOnlyKeyValueContext) item in items.Items)
+            foreach ((string, ReadOnlyKeyValueEntry) item in items.Items)
                 unionItems.TryAdd(item.Item1, item.Item2);
         }
 
@@ -1046,7 +1046,7 @@ internal sealed class KeyValueLocator
 
             if (items.Type == KeyValueResponseType.Get)
             {
-                foreach ((string, ReadOnlyKeyValueContext) item in result.Items)
+                foreach ((string, ReadOnlyKeyValueEntry) item in result.Items)
                     unionItems.TryAdd(item.Item1, item.Item2);
             }
         }
@@ -1063,7 +1063,7 @@ internal sealed class KeyValueLocator
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     private async Task NodeScanByPrefix(
-        ConcurrentDictionary<string, ReadOnlyKeyValueContext> unionItems, 
+        ConcurrentDictionary<string, ReadOnlyKeyValueEntry> unionItems, 
         RaftNode node, 
         string prefixKeyName, 
         KeyValueDurability durability, 
@@ -1074,7 +1074,7 @@ internal sealed class KeyValueLocator
         
         if (response.Type == KeyValueResponseType.Get)
         {
-            foreach ((string, ReadOnlyKeyValueContext) item in response.Items)
+            foreach ((string, ReadOnlyKeyValueEntry) item in response.Items)
                 unionItems.TryAdd(item.Item1, item.Item2);
         }
     }    

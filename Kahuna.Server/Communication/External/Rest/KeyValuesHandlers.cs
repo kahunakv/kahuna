@@ -172,7 +172,7 @@ public static class KeyValuesHandlers
                     Type = KeyValueResponseType.InvalidInput
                 };
 
-            (KeyValueResponseType type, ReadOnlyKeyValueContext? keyValueContext) = await keyValues.LocateAndTryGetValue(
+            (KeyValueResponseType type, ReadOnlyKeyValueEntry? keyValueContext) = await keyValues.LocateAndTryGetValue(
                 request.TransactionId,
                 request.Key, 
                 request.Revision,
@@ -208,7 +208,7 @@ public static class KeyValuesHandlers
                     Type = KeyValueResponseType.InvalidInput
                 };
 
-            (KeyValueResponseType type, ReadOnlyKeyValueContext? keyValueContext) = await keyValues.LocateAndTryExistsValue(
+            (KeyValueResponseType type, ReadOnlyKeyValueEntry? keyValueContext) = await keyValues.LocateAndTryExistsValue(
                 request.TransactionId,
                 request.Key, 
                 request.Revision,

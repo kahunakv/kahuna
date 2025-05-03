@@ -16,13 +16,7 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// <see cref="BaseHandler"/>
 internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
 {
-    public TryAcquireExclusiveLockHandler(BTree<string, KeyValueContext> keyValuesStore,
-        Dictionary<string, KeyValueWriteIntent> locksByPrefix,
-        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        IPersistenceBackend persistenceBackend,
-        IRaft raft,
-        KahunaConfiguration configuration,
-        ILogger<IKahuna> logger) : base(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger)
+    public TryAcquireExclusiveLockHandler(KeyValueContext context) : base(context)
     {
         
     }
@@ -32,41 +26,41 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
         if (message.TransactionId == HLCTimestamp.Zero)
             return KeyValueStaticResponses.ErroredResponse;
         
-        HLCTimestamp currentTime = raft.HybridLogicalClock.ReceiveEvent(raft.GetLocalNodeId(), message.TransactionId);
+        HLCTimestamp currentTime = context.Raft.HybridLogicalClock.ReceiveEvent(context.Raft.GetLocalNodeId(), message.TransactionId);
 
-        if (!keyValuesStore.TryGetValue(message.Key, out KeyValueContext? context))
+        if (!context.Store.TryGetValue(message.Key, out KeyValueEntry? entry))
         {
-            KeyValueContext? newContext = null;
+            KeyValueEntry? newEntry = null;
 
             /// Try to retrieve KeyValue context from persistence
             if (message.Durability == KeyValueDurability.Persistent)
-                newContext = await raft.ReadThreadPool.EnqueueTask(() => PersistenceBackend.GetKeyValue(message.Key));
+                newEntry = await context.Raft.ReadThreadPool.EnqueueTask(() => context.PersistenceBackend.GetKeyValue(message.Key));
 
-            newContext ??= new() { Bucket = GetBucket(message.Key), State = KeyValueState.Undefined, Revision = -1 };
+            newEntry ??= new() { Bucket = GetBucket(message.Key), State = KeyValueState.Undefined, Revision = -1 };
             
-            context = newContext;
+            entry = newEntry;
 
-            keyValuesStore.Insert(message.Key, newContext);
+            context.Store.Insert(message.Key, newEntry);
         }
 
-        if (context.WriteIntent is not null)
+        if (entry.WriteIntent is not null)
         {
             // if the transactionId is the same owner no need to acquire the lock
-            if (context.WriteIntent.TransactionId == message.TransactionId) 
+            if (entry.WriteIntent.TransactionId == message.TransactionId) 
                 return KeyValueStaticResponses.LockedResponse;
 
             // Check if the lease is still active
-            if (context.WriteIntent.Expires != HLCTimestamp.Zero && context.WriteIntent.Expires - currentTime > TimeSpan.Zero)
+            if (entry.WriteIntent.Expires != HLCTimestamp.Zero && entry.WriteIntent.Expires - currentTime > TimeSpan.Zero)
                 return KeyValueStaticResponses.AlreadyLockedResponse;
         }
 
-        context.WriteIntent = new()
+        entry.WriteIntent = new()
         {
             TransactionId = message.TransactionId,
             Expires = message.TransactionId + message.ExpiresMs,
         };
         
-        logger.LogDebug("Assigned {Key} write intent to TxId={TransactionId}", message.Key, message.TransactionId);
+        context.Logger.LogDebug("Assigned {Key} write intent to TxId={TransactionId}", message.Key, message.TransactionId);
         
         return KeyValueStaticResponses.LockedResponse;
     }

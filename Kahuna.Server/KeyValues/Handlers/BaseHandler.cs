@@ -21,40 +21,51 @@ internal abstract class BaseHandler
     /// <summary>
     /// Represents the background writer actor reference.
     /// </summary>
-    protected readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
-    
-    protected readonly IRaft raft;
-
-    protected readonly IPersistenceBackend PersistenceBackend;
-
-    protected readonly BTree<string, KeyValueContext> keyValuesStore;
-    
-    protected readonly Dictionary<string, KeyValueWriteIntent> locksByPrefix;
-
-    protected readonly KahunaConfiguration configuration;
-
-    protected readonly ILogger<IKahuna> logger;
+    protected readonly KeyValueContext context;
     
     private readonly HashSet<long> revisionsToRemove = [];
     
-    protected BaseHandler(
-        BTree<string, KeyValueContext> keyValuesStore,
-        Dictionary<string, KeyValueWriteIntent> locksByPrefix,
-        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        IPersistenceBackend persistenceBackend,
-        IRaft raft,
-        KahunaConfiguration configuration,
-        ILogger<IKahuna> logger
-    )
+    protected BaseHandler(KeyValueContext context)
     {
-        this.keyValuesStore = keyValuesStore;
-        this.locksByPrefix = locksByPrefix;
-        this.backgroundWriter = backgroundWriter;
-        this.raft = raft;
-        this.PersistenceBackend = persistenceBackend;        
-        this.configuration = configuration;
-        this.logger = logger;
+        this.context = context;
     }
+    
+    /// <summary>
+    /// Creates a proposal for a key/value operation and sends it to the proposal actor for replication.
+    /// </summary>
+    /// <param name="message"></param>
+    /// <param name="entry"></param>
+    /// <param name="proposal"></param>
+    /// <param name="currentTime"></param>
+    /// <returns></returns>
+    /*private KeyValueResponse CreateProposal(KeyValueRequest message, KeyValueEntry entry, KeyValueProposal proposal, HLCTimestamp currentTime)
+    {
+        if (!actorContext.Reply.HasValue)
+            return KeyValueStaticResponses.ErroredResponse;
+            
+        int currentProposalId = Interlocked.Increment(ref proposalId);
+
+        entry.WriteIntent = new()
+        {
+            ProposalId = currentProposalId, 
+            Expires = currentTime + ProposalWaitTimeout
+        };
+            
+        proposals.Add(currentProposalId, proposal);
+            
+        proposalRouter.Send(new(
+            message.Type,
+            currentProposalId, 
+            proposal, 
+            actorContext.Self, 
+            actorContext.Reply.Value.Promise,
+            currentTime
+        ));
+
+        actorContext.ByPassReply = true;
+            
+        return LockStaticResponses.WaitingForReplication;
+    }*/
     
     /// <summary>
     /// Persists and replicates the key/value messages to the Raft partition
@@ -65,10 +76,10 @@ internal abstract class BaseHandler
     /// <returns></returns>
     protected async Task<bool> PersistAndReplicateKeyValueMessage(KeyValueRequestType type, KeyValueProposal proposal, HLCTimestamp currentTime)
     {
-        if (!raft.Joined)
+        if (!context.Raft.Joined)
             return true;
 
-        int partitionId = raft.GetPartitionKey(proposal.Key);
+        int partitionId = context.Raft.GetPartitionKey(proposal.Key);
 
         KeyValueMessage kvm = new()
         {
@@ -92,7 +103,7 @@ internal abstract class BaseHandler
         if (proposal.Value is not null)
             kvm.Value = UnsafeByteOperations.UnsafeWrap(proposal.Value);
 
-        RaftReplicationResult result = await raft.ReplicateLogs(
+        RaftReplicationResult result = await context.Raft.ReplicateLogs(
             partitionId,
             ReplicationTypes.KeyValues,
             ReplicationSerializer.Serialize(kvm)
@@ -100,12 +111,12 @@ internal abstract class BaseHandler
 
         if (!result.Success)
         {
-            logger.LogWarning("Failed to replicate key/value {Key} Partition={Partition} Status={Status} Ticket={Ticket}", proposal.Key, partitionId, result.Status, result.TicketId);
+            context.Logger.LogWarning("Failed to replicate key/value {Key} Partition={Partition} Status={Status} Ticket={Ticket}", proposal.Key, partitionId, result.Status, result.TicketId);
             
             return false;
         }
         
-        backgroundWriter.Send(new(
+        context.BackgroundWriter.Send(new(
             BackgroundWriteType.QueueStoreKeyValue,
             partitionId,
             proposal.Key,
@@ -121,67 +132,79 @@ internal abstract class BaseHandler
     }
 
     /// <summary>
-    /// Returns an existing KeyValueContext from memory or retrieves it from the persistence layer
+    /// Returns an existing KeyValueEntry from memory or retrieves it from the persistence layer if there's a cache miss.
     /// </summary>
     /// <param name="key"></param>
     /// <param name="durability"></param>
-    /// <param name="readKeyValueContext"></param>
+    /// <param name="readKeyValueEntry"></param>
     /// <returns></returns>
-    protected async ValueTask<KeyValueContext?> GetKeyValueContext(string key, KeyValueDurability durability, ReadOnlyKeyValueContext? readKeyValueContext = null)
+    protected async ValueTask<KeyValueEntry?> GetKeyValueEntry(string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? readKeyValueEntry = null)
     {
-        if (!keyValuesStore.TryGetValue(key, out KeyValueContext? context))
+        if (!context.Store.TryGetValue(key, out KeyValueEntry? entry))
         {
             if (durability == KeyValueDurability.Persistent)
             {
-                if (readKeyValueContext is null)
-                    context = await raft.ReadThreadPool.EnqueueTask(() => PersistenceBackend.GetKeyValue(key));
+                if (readKeyValueEntry is null)
+                    entry = await context.Raft.ReadThreadPool.EnqueueTask(() => context.PersistenceBackend.GetKeyValue(key));
                 else
-                    context = new()
+                    entry = new()
                     {
                         Bucket = GetBucket(key),
-                        Value = readKeyValueContext.Value,
-                        Revision = readKeyValueContext.Revision,
-                        Expires = readKeyValueContext.Expires,
-                        LastUsed = readKeyValueContext.LastUsed,
-                        LastModified = readKeyValueContext.LastModified,
-                        State = readKeyValueContext.State
+                        Value = readKeyValueEntry.Value,
+                        Revision = readKeyValueEntry.Revision,
+                        Expires = readKeyValueEntry.Expires,
+                        LastUsed = readKeyValueEntry.LastUsed,
+                        LastModified = readKeyValueEntry.LastModified,
+                        State = readKeyValueEntry.State
                     };
                 
-                if (context is not null)
+                if (entry is not null)
                 {
-                    context.LastUsed = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
-                    keyValuesStore.Insert(key, context);
-                    return context;
+                    entry.LastUsed = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
+                    context.Store.Insert(key, entry);
+                    return entry;
                 }
             }
             
             return null;    
         }
         
-        return context;
+        return entry;
     }
 
+    /// <summary>
+    /// Calculates the bucket name for the key.
+    /// </summary>
+    /// <param name="key"></param>
+    /// <returns></returns>
     protected static string? GetBucket(string key)
     {
         int index = key.LastIndexOf('/');
         return index == -1 ? null : key[..index];
     }
 
-    protected void RemoveExpiredRevisions(KeyValueContext context, long refRevision)
+    /// <summary>
+    /// Removes expired revisions from the KeyValueEntry dictionary
+    /// </summary>
+    /// <param name="entry"></param>
+    /// <param name="refRevision">Revisions older than the ref revision will be removed</param>
+    protected void RemoveExpiredRevisions(KeyValueEntry entry, long refRevision)
     {
-        if (context.Revisions is null)
-            return;               
+        if (entry.Revisions is null)
+            return;
+
+        int toBeKept = context.Configuration.RevisionsToKeepCached;
             
-        foreach (KeyValuePair<long, byte[]?> kv in context.Revisions)
+        foreach (KeyValuePair<long, byte[]?> kv in entry.Revisions)
         {
-            if (kv.Key < (refRevision - configuration.RevisionsToKeepCached))                
+            if (kv.Key < (refRevision - toBeKept))                
                 revisionsToRemove.Add(kv.Key);
         }
 
         if (revisionsToRemove.Count > 0)
         {
             foreach (long revision in revisionsToRemove)                
-                context.Revisions.Remove(revision);                
+                entry.Revisions.Remove(revision);                
             
             revisionsToRemove.Clear();
         }

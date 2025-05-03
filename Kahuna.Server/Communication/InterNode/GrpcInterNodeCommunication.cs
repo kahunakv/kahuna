@@ -411,7 +411,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     /// <param name="durability">The durability type indicating whether the operation is ephemeral or persistent.</param>
     /// <param name="cancellationToken">A token to observe any cancellation requests for the operation.</param>
     /// <returns>A tuple containing the type of key-value response and an optional read-only key-value context with the retrieved value and metadata.</returns>
-    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryGetValue(
+    public async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(
         string node,
         HLCTimestamp transactionId,
         string key,
@@ -464,7 +464,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     /// <param name="durability">The durability level to determine if the operation should be ephemeral or persistent.</param>
     /// <param name="cancellationToken">A cancellation token to signal the operation should be aborted.</param>
     /// <returns>A tuple containing the key-value response type and an optional read-only context if the key-value pair exists.</returns>
-    public async Task<(KeyValueResponseType, ReadOnlyKeyValueContext?)> TryExistsValue(
+    public async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryExistsValue(
         string node,
         HLCTimestamp transactionId,
         string key,
@@ -1147,9 +1147,9 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         }
     }
 
-    private static List<(string, ReadOnlyKeyValueContext)> GetReadOnlyItem(RepeatedField<GrpcKeyValueByPrefixItemResponse> remoteResponseItems)
+    private static List<(string, ReadOnlyKeyValueEntry)> GetReadOnlyItem(RepeatedField<GrpcKeyValueByPrefixItemResponse> remoteResponseItems)
     {
-        List<(string, ReadOnlyKeyValueContext)> responses = new(remoteResponseItems.Count);
+        List<(string, ReadOnlyKeyValueEntry)> responses = new(remoteResponseItems.Count);
         
         foreach (GrpcKeyValueByPrefixItemResponse? kv in remoteResponseItems)
         {

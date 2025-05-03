@@ -30,6 +30,12 @@ public sealed class KeyValueProposal
     /// or update resolution.
     /// </summary>
     public long Revision { get; }
+    
+    /// <summary>
+    /// Indicates whether the proposal must save a revision or not.
+    /// It can help to reduce memory and disk usage when the revision is not needed.
+    /// </summary>
+    public bool NoRevision { get; }
 
     /// <summary>
     /// Gets the expiry timestamp associated with the key-value proposal.
@@ -72,6 +78,7 @@ public sealed class KeyValueProposal
         string key, 
         byte[]? value, 
         long revision,
+        bool noRevision,
         HLCTimestamp expires, 
         HLCTimestamp lastUsed,
         HLCTimestamp lastModified,
@@ -82,6 +89,7 @@ public sealed class KeyValueProposal
         Value = value;
         Revision = revision;
         Expires = expires;
+        NoRevision = noRevision;
         LastUsed = lastUsed;
         LastModified = lastModified;
         State = state;

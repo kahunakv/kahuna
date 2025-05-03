@@ -49,7 +49,7 @@ public class TestKeyValues : BaseCluster
         Assert.Equal(KeyValueResponseType.Set, response);
         Assert.Equal(0, revision);
         
-        (response, ReadOnlyKeyValueContext? readOnlyKeyValueContext) = await kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, keyName, -1, durability, TestContext.Current.CancellationToken);
+        (response, ReadOnlyKeyValueEntry? readOnlyKeyValueContext) = await kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, keyName, -1, durability, TestContext.Current.CancellationToken);
         Assert.Equal(KeyValueResponseType.Get, response);
         Assert.NotNull(readOnlyKeyValueContext);
         Assert.Equal(0, readOnlyKeyValueContext.Revision);
@@ -208,9 +208,9 @@ public class TestKeyValues : BaseCluster
         await LeaveCluster(node1, node2, node3);
     }
 
-    private static void ValidateGetByBucketItems(string prefix, List<(string, ReadOnlyKeyValueContext)> resultItems)
+    private static void ValidateGetByBucketItems(string prefix, List<(string, ReadOnlyKeyValueEntry)> resultItems)
     {
-        foreach ((string key, ReadOnlyKeyValueContext value) in resultItems)
+        foreach ((string key, ReadOnlyKeyValueEntry value) in resultItems)
         {
             Assert.StartsWith(prefix, key);
             Assert.Equal(0, value.Revision);

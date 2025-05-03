@@ -65,7 +65,7 @@ internal sealed class GetByBucketCommand : BaseCommand
         {
             List<KeyValueExpressionResult> varValues = new(response.Items.Count);
             
-            foreach ((string key, ReadOnlyKeyValueContext valueContext) item in response.Items)
+            foreach ((string key, ReadOnlyKeyValueEntry valueContext) item in response.Items)
                 varValues.Add(new(Encoding.UTF8.GetString(item.valueContext.Value ?? []), item.valueContext.Revision, item.valueContext.Expires.L));
             
             context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new(varValues));
@@ -73,7 +73,7 @@ internal sealed class GetByBucketCommand : BaseCommand
 
         List<KeyValueTransactionResultValue> values = new(response.Items.Count);
         
-        foreach ((string key, ReadOnlyKeyValueContext valueContext) item in response.Items)
+        foreach ((string key, ReadOnlyKeyValueEntry valueContext) item in response.Items)
         {
             values.Add(new()
             {

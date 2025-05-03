@@ -17,9 +17,9 @@ internal interface IPersistenceBackend
 
     public LockContext? GetLock(string resource);
     
-    public KeyValueContext? GetKeyValue(string keyName);
+    public KeyValueEntry? GetKeyValue(string keyName);
     
-    public KeyValueContext? GetKeyValueRevision(string keyName, long revision);
+    public KeyValueEntry? GetKeyValueRevision(string keyName, long revision);
 
-    public List<(string, ReadOnlyKeyValueContext)> GetKeyValueByPrefix(string prefixKeyName);
+    public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName);
 }

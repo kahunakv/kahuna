@@ -15,27 +15,21 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// </summary>
 internal sealed class TryExistsHandler : BaseHandler
 {
-    public TryExistsHandler(BTree<string, KeyValueContext> keyValuesStore,
-        Dictionary<string, KeyValueWriteIntent> locksByPrefix,
-        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        IPersistenceBackend persistenceBackend,
-        IRaft raft,
-        KahunaConfiguration configuration,
-        ILogger<IKahuna> logger) : base(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger)
+    public TryExistsHandler(KeyValueContext context) : base(context)
     {
         
     }
 
     public async Task<KeyValueResponse> Execute(KeyValueRequest message)
     {
-        KeyValueContext? context = await GetKeyValueContext(message.Key, message.Durability);
+        KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability);
 
-        ReadOnlyKeyValueContext readOnlyKeyValueContext;
+        ReadOnlyKeyValueEntry readOnlyKeyValueEntry;
         
         if (message.CompareRevision > -1)
         {
-            if (context is not null && context.Revision == message.CompareRevision)
-                return new(KeyValueResponseType.Exists, new ReadOnlyKeyValueContext(
+            if (entry is not null && entry.Revision == message.CompareRevision)
+                return new(KeyValueResponseType.Exists, new ReadOnlyKeyValueEntry(
                     null, 
                     message.CompareRevision, 
                     HLCTimestamp.Zero,
@@ -44,10 +38,10 @@ internal sealed class TryExistsHandler : BaseHandler
                     KeyValueState.Set
                 ));
             
-            if (context?.Revisions != null)
+            if (entry?.Revisions != null)
             {
-                if (context.Revisions.ContainsKey(message.CompareRevision))
-                    return new(KeyValueResponseType.Exists, new ReadOnlyKeyValueContext(
+                if (entry.Revisions.ContainsKey(message.CompareRevision))
+                    return new(KeyValueResponseType.Exists, new ReadOnlyKeyValueEntry(
                         null, 
                         message.CompareRevision, 
                         HLCTimestamp.Zero,
@@ -60,11 +54,11 @@ internal sealed class TryExistsHandler : BaseHandler
             // Fallback to disk
             if (message.Durability == KeyValueDurability.Persistent)
             {
-                KeyValueContext? revisionContext = await raft.ReadThreadPool.EnqueueTask(() => PersistenceBackend.GetKeyValueRevision(message.Key, message.CompareRevision));
+                KeyValueEntry? revisionContext = await context.Raft.ReadThreadPool.EnqueueTask(() => context.PersistenceBackend.GetKeyValueRevision(message.Key, message.CompareRevision));
                 if (revisionContext is null)
                     return KeyValueStaticResponses.DoesNotExistContextResponse;
 
-                return new(KeyValueResponseType.Exists, new ReadOnlyKeyValueContext(
+                return new(KeyValueResponseType.Exists, new ReadOnlyKeyValueEntry(
                     null, 
                     message.CompareRevision, 
                     HLCTimestamp.Zero,
@@ -77,94 +71,94 @@ internal sealed class TryExistsHandler : BaseHandler
             return KeyValueStaticResponses.DoesNotExistContextResponse; 
         }
         
-        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
         
         // Validate if there's an exclusive key acquired on the lock and whether it is expired
         // if we find expired write intents we can remove it to allow new transactions to proceed
-        if (context?.WriteIntent != null)
+        if (entry?.WriteIntent != null)
         {
-            if (context.WriteIntent.TransactionId != message.TransactionId)
+            if (entry.WriteIntent.TransactionId != message.TransactionId)
             {
-                if (context.WriteIntent.Expires - currentTime > TimeSpan.Zero)                
+                if (entry.WriteIntent.Expires - currentTime > TimeSpan.Zero)                
                     return new(KeyValueResponseType.MustRetry, 0);
                 
-                context.WriteIntent = null;
+                entry.WriteIntent = null;
             }
         }
         
         // Validate if there's a prefix lock acquired on the bucket
         // if we find expired write intents we can remove it to allow new transactions to proceed
         
-        string? bucket = context is not null ? context.Bucket : GetBucket(message.Key);
+        string? bucket = entry is not null ? entry.Bucket : GetBucket(message.Key);
         
-        if (bucket is not null && locksByPrefix.TryGetValue(bucket, out KeyValueWriteIntent? intent))
+        if (bucket is not null && context.LocksByPrefix.TryGetValue(bucket, out KeyValueWriteIntent? intent))
         {
             if (intent.TransactionId != message.TransactionId)
             {
                 if (intent.Expires - currentTime > TimeSpan.Zero)
                     return new(KeyValueResponseType.MustRetry, 0);
             
-                locksByPrefix.Remove(bucket);
+                context.LocksByPrefix.Remove(bucket);
             }
         }
 
         if (message.TransactionId != HLCTimestamp.Zero)
         {
-            if (context is null)
+            if (entry is null)
             {
-                context = new() { Bucket = GetBucket(message.Key), State = KeyValueState.Undefined, Revision = -1 };
-                keyValuesStore.Insert(message.Key, context);
+                entry = new() { Bucket = GetBucket(message.Key), State = KeyValueState.Undefined, Revision = -1 };
+                context.Store.Insert(message.Key, entry);
             }
             
-            context.MvccEntries ??= new();
+            entry.MvccEntries ??= new();
 
-            if (!context.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? entry))
+            if (!entry.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? mvccEntry))
             {
-                entry = new()
+                mvccEntry = new()
                 {
-                    Value = context.Value, 
-                    Revision = context.Revision, 
-                    Expires = context.Expires, 
-                    LastUsed = context.LastUsed,
-                    LastModified = context.LastModified,
-                    State = context.State
+                    Value = entry.Value, 
+                    Revision = entry.Revision, 
+                    Expires = entry.Expires, 
+                    LastUsed = entry.LastUsed,
+                    LastModified = entry.LastModified,
+                    State = entry.State
                 };
 
-                context.MvccEntries.Add(message.TransactionId, entry);
+                entry.MvccEntries.Add(message.TransactionId, mvccEntry);
             }
             
-            if (entry.State is KeyValueState.Undefined or KeyValueState.Deleted || (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero))
+            if (mvccEntry.State is KeyValueState.Undefined or KeyValueState.Deleted || (mvccEntry.Expires != HLCTimestamp.Zero && mvccEntry.Expires - currentTime < TimeSpan.Zero))
                 return KeyValueStaticResponses.DoesNotExistContextResponse;
 
-            if (context.Revision > entry.Revision) // early conflict detection
+            if (entry.Revision > mvccEntry.Revision) // early conflict detection
                 return KeyValueStaticResponses.AbortedResponse;
             
-            readOnlyKeyValueContext = new(
+            readOnlyKeyValueEntry = new(
                 null, 
-                entry.Revision, 
-                entry.Expires, 
-                entry.LastUsed, 
-                entry.LastModified, 
-                entry.State
+                mvccEntry.Revision, 
+                mvccEntry.Expires, 
+                mvccEntry.LastUsed, 
+                mvccEntry.LastModified, 
+                mvccEntry.State
             );
 
-            return new(KeyValueResponseType.Exists, readOnlyKeyValueContext);
+            return new(KeyValueResponseType.Exists, readOnlyKeyValueEntry);
         }
         
-        if (context is null || context.State is KeyValueState.Undefined or KeyValueState.Deleted || (context.Expires != HLCTimestamp.Zero && context.Expires - currentTime < TimeSpan.Zero))
+        if (entry is null || entry.State is KeyValueState.Undefined or KeyValueState.Deleted || (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero))
             return KeyValueStaticResponses.DoesNotExistContextResponse;
 
-        context.LastUsed = currentTime;
+        entry.LastUsed = currentTime;
 
-        readOnlyKeyValueContext = new(
+        readOnlyKeyValueEntry = new(
             null, 
-            context.Revision, 
-            context.Expires, 
-            context.LastUsed, 
-            context.LastModified, 
-            context.State
+            entry.Revision, 
+            entry.Expires, 
+            entry.LastUsed, 
+            entry.LastModified, 
+            entry.State
         );
 
-        return new(KeyValueResponseType.Exists, readOnlyKeyValueContext);
+        return new(KeyValueResponseType.Exists, readOnlyKeyValueEntry);
     }
 }
