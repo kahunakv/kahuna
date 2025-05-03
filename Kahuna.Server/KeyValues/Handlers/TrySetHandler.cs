@@ -73,6 +73,9 @@ internal sealed class TrySetHandler : BaseHandler
         }
         else
         {
+            if (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
+                entry.State = KeyValueState.Deleted;
+            
             if (entry.State is KeyValueState.Deleted or KeyValueState.Undefined)
             {
                 entry.Value = null;
