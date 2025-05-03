@@ -119,41 +119,58 @@ internal sealed class SetManyCommand : BaseCommand
         }
 
         int expiresMs = 0;
-        
-        if (ast.extendedOne is not null)
-            expiresMs = int.Parse(ast.extendedOne.yytext!);
-
-        KeyValueFlags flags = KeyValueFlags.Set;
-
-        if (ast.extendedTwo is not null)
-        {
-            flags = ast.extendedTwo.nodeType switch
-            {
-                NodeType.SetNotExists => KeyValueFlags.SetIfNotExists,
-                NodeType.SetExists => KeyValueFlags.SetIfExists,
-                _ => flags
-            };
-        }
-        
         long compareRevision = 0;
         byte[]? compareValue = null;
+        KeyValueFlags flags = KeyValueFlags.Set;
 
-        if (ast.extendedThree is not null)
+        if (ast.extendedOne is not null)
         {
-            if (ast.extendedThree.leftAst is null)
-                throw new KahunaScriptException("Invalid SET cmp/cmprev", ast.yyline);
+            List<KeyValueSetFlag> arguments = [];
 
-            switch (ast.extendedThree.nodeType)
+            GetSetFlags(ast.extendedOne, arguments);
+            
+            foreach (KeyValueSetFlag flag in arguments)
             {
-                case NodeType.SetCmp:
-                    flags = KeyValueFlags.SetIfEqualToValue;
-                    compareValue = KeyValueTransactionExpression.Eval(context, ast.extendedThree.leftAst).ToBytes();
-                    break;
-                
-                case NodeType.SetCmpRev:
-                    flags = KeyValueFlags.SetIfEqualToRevision;
-                    compareRevision = KeyValueTransactionExpression.Eval(context, ast.extendedThree.leftAst).ToLong();
-                    break;
+                switch (flag.NodeType)
+                {
+                    case NodeType.SetEx:
+                        if (flag.ExprAst is null)
+                            throw new KahunaScriptException("Invalid SET EX expression", ast.yyline); 
+                        
+                        KeyValueExpressionResult ex = KeyValueTransactionExpression.Eval(context, flag.ExprAst);
+                        if (ex.Type != KeyValueExpressionType.LongType)
+                            throw new KahunaScriptException("Invalid SET EX expression", ast.yyline);
+                        
+                        expiresMs = (int)ex.LongValue;
+                        break;
+                    
+                    case NodeType.SetExists:
+                        flags |= KeyValueFlags.SetIfExists;
+                        break;
+                    
+                    case NodeType.SetNotExists:
+                        flags |= KeyValueFlags.SetIfNotExists;
+                        break;
+                    
+                    case NodeType.SetCmp:
+                        if (flag.ExprAst is null)
+                            throw new KahunaScriptException("Invalid SET CMP expression", ast.yyline); 
+                        
+                        flags |= KeyValueFlags.SetIfEqualToValue;
+                        compareValue = KeyValueTransactionExpression.Eval(context, flag.ExprAst).ToBytes();
+                        break;
+                    
+                    case NodeType.SetCmpRev:
+                        if (flag.ExprAst is null)
+                            throw new KahunaScriptException("Invalid SET CMPREV expression", ast.yyline); 
+                        
+                        flags |= KeyValueFlags.SetIfEqualToRevision;
+                        compareRevision = KeyValueTransactionExpression.Eval(context, flag.ExprAst).ToLong();
+                        break;
+                    
+                    default:
+                        throw new NotImplementedException();
+                }
             }
         }
 
@@ -170,5 +187,42 @@ internal sealed class SetManyCommand : BaseCommand
             ExpiresMs = expiresMs,
             Durability = durability            
         };
+    }
+    
+    private static void GetSetFlags(NodeAst ast, List<KeyValueSetFlag> flags)
+    {
+        while (true)
+        {
+            switch (ast.nodeType)
+            {
+                case NodeType.SetFlagsList:
+                {
+                    if (ast.leftAst is not null)
+                        GetSetFlags(ast.leftAst, flags);
+
+                    if (ast.rightAst is not null)
+                    {
+                        ast = ast.rightAst!;
+                        continue;
+                    }
+
+                    break;
+                }
+                
+                case NodeType.SetCmp:
+                case NodeType.SetCmpRev:
+                case NodeType.SetEx:
+                case NodeType.SetNotExists:
+                case NodeType.SetExists:
+                case NodeType.SetNoRev:
+                    flags.Add(new(ast.nodeType, ast.leftAst));
+                    break;
+                
+                default:
+                    throw new NotImplementedException();
+            }
+
+            break;
+        }
     }
 }
