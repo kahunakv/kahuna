@@ -58,7 +58,10 @@ internal sealed class TryReleaseExclusivePrefixLockHandler : BaseHandler
     }           
     
     private static void TryReleaseLock(HLCTimestamp transactionId, KeyValueEntry entry)
-    {                               
+    {
+        //if (entry.ReplicationIntent is not null)
+        //    return KeyValueStaticResponses.WaitingForReplicationResponse;
+        
         if (entry.WriteIntent is not null)
         {
             // if the transactionId is the same owner no need to acquire the lock

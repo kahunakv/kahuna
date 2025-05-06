@@ -1,4 +1,5 @@
 
+using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues;
@@ -7,8 +8,10 @@ namespace Kahuna.Server.KeyValues;
 /// Represents a proposal for a key-value operation in the system. This proposal encapsulates
 /// all relevant metadata and state required to process or prepare a key-value mutation.
 /// </summary>
-public sealed class KeyValueProposal
+internal sealed class KeyValueProposal
 {
+    public KeyValueRequestType Type { get; }
+    
     /// <summary>
     /// Gets the unique key associated with the key-value proposal.
     /// The key identifies the entry within the key-value data store and is used
@@ -65,6 +68,11 @@ public sealed class KeyValueProposal
     public KeyValueState State { get; }
     
     /// <summary>
+    /// Pass the original durability to avoid inconsistencies
+    /// </summary>
+    public KeyValueDurability Durability { get; set; }
+    
+    /// <summary>
     /// Constructor for creating a new instance of the KeyValueProposal class.
     /// </summary>
     /// <param name="key"></param>
@@ -75,6 +83,7 @@ public sealed class KeyValueProposal
     /// <param name="lastModified"></param>
     /// <param name="state"></param>
     public KeyValueProposal(
+        KeyValueRequestType type,
         string key, 
         byte[]? value, 
         long revision,
@@ -82,9 +91,11 @@ public sealed class KeyValueProposal
         HLCTimestamp expires, 
         HLCTimestamp lastUsed,
         HLCTimestamp lastModified,
-        KeyValueState state
+        KeyValueState state,
+        KeyValueDurability durability
     )
     {
+        Type = type;
         Key = key;
         Value = value;
         Revision = revision;
@@ -93,5 +104,6 @@ public sealed class KeyValueProposal
         LastUsed = lastUsed;
         LastModified = lastModified;
         State = state;
+        Durability = durability;
     }
 }

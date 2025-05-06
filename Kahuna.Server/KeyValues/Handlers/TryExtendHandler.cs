@@ -35,6 +35,17 @@ internal sealed class TryExtendHandler : BaseHandler
         else
             currentTime = context.Raft.HybridLogicalClock.ReceiveEvent(context.Raft.GetLocalNodeId(), message.TransactionId);
         
+        // Validate if there's an active replication enty on the key/value entry
+        // clients must retry operations to make sure the entry is fully replicated
+        // before modifying the entry
+        if (entry.ReplicationIntent is not null)
+        {
+            if (entry.ReplicationIntent.Expires - currentTime > TimeSpan.Zero)                
+                return KeyValueStaticResponses.WaitingForReplicationResponse;
+                
+            entry.ReplicationIntent = null;
+        }
+        
         // Validate if there's an exclusive key acquired on the lock and whether it is expired
         // if we find expired write intents we can remove it to allow new transactions to proceed
         if (entry.WriteIntent is not null)
@@ -42,7 +53,7 @@ internal sealed class TryExtendHandler : BaseHandler
             if (entry.WriteIntent.TransactionId != message.TransactionId)
             {
                 if (entry.WriteIntent.Expires - currentTime > TimeSpan.Zero)                
-                    return new(KeyValueResponseType.MustRetry, 0);
+                    return KeyValueStaticResponses.MustRetryResponse;
                 
                 entry.WriteIntent = null;
             }
@@ -55,7 +66,7 @@ internal sealed class TryExtendHandler : BaseHandler
             if (intent.TransactionId != message.TransactionId)
             {
                 if (intent.Expires - currentTime > TimeSpan.Zero)
-                    return new(KeyValueResponseType.MustRetry, 0);
+                    return KeyValueStaticResponses.MustRetryResponse;
             
                 context.LocksByPrefix.Remove(entry.Bucket);
             }
@@ -101,6 +112,7 @@ internal sealed class TryExtendHandler : BaseHandler
             return new(KeyValueResponseType.DoesNotExist, entry.Revision);
 
         KeyValueProposal proposal = new(
+            message.Type,
             message.Key,
             entry.Value,
             entry.Revision,
@@ -108,15 +120,12 @@ internal sealed class TryExtendHandler : BaseHandler
             currentTime + message.ExpiresMs,
             currentTime,
             currentTime,
-            entry.State
+            entry.State,
+            message.Durability
         );
         
         if (message.Durability == KeyValueDurability.Persistent)
-        {
-            bool success = await PersistAndReplicateKeyValueMessage(message.Type, proposal, currentTime);
-            if (!success)
-                return KeyValueStaticResponses.ErroredResponse;
-        }
+            return CreateProposal(message, entry, proposal, currentTime);
         
         entry.Expires = proposal.Expires;
         entry.LastUsed = proposal.LastUsed;

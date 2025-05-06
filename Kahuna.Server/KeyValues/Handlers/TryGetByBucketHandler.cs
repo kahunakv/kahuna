@@ -31,7 +31,7 @@ internal sealed class TryGetByBucketHandler : BaseHandler
     }
 
     /// <summary>
-    /// Queries the key-value store for entries matching the specified prefix in an ephemeral context.
+    /// Queries the key-value store for entries matching the specified bucket in an ephemeral context.
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
@@ -50,8 +50,8 @@ internal sealed class TryGetByBucketHandler : BaseHandler
             if (response.Type != KeyValueResponseType.Get)
                 return new(response.Type, []);
 
-            if (response is { Type: KeyValueResponseType.Get, Context: not null })
-                items.Add((key, response.Context));
+            if (response is { Type: KeyValueResponseType.Get, Entry: not null })
+                items.Add((key, response.Entry));
         }
 
         items.Sort(EnsureLexicographicalOrder);
@@ -78,16 +78,16 @@ internal sealed class TryGetByBucketHandler : BaseHandler
             if (response.Type == KeyValueResponseType.DoesNotExist)
                 continue;
             
-            if (response.Type != KeyValueResponseType.Get || response.Context is null)
+            if (response.Type != KeyValueResponseType.Get || response.Entry is null)
                 return new(response.Type, []);
 
             items.Add(key, new(
-                response.Context.Value, 
-                response.Context.Revision, 
-                response.Context.Expires, 
-                response.Context.LastUsed,
-                response.Context.LastModified,
-                response.Context.State
+                response.Entry.Value, 
+                response.Entry.Revision, 
+                response.Entry.Expires, 
+                response.Entry.LastUsed,
+                response.Entry.LastModified,
+                response.Entry.State
             ));
         }
 
@@ -105,8 +105,8 @@ internal sealed class TryGetByBucketHandler : BaseHandler
             if (response.Type == KeyValueResponseType.DoesNotExist)
                 continue;
 
-            if (response is { Type: KeyValueResponseType.Get, Context: not null })
-                items.Add(key, response.Context);
+            if (response is { Type: KeyValueResponseType.Get, Entry: not null })
+                items.Add(key, response.Entry);
         }
 
         // step 3: make sure the items are sorted in lexicographical order
@@ -129,8 +129,29 @@ internal sealed class TryGetByBucketHandler : BaseHandler
 
         ReadOnlyKeyValueEntry readOnlyKeyValueEntry;
         
-        if (entry?.WriteIntent != null && entry.WriteIntent.TransactionId != transactionId)
-            return new(KeyValueResponseType.MustRetry, 0);
+        // Validate if there's an active replication enty on the key/value entry
+        // clients must retry operations to make sure the entry is fully replicated
+        // before modifying the entry
+        if (entry?.ReplicationIntent is not null)
+        {
+            if (entry.ReplicationIntent.Expires - currentTime > TimeSpan.Zero)                
+                return KeyValueStaticResponses.WaitingForReplicationResponse;
+                
+            entry.ReplicationIntent = null;
+        }
+        
+        // Validate if there's an exclusive key acquired on the lock and whether it is expired
+        // if we find expired write intents we can remove it to allow new transactions to proceed
+        if (entry?.WriteIntent != null)
+        {
+            if (entry.WriteIntent.TransactionId != transactionId)
+            {
+                if (entry.WriteIntent.Expires - currentTime > TimeSpan.Zero)                
+                    return KeyValueStaticResponses.MustRetryResponse;
+                
+                entry.WriteIntent = null;
+            }
+        }
 
         // TransactionId is provided so we keep a MVCC entry for it
         if (transactionId != HLCTimestamp.Zero)

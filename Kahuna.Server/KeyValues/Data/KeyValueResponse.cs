@@ -47,11 +47,11 @@ public sealed class KeyValueResponse
     /// Gets the read-only key-value context associated with the response. Used in the 'get' operation.
     /// </summary>
     /// <remarks>
-    /// The <see cref="Context"/> property provides additional context about the key-value operation if available.
+    /// The <see cref="Entry"/> property provides additional context about the key-value operation if available.
     /// It encapsulates metadata or supplementary information relevant to the request, such as conditions
     /// or detailed operation state. This property can return null if no context is associated with the response.
     /// </remarks>
-    public ReadOnlyKeyValueEntry? Context { get; }
+    public ReadOnlyKeyValueEntry? Entry { get; }
     
     /// <summary>
     /// Used in the 'get by bucket' operation to return all the found values.
@@ -86,10 +86,10 @@ public sealed class KeyValueResponse
         Ticket = ticket;
     }
     
-    public KeyValueResponse(KeyValueResponseType type, ReadOnlyKeyValueEntry? context)
+    public KeyValueResponse(KeyValueResponseType type, ReadOnlyKeyValueEntry? entry)
     {
         Type = type;
-        Context = context;
+        Entry = entry;
     }
     
     public KeyValueResponse(KeyValueResponseType type, List<(string, ReadOnlyKeyValueEntry)> items)

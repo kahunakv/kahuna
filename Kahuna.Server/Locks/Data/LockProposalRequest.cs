@@ -4,7 +4,7 @@ using Kahuna.Server.Locks.Data;
 using Kahuna.Shared.Locks;
 using Kommander.Time;
 
-namespace Kahuna.Server.Locks;
+namespace Kahuna.Server.Locks.Data;
 
 internal sealed class LockProposalRequest
 {

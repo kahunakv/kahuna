@@ -32,6 +32,9 @@ internal sealed class TryReleaseExclusiveLockHandler : BaseHandler
         else
             entry.MvccEntries.Remove(message.TransactionId);
         
+        if (entry.ReplicationIntent is not null)
+            return KeyValueStaticResponses.WaitingForReplicationResponse;
+        
         if (entry.WriteIntent is not null && entry.WriteIntent.TransactionId != message.TransactionId)
             return KeyValueStaticResponses.AlreadyLockedResponse;
 

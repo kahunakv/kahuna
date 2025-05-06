@@ -77,6 +77,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         }
 
         KeyValueProposal proposal = new(
+            message.Type,
             message.Key,
             mvccEntry.Value,
             mvccEntry.Revision,
@@ -84,7 +85,8 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             mvccEntry.Expires,
             mvccEntry.LastUsed,
             mvccEntry.LastModified,
-            mvccEntry.State
+            mvccEntry.State,
+            message.Durability
         );
 
         if (message.Durability != KeyValueDurability.Persistent)

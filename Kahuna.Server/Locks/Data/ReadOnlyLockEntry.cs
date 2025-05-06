@@ -4,9 +4,9 @@ using Kommander.Time;
 namespace Kahuna.Server.Locks.Data;
 
 /// <summary>
-/// A snapshot of a lock context that is read-only.
+/// A snapshot of a lock entry that is read-only.
 /// </summary>
-public sealed class ReadOnlyLockContext
+public sealed class ReadOnlyLockEntry
 {
     public byte[]? Owner { get; }
     
@@ -14,7 +14,7 @@ public sealed class ReadOnlyLockContext
     
     public HLCTimestamp Expires { get; }
     
-    public ReadOnlyLockContext(byte[]? owner, long fencingToken, HLCTimestamp expires)
+    public ReadOnlyLockEntry(byte[]? owner, long fencingToken, HLCTimestamp expires)
     {
         Owner = owner;
         FencingToken = fencingToken;

@@ -3,7 +3,7 @@ using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues;
 
-public sealed class KeyValueWriteIntent
+internal sealed class KeyValueWriteIntent
 {
     public HLCTimestamp TransactionId { get; set; }
     

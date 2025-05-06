@@ -73,6 +73,17 @@ internal sealed class TryExistsHandler : BaseHandler
         
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
         
+        // Validate if there's an active replication enty on the key/value entry
+        // clients must retry operations to make sure the entry is fully replicated
+        // before modifying the entry
+        if (entry?.ReplicationIntent is not null)
+        {
+            if (entry.ReplicationIntent.Expires - currentTime > TimeSpan.Zero)                
+                return KeyValueStaticResponses.WaitingForReplicationResponse;
+                
+            entry.ReplicationIntent = null;
+        }
+        
         // Validate if there's an exclusive key acquired on the lock and whether it is expired
         // if we find expired write intents we can remove it to allow new transactions to proceed
         if (entry?.WriteIntent != null)
@@ -80,7 +91,7 @@ internal sealed class TryExistsHandler : BaseHandler
             if (entry.WriteIntent.TransactionId != message.TransactionId)
             {
                 if (entry.WriteIntent.Expires - currentTime > TimeSpan.Zero)                
-                    return new(KeyValueResponseType.MustRetry, 0);
+                    return KeyValueStaticResponses.MustRetryResponse;
                 
                 entry.WriteIntent = null;
             }
@@ -96,7 +107,7 @@ internal sealed class TryExistsHandler : BaseHandler
             if (intent.TransactionId != message.TransactionId)
             {
                 if (intent.Expires - currentTime > TimeSpan.Zero)
-                    return new(KeyValueResponseType.MustRetry, 0);
+                    return KeyValueStaticResponses.MustRetryResponse;
             
                 context.LocksByPrefix.Remove(bucket);
             }

@@ -13,7 +13,7 @@ namespace Kahuna.Server.Persistence.Backend;
 /// </summary>
 internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
 {
-    private readonly ConcurrentDictionary<string, LockContext> locks = new();
+    private readonly ConcurrentDictionary<string, LockEntry> locks = new();
     
     private readonly ConcurrentDictionary<string, KeyValueEntry> keyValues = new();
 
@@ -27,7 +27,7 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
     {
         foreach (PersistenceRequestItem item in items)
         {
-            if (locks.TryGetValue(item.Key, out LockContext? lockContext))
+            if (locks.TryGetValue(item.Key, out LockEntry? lockContext))
             {
                 lockContext.Owner = item.Value;
                 lockContext.Expires = new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter);
@@ -89,7 +89,7 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
         return true;
     }
 
-    public LockContext? GetLock(string resource)
+    public LockEntry? GetLock(string resource)
     {
         return locks.GetValueOrDefault(resource);
     }

@@ -15,7 +15,7 @@ internal interface IPersistenceBackend
 
     public bool StoreKeyValues(List<PersistenceRequestItem> items);
 
-    public LockContext? GetLock(string resource);
+    public LockEntry? GetLock(string resource);
     
     public KeyValueEntry? GetKeyValue(string keyName);
     

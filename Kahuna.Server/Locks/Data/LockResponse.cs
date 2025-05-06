@@ -34,10 +34,10 @@ internal sealed class LockResponse
     /// information about the state of the lock, such as its owner, fencing token, and expiration time.
     /// </summary>
     /// <remarks>
-    /// The value is of type <see cref="ReadOnlyLockContext"/> and may be null if no context is applicable
+    /// The value is of type <see cref="ReadOnlyLockEntry"/> and may be null if no context is applicable
     /// or available for the operation result.
     /// </remarks>
-    public ReadOnlyLockContext? Context { get; }
+    public ReadOnlyLockEntry? Context { get; }
 
     /// <summary>
     /// Represents the response for a lock operation. Used to convey the result
@@ -62,7 +62,7 @@ internal sealed class LockResponse
     /// Represents the response for a lock operation, detailing the outcome
     /// and relevant contextual information such as fencing tokens and lock context.
     /// </summary>
-    public LockResponse(LockResponseType type, ReadOnlyLockContext? context)
+    public LockResponse(LockResponseType type, ReadOnlyLockEntry? context)
     {
         Type = type;
         Context = context;

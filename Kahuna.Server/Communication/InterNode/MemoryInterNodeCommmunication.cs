@@ -114,7 +114,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>A tuple containing the lock response type and the lock context.</returns>
     /// <exception cref="KahunaServerException">Thrown if the node does not exist.</exception>
-    public async Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(
+    public async Task<(LockResponseType, ReadOnlyLockEntry?)> GetLock(
         string node, 
         string resource, 
         LockDurability durability, 

@@ -83,6 +83,17 @@ internal sealed class TrySetHandler : BaseHandler
             }
         }
         
+        // Validate if there's an active replication enty on the key/value entry
+        // clients must retry operations to make sure the entry is fully replicated
+        // before modifying the entry
+        if (entry.ReplicationIntent is not null)
+        {
+            if (entry.ReplicationIntent.Expires - currentTime > TimeSpan.Zero)                
+                return KeyValueStaticResponses.WaitingForReplicationResponse;
+                
+            entry.ReplicationIntent = null;
+        }
+        
         // Validate if there's an exclusive key acquired on the lock and whether it is expired
         // if we find expired write intents we can remove it to allow new transactions to proceed
         if (entry.WriteIntent != null)
@@ -221,6 +232,7 @@ internal sealed class TrySetHandler : BaseHandler
             return new(KeyValueResponseType.NotSet, entry.Revision, entry.LastModified);
         
         KeyValueProposal proposal = new(
+            message.Type,
             message.Key,
             message.Value,
             entry.Revision + 1,
@@ -228,15 +240,12 @@ internal sealed class TrySetHandler : BaseHandler
             newExpires,
             currentTime,
             currentTime,
-            KeyValueState.Set
+            KeyValueState.Set,
+            message.Durability
         );
 
         if (message.Durability == KeyValueDurability.Persistent)
-        {
-            bool success = await PersistAndReplicateKeyValueMessage(message.Type, proposal, currentTime);
-            if (!success)
-                return KeyValueStaticResponses.ErroredResponse;
-        }
+            return CreateProposal(message, entry, proposal, currentTime);
 
         if (entry.Revisions is not null)
             RemoveExpiredRevisions(entry, proposal.Revision);        

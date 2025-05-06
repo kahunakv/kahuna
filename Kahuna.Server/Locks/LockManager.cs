@@ -4,14 +4,12 @@ using Nixie.Routers;
 
 using Kommander;
 using Kommander.Data;
-using Kommander.Time;
 
 using Kahuna.Shared.Locks;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
-using Kahuna.Server.Replication.Protos;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Locks.Data;
 
@@ -25,6 +23,8 @@ namespace Kahuna.Server.Locks;
 /// </summary>
 internal sealed class LockManager
 {
+    private const int MaxRetries = 3;
+    
     private readonly ActorSystem actorSystem;
 
     private readonly IRaft raft;
@@ -226,7 +226,13 @@ internal sealed class LockManager
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public Task<(LockResponseType, long)> LocateAndTryLock(string resource, byte[] owner, int expiresMs, LockDurability durability, CancellationToken cancellationToken)
+    public Task<(LockResponseType, long)> LocateAndTryLock(
+        string resource,
+        byte[] owner, 
+        int expiresMs, 
+        LockDurability durability, 
+        CancellationToken cancellationToken
+    )
     {
         return locator.LocateAndTryLock(resource, owner, expiresMs, durability, cancellationToken);
     }
@@ -240,7 +246,13 @@ internal sealed class LockManager
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public Task<(LockResponseType, long)> LocateAndTryExtendLock(string resource, byte[] owner, int expiresMs, LockDurability durability, CancellationToken cancellationToken)
+    public Task<(LockResponseType, long)> LocateAndTryExtendLock(
+        string resource, 
+        byte[] owner, 
+        int expiresMs, 
+        LockDurability durability, 
+        CancellationToken cancellationToken
+    )
     {
         return locator.LocateAndTryExtendLock(resource, owner, expiresMs, durability, cancellationToken);
     }
@@ -266,7 +278,7 @@ internal sealed class LockManager
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public Task<(LockResponseType, ReadOnlyLockContext?)> LocateAndGetLock(string resource, LockDurability durability, CancellationToken cancellationToken)
+    public Task<(LockResponseType, ReadOnlyLockEntry?)> LocateAndGetLock(string resource, LockDurability durability, CancellationToken cancellationToken)
     {
         return locator.LocateAndGetLock(resource, durability, cancellationToken);
     }
@@ -292,7 +304,7 @@ internal sealed class LockManager
             null
         );
 
-        for (int i = 0; i < 3; i++)
+        for (int i = 0; i < MaxRetries; i++)
         {
             LockResponse? response;
 
@@ -337,7 +349,7 @@ internal sealed class LockManager
             null
         );
 
-        for (int i = 0; i < 3; i++)
+        for (int i = 0; i < MaxRetries; i++)
         {
             LockResponse? response;
 
@@ -381,7 +393,7 @@ internal sealed class LockManager
             null
         );
 
-        for (int i = 0; i < 3; i++)
+        for (int i = 0; i < MaxRetries; i++)
         {
             LockResponse? response;
 
@@ -411,7 +423,7 @@ internal sealed class LockManager
     /// <param name="resource"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(string resource, LockDurability durability)
+    public async Task<(LockResponseType, ReadOnlyLockEntry?)> GetLock(string resource, LockDurability durability)
     {
         LockRequest request = new(
             LockRequestType.Get, 

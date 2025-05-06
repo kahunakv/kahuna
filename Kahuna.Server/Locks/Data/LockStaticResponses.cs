@@ -17,6 +17,8 @@ internal static class LockStaticResponses
     
     internal static readonly LockResponse MustRetryResponse = new(LockResponseType.MustRetry);
     
+    internal static readonly LockResponse LockedResponse = new(LockResponseType.Locked);
+    
     internal static readonly LockResponse BusyResponse = new(LockResponseType.Busy);
     
     internal static readonly LockResponse ErroredResponse = new(LockResponseType.Errored);

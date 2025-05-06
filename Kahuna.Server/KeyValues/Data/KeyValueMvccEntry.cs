@@ -10,7 +10,7 @@ namespace Kahuna.Server.KeyValues;
 /// This class acts as a data structure for storing metadata and state related to
 /// a key-value entry, supporting versioning, state tracking, expiration, and modification timestamps.
 /// </remarks>
-public sealed class KeyValueMvccEntry
+internal sealed class KeyValueMvccEntry
 {
     /// <summary>
     /// The current value of the key.

@@ -163,7 +163,7 @@ public sealed class LocksService : Locker.LockerBase
                 Type = GrpcLockResponseType.LockResponseTypeInvalidInput
             };
         
-        (LockResponseType type, ReadOnlyLockContext? lockContext) = await locks.LocateAndGetLock(
+        (LockResponseType type, ReadOnlyLockEntry? lockContext) = await locks.LocateAndGetLock(
             request.Resource, 
             (LockDurability)request.Durability, 
             context.CancellationToken

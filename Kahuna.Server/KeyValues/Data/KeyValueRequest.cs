@@ -3,7 +3,6 @@ using Kahuna.Shared.KeyValue;
 using Kommander;
 using Kommander.Time;
 using Nixie.Routers;
-using Standart.Hash.xxHash;
 
 namespace Kahuna.Server.KeyValues;
 
@@ -18,27 +17,42 @@ namespace Kahuna.Server.KeyValues;
 /// </remarks>
 public sealed class KeyValueRequest : IConsistentHashable
 {
-    public KeyValueRequestType Type { get; }
+    public KeyValueRequestType Type { get; private set; }
+
+    public HLCTimestamp TransactionId { get; private set; }
+
+    public HLCTimestamp CommitId { get; private set; }
     
-    public HLCTimestamp TransactionId { get; }
+    public string Key { get; private set; }
     
-    public HLCTimestamp CommitId { get; }
+    public byte[]? Value { get; private set; }
     
-    public string Key { get; }
+    public byte[]? CompareValue { get; private set; }
     
-    public byte[]? Value { get; }
+    public long CompareRevision { get; private set; }
     
-    public byte[]? CompareValue { get; }
+    public KeyValueFlags Flags { get; private set; }
     
-    public long CompareRevision { get; }
+    public int ExpiresMs { get; private set; }
     
-    public KeyValueFlags Flags { get; }
+    public HLCTimestamp ProposalTicketId { get; private set; }
     
-    public int ExpiresMs { get; }
+    public KeyValueDurability Durability { get; private set;  }
     
-    public HLCTimestamp ProposalTicketId { get; }
+    /// <summary>
+    /// 
+    /// </summary>
+    public int ProposalId { get; private set; }
     
-    public KeyValueDurability Durability { get; }
+    /// <summary>
+    /// 
+    /// </summary>
+    public int PartitionId { get; private set; }
+    
+    /// <summary>
+    /// 
+    /// </summary>
+    public TaskCompletionSource<KeyValueResponse?>? Promise { get; private set; }
     
     /// <summary>
     /// Constructor
@@ -64,7 +78,10 @@ public sealed class KeyValueRequest : IConsistentHashable
         KeyValueFlags flags,
         int expiresMs, 
         HLCTimestamp proposalTicketId,
-        KeyValueDurability durability
+        KeyValueDurability durability,
+        int proposalId, 
+        int partitionId,
+        TaskCompletionSource<KeyValueResponse?>? promise
     )
     {
         Type = type;
@@ -78,6 +95,49 @@ public sealed class KeyValueRequest : IConsistentHashable
         ExpiresMs = expiresMs;
         ProposalTicketId = proposalTicketId;
         Durability = durability;
+        ProposalId = proposalId;
+        PartitionId = partitionId;
+        Promise = promise;
+    }
+    
+    public void Reset(
+        KeyValueRequestType type,
+        HLCTimestamp transactionId,
+        HLCTimestamp commitId,
+        string key, 
+        byte[]? value,
+        byte[]? compareValue,
+        long compareRevision,
+        KeyValueFlags flags,
+        int expiresMs, 
+        HLCTimestamp proposalTicketId,
+        KeyValueDurability durability,
+        int proposalId, 
+        int partitionId,
+        TaskCompletionSource<KeyValueResponse?>? promise
+    )
+    {
+        Type = type;
+        TransactionId = transactionId;
+        CommitId = commitId;
+        Key = key;
+        Value = value;
+        CompareValue = compareValue;
+        CompareRevision = compareRevision;
+        Flags = flags;
+        ExpiresMs = expiresMs;
+        ProposalTicketId = proposalTicketId;
+        Durability = durability;
+        ProposalId = proposalId;
+        PartitionId = partitionId;
+        Promise = promise;
+    }
+    
+    public void Clear()
+    {
+        Key = string.Empty;
+        Value = null;
+        Promise = null;
     }
 
     public int GetHash()

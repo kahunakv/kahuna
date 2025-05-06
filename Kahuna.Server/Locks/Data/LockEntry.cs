@@ -4,10 +4,10 @@ using Kommander.Time;
 namespace Kahuna.Server.Locks.Data;
 
 /// <summary>
-/// Represents the context of a lock, encapsulating the state, owner, expiration, and other
+/// Represents a lock entry, encapsulating the state, owner, expiration and other
 /// relevant metadata associated with a specific lock resource.
 /// </summary>
-internal sealed class LockContext
+internal sealed class LockEntry
 {
     /// <summary>
     /// The current owner of the lock.
@@ -42,5 +42,5 @@ internal sealed class LockContext
     /// <summary>
     /// Locks with persistent durability are temporarily marked for writing 
     /// </summary>
-    public LockWriteIntent? WriteIntent { get; set; }
+    public LockReplicationIntent? ReplicationIntent { get; set; }
 }

@@ -130,7 +130,7 @@ internal sealed class LockLocator
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<(LockResponseType, ReadOnlyLockContext?)> LocateAndGetLock(string resource, LockDurability durability, CancellationToken cancellationToken)
+    public async Task<(LockResponseType, ReadOnlyLockEntry?)> LocateAndGetLock(string resource, LockDurability durability, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(resource))
             return (LockResponseType.InvalidInput, null);

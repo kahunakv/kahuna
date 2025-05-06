@@ -140,7 +140,7 @@ public sealed class KahunaManager : IKahuna
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public Task<(LockResponseType, ReadOnlyLockContext?)> LocateAndGetLock(string resource, LockDurability durability, CancellationToken cancellationToken)
+    public Task<(LockResponseType, ReadOnlyLockEntry?)> LocateAndGetLock(string resource, LockDurability durability, CancellationToken cancellationToken)
     {
         return locks.LocateAndGetLock(resource, durability, cancellationToken);
     }
@@ -189,7 +189,7 @@ public sealed class KahunaManager : IKahuna
     /// <param name="resource"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(string resource, LockDurability durability)
+    public Task<(LockResponseType, ReadOnlyLockEntry?)> GetLock(string resource, LockDurability durability)
     {
         return locks.GetLock(resource, durability);
     }

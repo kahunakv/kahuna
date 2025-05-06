@@ -42,6 +42,17 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
 
             context.Store.Insert(message.Key, newEntry);
         }
+        
+        // Validate if there's an active replication enty on the key/value entry
+        // clients must retry operations to make sure the entry is fully replicated
+        // before modifying the entry
+        if (entry.ReplicationIntent is not null)
+        {
+            if (entry.ReplicationIntent.Expires - currentTime > TimeSpan.Zero)                
+                return KeyValueStaticResponses.WaitingForReplicationResponse;
+                
+            entry.ReplicationIntent = null;
+        }
 
         if (entry.WriteIntent is not null)
         {

@@ -234,10 +234,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// </summary>
     /// <param name="resource">The unique identifier of the resource for which the lock context is being retrieved.</param>
     /// <returns>
-    /// A <see cref="LockContext"/> instance containing details about the lock if it exists;
+    /// A <see cref="LockEntry"/> instance containing details about the lock if it exists;
     /// otherwise, null if no lock is associated with the specified resource.
     /// </returns>
-    public LockContext? GetLock(string resource)
+    public LockEntry? GetLock(string resource)
     {
         Span<byte> buffer = stackalloc byte[Encoding.UTF8.GetByteCount(resource)];
         Encoding.UTF8.GetBytes(resource.AsSpan(), buffer);
@@ -255,7 +255,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         else
             owner = message.Owner.ToByteArray();
 
-        LockContext context = new()
+        LockEntry entry = new()
         {
             Owner = owner,
             FencingToken = message.FencingToken,
@@ -264,7 +264,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             LastModified = new(message.LastModifiedNode, message.LastModifiedPhysical, message.LastModifiedCounter),
         };
 
-        return context;
+        return entry;
     }
 
     /// <summary>

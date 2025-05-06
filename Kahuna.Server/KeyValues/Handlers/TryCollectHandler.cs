@@ -40,8 +40,15 @@ internal sealed class TryCollectHandler : BaseHandler
             if (number >= cacheEntriesToRemove)
                 break;
             
-            if (key.Value.WriteIntent is not null)
+            if (key.Value.WriteIntent is not null || key.Value.ReplicationIntent is not null)
                 continue;
+            
+            if (key.Value.State is KeyValueState.Deleted or KeyValueState.Undefined)
+            {
+                keysToEvict.Add(key.Key);
+                number++;
+                continue;
+            }
             
             if (key.Value.Expires == HLCTimestamp.Zero)
                 continue;
@@ -53,23 +60,7 @@ internal sealed class TryCollectHandler : BaseHandler
             number++;
         }
         
-        // Step 2: Evict deleted keys
-        foreach (KeyValuePair<string, KeyValueEntry> key in context.Store.GetItems())
-        {
-            if (number >= cacheEntriesToRemove)
-                break;
-            
-            if (key.Value.WriteIntent is not null)
-                continue;
-
-            if (key.Value.State is KeyValueState.Deleted or KeyValueState.Undefined)
-            {
-                keysToEvict.Add(key.Key);
-                number++;
-            }
-        }
-        
-        // Step 3: Evict keys that haven't been used in a while
+        // Step 2: Evict keys that haven't been used in a while
         foreach (KeyValuePair<string, KeyValueEntry> key in context.Store.GetItems())
         {
             if (number >= cacheEntriesToRemove)

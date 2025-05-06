@@ -20,7 +20,7 @@ public interface IKahuna
 
     public Task<LockResponseType> LocateAndTryUnlock(string resource, byte[] owner, LockDurability durability,CancellationToken cancellationToken);
 
-    public Task<(LockResponseType, ReadOnlyLockContext?)> LocateAndGetLock(string resource, LockDurability durability, CancellationToken cancellationToken);
+    public Task<(LockResponseType, ReadOnlyLockEntry?)> LocateAndGetLock(string resource, LockDurability durability, CancellationToken cancellationToken);
     
     public Task<(LockResponseType, long)> TryLock(string resource, byte[] owner, int expiresMs, LockDurability durability);
 
@@ -28,7 +28,7 @@ public interface IKahuna
 
     public Task<LockResponseType> TryUnlock(string resource, byte[] owner, LockDurability durability);
     
-    public Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(string resource, LockDurability durability);
+    public Task<(LockResponseType, ReadOnlyLockEntry?)> GetLock(string resource, LockDurability durability);
 
     public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTrySetKeyValue(HLCTimestamp transactionId, string key, byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken);
     

@@ -79,7 +79,7 @@ public class TestLocks : BaseCluster
         Assert.Equal(LockResponseType.Extended, response);
         Assert.Equal(1, fencingToken);
 
-        (response, ReadOnlyLockContext? lockContext) = await kahuna1.LocateAndGetLock(lockName, durability, TestContext.Current.CancellationToken);
+        (response, ReadOnlyLockEntry? lockContext) = await kahuna1.LocateAndGetLock(lockName, durability, TestContext.Current.CancellationToken);
         Assert.Equal(LockResponseType.Got, response);
         Assert.NotNull(lockContext);
 
@@ -129,7 +129,7 @@ public class TestLocks : BaseCluster
         Assert.Equal(1, fencingToken);
 
         // Get lock context from a different node
-        (response, ReadOnlyLockContext? lockContext) = await kahuna1.LocateAndGetLock(lockName, durability, TestContext.Current.CancellationToken);
+        (response, ReadOnlyLockEntry? lockContext) = await kahuna1.LocateAndGetLock(lockName, durability, TestContext.Current.CancellationToken);
         Assert.Equal(LockResponseType.Got, response);
         Assert.NotNull(lockContext);
 
@@ -169,7 +169,7 @@ public class TestLocks : BaseCluster
         Assert.Equal(LockResponseType.LockDoesNotExist, response);
         Assert.Equal(0, fencingToken);
 
-        (response, ReadOnlyLockContext? lockContext) = await kahuna1.LocateAndGetLock(lockName, durability, TestContext.Current.CancellationToken);
+        (response, ReadOnlyLockEntry? lockContext) = await kahuna1.LocateAndGetLock(lockName, durability, TestContext.Current.CancellationToken);
         Assert.Equal(LockResponseType.LockDoesNotExist, response);
         //Assert.Null(lockContext);
 

@@ -1,9 +1,9 @@
 
 using Kommander.Time;
 
-namespace Kahuna.Server.Locks.Data;
+namespace Kahuna.Server.KeyValues;
 
-internal sealed class LockWriteIntent
+internal sealed class KeyValueReplicationIntent
 {
     public int ProposalId { get; set; }
     

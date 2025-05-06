@@ -16,6 +16,7 @@ public enum KeyValueResponseType
     Committed = 8,
     RolledBack = 9,
     Exists = 10,
+    WaitingForReplication = 11,
     Errored = 99,
     InvalidInput = 100,
     MustRetry = 101,

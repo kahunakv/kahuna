@@ -49,6 +49,13 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
             return KeyValueStaticResponses.ErroredResponse;
         }
 
+        if (entry.ReplicationIntent is null)
+        {
+            context.Logger.LogWarning("Replication intent is active on key {Key}", message.Key);
+            
+            return KeyValueStaticResponses.WaitingForReplicationResponse;;
+        }
+
         if (entry.WriteIntent is null)
         {
             context.Logger.LogWarning("Write intent is missing for {TransactionId}", message.TransactionId);

@@ -8,7 +8,7 @@ namespace Kahuna.Server.KeyValues;
 /// Used to manage the lifecycle and multi-version concurrency control (MVCC)
 /// of key-value pairs, providing support for persistence, revisions, expiration and lock management.
 /// </summary>
-public sealed class KeyValueEntry
+internal sealed class KeyValueEntry
 {
     /// <summary>
     /// The current bucket of the key if any
@@ -44,6 +44,11 @@ public sealed class KeyValueEntry
     /// Represents a potential write intent to modify the key
     /// </summary>
     public KeyValueWriteIntent? WriteIntent { get; set; }
+    
+    /// <summary>
+    /// Represents an active replication intent for the key
+    /// </summary>
+    public KeyValueReplicationIntent? ReplicationIntent { get; set; }
     
     /// <summary>
     /// Represents recently accessed revisions

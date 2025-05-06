@@ -47,7 +47,7 @@ for (int j = 0; j < 5; j++)
 
     for (int i = 0; i < numberOfTasks; i++)
     {
-        /*int remainder = (i + 1) % 8;
+        int remainder = (i + 1) % 8;
         
         switch (remainder)
         {
@@ -73,9 +73,9 @@ for (int j = 0; j < 5; j++)
             case 0:
                 tasks.Add(DeleteKeyConcurrently(locks));
                 break;                
-        }*/
+        }
         
-        tasks.Add(AcquireLockConcurrently(locks));
+        //tasks.Add(AcquireLockConcurrently(locks));
     }
 
     await Task.WhenAll(tasks);

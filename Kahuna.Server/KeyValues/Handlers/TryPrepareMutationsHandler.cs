@@ -109,7 +109,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         
         // Transaction queried a value that didn't exist
         if (mvccEntry.State == KeyValueState.Undefined)
-            return new(KeyValueResponseType.Prepared);
+            return KeyValueStaticResponses.PrepareResponse;
 
         // In optimistic concurrency, we create the write intent if it doesn't exist
         // this is to ensure that the assigned transaction will win the race.
@@ -129,9 +129,10 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         }
 
         if (message.Durability != KeyValueDurability.Persistent)
-            return new(KeyValueResponseType.Prepared);
+            return KeyValueStaticResponses.PrepareResponse;
         
         KeyValueProposal proposal = new(
+            message.Type,
             message.Key,
             mvccEntry.Value,
             mvccEntry.Revision,
@@ -139,7 +140,8 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             mvccEntry.Expires,
             mvccEntry.LastUsed,
             mvccEntry.LastModified,
-            mvccEntry.State
+            mvccEntry.State,
+            message.Durability
         );
 
         (bool success, HLCTimestamp proposalTicket) = await PrepareKeyValueMessage(KeyValueRequestType.TrySet, proposal, message.TransactionId);

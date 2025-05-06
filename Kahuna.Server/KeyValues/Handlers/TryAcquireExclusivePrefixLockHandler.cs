@@ -79,7 +79,18 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
     }           
     
     private KeyValueResponse TryLock(HLCTimestamp currentTime, HLCTimestamp transactionId, string key, int expiresMs, KeyValueEntry entry)
-    {                               
+    {            
+        // Validate if there's an active replication enty on the key/value entry
+        // clients must retry operations to make sure the entry is fully replicated
+        // before modifying the entry
+        if (entry.ReplicationIntent is not null)
+        {
+            if (entry.ReplicationIntent.Expires - currentTime > TimeSpan.Zero)                
+                return KeyValueStaticResponses.WaitingForReplicationResponse;
+                
+            entry.ReplicationIntent = null;
+        }
+        
         if (entry.WriteIntent is not null)
         {
             // if the transactionId is the same owner no need to acquire the lock

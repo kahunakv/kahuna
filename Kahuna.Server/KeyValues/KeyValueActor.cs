@@ -10,6 +10,7 @@ using Kahuna.Server.KeyValues.Handlers;
 using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Utils;
+using Nixie.Routers;
 
 namespace Kahuna.Server.KeyValues;
 
@@ -49,6 +50,11 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// can add/modify/delete the keys in the prefix.
     /// </summary>
     private readonly Dictionary<string, KeyValueWriteIntent> locksByPrefix = new();
+    
+    /// <summary>
+    /// 
+    /// </summary>
+    private readonly Dictionary<int, KeyValueProposal> proposals = new();
 
     /// <summary>
     /// Provides logging capabilities for the KeyValueActor class. This logger is used to
@@ -182,6 +188,16 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// consolidating cached data or freeing unneeded resources to maintain efficient operation.
     /// </summary>
     private readonly TryCollectHandler tryCollectHandler;
+    
+    /// <summary>
+    /// 
+    /// </summary>
+    private readonly CompleteProposalHandler completeProposalHandler;
+    
+    /// <summary>
+    /// 
+    /// </summary>
+    private readonly ReleaseProposalHandler releaseProposalHandler;
 
     /// <summary>
     /// A high-resolution timer used to measure the time elapsed during the handling of requests within the actor.
@@ -194,11 +210,16 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// Constructor
     /// </summary>
     /// <param name="actorContext"></param>
+    /// <param name="backgroundWriter"></param>
+    /// <param name="proposalRouter"></param>
+    /// <param name="persistenceBackend"></param>
     /// <param name="raft"></param>
+    /// <param name="configuration"></param>
     /// <param name="logger"></param>
     public KeyValueActor(
         IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
+        IActorRef<BalancingActor<KeyValueProposalActor, KeyValueProposalRequest>, KeyValueProposalRequest> proposalRouter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
         KahunaConfiguration configuration,
@@ -208,7 +229,18 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         this.actorContext = actorContext;
         this.logger = logger;
         
-        KeyValueContext context = new(keyValuesStore, locksByPrefix, backgroundWriter, persistenceBackend, raft, configuration, logger);
+        KeyValueContext context = new(
+            actorContext,
+            keyValuesStore, 
+            locksByPrefix, 
+            proposals,
+            backgroundWriter, 
+            proposalRouter,
+            persistenceBackend, 
+            raft, 
+            configuration, 
+            logger
+        );
 
         trySetHandler = new(context);
         tryExtendHandler = new(context);
@@ -226,6 +258,8 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         tryCommitMutationsHandler = new(context);
         tryRollbackMutationsHandler = new(context);
         tryCollectHandler = new(context);
+        completeProposalHandler = new(context);
+        releaseProposalHandler = new(context);
     }
 
     /// <summary>
@@ -279,6 +313,8 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.GetByBucket => await GetByBucket(message),
                 KeyValueRequestType.ScanByPrefix => await ScanByPrefix(message),
                 KeyValueRequestType.ScanByPrefixFromDisk => await ScanByPrefixFromDisk(message),
+                KeyValueRequestType.CompleteProposal => CompleteProposal(message),
+                KeyValueRequestType.ReleaseProposal => ReleaseProposal(message),
                 _ => KeyValueStaticResponses.ErroredResponse
             };
 
@@ -451,6 +487,28 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private Task<KeyValueResponse> TryRollbackMutations(KeyValueRequest message)
     {
         return tryRollbackMutationsHandler.Execute(message);
+    }
+    
+    /// <summary>
+    /// Completes a replication proposal by applying the changes to the key-value store
+    /// and removing the replication intent from the entry
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
+    private KeyValueResponse CompleteProposal(KeyValueRequest message)
+    {
+        return completeProposalHandler.Execute(message);
+    }
+    
+    /// <summary>
+    /// Releases a failed replication proposal by removing the temporary proposal
+    /// and removing the replication intent from the entry
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
+    private KeyValueResponse ReleaseProposal(KeyValueRequest message)
+    {
+        return releaseProposalHandler.Execute(message);
     }
 
     /// <summary>

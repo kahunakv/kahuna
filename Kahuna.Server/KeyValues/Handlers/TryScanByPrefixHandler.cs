@@ -41,8 +41,8 @@ internal sealed class TryScanByPrefixHandler : BaseHandler
             if (response.Type != KeyValueResponseType.Get)
                 continue;
 
-            if (response is { Type: KeyValueResponseType.Get, Context: not null })
-                items.Add((key, response.Context));
+            if (response is { Type: KeyValueResponseType.Get, Entry: not null })
+                items.Add((key, response.Entry));
         }        
                 
         return new(KeyValueResponseType.Get, items);

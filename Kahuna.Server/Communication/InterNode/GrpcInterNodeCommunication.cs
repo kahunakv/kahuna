@@ -152,7 +152,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     /// <param name="durability">Specifies the durability level of the lock, either ephemeral or persistent.</param>
     /// <param name="cancellationToken">A token to observe cancellation requests for the operation.</param>
     /// <returns>A tuple consisting of the lock response type and an optional lock context containing ownership and lock metadata.</returns>
-    public async Task<(LockResponseType, ReadOnlyLockContext?)> GetLock(
+    public async Task<(LockResponseType, ReadOnlyLockEntry?)> GetLock(
         string node, 
         string resource, 
         LockDurability durability, 

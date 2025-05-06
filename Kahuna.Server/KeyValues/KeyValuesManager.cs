@@ -1,5 +1,4 @@
 
-using Kahuna.Server.Communication.Internode;
 using Nixie;
 using Nixie.Routers;
 
@@ -15,7 +14,7 @@ using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
 using Kahuna.Server.ScriptParser;
-using Kahuna.Shared.Communication.Rest;
+using Kahuna.Server.Communication.Internode;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues;
@@ -27,6 +26,8 @@ namespace Kahuna.Server.KeyValues;
 /// </summary>
 internal sealed class KeyValuesManager
 {
+    private const int MaxRetries = 3;
+    
     private readonly ActorSystem actorSystem;
 
     private readonly IRaft raft;
@@ -42,6 +43,8 @@ internal sealed class KeyValuesManager
     private readonly IActorRef<ScriptParserEvicterActor, ScriptParserEvicterRequest> scriptParserEvicter;
 
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
+    
+    private readonly IActorRef<BalancingActor<KeyValueProposalActor, KeyValueProposalRequest>, KeyValueProposalRequest> proposalRouter;
 
     private readonly IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> ephemeralKeyValuesRouter;
     
@@ -83,6 +86,7 @@ internal sealed class KeyValuesManager
         
         scriptParserEvicter = actorSystem.Spawn<ScriptParserEvicterActor, ScriptParserEvicterRequest>("script-parser-evicter", logger);
         
+        proposalRouter = GetProposalRouter(configuration);
         ephemeralKeyValuesRouter = GetEphemeralRouter(configuration);
         persistentKeyValuesRouter = GetConsistentRouter(configuration);
 
@@ -91,6 +95,24 @@ internal sealed class KeyValuesManager
 
         restorer = new(backgroundWriter, raft, logger);
         replicator = new(backgroundWriter, raft, logger);
+    }
+    
+    private IActorRef<BalancingActor<KeyValueProposalActor, KeyValueProposalRequest>, KeyValueProposalRequest> GetProposalRouter(
+        KahunaConfiguration configuration
+    )
+    {
+        List<IActorRef<KeyValueProposalActor, KeyValueProposalRequest>> proposalInstances = new(configuration.LocksWorkers);
+
+        for (int i = 0; i < configuration.KeyValueWorkers; i++)
+            proposalInstances.Add(actorSystem.Spawn<KeyValueProposalActor, KeyValueProposalRequest>(
+                "proposal-keyvalue-" + i, 
+                raft, 
+                persistenceBackend, 
+                configuration,
+                logger
+            ));
+        
+        return actorSystem.Spawn<BalancingActor<KeyValueProposalActor, KeyValueProposalRequest>, KeyValueProposalRequest>(null, proposalInstances);
     }
 
     /// <summary>
@@ -109,7 +131,8 @@ internal sealed class KeyValuesManager
         for (int i = 0; i < configuration.KeyValueWorkers; i++)
             ephemeralInstances.Add(actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                 "ephemeral-keyvalue-" + i, backgroundWriter, 
-                persistenceBackend, 
+                persistenceBackend,
+                proposalRouter,
                 raft,
                 configuration,
                 logger
@@ -135,6 +158,7 @@ internal sealed class KeyValuesManager
             persistentInstances.Add(actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                 "persistent-keyvalue-" + i, backgroundWriter, 
                 persistenceBackend, 
+                proposalRouter,
                 raft, 
                 configuration,
                 logger
@@ -566,7 +590,7 @@ internal sealed class KeyValuesManager
         KeyValueDurability durability
     )
     {
-        KeyValueRequest request = new(
+        KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TrySet, 
             transactionId,
             HLCTimestamp.Zero,
@@ -577,20 +601,41 @@ internal sealed class KeyValuesManager
             flags,
             expiresMs, 
             HLCTimestamp.Zero,
-            durability
+            durability,
+            0,
+            0,
+            null
         );
 
-        KeyValueResponse? response;
-        
-        if (durability == KeyValueDurability.Ephemeral)
-            response = await ephemeralKeyValuesRouter.Ask(request);
-        else
-            response = await persistentKeyValuesRouter.Ask(request);
-        
-        if (response is null)
-            return (KeyValueResponseType.Errored, -1, HLCTimestamp.Zero);
-        
-        return (response.Type, response.Revision, response.Ticket);
+        try
+        {
+            for (int i = 0; i < MaxRetries; i++)
+            {
+                KeyValueResponse? response;
+
+                if (durability == KeyValueDurability.Ephemeral)
+                    response = await ephemeralKeyValuesRouter.Ask(request);
+                else
+                    response = await persistentKeyValuesRouter.Ask(request);
+
+                if (response is null)
+                    return (KeyValueResponseType.Errored, -1, HLCTimestamp.Zero);
+                
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
+
+                return (response.Type, response.Revision, response.Ticket);
+            }
+            
+            return (KeyValueResponseType.MustRetry, -1, HLCTimestamp.Zero);
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
     }
 
     /// <summary>
@@ -603,9 +648,9 @@ internal sealed class KeyValuesManager
         Lock sync = new();
         List<KahunaSetKeyValueResponseItem> responses = new(items.Count);
 
-        await items.ForEachAsync(5, async (KahunaSetKeyValueRequestItem item) =>
+        await items.ForEachAsync(5, async item =>
         {
-            KeyValueRequest request = new(
+            KeyValueRequest request = KeyValueRequestPool.Rent(
                 KeyValueRequestType.TrySet, 
                 item.TransactionId,
                 HLCTimestamp.Zero,
@@ -616,33 +661,41 @@ internal sealed class KeyValuesManager
                 item.Flags,
                 item.ExpiresMs, 
                 HLCTimestamp.Zero,
-                item.Durability
+                item.Durability,
+                0,
+                0,
+                null
             );
 
-            KeyValueResponse? response;
-            
-            if (item.Durability == KeyValueDurability.Ephemeral)
-                response = await ephemeralKeyValuesRouter.Ask(request);
-            else
-                response = await persistentKeyValuesRouter.Ask(request);
-
-            if (response is null)
+            try
             {
-                responses.Add(new() { Type = KeyValueResponseType.Errored });
-                return;
-            }
+                KeyValueResponse? response;
+                
+                if (item.Durability == KeyValueDurability.Ephemeral)
+                    response = await ephemeralKeyValuesRouter.Ask(request);
+                else
+                    response = await persistentKeyValuesRouter.Ask(request);
 
-            lock (sync)
-                responses.Add(new()
+                if (response is null || response.Type == KeyValueResponseType.WaitingForReplication)
                 {
-                    Key = item.Key ?? "", 
-                    Type = response.Type, 
-                    Revision = response.Revision, 
-                    LastModified = response.Ticket,
-                    Durability = item.Durability
-                });
-            
-            //await Task.CompletedTask;
+                    responses.Add(new() { Type = KeyValueResponseType.Errored });
+                    return;
+                }
+
+                lock (sync)
+                    responses.Add(new()
+                    {
+                        Key = item.Key ?? "",
+                        Type = response.Type,
+                        Revision = response.Revision,
+                        LastModified = response.Ticket,
+                        Durability = item.Durability
+                    });
+            }
+            finally
+            {
+                KeyValueRequestPool.Return(request);
+            }
         });
 
         return responses;
@@ -662,7 +715,7 @@ internal sealed class KeyValuesManager
         KeyValueDurability durability
     )
     {
-        KeyValueRequest request = new(
+        KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TryExtend,
             transactionId,
             HLCTimestamp.Zero,
@@ -673,20 +726,41 @@ internal sealed class KeyValuesManager
             KeyValueFlags.None,
             expiresMs, 
             HLCTimestamp.Zero,
-            durability
+            durability,
+            0,
+            0,
+            null
         );
 
-        KeyValueResponse? response;
-        
-        if (durability == KeyValueDurability.Ephemeral)
-            response = await ephemeralKeyValuesRouter.Ask(request);
-        else
-            response = await persistentKeyValuesRouter.Ask(request);
-        
-        if (response is null)
-            return (KeyValueResponseType.Errored, -1, HLCTimestamp.Zero);
-        
-        return (response.Type, response.Revision, response.Ticket);
+        try
+        {
+            for (int i = 0; i < MaxRetries; i++)
+            {
+                KeyValueResponse? response;
+
+                if (durability == KeyValueDurability.Ephemeral)
+                    response = await ephemeralKeyValuesRouter.Ask(request);
+                else
+                    response = await persistentKeyValuesRouter.Ask(request);
+
+                if (response is null)
+                    return (KeyValueResponseType.Errored, -1, HLCTimestamp.Zero);
+                
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
+
+                return (response.Type, response.Revision, response.Ticket);
+            }
+
+            return (KeyValueResponseType.MustRetry, -1, HLCTimestamp.Zero);
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
     }
 
     /// <summary>
@@ -696,9 +770,13 @@ internal sealed class KeyValuesManager
     /// <param name="key"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, long, HLCTimestamp)> TryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueDurability durability)
+    public async Task<(KeyValueResponseType, long, HLCTimestamp)> TryDeleteKeyValue(
+        HLCTimestamp transactionId, 
+        string key, 
+        KeyValueDurability durability
+    )
     {
-        KeyValueRequest request = new(
+        KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TryDelete, 
             transactionId,
             HLCTimestamp.Zero,
@@ -709,20 +787,41 @@ internal sealed class KeyValuesManager
             KeyValueFlags.None,
             0, 
             HLCTimestamp.Zero,
-            durability
+            durability,
+            0,
+            0,
+            null
         );
 
-        KeyValueResponse? response;
-        
-        if (durability == KeyValueDurability.Ephemeral)
-            response = await ephemeralKeyValuesRouter.Ask(request);
-        else
-            response = await persistentKeyValuesRouter.Ask(request);
-        
-        if (response is null)
-            return (KeyValueResponseType.Errored, -1, HLCTimestamp.Zero);
-        
-        return (response.Type, response.Revision, response.Ticket);
+        try
+        {
+            for (int i = 0; i < MaxRetries; i++)
+            {
+                KeyValueResponse? response;
+                
+                if (durability == KeyValueDurability.Ephemeral)
+                    response = await ephemeralKeyValuesRouter.Ask(request);
+                else
+                    response = await persistentKeyValuesRouter.Ask(request);
+
+                if (response is null)
+                    return (KeyValueResponseType.Errored, -1, HLCTimestamp.Zero);
+                
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
+
+                return (response.Type, response.Revision, response.Ticket);
+            }
+            
+            return (KeyValueResponseType.MustRetry, -1, HLCTimestamp.Zero);
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
     }
     
     /// <summary>
@@ -739,7 +838,7 @@ internal sealed class KeyValuesManager
         KeyValueDurability durability
     )
     {
-        KeyValueRequest request = new(
+        KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TryGet, 
             transactionId, 
             HLCTimestamp.Zero,
@@ -750,20 +849,41 @@ internal sealed class KeyValuesManager
             KeyValueFlags.None,
             0, 
             HLCTimestamp.Zero,
-            durability
+            durability,
+            0,
+            0,
+            null
         );
 
-        KeyValueResponse? response;
-        
-        if (durability == KeyValueDurability.Ephemeral)
-            response = await ephemeralKeyValuesRouter.Ask(request);
-        else
-            response = await persistentKeyValuesRouter.Ask(request);
-        
-        if (response is null)
-            return (KeyValueResponseType.Errored, null);
-        
-        return (response.Type, response.Context);
+        try
+        {
+            for (int i = 0; i < MaxRetries; i++)
+            {
+                KeyValueResponse? response;
+
+                if (durability == KeyValueDurability.Ephemeral)
+                    response = await ephemeralKeyValuesRouter.Ask(request);
+                else
+                    response = await persistentKeyValuesRouter.Ask(request);
+
+                if (response is null)
+                    return (KeyValueResponseType.Errored, null);
+
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
+
+                return (response.Type, response.Entry);
+            }
+            
+            return (KeyValueResponseType.MustRetry, null);
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
     }
     
     /// <summary>
@@ -780,7 +900,7 @@ internal sealed class KeyValuesManager
         KeyValueDurability durability
     )
     {
-        KeyValueRequest request = new(
+        KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TryExists, 
             transactionId, 
             HLCTimestamp.Zero,
@@ -791,20 +911,41 @@ internal sealed class KeyValuesManager
             KeyValueFlags.None,
             0, 
             HLCTimestamp.Zero,
-            durability
+            durability,
+            0,
+            0,
+            null
         );
 
-        KeyValueResponse? response;
-        
-        if (durability == KeyValueDurability.Ephemeral)
-            response = await ephemeralKeyValuesRouter.Ask(request);
-        else
-            response = await persistentKeyValuesRouter.Ask(request);
-        
-        if (response is null)
-            return (KeyValueResponseType.Errored, null);
-        
-        return (response.Type, response.Context);
+        try
+        {
+            for (int i = 0; i < MaxRetries; i++)
+            {
+                KeyValueResponse? response;
+                
+                if (durability == KeyValueDurability.Ephemeral)
+                    response = await ephemeralKeyValuesRouter.Ask(request);
+                else
+                    response = await persistentKeyValuesRouter.Ask(request);
+
+                if (response is null)
+                    return (KeyValueResponseType.Errored, null);
+
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
+
+                return (response.Type, response.Entry);
+            }
+            
+            return (KeyValueResponseType.MustRetry, null);
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
     }
     
     /// <summary>
@@ -817,7 +958,7 @@ internal sealed class KeyValuesManager
     /// <returns></returns>
     public async Task<(KeyValueResponseType, string, KeyValueDurability)> TryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability)
     {
-        KeyValueRequest request = new(
+        KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TryAcquireExclusiveLock, 
             transactionId, 
             HLCTimestamp.Zero,
@@ -828,20 +969,41 @@ internal sealed class KeyValuesManager
             KeyValueFlags.None,
             expiresMs, 
             HLCTimestamp.Zero,
-            durability
+            durability,
+            0,
+            0,
+            null
         );
 
-        KeyValueResponse? response;
-        
-        if (durability == KeyValueDurability.Ephemeral)
-            response = await ephemeralKeyValuesRouter.Ask(request);
-        else
-            response = await persistentKeyValuesRouter.Ask(request);
-        
-        if (response is null)
-            return (KeyValueResponseType.Errored, key, durability);
-        
-        return (response.Type, key, durability);
+        try
+        {
+            for (int i = 0; i < MaxRetries; i++)
+            {
+                KeyValueResponse? response;
+                
+                if (durability == KeyValueDurability.Ephemeral)
+                    response = await ephemeralKeyValuesRouter.Ask(request);
+                else
+                    response = await persistentKeyValuesRouter.Ask(request);
+
+                if (response is null)
+                    return (KeyValueResponseType.Errored, key, durability);
+
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
+
+                return (response.Type, key, durability);
+            }
+            
+            return (KeyValueResponseType.MustRetry, key, durability);
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
     }
     
     /// <summary>
@@ -859,31 +1021,52 @@ internal sealed class KeyValuesManager
         KeyValueDurability durability
     )
     {
-        KeyValueRequest request = new(
+        KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TryAcquireExclusivePrefixLock, 
-            transactionId, 
+            transactionId,
             HLCTimestamp.Zero,
-            prefixKey, 
+            prefixKey,
             null, 
             null,
             -1,
             KeyValueFlags.None,
             expiresMs, 
             HLCTimestamp.Zero,
-            durability
+            durability,
+            0,
+            0,
+            null
         );
+        
+        try
+        {
+            for (int i = 0; i < MaxRetries; i++)
+            {
+                KeyValueResponse? response;
 
-        KeyValueResponse? response;
-        
-        if (durability == KeyValueDurability.Ephemeral)
-            response = await ephemeralKeyValuesRouter.Ask(request);
-        else
-            response = await persistentKeyValuesRouter.Ask(request);
-        
-        if (response is null)
-            return KeyValueResponseType.Errored;
-        
-        return response.Type;
+                if (durability == KeyValueDurability.Ephemeral)
+                    response = await ephemeralKeyValuesRouter.Ask(request);
+                else
+                    response = await persistentKeyValuesRouter.Ask(request);
+
+                if (response is null)
+                    return KeyValueResponseType.Errored;
+
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
+
+                return response.Type;
+            }
+
+            return KeyValueResponseType.MustRetry;
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
     }
     
     /// <summary>
@@ -901,7 +1084,7 @@ internal sealed class KeyValuesManager
         
         foreach ((string key, int expiresMs, KeyValueDurability durability) key in keys)
         {
-            KeyValueRequest request = new(
+            KeyValueRequest request = KeyValueRequestPool.Rent(
                 KeyValueRequestType.TryAcquireExclusiveLock,
                 transactionId,
                 HLCTimestamp.Zero,
@@ -912,26 +1095,36 @@ internal sealed class KeyValuesManager
                 KeyValueFlags.None,
                 key.expiresMs,
                 HLCTimestamp.Zero,
-                key.durability
+                key.durability,
+                0,
+                0,
+                null
             );
 
-            KeyValueResponse? response;
-
-            if (key.durability == KeyValueDurability.Ephemeral)
-                response = await ephemeralKeyValuesRouter.Ask(request);
-            else
-                response = await persistentKeyValuesRouter.Ask(request);
-
-            if (response is null)
+            try
             {
-                responses.Add((KeyValueResponseType.Errored, key.key, key.durability));
-                continue;
+                KeyValueResponse? response;
+
+                if (key.durability == KeyValueDurability.Ephemeral)
+                    response = await ephemeralKeyValuesRouter.Ask(request);
+                else
+                    response = await persistentKeyValuesRouter.Ask(request);
+
+                if (response is null || response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    responses.Add((KeyValueResponseType.Errored, key.key, key.durability));
+                    continue;
+                }
+
+                responses.Add((response.Type, key.key, key.durability));
+
+                if (response.Type != KeyValueResponseType.Locked)
+                    break;
             }
-
-            responses.Add((response.Type, key.key, key.durability));
-
-            if (response.Type != KeyValueResponseType.Locked)
-                break;
+            finally
+            {
+                KeyValueRequestPool.Return(request);
+            }
         }
 
         return responses;
@@ -946,7 +1139,7 @@ internal sealed class KeyValuesManager
     /// <returns></returns>
     public async Task<(KeyValueResponseType, string)> TryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueDurability durability)
     {
-        KeyValueRequest request = new(
+        KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TryReleaseExclusiveLock, 
             transactionId, 
             HLCTimestamp.Zero,
@@ -957,20 +1150,41 @@ internal sealed class KeyValuesManager
             KeyValueFlags.None,
             0, 
             HLCTimestamp.Zero,
-            durability
+            durability,
+            0,
+            0,
+            null
         );
 
-        KeyValueResponse? response;
-        
-        if (durability == KeyValueDurability.Ephemeral)
-            response = await ephemeralKeyValuesRouter.Ask(request);
-        else
-            response = await persistentKeyValuesRouter.Ask(request);
-        
-        if (response is null)
-            return (KeyValueResponseType.Errored, key);
-        
-        return (response.Type, key);
+        try
+        {
+            for (int i = 0; i < MaxRetries; i++)
+            {
+                KeyValueResponse? response;
+
+                if (durability == KeyValueDurability.Ephemeral)
+                    response = await ephemeralKeyValuesRouter.Ask(request);
+                else
+                    response = await persistentKeyValuesRouter.Ask(request);
+
+                if (response is null)
+                    return (KeyValueResponseType.Errored, key);
+
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
+
+                return (response.Type, key);
+            }
+            
+            return (KeyValueResponseType.MustRetry, key);
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
     }
     
     /// <summary>
@@ -982,7 +1196,7 @@ internal sealed class KeyValuesManager
     /// <returns></returns>
     public async Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability)
     {
-        KeyValueRequest request = new(
+        KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TryReleaseExclusivePrefixLock, 
             transactionId, 
             HLCTimestamp.Zero,
@@ -993,20 +1207,41 @@ internal sealed class KeyValuesManager
             KeyValueFlags.None,
             0, 
             HLCTimestamp.Zero,
-            durability
+            durability,
+            0,
+            0,
+            null
         );
 
-        KeyValueResponse? response;
-        
-        if (durability == KeyValueDurability.Ephemeral)
-            response = await ephemeralKeyValuesRouter.Ask(request);
-        else
-            response = await persistentKeyValuesRouter.Ask(request);
-        
-        if (response is null)
-            return KeyValueResponseType.Errored;
-        
-        return response.Type;
+        try
+        {
+            for (int i = 0; i < MaxRetries; i++)
+            {
+                KeyValueResponse? response;
+
+                if (durability == KeyValueDurability.Ephemeral)
+                    response = await ephemeralKeyValuesRouter.Ask(request);
+                else
+                    response = await persistentKeyValuesRouter.Ask(request);
+
+                if (response is null)
+                    return KeyValueResponseType.Errored;
+
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
+
+                return response.Type;
+            }
+            
+            return KeyValueResponseType.MustRetry;
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
     }
     
     /// <summary>
@@ -1024,7 +1259,7 @@ internal sealed class KeyValuesManager
         
         foreach ((string key, KeyValueDurability durability) key in keys)
         {
-            KeyValueRequest request = new(
+            KeyValueRequest request = KeyValueRequestPool.Rent(
                 KeyValueRequestType.TryReleaseExclusiveLock,
                 transactionId,
                 HLCTimestamp.Zero,
@@ -1035,23 +1270,33 @@ internal sealed class KeyValuesManager
                 KeyValueFlags.None,
                 0,
                 HLCTimestamp.Zero,
-                key.durability
+                key.durability,
+                0,
+                0,
+                null
             );
 
-            KeyValueResponse? response;
-
-            if (key.durability == KeyValueDurability.Ephemeral)
-                response = await ephemeralKeyValuesRouter.Ask(request);
-            else
-                response = await persistentKeyValuesRouter.Ask(request);
-
-            if (response is null)
+            try
             {
-                responses.Add((KeyValueResponseType.Errored, key.key, key.durability));
-                continue;
-            }
+                KeyValueResponse? response;
 
-            responses.Add((response.Type, key.key, key.durability));
+                if (key.durability == KeyValueDurability.Ephemeral)
+                    response = await ephemeralKeyValuesRouter.Ask(request);
+                else
+                    response = await persistentKeyValuesRouter.Ask(request);
+
+                if (response is null || response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    responses.Add((KeyValueResponseType.Errored, key.key, key.durability));
+                    continue;
+                }
+
+                responses.Add((response.Type, key.key, key.durability));
+            }
+            finally
+            {
+                KeyValueRequestPool.Return(request);
+            }
         }
 
         return responses;
@@ -1065,9 +1310,14 @@ internal sealed class KeyValuesManager
     /// <param name="key"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> TryPrepareMutations(HLCTimestamp transactionId, HLCTimestamp commitId, string key, KeyValueDurability durability)
+    public async Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> TryPrepareMutations(
+        HLCTimestamp transactionId, 
+        HLCTimestamp commitId, 
+        string key, 
+        KeyValueDurability durability
+    )
     {
-        KeyValueRequest request = new(
+        KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TryPrepareMutations, 
             transactionId, 
             commitId,
@@ -1078,20 +1328,41 @@ internal sealed class KeyValuesManager
             KeyValueFlags.None,
             0, 
             HLCTimestamp.Zero,
-            durability
+            durability,
+            0,
+            0,
+            null
         );
 
-        KeyValueResponse? response;
-        
-        if (durability == KeyValueDurability.Ephemeral)
-            response = await ephemeralKeyValuesRouter.Ask(request);
-        else
-            response = await persistentKeyValuesRouter.Ask(request);
-        
-        if (response is null)
-            return (KeyValueResponseType.Errored, HLCTimestamp.Zero, key, durability);
-        
-        return (response.Type, response.Ticket, key, durability);
+        try
+        {
+            for (int i = 0; i < MaxRetries; i++)
+            {
+                KeyValueResponse? response;
+
+                if (durability == KeyValueDurability.Ephemeral)
+                    response = await ephemeralKeyValuesRouter.Ask(request);
+                else
+                    response = await persistentKeyValuesRouter.Ask(request);
+
+                if (response is null)
+                    return (KeyValueResponseType.Errored, HLCTimestamp.Zero, key, durability);
+
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
+
+                return (response.Type, response.Ticket, key, durability);
+            }
+            
+            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero, key, durability);
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
     }
     
     /// <summary>
@@ -1110,9 +1381,9 @@ internal sealed class KeyValuesManager
         Lock sync = new();
         List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> responses = new(keys.Count);
 
-        await keys.ForEachAsync(5, async ((string key, KeyValueDurability durability) key) =>
+        await keys.ForEachAsync(5, async key =>
         {
-            KeyValueRequest request = new(
+            KeyValueRequest request = KeyValueRequestPool.Rent(
                 KeyValueRequestType.TryPrepareMutations,
                 transactionId,
                 commitId,
@@ -1123,23 +1394,36 @@ internal sealed class KeyValuesManager
                 KeyValueFlags.None,
                 0,
                 HLCTimestamp.Zero,
-                key.durability
+                key.durability,
+                0,
+                0,
+                null
             );
 
-            KeyValueResponse? response;
+            try
+            {
+                KeyValueResponse? response;
 
-            if (key.durability == KeyValueDurability.Ephemeral)
-                response = await ephemeralKeyValuesRouter.Ask(request);
-            else
-                response = await persistentKeyValuesRouter.Ask(request);
+                if (key.durability == KeyValueDurability.Ephemeral)
+                    response = await ephemeralKeyValuesRouter.Ask(request);
+                else
+                    response = await persistentKeyValuesRouter.Ask(request);
 
-            if (response is null)
-                return;
+                if (response is null || response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    lock (sync)
+                        responses.Add((KeyValueResponseType.Errored, HLCTimestamp.Zero, key.key, key.durability));
+                    
+                    return;
+                }
 
-            lock (sync)
-                responses.Add((response.Type, response.Ticket, key.key, key.durability));
-            
-            //(string key, KeyValueDurability durability)
+                lock (sync)
+                    responses.Add((response.Type, response.Ticket, key.key, key.durability));
+            }
+            finally
+            {
+                KeyValueRequestPool.Return(request);
+            }
         });
 
         return responses;
@@ -1160,7 +1444,7 @@ internal sealed class KeyValuesManager
         KeyValueDurability durability
     )
     {
-        KeyValueRequest request = new(
+        KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TryCommitMutations, 
             transactionId, 
             HLCTimestamp.Zero,
@@ -1171,20 +1455,41 @@ internal sealed class KeyValuesManager
             KeyValueFlags.None,
             0, 
             proposalTicketId,
-            durability
+            durability,
+            0,
+            0,
+            null
         );
+        
+        try
+        {
+            for (int i = 0; i < MaxRetries; i++)
+            {
+                KeyValueResponse? response;
 
-        KeyValueResponse? response;
-        
-        if (durability == KeyValueDurability.Ephemeral)
-            response = await ephemeralKeyValuesRouter.Ask(request);
-        else
-            response = await persistentKeyValuesRouter.Ask(request);
-        
-        if (response is null)
+                if (durability == KeyValueDurability.Ephemeral)
+                    response = await ephemeralKeyValuesRouter.Ask(request);
+                else
+                    response = await persistentKeyValuesRouter.Ask(request);
+
+                if (response is null)
+                    return (KeyValueResponseType.Errored, -1);
+
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
+
+                return (response.Type, response.Revision);
+            }
+            
             return (KeyValueResponseType.Errored, -1);
-        
-        return (response.Type, response.Revision);
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
     }
     
     /// <summary>
@@ -1201,9 +1506,9 @@ internal sealed class KeyValuesManager
         Lock sync = new();
         List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> responses = new(keys.Count);
 
-        await keys.ForEachAsync(5, async ((string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) key) =>
+        await keys.ForEachAsync(5, async key =>
         {
-            KeyValueRequest request = new(
+            KeyValueRequest request = KeyValueRequestPool.Rent(
                 KeyValueRequestType.TryCommitMutations,
                 transactionId,
                 HLCTimestamp.Zero,
@@ -1214,21 +1519,36 @@ internal sealed class KeyValuesManager
                 KeyValueFlags.None,
                 0,
                 key.proposalTicketId,
-                key.durability
+                key.durability,
+                0,
+                0,
+                null
             );
 
-            KeyValueResponse? response;
+            try
+            {
+                KeyValueResponse? response;
 
-            if (key.durability == KeyValueDurability.Ephemeral)
-                response = await ephemeralKeyValuesRouter.Ask(request);
-            else
-                response = await persistentKeyValuesRouter.Ask(request);
+                if (key.durability == KeyValueDurability.Ephemeral)
+                    response = await ephemeralKeyValuesRouter.Ask(request);
+                else
+                    response = await persistentKeyValuesRouter.Ask(request);
 
-            if (response is null)
-                return;
+                if (response is null || response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    lock (sync)
+                        responses.Add((KeyValueResponseType.Errored, key.key, -1, key.durability));
+                    
+                    return;
+                }
 
-            lock (sync)
-                responses.Add((response.Type, key.key, response.Revision, key.durability));
+                lock (sync)
+                    responses.Add((response.Type, key.key, response.Revision, key.durability));
+            }
+            finally
+            {
+                KeyValueRequestPool.Return(request);
+            }
         });
 
         return responses;
@@ -1260,7 +1580,10 @@ internal sealed class KeyValuesManager
             KeyValueFlags.None,
             0, 
             proposalTicketId,
-            durability
+            durability,
+            0,
+            0,
+            null
         );
 
         KeyValueResponse? response;
@@ -1292,7 +1615,7 @@ internal sealed class KeyValuesManager
         Lock sync = new();
         List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> responses = new(keys.Count);
 
-        await keys.ForEachAsync(5, async ((string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) key) =>
+        await keys.ForEachAsync(5, async key =>
         {
             KeyValueRequest request = new(
                 KeyValueRequestType.TryRollbackMutations,
@@ -1305,7 +1628,10 @@ internal sealed class KeyValuesManager
                 KeyValueFlags.None,
                 0,
                 key.proposalTicketId,
-                key.durability
+                key.durability,
+                0,
+                0,
+                null
             );
 
             KeyValueResponse? response;
@@ -1369,7 +1695,10 @@ internal sealed class KeyValuesManager
             KeyValueFlags.None,
             0,
             HLCTimestamp.Zero,
-            durability
+            durability,
+            0,
+            0,
+            null
         );
         
         List<(string, ReadOnlyKeyValueEntry)> items = [];
@@ -1435,7 +1764,10 @@ internal sealed class KeyValuesManager
             KeyValueFlags.None,
             0,
             HLCTimestamp.Zero,
-            KeyValueDurability.Persistent
+            KeyValueDurability.Persistent,
+            0,
+            0,
+            null
         );
 
         KeyValueResponse? response = await persistentKeyValuesRouter.Ask(request);
@@ -1458,7 +1790,7 @@ internal sealed class KeyValuesManager
     /// <returns></returns>
     public async Task<KeyValueGetByBucketResult> GetByBucket(HLCTimestamp transactionId, string prefixKeyName, KeyValueDurability durability)
     {
-        KeyValueRequest request = new(
+        KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.GetByBucket,
             transactionId,
             HLCTimestamp.Zero,
@@ -1469,23 +1801,44 @@ internal sealed class KeyValuesManager
             KeyValueFlags.None,
             0,
             HLCTimestamp.Zero,
-            durability
+            durability,
+            0,
+            0,
+            null
         );
-        
-        KeyValueResponse? response;
-        
-        if (durability == KeyValueDurability.Ephemeral)
-            response = await ephemeralKeyValuesRouter.Ask(request);
-        else
-            response = await persistentKeyValuesRouter.Ask(request);
 
-        if (response is null)
-            return new(KeyValueResponseType.Errored, []);
-        
-        if (response is { Type: KeyValueResponseType.Get, Items: not null })
-            return new(response.Type, response.Items); 
-        
-        return new(response.Type, []);
+        try
+        {
+            for (int i = 0; i < MaxRetries; i++)
+            {
+                KeyValueResponse? response;
+
+                if (durability == KeyValueDurability.Ephemeral)
+                    response = await ephemeralKeyValuesRouter.Ask(request);
+                else
+                    response = await persistentKeyValuesRouter.Ask(request);
+
+                if (response is null)
+                    return new(KeyValueResponseType.Errored, []);
+
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
+
+                if (response is { Type: KeyValueResponseType.Get, Items: not null })
+                    return new(response.Type, response.Items);
+
+                return new(response.Type, []);
+            }
+
+            return new(KeyValueResponseType.MustRetry, []);
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
     }
 
     /// <summary>

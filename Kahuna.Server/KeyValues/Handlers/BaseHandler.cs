@@ -18,6 +18,10 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// </summary>
 internal abstract class BaseHandler
 {
+    private const int ProposalWaitTimeout = 10000;
+    
+    private static int proposalId;
+    
     /// <summary>
     /// Represents the background writer actor reference.
     /// </summary>
@@ -38,25 +42,27 @@ internal abstract class BaseHandler
     /// <param name="proposal"></param>
     /// <param name="currentTime"></param>
     /// <returns></returns>
-    /*private KeyValueResponse CreateProposal(KeyValueRequest message, KeyValueEntry entry, KeyValueProposal proposal, HLCTimestamp currentTime)
+    protected KeyValueResponse CreateProposal(KeyValueRequest message, KeyValueEntry entry, KeyValueProposal proposal, HLCTimestamp currentTime)
     {
+        IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext = context.ActorContext;
+        
         if (!actorContext.Reply.HasValue)
             return KeyValueStaticResponses.ErroredResponse;
             
         int currentProposalId = Interlocked.Increment(ref proposalId);
 
-        entry.WriteIntent = new()
+        entry.ReplicationIntent = new()
         {
             ProposalId = currentProposalId, 
             Expires = currentTime + ProposalWaitTimeout
         };
             
-        proposals.Add(currentProposalId, proposal);
+        context.Proposals.Add(currentProposalId, proposal);
             
-        proposalRouter.Send(new(
+        context.ProposalRouter.Send(new(
             message.Type,
             currentProposalId, 
-            proposal, 
+            proposal,
             actorContext.Self, 
             actorContext.Reply.Value.Promise,
             currentTime
@@ -64,8 +70,8 @@ internal abstract class BaseHandler
 
         actorContext.ByPassReply = true;
             
-        return LockStaticResponses.WaitingForReplication;
-    }*/
+        return KeyValueStaticResponses.WaitingForReplicationResponse;
+    }
     
     /// <summary>
     /// Persists and replicates the key/value messages to the Raft partition

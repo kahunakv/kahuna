@@ -422,9 +422,9 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
     /// </summary>
     /// <param name="resource">The resource for which the lock data will be queried. This is used to identify the corresponding database shard.</param>
     /// <returns>
-    /// A <see cref="LockContext"/> instance representing the acquired lock context or null if the lock could not be acquired.
+    /// A <see cref="LockEntry"/> instance representing the acquired lock context or null if the lock could not be acquired.
     /// </returns>
-    public LockContext? GetLock(string resource)
+    public LockEntry? GetLock(string resource)
     {
         try
         {
