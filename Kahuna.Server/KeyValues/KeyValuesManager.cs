@@ -130,9 +130,10 @@ internal sealed class KeyValuesManager
 
         for (int i = 0; i < configuration.KeyValueWorkers; i++)
             ephemeralInstances.Add(actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
-                "ephemeral-keyvalue-" + i, backgroundWriter, 
-                persistenceBackend,
+                "ephemeral-keyvalue-" + i, 
+                backgroundWriter, 
                 proposalRouter,
+                persistenceBackend,                
                 raft,
                 configuration,
                 logger
@@ -156,9 +157,10 @@ internal sealed class KeyValuesManager
 
         for (int i = 0; i < configuration.KeyValueWorkers; i++)
             persistentInstances.Add(actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
-                "persistent-keyvalue-" + i, backgroundWriter, 
-                persistenceBackend, 
+                "persistent-keyvalue-" + i, 
+                backgroundWriter, 
                 proposalRouter,
+                persistenceBackend,                 
                 raft, 
                 configuration,
                 logger
