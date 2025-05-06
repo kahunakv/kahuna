@@ -78,6 +78,12 @@ public class GrpcCommunication : IKahunaCommunication
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
+            
+            if (response.Type == GrpcLockResponseType.LockResponseTypeMustRetry)
+            {
+                await Task.Delay(1, cancellationToken);
+                continue;
+            }
 
             if (response.Type == GrpcLockResponseType.LockResponseTypeLocked)
                 return (KahunaLockAcquireResult.Success, response.FencingToken, response.ServedFrom);
@@ -86,7 +92,7 @@ public class GrpcCommunication : IKahunaCommunication
                 return (KahunaLockAcquireResult.Conflicted, -1, null);
             
             if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
+                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);            
 
         } while (response.Type == GrpcLockResponseType.LockResponseTypeMustRetry);
             
