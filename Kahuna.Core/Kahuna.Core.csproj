@@ -9,8 +9,16 @@
     <IsPackable>true</IsPackable>
     <PackageId>Kahuna.Core</PackageId>
     <Version>0.1.0</Version>
-    <Authors>Kahuna</Authors>
-    <Description>Embeddable Kahuna core engine.</Description>
+    <Description>.NET embeddable core for Kahuna: Distributed locks and reliable key-value store</Description>
+    <Authors>Andres Gutierrez</Authors>
+    <Company>Andres Gutierrez</Company>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageDescription>.NET embeddable core for Kahuna: Distributed locks and reliable key-value store</PackageDescription>
+    <PackageProjectUrl>https://github.com/kahunakv/kahuna</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/kahunakv/kahuna</RepositoryUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>distributed lock;locks;redlock;raft;consensus;paxos;distributed consensus;leader election;zookeeper</PackageTags>
   </PropertyGroup>
 
   <PropertyGroup>
@@ -50,6 +58,13 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Kahuna.Shared\Kahuna.Shared.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../README.md">
+      <Pack>True</Pack>
+      <PackagePath>\</PackagePath>
+    </None>
   </ItemGroup>
 
   <ItemGroup Label="ScriptParser">
