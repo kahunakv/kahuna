@@ -17,14 +17,6 @@
   <PackageReference Include="Grpc.AspNetCore.Server.Reflection" Version="2.67.0" />
   <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.3" />
   <PackageReference Include="CommandLineParser" Version="2.9.1" />
-  <PackageReference Include="Polly.Contrib.WaitAndRetry" Version="1.1.1" />
-  <PackageReference Include="YaccLexTools" Version="1.2.3" />
-</ItemGroup>
-
-<ItemGroup>
-  <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
-    <_Parameter1>Kahuna.Tests</_Parameter1>
-  </AssemblyAttribute>
 </ItemGroup>
 
 <ItemGroup>
@@ -33,39 +25,8 @@
 </ItemGroup>
 
   <ItemGroup>
-    <Protobuf Include="Replication\Protos\lock_message.proto">
-      <Generator>MSBuild:Compile</Generator>
-    </Protobuf>
-    <Protobuf Include="Replication\Protos\keyvalue_message.proto">
-      <Generator>MSBuild:Compile</Generator>
-    </Protobuf>
-    <Protobuf Include="Persistence\Protos\rocksdb.proto">
-      <Generator>MSBuild:Compile</Generator>
-    </Protobuf>
-  </ItemGroup>
-
-  <ItemGroup>
+    <ProjectReference Include="..\Kahuna.Core\Kahuna.Core.csproj" />
     <ProjectReference Include="..\Kahuna.Shared\Kahuna.Shared.csproj" />
-  </ItemGroup>
-
-  <ItemGroup Label="ScriptParser">
-    <YaccFile Include="ScriptParser\ScriptParser.Language.grammar.y">
-      <OutputFile>ScriptParser\ScriptParser.Parser.Generated.cs</OutputFile>
-      <Arguments>/gplex /nolines</Arguments>
-    </YaccFile>
-    <None Include="ScriptParser\ScriptParser.Parser.Generated.cs">
-      <AutoGen>True</AutoGen>
-      <DesignTime>True</DesignTime>
-      <DependentUpon>ScriptParser\ScriptParser.Language.grammar.y</DependentUpon>
-    </None>
-    <LexFile Include="ScriptParser\ScriptParser.Language.analyzer.lex">
-      <OutputFile>ScriptParser\ScriptParser.Scanner.Generated.cs</OutputFile>
-    </LexFile>
-    <None Include="ScriptParser\ScriptParser.Scanner.Generated.cs">
-      <AutoGen>True</AutoGen>
-      <DesignTime>True</DesignTime>
-      <DependentUpon>ScriptParser\ScriptParser.Language.analyzer.lex</DependentUpon>
-    </None>
   </ItemGroup>
   
 </Project>

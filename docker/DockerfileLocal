@@ -4,6 +4,7 @@ FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build-env
 RUN rm -fr /src && mkdir -p /src
 #COPY Kommander /src/Kommander/
 COPY Kahuna.Shared /src/Kahuna.Shared/
+COPY Kahuna.Core /src/Kahuna.Core/
 COPY Kahuna.Server /src/Kahuna.Server/
 
 # build the dotnet program
@@ -61,4 +62,3 @@ ENTRYPOINT [ "/app/entrypoint.sh" ]
 
 # Swap entrypoints if the container is exploding and you want to keep it alive indefinitely so you can go look into it.
 #ENTRYPOINT ["tail", "-f", "/dev/null"]
-
