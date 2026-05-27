@@ -263,12 +263,25 @@ public class TestLocks : BaseCluster
 
         (LockResponseType, long)[] extendResults = await Task.WhenAll(extendTask1, extendTask2, extendTask3);
 
-        // Only one should succeed (the owner), others should be not owner
+        // Only one should succeed. In the persistent path, concurrent non-owner
+        // extensions can observe the owner's proposal in flight and return retryable statuses.
         int extendedCount = extendResults.Count(r => r.Item1 == LockResponseType.Extended);
-        int notOwnerCount = extendResults.Count(r => r.Item1 == LockResponseType.InvalidOwner);
+        int rejectedCount = extendResults.Count(r => r.Item1 is LockResponseType.InvalidOwner or LockResponseType.Busy or LockResponseType.MustRetry);
 
         Assert.Equal(1, extendedCount);
-        Assert.Equal(2, notOwnerCount);
+        Assert.Equal(2, rejectedCount);
+
+        byte[] winningOwner = results[0].Item1 == LockResponseType.Locked
+            ? ownerA
+            : results[1].Item1 == LockResponseType.Locked
+                ? ownerB
+                : ownerC;
+
+        foreach (byte[] owner in new[] { ownerA, ownerB, ownerC }.Where(owner => !owner.SequenceEqual(winningOwner)))
+        {
+            (LockResponseType response, _) = await kahuna1.LocateAndTryExtendLock(lockName, owner, 1000, durability, TestContext.Current.CancellationToken);
+            Assert.Equal(LockResponseType.InvalidOwner, response);
+        }
 
         await node1.LeaveCluster(true);
         await node2.LeaveCluster(true);
