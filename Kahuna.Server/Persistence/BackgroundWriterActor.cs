@@ -243,7 +243,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
         foreach (TimeSpan timeSpan in backoffDelays)
         {
-            bool success = await raft.WriteThreadPool.EnqueueTask(() => persistenceBackend.StoreLocks(items));
+            bool success = await raft.ReadThreadPool.EnqueueTask(() => persistenceBackend.StoreLocks(items));
             if (!success)
             {
                 logger.LogWarning("Coundn't store batch of {Count} locks. Waiting...", items.Count);
@@ -335,7 +335,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         
         foreach (TimeSpan timeSpan in backoffDelays)
         {
-            bool success = await raft.WriteThreadPool.EnqueueTask(() => persistenceBackend.StoreKeyValues(items));
+            bool success = await raft.ReadThreadPool.EnqueueTask(() => persistenceBackend.StoreKeyValues(items));
             if (!success)
             {
                 logger.LogWarning("Coundn't store batch of {Count} key-values. Waiting...", items.Count);
