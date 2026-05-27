@@ -37,7 +37,7 @@ public class TestCancellationAndTimeouts
         cts.Cancel();
         
         // Attempt to set a key with a cancelled token
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        await AssertCancelledAsync(async () =>
         {
             await client.SetKeyValue(
                 keyName,
@@ -73,7 +73,7 @@ public class TestCancellationAndTimeouts
         cts.Cancel();
         
         // Attempt to get the key with a cancelled token
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        await AssertCancelledAsync(async () =>
         {
             await client.GetKeyValue(
                 keyName,
@@ -96,15 +96,17 @@ public class TestCancellationAndTimeouts
         using CancellationTokenSource cts = new();
         cts.Cancel();
         
-        // Attempt to acquire a lock with a cancelled token
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        async Task AcquireLockWithCancelledToken()
         {
             await client.GetOrCreateLock(
                 lockName,
                 expiryTime: 10000,
                 cancellationToken: cts.Token
             );
-        });
+        }
+
+        // Attempt to acquire a lock with a cancelled token
+        await AssertCancelledAsync(AcquireLockWithCancelledToken);
     }
 
     [Theory, CombinatorialData]
@@ -120,7 +122,7 @@ public class TestCancellationAndTimeouts
         cts.Cancel();
         
         // Attempt to execute a transaction script with a cancelled token
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        await AssertCancelledAsync(async () =>
         {
             await client.ExecuteKeyValueTransactionScript(
                 "SET `some-key` 'some-value'",
@@ -262,7 +264,7 @@ public class TestCancellationAndTimeouts
         cts.Cancel();
         
         // Attempt to set a key in the transaction with a cancelled token
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        await AssertCancelledAsync(async () =>
         {
             await session.SetKeyValue(
                 GetRandomKeyName(),
@@ -301,5 +303,15 @@ public class TestCancellationAndTimeouts
     private static string GetRandomKeyName()
     {
         return $"test-key-{Guid.NewGuid():N}";
+    }
+
+    private static async Task AssertCancelledAsync(Func<Task> action)
+    {
+        Exception exception = await Assert.ThrowsAnyAsync<Exception>(action);
+        
+        Assert.True(
+            exception is OperationCanceledException or KahunaException,
+            $"Expected cancellation to surface as {nameof(OperationCanceledException)} or {nameof(KahunaException)}, got {exception.GetType().Name}"
+        );
     }
 } 

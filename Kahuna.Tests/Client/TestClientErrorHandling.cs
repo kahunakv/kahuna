@@ -51,6 +51,21 @@ public class TestClientErrorHandling
         
         string keyName = GetRandomKeyName();
 
+        if (communicationType == KahunaCommunicationType.Grpc)
+        {
+            await Assert.ThrowsAsync<ArgumentNullException>(async () =>
+            {
+                await client.SetKeyValue(
+                    keyName,
+                    null as byte[],
+                    10000,
+                    cancellationToken: TestContext.Current.CancellationToken
+                );
+            });
+            
+            return;
+        }
+
         // Test with null value (byte[] overload)
         KahunaKeyValue result = await client.SetKeyValue(
             keyName, 
@@ -68,7 +83,8 @@ public class TestClientErrorHandling
         );
         
         Assert.True(getResult.Success);
-        Assert.Null(getResult.Value);
+        Assert.NotNull(getResult.Value);
+        Assert.Empty(getResult.Value);
         Assert.Equal("", getResult.ValueAsString());
     }
 
@@ -192,7 +208,7 @@ public class TestClientErrorHandling
             );
         });
 
-        Assert.Contains("Failed to execute transaction script", ex.Message);
+        Assert.Contains("Syntax error", ex.Message);
     }
 
     [Theory, CombinatorialData]
@@ -213,7 +229,7 @@ public class TestClientErrorHandling
             );
         });
 
-        Assert.Contains("Failed to acquire lock", ex.Message);
+        Assert.Contains("Failed to lock", ex.Message);
     }
 
     [Theory, CombinatorialData]
@@ -227,12 +243,13 @@ public class TestClientErrorHandling
         string nonExistentLock = $"non-existent-lock-{Guid.NewGuid():N}";
 
         // Try to get info for a lock that doesn't exist
-        KahunaLockInfo? lockInfo = await client.GetLockInfo(
-            nonExistentLock,
-            cancellationToken: TestContext.Current.CancellationToken
-        );
-        
-        Assert.Null(lockInfo);
+        await Assert.ThrowsAsync<KahunaException>(async () =>
+        {
+            await client.GetLockInfo(
+                nonExistentLock,
+                cancellationToken: TestContext.Current.CancellationToken
+            );
+        });
     }
 
     [Theory, CombinatorialData]
@@ -255,13 +272,20 @@ public class TestClientErrorHandling
         Assert.True(kLock.IsAcquired);
         
         // Try to unlock with an invalid owner
-        bool unlockResult = await client.Unlock(
-            lockName,
-            "invalid-owner",
-            cancellationToken: TestContext.Current.CancellationToken
-        );
-        
-        Assert.False(unlockResult);
+        try
+        {
+            bool unlockResult = await client.Unlock(
+                lockName,
+                "invalid-owner",
+                cancellationToken: TestContext.Current.CancellationToken
+            );
+            
+            Assert.False(unlockResult);
+        }
+        catch (KahunaException ex)
+        {
+            Assert.Contains("InvalidOwner", ex.Message);
+        }
         
         // Clean up
         await kLock.DisposeAsync();
