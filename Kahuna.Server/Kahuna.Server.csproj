@@ -22,6 +22,12 @@
 </ItemGroup>
 
 <ItemGroup>
+  <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+    <_Parameter1>Kahuna.Tests</_Parameter1>
+  </AssemblyAttribute>
+</ItemGroup>
+
+<ItemGroup>
   <Folder Include="Cluster\" />
   <Folder Include="Communication\External\" />
 </ItemGroup>

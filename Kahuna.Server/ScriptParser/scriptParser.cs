@@ -65,7 +65,21 @@ internal sealed partial class scriptParser
         Parse();
 
         if (!string.IsNullOrEmpty(scanner.YYError))
-            throw new KahunaScriptException(scanner.YYError + " at line " + scanner.yylloc.EndLine, scanner.yylloc.StartLine);
+        {
+            string message = scanner.YYError;
+            int line = scanner.YYErrorLine;
+            int column = scanner.YYErrorColumn;
+
+            if (line > 0 && column > 0)
+            {
+                message += $" at line {line}, column {column}";
+
+                if (!string.IsNullOrEmpty(scanner.YYErrorToken))
+                    message += $" near '{scanner.YYErrorToken}'";
+            }
+
+            throw new KahunaScriptException(message, line, column);
+        }
 
         NodeAst? root = CurrentSemanticValue.n;
 

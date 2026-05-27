@@ -100,152 +100,152 @@ TAnd            &&
 
 /* Scanner body */
 
-{Number}		{ yylval.l = yyline; yylval.s = yytext; return (int)Token.TDIGIT; }
+{Number}		{ SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext; return (int)Token.TDIGIT; }
 
-{Decimal}		{ yylval.l = yyline; yylval.s = yytext; return (int)Token.TFLOAT; }
+{Decimal}		{ SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext; return (int)Token.TFLOAT; }
 
-{String}		{ yylval.l = yyline; yylval.s = yytext.Trim('\"'); return (int)Token.TSTRING; }
+{String}		{ SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext.Trim('\"'); return (int)Token.TSTRING; }
 
-{StringSingle}  { yylval.l = yyline; yylval.s = yytext.Trim('\''); return (int)Token.TSTRING; }
+{StringSingle}  { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext.Trim('\''); return (int)Token.TSTRING; }
 
 {Space}+		/* skip */
 
-{LParen} { yylval.l = yyline; return (int)Token.LPAREN; }
+{LParen} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.LPAREN; }
 
-{RParen} { yylval.l = yyline; return (int)Token.RPAREN; }
+{RParen} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.RPAREN; }
 
-{LBrace} { yylval.l = yyline; return (int)Token.LBRACE; }
+{LBrace} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.LBRACE; }
 
-{RBrace} { yylval.l = yyline; return (int)Token.RBRACE; }
+{RBrace} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.RBRACE; }
 
-{LSquareBrace} { yylval.l = yyline; return (int)Token.LSQUAREBRACE; }
+{LSquareBrace} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.LSQUAREBRACE; }
 
-{RSquareBrace} { yylval.l = yyline; return (int)Token.RSQUAREBRACE; }
+{RSquareBrace} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.RSQUAREBRACE; }
 
-{TComma} { yylval.l = yyline; return (int)Token.TCOMMA; }
+{TComma} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TCOMMA; }
 
-{TLet} { yylval.l = yyline; return (int)Token.TLET; }
+{TLet} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TLET; }
 
-{TGet} { yylval.l = yyline; return (int)Token.TGET; }
+{TGet} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TGET; }
 
-{TSet} { yylval.l = yyline; return (int)Token.TSET; }
+{TSet} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TSET; }
 
-{TEget} { yylval.l = yyline; return (int)Token.TEGET; }
+{TEget} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TEGET; }
 
-{TEset} { yylval.l = yyline; return (int)Token.TESET; }
+{TEset} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TESET; }
 
-{TDelete} { yylval.l = yyline; return (int)Token.TDELETE; }
+{TDelete} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TDELETE; }
 
-{TDel} { yylval.l = yyline; return (int)Token.TDELETE; }
+{TDel} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TDELETE; }
 
-{TEDelete} { yylval.l = yyline; return (int)Token.TEDELETE; }
+{TEDelete} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TEDELETE; }
 
-{TEDel} { yylval.l = yyline; return (int)Token.TEDELETE; }
+{TEDel} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TEDELETE; }
 
-{TExists} { yylval.l = yyline; return (int)Token.TEXISTS; }
+{TExists} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TEXISTS; }
 
-{TEExists} { yylval.l = yyline; return (int)Token.TEEXISTS; }
+{TEExists} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TEEXISTS; }
 
-{TExtend} { yylval.l = yyline; return (int)Token.TEXTEND; }
+{TExtend} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TEXTEND; }
 
-{TEExtend} { yylval.l = yyline; return (int)Token.TEEXTEND; }
+{TEExtend} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TEEXTEND; }
 
-{TIf} { yylval.l = yyline; return (int)Token.TIF; }
+{TIf} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TIF; }
 
-{TElse} { yylval.l = yyline; return (int)Token.TELSE; }
+{TElse} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TELSE; }
 
-{TThen} { yylval.l = yyline; return (int)Token.TTHEN; }
+{TThen} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TTHEN; }
 
-{TEnd} { yylval.l = yyline; return (int)Token.TEND; }
+{TEnd} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TEND; }
 
-{TFor} { yylval.l = yyline; return (int)Token.TFOR; }
+{TFor} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TFOR; }
 
-{TDo} { yylval.l = yyline; return (int)Token.TDO; }
+{TDo} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TDO; }
 
-{TIn} { yylval.l = yyline; return (int)Token.TIN; }
+{TIn} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TIN; }
 
-{TBegin} { yylval.l = yyline; return (int)Token.TBEGIN; }
+{TBegin} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TBEGIN; }
 
-{TRollback} { yylval.l = yyline; return (int)Token.TROLLBACK; }
+{TRollback} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TROLLBACK; }
 
-{TCommit} { yylval.l = yyline; return (int)Token.TCOMMIT; }
+{TCommit} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TCOMMIT; }
 
-{TTrue} { yylval.l = yyline; return (int)Token.TTRUE; }
+{TTrue} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TTRUE; }
 
-{TFalse} { yylval.l = yyline; return (int)Token.TFALSE; }
+{TFalse} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TFALSE; }
 
-{TNx} { yylval.l = yyline; return (int)Token.TNX; }
+{TNx} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TNX; }
 
-{TXx} { yylval.l = yyline; return (int)Token.TXX; }
+{TXx} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TXX; }
 
-{TEx} { yylval.l = yyline; return (int)Token.TEX; }
+{TEx} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TEX; }
 
-{TCmp} { yylval.l = yyline; return (int)Token.TCMP; }
+{TCmp} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TCMP; }
 
-{TCmpRev} { yylval.l = yyline; return (int)Token.TCMPREV; }
+{TCmpRev} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TCMPREV; }
 
-{TReturn} { yylval.l = yyline; return (int)Token.TRETURN; }
+{TReturn} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TRETURN; }
 
-{TSleep} { yylval.l = yyline; return (int)Token.TSLEEP; }
+{TSleep} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TSLEEP; }
 
-{TThrow} { yylval.l = yyline; return (int)Token.TTHROW; }
+{TThrow} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TTHROW; }
 
-{TFound} { yylval.l = yyline; return (int)Token.TFOUND; }
+{TFound} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TFOUND; }
 
-{TNull} { yylval.l = yyline; return (int)Token.TNULL; }
+{TNull} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TNULL; }
 
-{TEquals} { yylval.l = yyline; return (int)Token.TEQUALS; }
+{TEquals} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TEQUALS; }
 
-{TDoubleEquals} { yylval.l = yyline; return (int)Token.TDOUBLEEQUALS; }
+{TDoubleEquals} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TDOUBLEEQUALS; }
 
-{TGreater} { yylval.l = yyline; return (int)Token.TGREATERTHAN; }
+{TGreater} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TGREATERTHAN; }
 
-{TGreaterEquals} { yylval.l = yyline; return (int)Token.TGREATERTHANEQUALS; }
+{TGreaterEquals} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TGREATERTHANEQUALS; }
 
-{TAdd} { yylval.l = yyline; return (int)Token.TADD; }
+{TAdd} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TADD; }
 
-{TMinus} { yylval.l = yyline; return (int)Token.TMINUS; }
+{TMinus} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TMINUS; }
 
-{TMult} { yylval.l = yyline; return (int)Token.TMULT; }
+{TMult} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TMULT; }
 
-{TDiv} { yylval.l = yyline; return (int)Token.TDIV; }
+{TDiv} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TDIV; }
 
-{TOr} { yylval.l = yyline; return (int)Token.TOR; }
+{TOr} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TOR; }
 
-{TAnd} { yylval.l = yyline; return (int)Token.TAND; }
+{TAnd} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TAND; }
 
-{TLess} { yylval.l = yyline; return (int)Token.TLESSTHAN; }
+{TLess} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TLESSTHAN; }
 
-{TNot} { yylval.l = yyline; return (int)Token.TNOT; }
+{TNot} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TNOT; }
 
-{TNotWord} { yylval.l = yyline; return (int)Token.TNOT; }
+{TNotWord} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TNOT; }
 
-{TLessEquals} { yylval.l = yyline; return (int)Token.TLESSTHANEQUALS; }
+{TLessEquals} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TLESSTHANEQUALS; }
 
-{TNotEquals} { yylval.l = yyline; return (int)Token.TNOTEQUALS; }
+{TNotEquals} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TNOTEQUALS; }
 
-{TNotEquals2} { yylval.l = yyline; return (int)Token.TNOTEQUALS; }
+{TNotEquals2} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TNOTEQUALS; }
 
-{TDoubleDot} { yylval.l = yyline; return (int)Token.TDOUBLEDOT; }
+{TDoubleDot} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TDOUBLEDOT; }
 
-{TAt} { yylval.l = yyline; return (int)Token.TAT; }
+{TAt} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TAT; }
 
-{TAtWord} { yylval.l = yyline; return (int)Token.TAT; }
+{TAtWord} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TAT; }
 
-{TScan} { yylval.l = yyline; return (int)Token.TSCAN; }
+{TScan} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TSCAN; }
 
-{TEScan} { yylval.l = yyline; return (int)Token.TESCAN; }
+{TEScan} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TESCAN; }
 
-{TBy} { yylval.l = yyline; return (int)Token.TBY; }
+{TBy} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TBY; }
 
-{TPrefix} { yylval.l = yyline; return (int)Token.TPREFIX; }
+{TPrefix} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TPREFIX; }
 
-{TBucket} { yylval.l = yyline; return (int)Token.TBUCKET; }
+{TBucket} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TBUCKET; }
 
-{Identifier} { yylval.l = yyline; yylval.s = yytext; return (int)Token.TIDENTIFIER; }
+{Identifier} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext; return (int)Token.TIDENTIFIER; }
 
-{EscIdentifier} { yylval.l = yyline; yylval.s = yytext.Trim('`'); return (int)Token.TIDENTIFIER; }
+{EscIdentifier} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext.Trim('`'); return (int)Token.TIDENTIFIER; }
 
-{Placeholder} { yylval.l = yyline; yylval.s = yytext; return (int)Token.TPLACEHOLDER; }
+{Placeholder} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext; return (int)Token.TPLACEHOLDER; }
 
 %%

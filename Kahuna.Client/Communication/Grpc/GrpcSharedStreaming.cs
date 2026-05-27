@@ -15,8 +15,13 @@ namespace Kahuna.Client.Communication;
 /// communication for locking and key-value operations. It encapsulates two duplex streaming calls
 /// for handling lock and key-value requests and responses.
 /// </summary>
-internal sealed class GrpcSharedStreaming
+internal sealed class GrpcSharedStreaming : IDisposable
 {
+    /// <summary>
+    /// Unique identifier for this shared streaming pair.
+    /// </summary>
+    public long Id { get; }
+
     /// <summary>
     /// Provides a lightweight synchronization mechanism used to control concurrent access
     /// to shared resources in the context of gRPC-based streaming operations. Ensures that
@@ -44,11 +49,20 @@ internal sealed class GrpcSharedStreaming
     /// <param name="lockStreaming"></param>
     /// <param name="keyValueStreaming"></param>
     public GrpcSharedStreaming(
+        long id,
         AsyncDuplexStreamingCall<GrpcBatchClientLockRequest, GrpcBatchClientLockResponse> lockStreaming,
         AsyncDuplexStreamingCall<GrpcBatchClientKeyValueRequest, GrpcBatchClientKeyValueResponse> keyValueStreaming        
     )
     {
+        Id = id;
         LockStreaming = lockStreaming;
         KeyValueStreaming = keyValueStreaming;        
+    }
+
+    public void Dispose()
+    {
+        LockStreaming.Dispose();
+        KeyValueStreaming.Dispose();
+        Semaphore.Dispose();
     }
 }

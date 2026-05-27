@@ -5,8 +5,8 @@
 //  See accompanying file GPLEXcopyright.rtf.
 //
 //  GPLEX Version:  1.2.3
-//  DateTime: 5/1/2025 11:10:52 AM
-//  GPLEX input file <ScriptParser/ScriptParser.Language.analyzer.lex - 5/1/2025 11:08:55 AM>
+//  DateTime: 27/05/2026 11:17:31 AM
+//  GPLEX input file <ScriptParser/ScriptParser.Language.analyzer.lex - 27/05/2026 11:17:20 AM>
 //  GPLEX frame file <embedded resource>
 //
 //  Option settings: verbose, parser, stack, minimize
@@ -1691,45 +1691,45 @@ int NextState() {
 /* skip */
             break;
         case 2: // Recognized '{TNot}',	Shortest string "!"
-yylval.l = yyline; return (int)Token.TNOT;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TNOT;
             break;
         case 3: // Recognized '{LParen}',	Shortest string "("
-yylval.l = yyline; return (int)Token.LPAREN;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.LPAREN;
             break;
         case 4: // Recognized '{RParen}',	Shortest string ")"
-yylval.l = yyline; return (int)Token.RPAREN;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.RPAREN;
             break;
         case 5: // Recognized '{TMult}',	Shortest string "*"
-yylval.l = yyline; return (int)Token.TMULT;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TMULT;
             break;
         case 6: // Recognized '{TAdd}',	Shortest string "+"
-yylval.l = yyline; return (int)Token.TADD;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TADD;
             break;
         case 7: // Recognized '{TComma}',	Shortest string ","
-yylval.l = yyline; return (int)Token.TCOMMA;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TCOMMA;
             break;
         case 8: // Recognized '{TMinus}',	Shortest string "-"
-yylval.l = yyline; return (int)Token.TMINUS;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TMINUS;
             break;
         case 9: // Recognized '{TDiv}',	Shortest string "/"
-yylval.l = yyline; return (int)Token.TDIV;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TDIV;
             break;
         case 10: // Recognized '{Number}',	Shortest string "0"
         case 11: // Recognized '{Number}',	Shortest string "1"
         case 167: // Recognized '{Number}',	Shortest string "0x0"
-yylval.l = yyline; yylval.s = yytext; return (int)Token.TDIGIT;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext; return (int)Token.TDIGIT;
             break;
         case 12: // Recognized '{TLess}',	Shortest string "<"
-yylval.l = yyline; return (int)Token.TLESSTHAN;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TLESSTHAN;
             break;
         case 13: // Recognized '{TEquals}',	Shortest string "="
-yylval.l = yyline; return (int)Token.TEQUALS;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TEQUALS;
             break;
         case 14: // Recognized '{TGreater}',	Shortest string ">"
-yylval.l = yyline; return (int)Token.TGREATERTHAN;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TGREATERTHAN;
             break;
         case 15: // Recognized '{TAt}',	Shortest string "@"
-yylval.l = yyline; return (int)Token.TAT;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TAT;
             break;
         case 16: // Recognized '{Identifier}',	Shortest string "A"
         case 17: // Recognized '{Identifier}',	Shortest string "B"
@@ -1828,184 +1828,184 @@ yylval.l = yyline; return (int)Token.TAT;
         case 154: // Recognized '{Identifier}',	Shortest string "BUCKE"
         case 156: // Recognized '{Identifier}',	Shortest string "BEG"
         case 157: // Recognized '{Identifier}',	Shortest string "BEGI"
-yylval.l = yyline; yylval.s = yytext; return (int)Token.TIDENTIFIER;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext; return (int)Token.TIDENTIFIER;
             break;
         case 32: // Recognized '{LSquareBrace}',	Shortest string "["
-yylval.l = yyline; return (int)Token.LSQUAREBRACE;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.LSQUAREBRACE;
             break;
         case 33: // Recognized '{RSquareBrace}',	Shortest string "]"
-yylval.l = yyline; return (int)Token.RSQUAREBRACE;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.RSQUAREBRACE;
             break;
         case 34: // Recognized '{LBrace}',	Shortest string "{"
-yylval.l = yyline; return (int)Token.LBRACE;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.LBRACE;
             break;
         case 35: // Recognized '{RBrace}',	Shortest string "}"
-yylval.l = yyline; return (int)Token.RBRACE;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.RBRACE;
             break;
         case 36: // Recognized '{TOr}',	Shortest string "||"
-yylval.l = yyline; return (int)Token.TOR;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TOR;
             break;
         case 37: // Recognized '{TXx}',	Shortest string "XX"
-yylval.l = yyline; return (int)Token.TXX;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TXX;
             break;
         case 41: // Recognized '{TTrue}',	Shortest string "TRUE"
-yylval.l = yyline; return (int)Token.TTRUE;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TTRUE;
             break;
         case 45: // Recognized '{TThrow}',	Shortest string "THROW"
-yylval.l = yyline; return (int)Token.TTHROW;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TTHROW;
             break;
         case 46: // Recognized '{TThen}',	Shortest string "THEN"
-yylval.l = yyline; return (int)Token.TTHEN;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TTHEN;
             break;
         case 52: // Recognized '{TSleep}',	Shortest string "SLEEP"
-yylval.l = yyline; return (int)Token.TSLEEP;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TSLEEP;
             break;
         case 53: // Recognized '{TSet}',	Shortest string "SET"
-yylval.l = yyline; return (int)Token.TSET;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TSET;
             break;
         case 55: // Recognized '{TScan}',	Shortest string "SCAN"
-yylval.l = yyline; return (int)Token.TSCAN;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TSCAN;
             break;
         case 63: // Recognized '{TRollback}',	Shortest string "ROLLBACK"
-yylval.l = yyline; return (int)Token.TROLLBACK;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TROLLBACK;
             break;
         case 67: // Recognized '{TReturn}',	Shortest string "RETURN"
-yylval.l = yyline; return (int)Token.TRETURN;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TRETURN;
             break;
         case 72: // Recognized '{TPrefix}',	Shortest string "PREFIX"
-yylval.l = yyline; return (int)Token.TPREFIX;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TPREFIX;
             break;
         case 75: // Recognized '{TNx}',	Shortest string "NX"
-yylval.l = yyline; return (int)Token.TNX;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TNX;
             break;
         case 77: // Recognized '{TNull}',	Shortest string "NULL"
-yylval.l = yyline; return (int)Token.TNULL;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TNULL;
             break;
         case 78: // Recognized '{TNotWord}',	Shortest string "NOT"
-yylval.l = yyline; return (int)Token.TNOT;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TNOT;
             break;
         case 80: // Recognized '{TLet}',	Shortest string "LET"
-yylval.l = yyline; return (int)Token.TLET;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TLET;
             break;
         case 81: // Recognized '{TIf}',	Shortest string "IF"
-yylval.l = yyline; return (int)Token.TIF;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TIF;
             break;
         case 82: // Recognized '{TIn}',	Shortest string "IN"
-yylval.l = yyline; return (int)Token.TIN;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TIN;
             break;
         case 84: // Recognized '{TGet}',	Shortest string "GET"
-yylval.l = yyline; return (int)Token.TGET;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TGET;
             break;
         case 87: // Recognized '{TFor}',	Shortest string "FOR"
-yylval.l = yyline; return (int)Token.TFOR;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TFOR;
             break;
         case 90: // Recognized '{TFound}',	Shortest string "FOUND"
-yylval.l = yyline; return (int)Token.TFOUND;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TFOUND;
             break;
         case 93: // Recognized '{TFalse}',	Shortest string "FALSE"
-yylval.l = yyline; return (int)Token.TFALSE;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TFALSE;
             break;
         case 100: // Recognized '{TEx}',	Shortest string "EX"
-yylval.l = yyline; return (int)Token.TEX;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TEX;
             break;
         case 105: // Recognized '{TExtend}',	Shortest string "EXTEND"
-yylval.l = yyline; return (int)Token.TEXTEND;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TEXTEND;
             break;
         case 108: // Recognized '{TExists}',	Shortest string "EXISTS"
-yylval.l = yyline; return (int)Token.TEXISTS;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TEXISTS;
             break;
         case 111: // Recognized '{TEset}',	Shortest string "ESET"
-yylval.l = yyline; return (int)Token.TESET;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TESET;
             break;
         case 113: // Recognized '{TEScan}',	Shortest string "ESCAN"
-yylval.l = yyline; return (int)Token.TESCAN;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TESCAN;
             break;
         case 114: // Recognized '{TEnd}',	Shortest string "END"
-yylval.l = yyline; return (int)Token.TEND;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TEND;
             break;
         case 116: // Recognized '{TElse}',	Shortest string "ELSE"
-yylval.l = yyline; return (int)Token.TELSE;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TELSE;
             break;
         case 118: // Recognized '{TEget}',	Shortest string "EGET"
-yylval.l = yyline; return (int)Token.TEGET;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TEGET;
             break;
         case 124: // Recognized '{TEExtend}',	Shortest string "EEXTEND"
-yylval.l = yyline; return (int)Token.TEEXTEND;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TEEXTEND;
             break;
         case 127: // Recognized '{TEExists}',	Shortest string "EEXISTS"
-yylval.l = yyline; return (int)Token.TEEXISTS;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TEEXISTS;
             break;
         case 129: // Recognized '{TEDel}',	Shortest string "EDEL"
-yylval.l = yyline; return (int)Token.TEDELETE;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TEDELETE;
             break;
         case 132: // Recognized '{TEDelete}',	Shortest string "EDELETE"
-yylval.l = yyline; return (int)Token.TEDELETE;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TEDELETE;
             break;
         case 134: // Recognized '{TDo}',	Shortest string "DO"
-yylval.l = yyline; return (int)Token.TDO;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TDO;
             break;
         case 135: // Recognized '{TDel}',	Shortest string "DEL"
-yylval.l = yyline; return (int)Token.TDELETE;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TDELETE;
             break;
         case 138: // Recognized '{TDelete}',	Shortest string "DELETE"
-yylval.l = yyline; return (int)Token.TDELETE;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TDELETE;
             break;
         case 144: // Recognized '{TCommit}',	Shortest string "COMMIT"
-yylval.l = yyline; return (int)Token.TCOMMIT;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TCOMMIT;
             break;
         case 145: // Recognized '{TCmp}',	Shortest string "CMP"
-yylval.l = yyline; return (int)Token.TCMP;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TCMP;
             break;
         case 148: // Recognized '{TCmpRev}',	Shortest string "CMPREV"
-yylval.l = yyline; return (int)Token.TCMPREV;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TCMPREV;
             break;
         case 151: // Recognized '{TBy}',	Shortest string "BY"
-yylval.l = yyline; return (int)Token.TBY;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TBY;
             break;
         case 155: // Recognized '{TBucket}',	Shortest string "BUCKET"
-yylval.l = yyline; return (int)Token.TBUCKET;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TBUCKET;
             break;
         case 158: // Recognized '{TBegin}',	Shortest string "BEGIN"
-yylval.l = yyline; return (int)Token.TBEGIN;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TBEGIN;
             break;
         case 159: // Recognized '{TAtWord}',	Shortest string "AT"
-yylval.l = yyline; return (int)Token.TAT;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TAT;
             break;
         case 160: // Recognized '{EscIdentifier}',	Shortest string "``"
-yylval.l = yyline; yylval.s = yytext.Trim('`'); return (int)Token.TIDENTIFIER;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext.Trim('`'); return (int)Token.TIDENTIFIER;
             break;
         case 161: // Recognized '{Placeholder}',	Shortest string "@0"
-yylval.l = yyline; yylval.s = yytext; return (int)Token.TPLACEHOLDER;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext; return (int)Token.TPLACEHOLDER;
             break;
         case 162: // Recognized '{TGreaterEquals}',	Shortest string ">="
-yylval.l = yyline; return (int)Token.TGREATERTHANEQUALS;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TGREATERTHANEQUALS;
             break;
         case 163: // Recognized '{TDoubleEquals}',	Shortest string "=="
-yylval.l = yyline; return (int)Token.TDOUBLEEQUALS;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TDOUBLEEQUALS;
             break;
         case 164: // Recognized '{TLessEquals}',	Shortest string "<="
-yylval.l = yyline; return (int)Token.TLESSTHANEQUALS;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TLESSTHANEQUALS;
             break;
         case 165: // Recognized '{TNotEquals}',	Shortest string "<>"
-yylval.l = yyline; return (int)Token.TNOTEQUALS;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TNOTEQUALS;
             break;
         case 166: // Recognized '{Decimal}',	Shortest string "0.0"
-yylval.l = yyline; yylval.s = yytext; return (int)Token.TFLOAT;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext; return (int)Token.TFLOAT;
             break;
         case 168: // Recognized '{TDoubleDot}',	Shortest string ".."
-yylval.l = yyline; return (int)Token.TDOUBLEDOT;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TDOUBLEDOT;
             break;
         case 169: // Recognized '{StringSingle}',	Shortest string "''"
-yylval.l = yyline; yylval.s = yytext.Trim('\''); return (int)Token.TSTRING;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext.Trim('\''); return (int)Token.TSTRING;
             break;
         case 170: // Recognized '{TAnd}',	Shortest string "&&"
-yylval.l = yyline; return (int)Token.TAND;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TAND;
             break;
         case 171: // Recognized '{String}',	Shortest string "\"\""
-yylval.l = yyline; yylval.s = yytext.Trim('\"'); return (int)Token.TSTRING;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext.Trim('\"'); return (int)Token.TSTRING;
             break;
         case 172: // Recognized '{TNotEquals2}',	Shortest string "!="
-yylval.l = yyline; return (int)Token.TNOTEQUALS;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TNOTEQUALS;
             break;
         default:
             break;
