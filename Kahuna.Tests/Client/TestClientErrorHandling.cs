@@ -8,7 +8,6 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace Kahuna.Tests.Client;
 
@@ -70,7 +69,7 @@ public class TestClientErrorHandling
         
         Assert.True(getResult.Success);
         Assert.Null(getResult.Value);
-        Assert.Equal("", getResult.StringValue);
+        Assert.Equal("", getResult.ValueAsString());
     }
 
     [Theory, CombinatorialData]
@@ -209,7 +208,7 @@ public class TestClientErrorHandling
         {
             await client.GetOrCreateLock(
                 "",
-                10000,
+                expiryTime: 10000,
                 cancellationToken: TestContext.Current.CancellationToken
             );
         });
@@ -249,7 +248,7 @@ public class TestClientErrorHandling
         // First acquire a lock
         KahunaLock kLock = await client.GetOrCreateLock(
             lockName,
-            10000,
+            expiryTime: 10000,
             cancellationToken: TestContext.Current.CancellationToken
         );
         
@@ -318,8 +317,8 @@ public class TestClientErrorHandling
     {
         return communicationType switch
         {
-            KahunaCommunicationType.Grpc => new GrpcCommunication(),
-            KahunaCommunicationType.Rest => new RestCommunication(),
+            KahunaCommunicationType.Grpc => new GrpcCommunication(null, null),
+            KahunaCommunicationType.Rest => new RestCommunication(null),
             _ => throw new ArgumentOutOfRangeException(nameof(communicationType))
         };
     }

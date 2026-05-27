@@ -6,7 +6,6 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace Kahuna.Tests.Client;
 
@@ -35,7 +34,7 @@ public class TestTransactionSessions
         
         // Start a transaction session
         KahunaTransactionSession session = await client.StartTransactionSession(
-            new KahunaTransactionOptions { Locking = TransactionLocking.Optimistic },
+            new KahunaTransactionOptions { Locking = KeyValueTransactionLocking.Optimistic },
             TestContext.Current.CancellationToken
         );
         
@@ -59,7 +58,7 @@ public class TestTransactionSessions
         );
         
         Assert.True(getResult.Success);
-        Assert.Equal("transaction-value", getResult.StringValue);
+        Assert.Equal("transaction-value", getResult.ValueAsString());
     }
 
     [Theory, CombinatorialData]
@@ -74,7 +73,7 @@ public class TestTransactionSessions
         
         // Start a transaction session
         KahunaTransactionSession session = await client.StartTransactionSession(
-            new KahunaTransactionOptions { Locking = TransactionLocking.Optimistic },
+            new KahunaTransactionOptions { Locking = KeyValueTransactionLocking.Optimistic },
             TestContext.Current.CancellationToken
         );
         
@@ -114,7 +113,7 @@ public class TestTransactionSessions
         
         // Start a transaction session
         KahunaTransactionSession session = await client.StartTransactionSession(
-            new KahunaTransactionOptions { Locking = TransactionLocking.Optimistic },
+            new KahunaTransactionOptions { Locking = KeyValueTransactionLocking.Optimistic },
             TestContext.Current.CancellationToken
         );
         
@@ -162,7 +161,7 @@ public class TestTransactionSessions
         );
         
         Assert.True(getResult1.Success);
-        Assert.Equal("value1", getResult1.StringValue);
+        Assert.Equal("value1", getResult1.ValueAsString());
         
         // Verify key2 doesn't exist (was deleted)
         KahunaKeyValue getResult2 = await client.GetKeyValue(
@@ -179,7 +178,7 @@ public class TestTransactionSessions
         );
         
         Assert.True(getResult3.Success);
-        Assert.Equal("value3", getResult3.StringValue);
+        Assert.Equal("value3", getResult3.ValueAsString());
     }
 
     [Theory, CombinatorialData]
@@ -204,7 +203,7 @@ public class TestTransactionSessions
         
         // Start a transaction session with pessimistic locking
         KahunaTransactionSession session = await client.StartTransactionSession(
-            new KahunaTransactionOptions { Locking = TransactionLocking.Pessimistic },
+            new KahunaTransactionOptions { Locking = KeyValueTransactionLocking.Pessimistic },
             TestContext.Current.CancellationToken
         );
         
@@ -215,7 +214,7 @@ public class TestTransactionSessions
         );
         
         Assert.True(getResult.Success);
-        Assert.Equal("initial-value", getResult.StringValue);
+        Assert.Equal("initial-value", getResult.ValueAsString());
         
         // Update the key in the transaction
         KahunaKeyValue updateResult = await session.SetKeyValue(
@@ -237,7 +236,7 @@ public class TestTransactionSessions
         );
         
         Assert.True(finalGetResult.Success);
-        Assert.Equal("updated-value", finalGetResult.StringValue);
+        Assert.Equal("updated-value", finalGetResult.ValueAsString());
     }
 
     [Theory, CombinatorialData]
@@ -252,7 +251,7 @@ public class TestTransactionSessions
         int attempts = 0;
         
         await client.RetryableTransaction(
-            new KahunaTransactionOptions { Locking = TransactionLocking.Optimistic },
+            new KahunaTransactionOptions { Locking = KeyValueTransactionLocking.Optimistic },
             async (session, token) => {
                 attempts++;
                 await session.SetKeyValue(keyName, $"value-{attempts}", 10000, cancellationToken: token);
@@ -267,7 +266,7 @@ public class TestTransactionSessions
         );
         
         Assert.True(getResult.Success);
-        Assert.Equal($"value-1", getResult.StringValue);
+        Assert.Equal($"value-1", getResult.ValueAsString());
         Assert.Equal(1, attempts);
     }
 
@@ -282,14 +281,14 @@ public class TestTransactionSessions
         // Start a transaction session with a very short timeout
         KahunaTransactionSession session = await client.StartTransactionSession(
             new KahunaTransactionOptions { 
-                Locking = TransactionLocking.Optimistic,
+                Locking = KeyValueTransactionLocking.Optimistic,
                 Timeout = 1  // 1ms timeout
             },
             TestContext.Current.CancellationToken
         );
         
         // Wait for the timeout to expire
-        await Task.Delay(100);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
         
         // Attempting to use the session after timeout should throw an exception
         await Assert.ThrowsAsync<KahunaException>(async () => {
@@ -318,8 +317,8 @@ public class TestTransactionSessions
     {
         return communicationType switch
         {
-            KahunaCommunicationType.Grpc => new GrpcCommunication(),
-            KahunaCommunicationType.Rest => new RestCommunication(),
+            KahunaCommunicationType.Grpc => new GrpcCommunication(null, null),
+            KahunaCommunicationType.Rest => new RestCommunication(null),
             _ => throw new ArgumentOutOfRangeException(nameof(communicationType))
         };
     }

@@ -6,7 +6,6 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace Kahuna.Tests.Client;
 
@@ -102,7 +101,7 @@ public class TestCancellationAndTimeouts
         {
             await client.GetOrCreateLock(
                 lockName,
-                10000,
+                expiryTime: 10000,
                 cancellationToken: cts.Token
             );
         });
@@ -143,7 +142,7 @@ public class TestCancellationAndTimeouts
         // First acquire the lock
         KahunaLock firstLock = await client.GetOrCreateLock(
             lockName,
-            10000,
+            expiryTime: 10000,
             cancellationToken: TestContext.Current.CancellationToken
         );
         
@@ -178,7 +177,7 @@ public class TestCancellationAndTimeouts
         // First acquire the lock
         KahunaLock firstLock = await client.GetOrCreateLock(
             lockName,
-            10000,
+            expiryTime: 10000,
             cancellationToken: TestContext.Current.CancellationToken
         );
         
@@ -190,9 +189,9 @@ public class TestCancellationAndTimeouts
         // Start a task that cancels the token after a short delay
         _ = Task.Run(async () =>
         {
-            await Task.Delay(100);
+            await Task.Delay(100, TestContext.Current.CancellationToken);
             cts.Cancel();
-        });
+        }, TestContext.Current.CancellationToken);
         
         // Try to acquire the same lock with a long wait time, but it should be cancelled
         await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
@@ -224,15 +223,15 @@ public class TestCancellationAndTimeouts
         // Start a task that cancels the token after a short delay
         _ = Task.Run(async () =>
         {
-            await Task.Delay(100);
+            await Task.Delay(100, TestContext.Current.CancellationToken);
             cts.Cancel();
-        });
+        }, TestContext.Current.CancellationToken);
         
         // Try to execute a retryable transaction that should be cancelled
         await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
         {
             await client.RetryableTransaction(
-                new KahunaTransactionOptions { Locking = TransactionLocking.Optimistic },
+                new KahunaTransactionOptions { Locking = KeyValueTransactionLocking.Optimistic },
                 async (session, token) =>
                 {
                     // Simulate some work
@@ -254,7 +253,7 @@ public class TestCancellationAndTimeouts
         
         // Start a transaction session
         KahunaTransactionSession session = await client.StartTransactionSession(
-            new KahunaTransactionOptions { Locking = TransactionLocking.Optimistic },
+            new KahunaTransactionOptions { Locking = KeyValueTransactionLocking.Optimistic },
             TestContext.Current.CancellationToken
         );
         
@@ -293,8 +292,8 @@ public class TestCancellationAndTimeouts
     {
         return communicationType switch
         {
-            KahunaCommunicationType.Grpc => new GrpcCommunication(),
-            KahunaCommunicationType.Rest => new RestCommunication(),
+            KahunaCommunicationType.Grpc => new GrpcCommunication(null, null),
+            KahunaCommunicationType.Rest => new RestCommunication(null),
             _ => throw new ArgumentOutOfRangeException(nameof(communicationType))
         };
     }

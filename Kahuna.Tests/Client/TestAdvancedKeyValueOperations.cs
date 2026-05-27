@@ -7,7 +7,6 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace Kahuna.Tests.Client;
 
@@ -43,7 +42,7 @@ public class TestAdvancedKeyValueOperations
             {
                 Key = $"{keyPrefix}{i}",
                 Value = Encoding.UTF8.GetBytes($"value-{i}"),
-                ExpiryTime = 10000,
+                ExpiresMs = 10000,
                 Flags = KeyValueFlags.Set,
                 Durability = durability
             });
@@ -68,7 +67,7 @@ public class TestAdvancedKeyValueOperations
             );
             
             Assert.True(getResult.Success);
-            Assert.Equal($"value-{i}", getResult.StringValue);
+            Assert.Equal($"value-{i}", getResult.ValueAsString());
         }
     }
 
@@ -126,9 +125,9 @@ public class TestAdvancedKeyValueOperations
         // Verify the values are correct
         for (int i = 0; i < 10; i++)
         {
-            KahunaKeyValue keyValue = scanResults.FirstOrDefault(kv => kv.Key == $"{keyPrefix}{i}");
+            KahunaKeyValue keyValue = scanResults.FirstOrDefault(kv => kv.Key == $"{keyPrefix}{i}")!;
             Assert.NotNull(keyValue);
-            Assert.Equal($"value-{i}", keyValue.StringValue);
+            Assert.Equal($"value-{i}", keyValue.ValueAsString());
         }
     }
 
@@ -186,9 +185,9 @@ public class TestAdvancedKeyValueOperations
         // Verify the values are correct
         for (int i = 0; i < 10; i++)
         {
-            KahunaKeyValue keyValue = bucketResults.FirstOrDefault(kv => kv.Key == $"{bucketPrefix}/key-{i}");
+            KahunaKeyValue keyValue = bucketResults.FirstOrDefault(kv => kv.Key == $"{bucketPrefix}/key-{i}")!;
             Assert.NotNull(keyValue);
-            Assert.Equal($"value-{i}", keyValue.StringValue);
+            Assert.Equal($"value-{i}", keyValue.ValueAsString());
         }
     }
 
@@ -245,7 +244,7 @@ public class TestAdvancedKeyValueOperations
         );
         
         Assert.True(currentValue.Success);
-        Assert.Equal("value-3", currentValue.StringValue);
+        Assert.Equal("value-3", currentValue.ValueAsString());
         Assert.Equal(2, currentValue.Revision);
         
         // Get a specific revision
@@ -257,7 +256,7 @@ public class TestAdvancedKeyValueOperations
         );
         
         Assert.True(revision1.Success);
-        Assert.Equal("value-2", revision1.StringValue);
+        Assert.Equal("value-2", revision1.ValueAsString());
         Assert.Equal(1, revision1.Revision);
         
         // Get an earlier revision
@@ -269,7 +268,7 @@ public class TestAdvancedKeyValueOperations
         );
         
         Assert.True(revision0.Success);
-        Assert.Equal("value-1", revision0.StringValue);
+        Assert.Equal("value-1", revision0.ValueAsString());
         Assert.Equal(0, revision0.Revision);
     }
 
@@ -294,7 +293,7 @@ END
         KahunaTransactionScript script = client.LoadTransactionScript(scriptText);
         
         // Execute the script with parameters
-        KahunaKeyValueTransactionResult result = await script.Execute(
+        KahunaKeyValueTransactionResult result = await script.Run(
             new List<KeyValueParameter>
             {
                 new() { Key = "@key", Value = keyName },
@@ -312,7 +311,7 @@ END
         );
         
         Assert.True(getResult.Success);
-        Assert.Equal("script-value", getResult.StringValue);
+        Assert.Equal("script-value", getResult.ValueAsString());
     }
 
     [Theory, CombinatorialData]
@@ -357,7 +356,7 @@ END
         );
         
         Assert.True(getResult.Success);
-        Assert.Equal("new-value", getResult.StringValue);
+        Assert.Equal("new-value", getResult.ValueAsString());
     }
 
     [Theory, CombinatorialData]
@@ -402,7 +401,7 @@ END
         );
         
         Assert.True(getResult.Success);
-        Assert.Equal("initial-value", getResult.StringValue);
+        Assert.Equal("initial-value", getResult.ValueAsString());
     }
 
     private KahunaClient GetClientByType(KahunaCommunicationType communicationType, KahunaClientType clientType)
@@ -421,8 +420,8 @@ END
     {
         return communicationType switch
         {
-            KahunaCommunicationType.Grpc => new GrpcCommunication(),
-            KahunaCommunicationType.Rest => new RestCommunication(),
+            KahunaCommunicationType.Grpc => new GrpcCommunication(null, null),
+            KahunaCommunicationType.Rest => new RestCommunication(null),
             _ => throw new ArgumentOutOfRangeException(nameof(communicationType))
         };
     }

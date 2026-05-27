@@ -622,6 +622,48 @@ public class KahunaTransactionSession : IAsyncDisposable
         
         return new(Client, key, success, revision, durability, timeElapsedMs);
     }
+
+    /// <summary>
+    /// Deletes a key-value pair inside the current transaction session.
+    /// </summary>
+    /// <param name="key">The key to delete.</param>
+    /// <param name="durability">The durability level of the key-value pair.</param>
+    /// <param name="cancellationToken">Token used to propagate cancellation requests.</param>
+    /// <returns>A task that resolves to the delete operation result.</returns>
+    public async Task<KahunaKeyValue> DeleteKeyValue(
+        string key,
+        KeyValueDurability durability = KeyValueDurability.Persistent,
+        CancellationToken cancellationToken = default
+    )
+    {
+        if (Status != KahunaTransactionStatus.Pending)
+            throw new KahunaException("Cannot perform actions on a completed transaction.", KeyValueResponseType.Errored);
+        
+        acquiredLocks ??= [];
+
+        if (!acquiredLocks.Contains((key, durability)))
+        {
+            bool successLock = await Client.Communication.TryAcquireExclusiveKeyValueLock(Url, TransactionId, key, durability, cancellationToken);
+            if (successLock)
+                acquiredLocks.Add((key, durability));
+        }
+        
+        (bool success, long revision, int timeElapsedMs) = await Client.Communication.TryDeleteKeyValue(
+            Url,
+            TransactionId,
+            key,
+            durability,
+            cancellationToken
+        ).ConfigureAwait(false);
+        
+        if (success)
+        {
+            modifiedKeys ??= [];
+            modifiedKeys.Add((key, durability));
+        }
+        
+        return new(Client, key, success, revision, durability, timeElapsedMs);
+    }
     
     /// <summary>
     /// Get keys with a specific prefix
