@@ -116,6 +116,17 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         return await Raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Flushes all pending dirty writes to the persistence backend and waits for completion.
+    /// Call this after WAL restore (after <see cref="WaitForLeaderForKeyAsync"/>) to ensure
+    /// restored entries are written to SQLite before reading schema or row data.
+    /// </summary>
+    public Task FlushAsync()
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        return Kahuna.FlushPersistenceAsync();
+    }
+
     public async ValueTask DisposeAsync()
     {
         if (disposed)

@@ -144,7 +144,10 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             message.Durability
         );
 
-        (bool success, HLCTimestamp proposalTicket) = await PrepareKeyValueMessage(KeyValueRequestType.TrySet, proposal, message.TransactionId);
+        KeyValueRequestType proposalType = proposal.State == KeyValueState.Deleted
+            ? KeyValueRequestType.TryDelete
+            : KeyValueRequestType.TrySet;
+        (bool success, HLCTimestamp proposalTicket) = await PrepareKeyValueMessage(proposalType, proposal, message.TransactionId);
         if (!success)
         {
             context.Logger.LogWarning("Failed to propose logs for {TransactionId}", message.TransactionId);

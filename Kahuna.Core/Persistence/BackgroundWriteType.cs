@@ -5,5 +5,6 @@ public enum BackgroundWriteType
 {
     QueueStoreLock,
     QueueStoreKeyValue,
-    Flush
+    Flush,
+    FlushAndNotify
 }

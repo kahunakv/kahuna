@@ -53,7 +53,9 @@ public sealed class KahunaManager : IKahuna
     private readonly KeyValuesManager keyValues;
 
     private readonly SequencerManager sequencer;
-    
+
+    private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
+
     /// <summary>
     /// Constructor
     /// </summary>
@@ -64,22 +66,33 @@ public sealed class KahunaManager : IKahuna
     public KahunaManager(ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, IInterNodeCommunication interNodeCommunication, ILogger<IKahuna> logger)
     {
         this.actorSystem = actorSystem;
-        
+
         IPersistenceBackend persistenceBackend = GetPersistence(configuration);
-        
-        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter = actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
-            "background-writer", 
-            raft, 
-            persistenceBackend, 
+
+        backgroundWriter = actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
+            "background-writer",
+            raft,
+            persistenceBackend,
             configuration,
             logger
         );
-        
+
         this.locks = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);
         this.keyValues = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);
         this.sequencer = new(keyValues, logger);
     }
     
+    /// <summary>
+    /// Flushes all pending dirty objects to the persistence backend and waits for completion.
+    /// Use this before closing/disposing to ensure all queued writes land in storage.
+    /// </summary>
+    public Task FlushPersistenceAsync()
+    {
+        TaskCompletionSource<bool> tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        backgroundWriter.Send(new(BackgroundWriteType.FlushAndNotify, tcs));
+        return tcs.Task;
+    }
+
     /// <summary>
     /// Creates the persistence instance
     /// </summary>

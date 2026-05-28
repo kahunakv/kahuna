@@ -116,7 +116,13 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 await FlushLocks();
                 await FlushKeyValues();
                 break;
-            
+
+            case BackgroundWriteType.FlushAndNotify:
+                await FlushLocks();
+                await FlushKeyValues();
+                message.CompletionSource?.TrySetResult(true);
+                break;
+
             default:
                 throw new NotImplementedException();
         }

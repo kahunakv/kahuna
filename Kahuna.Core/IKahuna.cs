@@ -127,5 +127,7 @@ public interface IKahuna
 
     public Task<bool> OnReplicationReceived(int partitionId, RaftLog log);
 
-    public void OnReplicationError(int partitionId, RaftLog log);    
+    public void OnReplicationError(int partitionId, RaftLog log);
+
+    public Task FlushPersistenceAsync();
 }
