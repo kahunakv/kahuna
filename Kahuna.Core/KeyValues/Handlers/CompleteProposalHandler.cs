@@ -77,27 +77,28 @@ internal sealed class CompleteProposalHandler : BaseHandler
         entry.ReplicationIntent = null;
         context.Proposals.Remove(message.ProposalId);
 
-        if (message.Promise is null)
-            return new(KeyValueResponseType.Set, proposal.Revision);
+        KeyValueResponse response;
 
         switch (proposal.Type)
         {
             case KeyValueRequestType.TrySet:
-                message.Promise.TrySetResult(new(KeyValueResponseType.Set, entry.Revision));
+                response = new(KeyValueResponseType.Set, entry.Revision);
                 break;
 
             case KeyValueRequestType.TryExtend:
-                message.Promise.TrySetResult(new(KeyValueResponseType.Extended, entry.Revision));
+                response = new(KeyValueResponseType.Extended, entry.Revision);
                 break;
 
             case KeyValueRequestType.TryDelete:
-                message.Promise.TrySetResult(new(KeyValueResponseType.Deleted, entry.Revision));
+                response = new(KeyValueResponseType.Deleted, entry.Revision);
                 break;
-            
+
             default:
                 throw new NotImplementedException();
         }
-        
-        return KeyValueStaticResponses.ErroredResponse;
+
+        message.Promise?.TrySetResult(response);
+
+        return response;
     }
 }

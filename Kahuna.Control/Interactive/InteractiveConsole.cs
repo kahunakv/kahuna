@@ -12,6 +12,7 @@ using System.Text;
 using System.Text.Json;
 using DotNext.Threading.Tasks;
 using Kahuna.Client;
+using Kahuna.Control.Commands;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 using RadLine;
@@ -31,7 +32,7 @@ public static class InteractiveConsole
     {
         Assembly assembly = Assembly.GetExecutingAssembly();
         FileVersionInfo fvi = FileVersionInfo.GetVersionInfo(assembly.Location);
-        
+
         AnsiConsole.MarkupLine("[green]Kahuna Shell {0} (beta)[/]\n", fvi.FileMajorPart + "." + fvi.FileMinorPart + "." + fvi.FileBuildPart);
 
         string historyPath = string.Concat(Path.GetTempPath(), Path.PathSeparator, "kahuna.history.json");
@@ -97,6 +98,12 @@ public static class InteractiveConsole
                 "eextend-lock",
                 "eunlock",
                 "eget-lock",
+                // sequences
+                "create-sequence",
+                "get-sequence",
+                "next-sequence",
+                "reserve-sequence",
+                "delete-sequence",
             ];
 
             string[] functions = [
@@ -137,7 +144,7 @@ public static class InteractiveConsole
                 "floor",
                 "abs",
                 "pow",
-                "current_time",                
+                "current_time",
             ];
 
             string[] commands =
@@ -147,14 +154,14 @@ public static class InteractiveConsole
                 "exit",
                 "quit"
             ];
-            
+
             string[] constants =
             [
                 "null",
                 "true",
                 "false"
             ];
-            
+
             string[] regexes =
             [
                 @"(?<number>\b\d+(\.\d+)?\b)",
@@ -178,10 +185,10 @@ public static class InteractiveConsole
 
             foreach (string command in commands)
                 worldHighlighter.AddWord(command, commandStyle);
-            
+
             foreach (string constant in constants)
                 worldHighlighter.AddWord(constant, constantsStyle);
-            
+
             foreach (string regex in regexes)
                 worldHighlighter.AddRegex(regex, constantsStyle);
 
@@ -190,7 +197,7 @@ public static class InteractiveConsole
                 MultiLine = true,
                 Text = "",
                 Prompt = new MyLineNumberPrompt(new(foreground: Color.PaleTurquoise1)),
-                //Completion = new TestCompletion(),        
+                //Completion = new TestCompletion(),
                 Highlighter = worldHighlighter
             };
 
@@ -208,7 +215,7 @@ public static class InteractiveConsole
 
                 kvp.Value.DisposeAsync().Wait();
             }
-            
+
             SaveHistory(historyPath, history).Wait();
         };
 
@@ -227,37 +234,37 @@ public static class InteractiveConsole
                     continue;
 
                 string commandTrim = command.Trim();
-                
+
                 if (string.Equals(commandTrim, "exit", StringComparison.InvariantCultureIgnoreCase) || string.Equals(commandTrim, "quit", StringComparison.InvariantCultureIgnoreCase))
                 {
                     await Exit(historyPath, history, locks, elocks);
                     break;
                 }
-                
+
                 if (string.Equals(commandTrim, "clear", StringComparison.InvariantCultureIgnoreCase))
                 {
                     AnsiConsole.Clear();
                     continue;
                 }
-                
+
                 if (commandTrim.StartsWith("run ", StringComparison.InvariantCultureIgnoreCase))
                 {
                     await LoadAndRunScript(connection, scripts, history, commandTrim, options);
                     continue;
                 }
-                
+
                 if (commandTrim.StartsWith("lock ", StringComparison.InvariantCultureIgnoreCase))
                 {
                     await TryLock(connection, history, commandTrim, locks, LockDurability.Persistent);
                     continue;
                 }
-                
+
                 if (commandTrim.StartsWith("elock ", StringComparison.InvariantCultureIgnoreCase))
                 {
                     await TryLock(connection, history, commandTrim, elocks, LockDurability.Ephemeral);
                     continue;
                 }
-                
+
                 if (commandTrim.StartsWith("unlock ", StringComparison.InvariantCultureIgnoreCase))
                 {
                     await TryUnlock(history, commandTrim, locks);
@@ -281,7 +288,7 @@ public static class InteractiveConsole
                     await GetLock(history, commandTrim, elocks);
                     continue;
                 }
-                
+
                 if (commandTrim.StartsWith("extend-lock ", StringComparison.InvariantCultureIgnoreCase))
                 {
                     await TryExtendLock(history, commandTrim, locks);
@@ -291,6 +298,36 @@ public static class InteractiveConsole
                 if (commandTrim.StartsWith("eextend-lock ", StringComparison.InvariantCultureIgnoreCase))
                 {
                     await TryExtendLock(history, commandTrim, elocks);
+                    continue;
+                }
+
+                if (commandTrim.StartsWith("create-sequence ", StringComparison.InvariantCultureIgnoreCase))
+                {
+                    await CreateSequence(connection, history, commandTrim);
+                    continue;
+                }
+
+                if (commandTrim.StartsWith("get-sequence ", StringComparison.InvariantCultureIgnoreCase))
+                {
+                    await GetSequence(connection, history, commandTrim);
+                    continue;
+                }
+
+                if (commandTrim.StartsWith("next-sequence ", StringComparison.InvariantCultureIgnoreCase))
+                {
+                    await NextSequence(connection, history, commandTrim);
+                    continue;
+                }
+
+                if (commandTrim.StartsWith("reserve-sequence ", StringComparison.InvariantCultureIgnoreCase))
+                {
+                    await ReserveSequence(connection, history, commandTrim);
+                    continue;
+                }
+
+                if (commandTrim.StartsWith("delete-sequence ", StringComparison.InvariantCultureIgnoreCase))
+                {
+                    await DeleteSequence(connection, history, commandTrim);
                     continue;
                 }
 
@@ -328,7 +365,7 @@ public static class InteractiveConsole
                 AnsiConsole.MarkupLine("[red]{0}[/]: {1}\n", Markup.Escape(ex.GetType().Name), Markup.Escape(ex.Message));
             }
         }
-        
+
         foreach (KeyValuePair<string, KahunaLock> kvp in elocks)
         {
             try
@@ -386,7 +423,7 @@ public static class InteractiveConsole
     {
         if (history is not null)
             await File.WriteAllTextAsync(historyPath, JsonSerializer.Serialize(history));
-        
+
         //AnsiConsole.MarkupLine("[cyan]Saving history to {0}...[/]", Markup.Escape(historyPath));
     }
 
@@ -412,7 +449,7 @@ public static class InteractiveConsole
         if (kahunaLock.IsAcquired)
         {
             AnsiConsole.MarkupLine("[cyan]f{0} acquired {1}[/]\n", Markup.Escape(kahunaLock.FencingToken.ToString()), Markup.Escape(Encoding.UTF8.GetString(kahunaLock.Owner)));
-            
+
             locks.TryAdd(parts[1], kahunaLock);
         }
         else
@@ -430,7 +467,7 @@ public static class InteractiveConsole
     private static async Task TryUnlock(List<string> history, string commandTrim, Dictionary<string, KahunaLock> locks)
     {
         history.Add(commandTrim);
-                    
+
         string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
 
         if (locks.TryGetValue(parts[1], out KahunaLock? kahunaLock))
@@ -441,9 +478,9 @@ public static class InteractiveConsole
                 AnsiConsole.MarkupLine("[cyan]unlocked[/]\n");
             //else
             //    AnsiConsole.MarkupLine("[yellow]not unlocked[/]");
-            
+
             locks.Remove(parts[1]);
-        } 
+        }
         else
         {
             AnsiConsole.MarkupLine("[yellow]not acquired[/]\n");
@@ -463,7 +500,7 @@ public static class InteractiveConsole
     private static async Task TryExtendLock(List<string> history, string commandTrim, Dictionary<string, KahunaLock> locks)
     {
         history.Add(commandTrim);
-                    
+
         string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
 
         if (locks.TryGetValue(parts[1], out KahunaLock? kahunaLock))
@@ -493,7 +530,7 @@ public static class InteractiveConsole
     private static async Task GetLock(List<string> history, string commandTrim, Dictionary<string, KahunaLock> locks)
     {
         history.Add(commandTrim);
-                    
+
         string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
 
         if (locks.TryGetValue(parts[1], out KahunaLock? kahunaLock))
@@ -511,6 +548,129 @@ public static class InteractiveConsole
         }
     }
 
+    private static async Task CreateSequence(KahunaClient connection, List<string> history, string commandTrim)
+    {
+        history.Add(commandTrim);
+
+        string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 2)
+        {
+            AnsiConsole.MarkupLine("[yellow]usage: create-sequence <name> [initial-value] [increment] [max-value][/]\n");
+            return;
+        }
+
+        long initialValue = parts.Length > 2 ? long.Parse(parts[2]) : 0;
+        long increment = parts.Length > 3 ? long.Parse(parts[3]) : 1;
+        long? maxValue = parts.Length > 4 ? long.Parse(parts[4]) : null;
+
+        KahunaSequence sequence = await connection.CreateSequence(parts[1], initialValue, increment, maxValue);
+        WriteSequence(sequence, "created");
+    }
+
+    private static async Task GetSequence(KahunaClient connection, List<string> history, string commandTrim)
+    {
+        history.Add(commandTrim);
+
+        string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 2)
+        {
+            AnsiConsole.MarkupLine("[yellow]usage: get-sequence <name>[/]\n");
+            return;
+        }
+
+        KahunaSequence? sequence = await connection.GetSequence(parts[1]);
+        if (sequence is null)
+        {
+            AnsiConsole.MarkupLine("[yellow]not found[/]\n");
+            return;
+        }
+
+        WriteSequence(sequence, "get");
+    }
+
+    private static async Task NextSequence(KahunaClient connection, List<string> history, string commandTrim)
+    {
+        history.Add(commandTrim);
+
+        string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 2)
+        {
+            AnsiConsole.MarkupLine("[yellow]usage: next-sequence <name> [idempotency-key][/]\n");
+            return;
+        }
+
+        KahunaSequenceRange range = await connection.ReserveSequenceRange(parts[1], 1, parts.Length > 2 ? parts[2] : null);
+        WriteSequenceRange(range, "next");
+    }
+
+    private static async Task ReserveSequence(KahunaClient connection, List<string> history, string commandTrim)
+    {
+        history.Add(commandTrim);
+
+        string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 3)
+        {
+            AnsiConsole.MarkupLine("[yellow]usage: reserve-sequence <name> <count> [idempotency-key][/]\n");
+            return;
+        }
+
+        KahunaSequenceRange range = await connection.ReserveSequenceRange(parts[1], int.Parse(parts[2]), parts.Length > 3 ? parts[3] : null);
+        WriteSequenceRange(range, "reserved");
+    }
+
+    private static async Task DeleteSequence(KahunaClient connection, List<string> history, string commandTrim)
+    {
+        history.Add(commandTrim);
+
+        string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 2)
+        {
+            AnsiConsole.MarkupLine("[yellow]usage: delete-sequence <name>[/]\n");
+            return;
+        }
+
+        bool deleted = await connection.DeleteSequence(parts[1]);
+        AnsiConsole.MarkupLine(deleted ? "[cyan]deleted[/]\n" : "[yellow]not found[/]\n");
+    }
+
+    private static void WriteSequence(KahunaSequence sequence, string action)
+    {
+        AnsiConsole.MarkupLine(
+            "r{0} [cyan]{1}[/] [lightpink3]{2}[/] current [cyan]{3}[/] increment {4} max {5}\n",
+            sequence.Revision,
+            action,
+            Markup.Escape(sequence.Name),
+            sequence.CurrentValue,
+            sequence.Increment,
+            sequence.MaxValue?.ToString() ?? "-"
+        );
+    }
+
+    private static void WriteSequenceRange(KahunaSequenceRange range, string action)
+    {
+        if (range.Count == 1)
+        {
+            AnsiConsole.MarkupLine(
+                "r{0} [cyan]{1}[/] [lightpink3]{2}[/] [cyan]{3}[/]\n",
+                range.Revision,
+                action,
+                Markup.Escape(range.Name),
+                range.Start
+            );
+            return;
+        }
+
+        AnsiConsole.MarkupLine(
+            "r{0} [cyan]{1}[/] [lightpink3]{2}[/] [cyan]{3}..{4}[/] count {5}\n",
+            range.Revision,
+            action,
+            Markup.Escape(range.Name),
+            range.Start,
+            range.End,
+            range.Count
+        );
+    }
+
     /// <summary>
     /// Executes a specified command using the provided connection and scripts, processes the result,
     /// and logs the command to history if it completes without errors or retries.
@@ -524,7 +684,7 @@ public static class InteractiveConsole
     private static async Task RunCommand(KahunaClient connection,
         Dictionary<string, KahunaTransactionScript> scripts,
         List<string> history,
-        string commandTrim, 
+        string commandTrim,
         KahunaControlOptions options
     )
     {
@@ -533,15 +693,15 @@ public static class InteractiveConsole
             script = connection.LoadTransactionScript(commandTrim);
             scripts.Add(commandTrim, script);
         }
-        
+
         using CancellationTokenSource cts = new();
-        
+
         //Console.WriteLine(options.DefaultTimeout);
-        
+
         cts.CancelAfter(TimeSpan.FromSeconds(options.DefaultTimeout));
-        
+
         KahunaKeyValueTransactionResult result = await script.Run(cancellationToken: cts.Token);
-                
+
         switch (result.Type)
         {
             case KeyValueResponseType.Get:
@@ -551,8 +711,8 @@ public static class InteractiveConsole
                     {
                         AnsiConsole.MarkupLine(
                             "r{0} [cyan]{1}[/] {2}ms\n",
-                            result.Values[0].Revision,                                                         
-                            Markup.Escape(GetHumanValue(result.Values[0])), 
+                            result.Values[0].Revision,
+                            Markup.Escape(GetHumanValue(result.Values[0])),
                             result.TimeElapsedMs
                         );
                     }
@@ -563,7 +723,7 @@ public static class InteractiveConsole
                             if (value.Key is null)
                                 AnsiConsole.MarkupLine(
                                     "r{0} [cyan]{1}[/]",
-                                    value.Revision >= 0 ? value.Revision : "-",                                   
+                                    value.Revision >= 0 ? value.Revision : "-",
                                     Markup.Escape(GetHumanValue(value))
                                 );
                             else
@@ -572,17 +732,17 @@ public static class InteractiveConsole
                                     "r{0} [lightpink3]{1}[/] [cyan]{2}[/]",
                                     value.Revision >= 0 ? value.Revision : "-",
                                     Markup.Escape(value.Key ?? ""),
-                                    Markup.Escape(GetHumanValue(value)) 
+                                    Markup.Escape(GetHumanValue(value))
                                 );
                             }
                         }
 
                         AnsiConsole.WriteLine("{0}ms\n", result.TimeElapsedMs);
-                    }                    
+                    }
                 }
 
                 break;
-            
+
             case KeyValueResponseType.DoesNotExist:
                 if (result.Values is not null)
                 {
@@ -591,13 +751,13 @@ public static class InteractiveConsole
                 }
 
                 break;
-            
+
             case KeyValueResponseType.Set:
                 if (result.Values is not null)
                 {
                     foreach (KahunaKeyValueTransactionResultValue value in result.Values)
                         AnsiConsole.MarkupLine(
-                            "r{0} [cyan]set[/] {1}ms\n", 
+                            "r{0} [cyan]set[/] {1}ms\n",
                             value.Revision >= 0 ? value.Revision : "-",
                             result.TimeElapsedMs
                         );
@@ -605,73 +765,73 @@ public static class InteractiveConsole
                 else
                 {
                     AnsiConsole.MarkupLine(
-                        "r{0} [cyan]set[/] {1}ms\n", 
+                        "r{0} [cyan]set[/] {1}ms\n",
                         "-",
                         result.TimeElapsedMs
                     );
                 }
 
                 break;
-            
+
             case KeyValueResponseType.NotSet:
                 if (result.Values is not null)
                 {
                     foreach (KahunaKeyValueTransactionResultValue value in result.Values)
                         AnsiConsole.MarkupLine(
-                            "r{0} [yellow]not set[/] {1}ms\n", 
+                            "r{0} [yellow]not set[/] {1}ms\n",
                             value.Revision >= 0 ? value.Revision : "-",
                             result.TimeElapsedMs
                         );
-                } 
-                else                                 
+                }
+                else
                     AnsiConsole.MarkupLine("r{0} [yellow]not set[/] {1}ms\n", 0, result.TimeElapsedMs);
-                
+
                 break;
-            
+
             case KeyValueResponseType.Deleted:
                 if (result.Values is not null)
                 {
                     foreach (KahunaKeyValueTransactionResultValue value in result.Values)
                         AnsiConsole.MarkupLine(
-                            "r{0} [cyan]deleted[/] {1}ms\n", 
+                            "r{0} [cyan]deleted[/] {1}ms\n",
                             value.Revision >= 0 ? value.Revision : "-",
                             result.TimeElapsedMs
                         );
-                } 
-                else                                 
-                    AnsiConsole.MarkupLine("r{0} [cyan]deleted[/] {1}ms\n", 0, result.TimeElapsedMs);           
-                
+                }
+                else
+                    AnsiConsole.MarkupLine("r{0} [cyan]deleted[/] {1}ms\n", 0, result.TimeElapsedMs);
+
                 break;
-            
+
             case KeyValueResponseType.Extended:
-                
+
                 if (result.Values is not null)
                 {
                     foreach (KahunaKeyValueTransactionResultValue value in result.Values)
                         AnsiConsole.MarkupLine(
-                            "r{0} [cyan]extended[/] {1}ms\n", 
+                            "r{0} [cyan]extended[/] {1}ms\n",
                             value.Revision >= 0 ? value.Revision : "-",
                             result.TimeElapsedMs
                         );
-                } 
-                else                                 
-                    AnsiConsole.MarkupLine("r{0} [yellow]extended[/] {1}ms\n", 0, result.TimeElapsedMs); 
-                                
+                }
+                else
+                    AnsiConsole.MarkupLine("r{0} [yellow]extended[/] {1}ms\n", 0, result.TimeElapsedMs);
+
                 break;
-            
+
             case KeyValueResponseType.Exists:
                 if (result.Values is not null)
                 {
                     foreach (KahunaKeyValueTransactionResultValue value in result.Values)
                         AnsiConsole.MarkupLine(
-                            "r{0} [cyan]exists[/] {1}ms\n", 
+                            "r{0} [cyan]exists[/] {1}ms\n",
                             value.Revision >= 0 ? value.Revision : "-",
                             result.TimeElapsedMs
                         );
-                } 
-                else                                 
-                    AnsiConsole.MarkupLine("r{0} [cyan]exists[/] {1}ms\n", 0, result.TimeElapsedMs); 
-                                
+                }
+                else
+                    AnsiConsole.MarkupLine("r{0} [cyan]exists[/] {1}ms\n", 0, result.TimeElapsedMs);
+
                 break;
 
             case KeyValueResponseType.Locked:
@@ -688,7 +848,7 @@ public static class InteractiveConsole
                 AnsiConsole.MarkupLine("[yellow]{0}[/]ms\n", result.Type, result.TimeElapsedMs);
                 break;
         }
-        
+
         if (result.Type != KeyValueResponseType.Errored && result.Type != KeyValueResponseType.MustRetry)
             history.Add(commandTrim);
     }
@@ -704,25 +864,25 @@ public static class InteractiveConsole
     /// <param name="commandTrim">The trimmed command string that contains the script file path.</param>
     /// <returns>A task representing the asynchronous execution of the script.</returns>
     private static async Task LoadAndRunScript(
-        KahunaClient connection, 
-        Dictionary<string, KahunaTransactionScript> scripts, 
-        List<string> history, 
+        KahunaClient connection,
+        Dictionary<string, KahunaTransactionScript> scripts,
+        List<string> history,
         string commandTrim,
         KahunaControlOptions options
     )
     {
         string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
-        
+
         if (!File.Exists(parts[1]))
         {
             AnsiConsole.MarkupLine("[red]File does not exist[/]");
             return;
         }
-        
+
         string scriptText = await File.ReadAllTextAsync(parts[1]);
         if (string.IsNullOrWhiteSpace(scriptText))
             return;
-        
+
         try
         {
             AnsiConsole.MarkupLine("[purple]{0}[/]", Markup.Escape(scriptText));
@@ -737,7 +897,7 @@ public static class InteractiveConsole
 
     private static string GetHumanValue(KahunaKeyValueTransactionResultValue result)
     {
-        if (result.Value is null) 
+        if (result.Value is null)
             return "(null)";
 
         string str = Encoding.UTF8.GetString(result.Value);

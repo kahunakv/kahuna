@@ -67,6 +67,36 @@ if (IsSingleCommand(opts))
             await UnlockCommand.Execute(connection, opts.Unlock, opts.Owner!, format);
             return;
         }
+
+        if (!string.IsNullOrEmpty(opts.CreateSequence))
+        {
+            await SequenceCommand.Create(connection, opts.CreateSequence, opts.InitialValue, opts.Increment, opts.MaxValue, format);
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(opts.GetSequence))
+        {
+            await SequenceCommand.Get(connection, opts.GetSequence, format);
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(opts.NextSequence))
+        {
+            await SequenceCommand.Next(connection, opts.NextSequence, opts.IdempotencyKey, format);
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(opts.ReserveSequence))
+        {
+            await SequenceCommand.Reserve(connection, opts.ReserveSequence, opts.Count, opts.IdempotencyKey, format);
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(opts.DeleteSequence))
+        {
+            await SequenceCommand.Delete(connection, opts.DeleteSequence, format);
+            return;
+        }
     }
     catch (Exception ex)
     {
@@ -99,23 +129,38 @@ static bool IsSingleCommand(KahunaControlOptions kahunaControlOptions)
 {
     if (!string.IsNullOrEmpty(kahunaControlOptions.Set))
         return true;
-    
+
     if (!string.IsNullOrEmpty(kahunaControlOptions.Get))
         return true;
-    
+
     if (!string.IsNullOrEmpty(kahunaControlOptions.GetByBucket))
         return true;
-    
+
     if (!string.IsNullOrEmpty(kahunaControlOptions.ScanByPrefix))
         return true;
-    
+
     if (!string.IsNullOrEmpty(kahunaControlOptions.Lock))
         return true;
-    
+
     if (!string.IsNullOrEmpty(kahunaControlOptions.Unlock))
         return true;
-    
+
     if (!string.IsNullOrEmpty(kahunaControlOptions.ExtendLock))
+        return true;
+
+    if (!string.IsNullOrEmpty(kahunaControlOptions.CreateSequence))
+        return true;
+
+    if (!string.IsNullOrEmpty(kahunaControlOptions.GetSequence))
+        return true;
+
+    if (!string.IsNullOrEmpty(kahunaControlOptions.NextSequence))
+        return true;
+
+    if (!string.IsNullOrEmpty(kahunaControlOptions.ReserveSequence))
+        return true;
+
+    if (!string.IsNullOrEmpty(kahunaControlOptions.DeleteSequence))
         return true;
 
     return false;
