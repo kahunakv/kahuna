@@ -196,7 +196,7 @@ public class TestCancellationAndTimeouts
         }, TestContext.Current.CancellationToken);
         
         // Try to acquire the same lock with a long wait time, but it should be cancelled
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        await AssertCancelledAsync(async () =>
         {
             await client.GetOrCreateLock(
                 lockName,

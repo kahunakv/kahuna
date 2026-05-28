@@ -232,7 +232,7 @@ public class TestLocks
         Assert.Equal(lockInfo.Owner, kLock.Owner);
         HLCTimestamp expires = lockInfo.Expires;
         
-        (extended, fencingToken) = await kLock.TryExtend(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        (extended, fencingToken) = await kLock.TryExtend(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
         Assert.True(extended);
         Assert.Equal(kLock.FencingToken, fencingToken);
         
