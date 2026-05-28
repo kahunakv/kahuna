@@ -684,20 +684,24 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
     {
         foreach (KeyValuePair<int, (ReaderWriterLock, SqliteConnection)> conn in connections)
         {
+            bool lockTaken = false;
+
             try
             {
                 conn.Value.Item1.AcquireWriterLock(TimeSpan.FromSeconds(5));
+                lockTaken = true;
 
                 conn.Value.Item2.Dispose();
             }
             finally
             {
-                conn.Value.Item1.ReleaseWriterLock();
+                if (lockTaken)
+                    conn.Value.Item1.ReleaseWriterLock();
             }
         }
 
         GC.SuppressFinalize(this);
-        
-        semaphore.Release();
+
+        semaphore.Dispose();
     }
 }

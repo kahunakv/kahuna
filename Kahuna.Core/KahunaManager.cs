@@ -26,7 +26,7 @@ namespace Kahuna;
 /// <summary>
 /// Façade to the internal systems of Kahuna.
 /// </summary>
-public sealed class KahunaManager : IKahuna
+public sealed class KahunaManager : IKahuna, IDisposable
 {
     /// <summary>
     /// Represents the core actor system used for managing actor-based concurrency within the KahunaManager.
@@ -56,6 +56,8 @@ public sealed class KahunaManager : IKahuna
 
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
 
+    private readonly IPersistenceBackend persistenceBackend;
+
     /// <summary>
     /// Constructor
     /// </summary>
@@ -67,7 +69,7 @@ public sealed class KahunaManager : IKahuna
     {
         this.actorSystem = actorSystem;
 
-        IPersistenceBackend persistenceBackend = GetPersistence(configuration);
+        persistenceBackend = GetPersistence(configuration);
 
         backgroundWriter = actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
             "background-writer",
@@ -80,6 +82,14 @@ public sealed class KahunaManager : IKahuna
         this.locks = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);
         this.keyValues = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);
         this.sequencer = new(keyValues, logger);
+    }
+
+    public void Dispose()
+    {
+        GC.SuppressFinalize(this);
+
+        if (persistenceBackend is IDisposable disposable)
+            disposable.Dispose();
     }
     
     /// <summary>

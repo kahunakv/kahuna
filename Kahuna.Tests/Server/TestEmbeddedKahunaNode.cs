@@ -1,9 +1,12 @@
 using System.Text;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.Locks.Data;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Shared.Locks;
 using Kommander;
 using Kommander.Time;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 
 namespace Kahuna.Tests.Server;
@@ -167,6 +170,165 @@ public sealed class TestEmbeddedKahunaNode
         Assert.Equal(second.Raft.GetLocalEndpoint(), leader);
     }
 
+    [Fact]
+    public async Task TestFlushPersistsPendingKeyValues()
+    {
+        string storagePath = CreateTempStoragePath();
+
+        try
+        {
+            byte[] value = Encoding.UTF8.GetBytes("flush-value");
+
+            await using (EmbeddedKahunaNode node = new(CreateSqliteOptions(storagePath), loggerFactory))
+            {
+                await node.StartAsync(TestContext.Current.CancellationToken);
+
+                (KeyValueResponseType response, long revision, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+                    HLCTimestamp.Zero,
+                    "tenant/flush/key-a",
+                    value,
+                    null,
+                    -1,
+                    KeyValueFlags.Set,
+                    0,
+                    KeyValueDurability.Persistent,
+                    TestContext.Current.CancellationToken
+                );
+
+                Assert.Equal(KeyValueResponseType.Set, response);
+                Assert.Equal(0, revision);
+
+                await node.FlushAsync();
+            }
+
+            PersistentKeyValue? persisted = ReadPersistedKeyValue(storagePath, "tenant/flush/key-a");
+
+            Assert.NotNull(persisted);
+            Assert.Equal(0, persisted.Revision);
+            Assert.Equal(value, persisted.Value);
+            Assert.Equal((int)KeyValueState.Set, persisted.State);
+        }
+        finally
+        {
+            TryDeleteDirectory(storagePath);
+        }
+    }
+
+    [Fact]
+    public async Task TestFlushPersistsPendingLocks()
+    {
+        string storagePath = CreateTempStoragePath();
+
+        try
+        {
+            byte[] owner = Encoding.UTF8.GetBytes("flush-owner");
+
+            await using (EmbeddedKahunaNode node = new(CreateSqliteOptions(storagePath), loggerFactory))
+            {
+                await node.StartAsync(TestContext.Current.CancellationToken);
+
+                (LockResponseType response, long fencingToken) = await node.Kahuna.LocateAndTryLock(
+                    "tenant/flush/lock-a",
+                    owner,
+                    30000,
+                    LockDurability.Persistent,
+                    TestContext.Current.CancellationToken
+                );
+
+                Assert.Equal(LockResponseType.Locked, response);
+                Assert.Equal(0, fencingToken);
+
+                await node.FlushAsync();
+            }
+
+            PersistentLock? persisted = ReadPersistedLock(storagePath, "tenant/flush/lock-a");
+
+            Assert.NotNull(persisted);
+            Assert.Equal(owner, persisted.Owner);
+            Assert.Equal(0, persisted.FencingToken);
+            Assert.Equal((int)LockState.Locked, persisted.State);
+        }
+        finally
+        {
+            TryDeleteDirectory(storagePath);
+        }
+    }
+
+    [Fact]
+    public async Task TestEmbeddedNodeSupportsRocksDbStorage()
+    {
+        string storagePath = CreateTempStoragePath();
+
+        try
+        {
+            byte[] value = Encoding.UTF8.GetBytes("rocksdb-value");
+            byte[] owner = Encoding.UTF8.GetBytes("rocksdb-owner");
+
+            await using (EmbeddedKahunaNode first = new(CreateRocksDbOptions(storagePath), loggerFactory))
+            {
+                await first.StartAsync(TestContext.Current.CancellationToken);
+
+                (KeyValueResponseType response, long revision, _) = await first.Kahuna.LocateAndTrySetKeyValue(
+                    HLCTimestamp.Zero,
+                    "tenant/rocksdb/key-a",
+                    value,
+                    null,
+                    -1,
+                    KeyValueFlags.Set,
+                    0,
+                    KeyValueDurability.Persistent,
+                    TestContext.Current.CancellationToken
+                );
+
+                Assert.Equal(KeyValueResponseType.Set, response);
+                Assert.Equal(0, revision);
+
+                (LockResponseType lockResponse, long fencingToken) = await first.Kahuna.LocateAndTryLock(
+                    "tenant/rocksdb/lock-a",
+                    owner,
+                    30000,
+                    LockDurability.Persistent,
+                    TestContext.Current.CancellationToken
+                );
+
+                Assert.Equal(LockResponseType.Locked, lockResponse);
+                Assert.Equal(0, fencingToken);
+
+                await first.FlushAsync();
+            }
+
+            await using EmbeddedKahunaNode second = new(CreateRocksDbOptions(storagePath), loggerFactory);
+            await second.StartAsync(TestContext.Current.CancellationToken);
+
+            (KeyValueResponseType responseType, ReadOnlyKeyValueEntry? entry) = await second.Kahuna.LocateAndTryGetValue(
+                HLCTimestamp.Zero,
+                "tenant/rocksdb/key-a",
+                -1,
+                KeyValueDurability.Persistent,
+                TestContext.Current.CancellationToken
+            );
+
+            Assert.Equal(KeyValueResponseType.Get, responseType);
+            Assert.NotNull(entry);
+            Assert.Equal(value, entry.Value);
+
+            (LockResponseType lockResponseType, ReadOnlyLockEntry? lockEntry) = await second.Kahuna.LocateAndGetLock(
+                "tenant/rocksdb/lock-a",
+                LockDurability.Persistent,
+                TestContext.Current.CancellationToken
+            );
+
+            Assert.Equal(LockResponseType.Got, lockResponseType);
+            Assert.NotNull(lockEntry);
+            Assert.Equal(owner, lockEntry.Owner);
+            Assert.Equal(0, lockEntry.FencingToken);
+        }
+        finally
+        {
+            TryDeleteDirectory(storagePath);
+        }
+    }
+
     private static async Task SetValue(EmbeddedKahunaNode node, string key, string value)
     {
         (KeyValueResponseType response, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
@@ -183,4 +345,106 @@ public sealed class TestEmbeddedKahunaNode
 
         Assert.Equal(KeyValueResponseType.Set, response);
     }
+
+    private static EmbeddedKahunaOptions CreateSqliteOptions(string storagePath)
+    {
+        return new()
+        {
+            Storage = "sqlite",
+            StoragePath = storagePath,
+            StorageRevision = "flush-tests",
+            WalStorage = "memory",
+            InitialPartitions = 1,
+            DirtyObjectsWriterDelay = 60000
+        };
+    }
+
+    private static EmbeddedKahunaOptions CreateRocksDbOptions(string storagePath)
+    {
+        return new()
+        {
+            Storage = "rocksdb",
+            StoragePath = storagePath,
+            StorageRevision = "rocksdb-tests",
+            WalStorage = "memory",
+            InitialPartitions = 1,
+            DirtyObjectsWriterDelay = 60000
+        };
+    }
+
+    private static string CreateTempStoragePath()
+    {
+        string storagePath = Path.Combine(Path.GetTempPath(), "kahuna-flush-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(storagePath);
+        return storagePath;
+    }
+
+    private static PersistentKeyValue? ReadPersistedKeyValue(string storagePath, string key)
+    {
+        foreach (string databasePath in Directory.EnumerateFiles(storagePath, "kahuna*_flush-tests.db"))
+        {
+            using SqliteConnection connection = new($"Data Source={databasePath};Mode=ReadOnly");
+            connection.Open();
+
+            using SqliteCommand command = connection.CreateCommand();
+            command.CommandText = "SELECT revision, value, state FROM keys WHERE key = $key";
+            command.Parameters.AddWithValue("$key", key);
+
+            using SqliteDataReader reader = command.ExecuteReader();
+            if (!reader.Read())
+                continue;
+
+            return new(
+                reader.GetInt64(0),
+                reader.IsDBNull(1) ? null : (byte[])reader["value"],
+                reader.GetInt32(2)
+            );
+        }
+
+        return null;
+    }
+
+    private static PersistentLock? ReadPersistedLock(string storagePath, string resource)
+    {
+        foreach (string databasePath in Directory.EnumerateFiles(storagePath, "kahuna*_flush-tests.db"))
+        {
+            using SqliteConnection connection = new($"Data Source={databasePath};Mode=ReadOnly");
+            connection.Open();
+
+            using SqliteCommand command = connection.CreateCommand();
+            command.CommandText = "SELECT owner, fencingToken, state FROM locks WHERE resource = $resource";
+            command.Parameters.AddWithValue("$resource", resource);
+
+            using SqliteDataReader reader = command.ExecuteReader();
+            if (!reader.Read())
+                continue;
+
+            return new(
+                reader.IsDBNull(0) ? null : (byte[])reader["owner"],
+                reader.GetInt64(1),
+                reader.GetInt32(2)
+            );
+        }
+
+        return null;
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+                Directory.Delete(path, recursive: true);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
+    private sealed record PersistentKeyValue(long Revision, byte[]? Value, int State);
+
+    private sealed record PersistentLock(byte[]? Owner, long FencingToken, int State);
 }

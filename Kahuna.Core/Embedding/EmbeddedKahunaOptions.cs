@@ -15,12 +15,18 @@ public sealed class EmbeddedKahunaOptions
 
     public int InitialPartitions { get; set; } = 1;
 
+    /// <summary>
+    /// Persistence backend for locks, key-values, and sequences. Supported values: memory, sqlite, rocksdb.
+    /// </summary>
     public string Storage { get; set; } = "memory";
 
     public string StoragePath { get; set; } = "";
 
     public string StorageRevision { get; set; } = "";
 
+    /// <summary>
+    /// Raft WAL backend. Supported values: memory, sqlite, rocksdb.
+    /// </summary>
     public string WalStorage { get; set; } = "memory";
 
     public string WalPath { get; set; } = "";

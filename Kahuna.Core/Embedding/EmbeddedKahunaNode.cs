@@ -142,6 +142,9 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
             await Raft.LeaveCluster(disposeActorSystem: true).ConfigureAwait(false);
         }
+
+        if (Kahuna is IDisposable disposable)
+            disposable.Dispose();
     }
 
     private static IWAL CreateWal(EmbeddedKahunaOptions options, ILogger<IRaft> logger)

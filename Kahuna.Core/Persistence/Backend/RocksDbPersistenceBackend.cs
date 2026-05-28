@@ -239,8 +239,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// </returns>
     public LockEntry? GetLock(string resource)
     {
-        Span<byte> buffer = stackalloc byte[Encoding.UTF8.GetByteCount(resource)];
-        Encoding.UTF8.GetBytes(resource.AsSpan(), buffer);
+        string currentKey = resource + CurrentMarker;
+
+        Span<byte> buffer = stackalloc byte[Encoding.UTF8.GetByteCount(currentKey)];
+        Encoding.UTF8.GetBytes(currentKey.AsSpan(), buffer);
         
         byte[]? value = db.Get(buffer, cf: columnFamilyLocks);
         if (value is null)
@@ -262,6 +264,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             Expires = new(message.ExpiresNode, message.ExpiresPhysical, message.ExpiresCounter),
             LastUsed = new(message.LastUsedNode, message.LastUsedPhysical, message.LastUsedCounter),
             LastModified = new(message.LastModifiedNode, message.LastModifiedPhysical, message.LastModifiedCounter),
+            State = (LockState)message.State
         };
 
         return entry;
