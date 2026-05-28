@@ -150,11 +150,12 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
             const string createTableQuery3 = """
              CREATE TABLE IF NOT EXISTS keys_revisions (
                  key STRING,
-                 revision INT, 
-                 value BLOB, 
+                 revision INT,
+                 value BLOB,
+                 expiresNode INT,
                  expiresPhysical INT,
-                 expiresCounter INT, 
-                 lastUsedNode INT, 
+                 expiresCounter INT,
+                 lastUsedNode INT,
                  lastUsedPhysical INT,
                  lastUsedCounter INT,
                  lastModifiedNode INT,
@@ -164,13 +165,13 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                  PRIMARY KEY (key, revision)
              );
              """;
-            
+
             using SqliteCommand command3 = new(createTableQuery3, connection);
-            command2.ExecuteNonQuery();
-            
+            command3.ExecuteNonQuery();
+
             const string pragmasQuery = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY;";
             using SqliteCommand command4 = new(pragmasQuery, connection);
-            command3.ExecuteNonQuery();
+            command4.ExecuteNonQuery();
 
             ReaderWriterLock readerWriterLock = new();
             
@@ -277,8 +278,8 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         try
         {
             const string insertKeys = """
-              INSERT INTO keys (key, revision, value, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, lastUsedCounter, @lastModifiedNode, lastModifiedPhysical, lastModifiedCounter, state) 
-              VALUES (@key, @revision, @value, @expiresNode, @expiresPhysical, @expiresCounter, @lastUsedNode, @lastUsedPhysical, @lastUsedCounter, @lastModifiedNode, @lastModifiedPhysical, @lastModifiedCounter, @state) 
+              INSERT INTO keys (key, revision, value, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, lastUsedCounter, lastModifiedNode, lastModifiedPhysical, lastModifiedCounter, state)
+              VALUES (@key, @revision, @value, @expiresNode, @expiresPhysical, @expiresCounter, @lastUsedNode, @lastUsedPhysical, @lastUsedCounter, @lastModifiedNode, @lastModifiedPhysical, @lastModifiedCounter, @state)
               ON CONFLICT(key) DO UPDATE SET
               revision=@revision,
               value=@value, 
