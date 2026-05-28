@@ -23,6 +23,7 @@
 
   <PropertyGroup>
     <NoWarn>SYSLIB0051</NoWarn>
+    <NuGetAudit>false</NuGetAudit>
   </PropertyGroup>
 
   <ItemGroup>

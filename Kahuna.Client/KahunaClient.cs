@@ -7,6 +7,7 @@
  */
 
 using System.Text;
+using Grpc.Core;
 using Kahuna.Client.Communication;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
@@ -118,7 +119,14 @@ public class KahunaClient
 
         while (stopWatch.GetElapsedTime() < wait)
         {
-            (result, fencingToken, servedFrom) = await TryAcquireLock(resource, owner, expiryTime, durability, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                (result, fencingToken, servedFrom) = await TryAcquireLock(resource, owner, expiryTime, durability, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (cancellationToken.IsCancellationRequested && IsCancellationException(ex))
+            {
+                throw new OperationCanceledException("Operation cancelled", ex, cancellationToken);
+            }
 
             if (result != KahunaLockAcquireResult.Success)
             {
@@ -219,6 +227,20 @@ public class KahunaClient
             throw new KahunaException("Retry cannot be zero", LockResponseType.InvalidInput);
         
         return await PeriodicallyTryAcquireLock(resource, expiry, wait, retry, durability, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static bool IsCancellationException(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is OperationCanceledException)
+                return true;
+
+            if (current is RpcException { StatusCode: StatusCode.Cancelled })
+                return true;
+        }
+
+        return false;
     }
     
     /// <summary>

@@ -33,6 +33,11 @@ namespace Kahuna.Client.Communication;
 /// </summary>
 public class RestCommunication : IKahunaCommunication
 {
+    static RestCommunication()
+    {
+        FlurlHttp.Clients.WithDefaults(x => x.ConfigureInnerHandler(ih => ih.ServerCertificateCustomValidationCallback = (a, b, c, d) => true));
+    }
+
     private readonly ILogger? logger;
     
     public RestCommunication(ILogger? logger)
@@ -92,6 +97,17 @@ public class RestCommunication : IKahunaCommunication
         };
     }
 
+    private static bool IsCancellationException(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is OperationCanceledException)
+                return true;
+        }
+
+        return false;
+    }
+
     /// <summary>
     /// Attempts to acquire a lock for a specified resource with the given configuration.
     /// </summary>
@@ -130,15 +146,22 @@ public class RestCommunication : IKahunaCommunication
             
             AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
         
-            response = await retryPolicy.ExecuteAsync(() =>
-                url
-                .WithOAuthBearerToken("xxx")
-                .AppendPathSegments("v1/locks/try-lock")
-                .WithHeader("Accept", "application/json")
-                .WithHeader("Content-Type", "application/json")
-                .WithSettings(o => o.HttpVersion = "2.0")
-                .PostStringAsync(payload, cancellationToken: cancellationToken)
-                .ReceiveJson<KahunaLockResponse>()).ConfigureAwait(false);
+            try
+            {
+                response = await retryPolicy.ExecuteAsync(() =>
+                    url
+                    .WithOAuthBearerToken("xxx")
+                    .AppendPathSegments("v1/locks/try-lock")
+                    .WithHeader("Accept", "application/json")
+                    .WithHeader("Content-Type", "application/json")
+                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .PostStringAsync(payload, cancellationToken: cancellationToken)
+                    .ReceiveJson<KahunaLockResponse>()).ConfigureAwait(false);
+            }
+            catch (FlurlHttpException ex) when (cancellationToken.IsCancellationRequested && IsCancellationException(ex))
+            {
+                throw new OperationCanceledException("Operation cancelled", ex, cancellationToken);
+            }
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
