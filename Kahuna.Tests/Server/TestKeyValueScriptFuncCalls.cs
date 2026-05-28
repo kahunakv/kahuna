@@ -500,6 +500,36 @@ public class TestKeyValueScriptFuncCalls : BaseCluster
     }
     
     [Theory, CombinatorialData]
+    public async Task TestStringFuncCalls([CombinatorialValues("memory")] string storage,[CombinatorialValues(4)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+         await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        string script = "RETURN lower('HELLO')";
+
+        KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(-1, resp.Revision);
+        Assert.Equal("hello", Encoding.UTF8.GetString(resp.Value ?? []));
+
+        script = "RETURN upper('hello')";
+
+        resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(-1, resp.Revision);
+        Assert.Equal("HELLO", Encoding.UTF8.GetString(resp.Value ?? []));
+
+        script = "RETURN concat('hello ', 'world')";
+
+        resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(-1, resp.Revision);
+        Assert.Equal("hello world", Encoding.UTF8.GetString(resp.Value ?? []));
+
+        await LeaveCluster(node1, node2, node3);
+    }
+    
+    [Theory, CombinatorialData]
     public async Task TestCountFuncCalls([CombinatorialValues("memory")] string storage,[CombinatorialValues(4)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =

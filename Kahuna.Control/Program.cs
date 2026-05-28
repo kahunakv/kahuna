@@ -46,7 +46,7 @@ if (IsSingleCommand(opts))
 
         if (!string.IsNullOrEmpty(opts.ScanByPrefix))
         {
-            await KeyValueGetByBucketCommand.Execute(connection, opts.ScanByPrefix, format);
+            await KeyValueScanByPrefixCommand.Execute(connection, opts.ScanByPrefix, format);
             return;
         }
 

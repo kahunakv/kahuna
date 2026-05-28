@@ -33,7 +33,7 @@ internal static class LowerFunction
 
         return arg.Type switch
         {
-            KeyValueExpressionType.StringType => new(arg.StrValue?.ToUpperInvariant()),
+            KeyValueExpressionType.StringType => new(arg.StrValue?.ToLowerInvariant()),
             _ => throw new KahunaScriptException($"Cannot use 'lower' function on argument {arg.Type}", ast.yyline)
         };
     }

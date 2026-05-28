@@ -17,7 +17,7 @@ internal static class ConcatFunction
             throw new KahunaScriptException("Invalid number of arguments for 'concat' function", ast.yyline);
 
         KeyValueExpressionResult arg1 = arguments[0];
-        KeyValueExpressionResult arg2 = arguments[0];
+        KeyValueExpressionResult arg2 = arguments[1];
 
         if (arg1.Type != KeyValueExpressionType.StringType || arg2.Type != KeyValueExpressionType.StringType)
             throw new KahunaScriptException($"Cannot use 'concat' function on argument {arg1.Type} + {arg2.Type}", ast.yyline);

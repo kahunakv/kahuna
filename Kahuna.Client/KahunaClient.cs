@@ -64,8 +64,8 @@ public class KahunaClient
     {
         this.urls = urls;
         this.logger = logger;
-        this.communication = (communication ?? new GrpcCommunication(Options, logger));
         this.Options = options ?? new();
+        this.communication = communication ?? new GrpcCommunication(Options, logger);
     }
 
     /// <summary>
