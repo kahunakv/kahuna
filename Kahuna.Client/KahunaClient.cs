@@ -10,6 +10,7 @@ using System.Text;
 using Kahuna.Client.Communication;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
+using Kahuna.Shared.Sequences;
 using Kommander.Diagnostics;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
@@ -928,6 +929,113 @@ public class KahunaClient
     {
         return new(this, script);
     }
+
+    public async Task<KahunaSequence> CreateSequence(
+        string name,
+        long initialValue = 0,
+        long increment = 1,
+        long? maxValue = null,
+        SequenceDurability durability = SequenceDurability.Persistent,
+        CancellationToken cancellationToken = default
+    )
+    {
+        (SequenceResponseType response, _, _) = await communication.CreateSequence(
+            GetRoundRobinUrl(),
+            name,
+            initialValue,
+            increment,
+            maxValue,
+            durability,
+            cancellationToken
+        ).ConfigureAwait(false);
+
+        if (response != SequenceResponseType.Success)
+            throw new KahunaException("Failed to create sequence: " + response, response);
+
+        KahunaSequence? sequence = await GetSequence(name, durability, cancellationToken).ConfigureAwait(false);
+        if (sequence is null)
+            throw new KahunaException("Created sequence could not be read", SequenceResponseType.Error);
+
+        return sequence;
+    }
+
+    public async Task<KahunaSequence?> GetSequence(
+        string name,
+        SequenceDurability durability = SequenceDurability.Persistent,
+        CancellationToken cancellationToken = default
+    )
+    {
+        (SequenceResponseType response, ReadOnlySequenceEntry? sequence, _) = await communication.GetSequence(
+            GetRoundRobinUrl(),
+            name,
+            durability,
+            cancellationToken
+        ).ConfigureAwait(false);
+
+        if (response == SequenceResponseType.NotFound)
+            return null;
+
+        if (response != SequenceResponseType.Success || sequence is null)
+            throw new KahunaException("Failed to get sequence: " + response, response);
+
+        return new(sequence);
+    }
+
+    public async Task<long> NextSequenceValue(
+        string name,
+        string? idempotencyKey = null,
+        SequenceDurability durability = SequenceDurability.Persistent,
+        CancellationToken cancellationToken = default
+    )
+    {
+        KahunaSequenceRange range = await ReserveSequenceRange(name, 1, idempotencyKey, durability, cancellationToken).ConfigureAwait(false);
+        return range.Start;
+    }
+
+    public async Task<KahunaSequenceRange> ReserveSequenceRange(
+        string name,
+        int count,
+        string? idempotencyKey = null,
+        SequenceDurability durability = SequenceDurability.Persistent,
+        CancellationToken cancellationToken = default
+    )
+    {
+        (SequenceResponseType response, SequenceAllocation allocation, _) = await communication.ReserveSequenceRange(
+            GetRoundRobinUrl(),
+            name,
+            count,
+            idempotencyKey,
+            durability,
+            cancellationToken
+        ).ConfigureAwait(false);
+
+        if (response != SequenceResponseType.Success)
+            throw new KahunaException("Failed to reserve sequence range: " + response, response);
+
+        return new(allocation.Name, allocation.Start, allocation.End, allocation.Count, allocation.Revision);
+    }
+
+    public async Task<bool> DeleteSequence(
+        string name,
+        SequenceDurability durability = SequenceDurability.Persistent,
+        CancellationToken cancellationToken = default
+    )
+    {
+        (SequenceResponseType response, _) = await communication.DeleteSequence(
+            GetRoundRobinUrl(),
+            name,
+            durability,
+            cancellationToken
+        ).ConfigureAwait(false);
+
+        if (response == SequenceResponseType.NotFound)
+            return false;
+
+        if (response != SequenceResponseType.Success)
+            throw new KahunaException("Failed to delete sequence: " + response, response);
+
+        return true;
+    }
     
     /// <summary>
     /// Chooses the next server in the list of servers in a round-robin fashion
@@ -939,4 +1047,3 @@ public class KahunaClient
         return urls[Math.Abs(serverPointer) % urls.Length];
     }
 }
-

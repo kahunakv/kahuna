@@ -13,8 +13,10 @@ using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
 using Kahuna.Server.ScriptParser;
+using Kahuna.Server.Sequencer;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
+using Kahuna.Shared.Sequences;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Locks.Data;
 using Kahuna.Shared.Communication.Rest;
@@ -49,6 +51,8 @@ public sealed class KahunaManager : IKahuna
     /// Acts as a centralized component for key-value operations within the Kahuna system.
     /// </summary>
     private readonly KeyValuesManager keyValues;
+
+    private readonly SequencerManager sequencer;
     
     /// <summary>
     /// Constructor
@@ -73,6 +77,7 @@ public sealed class KahunaManager : IKahuna
         
         this.locks = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);
         this.keyValues = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);
+        this.sequencer = new(keyValues, logger);
     }
     
     /// <summary>
@@ -909,6 +914,57 @@ public sealed class KahunaManager : IKahuna
     )
     {
         return keyValues.RollbackTransaction(timestamp, acquiredLocks, modifiedKeys);
+    }
+
+    public Task<(SequenceResponseType, ReadOnlySequenceEntry?)> LocateAndGetSequence(
+        string name,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        return sequencer.LocateAndGetSequence(name, durability, cancellationToken);
+    }
+
+    public Task<(SequenceResponseType, long)> LocateAndCreateSequence(
+        string name,
+        long initialValue,
+        long increment,
+        long? maxValue,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        return sequencer.LocateAndCreateSequence(name, initialValue, increment, maxValue, durability, cancellationToken);
+    }
+
+    public Task<(SequenceResponseType, SequenceAllocation)> LocateAndNextSequenceValue(
+        string name,
+        string? idempotencyKey,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        return sequencer.LocateAndNextSequenceValue(name, idempotencyKey, durability, cancellationToken);
+    }
+
+    public Task<(SequenceResponseType, SequenceAllocation)> LocateAndReserveSequenceRange(
+        string name,
+        int count,
+        string? idempotencyKey,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        return sequencer.LocateAndReserveSequenceRange(name, count, idempotencyKey, durability, cancellationToken);
+    }
+
+    public Task<SequenceResponseType> LocateAndDeleteSequence(
+        string name,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        return sequencer.LocateAndDeleteSequence(name, durability, cancellationToken);
     }
     
     public async Task<bool> OnLogRestored(int partitionId, RaftLog log)

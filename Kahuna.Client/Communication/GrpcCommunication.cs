@@ -7,12 +7,16 @@
  */
 
 using System.Collections.Concurrent;
+using System.Net.Security;
 using System.Runtime.InteropServices;
 using Google.Protobuf;
 using Google.Protobuf.Collections;
+using Grpc.Core;
 using Grpc.Net.Client;
+using Grpc.Net.Client.Configuration;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
+using Kahuna.Shared.Sequences;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
 
@@ -1351,6 +1355,160 @@ public class GrpcCommunication : IKahunaCommunication
         } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
             
         throw new KahunaException("Failed to rollback key/value transaction: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
+    }
+
+    public async Task<(SequenceResponseType, ReadOnlySequenceEntry?, int)> GetSequence(string url, string name, SequenceDurability durability, CancellationToken cancellationToken)
+    {
+        using GrpcChannel channel = CreateSequenceChannel(url);
+        Sequencer.SequencerClient client = new(channel);
+
+        GrpcSequenceResponse response = await client.GetSequenceAsync(new()
+        {
+            Name = name,
+            Durability = (GrpcSequenceDurability)durability
+        }, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        return ((SequenceResponseType)response.Type, ToReadOnlySequenceEntry(response.Sequence), response.TimeElapsedMs);
+    }
+
+    public async Task<(SequenceResponseType, long, int)> CreateSequence(string url, string name, long initialValue, long increment, long? maxValue, SequenceDurability durability, CancellationToken cancellationToken)
+    {
+        GrpcCreateSequenceRequest request = new()
+        {
+            Name = name,
+            InitialValue = initialValue,
+            Increment = increment,
+            Durability = (GrpcSequenceDurability)durability
+        };
+
+        if (maxValue.HasValue)
+            request.MaxValue = maxValue.Value;
+
+        using GrpcChannel channel = CreateSequenceChannel(url);
+        Sequencer.SequencerClient client = new(channel);
+        GrpcSequenceResponse response = await client.CreateSequenceAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        return ((SequenceResponseType)response.Type, response.Revision, response.TimeElapsedMs);
+    }
+
+    public async Task<(SequenceResponseType, SequenceAllocation, int)> NextSequenceValue(string url, string name, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken)
+    {
+        GrpcNextSequenceRequest request = new()
+        {
+            Name = name,
+            Durability = (GrpcSequenceDurability)durability
+        };
+
+        if (idempotencyKey is not null)
+            request.IdempotencyKey = idempotencyKey;
+
+        using GrpcChannel channel = CreateSequenceChannel(url);
+        Sequencer.SequencerClient client = new(channel);
+        GrpcSequenceAllocationResponse response = await client.NextSequenceValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        return ((SequenceResponseType)response.Type, ToSequenceAllocation(response.Allocation), response.TimeElapsedMs);
+    }
+
+    public async Task<(SequenceResponseType, SequenceAllocation, int)> ReserveSequenceRange(string url, string name, int count, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken)
+    {
+        GrpcReserveSequenceRangeRequest request = new()
+        {
+            Name = name,
+            Count = count,
+            Durability = (GrpcSequenceDurability)durability
+        };
+
+        if (idempotencyKey is not null)
+            request.IdempotencyKey = idempotencyKey;
+
+        using GrpcChannel channel = CreateSequenceChannel(url);
+        Sequencer.SequencerClient client = new(channel);
+        GrpcSequenceAllocationResponse response = await client.ReserveSequenceRangeAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        return ((SequenceResponseType)response.Type, ToSequenceAllocation(response.Allocation), response.TimeElapsedMs);
+    }
+
+    public async Task<(SequenceResponseType, int)> DeleteSequence(string url, string name, SequenceDurability durability, CancellationToken cancellationToken)
+    {
+        using GrpcChannel channel = CreateSequenceChannel(url);
+        Sequencer.SequencerClient client = new(channel);
+
+        GrpcSequenceResponse response = await client.DeleteSequenceAsync(new()
+        {
+            Name = name,
+            Durability = (GrpcSequenceDurability)durability
+        }, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        return ((SequenceResponseType)response.Type, response.TimeElapsedMs);
+    }
+
+    private static GrpcChannel CreateSequenceChannel(string url)
+    {
+        SslClientAuthenticationOptions sslOptions = new()
+        {
+            RemoteCertificateValidationCallback = delegate { return true; }
+        };
+
+        SocketsHttpHandler handler = new()
+        {
+            SslOptions = sslOptions,
+            ConnectTimeout = TimeSpan.FromSeconds(10),
+            PooledConnectionIdleTimeout = Timeout.InfiniteTimeSpan,
+            KeepAlivePingDelay = TimeSpan.FromSeconds(30),
+            KeepAlivePingTimeout = TimeSpan.FromSeconds(10),
+            EnableMultipleHttp2Connections = true,
+        };
+
+        MethodConfig defaultMethodConfig = new()
+        {
+            Names = { MethodName.Default },
+            RetryPolicy = new RetryPolicy
+            {
+                MaxAttempts = 5,
+                InitialBackoff = TimeSpan.FromSeconds(1),
+                MaxBackoff = TimeSpan.FromSeconds(5),
+                BackoffMultiplier = 1.5,
+                RetryableStatusCodes = { StatusCode.Unavailable }
+            }
+        };
+
+        return GrpcChannel.ForAddress(url, new()
+        {
+            HttpHandler = handler,
+            ServiceConfig = new() { MethodConfigs = { defaultMethodConfig } }
+        });
+    }
+
+    private static ReadOnlySequenceEntry? ToReadOnlySequenceEntry(GrpcSequenceEntry? entry)
+    {
+        if (entry is null || string.IsNullOrEmpty(entry.Name))
+            return null;
+
+        return new(
+            entry.Name,
+            entry.CurrentValue,
+            entry.InitialValue,
+            entry.Increment,
+            entry.HasMaxValue ? entry.MaxValue : null,
+            entry.Revision,
+            (SequenceDurability)entry.Durability,
+            new(entry.CreatedAtNode, entry.CreatedAtPhysical, entry.CreatedAtCounter),
+            new(entry.UpdatedAtNode, entry.UpdatedAtPhysical, entry.UpdatedAtCounter)
+        );
+    }
+
+    private static SequenceAllocation ToSequenceAllocation(GrpcSequenceAllocation? allocation)
+    {
+        if (allocation is null)
+            return default;
+
+        return new(
+            allocation.Name,
+            allocation.Start,
+            allocation.End,
+            allocation.Count,
+            allocation.Revision
+        );
     }
     
     private static IEnumerable<GrpcTransactionModifiedKey> GetTransactionAcquiredOrModifiedKeys(List<KeyValueTransactionModifiedKey> modifiedKeys)

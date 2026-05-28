@@ -102,8 +102,10 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         await Raft.JoinCluster().ConfigureAwait(false);
         started = true;
 
-        if (Raft.Configuration.InitialPartitions > 0)
-            await Raft.WaitForLeader(0, cancellationToken).ConfigureAwait(false);
+        await Raft.WaitForLeader(0, cancellationToken).ConfigureAwait(false);
+
+        for (int partitionId = 1; partitionId <= Raft.Configuration.InitialPartitions; partitionId++)
+            await Raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<string> WaitForLeaderForKeyAsync(string key, CancellationToken cancellationToken = default)

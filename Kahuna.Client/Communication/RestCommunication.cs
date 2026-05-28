@@ -9,9 +9,11 @@
 using System.Net;
 using System.Text.Json;
 using Flurl.Http;
+using Kommander.Diagnostics;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
+using Kahuna.Shared.Sequences;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
 using Polly;
@@ -966,5 +968,66 @@ public class RestCommunication : IKahunaCommunication
     public Task<bool> RollbackTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken)
     {
         throw new NotImplementedException();
+    }
+
+    public async Task<(SequenceResponseType, ReadOnlySequenceEntry?, int)> GetSequence(string url, string name, SequenceDurability durability, CancellationToken cancellationToken)
+    {
+        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
+        KahunaSequenceNameRequest request = new() { Name = name, Durability = durability };
+        KahunaSequenceResponse response = await PostSequenceRequest(url, "get", request, KahunaJsonContext.Default.KahunaSequenceNameRequest, cancellationToken).ConfigureAwait(false);
+        return (response.Type, response.Sequence, (int)stopwatch.GetElapsedMilliseconds());
+    }
+
+    public async Task<(SequenceResponseType, long, int)> CreateSequence(string url, string name, long initialValue, long increment, long? maxValue, SequenceDurability durability, CancellationToken cancellationToken)
+    {
+        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
+        KahunaSequenceCreateRequest request = new() { Name = name, InitialValue = initialValue, Increment = increment, MaxValue = maxValue, Durability = durability };
+        KahunaSequenceResponse response = await PostSequenceRequest(url, "create", request, KahunaJsonContext.Default.KahunaSequenceCreateRequest, cancellationToken).ConfigureAwait(false);
+        return (response.Type, response.Revision, (int)stopwatch.GetElapsedMilliseconds());
+    }
+
+    public async Task<(SequenceResponseType, SequenceAllocation, int)> NextSequenceValue(string url, string name, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken)
+    {
+        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
+        KahunaSequenceNextRequest request = new() { Name = name, IdempotencyKey = idempotencyKey, Durability = durability };
+        KahunaSequenceResponse response = await PostSequenceRequest(url, "next", request, KahunaJsonContext.Default.KahunaSequenceNextRequest, cancellationToken).ConfigureAwait(false);
+        return (response.Type, response.Allocation, (int)stopwatch.GetElapsedMilliseconds());
+    }
+
+    public async Task<(SequenceResponseType, SequenceAllocation, int)> ReserveSequenceRange(string url, string name, int count, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken)
+    {
+        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
+        KahunaSequenceReserveRequest request = new() { Name = name, Count = count, IdempotencyKey = idempotencyKey, Durability = durability };
+        KahunaSequenceResponse response = await PostSequenceRequest(url, "reserve", request, KahunaJsonContext.Default.KahunaSequenceReserveRequest, cancellationToken).ConfigureAwait(false);
+        return (response.Type, response.Allocation, (int)stopwatch.GetElapsedMilliseconds());
+    }
+
+    public async Task<(SequenceResponseType, int)> DeleteSequence(string url, string name, SequenceDurability durability, CancellationToken cancellationToken)
+    {
+        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
+        KahunaSequenceNameRequest request = new() { Name = name, Durability = durability };
+        KahunaSequenceResponse response = await PostSequenceRequest(url, "delete", request, KahunaJsonContext.Default.KahunaSequenceNameRequest, cancellationToken).ConfigureAwait(false);
+        return (response.Type, (int)stopwatch.GetElapsedMilliseconds());
+    }
+
+    private static async Task<KahunaSequenceResponse> PostSequenceRequest<T>(string url, string action, T request, System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> jsonTypeInfo, CancellationToken cancellationToken)
+    {
+        string payload = JsonSerializer.Serialize(request, jsonTypeInfo);
+        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
+
+        KahunaSequenceResponse? response = await retryPolicy.ExecuteAsync(() =>
+            url
+                .WithOAuthBearerToken("xxx")
+                .AppendPathSegments("v1/sequences/" + action)
+                .WithHeader("Accept", "application/json")
+                .WithHeader("Content-Type", "application/json")
+                .WithSettings(o => o.HttpVersion = "2.0")
+                .PostStringAsync(payload, cancellationToken: cancellationToken)
+                .ReceiveJson<KahunaSequenceResponse>()).ConfigureAwait(false);
+
+        if (response is null)
+            throw new KahunaException("Response is null", SequenceResponseType.Error);
+
+        return response;
     }
 }

@@ -1,0 +1,95 @@
+syntax = "proto3";
+
+service Sequencer {
+  rpc CreateSequence (GrpcCreateSequenceRequest) returns (GrpcSequenceResponse);
+  rpc GetSequence (GrpcGetSequenceRequest) returns (GrpcSequenceResponse);
+  rpc NextSequenceValue (GrpcNextSequenceRequest) returns (GrpcSequenceAllocationResponse);
+  rpc ReserveSequenceRange (GrpcReserveSequenceRangeRequest) returns (GrpcSequenceAllocationResponse);
+  rpc DeleteSequence (GrpcDeleteSequenceRequest) returns (GrpcSequenceResponse);
+}
+
+message GrpcCreateSequenceRequest {
+  string Name = 1;
+  int64 InitialValue = 2;
+  int64 Increment = 3;
+  optional int64 MaxValue = 4;
+  GrpcSequenceDurability Durability = 5;
+}
+
+message GrpcGetSequenceRequest {
+  string Name = 1;
+  GrpcSequenceDurability Durability = 2;
+}
+
+message GrpcNextSequenceRequest {
+  string Name = 1;
+  optional string IdempotencyKey = 2;
+  GrpcSequenceDurability Durability = 3;
+}
+
+message GrpcReserveSequenceRangeRequest {
+  string Name = 1;
+  int32 Count = 2;
+  optional string IdempotencyKey = 3;
+  GrpcSequenceDurability Durability = 4;
+}
+
+message GrpcDeleteSequenceRequest {
+  string Name = 1;
+  GrpcSequenceDurability Durability = 2;
+}
+
+message GrpcSequenceEntry {
+  string Name = 1;
+  int64 CurrentValue = 2;
+  int64 InitialValue = 3;
+  int64 Increment = 4;
+  optional int64 MaxValue = 5;
+  int64 Revision = 6;
+  GrpcSequenceDurability Durability = 7;
+  int32 CreatedAtNode = 8;
+  int64 CreatedAtPhysical = 9;
+  uint32 CreatedAtCounter = 10;
+  int32 UpdatedAtNode = 11;
+  int64 UpdatedAtPhysical = 12;
+  uint32 UpdatedAtCounter = 13;
+}
+
+message GrpcSequenceAllocation {
+  string Name = 1;
+  int64 Start = 2;
+  int64 End = 3;
+  int32 Count = 4;
+  int64 Revision = 5;
+}
+
+message GrpcSequenceResponse {
+  optional string ServedFrom = 1;
+  GrpcSequenceResponseType Type = 2;
+  GrpcSequenceEntry Sequence = 3;
+  int64 Revision = 4;
+  int32 TimeElapsedMs = 5;
+}
+
+message GrpcSequenceAllocationResponse {
+  optional string ServedFrom = 1;
+  GrpcSequenceResponseType Type = 2;
+  GrpcSequenceAllocation Allocation = 3;
+  int32 TimeElapsedMs = 4;
+}
+
+enum GrpcSequenceDurability {
+  SEQUENCE_DURABILITY_UNSPECIFIED = 0;
+  SEQUENCE_PERSISTENT = 1;
+}
+
+enum GrpcSequenceResponseType {
+  SEQUENCE_SUCCESS = 0;
+  SEQUENCE_NOT_FOUND = 1;
+  SEQUENCE_ALREADY_EXISTS = 2;
+  SEQUENCE_INVALID_INPUT = 3;
+  SEQUENCE_MAX_VALUE_EXCEEDED = 4;
+  SEQUENCE_MUST_RETRY = 5;
+  SEQUENCE_ABORTED = 6;
+  SEQUENCE_ERROR = 99;
+}

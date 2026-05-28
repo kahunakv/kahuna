@@ -6,7 +6,7 @@ namespace Kahuna.Communication.External.Grpc;
 /// </summary>
 /// <remarks>
 /// This class includes functionality for mapping specific gRPC services to routes in a .NET application,
-/// leveraging services such as <see cref="LocksService"/> and <see cref="KeyValuesService"/>.
+/// leveraging services such as <see cref="LocksService"/>, <see cref="KeyValuesService"/>, and <see cref="SequencesService"/>.
 /// These mappings enable the integration of gRPC endpoints into the application's request pipeline.
 /// </remarks>
 public static class MapGrpcRoutesExtensions
@@ -15,5 +15,6 @@ public static class MapGrpcRoutesExtensions
     {
         app.MapGrpcService<LocksService>();
         app.MapGrpcService<KeyValuesService>();
+        app.MapGrpcService<SequencesService>();
     }
 }

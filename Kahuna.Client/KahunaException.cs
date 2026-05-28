@@ -8,6 +8,7 @@
 
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
+using Kahuna.Shared.Sequences;
 
 namespace Kahuna.Client;
 
@@ -19,6 +20,8 @@ public sealed class KahunaException : Exception
     public LockResponseType LockErrorCode { get; }
     
     public KeyValueResponseType KeyValueErrorCode { get; }
+
+    public SequenceResponseType SequenceErrorCode { get; }
     
     /// <summary>
     /// Represents an exception specific to Kahuna Lock operations.
@@ -34,5 +37,10 @@ public sealed class KahunaException : Exception
     public KahunaException(string message, KeyValueResponseType errorCode) : base(message)
     {
         KeyValueErrorCode = errorCode;
+    }
+
+    public KahunaException(string message, SequenceResponseType errorCode) : base(message)
+    {
+        SequenceErrorCode = errorCode;
     }
 }
