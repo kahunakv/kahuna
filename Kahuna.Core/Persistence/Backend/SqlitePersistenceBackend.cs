@@ -630,8 +630,13 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
     public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName)
     {
         List<(string, ReadOnlyKeyValueEntry)> results = [];
-        
-        (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabase(prefixKeyName);
+
+        // Keys of the form "{prefix}/{x}" are stored on shard ConsistentHash(prefix) because
+        // StoreKeyValues uses InversePrefixedHash(fullKey) = ConsistentHash(fullKey[..lastSlash]) = ConsistentHash(prefix).
+        // TryOpenDatabase(prefix) would compute InversePrefixedHash(prefix) = ConsistentHash(prefix[..lastSlash]),
+        // which is one level too high and maps to the wrong shard.
+        int shard = HashUtils.ConsistentHash(prefixKeyName, MaxShards);
+        (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(shard);
         
         try
         {
