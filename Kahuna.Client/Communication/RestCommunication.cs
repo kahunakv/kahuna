@@ -171,6 +171,15 @@ public class RestCommunication : IKahunaCommunication
             
             if (response.Type == LockResponseType.Busy)
                 return (KahunaLockAcquireResult.Conflicted, response.FencingToken, response.ServedFrom);
+
+            if (response.Type == LockResponseType.MustRetry)
+            {
+                if (++retries >= 5)
+                    return (KahunaLockAcquireResult.Error, response.FencingToken, response.ServedFrom);
+
+                await Task.Delay(1, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
             
             if (++retries >= 5)
                 throw new KahunaException("Retries exhausted.", LockResponseType.Errored);

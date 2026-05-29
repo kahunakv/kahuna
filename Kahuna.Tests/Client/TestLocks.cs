@@ -202,7 +202,7 @@ public class TestLocks
         if (!kLock.IsAcquired)
             return;
 
-        total++;
+        Interlocked.Increment(ref total);
     }
     
     [Theory, CombinatorialData]

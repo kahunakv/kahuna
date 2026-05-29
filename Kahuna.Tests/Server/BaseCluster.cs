@@ -228,10 +228,22 @@ public abstract class BaseCluster
     protected static async Task LeaveCluster(IRaft raft1, IRaft raft2, IRaft raft3)
     {
         await Task.WhenAll(
-            raft1.LeaveCluster(dispose: true), 
-            raft2.LeaveCluster(dispose: true),
-            raft3.LeaveCluster(dispose: true)
+            LeaveCluster(raft1), 
+            LeaveCluster(raft2),
+            LeaveCluster(raft3)
         );
+    }
+
+    private static async Task LeaveCluster(IRaft raft)
+    {
+        try
+        {
+            await raft.LeaveCluster(dispose: true);
+        }
+        catch (ObjectDisposedException)
+        {
+            // Kommander may already have torn down its internal cancellation source during shutdown.
+        }
     }
 
     private static IWAL GetWAL(string walStorage, ILogger<IRaft> logger)

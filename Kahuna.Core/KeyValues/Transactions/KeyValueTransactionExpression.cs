@@ -1,4 +1,5 @@
 
+using System.Globalization;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.KeyValues.Transactions.Functions;
 using Kahuna.Server.KeyValues.Transactions.Operators;
@@ -34,7 +35,7 @@ internal static class KeyValueTransactionExpression
                 return new(ast.yytext!);
             
             case NodeType.FloatType:               
-                return new(double.Parse(ast.yytext!));
+                return new(double.Parse(ast.yytext!, CultureInfo.InvariantCulture));
             
             case NodeType.BooleanType:
                 return new(ast.yytext! == "true");
