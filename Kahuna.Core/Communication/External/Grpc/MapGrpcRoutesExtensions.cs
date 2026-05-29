@@ -1,4 +1,6 @@
 
+using Microsoft.AspNetCore.Builder;
+
 namespace Kahuna.Communication.External.Grpc;
 
 /// <summary>
