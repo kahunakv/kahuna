@@ -220,7 +220,17 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             Raft.OnReplicationError -= Kahuna.OnReplicationError;
 
             await Raft.LeaveCluster(dispose: true).ConfigureAwait(false);
+
+            // Drain all actor inboxes before disposing, so that background tasks
+            // from this instance do not race with the next instance's actors on the
+            // shared .NET thread pool.
+            await actorSystem.GracefulShutdownAll(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+
             actorSystem.Dispose();
+
+            // Brief pause for dispatcher drain tasks and partition stop tasks that complete
+            // asynchronously after Stop()/Dispose() return.
+            await Task.Delay(50).ConfigureAwait(false);
         }
 
         if (Kahuna is IDisposable disposable)
