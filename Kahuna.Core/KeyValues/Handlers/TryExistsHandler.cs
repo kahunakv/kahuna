@@ -54,7 +54,7 @@ internal sealed class TryExistsHandler : BaseHandler
             // Fallback to disk
             if (message.Durability == KeyValueDurability.Persistent)
             {
-                KeyValueEntry? revisionContext = await context.Raft.ReadThreadPool.EnqueueTask(() => context.PersistenceBackend.GetKeyValueRevision(message.Key, message.CompareRevision));
+                KeyValueEntry? revisionContext = await context.Raft.ReadScheduler.EnqueueTask(message.PartitionId, () => context.PersistenceBackend.GetKeyValueRevision(message.Key, message.CompareRevision));
                 if (revisionContext is null)
                     return KeyValueStaticResponses.DoesNotExistContextResponse;
 

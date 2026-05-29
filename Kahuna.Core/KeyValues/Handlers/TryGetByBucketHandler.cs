@@ -93,7 +93,7 @@ internal sealed class TryGetByBucketHandler : BaseHandler
 
         // step 2: we join the in-memory store with the disk store
         // @todo we probably want to cache this in an mvcc entry
-        List<(string, ReadOnlyKeyValueEntry)> itemsFromDisk = await context.Raft.ReadThreadPool.EnqueueTask(() => context.PersistenceBackend.GetKeyValueByPrefix(message.Key));
+        List<(string, ReadOnlyKeyValueEntry)> itemsFromDisk = await context.Raft.ReadScheduler.EnqueueTask(message.PartitionId, () => context.PersistenceBackend.GetKeyValueByPrefix(message.Key));
         
         foreach ((string key, ReadOnlyKeyValueEntry readOnlyKeyValueEntry) in itemsFromDisk)
         {

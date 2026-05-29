@@ -64,7 +64,6 @@ builder.Services.AddSingleton<IRaft>(services =>
     //IWAL walAdapter = new InMemoryWAL(logger);
     
     return new RaftManager(
-        services.GetRequiredService<ActorSystem>(),
         configuration,
         new StaticDiscovery(opts.InitialCluster is not null ? [.. opts.InitialCluster.Select(k => new RaftNode(k))] : []),
         walAdapter,

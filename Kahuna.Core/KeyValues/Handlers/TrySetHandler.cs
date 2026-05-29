@@ -39,7 +39,7 @@ internal sealed class TrySetHandler : BaseHandler
             /// Try to retrieve KeyValue context from persistence
             if (message.Durability == KeyValueDurability.Persistent)
             {
-                newEntry = await context.Raft.ReadThreadPool.EnqueueTask(() => context.PersistenceBackend.GetKeyValue(message.Key));
+                newEntry = await context.Raft.ReadScheduler.EnqueueTask(message.PartitionId, () => context.PersistenceBackend.GetKeyValue(message.Key));
                 if (newEntry is not null)
                 {
                     if (newEntry.State is KeyValueState.Deleted or KeyValueState.Undefined)
@@ -263,4 +263,3 @@ internal sealed class TrySetHandler : BaseHandler
         return new(KeyValueResponseType.Set, entry.Revision);
     }   
 }
-

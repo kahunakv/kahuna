@@ -151,7 +151,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
 
             /// Try to retrieve lock context from persistence
             if (message.Durability == LockDurability.Persistent)
-                newEntry = await raft.ReadThreadPool.EnqueueTask(() => persistenceBackend.GetLock(message.Resource));
+                newEntry = await raft.ReadScheduler.EnqueueTask(message.PartitionId, () => persistenceBackend.GetLock(message.Resource));
 
             newEntry ??= new() { FencingToken = -1 };
             
@@ -324,7 +324,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         {
             if (durability == LockDurability.Persistent)
             {
-                entry = await raft.ReadThreadPool.EnqueueTask(() => persistenceBackend.GetLock(resource));
+                entry = await raft.ReadScheduler.EnqueueTask(raft.GetPartitionKey(resource), () => persistenceBackend.GetLock(resource));
                 if (entry is not null)
                 {
                     entry.LastUsed = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());

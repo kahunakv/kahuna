@@ -151,7 +151,7 @@ internal abstract class BaseHandler
             if (durability == KeyValueDurability.Persistent)
             {
                 if (readKeyValueEntry is null)
-                    entry = await context.Raft.ReadThreadPool.EnqueueTask(() => context.PersistenceBackend.GetKeyValue(key));
+                    entry = await context.Raft.ReadScheduler.EnqueueTask(context.Raft.GetPartitionKey(key), () => context.PersistenceBackend.GetKeyValue(key));
                 else
                     entry = new()
                     {

@@ -1,4 +1,5 @@
 using Kommander;
+using Kommander.Communication;
 using Kommander.Discovery;
 using Kommander.Time;
 using Kommander.WAL;
@@ -14,7 +15,9 @@ namespace Kahuna;
 /// </summary>
 public sealed class EmbeddedKahunaNode : IAsyncDisposable
 {
-    private readonly MemoryInterNodeCommmunication interNodeCommunication;
+    private readonly ActorSystem actorSystem;
+
+    private readonly MemoryInterNodeCommmunication? standaloneComm;
 
     private bool started;
 
@@ -36,7 +39,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         ILogger<IRaft> raftLogger = loggerFactory.CreateLogger<IRaft>();
         ILogger<IKahuna> kahunaLogger = loggerFactory.CreateLogger<IKahuna>();
 
-        ActorSystem actorSystem = new(logger: raftLogger);
+        actorSystem = new(logger: raftLogger);
         EmbeddedRaftCommunication raftCommunication = new();
 
         RaftConfiguration raftConfiguration = new()
@@ -55,7 +58,6 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         };
 
         this.Raft = new RaftManager(
-            actorSystem,
             raftConfiguration,
             new StaticDiscovery(EmbeddedRaftCommunication.Witnesses),
             CreateWal(options, raftLogger),
@@ -82,8 +84,81 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             DirtyObjectsWriterDelay = options.DirtyObjectsWriterDelay
         }, options.WalPath);
 
-        this.interNodeCommunication = new();
-        this.Kahuna = new KahunaManager(actorSystem, Raft, kahunaConfiguration, interNodeCommunication, kahunaLogger);
+        this.standaloneComm = new();
+        this.Kahuna = new KahunaManager(actorSystem, Raft, kahunaConfiguration, standaloneComm, kahunaLogger);
+    }
+
+    /// <summary>
+    /// Boots a Kahuna engine with externally supplied communication implementations.
+    /// Use this overload for cluster mode where real gRPC inter-node and Raft transports
+    /// replace the in-process fakes used by the parameterless constructor.
+    /// </summary>
+    public EmbeddedKahunaNode(
+        EmbeddedKahunaOptions options,
+        IInterNodeCommunication interNode,
+        ICommunication raftComm,
+        IDiscovery discovery,
+        ILoggerFactory? loggerFactory = null)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(interNode);
+        ArgumentNullException.ThrowIfNull(raftComm);
+        ArgumentNullException.ThrowIfNull(discovery);
+
+        ValidateOptions(options);
+        EnsureStorageDirectories(options);
+
+        loggerFactory ??= NullLoggerFactory.Instance;
+
+        ILogger<IRaft> raftLogger = loggerFactory.CreateLogger<IRaft>();
+        ILogger<IKahuna> kahunaLogger = loggerFactory.CreateLogger<IKahuna>();
+
+        actorSystem = new(logger: raftLogger);
+
+        RaftConfiguration raftConfiguration = new()
+        {
+            NodeName = options.NodeName,
+            NodeId = options.NodeId,
+            Host = options.Host,
+            Port = options.Port,
+            InitialPartitions = options.InitialPartitions,
+            ReadIOThreads = options.ReadIOThreads,
+            WriteIOThreads = options.WriteIOThreads,
+            StartElectionTimeout = options.StartElectionTimeout,
+            EndElectionTimeout = options.EndElectionTimeout,
+            CompactEveryOperations = options.CompactEveryOperations,
+            CompactNumberEntries = options.CompactNumberEntries
+        };
+
+        this.Raft = new RaftManager(
+            raftConfiguration,
+            discovery,
+            CreateWal(options, raftLogger),
+            raftComm,
+            new HybridLogicalClock(),
+            raftLogger
+        );
+
+        KahunaConfiguration kahunaConfiguration = ConfigurationValidator.Validate(new()
+        {
+            HttpsCertificate = "",
+            HttpsCertificatePassword = "",
+            LocksWorkers = options.LocksWorkers,
+            KeyValueWorkers = options.KeyValueWorkers,
+            BackgroundWriterWorkers = options.BackgroundWriterWorkers,
+            Storage = options.Storage,
+            StoragePath = options.StoragePath,
+            StorageRevision = string.IsNullOrWhiteSpace(options.StorageRevision) ? Guid.NewGuid().ToString() : options.StorageRevision,
+            DefaultTransactionTimeout = options.DefaultTransactionTimeout,
+            ScriptCacheExpiration = options.ScriptCacheExpiration,
+            RevisionsToKeepCached = options.RevisionsToKeepCached,
+            CacheEntryTtl = options.CacheEntryTtl,
+            CacheEntriesToRemove = options.CacheEntriesToRemove,
+            DirtyObjectsWriterDelay = options.DirtyObjectsWriterDelay
+        }, options.WalPath);
+
+        this.standaloneComm = null;
+        this.Kahuna = new KahunaManager(actorSystem, Raft, kahunaConfiguration, interNode, kahunaLogger);
     }
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
@@ -97,8 +172,12 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         Raft.OnReplicationReceived += Kahuna.OnReplicationReceived;
         Raft.OnReplicationError += Kahuna.OnReplicationError;
 
-        string localEndpoint = Raft.GetLocalEndpoint();
-        interNodeCommunication.SetNodes(new() { { localEndpoint, Kahuna } });
+        if (standaloneComm is not null)
+        {
+            string localEndpoint = Raft.GetLocalEndpoint();
+            standaloneComm.SetNodes(new() { { localEndpoint, Kahuna } });
+        }
+
         await Raft.JoinCluster().ConfigureAwait(false);
         started = true;
 
@@ -140,7 +219,8 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             Raft.OnReplicationReceived -= Kahuna.OnReplicationReceived;
             Raft.OnReplicationError -= Kahuna.OnReplicationError;
 
-            await Raft.LeaveCluster(disposeActorSystem: true).ConfigureAwait(false);
+            await Raft.LeaveCluster(dispose: true).ConfigureAwait(false);
+            actorSystem.Dispose();
         }
 
         if (Kahuna is IDisposable disposable)

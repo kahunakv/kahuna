@@ -33,7 +33,6 @@ public abstract class BaseCluster
         };
         
         RaftManager raft = new(
-            actorSystem, 
             config, 
             new StaticDiscovery([new("localhost:8002"), new("localhost:8003")]),
             wal,
@@ -86,7 +85,6 @@ public abstract class BaseCluster
         };
         
         RaftManager raft = new(
-            actorSystem, 
             config, 
             new StaticDiscovery([new("localhost:8001"), new("localhost:8003")]),
             wal,
@@ -139,7 +137,6 @@ public abstract class BaseCluster
         };
         
         RaftManager raft = new(
-            actorSystem, 
             config, 
             new StaticDiscovery([new("localhost:8001"), new("localhost:8002")]),
             wal,
@@ -231,9 +228,9 @@ public abstract class BaseCluster
     protected static async Task LeaveCluster(IRaft raft1, IRaft raft2, IRaft raft3)
     {
         await Task.WhenAll(
-            raft1.LeaveCluster(disposeActorSystem: true), 
-            raft2.LeaveCluster(disposeActorSystem: true),
-            raft3.LeaveCluster(disposeActorSystem: true)
+            raft1.LeaveCluster(dispose: true), 
+            raft2.LeaveCluster(dispose: true),
+            raft3.LeaveCluster(dispose: true)
         );
     }
 

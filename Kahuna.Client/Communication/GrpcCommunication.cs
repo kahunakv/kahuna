@@ -603,55 +603,68 @@ public class GrpcCommunication : IKahunaCommunication
             Durability = (GrpcKeyValueDurability)durability
         };
 
-        int retries = 0;
-        GrpcTryGetKeyValueResponse? response;
-               
-        GrpcBatcher batcher = GetSharedBatcher(url);
-        
-        do
+        for (int unavailableRetries = 0; unavailableRetries < 2; unavailableRetries++)
         {
-            if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);                   
+            int retries = 0;
+            GrpcTryGetKeyValueResponse? response;
+               
+            GrpcBatcher batcher = GetSharedBatcher(url);
             
-            GrpcBatcherResponse batchResponse;
-                
-            if (cancellationToken == CancellationToken.None)
-               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-            else
-               batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
-            
-            response = batchResponse.TryGetKeyValue;
-
-            if (response is null)
-                throw new KahunaException("Response is null", KeyValueResponseType.Errored);
-
-            switch (response.Type)
+            try
             {
-                case GrpcKeyValueResponseType.TypeGot:
+                do
                 {
-                    byte[]? value;
-
-                    if (MemoryMarshal.TryGetArray(response.Value.Memory, out ArraySegment<byte> segment))
-                        value = segment.Array;
+                    if (cancellationToken.IsCancellationRequested)
+                        throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);                   
+                
+                    GrpcBatcherResponse batchResponse;
+                        
+                    if (cancellationToken == CancellationToken.None)
+                       batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
                     else
-                        value = response.Value.ToByteArray();
-                    
-                    return (true, value, response.Revision, response.TimeElapsedMs);
-                }
+                       batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            
+                    response = batchResponse.TryGetKeyValue;
 
-                case GrpcKeyValueResponseType.TypeDoesNotExist:
-                    return (false, null, 0, response.TimeElapsedMs);
+                    if (response is null)
+                        throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+
+                    switch (response.Type)
+                    {
+                        case GrpcKeyValueResponseType.TypeGot:
+                        {
+                            byte[]? value;
+
+                            if (MemoryMarshal.TryGetArray(response.Value.Memory, out ArraySegment<byte> segment))
+                                value = segment.Array;
+                            else
+                                value = response.Value.ToByteArray();
+                    
+                            return (true, value, response.Revision, response.TimeElapsedMs);
+                        }
+
+                        case GrpcKeyValueResponseType.TypeDoesNotExist:
+                            return (false, null, 0, response.TimeElapsedMs);
+                    }
+            
+                    if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
+                        logger?.LogDebug("Server asked to retry get key/value");
+            
+                    if (++retries >= 5)
+                        throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
+            
+                } while (transactionId == HLCTimestamp.Zero && response.Type == GrpcKeyValueResponseType.TypeMustRetry);
+                    
+                throw new KahunaException("Failed to get key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
             }
-            
-            if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
-                logger?.LogDebug("Server asked to retry get key/value");
-            
-            if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
-            
-        } while (transactionId == HLCTimestamp.Zero && response.Type == GrpcKeyValueResponseType.TypeMustRetry);
-            
-        throw new KahunaException("Failed to get key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
+            catch (RpcException ex) when (ex.StatusCode == StatusCode.Unavailable && !cancellationToken.IsCancellationRequested && unavailableRetries == 0)
+            {
+                logger?.LogDebug(ex, "Retrying get key/value after gRPC stream became unavailable");
+                await Task.Delay(25, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        throw new KahunaException("gRPC stream unavailable", KeyValueResponseType.Errored);
     }
 
     /// <summary>

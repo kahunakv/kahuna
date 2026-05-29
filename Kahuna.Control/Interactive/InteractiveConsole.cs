@@ -10,7 +10,6 @@ using System.Diagnostics;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
-using DotNext.Threading.Tasks;
 using Kahuna.Client;
 using Kahuna.Control.Commands;
 using Kahuna.Shared.KeyValue;
@@ -213,7 +212,7 @@ public static class InteractiveConsole
             {
                 AnsiConsole.MarkupLine("[yellow]Disposing lock {0}...[/]", Encoding.UTF8.GetString(kvp.Value.Owner));
 
-                kvp.Value.DisposeAsync().Wait();
+                kvp.Value.DisposeAsync().AsTask().Wait();
             }
 
             SaveHistory(historyPath, history).Wait();
