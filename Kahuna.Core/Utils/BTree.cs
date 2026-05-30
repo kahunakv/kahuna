@@ -11,9 +11,10 @@ namespace Kahuna.Utils;
 public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 {
     private readonly int _order;
+    private readonly IComparer<TKey> _comparer;
 
     private Node<TKey, TValue>? Root { get; set; }
-    
+
     public int Count { get; internal set; }
 
     /// <summary>
@@ -26,9 +27,13 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     {
         if (order < 3)
             throw new ArgumentException("Order must be at least 3", nameof(order));
-        
+
         _order = order;
-        Root = new(_order, true);
+        // Use ordinal comparison for string keys so ordering is byte-exact and culture-invariant.
+        _comparer = typeof(TKey) == typeof(string)
+            ? (IComparer<TKey>)(object)StringComparer.Ordinal
+            : Comparer<TKey>.Default;
+        Root = new(_order, true, _comparer);
         Count = 0;
     }
 
@@ -46,14 +51,14 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         while (node is not null)
         {
             int idx = node.FindIndex(key);
-            
+
             if (node.IsLeaf)
-                return idx < node.KeyCount && node.Keys[idx].CompareTo(key) == 0;
-            
+                return idx < node.KeyCount && _comparer.Compare(node.Keys[idx], key) == 0;
+
             int childIdx = node.FindChildIndex(key);
             node = node.Children[childIdx];
         }
-        
+
         return false;
     }
 
@@ -81,8 +86,8 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
         while (node is not null)
         {
-            // binary‐search the sorted key array
-            int idx = Array.BinarySearch(node.Keys, 0, node.KeyCount, key);
+            // binary‐search the sorted key array using the tree's comparer
+            int idx = Array.BinarySearch(node.Keys, 0, node.KeyCount, key, _comparer);
 
             if (node.IsLeaf)
             {
@@ -106,13 +111,13 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     /// <param name="value">The value associated with the key.</param>
     public void Insert(TKey key, TValue value)
     {
-        Root ??= new(_order, true);
+        Root ??= new(_order, true, _comparer);
 
         (Node<TKey, TValue>? sibling, TKey promote) = Root.InsertRec(key, value, this);
         if (sibling is not null)
         {
             Node<TKey, TValue> oldRoot = Root;
-            Node<TKey, TValue> newRoot = new(_order, false)
+            Node<TKey, TValue> newRoot = new(_order, false, _comparer)
             {
                 Keys = {
                     [0] = promote
@@ -165,12 +170,12 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             node = node.Children[0];
 
         Node<TKey, TValue>? cursor = node;
-        
+
         while (cursor is not null)
         {
             for (int i = 0; i < cursor.KeyCount; i++)
                 yield return new(cursor.Keys[i], cursor.Values[i]!);
-            
+
             cursor = cursor.Next;
         }
     }
@@ -190,24 +195,24 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
         // 1) Descend to the leaf that should contain minKey
         Node<TKey, TValue> node = temp;
-        
+
         while (!node.IsLeaf)
             node = node.Children[node.FindChildIndex(minKey)];
 
         // 2) Walk forward through the leaf chain
         Node<TKey, TValue>? cursor = node;
-        
+
         while (cursor is not null)
         {
             for (int i = 0; i < cursor.KeyCount; i++)
             {
                 TKey key = cursor.Keys[i];
-                if (key.CompareTo(minKey) < 0)
+                if (_comparer.Compare(key, minKey) < 0)
                     continue;
-                
-                if (key.CompareTo(maxKey) > 0)
+
+                if (_comparer.Compare(key, maxKey) > 0)
                     yield break;
-                
+
                 yield return new(key, cursor.Values[i]!);
             }
             cursor = cursor.Next;
@@ -219,7 +224,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     /// This method is only supported for BTree instances where TKey is of type string.
     /// </summary>
     /// <param name="prefix">The prefix to match against the keys in the B-Tree. Only keys that begin with this prefix will be included in the results.</param>
-    /// <returns>A collection of key-value pairs where the keys start with the specified prefix, retrieved in lexicographical order.</returns>
+    /// <returns>A collection of key-value pairs where the keys start with the specified prefix, retrieved in ordinal order.</returns>
     /// <exception cref="InvalidOperationException">Thrown when TKey is not of type string, as the operation is only valid for string-type keys.</exception>
     public IEnumerable<KeyValuePair<TKey, TValue>> GetByBucket(string prefix)
     {
@@ -233,27 +238,27 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
         // 1) Descend to the leaf that would contain `prefix`
         Node<TKey, TValue> node = temp;
-        
+
         while (!node.IsLeaf)
             node = node.Children[node.FindChildIndex((TKey)(object)prefix)]!;
 
         // 2) Walk forward through the linked leaves
         Node<TKey, TValue>? cursor = node;
-        
+
         while (cursor is not null)
         {
             for (int i = 0; i < cursor.KeyCount; i++)
             {
                 // safe cast because we checked TKey==string
                 string key = (string)(object)cursor.Keys[i];
-                
-                if (key.StartsWith(prefix))
+
+                if (key.StartsWith(prefix, StringComparison.Ordinal))
                     yield return new((TKey)(object)key, cursor.Values[i]!);
-                else if (string.Compare(key, prefix, StringComparison.Ordinal) > 0)
+                else if (string.CompareOrdinal(key, prefix) > 0)
                     // once we pass the prefix range, we can stop
                     yield break;
             }
-            
+
             cursor = cursor.Next;
         }
     }
@@ -269,20 +274,22 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
     internal readonly TKey[] Keys;
 
     internal readonly TValue?[] Values;
-    
+
     internal readonly Node<TKey, TValue>[] Children;
-    
+
     internal int KeyCount;
-    
+
     internal readonly bool IsLeaf;
-    
+
     internal Node<TKey, TValue>? Next;
 
     private readonly int _order;
+    private readonly IComparer<TKey> _comparer;
 
-    public Node(int order, bool isLeaf)
+    public Node(int order, bool isLeaf, IComparer<TKey> comparer)
     {
         _order = order;
+        _comparer = comparer;
         Keys = new TKey[order];
         Values = isLeaf ? new TValue?[order] : [];
         Children = new Node<TKey, TValue>[order + 1];
@@ -297,7 +304,7 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
         if (IsLeaf)
         {
             int idx = FindIndex(key);
-            if (idx < KeyCount && Keys[idx].CompareTo(key) == 0)
+            if (idx < KeyCount && _comparer.Compare(Keys[idx], key) == 0)
                 throw new ArgumentException("Duplicate key", nameof(key));
 
             for (int i = KeyCount; i > idx; i--)
@@ -305,7 +312,7 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
                 Keys[i] = Keys[i - 1];
                 Values[i] = Values[i - 1];
             }
-            
+
             Keys[idx] = key;
             Values[idx] = value;
             KeyCount++;
@@ -316,12 +323,12 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
 
             return (null!, default!);
         }
-        
+
         // interior
         int childIdx = FindChildIndex(key);
-        
+
         (Node<TKey, TValue>? childSib, TKey childPromote) = Children[childIdx].InsertRec(key, value, tree);
-        
+
         if (childSib is not null)
         {
             for (int i = KeyCount; i > childIdx; i--)
@@ -329,7 +336,7 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
                 Keys[i] = Keys[i - 1];
                 Children[i + 1] = Children[i];
             }
-            
+
             Keys[childIdx] = childPromote;
             Children[childIdx + 1] = childSib;
             KeyCount++;
@@ -337,77 +344,77 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
             if (KeyCount >= _order)
                 return SplitInternal();
         }
-        
+
         return (null!, default!);
     }
 
     private (Node<TKey, TValue> sibling, TKey promoteKey) SplitLeaf()
     {
         int mid = KeyCount / 2;
-        Node<TKey, TValue> sibling = new(_order, true);
-        
+        Node<TKey, TValue> sibling = new(_order, true, _comparer);
+
         int j = 0;
         for (int i = mid; i < KeyCount; i++, j++)
         {
             sibling.Keys[j] = Keys[i];
             sibling.Values[j] = Values[i];
         }
-        
+
         sibling.KeyCount = KeyCount - mid;
         KeyCount = mid;
         sibling.Next = Next;
         Next = sibling;
-        
+
         return (sibling, sibling.Keys[0]);
     }
 
     private (Node<TKey, TValue> sibling, TKey promoteKey) SplitInternal()
     {
         int mid = KeyCount / 2;
-        Node<TKey, TValue> sibling = new(_order, false);
-        
+        Node<TKey, TValue> sibling = new(_order, false, _comparer);
+
         int j = 0;
-        
+
         for (int i = mid + 1; i < KeyCount; i++, j++)
             sibling.Keys[j] = Keys[i];
-        
+
         for (int i = mid + 1, k = 0; i <= KeyCount; i++, k++)
             sibling.Children[k] = Children[i];
-        
+
         sibling.KeyCount = KeyCount - mid - 1;
         TKey promoteKey = Keys[mid];
         KeyCount = mid;
-        
+
         return (sibling, promoteKey);
     }
 
     internal int FindIndex(TKey key)
     {
         int i = 0;
-        
-        while (i < KeyCount && Keys[i].CompareTo(key) < 0)
+
+        while (i < KeyCount && _comparer.Compare(Keys[i], key) < 0)
             i++;
-        
+
         return i;
     }
 
     internal int FindChildIndex(TKey key)
     {
         int i = 0;
-        
-        while (i < KeyCount && Keys[i].CompareTo(key) <= 0)
+
+        while (i < KeyCount && _comparer.Compare(Keys[i], key) <= 0)
             i++;
-        
+
         return i;
     }
-    
+
     internal bool RemoveRec(TKey key, BTree<TKey, TValue> tree)
     {
         if (IsLeaf)
         {
             // try delete in this leaf
             int idx = FindIndex(key);
-            if (idx >= KeyCount || Keys[idx].CompareTo(key) != 0)
+            if (idx >= KeyCount || _comparer.Compare(Keys[idx], key) != 0)
                 return false;
 
             // shift left
@@ -521,10 +528,10 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
 
             for (int i = 0; i < right.KeyCount - 1; i++)
                 right.Keys[i] = right.Keys[i + 1];
-            
+
             for (int i = 0; i < right.KeyCount; i++)
                 right.Children[i] = right.Children[i + 1];
-            
+
             right.KeyCount--;
         }
     }
@@ -565,7 +572,7 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
             Keys[i]      = Keys[i + 1];
             Children[i+1] = Children[i+2];
         }
-        
+
         KeyCount--;
     }
 
@@ -605,7 +612,7 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
             Keys[i]      = Keys[i + 1];
             Children[i+1] = Children[i+2];
         }
-        
+
         KeyCount--;
     }
 }
