@@ -111,11 +111,19 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         }
 
         (bool success, int partitionId, long commitIndex) = await CommitKeyValueMessage(message.Key, message.ProposalTicketId);
-        
-        entry.MvccEntries.Remove(message.TransactionId);                   
+
+        // Re-check after await: a concurrent commit for the same transaction may have
+        // already committed this entry while we were suspended waiting for Raft.
+        if (entry.WriteIntent is null)
+        {
+            context.Logger.LogWarning("Write intent already cleared for {TransactionId} — duplicate commit detected, aborting", message.TransactionId);
+            return KeyValueStaticResponses.ErroredResponse;
+        }
+
+        entry.MvccEntries.Remove(message.TransactionId);
         entry.WriteIntent = null;
-        
-        if (!success)                                
+
+        if (!success)
             return KeyValueStaticResponses.ErroredResponse;        
 
         if (entry.Revisions is not null)

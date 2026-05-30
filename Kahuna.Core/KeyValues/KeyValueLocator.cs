@@ -806,14 +806,14 @@ internal sealed class KeyValueLocator
         int partitionId = raft.GetPartitionKey(key);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
-            return await manager.TryCommitMutations(transactionId, key, ticketId, durability);
-            
+            return await manager.TryRollbackMutations(transactionId, key, ticketId, durability);
+
         string leader = await raft.WaitForLeader(partitionId, cancelationToken);
         if (leader == raft.GetLocalEndpoint())
             return (KeyValueResponseType.MustRetry, 0);
-        
+
         logger.LogDebug("ROLLBACK-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
-        
+
         return await interNodeCommunication.TryRollbackMutations(leader, transactionId, key, ticketId, durability, cancelationToken);
     }
     
