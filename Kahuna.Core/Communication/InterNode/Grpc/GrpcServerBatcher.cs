@@ -129,6 +129,15 @@ internal sealed class GrpcServerBatcher
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
+
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcGetByRangeRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
     
     public Task<GrpcServerBatcherResponse> Enqueue(GrpcScanByPrefixRequest message)
     {
@@ -461,6 +470,11 @@ internal sealed class GrpcServerBatcher
             batchRequest.Type = GrpcServerBatchType.ServerTryGetByBucket;
             batchRequest.GetByBucket = itemRequest.GetByBucket;
         }
+        else if (itemRequest.GetByRange is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryGetByRange;
+            batchRequest.GetByRange = itemRequest.GetByRange;
+        }
         else if (itemRequest.ScanByPrefix is not null)
         {
             batchRequest.Type = GrpcServerBatchType.ServerTryScanByPrefix;
@@ -646,6 +660,10 @@ internal sealed class GrpcServerBatcher
                     
                     case GrpcServerBatchType.ServerTryGetByBucket:
                         item.Promise.SetResult(new(response.GetByBucket));
+                        break;
+
+                    case GrpcServerBatchType.ServerTryGetByRange:
+                        item.Promise.SetResult(new(response.GetByRange));
                         break;
                     
                     case GrpcServerBatchType.ServerTryScanByPrefix:

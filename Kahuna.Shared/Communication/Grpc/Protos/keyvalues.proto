@@ -23,6 +23,7 @@ service KeyValuer {
   rpc ScanByPrefix (GrpcScanByPrefixRequest) returns (GrpcScanByPrefixResponse);
   rpc ScanAllByPrefix (GrpcScanAllByPrefixRequest) returns (GrpcScanAllByPrefixResponse);
   rpc GetByBucket (GrpcGetByBucketRequest) returns (GrpcGetByBucketResponse);
+  rpc GetByRangeStream (GrpcGetByRangeRequest) returns (stream GrpcGetByRangePageResponse);
   rpc StartTransaction (GrpcStartTransactionRequest) returns (GrpcStartTransactionResponse);
   rpc CommitTransaction (GrpcCommitTransactionRequest) returns (GrpcCommitTransactionResponse);
   rpc RollbackTransaction (GrpcRollbackTransactionRequest) returns (GrpcRollbackTransactionResponse);
@@ -469,6 +470,37 @@ message GrpcGetByBucketResponse {
   repeated GrpcKeyValueByPrefixItemResponse Items = 3;
 }
 
+message GrpcGetByRangeRequest {
+  int32 TransactionIdNode = 1;
+  int64 TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter = 3;
+  string Prefix = 4;
+  optional string StartKey = 5;
+  bool StartInclusive = 6;
+  optional string EndKey = 7;
+  bool EndInclusive = 8;
+  int32 Limit = 9;
+  int32 ReadTimestampNode = 10;
+  int64 ReadTimestampPhysical = 11;
+  uint32 ReadTimestampCounter = 12;
+  GrpcKeyValueDurability Durability = 13;
+}
+
+message GrpcGetByRangePageResponse {
+  GrpcKeyValueResponseType Type = 1;
+  repeated GrpcKeyValueByPrefixItemResponse Items = 2;
+  optional string NextCursor = 3;
+  bool HasMore = 4;
+}
+
+message GrpcGetByRangeResponse {
+  optional string ServedFrom = 1;
+  GrpcKeyValueResponseType Type = 2;
+  repeated GrpcKeyValueByPrefixItemResponse Items = 3;
+  optional string NextCursor = 4;
+  bool HasMore = 5;
+}
+
 message GrpcScanAllByPrefixRequest {
   string PrefixKey = 1;
   GrpcKeyValueDurability Durability = 2;
@@ -620,6 +652,7 @@ message GrpcBatchServerKeyValueRequest {
     GrpcStartTransactionRequest StartTransaction = 25;
     GrpcCommitTransactionRequest CommitTransaction = 26;
     GrpcRollbackTransactionRequest RollbackTransaction = 27;
+    GrpcGetByRangeRequest GetByRange = 28;
   }
 }
 
@@ -652,6 +685,7 @@ message GrpcBatchServerKeyValueResponse
     GrpcStartTransactionResponse StartTransaction = 24;
     GrpcCommitTransactionResponse CommitTransaction = 25;
     GrpcRollbackTransactionResponse RollbackTransaction = 26;
+    GrpcGetByRangeResponse GetByRange = 27;
   }
 }
 
@@ -698,6 +732,7 @@ enum GrpcServerBatchType {
   SERVER_TRY_START_TRANSACTION = 23;
   SERVER_TRY_COMMIT_TRANSACTION = 24;
   SERVER_TRY_ROLLBACK_TRANSACTION = 25;
+  SERVER_TRY_GET_BY_RANGE = 26;
 }
 
 enum GrpcKeyValueFlags {

@@ -584,6 +584,35 @@ public sealed class KahunaManager : IKahuna, IDisposable
         return keyValues.LocateAndGetByBucket(transactionId, prefixedKey, durability, cancellationToken);
     }
 
+    public Task<KeyValueGetByRangeResult> LocateAndGetByRange(
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey,
+        bool startInclusive,
+        string? endKey,
+        bool endInclusive,
+        int limit,
+        HLCTimestamp readTimestamp,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken)
+    {
+        return keyValues.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
+    }
+
+    public IAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> LocateAndScanRange(
+        HLCTimestamp txId,
+        string prefix,
+        string? startKey,
+        bool startInclusive,
+        string? endKey,
+        bool endInclusive,
+        int pageSize,
+        KeyValueDurability durability,
+        CancellationToken ct)
+    {
+        return keyValues.LocateAndScanRange(txId, prefix, startKey, startInclusive, endKey, endInclusive, pageSize, durability, ct);
+    }
+
     /// <summary>
     /// Starts a transaction for a key-value operation by locating the appropriate node and setting up the transaction.
     /// </summary>

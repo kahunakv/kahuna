@@ -773,9 +773,17 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <exception cref="KahunaServerException"></exception>
     public async Task<KeyValueGetByBucketResult> GetByBucket(string node, HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))        
-            return await kahunaNode.GetByBucket(transactionId, prefixedKey, durability);        
-        
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+            return await kahunaNode.GetByBucket(transactionId, prefixedKey, durability);
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public async Task<KeyValueGetByRangeResult> GetByRange(string node, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+            return await kahunaNode.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
+
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 

@@ -917,6 +917,40 @@ internal sealed class KeyValueLocator
     }
 
     /// <summary>
+    /// Locates the leader for the given prefix and executes a bounded, cursor-paged range scan.
+    /// When the leader is remote, the request is forwarded via the inter-node batch channel so
+    /// the leader processes exactly one page without buffering the full table.
+    /// </summary>
+    public async Task<KeyValueGetByRangeResult> LocateAndGetByRange(
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey,
+        bool startInclusive,
+        string? endKey,
+        bool endInclusive,
+        int limit,
+        HLCTimestamp readTimestamp,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(prefix))
+            return new(KeyValueResponseType.Errored, [], null, false);
+
+        int partitionId = raft.GetPrefixPartitionKey(prefix);
+
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+            return await manager.GetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability);
+
+        string leader = await raft.WaitForLeader(partitionId, cancellationToken);
+        if (leader == raft.GetLocalEndpoint())
+            return new(KeyValueResponseType.MustRetry, [], null, false);
+
+        logger.LogDebug("GETRANGE-KEYVALUE Redirect {Prefix} to leader partition {Partition} at {Leader}", prefix, partitionId, leader);
+
+        return await interNodeCommunication.GetByRange(leader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
+    }
+
+    /// <summary>
     /// Attempts to locate the appropriate partition leader and starts a transaction based on the provided options.
     /// </summary>
     /// <param name="options">The transaction options, including a unique identifier used to determine the partition.</param>

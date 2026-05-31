@@ -23,6 +23,7 @@ public enum KeyValueRequestType
     ScanByPrefix,
     ScanByPrefixFromDisk,
     GetByBucket,
+    GetByRange,
     CompleteProposal,
     ReleaseProposal
 }

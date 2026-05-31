@@ -22,4 +22,6 @@ internal interface IPersistenceBackend
     public KeyValueEntry? GetKeyValueRevision(string keyName, long revision);
 
     public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName);
+
+    public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit);
 }

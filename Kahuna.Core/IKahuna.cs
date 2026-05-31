@@ -45,6 +45,25 @@ public interface IKahuna
 
     public Task<KeyValueGetByBucketResult> LocateAndGetByBucket(HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken);
 
+    public Task<KeyValueGetByRangeResult> LocateAndGetByRange(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Streams all key-value entries whose keys start with <paramref name="prefix"/> as an
+    /// <see cref="IAsyncEnumerable{T}"/>, fetching results in cursor-paged batches of
+    /// <paramref name="pageSize"/> items. The snapshot timestamp is captured on the first page
+    /// and held fixed across all subsequent pages for a consistent read.
+    /// </summary>
+    public IAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> LocateAndScanRange(
+        HLCTimestamp txId,
+        string prefix,
+        string? startKey,
+        bool startInclusive,
+        string? endKey,
+        bool endInclusive,
+        int pageSize,
+        KeyValueDurability durability,
+        CancellationToken ct);
+
     public Task<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValue(HLCTimestamp transactionId, string key, byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs, KeyValueDurability durability);
 
     public Task<(KeyValueResponseType, long, HLCTimestamp)> TryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability);

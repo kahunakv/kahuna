@@ -15,6 +15,7 @@ using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
 using Kahuna.Server.ScriptParser;
 using Kahuna.Server.Communication.Internode;
+using System.Runtime.CompilerServices;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues;
@@ -514,6 +515,80 @@ internal sealed class KeyValuesManager
     public Task<KeyValueGetByBucketResult> LocateAndGetByBucket(HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         return locator.LocateAndGetByBucket(transactionId, prefixedKey, durability, cancellationToken);
+    }
+
+    public Task<KeyValueGetByRangeResult> LocateAndGetByRange(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        return locator.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
+    }
+
+    /// <summary>
+    /// Streams all key-value entries under <paramref name="prefix"/> as an <see cref="IAsyncEnumerable{T}"/>.
+    /// Pages are fetched via <see cref="LocateAndGetByRange"/>; the snapshot timestamp captured on page 0
+    /// is carried in every cursor and reused on each subsequent page for consistent reads.
+    /// Transient <see cref="KeyValueResponseType.MustRetry"/> / <see cref="KeyValueResponseType.WaitingForReplication"/>
+    /// responses cause the current page to be retried from the same cursor with exponential back-off.
+    /// </summary>
+    public async IAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> LocateAndScanRange(
+        HLCTimestamp txId,
+        string prefix,
+        string? startKey,
+        bool startInclusive,
+        string? endKey,
+        bool endInclusive,
+        int pageSize,
+        KeyValueDurability durability,
+        [EnumeratorCancellation] CancellationToken ct)
+    {
+        string? cursorKey       = startKey;
+        bool    cursorInclusive = startInclusive;
+        HLCTimestamp snapshotTs = HLCTimestamp.Zero;
+        int backoffMs           = 1;
+
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            KeyValueGetByRangeResult page = await locator.LocateAndGetByRange(
+                txId, prefix,
+                cursorKey, cursorInclusive,
+                endKey, endInclusive,
+                pageSize, snapshotTs, durability, ct);
+
+            if (page.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+            {
+                // On a transient failure at page 0, snapshotTs is still Zero, so the handler
+                // will capture a fresh HLC tick on the next attempt.  This means the snapshot
+                // instant is "first successful page 0" rather than "scan start."  That is
+                // acceptable: MustRetry/WaitingForReplication means the leader wasn't ready yet,
+                // so there is no meaningful earlier snapshot to preserve.  Pages 1+ always carry
+                // the snapshotTs latched from the first successful page-0 cursor.
+                await Task.Delay(backoffMs, ct);
+                backoffMs = Math.Min(backoffMs * 2, 1000);
+                continue;
+            }
+
+            backoffMs = 1;
+
+            if (page.Type != KeyValueResponseType.Get)
+                yield break;
+
+            foreach ((string key, ReadOnlyKeyValueEntry entry) in page.Items)
+                yield return (key, entry);
+
+            if (!page.HasMore || page.NextCursor is null)
+                yield break;
+
+            // Decode cursor: advance past last key and latch the snapshot timestamp.
+            if (!KeyValueRangeCursor.TryDecode(page.NextCursor, out string lastKey, out _, out _, out HLCTimestamp cursorTs))
+                yield break;
+
+            if (snapshotTs.IsNull())
+                snapshotTs = cursorTs;
+
+            cursorKey       = lastKey;
+            cursorInclusive = false;
+        }
     }
 
     /// <summary>
@@ -1836,6 +1911,67 @@ internal sealed class KeyValuesManager
             }
 
             return new(KeyValueResponseType.MustRetry, []);
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
+    }
+
+    /// <summary>
+    /// Executes a bounded, cursor-paged range scan over keys starting with <paramref name="prefix"/>.
+    /// </summary>
+    public async Task<KeyValueGetByRangeResult> GetByRange(
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey,
+        bool startInclusive,
+        string? endKey,
+        bool endInclusive,
+        int limit,
+        HLCTimestamp readTimestamp,
+        KeyValueDurability durability)
+    {
+        KeyValueRequest request = KeyValueRequestPool.RentRange(
+            transactionId,
+            prefix,
+            startKey,
+            startInclusive,
+            endKey,
+            endInclusive,
+            limit,
+            readTimestamp,
+            durability,
+            null
+        );
+
+        try
+        {
+            for (int i = 0; i < MaxRetries; i++)
+            {
+                KeyValueResponse? response;
+
+                if (durability == KeyValueDurability.Ephemeral)
+                    response = await ephemeralKeyValuesRouter.Ask(request);
+                else
+                    response = await persistentKeyValuesRouter.Ask(request);
+
+                if (response is null)
+                    return new(KeyValueResponseType.Errored, [], null, false);
+
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
+
+                if (response.RangeResult is not null)
+                    return response.RangeResult;
+
+                return new(response.Type, [], null, false);
+            }
+
+            return new(KeyValueResponseType.MustRetry, [], null, false);
         }
         finally
         {

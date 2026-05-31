@@ -49,8 +49,26 @@ public sealed class KeyValueRequest : IConsistentHashable
     /// </summary>
     public int PartitionId { get; private set; }
     
+    /// <summary>Range scan: inclusive lower bound key (null = start of prefix).</summary>
+    public string? StartKey { get; internal set; }
+
+    /// <summary>Range scan: whether the lower bound is inclusive.</summary>
+    public bool StartInclusive { get; internal set; }
+
+    /// <summary>Range scan: inclusive/exclusive upper bound key (null = end of prefix).</summary>
+    public string? EndKey { get; internal set; }
+
+    /// <summary>Range scan: whether the upper bound is inclusive.</summary>
+    public bool EndInclusive { get; internal set; }
+
+    /// <summary>Range scan: maximum items to return per page.</summary>
+    public int Limit { get; internal set; }
+
+    /// <summary>Range scan: fixed snapshot timestamp for consistent paging (Zero = latest).</summary>
+    public HLCTimestamp ReadTimestamp { get; internal set; }
+
     /// <summary>
-    /// 
+    ///
     /// </summary>
     public TaskCompletionSource<KeyValueResponse?>? Promise { get; private set; }
     
@@ -138,11 +156,17 @@ public sealed class KeyValueRequest : IConsistentHashable
         Key = string.Empty;
         Value = null;
         Promise = null;
+        StartKey = null;
+        EndKey = null;
+        StartInclusive = false;
+        EndInclusive = false;
+        Limit = 0;
+        ReadTimestamp = HLCTimestamp.Zero;
     }
 
     public int GetHash()
     {
-        if (Type is KeyValueRequestType.GetByBucket or KeyValueRequestType.ScanByPrefix)
+        if (Type is KeyValueRequestType.GetByBucket or KeyValueRequestType.GetByRange or KeyValueRequestType.ScanByPrefix)
             return (int)HashUtils.SimpleHash(Key);
         
         return (int)HashUtils.InversePrefixedStaticHash(Key, '/');

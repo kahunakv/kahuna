@@ -994,6 +994,59 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
+    /// <summary>
+    /// Forwards a single-page GetByRange request to a remote leader node via the batch channel.
+    /// </summary>
+    public async Task<KeyValueGetByRangeResult> GetByRange(
+        string node,
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey,
+        bool startInclusive,
+        string? endKey,
+        bool endInclusive,
+        int limit,
+        HLCTimestamp readTimestamp,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken)
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcGetByRangeRequest request = new()
+        {
+            TransactionIdNode     = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter  = transactionId.C,
+            Prefix                = prefix,
+            StartInclusive        = startInclusive,
+            EndInclusive          = endInclusive,
+            Limit                 = limit,
+            ReadTimestampNode     = readTimestamp.N,
+            ReadTimestampPhysical = readTimestamp.L,
+            ReadTimestampCounter  = readTimestamp.C,
+            Durability            = (GrpcKeyValueDurability)durability,
+        };
+
+        if (startKey is not null) request.StartKey = startKey;
+        if (endKey   is not null) request.EndKey   = endKey;
+
+        GrpcServerBatcherResponse batchResponse;
+
+        if (cancellationToken == CancellationToken.None)
+            batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+        else
+            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        GrpcGetByRangeResponse remoteResponse = batchResponse.GetByRange!;
+        remoteResponse.ServedFrom = $"https://{node}";
+
+        return new(
+            (KeyValueResponseType)remoteResponse.Type,
+            GetReadOnlyItem(remoteResponse.Items),
+            remoteResponse.HasNextCursor ? remoteResponse.NextCursor : null,
+            remoteResponse.HasMore);
+    }
+
     public async Task<KeyValueGetByBucketResult> ScanByPrefix(string node, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);

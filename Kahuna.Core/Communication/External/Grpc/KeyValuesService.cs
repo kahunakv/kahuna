@@ -1166,6 +1166,105 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
     
     /// <summary>
+    /// Server-streaming RPC: pages through all items in the given range, emitting one
+    /// <see cref="GrpcGetByRangePageResponse"/> per page so the leader never buffers the full table.
+    /// The snapshot timestamp captured on the first page is carried in each cursor and re-used on
+    /// subsequent pages to guarantee a consistent view across the stream.
+    /// </summary>
+    public override async Task GetByRangeStream(
+        GrpcGetByRangeRequest request,
+        IServerStreamWriter<GrpcGetByRangePageResponse> responseStream,
+        ServerCallContext context)
+    {
+        if (string.IsNullOrEmpty(request.Prefix))
+            return;
+
+        string? startKey    = request.HasStartKey ? request.StartKey : null;
+        string? endKey      = request.HasEndKey   ? request.EndKey   : null;
+        bool startInclusive = !request.HasStartKey || request.StartInclusive;
+        HLCTimestamp readTimestamp = new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter);
+
+        while (true)
+        {
+            KeyValueGetByRangeResult result = await keyValues.LocateAndGetByRange(
+                new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
+                request.Prefix,
+                startKey,
+                startInclusive,
+                endKey,
+                endKey is not null && request.EndInclusive,
+                request.Limit,
+                readTimestamp,
+                (KeyValueDurability)request.Durability,
+                context.CancellationToken);
+
+            GrpcGetByRangePageResponse pageResponse = new()
+            {
+                Type    = (GrpcKeyValueResponseType)result.Type,
+                HasMore = result.HasMore,
+            };
+
+            if (result.NextCursor is not null)
+                pageResponse.NextCursor = result.NextCursor;
+
+            pageResponse.Items.AddRange(GetKeyValueItems(result.Items));
+
+            await responseStream.WriteAsync(pageResponse);
+
+            if (!result.HasMore || result.NextCursor is null)
+                break;
+
+            // Cursor resume: exclusive start on the bare lastKey so no key in
+            // (lastKey, nextKey) is skipped — in particular, keys where lastKey
+            // is a strict prefix of the candidate (e.g. variable-length index keys).
+            if (!KeyValueRangeCursor.TryDecode(result.NextCursor, out string lastKey, out _, out _, out HLCTimestamp cursorTs))
+                break;
+
+            startKey       = lastKey;
+            startInclusive = false;
+            readTimestamp  = cursorTs;
+        }
+    }
+
+    /// <summary>
+    /// Batch-batcher entry point: handles a single GetByRange page request, matching the pattern
+    /// used by <see cref="GetByBucketInternal"/>.
+    /// </summary>
+    internal async Task<GrpcGetByRangeResponse> GetByRangeInternal(GrpcGetByRangeRequest request, ServerCallContext context)
+    {
+        if (string.IsNullOrEmpty(request.Prefix))
+            return new() { Type = GrpcKeyValueResponseType.TypeInvalidInput };
+
+        string? startKey = request.HasStartKey ? request.StartKey : null;
+        string? endKey   = request.HasEndKey   ? request.EndKey   : null;
+
+        KeyValueGetByRangeResult result = await keyValues.LocateAndGetByRange(
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
+            request.Prefix,
+            startKey,
+            startKey is null || request.StartInclusive,
+            endKey,
+            endKey is not null && request.EndInclusive,
+            request.Limit,
+            new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
+            (KeyValueDurability)request.Durability,
+            context.CancellationToken);
+
+        GrpcGetByRangeResponse response = new()
+        {
+            Type    = (GrpcKeyValueResponseType)result.Type,
+            HasMore = result.HasMore,
+        };
+
+        if (result.NextCursor is not null)
+            response.NextCursor = result.NextCursor;
+
+        response.Items.AddRange(GetKeyValueItems(result.Items));
+
+        return response;
+    }
+
+    /// <summary>
     /// Scans for key-value pairs based on a specified prefix.
     /// </summary>
     /// <param name="request">The request containing the prefix and relevant parameters for the scan operation.</param>

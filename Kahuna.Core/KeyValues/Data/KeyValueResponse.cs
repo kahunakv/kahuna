@@ -57,6 +57,11 @@ public sealed class KeyValueResponse
     /// Used in the 'get by bucket' operation to return all the found values.
     /// </summary>
     public List<(string, ReadOnlyKeyValueEntry)>? Items { get; }
+
+    /// <summary>
+    /// Used in the 'get by range' operation to return a paged result with cursor.
+    /// </summary>
+    public KeyValueGetByRangeResult? RangeResult { get; }
     
     /// <summary>
     /// Construtor
@@ -96,5 +101,11 @@ public sealed class KeyValueResponse
     {
         Type = type;
         Items = items;
+    }
+
+    public KeyValueResponse(KeyValueResponseType type, KeyValueGetByRangeResult rangeResult)
+    {
+        Type = type;
+        RangeResult = rangeResult;
     }
 }

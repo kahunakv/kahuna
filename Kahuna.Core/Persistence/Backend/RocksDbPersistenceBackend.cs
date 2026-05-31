@@ -409,6 +409,59 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     }
 
     /// <summary>
+    /// Retrieves a bounded, ordered page of key-value pairs whose keys start with <paramref name="prefix"/>,
+    /// beginning at <paramref name="startKey"/> (or the prefix start if null), up to <paramref name="limit"/> entries.
+    /// </summary>
+    public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit)
+    {
+        List<(string, ReadOnlyKeyValueEntry)> result = [];
+
+        string seekKey = startKey ?? prefix;
+        Span<byte> buffer = stackalloc byte[Encoding.UTF8.GetByteCount(seekKey)];
+        Encoding.UTF8.GetBytes(seekKey.AsSpan(), buffer);
+
+        using Iterator iterator = db.NewIterator(cf: columnFamilyKeys);
+        iterator.Seek(buffer);
+
+        while (iterator.Valid() && result.Count < limit)
+        {
+            string key = Encoding.UTF8.GetString(iterator.Key());
+
+            if (!key.StartsWith(prefix, StringComparison.Ordinal))
+                break;
+
+            if (!key.EndsWith(CurrentMarker, StringComparison.Ordinal))
+            {
+                iterator.Next();
+                continue;
+            }
+
+            string keyWithoutMarker = key[..^CurrentMarker.Length];
+
+            RocksDbKeyValueMessage message = UnserializeKeyValueMessage(iterator.Value());
+
+            byte[]? messageValue;
+            if (MemoryMarshal.TryGetArray(message.Value.Memory, out ArraySegment<byte> segment))
+                messageValue = segment.Array;
+            else
+                messageValue = message.Value.ToByteArray();
+
+            result.Add((keyWithoutMarker, new(
+                messageValue,
+                message.Revision,
+                new(message.ExpiresNode, message.ExpiresPhysical, message.ExpiresCounter),
+                new(message.LastUsedNode, message.LastUsedPhysical, message.LastUsedCounter),
+                new(message.LastModifiedNode, message.LastModifiedPhysical, message.LastModifiedCounter),
+                (KeyValueState)message.State
+            )));
+
+            iterator.Next();
+        }
+
+        return result;
+    }
+
+    /// <summary>
     /// Serializes a provided <see cref="RocksDbLockMessage"/> instance into a byte array.
     /// This method ensures that larger messages, in particular those with an Owner
     /// property exceeding the maximum allowed size, are handled efficiently by utilizing

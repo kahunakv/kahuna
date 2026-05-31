@@ -205,6 +205,14 @@ internal sealed class KeyValueServerBatcher
                         tasks.Add(GetByBucketDelayed(semaphore, request.RequestId, tryGetByBucketRequest, responseStream, context));
                     }
                     break;
+
+                    case GrpcServerBatchType.ServerTryGetByRange:
+                    {
+                        GrpcGetByRangeRequest? getByRangeRequest = request.GetByRange;
+
+                        tasks.Add(GetByRangeDelayed(semaphore, request.RequestId, getByRangeRequest, responseStream, context));
+                    }
+                    break;
                     
                     case GrpcServerBatchType.ServerTryScanByPrefix:
                     {
@@ -653,6 +661,26 @@ internal sealed class KeyValueServerBatcher
         await WriteResponseToStream(semaphore, responseStream, response, context);
     }
     
+    private async Task GetByRangeDelayed(
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcGetByRangeRequest getByRangeRequest,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcGetByRangeResponse getByRangeResponse = await service.GetByRangeInternal(getByRangeRequest, context);
+
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type = GrpcServerBatchType.ServerTryGetByRange,
+            RequestId = requestId,
+            GetByRange = getByRangeResponse
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+
     private async Task ScanByPrefixDelayed(
         SemaphoreSlim semaphore, 
         int requestId, 

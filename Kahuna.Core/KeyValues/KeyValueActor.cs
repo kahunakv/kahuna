@@ -107,6 +107,12 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private readonly TryGetByBucketHandler tryGetByBucketHandler;
 
     /// <summary>
+    /// Handles paginated range scans over key-value entries, merging in-memory and
+    /// disk-backed results with MVCC/RYOW semantics and a cursor for resumption.
+    /// </summary>
+    private readonly TryGetByRangeHandler tryGetByRangeHandler;
+
+    /// <summary>
     /// Handles operations for scanning keys in the key-value store with a specified prefix.
     /// This handler is responsible for efficiently retrieving all key-value pairs
     /// that match a given prefix. This operation returns entries cached in-memory that
@@ -249,6 +255,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         tryScanByPrefixHandler = new(context);
         tryScanByPrefixFromDiskHandler = new(context);
         tryGetByBucketHandler = new(context);
+        tryGetByRangeHandler = new(context);
         tryExistsHandler = new(context);
         tryAcquireExclusiveLockHandler = new(context);
         tryAcquireExclusivePrefixLockHandler = new(context);
@@ -311,6 +318,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.TryCommitMutations => await TryCommitMutations(message),
                 KeyValueRequestType.TryRollbackMutations => await TryRollbackMutations(message),
                 KeyValueRequestType.GetByBucket => await GetByBucket(message),
+                KeyValueRequestType.GetByRange => await GetByRange(message),
                 KeyValueRequestType.ScanByPrefix => await ScanByPrefix(message),
                 KeyValueRequestType.ScanByPrefixFromDisk => await ScanByPrefixFromDisk(message),
                 KeyValueRequestType.CompleteProposal => CompleteProposal(message),
@@ -407,6 +415,16 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private Task<KeyValueResponse> GetByBucket(KeyValueRequest message)
     {
         return tryGetByBucketHandler.Execute(message);
+    }
+
+    /// <summary>
+    /// Returns a bounded, cursor-paged range of keys within a prefix
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
+    private Task<KeyValueResponse> GetByRange(KeyValueRequest message)
+    {
+        return tryGetByRangeHandler.Execute(message);
     }
     
     /// <summary>

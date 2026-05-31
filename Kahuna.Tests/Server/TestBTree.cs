@@ -439,4 +439,241 @@ public class TestBTree
 
         Assert.Equal(50, matches);
     }
+
+    [Fact]
+    public void TestGetByRangeInclusiveBothEnds()
+    {
+        BTree<string, string> btree = new(4);
+
+        btree.Insert("svc/001", "a");
+        btree.Insert("svc/002", "b");
+        btree.Insert("svc/003", "c");
+        btree.Insert("svc/004", "d");
+        btree.Insert("svc/005", "e");
+
+        List<KeyValuePair<string, string>> items = btree
+            .GetByRange("svc/002", true, "svc/004", true, 100)
+            .ToList();
+
+        Assert.Equal(3, items.Count);
+        Assert.Equal("svc/002", items[0].Key);
+        Assert.Equal("svc/003", items[1].Key);
+        Assert.Equal("svc/004", items[2].Key);
+    }
+
+    [Fact]
+    public void TestGetByRangeExclusiveBothEnds()
+    {
+        BTree<string, string> btree = new(4);
+
+        btree.Insert("svc/001", "a");
+        btree.Insert("svc/002", "b");
+        btree.Insert("svc/003", "c");
+        btree.Insert("svc/004", "d");
+        btree.Insert("svc/005", "e");
+
+        List<KeyValuePair<string, string>> items = btree
+            .GetByRange("svc/002", false, "svc/004", false, 100)
+            .ToList();
+
+        Assert.Single(items);
+        Assert.Equal("svc/003", items[0].Key);
+    }
+
+    [Fact]
+    public void TestGetByRangeInclusiveStartExclusiveEnd()
+    {
+        BTree<string, string> btree = new(4);
+
+        btree.Insert("svc/001", "a");
+        btree.Insert("svc/002", "b");
+        btree.Insert("svc/003", "c");
+        btree.Insert("svc/004", "d");
+        btree.Insert("svc/005", "e");
+
+        List<KeyValuePair<string, string>> items = btree
+            .GetByRange("svc/002", true, "svc/004", false, 100)
+            .ToList();
+
+        Assert.Equal(2, items.Count);
+        Assert.Equal("svc/002", items[0].Key);
+        Assert.Equal("svc/003", items[1].Key);
+    }
+
+    [Fact]
+    public void TestGetByRangeExclusiveStartInclusiveEnd()
+    {
+        BTree<string, string> btree = new(4);
+
+        btree.Insert("svc/001", "a");
+        btree.Insert("svc/002", "b");
+        btree.Insert("svc/003", "c");
+        btree.Insert("svc/004", "d");
+        btree.Insert("svc/005", "e");
+
+        List<KeyValuePair<string, string>> items = btree
+            .GetByRange("svc/002", false, "svc/004", true, 100)
+            .ToList();
+
+        Assert.Equal(2, items.Count);
+        Assert.Equal("svc/003", items[0].Key);
+        Assert.Equal("svc/004", items[1].Key);
+    }
+
+    [Fact]
+    public void TestGetByRangeLimitCap()
+    {
+        BTree<string, string> btree = new(4);
+
+        for (int i = 1; i <= 10; i++)
+            btree.Insert($"svc/{i:D3}", i.ToString());
+
+        List<KeyValuePair<string, string>> items = btree
+            .GetByRange("svc/001", true, null, false, 3)
+            .ToList();
+
+        Assert.Equal(3, items.Count);
+        Assert.Equal("svc/001", items[0].Key);
+        Assert.Equal("svc/002", items[1].Key);
+        Assert.Equal("svc/003", items[2].Key);
+    }
+
+    [Fact]
+    public void TestGetByRangeStartBetweenExistingKeys()
+    {
+        BTree<string, string> btree = new(4);
+
+        btree.Insert("svc/001", "a");
+        btree.Insert("svc/003", "c");
+        btree.Insert("svc/005", "e");
+        btree.Insert("svc/007", "g");
+        btree.Insert("svc/009", "i");
+
+        // "svc/004" falls between existing keys 003 and 005
+        List<KeyValuePair<string, string>> items = btree
+            .GetByRange("svc/004", true, "svc/008", true, 100)
+            .ToList();
+
+        Assert.Equal(2, items.Count);
+        Assert.Equal("svc/005", items[0].Key);
+        Assert.Equal("svc/007", items[1].Key);
+    }
+
+    [Fact]
+    public void TestGetByRangeEmptyRange()
+    {
+        BTree<string, string> btree = new(4);
+
+        btree.Insert("svc/001", "a");
+        btree.Insert("svc/002", "b");
+        btree.Insert("svc/003", "c");
+
+        // start > end → empty
+        List<KeyValuePair<string, string>> items = btree
+            .GetByRange("svc/003", true, "svc/001", true, 100)
+            .ToList();
+
+        Assert.Empty(items);
+    }
+
+    [Fact]
+    public void TestGetByRangeNullEndScansToEndOfTree()
+    {
+        BTree<string, string> btree = new(4);
+
+        for (int i = 1; i <= 5; i++)
+            btree.Insert($"svc/{i:D3}", i.ToString());
+
+        List<KeyValuePair<string, string>> items = btree
+            .GetByRange("svc/003", true, null, false, 100)
+            .ToList();
+
+        Assert.Equal(3, items.Count);
+        Assert.Equal("svc/003", items[0].Key);
+        Assert.Equal("svc/004", items[1].Key);
+        Assert.Equal("svc/005", items[2].Key);
+    }
+
+    [Fact]
+    public void TestGetByRangeOrdinalOrder()
+    {
+        BTree<string, string> btree = new(16);
+
+        // Insert keys that would sort differently under culture vs ordinal
+        btree.Insert("svc/a", "1");
+        btree.Insert("svc/b", "2");
+        btree.Insert("svc/z", "3");
+        btree.Insert("svc/~extra", "4");  // '~' (0x7E) > 'z' (0x7A) ordinal
+
+        List<KeyValuePair<string, string>> items = btree
+            .GetByRange("svc/a", true, "svc/z", true, 100)
+            .ToList();
+
+        Assert.Equal(3, items.Count);
+        Assert.Equal("svc/a", items[0].Key);
+        Assert.Equal("svc/b", items[1].Key);
+        Assert.Equal("svc/z", items[2].Key);
+        // "svc/~extra" is beyond "svc/z" in ordinal order and must not appear
+    }
+
+    /// <summary>
+    /// Port of TestGetByBucketWithCultureOrdinalDivergentSibling to GetByRange.
+    /// </summary>
+    [Fact]
+    public void TestGetByRangeWithCultureOrdinalDivergentSibling()
+    {
+        BTree<string, string> btree = new(32);
+
+        const string table = "6a1b1bf86a4dc10c156599f8";
+        string scanBucket = $"{table}:i:robots_id_idx";
+        string rangeStart = $"{scanBucket}/";
+        string rangeEnd = $"{scanBucket}/\xff\xff\xff\xff";
+
+        btree.Insert($"{table}:i:~pk/k0", "u0");
+        btree.Insert($"{scanBucket}/k0", "m0");
+        btree.Insert($"{table}:r/k0", "r0");
+        btree.Insert($"{table}:i:~pk/k1", "u1");
+        btree.Insert($"{scanBucket}/k1", "m1");
+        btree.Insert($"{scanBucket}/k2", "m2");
+        btree.Insert($"{table}:r/k1", "r1");
+
+        Assert.True(btree.ContainsKey($"{scanBucket}/k0"));
+        Assert.True(btree.ContainsKey($"{scanBucket}/k1"));
+        Assert.True(btree.ContainsKey($"{scanBucket}/k2"));
+
+        List<KeyValuePair<string, string>> matches = btree
+            .GetByRange(rangeStart, true, rangeEnd, true, 100)
+            .Where(kv => kv.Key.StartsWith($"{scanBucket}/", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.Equal(3, matches.Count);
+    }
+
+    /// <summary>
+    /// Port of TestGetByBucketIgnoresTildeSiblingBucketAtScale to GetByRange.
+    /// </summary>
+    [Fact]
+    public void TestGetByRangeIgnoresTildeSiblingBucketAtScale()
+    {
+        BTree<string, string> btree = new(32);
+
+        const string table = "6a1b1bf86a4dc10c156599f8";
+        string scanBucket = $"{table}:i:robots_id_idx";
+        string rangeStart = $"{scanBucket}/";
+        string rangeEnd = $"{scanBucket}/\xff\xff\xff\xff";
+
+        for (int i = 0; i < 50; i++)
+        {
+            string suffix = i.ToString("D4");
+            btree.Insert($"{scanBucket}/{suffix}", "m" + i);
+            btree.Insert($"{table}:i:~pk/{suffix}", "u" + i);
+            btree.Insert($"{table}:r/{suffix}", "r" + i);
+        }
+
+        int matches = btree
+            .GetByRange(rangeStart, true, rangeEnd, true, 200)
+            .Count(kv => kv.Key.StartsWith($"{scanBucket}/", StringComparison.Ordinal));
+
+        Assert.Equal(50, matches);
+    }
 }

@@ -220,6 +220,59 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     }
 
     /// <summary>
+    /// Retrieves key-value pairs from the B-Tree within an ordinal string range, with inclusive/exclusive
+    /// bounds and a maximum item count. Only supported for BTree instances where TKey is of type string.
+    /// </summary>
+    /// <param name="start">The lower bound key.</param>
+    /// <param name="startInclusive">Whether the lower bound is inclusive.</param>
+    /// <param name="end">The upper bound key, or null to scan to the end of the tree.</param>
+    /// <param name="endInclusive">Whether the upper bound is inclusive.</param>
+    /// <param name="limit">Maximum number of items to return.</param>
+    public IEnumerable<KeyValuePair<TKey, TValue>> GetByRange(
+        string start, bool startInclusive,
+        string? end, bool endInclusive,
+        int limit)
+    {
+        if (typeof(TKey) != typeof(string))
+            throw new InvalidOperationException("GetByRange only supported for BTree<string, TValue>");
+
+        Node<TKey, TValue>? temp = Root;
+        if (temp is null || limit <= 0)
+            yield break;
+
+        Node<TKey, TValue> node = temp;
+        while (!node.IsLeaf)
+            node = node.Children[node.FindChildIndex((TKey)(object)start)]!;
+
+        int yielded = 0;
+        Node<TKey, TValue>? cursor = node;
+
+        while (cursor is not null && yielded < limit)
+        {
+            for (int i = 0; i < cursor.KeyCount && yielded < limit; i++)
+            {
+                string key = (string)(object)cursor.Keys[i];
+
+                int cmpStart = string.CompareOrdinal(key, start);
+                if (cmpStart < 0 || (!startInclusive && cmpStart == 0))
+                    continue;
+
+                if (end is not null)
+                {
+                    int cmpEnd = string.CompareOrdinal(key, end);
+                    if (cmpEnd > 0 || (!endInclusive && cmpEnd == 0))
+                        yield break;
+                }
+
+                yield return new((TKey)(object)key, cursor.Values[i]!);
+                yielded++;
+            }
+
+            cursor = cursor.Next;
+        }
+    }
+
+    /// <summary>
     /// Retrieves all key-value pairs from the B-Tree where the keys start with the specified prefix.
     /// This method is only supported for BTree instances where TKey is of type string.
     /// </summary>

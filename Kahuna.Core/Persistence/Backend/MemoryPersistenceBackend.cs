@@ -139,6 +139,35 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
         return items;
     }
 
+    /// <summary>
+    /// Retrieves a bounded, ordered page of key-value pairs whose keys start with <paramref name="prefix"/>,
+    /// beginning at <paramref name="startKey"/> (or the prefix start if null), up to <paramref name="limit"/> entries.
+    /// </summary>
+    public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit)
+    {
+        List<(string, ReadOnlyKeyValueEntry)> items = [];
+
+        IEnumerable<KeyValuePair<string, KeyValueEntry>> candidates = keyValues
+            .Where(kv => kv.Key.StartsWith(prefix, StringComparison.Ordinal));
+
+        if (startKey is not null)
+            candidates = candidates.Where(kv => string.CompareOrdinal(kv.Key, startKey) >= 0);
+
+        foreach ((string key, KeyValueEntry value) in candidates.OrderBy(kv => kv.Key, StringComparer.Ordinal).Take(limit))
+        {
+            items.Add((key, new(
+                value.Value,
+                value.Revision,
+                value.Expires,
+                value.LastUsed,
+                value.LastModified,
+                value.State
+            )));
+        }
+
+        return items;
+    }
+
     public void Dispose()
     {
         GC.SuppressFinalize(this);

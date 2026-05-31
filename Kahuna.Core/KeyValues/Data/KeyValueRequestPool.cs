@@ -74,6 +74,48 @@ internal static class KeyValueRequestPool
         );
     }
     
+    /// <summary>
+    /// Rents a <see cref="KeyValueRequest"/> pre-populated for a GetByRange scan.
+    /// </summary>
+    public static KeyValueRequest RentRange(
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey,
+        bool startInclusive,
+        string? endKey,
+        bool endInclusive,
+        int limit,
+        HLCTimestamp readTimestamp,
+        KeyValueDurability durability,
+        TaskCompletionSource<KeyValueResponse?>? promise)
+    {
+        KeyValueRequest request = Rent(
+            KeyValueRequestType.GetByRange,
+            transactionId,
+            HLCTimestamp.Zero,
+            prefix,
+            null,
+            null,
+            0,
+            KeyValueFlags.None,
+            0,
+            HLCTimestamp.Zero,
+            durability,
+            0,
+            0,
+            promise
+        );
+
+        request.StartKey       = startKey;
+        request.StartInclusive = startInclusive;
+        request.EndKey         = endKey;
+        request.EndInclusive   = endInclusive;
+        request.Limit          = limit;
+        request.ReadTimestamp  = readTimestamp;
+
+        return request;
+    }
+
     public static void Return(KeyValueRequest obj)
     {
         obj.Clear();

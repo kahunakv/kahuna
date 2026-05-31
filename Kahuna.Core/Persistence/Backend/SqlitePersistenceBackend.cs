@@ -685,6 +685,104 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         return results;
     }
 
+    /// <summary>
+    /// Retrieves a bounded, ordered page of key-value pairs whose keys start with <paramref name="prefix"/>,
+    /// beginning at <paramref name="startKey"/> (or the prefix start if null), up to <paramref name="limit"/> entries.
+    /// </summary>
+    public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit)
+    {
+        List<(string, ReadOnlyKeyValueEntry)> results = [];
+
+        int shard = HashUtils.ConsistentHash(prefix, MaxShards);
+        (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(shard);
+
+        try
+        {
+            readerWriterLock.AcquireReaderLock(TimeSpan.FromSeconds(5));
+
+            string seek = startKey ?? prefix;
+            string? upper = GetPrefixUpperBound(prefix);
+
+            // Collation note: SQLite's default TEXT collation for >= / < / ORDER BY is BINARY,
+            // which compares UTF-8 bytes.  string.CompareOrdinal (used by the C# merge layer)
+            // compares UTF-16 code units.  The two orderings are identical for code points U+0000–
+            // U+007F (the full ASCII range used by all Camus key formats).  They can diverge for
+            // keys containing multi-byte UTF-8 sequences (non-ASCII), where UTF-8 and UTF-16
+            // byte orders may differ for characters above U+07FF.  If non-ASCII keys are ever
+            // needed, add COLLATE BINARY explicitly and document the encoding assumption, or
+            // switch the C# layer to UTF-8 byte comparison to stay in sync.
+            string query = upper is not null
+                ? """
+                  SELECT key, value, revision, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, lastUsedCounter,
+                         lastModifiedNode, lastModifiedPhysical, lastModifiedCounter, state
+                  FROM keys
+                  WHERE key >= @start AND key < @upper
+                  ORDER BY key
+                  LIMIT @limit
+                  """
+                : """
+                  SELECT key, value, revision, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, lastUsedCounter,
+                         lastModifiedNode, lastModifiedPhysical, lastModifiedCounter, state
+                  FROM keys
+                  WHERE key >= @start
+                  ORDER BY key
+                  LIMIT @limit
+                  """;
+
+            using SqliteCommand command = new(query, connection);
+
+            command.Parameters.AddWithValue("@start", seek);
+            command.Parameters.AddWithValue("@limit", limit);
+            if (upper is not null)
+                command.Parameters.AddWithValue("@upper", upper);
+
+            using SqliteDataReader reader = command.ExecuteReader();
+
+            while (reader.Read())
+                results.Add((reader.IsDBNull(0) ? "" : reader.GetString(0), new(
+                    value: reader.IsDBNull(1) ? null : (byte[])reader[1],
+                    revision: reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                    expires: new(
+                        reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
+                        reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
+                        reader.IsDBNull(5) ? 0 : (uint)reader.GetInt64(5)
+                    ),
+                    lastUsed: new(
+                        reader.IsDBNull(6) ? 0 : reader.GetInt32(6),
+                        reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
+                        reader.IsDBNull(8) ? 0 : (uint)reader.GetInt64(8)
+                    ),
+                    lastModified: new(
+                        reader.IsDBNull(9) ? 0 : reader.GetInt32(9),
+                        reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+                        reader.IsDBNull(11) ? 0 : (uint)reader.GetInt64(11)
+                    ),
+                    state: reader.IsDBNull(12) ? KeyValueState.Undefined : (KeyValueState)reader.GetInt32(12)
+                )));
+        }
+        finally
+        {
+            readerWriterLock.ReleaseReaderLock();
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Returns the smallest string that is strictly greater than every string with the given prefix,
+    /// by finding the rightmost character that can be incremented and doing so.
+    /// Returns null when the prefix consists entirely of char.MaxValue characters (no upper bound exists).
+    /// </summary>
+    private static string? GetPrefixUpperBound(string prefix)
+    {
+        for (int i = prefix.Length - 1; i >= 0; i--)
+        {
+            if (prefix[i] < char.MaxValue)
+                return string.Concat(prefix.AsSpan(0, i), ((char)(prefix[i] + 1)).ToString());
+        }
+        return null;
+    }
+
     public void Dispose()
     {
         foreach (KeyValuePair<int, (ReaderWriterLock, SqliteConnection)> conn in connections)

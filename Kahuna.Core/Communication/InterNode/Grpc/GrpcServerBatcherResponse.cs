@@ -24,6 +24,8 @@ internal sealed class GrpcServerBatcherResponse
     public GrpcTryExistsKeyValueResponse? TryExistsKeyValue { get; }
     
     public GrpcGetByBucketResponse? GetByBucket { get; }
+
+    public GrpcGetByRangeResponse? GetByRange { get; }
     
     public GrpcScanByPrefixResponse? ScanByPrefix { get; }
     
@@ -113,6 +115,11 @@ internal sealed class GrpcServerBatcherResponse
     public GrpcServerBatcherResponse(GrpcGetByBucketResponse getByBucket)
     {
         GetByBucket = getByBucket;
+    }
+
+    public GrpcServerBatcherResponse(GrpcGetByRangeResponse getByRange)
+    {
+        GetByRange = getByRange;
     }
     
     public GrpcServerBatcherResponse(GrpcScanByPrefixResponse scanByPrefix)
