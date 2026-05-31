@@ -1,5 +1,6 @@
 
 using System.Text;
+using System.Globalization;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.ScriptParser;
 
@@ -61,7 +62,7 @@ internal static class EqualsOperator
             {
                 if (!long.TryParse(left.StrValue, out long leftLong))
                 {
-                    if (!double.TryParse(left.StrValue, out double leftDouble))                    
+                    if (!double.TryParse(left.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double leftDouble))                    
                         throw new KahunaScriptException("Invalid operands: " + left.Type + " == " + right.Type, ast.yyline);
                 
                     return new(Math.Abs(leftDouble - right.DoubleValue) <= 0.001);
@@ -74,7 +75,7 @@ internal static class EqualsOperator
             {
                 if (!long.TryParse(left.StrValue, out long leftLong))
                 {
-                    if (!double.TryParse(left.StrValue, out double leftDouble))                    
+                    if (!double.TryParse(left.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double leftDouble))                    
                         throw new KahunaScriptException("Invalid operands: " + left.Type + " == " + right.Type, ast.yyline);
                 
                     return new(Math.Abs(leftDouble - right.LongValue) <= 0.001);
@@ -87,7 +88,7 @@ internal static class EqualsOperator
             {
                 if (!long.TryParse(right.StrValue, out long rightLong))
                 {
-                    if (!double.TryParse(right.StrValue, out double rightDouble))                    
+                    if (!double.TryParse(right.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double rightDouble))                    
                         throw new KahunaScriptException("Invalid operands: " + left.Type + " == " + right.Type, ast.yyline);
                     
                     return new(Math.Abs(left.LongValue - rightDouble) <= 0.001);
@@ -100,7 +101,7 @@ internal static class EqualsOperator
             {
                 if (!long.TryParse(right.StrValue, out long rightLong))
                 {
-                    if (!double.TryParse(right.StrValue, out double rightDouble))                    
+                    if (!double.TryParse(right.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double rightDouble))                    
                         throw new KahunaScriptException($"Invalid operands: {left.Type} {operatorType} {right.Type}", ast.yyline);
                     
                     return new(Math.Abs(left.DoubleValue - rightDouble) <= 0.001);

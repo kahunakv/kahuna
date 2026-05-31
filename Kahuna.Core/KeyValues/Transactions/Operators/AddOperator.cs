@@ -1,4 +1,5 @@
 
+using System.Globalization;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.ScriptParser;
 
@@ -39,7 +40,7 @@ internal static class AddOperator
             {
                 if (!long.TryParse(left.StrValue, out long leftLong))
                 {
-                    if (!double.TryParse(left.StrValue, out double leftDouble))                    
+                    if (!double.TryParse(left.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double leftDouble))                    
                         throw new KahunaScriptException("Invalid operands: " + left.Type + " + " + right.Type, ast.yyline);
                 
                     return new(leftDouble + right.DoubleValue);
@@ -52,7 +53,7 @@ internal static class AddOperator
             {
                 if (!long.TryParse(left.StrValue, out long leftLong))
                 {
-                    if (!double.TryParse(left.StrValue, out double leftDouble))                    
+                    if (!double.TryParse(left.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double leftDouble))                    
                         throw new KahunaScriptException("Invalid operands: " + left.Type + " + " + right.Type, ast.yyline);
                 
                     return new(leftDouble + right.LongValue);
@@ -65,7 +66,7 @@ internal static class AddOperator
             {
                 if (!long.TryParse(right.StrValue, out long rightLong))
                 {
-                    if (!double.TryParse(right.StrValue, out double rightDouble))                    
+                    if (!double.TryParse(right.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double rightDouble))                    
                         throw new KahunaScriptException("Invalid operands: " + left.Type + " + " + right.Type, ast.yyline);
                     
                     return new(left.LongValue + rightDouble);
@@ -78,7 +79,7 @@ internal static class AddOperator
             {
                 if (!long.TryParse(right.StrValue, out long rightLong))
                 {
-                    if (!double.TryParse(right.StrValue, out double rightDouble))                    
+                    if (!double.TryParse(right.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double rightDouble))                    
                         throw new KahunaScriptException("Invalid operands: " + left.Type + " + " + right.Type, ast.yyline);
                     
                     return new(left.DoubleValue + rightDouble);

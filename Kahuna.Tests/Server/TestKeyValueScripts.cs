@@ -566,65 +566,69 @@ public class TestKeyValueScripts : BaseCluster
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
 
-        // Persistent tests
-        string script = """
-        SET pp 'hello world'                      
-        GET pp
+        // Unique key per run avoids interference when test classes execute in parallel
+        string key = $"ppext{Guid.NewGuid():N}";
+
+        string script = $"""
+        SET {key} 'hello world'
+        GET {key}
         """;
 
         KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
-        
-        script = """
-         BEGIN 
-          EXTEND pp 500
+
+        script = $"""
+         BEGIN
+          EXTEND {key} 500
           ROLLBACK
          END
          """;
-        
+
         resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Aborted, resp.Type);
-        
+
         await Task.Delay(1000, TestContext.Current.CancellationToken);
-        
-        script = "GET pp";
+
+        script = $"GET {key}";
 
         resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
-        
-        script = """
-         ESET pp 'hello world'                      
-         EGET pp
+
+        string ekey = $"ppexte{Guid.NewGuid():N}";
+
+        script = $"""
+         ESET {ekey} 'hello world'
+         EGET {ekey}
          """;
 
         resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
-        
-        script = """
-         BEGIN 
-          EEXTEND pp 500
+
+        script = $"""
+         BEGIN
+          EEXTEND {ekey} 500
           ROLLBACK
          END
          """;
-        
+
         resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Aborted, resp.Type);
-        
+
         await Task.Delay(1000, TestContext.Current.CancellationToken);
-        
-        script = "EGET pp";
+
+        script = $"EGET {ekey}";
 
         resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
-        
+
         await LeaveCluster(node1, node2, node3);
     }
 
