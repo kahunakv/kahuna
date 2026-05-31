@@ -49,11 +49,11 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
             return KeyValueStaticResponses.ErroredResponse;
         }
 
-        if (entry.ReplicationIntent is null)
+        if (entry.ReplicationIntent is not null)
         {
             context.Logger.LogWarning("Replication intent is active on key {Key}", message.Key);
-            
-            return KeyValueStaticResponses.WaitingForReplicationResponse;;
+
+            return KeyValueStaticResponses.WaitingForReplicationResponse;
         }
 
         if (entry.WriteIntent is null)
