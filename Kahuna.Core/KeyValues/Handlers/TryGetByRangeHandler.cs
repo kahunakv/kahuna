@@ -243,7 +243,9 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         HLCTimestamp readTimestamp,
         ReadOnlyKeyValueEntry? keyValueEntry = null)
     {
-        KeyValueEntry? entry = await GetKeyValueEntry(key, durability, keyValueEntry);
+        // populateCache: false — this is a read-only scan. Inserting disk entries into the
+        // store here would mutate the BTree while GetByRangePersistent is lazily enumerating it.
+        KeyValueEntry? entry = await GetKeyValueEntry(key, durability, keyValueEntry, populateCache: false);
 
         ReadOnlyKeyValueEntry readOnlyKeyValueEntry;
 
@@ -268,11 +270,12 @@ internal sealed class TryGetByRangeHandler : BaseHandler
 
         if (transactionId != HLCTimestamp.Zero)
         {
+            // Read-only scan: never insert a placeholder (would mutate the BTree mid-enumeration
+            // and pollute the read-through cache). A key absent from both memory and disk simply
+            // does not exist at this snapshot. RYOW still holds: keys the transaction itself wrote
+            // already live in the store with an MvccEntry and are returned via the branch below.
             if (entry is null)
-            {
-                entry = new() { Bucket = GetBucket(key), State = KeyValueState.Undefined, Revision = -1 };
-                context.Store.Insert(key, entry);
-            }
+                return KeyValueStaticResponses.DoesNotExistContextResponse;
 
             entry.MvccEntries ??= new();
 

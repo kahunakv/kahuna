@@ -95,7 +95,9 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
                 RemoveExpiredRevisions(entry, proposal.Revision);
 
             entry.Revisions ??= new();
-            entry.Revisions.Add(entry.Revision, entry.Value);
+            // Idempotent archive (see the persistent path below): a revision can recur across a
+            // delete→re-set cycle; Dictionary.Add would throw and corrupt the commit.
+            entry.Revisions[entry.Revision] = entry.Value;
 
             entry.Value = proposal.Value;
             entry.Expires = proposal.Expires;
@@ -103,8 +105,8 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             entry.LastUsed = proposal.LastUsed;
             entry.LastModified = proposal.LastModified;
             entry.State = proposal.State;
-            
-            entry.MvccEntries.Remove(message.TransactionId);                    
+
+            entry.MvccEntries.Remove(message.TransactionId);
             entry.WriteIntent = null;
 
             return new(KeyValueResponseType.Committed, 0);
@@ -130,7 +132,12 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             RemoveExpiredRevisions(entry, proposal.Revision);
                
         entry.Revisions ??= new();
-        entry.Revisions.Add(entry.Revision, entry.Value);
+        // Idempotent archive: a revision number can recur across a delete→re-set cycle for the same
+        // key. Dictionary.Add throws on a duplicate key, and that exception used to abort the index
+        // entry's commit while the row commit had already succeeded — leaving the row persisted but
+        // its unique-index entry stuck in the Deleted state (orphaned row → broken PK lookups and
+        // duplicate inserts). Overwriting is safe: the same revision carries the same value.
+        entry.Revisions[entry.Revision] = entry.Value;
 
         entry.Value = proposal.Value;
         entry.Expires = proposal.Expires;

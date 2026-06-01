@@ -144,7 +144,13 @@ internal abstract class BaseHandler
     /// <param name="durability"></param>
     /// <param name="readKeyValueEntry"></param>
     /// <returns></returns>
-    protected async ValueTask<KeyValueEntry?> GetKeyValueEntry(string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? readKeyValueEntry = null)
+    /// <param name="populateCache">
+    /// When true (default) a disk-resident entry is inserted into the in-memory store as a
+    /// read-through cache. Read-only range scans MUST pass false: they enumerate the store
+    /// lazily, and inserting during that enumeration mutates the BTree mid-iteration (leaf
+    /// splits invalidate the live cursor) and pollutes the cache with the entire scanned range.
+    /// </param>
+    protected async ValueTask<KeyValueEntry?> GetKeyValueEntry(string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? readKeyValueEntry = null, bool populateCache = true)
     {
         if (!context.Store.TryGetValue(key, out KeyValueEntry? entry))
         {
@@ -163,18 +169,19 @@ internal abstract class BaseHandler
                         LastModified = readKeyValueEntry.LastModified,
                         State = readKeyValueEntry.State
                     };
-                
+
                 if (entry is not null)
                 {
                     entry.LastUsed = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
-                    context.Store.Insert(key, entry);
+                    if (populateCache)
+                        context.Store.Insert(key, entry);
                     return entry;
                 }
             }
-            
-            return null;    
+
+            return null;
         }
-        
+
         return entry;
     }
 

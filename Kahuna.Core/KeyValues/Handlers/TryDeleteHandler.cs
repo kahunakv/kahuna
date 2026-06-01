@@ -100,10 +100,10 @@ internal sealed class TryDeleteHandler : BaseHandler
             
             if (entry.State == KeyValueState.Deleted)
                 return new(KeyValueResponseType.DoesNotExist, mvccEntry.Revision);
-            
+
             mvccEntry.State = KeyValueState.Deleted;
             mvccEntry.LastModified = currentTime;
-            
+
             return new(KeyValueResponseType.Deleted, mvccEntry.Revision, mvccEntry.LastModified);
         }
         

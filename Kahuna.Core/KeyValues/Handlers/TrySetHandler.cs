@@ -180,9 +180,9 @@ internal sealed class TrySetHandler : BaseHandler
             
             // Check if the value must not be changed according to flags
             if (
-                (message.Flags & KeyValueFlags.SetIfExists) != 0 && !exists || 
-                (message.Flags & KeyValueFlags.SetIfNotExists) != 0 && exists || 
-                (message.Flags & KeyValueFlags.SetIfEqualToValue) != 0 && !((ReadOnlySpan<byte>)mvccEntry.Value).SequenceEqual(message.CompareValue) || 
+                (message.Flags & KeyValueFlags.SetIfExists) != 0 && !exists ||
+                (message.Flags & KeyValueFlags.SetIfNotExists) != 0 && exists ||
+                (message.Flags & KeyValueFlags.SetIfEqualToValue) != 0 && !((ReadOnlySpan<byte>)mvccEntry.Value).SequenceEqual(message.CompareValue) ||
                 (message.Flags & KeyValueFlags.SetIfEqualToRevision) != 0 && mvccEntry.Revision != message.CompareRevision
             )
                 return new(KeyValueResponseType.NotSet, mvccEntry.Revision, mvccEntry.LastModified);
