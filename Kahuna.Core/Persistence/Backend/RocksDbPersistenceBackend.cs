@@ -548,6 +548,17 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         return RocksDbKeyValueMessage.Parser.ParseFrom(memoryStream);
     }
 
+    public bool PruneKeyValueRevisions(
+        IReadOnlyCollection<string>? keys,
+        int retentionCount,
+        TimeSpan retentionAge,
+        int batchSize,
+        out RevisionPruneResult result)
+    {
+        result = new(KeysVisited: 0, RevisionsDeleted: 0, BatchLimitReached: false);
+        return true;
+    }
+
     public void Dispose()
     {
         GC.SuppressFinalize(this);

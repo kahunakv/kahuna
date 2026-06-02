@@ -76,7 +76,12 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             LruSampleSize = options.LruSampleSize,
             LruSampleScanMax = options.LruSampleScanMax,
             MetadataTrimInterval = options.MetadataTrimInterval,
-            DirtyObjectsWriterDelay = options.DirtyObjectsWriterDelay
+            DirtyObjectsWriterDelay = options.DirtyObjectsWriterDelay,
+            PersistentRevisionRetentionCount = options.PersistentRevisionRetentionCount,
+            PersistentRevisionRetentionAge = options.PersistentRevisionRetentionAge,
+            PersistentRevisionCleanupInterval = options.PersistentRevisionCleanupInterval,
+            PersistentRevisionCleanupBatchSize = options.PersistentRevisionCleanupBatchSize,
+            PersistentRevisionCleanupOnWrite = options.PersistentRevisionCleanupOnWrite
         }, options.WalPath);
 
         this.standaloneComm = new();
@@ -144,7 +149,12 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             LruSampleSize = options.LruSampleSize,
             LruSampleScanMax = options.LruSampleScanMax,
             MetadataTrimInterval = options.MetadataTrimInterval,
-            DirtyObjectsWriterDelay = options.DirtyObjectsWriterDelay
+            DirtyObjectsWriterDelay = options.DirtyObjectsWriterDelay,
+            PersistentRevisionRetentionCount = options.PersistentRevisionRetentionCount,
+            PersistentRevisionRetentionAge = options.PersistentRevisionRetentionAge,
+            PersistentRevisionCleanupInterval = options.PersistentRevisionCleanupInterval,
+            PersistentRevisionCleanupBatchSize = options.PersistentRevisionCleanupBatchSize,
+            PersistentRevisionCleanupOnWrite = options.PersistentRevisionCleanupOnWrite
         }, options.WalPath);
 
         this.standaloneComm = null;

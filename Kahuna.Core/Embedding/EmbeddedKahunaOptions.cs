@@ -108,4 +108,14 @@ public sealed class EmbeddedKahunaOptions
     public int CompactNumberEntries { get; set; } = 50;
 
     public int MaxEntriesPerCompaction { get; set; } = 5000;
+
+    public int PersistentRevisionRetentionCount { get; set; }
+
+    public TimeSpan PersistentRevisionRetentionAge { get; set; }
+
+    public TimeSpan PersistentRevisionCleanupInterval { get; set; } = TimeSpan.FromMinutes(5);
+
+    public int PersistentRevisionCleanupBatchSize { get; set; } = 1000;
+
+    public bool PersistentRevisionCleanupOnWrite { get; set; } = true;
 }

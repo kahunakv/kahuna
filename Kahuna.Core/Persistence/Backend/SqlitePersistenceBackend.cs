@@ -169,6 +169,22 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
             using SqliteCommand command3 = new(createTableQuery3, connection);
             command3.ExecuteNonQuery();
 
+            const string createRevisionKeyIndexQuery = """
+                CREATE INDEX IF NOT EXISTS idx_keys_revisions_key_revision
+                ON keys_revisions(key, revision DESC);
+                """;
+
+            using (SqliteCommand commandIndex1 = new(createRevisionKeyIndexQuery, connection))
+                commandIndex1.ExecuteNonQuery();
+
+            const string createRevisionModifiedIndexQuery = """
+                CREATE INDEX IF NOT EXISTS idx_keys_revisions_last_modified
+                ON keys_revisions(lastModifiedPhysical);
+                """;
+
+            using (SqliteCommand commandIndex2 = new(createRevisionModifiedIndexQuery, connection))
+                commandIndex2.ExecuteNonQuery();
+
             const string pragmasQuery = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY;";
             using SqliteCommand command4 = new(pragmasQuery, connection);
             command4.ExecuteNonQuery();
@@ -781,6 +797,389 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                 return string.Concat(prefix.AsSpan(0, i), ((char)(prefix[i] + 1)).ToString());
         }
         return null;
+    }
+
+    public bool PruneKeyValueRevisions(
+        IReadOnlyCollection<string>? keys,
+        int retentionCount,
+        TimeSpan retentionAge,
+        int batchSize,
+        out RevisionPruneResult result)
+    {
+        result = new(KeysVisited: 0, RevisionsDeleted: 0, BatchLimitReached: false);
+
+        bool countEnabled = retentionCount > 0;
+        bool ageEnabled = retentionAge > TimeSpan.Zero;
+        if (!countEnabled && !ageEnabled)
+            return true;
+
+        if (batchSize <= 0)
+            return true;
+
+        try
+        {
+            long cutoffPhysical = ageEnabled
+                ? DateTimeOffset.UtcNow.Subtract(retentionAge).ToUnixTimeMilliseconds()
+                : 0;
+
+            int keysVisited = 0;
+            int deleted = 0;
+            bool batchLimitReached = false;
+
+            if (keys is { Count: > 0 })
+            {
+                Dictionary<int, List<string>> plan = GroupKeysByShard(keys);
+
+                foreach ((int shard, List<string> shardKeys) in plan)
+                {
+                    if (deleted >= batchSize)
+                    {
+                        batchLimitReached = true;
+                        break;
+                    }
+
+                    (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(shard);
+
+                    try
+                    {
+                        readerWriterLock.AcquireWriterLock(TimeSpan.FromSeconds(5));
+
+                        foreach (string key in shardKeys)
+                        {
+                            if (deleted >= batchSize)
+                            {
+                                batchLimitReached = true;
+                                break;
+                            }
+
+                            keysVisited++;
+
+                            deleted += PruneKeyRevisions(
+                                connection,
+                                key,
+                                countEnabled,
+                                retentionCount,
+                                ageEnabled,
+                                cutoffPhysical,
+                                batchSize - deleted);
+                        }
+
+                        if (!batchLimitReached)
+                        {
+                            if (deleted >= batchSize)
+                                batchLimitReached = true;
+                            else
+                            {
+                                foreach (string key in shardKeys)
+                                {
+                                    if (KeyHasMorePrunableRevisions(
+                                            connection,
+                                            key,
+                                            countEnabled,
+                                            retentionCount,
+                                            ageEnabled,
+                                            cutoffPhysical))
+                                    {
+                                        batchLimitReached = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        readerWriterLock.ReleaseWriterLock();
+                    }
+                }
+            }
+            else
+            {
+                for (int shard = 0; shard < MaxShards; shard++)
+                {
+                    if (deleted >= batchSize)
+                    {
+                        batchLimitReached = true;
+                        break;
+                    }
+
+                    (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(shard);
+
+                    try
+                    {
+                        readerWriterLock.AcquireWriterLock(TimeSpan.FromSeconds(5));
+
+                        List<string> candidateKeys = GetRevisionCandidateKeys(connection);
+
+                        foreach (string key in candidateKeys)
+                        {
+                            if (deleted >= batchSize)
+                            {
+                                batchLimitReached = true;
+                                break;
+                            }
+
+                            keysVisited++;
+
+                            deleted += PruneKeyRevisions(
+                                connection,
+                                key,
+                                countEnabled,
+                                retentionCount,
+                                ageEnabled,
+                                cutoffPhysical,
+                                batchSize - deleted);
+                        }
+
+                        if (!batchLimitReached
+                            && (deleted >= batchSize || ShardHasMorePrunableRevisions(connection, countEnabled, retentionCount, ageEnabled, cutoffPhysical)))
+                            batchLimitReached = true;
+                    }
+                    finally
+                    {
+                        readerWriterLock.ReleaseWriterLock();
+                    }
+                }
+            }
+
+            result = new(keysVisited, deleted, batchLimitReached);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(
+                "PruneKeyValueRevisions: {0} {1} {2}",
+                ex.GetType().Name,
+                ex.Message,
+                ex.StackTrace
+            );
+        }
+
+        return false;
+    }
+
+    private static Dictionary<int, List<string>> GroupKeysByShard(IReadOnlyCollection<string> keys)
+    {
+        Dictionary<int, List<string>> plan = new();
+
+        foreach (string key in keys.Distinct(StringComparer.Ordinal))
+        {
+            int shard = (int)HashUtils.InversePrefixedHash(key, '/', MaxShards);
+
+            if (plan.TryGetValue(shard, out List<string>? shardKeys))
+                shardKeys.Add(key);
+            else
+                plan.Add(shard, [key]);
+        }
+
+        return plan;
+    }
+
+    private static List<string> GetRevisionCandidateKeys(SqliteConnection connection)
+    {
+        const string query = """
+            SELECT DISTINCT kr.key
+            FROM keys_revisions kr
+            INNER JOIN keys k ON k.key = kr.key
+            ORDER BY kr.key
+            """;
+
+        List<string> keys = [];
+
+        using SqliteCommand command = new(query, connection);
+        using SqliteDataReader reader = command.ExecuteReader();
+
+        while (reader.Read())
+            keys.Add(reader.GetString(0));
+
+        return keys;
+    }
+
+    private static long? GetCurrentRevision(SqliteConnection connection, string key)
+    {
+        const string query = "SELECT revision FROM keys WHERE key = @key";
+
+        using SqliteCommand command = new(query, connection);
+        command.Parameters.AddWithValue("@key", key);
+
+        object? revision = command.ExecuteScalar();
+        if (revision is null or DBNull)
+            return null;
+
+        return Convert.ToInt64(revision);
+    }
+
+    private static int PruneKeyRevisions(
+        SqliteConnection connection,
+        string key,
+        bool countEnabled,
+        int retentionCount,
+        bool ageEnabled,
+        long cutoffPhysical,
+        int limit)
+    {
+        if (limit <= 0)
+            return 0;
+
+        long? currentRevision = GetCurrentRevision(connection, key);
+        if (currentRevision is null)
+            return 0;
+
+        List<string> predicates = [];
+
+        if (countEnabled)
+        {
+            predicates.Add("""
+                revision < (
+                    SELECT MIN(revision)
+                    FROM (
+                        SELECT revision
+                        FROM keys_revisions
+                        WHERE key = @key
+                        ORDER BY revision DESC
+                        LIMIT @retentionCount
+                    )
+                )
+                """);
+        }
+
+        if (ageEnabled)
+            predicates.Add("lastModifiedPhysical < @cutoffPhysical");
+
+        string policy = string.Join(" OR ", predicates);
+
+        string deleteQuery = $"""
+            DELETE FROM keys_revisions
+            WHERE rowid IN (
+                SELECT rowid
+                FROM keys_revisions
+                WHERE key = @key
+                  AND revision <> @currentRevision
+                  AND ({policy})
+                LIMIT @limit
+            )
+            """;
+
+        using SqliteCommand command = new(deleteQuery, connection);
+        command.Parameters.AddWithValue("@key", key);
+        command.Parameters.AddWithValue("@currentRevision", currentRevision.Value);
+
+        if (countEnabled)
+            command.Parameters.AddWithValue("@retentionCount", retentionCount);
+
+        if (ageEnabled)
+            command.Parameters.AddWithValue("@cutoffPhysical", cutoffPhysical);
+
+        command.Parameters.AddWithValue("@limit", limit);
+
+        return command.ExecuteNonQuery();
+    }
+
+    private static bool KeyHasMorePrunableRevisions(
+        SqliteConnection connection,
+        string key,
+        bool countEnabled,
+        int retentionCount,
+        bool ageEnabled,
+        long cutoffPhysical)
+    {
+        long? currentRevision = GetCurrentRevision(connection, key);
+        if (currentRevision is null)
+            return false;
+
+        List<string> predicates = [];
+
+        if (countEnabled)
+        {
+            predicates.Add("""
+                revision < (
+                    SELECT MIN(revision)
+                    FROM (
+                        SELECT revision
+                        FROM keys_revisions
+                        WHERE key = @key
+                        ORDER BY revision DESC
+                        LIMIT @retentionCount
+                    )
+                )
+                """);
+        }
+
+        if (ageEnabled)
+            predicates.Add("lastModifiedPhysical < @cutoffPhysical");
+
+        string policy = string.Join(" OR ", predicates);
+
+        string query = $"""
+            SELECT 1
+            FROM keys_revisions
+            WHERE key = @key
+              AND revision <> @currentRevision
+              AND ({policy})
+            LIMIT 1
+            """;
+
+        using SqliteCommand command = new(query, connection);
+        command.Parameters.AddWithValue("@key", key);
+        command.Parameters.AddWithValue("@currentRevision", currentRevision.Value);
+
+        if (countEnabled)
+            command.Parameters.AddWithValue("@retentionCount", retentionCount);
+
+        if (ageEnabled)
+            command.Parameters.AddWithValue("@cutoffPhysical", cutoffPhysical);
+
+        return command.ExecuteScalar() is not null;
+    }
+
+    private static bool ShardHasMorePrunableRevisions(
+        SqliteConnection connection,
+        bool countEnabled,
+        int retentionCount,
+        bool ageEnabled,
+        long cutoffPhysical)
+    {
+        List<string> predicates = [];
+
+        if (countEnabled)
+        {
+            predicates.Add("""
+                kr.revision < (
+                    SELECT MIN(revision)
+                    FROM (
+                        SELECT revision
+                        FROM keys_revisions
+                        WHERE key = kr.key
+                        ORDER BY revision DESC
+                        LIMIT @retentionCount
+                    )
+                )
+                """);
+        }
+
+        if (ageEnabled)
+            predicates.Add("kr.lastModifiedPhysical < @cutoffPhysical");
+
+        string policy = string.Join(" OR ", predicates);
+
+        string query = $"""
+            SELECT 1
+            FROM keys_revisions kr
+            INNER JOIN keys k ON k.key = kr.key
+            WHERE kr.revision <> k.revision
+              AND ({policy})
+            LIMIT 1
+            """;
+
+        using SqliteCommand command = new(query, connection);
+
+        if (countEnabled)
+            command.Parameters.AddWithValue("@retentionCount", retentionCount);
+
+        if (ageEnabled)
+            command.Parameters.AddWithValue("@cutoffPhysical", cutoffPhysical);
+
+        return command.ExecuteScalar() is not null;
     }
 
     public void Dispose()

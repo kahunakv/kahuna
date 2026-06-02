@@ -168,6 +168,17 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
         return items;
     }
 
+    public bool PruneKeyValueRevisions(
+        IReadOnlyCollection<string>? keys,
+        int retentionCount,
+        TimeSpan retentionAge,
+        int batchSize,
+        out RevisionPruneResult result)
+    {
+        result = new(KeysVisited: 0, RevisionsDeleted: 0, BatchLimitReached: false);
+        return true;
+    }
+
     public void Dispose()
     {
         GC.SuppressFinalize(this);

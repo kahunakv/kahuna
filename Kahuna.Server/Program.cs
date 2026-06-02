@@ -127,7 +127,12 @@ builder.Services.AddSingleton(ConfigurationValidator.Validate(new()
     ScriptCacheExpiration = TimeSpan.FromSeconds(opts.ScriptCacheExpiration),
     CacheEntryTtl = TimeSpan.FromSeconds(opts.CacheEntryTtl),
     CacheEntriesToRemove = opts.CacheEntriesToRemove,
-    DirtyObjectsWriterDelay = opts.DirtyObjectsWriterDelay
+    DirtyObjectsWriterDelay = opts.DirtyObjectsWriterDelay,
+    PersistentRevisionRetentionCount = opts.PersistentRevisionRetentionCount,
+    PersistentRevisionRetentionAge = TimeSpan.FromSeconds(opts.PersistentRevisionRetentionAge),
+    PersistentRevisionCleanupInterval = TimeSpan.FromSeconds(opts.PersistentRevisionCleanupInterval),
+    PersistentRevisionCleanupBatchSize = opts.PersistentRevisionCleanupBatchSize,
+    PersistentRevisionCleanupOnWrite = opts.GetPersistentRevisionCleanupOnWrite()
 }, opts.WalPath));
 
 // Start server

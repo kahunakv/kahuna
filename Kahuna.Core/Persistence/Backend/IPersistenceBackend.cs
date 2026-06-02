@@ -24,4 +24,21 @@ internal interface IPersistenceBackend
     public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName);
 
     public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit);
+
+    /// <summary>
+    /// Prunes persisted key/value revision history according to retention policy.
+    /// </summary>
+    /// <param name="keys">Target keys to prune, or <c>null</c> for a backend-wide sweep.</param>
+    /// <param name="retentionCount">Maximum revisions to keep per key; <c>0</c> disables count-based pruning.</param>
+    /// <param name="retentionAge">Maximum revision age; <see cref="TimeSpan.Zero"/> disables age-based pruning.</param>
+    /// <param name="batchSize">Maximum revision records to delete in this pass.</param>
+    /// <param name="result">Statistics for the prune pass.</param>
+    /// <returns><c>true</c> when the pass completed without error.</returns>
+    public bool PruneKeyValueRevisions(
+        IReadOnlyCollection<string>? keys,
+        int retentionCount,
+        TimeSpan retentionAge,
+        int batchSize,
+        out RevisionPruneResult result
+    );
 }

@@ -69,7 +69,35 @@ public static class ConfigurationValidator
 
         if (configuration.MetadataTrimInterval < 0)
             configuration.MetadataTrimInterval = 4;
+
+        ValidatePersistentRevisionRetention(configuration);
         
         return configuration;
     }
+
+    private static void ValidatePersistentRevisionRetention(KahunaConfiguration configuration)
+    {
+        if (configuration.PersistentRevisionRetentionCount < 0)
+            configuration.PersistentRevisionRetentionCount = 0;
+
+        if (configuration.PersistentRevisionRetentionAge < TimeSpan.Zero)
+            configuration.PersistentRevisionRetentionAge = TimeSpan.Zero;
+
+        if (configuration.PersistentRevisionRetentionCount != 0
+            && configuration.PersistentRevisionRetentionCount < 1)
+            configuration.PersistentRevisionRetentionCount = 1;
+
+        if (configuration.PersistentRevisionCleanupBatchSize < 1)
+            configuration.PersistentRevisionCleanupBatchSize = 1;
+
+        if (!IsPersistentRevisionRetentionEnabled(configuration))
+            return;
+
+        if (configuration.PersistentRevisionCleanupInterval <= TimeSpan.Zero)
+            configuration.PersistentRevisionCleanupInterval = TimeSpan.FromMinutes(5);
+    }
+
+    internal static bool IsPersistentRevisionRetentionEnabled(KahunaConfiguration configuration) =>
+        configuration.PersistentRevisionRetentionCount != 0
+        || configuration.PersistentRevisionRetentionAge > TimeSpan.Zero;
 }

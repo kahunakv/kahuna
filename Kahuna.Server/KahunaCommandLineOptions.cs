@@ -150,4 +150,29 @@ public sealed class KahunaCommandLineOptions
     
     [Option("dirty-objects-writer-delay", Required = false, HelpText = "Specifies how often the dirty object writer flushes ti disk (in milliseconds)", Default = 200)]
     public int DirtyObjectsWriterDelay { get; set; } = 200;
+
+    [Option("persistent-revision-retention-count", Required = false, HelpText = "Maximum persisted key/value revisions to keep per key (0 = keep forever)", Default = 0)]
+    public int PersistentRevisionRetentionCount { get; set; }
+
+    [Option("persistent-revision-retention-age", Required = false, HelpText = "Maximum age of persisted key/value revisions in seconds (0 = disabled)", Default = 0)]
+    public int PersistentRevisionRetentionAge { get; set; }
+
+    [Option("persistent-revision-cleanup-interval", Required = false, HelpText = "Minimum interval between full persistent revision cleanup sweeps in seconds", Default = 300)]
+    public int PersistentRevisionCleanupInterval { get; set; } = 300;
+
+    [Option("persistent-revision-cleanup-batch-size", Required = false, HelpText = "Maximum revision records deleted per cleanup pass", Default = 1000)]
+    public int PersistentRevisionCleanupBatchSize { get; set; } = 1000;
+
+    [Option("persistent-revision-cleanup-on-write", Required = false, HelpText = "Run targeted persistent revision cleanup after key/value writes (default: enabled)")]
+    public bool PersistentRevisionCleanupOnWrite { get; set; }
+
+    [Option("disable-persistent-revision-cleanup-on-write", Required = false, HelpText = "Disable targeted persistent revision cleanup after key/value writes")]
+    public bool DisablePersistentRevisionCleanupOnWrite { get; set; }
+
+    /// <summary>
+    /// Resolves cleanup-on-write for server startup. Enabled by default; use
+    /// <see cref="DisablePersistentRevisionCleanupOnWrite"/> to turn it off from the CLI.
+    /// </summary>
+    public bool GetPersistentRevisionCleanupOnWrite() =>
+        DisablePersistentRevisionCleanupOnWrite ? false : true;
 }

@@ -1,7 +1,9 @@
 
+using Kommander;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
+using Microsoft.Data.Sqlite;
 
 namespace Kahuna.Tests.Server;
 
@@ -10,14 +12,17 @@ namespace Kahuna.Tests.Server;
 /// </summary>
 public class TestPersistenceBackends
 {
-    private static PersistenceRequestItem MakeItem(string key, int i) =>
+    private static PersistenceRequestItem MakeItem(string key, long revision, long lastModifiedPhysical = 0) =>
         new(key,
-            System.Text.Encoding.UTF8.GetBytes("val" + i),
-            revision: i,
+            System.Text.Encoding.UTF8.GetBytes("val" + revision),
+            revision: revision,
             expiresNode: 0, expiresPhysical: 0, expiresCounter: 0,
             lastUsedNode: 0, lastUsedPhysical: 0, lastUsedCounter: 0,
-            lastModifiedNode: 0, lastModifiedPhysical: 0, lastModifiedCounter: 0,
+            lastModifiedNode: 0, lastModifiedPhysical: lastModifiedPhysical,
+            lastModifiedCounter: 0,
             state: (int)KeyValueState.Set);
+
+    private static PersistenceRequestItem MakeItem(string key, int i) => MakeItem(key, i);
 
     private static List<PersistenceRequestItem> MakeItems(string prefix, int count, int startIndex = 0) =>
         Enumerable.Range(startIndex, count)
@@ -39,6 +44,26 @@ public class TestPersistenceBackends
     }
 
     // ─── MemoryPersistenceBackend ────────────────────────────────────────────────
+
+    [Fact]
+    public void TestMemoryPruneKeyValueRevisionsIsNoOp()
+    {
+        using MemoryPersistenceBackend backend = new();
+        backend.StoreKeyValues(MakeItems("svc", 3));
+
+        Assert.True(backend.PruneKeyValueRevisions(["svc/0000"], retentionCount: 1, TimeSpan.FromHours(1), batchSize: 100, out RevisionPruneResult targeted));
+        Assert.Equal(0, targeted.KeysVisited);
+        Assert.Equal(0, targeted.RevisionsDeleted);
+        Assert.False(targeted.BatchLimitReached);
+
+        Assert.True(backend.PruneKeyValueRevisions(null, retentionCount: 3, TimeSpan.Zero, batchSize: 50, out RevisionPruneResult sweep));
+        Assert.Equal(0, sweep.KeysVisited);
+        Assert.Equal(0, sweep.RevisionsDeleted);
+        Assert.False(sweep.BatchLimitReached);
+
+        Assert.True(backend.PruneKeyValueRevisions(["svc/0000"], retentionCount: 1, TimeSpan.FromHours(1), batchSize: 100, out RevisionPruneResult secondPass));
+        Assert.Equal(targeted, secondPass);
+    }
 
     [Fact]
     public void TestMemoryGetByRangeReturnsAllInPrefix()
@@ -275,6 +300,126 @@ public class TestPersistenceBackends
         Assert.Equal(allKeys.Distinct().Count(), allKeys.Count);
         for (int i = 0; i < allKeys.Count - 1; i++)
             Assert.True(string.CompareOrdinal(allKeys[i], allKeys[i + 1]) < 0);
+    }
+
+    private static void StoreRevisions(SqlitePersistenceBackend backend, string key, int count)
+    {
+        for (long revision = 1; revision <= count; revision++)
+            backend.StoreKeyValues([MakeItem(key, revision)]);
+    }
+
+    private static int CountSqliteRevisionRows(string path, string dbRevision, string key)
+    {
+        int shard = (int)HashUtils.InversePrefixedHash(key, '/', 8);
+        using SqliteConnection connection = new($"Data Source={path}/kahuna{shard}_{dbRevision}.db");
+        connection.Open();
+
+        using SqliteCommand command = new("SELECT COUNT(*) FROM keys_revisions WHERE key = @key", connection);
+        command.Parameters.AddWithValue("@key", key);
+        return Convert.ToInt32(command.ExecuteScalar());
+    }
+
+    [Fact]
+    public void TestSqliteRetentionCountPrunesOldRevisions()
+    {
+        const string key = "retention/count";
+        string path = SqliteTempPath();
+        using SqlitePersistenceBackend backend = new(path, "revtest");
+
+        StoreRevisions(backend, key, 10);
+
+        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 3, TimeSpan.Zero, batchSize: 1000, out RevisionPruneResult result));
+        Assert.False(result.BatchLimitReached);
+        Assert.Equal(3, CountSqliteRevisionRows(path, "revtest", key));
+
+        KeyValueEntry? current = backend.GetKeyValue(key);
+        Assert.NotNull(current);
+        Assert.Equal(10, current.Revision);
+        Assert.Equal("val10", System.Text.Encoding.UTF8.GetString(current.Value!));
+
+        Assert.NotNull(backend.GetKeyValueRevision(key, 10));
+        Assert.Null(backend.GetKeyValueRevision(key, 7));
+        Assert.Null(backend.GetKeyValueRevision(key, 1));
+    }
+
+    [Fact]
+    public void TestSqliteRetentionCountPreservesCurrentRevisionWhenRetentionIsOne()
+    {
+        const string key = "retention/current";
+        string path = SqliteTempPath();
+        using SqlitePersistenceBackend backend = new(path, "revtest");
+
+        StoreRevisions(backend, key, 5);
+
+        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 1, TimeSpan.Zero, batchSize: 1000, out _));
+
+        Assert.Equal(1, CountSqliteRevisionRows(path, "revtest", key));
+        Assert.NotNull(backend.GetKeyValueRevision(key, 5));
+        Assert.Null(backend.GetKeyValueRevision(key, 4));
+    }
+
+    [Fact]
+    public void TestSqliteRetentionBatchSizeLimitsDeletesAndReportsBacklog()
+    {
+        const string key = "retention/batch";
+        string path = SqliteTempPath();
+        using SqlitePersistenceBackend backend = new(path, "revtest");
+
+        StoreRevisions(backend, key, 10);
+
+        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 3, TimeSpan.Zero, batchSize: 2, out RevisionPruneResult firstPass));
+        Assert.Equal(2, firstPass.RevisionsDeleted);
+        Assert.True(firstPass.BatchLimitReached);
+        Assert.True(CountSqliteRevisionRows(path, "revtest", key) > 3);
+
+        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 3, TimeSpan.Zero, batchSize: 1000, out RevisionPruneResult secondPass));
+        Assert.False(secondPass.BatchLimitReached);
+        Assert.Equal(3, CountSqliteRevisionRows(path, "revtest", key));
+    }
+
+    [Fact]
+    public void TestSqliteRetentionAgePrunesOldRowsButProtectsCurrentRevision()
+    {
+        const string key = "retention/age";
+        string path = SqliteTempPath();
+        using SqlitePersistenceBackend backend = new(path, "revtest");
+
+        long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        for (long revision = 1; revision <= 5; revision++)
+        {
+            long lastModifiedPhysical = revision < 5 ? now - 3_600_000 : now;
+            backend.StoreKeyValues([MakeItem(key, revision, lastModifiedPhysical)]);
+        }
+
+        Assert.True(backend.PruneKeyValueRevisions(
+            [key],
+            retentionCount: 0,
+            TimeSpan.FromMinutes(30),
+            batchSize: 1000,
+            out RevisionPruneResult result));
+
+        Assert.False(result.BatchLimitReached);
+        Assert.Equal(1, CountSqliteRevisionRows(path, "revtest", key));
+        Assert.NotNull(backend.GetKeyValue(key));
+        Assert.Equal(5, backend.GetKeyValue(key)!.Revision);
+        Assert.NotNull(backend.GetKeyValueRevision(key, 5));
+        Assert.Null(backend.GetKeyValueRevision(key, 1));
+    }
+
+    [Fact]
+    public void TestSqliteRetentionSweepPrunesWithoutTargetedKeys()
+    {
+        const string key = "retention/sweep";
+        string path = SqliteTempPath();
+        using SqlitePersistenceBackend backend = new(path, "revtest");
+
+        StoreRevisions(backend, key, 8);
+
+        Assert.True(backend.PruneKeyValueRevisions(null, retentionCount: 2, TimeSpan.Zero, batchSize: 1000, out RevisionPruneResult result));
+        Assert.Equal(2, CountSqliteRevisionRows(path, "revtest", key));
+        Assert.NotNull(backend.GetKeyValueRevision(key, 8));
+        Assert.Null(backend.GetKeyValueRevision(key, 6));
     }
 
     // ─── RocksDbPersistenceBackend ───────────────────────────────────────────────

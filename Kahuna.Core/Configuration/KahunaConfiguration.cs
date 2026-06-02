@@ -51,4 +51,29 @@ public sealed class KahunaConfiguration
     public int MetadataTrimInterval { get; set; } = 4;
     
     public int DirtyObjectsWriterDelay { get; set; }
+
+    /// <summary>
+    /// Maximum persisted key/value revision records to keep per key. 0 keeps all revisions forever.
+    /// </summary>
+    public int PersistentRevisionRetentionCount { get; set; }
+
+    /// <summary>
+    /// Maximum age of persisted key/value revision records. <see cref="TimeSpan.Zero"/> disables age retention.
+    /// </summary>
+    public TimeSpan PersistentRevisionRetentionAge { get; set; }
+
+    /// <summary>
+    /// Minimum cadence for periodic persistent revision cleanup passes.
+    /// </summary>
+    public TimeSpan PersistentRevisionCleanupInterval { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// Maximum revision records deleted per cleanup pass per backend worker.
+    /// </summary>
+    public int PersistentRevisionCleanupBatchSize { get; set; } = 1000;
+
+    /// <summary>
+    /// Queue keys touched by writes for targeted persistent revision cleanup.
+    /// </summary>
+    public bool PersistentRevisionCleanupOnWrite { get; set; } = true;
 }
