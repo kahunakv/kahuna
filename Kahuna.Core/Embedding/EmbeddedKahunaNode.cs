@@ -244,8 +244,8 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         return options.WalStorage switch
         {
             "memory" => new InMemoryWAL(logger),
-            "sqlite" => new SqliteWAL(options.WalPath, revision, logger),
-            "rocksdb" => new RocksDbWAL(options.WalPath, revision, logger),
+            "sqlite" => new SqliteWAL(options.WalPath, revision, logger, syncWrites: options.WalSyncWrites),
+            "rocksdb" => new RocksDbWAL(options.WalPath, revision, logger, syncWrites: options.WalSyncWrites),
             _ => throw new KahunaServerException("Invalid WAL storage type: " + options.WalStorage)
         };
     }

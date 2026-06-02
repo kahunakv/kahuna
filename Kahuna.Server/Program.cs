@@ -45,10 +45,12 @@ builder.Services.AddSingleton<IRaft>(services =>
     
     RaftConfiguration configuration = CreateRaftConfiguration(opts);
 
+    bool walSyncWrites = opts.GetWalSyncWrites();
+
     IWAL walAdapter = opts.WalStorage switch
     {
-        "rocksdb" => new RocksDbWAL(path: opts.WalPath, revision: opts.WalRevision, logger),
-        "sqlite" => new SqliteWAL(path: opts.WalPath, revision: opts.WalRevision, logger),
+        "rocksdb" => new RocksDbWAL(path: opts.WalPath, revision: opts.WalRevision, logger, syncWrites: walSyncWrites),
+        "sqlite" => new SqliteWAL(path: opts.WalPath, revision: opts.WalRevision, logger, syncWrites: walSyncWrites),
         _ => throw new KahunaServerException("Invalid WAL storage")
     };
 

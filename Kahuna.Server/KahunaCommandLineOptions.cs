@@ -43,6 +43,12 @@ public sealed class KahunaCommandLineOptions
     [Option("wal-revision", Required = false, HelpText = "WAL revision", Default = "v1")]
     public string WalRevision{ get; set; } = "";
 
+    [Option("wal-sync-writes", Required = false, HelpText = "Use synchronous durable WAL writes (default: enabled)")]
+    public bool WalSyncWrites { get; set; }
+
+    [Option("disable-wal-sync-writes", Required = false, HelpText = "Disable synchronous durable WAL writes for faster non-critical test/local runs")]
+    public bool DisableWalSyncWrites { get; set; }
+
     [Option("initial-cluster", Required = false, HelpText = "Initial cluster configuration for static discovery")]
     public IEnumerable<string>? InitialCluster { get; set; }
 
@@ -175,4 +181,7 @@ public sealed class KahunaCommandLineOptions
     /// </summary>
     public bool GetPersistentRevisionCleanupOnWrite() =>
         DisablePersistentRevisionCleanupOnWrite ? false : true;
+
+    public bool GetWalSyncWrites() =>
+        DisableWalSyncWrites ? false : true;
 }

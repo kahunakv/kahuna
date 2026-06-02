@@ -33,6 +33,8 @@ public sealed class EmbeddedKahunaOptions
 
     public string WalRevision { get; set; } = "";
 
+    public bool WalSyncWrites { get; set; } = true;
+
     public int LocksWorkers { get; set; } = Environment.ProcessorCount;
 
     public int KeyValueWorkers { get; set; } = Environment.ProcessorCount;

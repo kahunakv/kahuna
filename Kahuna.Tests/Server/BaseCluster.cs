@@ -251,8 +251,8 @@ public abstract class BaseCluster
         return walStorage switch
         {
             "memory" => new InMemoryWAL(logger),
-            "sqlite" => new SqliteWAL("/tmp", Guid.NewGuid().ToString(), logger),
-            "rocksdb" => new RocksDbWAL("/tmp", Guid.NewGuid().ToString(), logger),
+            "sqlite" => new SqliteWAL("/tmp", Guid.NewGuid().ToString(), logger, syncWrites: false),
+            "rocksdb" => new RocksDbWAL("/tmp", Guid.NewGuid().ToString(), logger, syncWrites: false),
             _ => throw new ArgumentException($"Unknown wal: {walStorage}")
         };
     }
