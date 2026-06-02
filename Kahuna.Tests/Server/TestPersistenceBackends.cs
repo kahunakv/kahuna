@@ -22,7 +22,7 @@ public class TestPersistenceBackends
             lastModifiedCounter: 0,
             state: (int)KeyValueState.Set);
 
-    private static PersistenceRequestItem MakeItem(string key, int i) => MakeItem(key, i);
+    private static PersistenceRequestItem MakeItem(string key, int i) => MakeItem(key, (long)i);
 
     private static List<PersistenceRequestItem> MakeItems(string prefix, int count, int startIndex = 0) =>
         Enumerable.Range(startIndex, count)
