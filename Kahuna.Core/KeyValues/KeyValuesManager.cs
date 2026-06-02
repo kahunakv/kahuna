@@ -43,6 +43,8 @@ internal sealed class KeyValuesManager
     
     private readonly IActorRef<ScriptParserEvicterActor, ScriptParserEvicterRequest> scriptParserEvicter;
 
+    private readonly IActorRef<KeyValueCollectorActor, KeyValueCollectorRequest> keyValueCollector;
+
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
     
     private readonly IActorRef<BalancingActor<KeyValueProposalActor, KeyValueProposalRequest>, KeyValueProposalRequest> proposalRouter;
@@ -90,6 +92,14 @@ internal sealed class KeyValuesManager
         proposalRouter = GetProposalRouter(configuration);
         ephemeralKeyValuesRouter = GetEphemeralRouter(configuration);
         persistentKeyValuesRouter = GetConsistentRouter(configuration);
+
+        keyValueCollector = actorSystem.Spawn<KeyValueCollectorActor, KeyValueCollectorRequest>(
+            "keyvalue-collector",
+            ephemeralInstances,
+            persistentInstances,
+            configuration,
+            logger
+        );
 
         txCoordinator = new(this, configuration, raft, logger);
         locator = new(this, configuration, raft, interNodeCommunication, logger);
@@ -2019,5 +2029,19 @@ internal sealed class KeyValuesManager
     )
     {
         return txCoordinator.RollbackTransaction(timestamp, acquiredLocks, modifiedKeys);
-    }    
+    }
+
+    internal async Task RunCollectOnAllInstancesAsync()
+    {
+        KeyValueRequest collect = new(KeyValueRequestType.Collect);
+        List<Task<KeyValueResponse?>> tasks = new(ephemeralInstances.Count + persistentInstances.Count);
+
+        foreach (IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actor in ephemeralInstances)
+            tasks.Add(actor.Ask(collect)!);
+
+        foreach (IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actor in persistentInstances)
+            tasks.Add(actor.Ask(collect)!);
+
+        await Task.WhenAll(tasks);
+    }
 }

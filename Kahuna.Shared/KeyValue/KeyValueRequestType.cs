@@ -25,5 +25,6 @@ public enum KeyValueRequestType
     GetByBucket,
     GetByRange,
     CompleteProposal,
-    ReleaseProposal
+    ReleaseProposal,
+    Collect
 }

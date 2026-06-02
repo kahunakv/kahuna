@@ -40,7 +40,7 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
             
             entry = newEntry;
 
-            context.Store.Insert(message.Key, newEntry);
+            context.InsertStoreEntry(message.Key, newEntry);
         }
         
         // Validate if there's an active replication enty on the key/value entry

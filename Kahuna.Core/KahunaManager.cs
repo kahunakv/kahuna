@@ -1044,4 +1044,6 @@ public sealed class KahunaManager : IKahuna, IDisposable
         locks.OnReplicationError(log);
         keyValues.OnReplicationError(log);
     }
+
+    internal Task RunCollectOnAllInstancesAsync() => keyValues.RunCollectOnAllInstancesAsync();
 }

@@ -125,11 +125,15 @@ internal sealed class TryDeleteHandler : BaseHandler
 
         if (message.Durability == KeyValueDurability.Persistent)
             return CreateProposal(message, entry, proposal, currentTime);
-        
+
+        int previousValueLength = entry.Value?.Length ?? 0;
+
         entry.Value = proposal.Value;
         entry.LastUsed = proposal.LastUsed;
         entry.LastModified = proposal.LastModified;
         entry.State = proposal.State;
+
+        context.AdjustEntryValueBytes(previousValueLength, entry.Value?.Length ?? 0);
         
         return new(KeyValueResponseType.Deleted, entry.Revision, entry.LastModified);
     }

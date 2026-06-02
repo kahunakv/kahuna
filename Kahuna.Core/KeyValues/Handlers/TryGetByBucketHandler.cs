@@ -159,7 +159,7 @@ internal sealed class TryGetByBucketHandler : BaseHandler
             if (entry is null)
             {
                 entry = new() { Bucket = GetBucket(key), State = KeyValueState.Undefined, Revision = -1 };
-                context.Store.Insert(key, entry);
+                context.InsertStoreEntry(key, entry);
             }
             
             entry.MvccEntries ??= new();

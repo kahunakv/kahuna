@@ -174,7 +174,7 @@ internal abstract class BaseHandler
                 {
                     entry.LastUsed = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
                     if (populateCache)
-                        context.Store.Insert(key, entry);
+                        context.InsertStoreEntry(key, entry);
                     return entry;
                 }
             }

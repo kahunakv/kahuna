@@ -42,6 +42,33 @@ public static class ConfigurationValidator
 
         if (configuration.BackgroundWriterWorkers <= 0)
             configuration.BackgroundWriterWorkers = 1;
+
+        if (configuration.CollectionInterval <= TimeSpan.Zero)
+            configuration.CollectionInterval = TimeSpan.FromSeconds(60);
+
+        if (configuration.CollectBatchMax <= 0)
+            configuration.CollectBatchMax = configuration.CacheEntriesToRemove > 0 ? configuration.CacheEntriesToRemove : 1_000;
+
+        if (configuration.CacheEntriesToRemove <= 0)
+            configuration.CacheEntriesToRemove = configuration.CollectBatchMax;
+
+        if (configuration.MaxEntriesPerActor <= 0)
+            configuration.MaxEntriesPerActor = 50_000;
+
+        if (configuration.MaxBytesPerActor <= 0)
+            configuration.MaxBytesPerActor = 256L * 1024 * 1024;
+
+        if (configuration.RevisionRetention <= 0)
+            configuration.RevisionRetention = configuration.RevisionsToKeepCached > 0 ? configuration.RevisionsToKeepCached : 16;
+
+        if (configuration.LruSampleSize <= 0)
+            configuration.LruSampleSize = 5;
+
+        if (configuration.LruSampleScanMax <= 0)
+            configuration.LruSampleScanMax = 256;
+
+        if (configuration.MetadataTrimInterval < 0)
+            configuration.MetadataTrimInterval = 4;
         
         return configuration;
     }

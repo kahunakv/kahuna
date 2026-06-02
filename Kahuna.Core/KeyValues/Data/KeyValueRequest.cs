@@ -73,6 +73,29 @@ public sealed class KeyValueRequest : IConsistentHashable
     public TaskCompletionSource<KeyValueResponse?>? Promise { get; private set; }
     
     /// <summary>
+    /// Creates a type-only request (e.g. periodic cache collection).
+    /// </summary>
+    public KeyValueRequest(KeyValueRequestType type)
+        : this(
+            type,
+            HLCTimestamp.Zero,
+            HLCTimestamp.Zero,
+            string.Empty,
+            null,
+            null,
+            -1,
+            KeyValueFlags.None,
+            0,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Persistent,
+            0,
+            0,
+            null
+        )
+    {
+    }
+
+    /// <summary>
     /// Constructor
     /// </summary>
     /// <param name="type"></param>

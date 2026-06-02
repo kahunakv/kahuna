@@ -54,13 +54,17 @@ internal sealed class CompleteProposalHandler : BaseHandler
         
         entry.Revisions ??= new();                       
         entry.Revisions.Add(entry.Revision, entry.Value);
-        
+
+        int previousValueLength = entry.Value?.Length ?? 0;
+
         entry.Value = proposal.Value;
         entry.Revision = proposal.Revision;
         entry.Expires = proposal.Expires;
         entry.LastUsed = proposal.LastUsed;
         entry.LastModified = proposal.LastModified;
         entry.State = proposal.State;
+
+        context.AdjustEntryValueBytes(previousValueLength, entry.Value?.Length ?? 0);
         
         context.BackgroundWriter.Send(new(
             BackgroundWriteType.QueueStoreKeyValue,

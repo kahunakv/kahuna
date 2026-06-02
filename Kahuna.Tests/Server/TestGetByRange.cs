@@ -28,6 +28,16 @@ public sealed class TestGetByRange
         InitialPartitions = 1
     };
 
+    private static EmbeddedKahunaOptions SqliteOptions(string storagePath) => new()
+    {
+        Storage = "sqlite",
+        StoragePath = storagePath,
+        StorageRevision = "range-regression-tests",
+        WalStorage = "memory",
+        InitialPartitions = 1,
+        DirtyObjectsWriterDelay = 60000
+    };
+
     private static async Task SeedKeys(EmbeddedKahunaNode node, string prefix, int count, KeyValueDurability durability)
     {
         for (int i = 0; i < count; i++)
@@ -730,5 +740,27 @@ public sealed class TestGetByRange
         for (int i = 1; i < keys.Count; i++)
             Assert.True(string.CompareOrdinal(keys[i], keys[i - 1]) > 0,
                 $"Keys not in ordinal order at index {i}");
+    }
+
+    private static string CreateTempStoragePath()
+    {
+        string storagePath = Path.Combine(Path.GetTempPath(), "kahuna-range-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(storagePath);
+        return storagePath;
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+                Directory.Delete(path, recursive: true);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
     }
 }

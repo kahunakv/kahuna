@@ -89,6 +89,8 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             message.Durability
         );
 
+        int previousValueLength = 0;
+
         if (message.Durability != KeyValueDurability.Persistent)
         {
             if (entry.Revisions is not null)
@@ -99,12 +101,16 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             // delete→re-set cycle; Dictionary.Add would throw and corrupt the commit.
             entry.Revisions[entry.Revision] = entry.Value;
 
+            previousValueLength = entry.Value?.Length ?? 0;
+
             entry.Value = proposal.Value;
             entry.Expires = proposal.Expires;
             entry.Revision = proposal.Revision;
             entry.LastUsed = proposal.LastUsed;
             entry.LastModified = proposal.LastModified;
             entry.State = proposal.State;
+
+            context.AdjustEntryValueBytes(previousValueLength, entry.Value?.Length ?? 0);
 
             entry.MvccEntries.Remove(message.TransactionId);
             entry.WriteIntent = null;
@@ -139,12 +145,16 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         // duplicate inserts). Overwriting is safe: the same revision carries the same value.
         entry.Revisions[entry.Revision] = entry.Value;
 
+        previousValueLength = entry.Value?.Length ?? 0;
+
         entry.Value = proposal.Value;
         entry.Expires = proposal.Expires;
         entry.Revision = proposal.Revision;
         entry.LastUsed = proposal.LastUsed;
         entry.LastModified = proposal.LastModified;
         entry.State = proposal.State;
+
+        context.AdjustEntryValueBytes(previousValueLength, entry.Value?.Length ?? 0);
         
         context.BackgroundWriter.Send(new(
             BackgroundWriteType.QueueStoreKeyValue,

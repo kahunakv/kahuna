@@ -81,6 +81,14 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             RevisionsToKeepCached = options.RevisionsToKeepCached,
             CacheEntryTtl = options.CacheEntryTtl,
             CacheEntriesToRemove = options.CacheEntriesToRemove,
+            CollectionInterval = options.CollectionInterval,
+            MaxEntriesPerActor = options.MaxEntriesPerActor,
+            MaxBytesPerActor = options.MaxBytesPerActor,
+            CollectBatchMax = options.CollectBatchMax,
+            RevisionRetention = options.RevisionRetention,
+            LruSampleSize = options.LruSampleSize,
+            LruSampleScanMax = options.LruSampleScanMax,
+            MetadataTrimInterval = options.MetadataTrimInterval,
             DirtyObjectsWriterDelay = options.DirtyObjectsWriterDelay
         }, options.WalPath);
 
@@ -154,6 +162,14 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             RevisionsToKeepCached = options.RevisionsToKeepCached,
             CacheEntryTtl = options.CacheEntryTtl,
             CacheEntriesToRemove = options.CacheEntriesToRemove,
+            CollectionInterval = options.CollectionInterval,
+            MaxEntriesPerActor = options.MaxEntriesPerActor,
+            MaxBytesPerActor = options.MaxBytesPerActor,
+            CollectBatchMax = options.CollectBatchMax,
+            RevisionRetention = options.RevisionRetention,
+            LruSampleSize = options.LruSampleSize,
+            LruSampleScanMax = options.LruSampleScanMax,
+            MetadataTrimInterval = options.MetadataTrimInterval,
             DirtyObjectsWriterDelay = options.DirtyObjectsWriterDelay
         }, options.WalPath);
 

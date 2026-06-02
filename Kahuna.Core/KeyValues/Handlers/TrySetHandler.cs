@@ -69,7 +69,7 @@ internal sealed class TrySetHandler : BaseHandler
             
             // logger.LogDebug("{0} {1}", context.State, context.Revision);
 
-            context.Store.Insert(message.Key, newEntry);
+            context.InsertStoreEntry(message.Key, newEntry);
         }
         else
         {
@@ -252,6 +252,8 @@ internal sealed class TrySetHandler : BaseHandler
         
         entry.Revisions ??= new();                       
         entry.Revisions.Add(entry.Revision, entry.Value);
+
+        int previousValueLength = entry.Value?.Length ?? 0;
         
         entry.Value = proposal.Value;
         entry.Revision = proposal.Revision;
@@ -259,6 +261,8 @@ internal sealed class TrySetHandler : BaseHandler
         entry.LastUsed = proposal.LastUsed;
         entry.LastModified = proposal.LastModified;
         entry.State = proposal.State;
+
+        context.AdjustEntryValueBytes(previousValueLength, entry.Value?.Length ?? 0);
 
         return new(KeyValueResponseType.Set, entry.Revision);
     }   

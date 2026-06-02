@@ -297,10 +297,15 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
             
             // Console.WriteLine("{0}", operations);
 
-            if (--operations == 0)
+            if (message.Type != KeyValueRequestType.Collect)
             {
-                Collect();
-                operations = CollectThreshold;
+                if (--operations == 0)
+                {
+                    if (tryCollectHandler.IsOverBudget())
+                        Collect();
+
+                    operations = CollectThreshold;
+                }
             }
 
             response = message.Type switch
@@ -323,6 +328,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.ScanByPrefixFromDisk => await ScanByPrefixFromDisk(message),
                 KeyValueRequestType.CompleteProposal => CompleteProposal(message),
                 KeyValueRequestType.ReleaseProposal => ReleaseProposal(message),
+                KeyValueRequestType.Collect => CollectMessage(),
                 _ => KeyValueStaticResponses.ErroredResponse
             };
 
@@ -535,5 +541,11 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private void Collect()
     {
         tryCollectHandler.Execute();
+    }
+
+    private KeyValueResponse? CollectMessage()
+    {
+        Collect();
+        return null;
     }
 }
