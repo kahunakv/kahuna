@@ -42,20 +42,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         actorSystem = new(logger: raftLogger);
         EmbeddedRaftCommunication raftCommunication = new();
 
-        RaftConfiguration raftConfiguration = new()
-        {
-            NodeName = options.NodeName,
-            NodeId = options.NodeId,
-            Host = options.Host,
-            Port = options.Port,
-            InitialPartitions = options.InitialPartitions,
-            ReadIOThreads = options.ReadIOThreads,
-            WriteIOThreads = options.WriteIOThreads,
-            StartElectionTimeout = options.StartElectionTimeout,
-            EndElectionTimeout = options.EndElectionTimeout,
-            CompactEveryOperations = options.CompactEveryOperations,
-            CompactNumberEntries = options.CompactNumberEntries
-        };
+        RaftConfiguration raftConfiguration = CreateRaftConfiguration(options);
 
         this.Raft = new RaftManager(
             raftConfiguration,
@@ -123,20 +110,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
         actorSystem = new(logger: raftLogger);
 
-        RaftConfiguration raftConfiguration = new()
-        {
-            NodeName = options.NodeName,
-            NodeId = options.NodeId,
-            Host = options.Host,
-            Port = options.Port,
-            InitialPartitions = options.InitialPartitions,
-            ReadIOThreads = options.ReadIOThreads,
-            WriteIOThreads = options.WriteIOThreads,
-            StartElectionTimeout = options.StartElectionTimeout,
-            EndElectionTimeout = options.EndElectionTimeout,
-            CompactEveryOperations = options.CompactEveryOperations,
-            CompactNumberEntries = options.CompactNumberEntries
-        };
+        RaftConfiguration raftConfiguration = CreateRaftConfiguration(options);
 
         this.Raft = new RaftManager(
             raftConfiguration,
@@ -263,6 +237,39 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             "sqlite" => new SqliteWAL(options.WalPath, revision, logger),
             "rocksdb" => new RocksDbWAL(options.WalPath, revision, logger),
             _ => throw new KahunaServerException("Invalid WAL storage type: " + options.WalStorage)
+        };
+    }
+
+    private static RaftConfiguration CreateRaftConfiguration(EmbeddedKahunaOptions options)
+    {
+        return new()
+        {
+            NodeName = options.NodeName,
+            NodeId = options.NodeId,
+            Host = options.Host,
+            Port = options.Port,
+            InitialPartitions = options.InitialPartitions,
+            HttpScheme = options.HttpScheme,
+            HttpAuthBearerToken = options.HttpAuthBearerToken,
+            HttpTimeout = options.HttpTimeout,
+            HttpVersion = options.HttpVersion,
+            HeartbeatInterval = options.HeartbeatInterval,
+            RecentHeartbeat = options.RecentHeartbeat,
+            VotingTimeout = options.VotingTimeout,
+            CheckLeaderInterval = options.CheckLeaderInterval,
+            TimerInitialDelay = options.TimerInitialDelay,
+            UpdateNodesInterval = options.UpdateNodesInterval,
+            StartElectionTimeout = options.StartElectionTimeout,
+            EndElectionTimeout = options.EndElectionTimeout,
+            StartElectionTimeoutIncrement = options.StartElectionTimeoutIncrement,
+            EndElectionTimeoutIncrement = options.EndElectionTimeoutIncrement,
+            SlowRaftStateMachineLog = options.SlowRaftStateMachineLog,
+            SlowRaftWALMachineLog = options.SlowRaftWALMachineLog,
+            ReadIOThreads = options.ReadIOThreads,
+            WriteIOThreads = options.WriteIOThreads,
+            CompactEveryOperations = options.CompactEveryOperations,
+            CompactNumberEntries = options.CompactNumberEntries,
+            MaxEntriesPerCompaction = options.MaxEntriesPerCompaction
         };
     }
 

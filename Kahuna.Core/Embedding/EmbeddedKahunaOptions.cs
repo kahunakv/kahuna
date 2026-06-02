@@ -71,11 +71,41 @@ public sealed class EmbeddedKahunaOptions
 
     public int WriteIOThreads { get; set; } = 8;
 
+    public string HttpScheme { get; set; } = "https://";
+
+    public string HttpAuthBearerToken { get; set; } = "";
+
+    public int HttpTimeout { get; set; } = 5;
+
+    public string HttpVersion { get; set; } = "2.0";
+
+    public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromMilliseconds(500);
+
+    public TimeSpan RecentHeartbeat { get; set; } = TimeSpan.FromMilliseconds(100);
+
+    public TimeSpan VotingTimeout { get; set; } = TimeSpan.FromMilliseconds(1500);
+
+    public TimeSpan CheckLeaderInterval { get; set; } = TimeSpan.FromMilliseconds(250);
+
+    public TimeSpan TimerInitialDelay { get; set; } = TimeSpan.FromMilliseconds(2500);
+
+    public TimeSpan UpdateNodesInterval { get; set; } = TimeSpan.FromMilliseconds(5000);
+
     public int StartElectionTimeout { get; set; } = 500;
 
     public int EndElectionTimeout { get; set; } = 1500;
 
+    public int StartElectionTimeoutIncrement { get; set; } = 100;
+
+    public int EndElectionTimeoutIncrement { get; set; } = 200;
+
+    public int SlowRaftStateMachineLog { get; set; } = 50;
+
+    public int SlowRaftWALMachineLog { get; set; } = 25;
+
     public int CompactEveryOperations { get; set; } = 1000;
 
     public int CompactNumberEntries { get; set; } = 50;
+
+    public int MaxEntriesPerCompaction { get; set; } = 5000;
 }

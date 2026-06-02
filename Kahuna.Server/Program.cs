@@ -43,16 +43,7 @@ builder.Services.AddSingleton<IRaft>(services =>
 
     ILogger<IRaft> logger = services.GetRequiredService<ILogger<IRaft>>();
     
-    RaftConfiguration configuration = new()
-    {
-        NodeName = opts.RaftNodeName,
-        NodeId = opts.RaftNodeId,
-        Host = opts.RaftHost,
-        Port = opts.RaftPort,
-        InitialPartitions = opts.InitialClusterPartitions,
-        ReadIOThreads = opts.ReadIOThreads,
-        WriteIOThreads = opts.WriteIOThreads
-    };
+    RaftConfiguration configuration = CreateRaftConfiguration(opts);
 
     IWAL walAdapter = opts.WalStorage switch
     {
@@ -150,3 +141,36 @@ app.MapGrpcKahunaRoutes();
 app.MapGrpcReflectionService();
 
 app.Run();
+
+static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
+{
+    return new()
+    {
+        NodeName = opts.RaftNodeName,
+        NodeId = opts.RaftNodeId,
+        Host = opts.RaftHost,
+        Port = opts.RaftPort,
+        InitialPartitions = opts.InitialClusterPartitions,
+        HttpScheme = opts.RaftHttpScheme,
+        HttpAuthBearerToken = opts.RaftHttpAuthBearerToken,
+        HttpTimeout = opts.RaftHttpTimeout,
+        HttpVersion = opts.RaftHttpVersion,
+        HeartbeatInterval = TimeSpan.FromMilliseconds(opts.RaftHeartbeatInterval),
+        RecentHeartbeat = TimeSpan.FromMilliseconds(opts.RaftRecentHeartbeat),
+        VotingTimeout = TimeSpan.FromMilliseconds(opts.RaftVotingTimeout),
+        CheckLeaderInterval = TimeSpan.FromMilliseconds(opts.RaftCheckLeaderInterval),
+        TimerInitialDelay = TimeSpan.FromMilliseconds(opts.RaftTimerInitialDelay),
+        UpdateNodesInterval = TimeSpan.FromMilliseconds(opts.RaftUpdateNodesInterval),
+        StartElectionTimeout = opts.RaftStartElectionTimeout,
+        EndElectionTimeout = opts.RaftEndElectionTimeout,
+        StartElectionTimeoutIncrement = opts.RaftStartElectionTimeoutIncrement,
+        EndElectionTimeoutIncrement = opts.RaftEndElectionTimeoutIncrement,
+        SlowRaftStateMachineLog = opts.RaftSlowStateMachineLog,
+        SlowRaftWALMachineLog = opts.RaftSlowWalMachineLog,
+        ReadIOThreads = opts.ReadIOThreads,
+        WriteIOThreads = opts.WriteIOThreads,
+        CompactEveryOperations = opts.RaftCompactEveryOperations,
+        CompactNumberEntries = opts.RaftCompactNumberEntries,
+        MaxEntriesPerCompaction = opts.RaftMaxEntriesPerCompaction
+    };
+}

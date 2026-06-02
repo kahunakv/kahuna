@@ -283,18 +283,22 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
 
         try
         {
-            logger.LogKeyValueActorEnter(
-                actorContext.Self.Runner.Name,
-                message.Type,
-                message.Key,
-                message.Value?.Length,
-                message.ExpiresMs,
-                message.Flags,
-                message.CompareRevision,
-                message.TransactionId,
-                message.Durability
-            );
-            
+            // Periodic Collect messages are fanned out to every actor each cycle; logging
+            // enter/took for them spams the cluster. The collect handler logs its own summary
+            // (LogKeyValueEviction) only when it actually evicts or trims.
+            if (message.Type != KeyValueRequestType.Collect)
+                logger.LogKeyValueActorEnter(
+                    actorContext.Self.Runner.Name,
+                    message.Type,
+                    message.Key,
+                    message.Value?.Length,
+                    message.ExpiresMs,
+                    message.Flags,
+                    message.CompareRevision,
+                    message.TransactionId,
+                    message.Durability
+                );
+
             // Console.WriteLine("{0}", operations);
 
             if (message.Type != KeyValueRequestType.Collect)
@@ -340,14 +344,15 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         }
         finally
         {
-            logger.LogKeyValueActorTook(
-                actorContext.Self.Runner.Name,
-                message.Type,
-                message.Key,
-                response?.Type,
-                response?.Revision,
-                stopwatch.ElapsedMilliseconds
-            );
+            if (message.Type != KeyValueRequestType.Collect)
+                logger.LogKeyValueActorTook(
+                    actorContext.Self.Runner.Name,
+                    message.Type,
+                    message.Key,
+                    response?.Type,
+                    response?.Revision,
+                    stopwatch.ElapsedMilliseconds
+                );
         }
 
         return KeyValueStaticResponses.ErroredResponse;

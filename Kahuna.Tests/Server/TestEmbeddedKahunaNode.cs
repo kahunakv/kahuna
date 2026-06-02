@@ -26,6 +26,74 @@ public sealed class TestEmbeddedKahunaNode
     }
 
     [Fact]
+    public async Task TestEmbeddedOptionsPassThroughKommanderConfiguration()
+    {
+        EmbeddedKahunaOptions options = new()
+        {
+            NodeName = "embedded-config-test",
+            NodeId = 42,
+            Host = "localhost",
+            Port = 0,
+            InitialPartitions = 1,
+            Storage = "memory",
+            WalStorage = "memory",
+            HttpScheme = "http://",
+            HttpAuthBearerToken = "raft-token",
+            HttpTimeout = 9,
+            HttpVersion = "1.1",
+            HeartbeatInterval = TimeSpan.FromMilliseconds(75),
+            RecentHeartbeat = TimeSpan.FromMilliseconds(25),
+            VotingTimeout = TimeSpan.FromMilliseconds(350),
+            CheckLeaderInterval = TimeSpan.FromMilliseconds(40),
+            TimerInitialDelay = TimeSpan.FromMilliseconds(25),
+            UpdateNodesInterval = TimeSpan.FromMilliseconds(125),
+            StartElectionTimeout = 150,
+            EndElectionTimeout = 300,
+            StartElectionTimeoutIncrement = 11,
+            EndElectionTimeoutIncrement = 22,
+            SlowRaftStateMachineLog = 33,
+            SlowRaftWALMachineLog = 44,
+            ReadIOThreads = 3,
+            WriteIOThreads = 2,
+            CompactEveryOperations = 123,
+            CompactNumberEntries = 12,
+            MaxEntriesPerCompaction = 345
+        };
+
+        await using EmbeddedKahunaNode node = new(options, loggerFactory);
+        await node.StartAsync(TestContext.Current.CancellationToken);
+
+        RaftConfiguration config = node.Raft.Configuration;
+
+        Assert.Equal(options.NodeName, config.NodeName);
+        Assert.Equal(options.NodeId, config.NodeId);
+        Assert.Equal(options.Host, config.Host);
+        Assert.Equal(options.Port, config.Port);
+        Assert.Equal(options.InitialPartitions, config.InitialPartitions);
+        Assert.Equal(options.HttpScheme, config.HttpScheme);
+        Assert.Equal(options.HttpAuthBearerToken, config.HttpAuthBearerToken);
+        Assert.Equal(options.HttpTimeout, config.HttpTimeout);
+        Assert.Equal(options.HttpVersion, config.HttpVersion);
+        Assert.Equal(options.HeartbeatInterval, config.HeartbeatInterval);
+        Assert.Equal(options.RecentHeartbeat, config.RecentHeartbeat);
+        Assert.Equal(options.VotingTimeout, config.VotingTimeout);
+        Assert.Equal(options.CheckLeaderInterval, config.CheckLeaderInterval);
+        Assert.Equal(options.TimerInitialDelay, config.TimerInitialDelay);
+        Assert.Equal(options.UpdateNodesInterval, config.UpdateNodesInterval);
+        Assert.Equal(options.StartElectionTimeout, config.StartElectionTimeout);
+        Assert.Equal(options.EndElectionTimeout, config.EndElectionTimeout);
+        Assert.Equal(options.StartElectionTimeoutIncrement, config.StartElectionTimeoutIncrement);
+        Assert.Equal(options.EndElectionTimeoutIncrement, config.EndElectionTimeoutIncrement);
+        Assert.Equal(options.SlowRaftStateMachineLog, config.SlowRaftStateMachineLog);
+        Assert.Equal(options.SlowRaftWALMachineLog, config.SlowRaftWALMachineLog);
+        Assert.Equal(options.ReadIOThreads, config.ReadIOThreads);
+        Assert.Equal(options.WriteIOThreads, config.WriteIOThreads);
+        Assert.Equal(options.CompactEveryOperations, config.CompactEveryOperations);
+        Assert.Equal(options.CompactNumberEntries, config.CompactNumberEntries);
+        Assert.Equal(options.MaxEntriesPerCompaction, config.MaxEntriesPerCompaction);
+    }
+
+    [Fact]
     public async Task TestEmbeddedNodeCanStartUseKeyValuesAndDispose()
     {
         await using EmbeddedKahunaNode node = new(new()

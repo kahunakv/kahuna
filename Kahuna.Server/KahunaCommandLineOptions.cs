@@ -79,6 +79,63 @@ public sealed class KahunaCommandLineOptions
     [Option("write-io-threads", Required = false, HelpText = "Write I/O threads", Default = 16)]
     public int WriteIOThreads { get; set; } = 16;
 
+    [Option("raft-http-scheme", Required = false, HelpText = "Raft HTTP scheme used by REST communication", Default = "https://")]
+    public string RaftHttpScheme { get; set; } = "https://";
+
+    [Option("raft-http-auth-bearer-token", Required = false, HelpText = "Raft HTTP bearer token used by REST communication", Default = "")]
+    public string RaftHttpAuthBearerToken { get; set; } = "";
+
+    [Option("raft-http-timeout", Required = false, HelpText = "Raft HTTP request timeout in seconds", Default = 5)]
+    public int RaftHttpTimeout { get; set; } = 5;
+
+    [Option("raft-http-version", Required = false, HelpText = "Raft HTTP version used by REST communication", Default = "2.0")]
+    public string RaftHttpVersion { get; set; } = "2.0";
+
+    [Option("raft-heartbeat-interval", Required = false, HelpText = "Raft leader heartbeat interval in milliseconds", Default = 500)]
+    public int RaftHeartbeatInterval { get; set; } = 500;
+
+    [Option("raft-recent-heartbeat", Required = false, HelpText = "Raft recent heartbeat window in milliseconds", Default = 100)]
+    public int RaftRecentHeartbeat { get; set; } = 100;
+
+    [Option("raft-voting-timeout", Required = false, HelpText = "Raft vote wait timeout in milliseconds", Default = 1500)]
+    public int RaftVotingTimeout { get; set; } = 1500;
+
+    [Option("raft-check-leader-interval", Required = false, HelpText = "Raft leader check interval in milliseconds", Default = 250)]
+    public int RaftCheckLeaderInterval { get; set; } = 250;
+
+    [Option("raft-timer-initial-delay", Required = false, HelpText = "Initial delay before Raft timers start in milliseconds", Default = 2500)]
+    public int RaftTimerInitialDelay { get; set; } = 2500;
+
+    [Option("raft-update-nodes-interval", Required = false, HelpText = "Raft node registry update interval in milliseconds", Default = 5000)]
+    public int RaftUpdateNodesInterval { get; set; } = 5000;
+
+    [Option("raft-start-election-timeout", Required = false, HelpText = "Raft minimum election timeout in milliseconds", Default = 2000)]
+    public int RaftStartElectionTimeout { get; set; } = 2000;
+
+    [Option("raft-end-election-timeout", Required = false, HelpText = "Raft maximum election timeout in milliseconds", Default = 4000)]
+    public int RaftEndElectionTimeout { get; set; } = 4000;
+
+    [Option("raft-start-election-timeout-increment", Required = false, HelpText = "Raft minimum election timeout increment in milliseconds", Default = 100)]
+    public int RaftStartElectionTimeoutIncrement { get; set; } = 100;
+
+    [Option("raft-end-election-timeout-increment", Required = false, HelpText = "Raft maximum election timeout increment in milliseconds", Default = 200)]
+    public int RaftEndElectionTimeoutIncrement { get; set; } = 200;
+
+    [Option("raft-slow-state-machine-log", Required = false, HelpText = "Raft state-machine slow operation log threshold in milliseconds", Default = 50)]
+    public int RaftSlowStateMachineLog { get; set; } = 50;
+
+    [Option("raft-slow-wal-machine-log", Required = false, HelpText = "Raft WAL state-machine slow operation log threshold in milliseconds", Default = 25)]
+    public int RaftSlowWalMachineLog { get; set; } = 25;
+
+    [Option("raft-compact-every-operations", Required = false, HelpText = "Committed operations between automatic Raft WAL compactions", Default = 10000)]
+    public int RaftCompactEveryOperations { get; set; } = 10000;
+
+    [Option("raft-compact-number-entries", Required = false, HelpText = "Raft WAL entries removed per compaction batch", Default = 100)]
+    public int RaftCompactNumberEntries { get; set; } = 100;
+
+    [Option("raft-max-entries-per-compaction", Required = false, HelpText = "Maximum Raft WAL entries to process per compaction run", Default = 5000)]
+    public int RaftMaxEntriesPerCompaction { get; set; } = 5000;
+
     [Option("script-cache-expiration", Required = false, HelpText = "Script cache expiration (in seconds)", Default = 600)]
     public int ScriptCacheExpiration { get; set; } = 600;
 
