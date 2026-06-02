@@ -10,6 +10,9 @@ jobs:
     env:
       GIT_BRANCH: ${{ github.head_ref || github.ref_name }}
       GIT_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+      KAHUNA_SERVER_DEFAULT_LOG_LEVEL: Warning
+      KAHUNA_SERVER_LOG_LEVEL: Error
+      KAHUNA_TEST_LOG_LEVEL: Warning
     steps:
       - name: Check out repository code
         uses: actions/checkout@v5
@@ -24,4 +27,4 @@ jobs:
       - name: Run Kahuna Server
         run: (cd scripts && chmod +x ./run-server.sh && ./run-server.sh)      
       - name: Run Tests
-        run: (cd Kahuna.Tests && dotnet test -l "console;verbosity=detailed")      
+        run: (cd Kahuna.Tests && dotnet test -l "console;verbosity=minimal")

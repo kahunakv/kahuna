@@ -15,14 +15,7 @@ public class TestKeyValueScriptOperators : BaseCluster
 
     public TestKeyValueScriptOperators(ITestOutputHelper outputHelper)
     {
-        ILoggerFactory loggerFactory = LoggerFactory.Create(builder =>
-        {
-            builder
-                .AddXUnit(outputHelper)
-                .AddFilter("Kommander", LogLevel.Warning)
-                .AddFilter("Kahuna", LogLevel.Debug)
-                .SetMinimumLevel(LogLevel.Debug);
-        });
+        ILoggerFactory loggerFactory = TestLogFactory.Create(outputHelper, quietKommander: true);
 
         raftLogger = loggerFactory.CreateLogger<IRaft>();
         kahunaLogger = loggerFactory.CreateLogger<IKahuna>();

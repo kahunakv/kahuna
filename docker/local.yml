@@ -19,6 +19,10 @@ services:
       - "8082:2071"
     volumes:
       - kahuna1-data:/storage
+    environment:
+      Logging__LogLevel__Default: ${KAHUNA_SERVER_DEFAULT_LOG_LEVEL:-Information}
+      Logging__LogLevel__Kahuna: ${KAHUNA_SERVER_LOG_LEVEL:-Debug}
+      Logging__LogLevel__Kommander: ${KAHUNA_SERVER_LOG_LEVEL:-Debug}
     networks:
       custom_net:
         ipv4_address: 172.30.0.2
@@ -41,6 +45,10 @@ services:
       - "8084:2071"
     volumes:
       - kahuna2-data:/storage
+    environment:
+      Logging__LogLevel__Default: ${KAHUNA_SERVER_DEFAULT_LOG_LEVEL:-Information}
+      Logging__LogLevel__Kahuna: ${KAHUNA_SERVER_LOG_LEVEL:-Debug}
+      Logging__LogLevel__Kommander: ${KAHUNA_SERVER_LOG_LEVEL:-Debug}
     networks:
       custom_net:
         ipv4_address: 172.30.0.3
@@ -63,6 +71,10 @@ services:
       - "8086:2071"
     volumes:
       - kahuna3-data:/storage
+    environment:
+      Logging__LogLevel__Default: ${KAHUNA_SERVER_DEFAULT_LOG_LEVEL:-Information}
+      Logging__LogLevel__Kahuna: ${KAHUNA_SERVER_LOG_LEVEL:-Debug}
+      Logging__LogLevel__Kommander: ${KAHUNA_SERVER_LOG_LEVEL:-Debug}
     networks:
       custom_net:
         ipv4_address: 172.30.0.4

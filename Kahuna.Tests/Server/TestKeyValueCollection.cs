@@ -23,12 +23,7 @@ public sealed class TestKeyValueCollection
 
     public TestKeyValueCollection(ITestOutputHelper outputHelper)
     {
-        loggerFactory = LoggerFactory.Create(builder =>
-        {
-            builder
-                .AddXUnit(outputHelper)
-                .SetMinimumLevel(LogLevel.Debug);
-        });
+        loggerFactory = TestLogFactory.Create(outputHelper);
     }
 
     [Fact]

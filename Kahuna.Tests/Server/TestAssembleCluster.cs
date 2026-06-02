@@ -13,12 +13,7 @@ public sealed class TestAssembleCluster : BaseCluster
     
     public TestAssembleCluster(ITestOutputHelper outputHelper)
     {
-        ILoggerFactory loggerFactory = LoggerFactory.Create(builder =>
-        {
-            builder
-                .AddXUnit(outputHelper)
-                .SetMinimumLevel(LogLevel.Debug);
-        });
+        ILoggerFactory loggerFactory = TestLogFactory.Create(outputHelper);
 
         raftLogger = loggerFactory.CreateLogger<IRaft>();
         kahunaLogger = loggerFactory.CreateLogger<IKahuna>();

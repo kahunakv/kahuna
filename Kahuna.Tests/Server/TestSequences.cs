@@ -9,12 +9,7 @@ public sealed class TestSequences
 
     public TestSequences(ITestOutputHelper outputHelper)
     {
-        loggerFactory = LoggerFactory.Create(builder =>
-        {
-            builder
-                .AddXUnit(outputHelper)
-                .SetMinimumLevel(LogLevel.Debug);
-        });
+        loggerFactory = TestLogFactory.Create(outputHelper);
     }
 
     [Fact]
