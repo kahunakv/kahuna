@@ -48,9 +48,22 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
     private readonly Dictionary<int, (ReaderWriterLock, SqliteConnection)> connections = new();
     
     private readonly string path;
-    
+
     private readonly string dbRevision;
-    
+
+    /// <summary>
+    /// Shard at which the next backend-wide revision sweep should resume.
+    /// </summary>
+    private int sweepShardCursor;
+
+    /// <summary>
+    /// Exclusive lower-bound key within <see cref="sweepShardCursor"/> at which the next sweep pass
+    /// should resume, or <c>null</c> to start from the first key in the shard. Together with
+    /// <see cref="sweepShardCursor"/> this lets each sweep pass scan only a bounded slice of the
+    /// keyspace instead of every revision row on every interval.
+    /// </summary>
+    private string? sweepKeyCursor;
+
     /// <summary>
     /// Constructor
     /// </summary>
@@ -816,146 +829,177 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         if (batchSize <= 0)
             return true;
 
-        try
+        long cutoffPhysical = ageEnabled
+            ? DateTimeOffset.UtcNow.Subtract(retentionAge).ToUnixTimeMilliseconds()
+            : 0;
+
+        int keysVisited = 0;
+        int deleted = 0;
+        bool batchLimitReached = false;
+        List<string>? remaining = null;
+
+        if (keys is { Count: > 0 })
         {
-            long cutoffPhysical = ageEnabled
-                ? DateTimeOffset.UtcNow.Subtract(retentionAge).ToUnixTimeMilliseconds()
-                : 0;
+            Dictionary<int, List<string>> plan = GroupKeysByShard(keys);
 
-            int keysVisited = 0;
-            int deleted = 0;
-            bool batchLimitReached = false;
-
-            if (keys is { Count: > 0 })
+            foreach ((int shard, List<string> shardKeys) in plan)
             {
-                Dictionary<int, List<string>> plan = GroupKeysByShard(keys);
-
-                foreach ((int shard, List<string> shardKeys) in plan)
+                if (deleted >= batchSize)
                 {
-                    if (deleted >= batchSize)
-                    {
-                        batchLimitReached = true;
-                        break;
-                    }
-
-                    (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(shard);
-
-                    try
-                    {
-                        readerWriterLock.AcquireWriterLock(TimeSpan.FromSeconds(5));
-
-                        foreach (string key in shardKeys)
-                        {
-                            if (deleted >= batchSize)
-                            {
-                                batchLimitReached = true;
-                                break;
-                            }
-
-                            keysVisited++;
-
-                            deleted += PruneKeyRevisions(
-                                connection,
-                                key,
-                                countEnabled,
-                                retentionCount,
-                                ageEnabled,
-                                cutoffPhysical,
-                                batchSize - deleted);
-                        }
-
-                        if (!batchLimitReached)
-                        {
-                            if (deleted >= batchSize)
-                                batchLimitReached = true;
-                            else
-                            {
-                                foreach (string key in shardKeys)
-                                {
-                                    if (KeyHasMorePrunableRevisions(
-                                            connection,
-                                            key,
-                                            countEnabled,
-                                            retentionCount,
-                                            ageEnabled,
-                                            cutoffPhysical))
-                                    {
-                                        batchLimitReached = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    finally
-                    {
-                        readerWriterLock.ReleaseWriterLock();
-                    }
+                    // Batch full before reaching this shard — none of its keys were visited.
+                    batchLimitReached = true;
+                    foreach (string key in shardKeys)
+                        (remaining ??= []).Add(key);
+                    continue;
                 }
-            }
-            else
-            {
-                for (int shard = 0; shard < MaxShards; shard++)
+
+                (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(shard);
+
+                try
                 {
-                    if (deleted >= batchSize)
+                    readerWriterLock.AcquireWriterLock(TimeSpan.FromSeconds(5));
+
+                    for (int i = 0; i < shardKeys.Count; i++)
                     {
-                        batchLimitReached = true;
-                        break;
-                    }
-
-                    (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(shard);
-
-                    try
-                    {
-                        readerWriterLock.AcquireWriterLock(TimeSpan.FromSeconds(5));
-
-                        List<string> candidateKeys = GetRevisionCandidateKeys(connection);
-
-                        foreach (string key in candidateKeys)
+                        if (deleted >= batchSize)
                         {
-                            if (deleted >= batchSize)
-                            {
-                                batchLimitReached = true;
-                                break;
-                            }
-
-                            keysVisited++;
-
-                            deleted += PruneKeyRevisions(
-                                connection,
-                                key,
-                                countEnabled,
-                                retentionCount,
-                                ageEnabled,
-                                cutoffPhysical,
-                                batchSize - deleted);
-                        }
-
-                        if (!batchLimitReached
-                            && (deleted >= batchSize || ShardHasMorePrunableRevisions(connection, countEnabled, retentionCount, ageEnabled, cutoffPhysical)))
                             batchLimitReached = true;
+                            for (int j = i; j < shardKeys.Count; j++)
+                                (remaining ??= []).Add(shardKeys[j]);
+                            break;
+                        }
+
+                        string key = shardKeys[i];
+                        keysVisited++;
+
+                        int budget = batchSize - deleted;
+                        int deletedForKey = PruneKeyRevisions(
+                            connection,
+                            key,
+                            countEnabled,
+                            retentionCount,
+                            ageEnabled,
+                            cutoffPhysical,
+                            budget);
+
+                        deleted += deletedForKey;
+
+                        // Only a delete that consumed the whole per-key budget can have left more
+                        // work behind; a short delete removed every matching row for this key.
+                        if (deletedForKey == budget
+                            && KeyHasMorePrunableRevisions(
+                                connection,
+                                key,
+                                countEnabled,
+                                retentionCount,
+                                ageEnabled,
+                                cutoffPhysical))
+                        {
+                            batchLimitReached = true;
+                            (remaining ??= []).Add(key);
+                        }
                     }
-                    finally
+                }
+                finally
+                {
+                    readerWriterLock.ReleaseWriterLock();
+                }
+            }
+        }
+        else
+        {
+            // Backend-wide sweep: resume from the (shard, key) cursor left by the previous pass so
+            // each pass scans at most batchSize keys (or performs batchSize deletes) instead of every
+            // revision row on every interval. When the whole keyspace has been scanned the cursor
+            // wraps to the start and the pass reports no backlog so the interval gate re-engages.
+            int keyBudget = batchSize;
+            bool paused = false;
+
+            int shard = sweepShardCursor;
+
+            while (shard < MaxShards)
+            {
+                if (deleted >= batchSize || keysVisited >= keyBudget)
+                {
+                    batchLimitReached = true;
+                    paused = true;
+                    break;
+                }
+
+                (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(shard);
+
+                try
+                {
+                    readerWriterLock.AcquireWriterLock(TimeSpan.FromSeconds(5));
+
+                    int pageLimit = keyBudget - keysVisited;
+                    List<string> page = GetRevisionCandidateKeys(connection, sweepKeyCursor, pageLimit);
+
+                    foreach (string key in page)
                     {
-                        readerWriterLock.ReleaseWriterLock();
+                        if (deleted >= batchSize)
+                        {
+                            batchLimitReached = true;
+                            paused = true;
+                            break;
+                        }
+
+                        keysVisited++;
+
+                        int budget = batchSize - deleted;
+                        int deletedForKey = PruneKeyRevisions(
+                            connection,
+                            key,
+                            countEnabled,
+                            retentionCount,
+                            ageEnabled,
+                            cutoffPhysical,
+                            budget);
+
+                        deleted += deletedForKey;
+
+                        if (deletedForKey == budget)
+                        {
+                            // Key may still have rows; resume AT this key next pass by leaving the
+                            // cursor on the previously completed key.
+                            batchLimitReached = true;
+                            paused = true;
+                            break;
+                        }
+
+                        // Key fully processed — advance the cursor past it.
+                        sweepKeyCursor = key;
                     }
+
+                    if (paused)
+                        break;
+
+                    if (page.Count < pageLimit)
+                    {
+                        // Shard exhausted — move to the next shard from its first key.
+                        shard++;
+                        sweepShardCursor = shard;
+                        sweepKeyCursor = null;
+                    }
+                    // else: a full page was returned and the key budget is now spent; the loop top
+                    // will pause and resume this same shard after sweepKeyCursor next pass.
+                }
+                finally
+                {
+                    readerWriterLock.ReleaseWriterLock();
                 }
             }
 
-            result = new(keysVisited, deleted, batchLimitReached);
-            return true;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine(
-                "PruneKeyValueRevisions: {0} {1} {2}",
-                ex.GetType().Name,
-                ex.Message,
-                ex.StackTrace
-            );
+            // Reached the end of the last shard without pausing: full scan complete, wrap around.
+            if (!paused && shard >= MaxShards)
+            {
+                sweepShardCursor = 0;
+                sweepKeyCursor = null;
+            }
         }
 
-        return false;
+        result = new(keysVisited, deleted, batchLimitReached, remaining);
+        return true;
     }
 
     private static Dictionary<int, List<string>> GroupKeysByShard(IReadOnlyCollection<string> keys)
@@ -975,18 +1019,30 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         return plan;
     }
 
-    private static List<string> GetRevisionCandidateKeys(SqliteConnection connection)
+    /// <summary>
+    /// Returns up to <paramref name="limit"/> distinct keys that have historical revision rows,
+    /// ordered ascending and strictly greater than <paramref name="afterKey"/> (or from the start
+    /// when it is <c>null</c>). The ordered, bounded scan lets the backend-wide sweep page through
+    /// the keyspace using the <c>idx_keys_revisions_key_revision</c> index instead of materialising
+    /// every candidate key on each pass.
+    /// </summary>
+    private static List<string> GetRevisionCandidateKeys(SqliteConnection connection, string? afterKey, int limit)
     {
         const string query = """
             SELECT DISTINCT kr.key
             FROM keys_revisions kr
             INNER JOIN keys k ON k.key = kr.key
+            WHERE (@after IS NULL OR kr.key > @after)
             ORDER BY kr.key
+            LIMIT @limit
             """;
 
         List<string> keys = [];
 
         using SqliteCommand command = new(query, connection);
+        command.Parameters.AddWithValue("@after", (object?)afterKey ?? DBNull.Value);
+        command.Parameters.AddWithValue("@limit", limit);
+
         using SqliteDataReader reader = command.ExecuteReader();
 
         while (reader.Read())
@@ -1122,56 +1178,6 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         using SqliteCommand command = new(query, connection);
         command.Parameters.AddWithValue("@key", key);
         command.Parameters.AddWithValue("@currentRevision", currentRevision.Value);
-
-        if (countEnabled)
-            command.Parameters.AddWithValue("@retentionCount", retentionCount);
-
-        if (ageEnabled)
-            command.Parameters.AddWithValue("@cutoffPhysical", cutoffPhysical);
-
-        return command.ExecuteScalar() is not null;
-    }
-
-    private static bool ShardHasMorePrunableRevisions(
-        SqliteConnection connection,
-        bool countEnabled,
-        int retentionCount,
-        bool ageEnabled,
-        long cutoffPhysical)
-    {
-        List<string> predicates = [];
-
-        if (countEnabled)
-        {
-            predicates.Add("""
-                kr.revision < (
-                    SELECT MIN(revision)
-                    FROM (
-                        SELECT revision
-                        FROM keys_revisions
-                        WHERE key = kr.key
-                        ORDER BY revision DESC
-                        LIMIT @retentionCount
-                    )
-                )
-                """);
-        }
-
-        if (ageEnabled)
-            predicates.Add("kr.lastModifiedPhysical < @cutoffPhysical");
-
-        string policy = string.Join(" OR ", predicates);
-
-        string query = $"""
-            SELECT 1
-            FROM keys_revisions kr
-            INNER JOIN keys k ON k.key = kr.key
-            WHERE kr.revision <> k.revision
-              AND ({policy})
-            LIMIT 1
-            """;
-
-        using SqliteCommand command = new(query, connection);
 
         if (countEnabled)
             command.Parameters.AddWithValue("@retentionCount", retentionCount);

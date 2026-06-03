@@ -36,6 +36,12 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// Maximum size of a packet to be written in a single batch.
     /// </summary>
     private const int MaxPacketSize = 1024 * 512;
+
+    /// <summary>
+    /// Upper bound on the number of keys queued for targeted revision cleanup.
+    /// Keys added beyond this limit are dropped; the periodic sweep covers them instead.
+    /// </summary>
+    private const int MaxPendingCleanupKeys = 10_000;
     
     private readonly IRaft raft;
 
@@ -76,6 +82,26 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// Whether a checkpoint operation is pending.
     /// </summary>
     private bool pendingCheckpoint;
+
+    /// <summary>
+    /// Distinct keys touched by successful key-value flushes that are queued for targeted
+    /// revision cleanup. Bounded by <see cref="MaxPendingCleanupKeys"/>.
+    /// </summary>
+    private readonly HashSet<string> pendingRevisionCleanupKeys = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Tracks whether the full backend-wide revision sweep has a batch still in progress
+    /// from a previous cycle that hit the batch size limit.
+    /// </summary>
+    private bool fullSweepBacklogPending;
+
+    /// <summary>
+    /// Wall-clock timestamp of the last completed (or attempted) full backend-wide sweep,
+    /// used to enforce <see cref="KahunaConfiguration.PersistentRevisionCleanupInterval"/>.
+    /// Initialised to <see cref="DateTime.UtcNow"/> so the first sweep is not triggered until
+    /// at least one full interval has elapsed after startup.
+    /// </summary>
+    private DateTime lastFullSweepUtc = DateTime.UtcNow;
     
     public BackgroundWriterActor(
         IActorContext<BackgroundWriterActor, BackgroundWriteRequest> context,
@@ -90,12 +116,16 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         this.configuration = configuration;
         this.logger = logger;
         
+        TimeSpan writerDelay = configuration.DirtyObjectsWriterDelay > 0
+            ? TimeSpan.FromMilliseconds(configuration.DirtyObjectsWriterDelay)
+            : TimeSpan.FromSeconds(5);
+
         context.ActorSystem.StartPeriodicTimer(
             context.Self,
             "flush-diry-objects",
             new(BackgroundWriteType.Flush),
-            TimeSpan.FromSeconds(5),
-            TimeSpan.FromMilliseconds(configuration.DirtyObjectsWriterDelay)
+            writerDelay,
+            writerDelay
         );
     }
     
@@ -115,11 +145,14 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 await CheckpointPartitions();
                 await FlushLocks();
                 await FlushKeyValues();
+                await RunTargetedRevisionCleanup();
+                await RunFullRevisionSweep();
                 break;
 
             case BackgroundWriteType.FlushAndNotify:
                 await FlushLocks();
                 await FlushKeyValues();
+                await RunTargetedRevisionCleanup();
                 message.CompletionSource?.TrySetResult(true);
                 break;
 
@@ -351,14 +384,185 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             }
 
             logger.LogDebug("Successfully stored batch of {Count} key-values in {Elapsed}ms", items.Count, stopwatch.ElapsedMilliseconds);
-            
+
+            if (ConfigurationValidator.IsPersistentRevisionRetentionEnabled(configuration)
+                && configuration.PersistentRevisionCleanupOnWrite)
+            {
+                foreach (PersistenceRequestItem item in items)
+                {
+                    if (pendingRevisionCleanupKeys.Count < MaxPendingCleanupKeys)
+                        pendingRevisionCleanupKeys.Add(item.Key);
+                }
+            }
+
             pendingCheckpoint = true;
             pendingKeyValuesItems = null;
             return;
         }
         
         pendingKeyValuesItems = items;
-        
+
         logger.LogError("Coundn't store batch of {Count} key-values", items.Count);
+    }
+
+    /// <summary>
+    /// Drains the pending revision cleanup key set and calls the persistence backend to prune
+    /// old revision records for those keys. Keys are re-queued when the batch limit is reached
+    /// or the backend call fails, so cleanup is retried on the next flush cycle.
+    /// Cleanup failure never propagates to the caller.
+    /// </summary>
+    private async ValueTask RunTargetedRevisionCleanup()
+    {
+        if (!ConfigurationValidator.IsPersistentRevisionRetentionEnabled(configuration))
+            return;
+
+        if (!configuration.PersistentRevisionCleanupOnWrite)
+            return;
+
+        if (pendingRevisionCleanupKeys.Count == 0)
+            return;
+
+        List<string> keysToClean = [..pendingRevisionCleanupKeys];
+        pendingRevisionCleanupKeys.Clear();
+
+        stopwatch.Restart();
+        RevisionPruneResult pruneResult = default;
+
+        try
+        {
+            bool success = await raft.ReadScheduler.EnqueueTask(0, () =>
+            {
+                bool ok = persistenceBackend.PruneKeyValueRevisions(
+                    keysToClean,
+                    configuration.PersistentRevisionRetentionCount,
+                    configuration.PersistentRevisionRetentionAge,
+                    configuration.PersistentRevisionCleanupBatchSize,
+                    out RevisionPruneResult r);
+                pruneResult = r;
+                return ok;
+            });
+
+            if (success)
+            {
+                if (pruneResult.RevisionsDeleted > 0 || pruneResult.BatchLimitReached)
+                    logger.LogDebug(
+                        "Pruned persistent key/value revisions: mode=targeted keys={Keys} deleted={Deleted} backlog={Backlog} elapsedMs={Elapsed} backend={Backend} retentionCount={RetentionCount} retentionAge={RetentionAge}",
+                        pruneResult.KeysVisited,
+                        pruneResult.RevisionsDeleted,
+                        pruneResult.BatchLimitReached,
+                        stopwatch.ElapsedMilliseconds,
+                        configuration.Storage,
+                        configuration.PersistentRevisionRetentionCount,
+                        configuration.PersistentRevisionRetentionAge
+                    );
+
+                if (pruneResult.BatchLimitReached)
+                {
+                    // Requeue only keys that still have prunable revisions (or were never visited
+                    // because the batch filled). Backends that don't report per-key backlog fall
+                    // back to the full set, preserving the previous conservative behaviour.
+                    foreach (string key in pruneResult.RemainingKeys ?? keysToClean)
+                    {
+                        if (pendingRevisionCleanupKeys.Count < MaxPendingCleanupKeys)
+                            pendingRevisionCleanupKeys.Add(key);
+                    }
+                }
+            }
+            else
+            {
+                logger.LogWarning(
+                    "Failed to prune key/value revisions for {Count} targeted keys; will retry. backend={Backend}",
+                    keysToClean.Count,
+                    configuration.Storage
+                );
+
+                foreach (string key in keysToClean)
+                {
+                    if (pendingRevisionCleanupKeys.Count < MaxPendingCleanupKeys)
+                        pendingRevisionCleanupKeys.Add(key);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Exception during targeted revision cleanup; will retry {Count} keys. backend={Backend}", keysToClean.Count, configuration.Storage);
+
+            foreach (string key in keysToClean)
+            {
+                if (pendingRevisionCleanupKeys.Count < MaxPendingCleanupKeys)
+                    pendingRevisionCleanupKeys.Add(key);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Runs a backend-wide revision sweep no more often than
+    /// <see cref="KahunaConfiguration.PersistentRevisionCleanupInterval"/>.
+    /// When a previous sweep hit the batch size limit the next eligible cycle resumes
+    /// immediately rather than waiting for another full interval.
+    /// Sweep failure is logged as a warning and never propagates to the caller.
+    /// </summary>
+    private async ValueTask RunFullRevisionSweep()
+    {
+        if (!ConfigurationValidator.IsPersistentRevisionRetentionEnabled(configuration))
+            return;
+
+        DateTime now = DateTime.UtcNow;
+
+        bool intervalElapsed = (now - lastFullSweepUtc) >= configuration.PersistentRevisionCleanupInterval;
+
+        if (!intervalElapsed && !fullSweepBacklogPending)
+            return;
+
+        lastFullSweepUtc = now;
+        fullSweepBacklogPending = false;
+
+        stopwatch.Restart();
+        RevisionPruneResult pruneResult = default;
+
+        try
+        {
+            bool success = await raft.ReadScheduler.EnqueueTask(0, () =>
+            {
+                bool ok = persistenceBackend.PruneKeyValueRevisions(
+                    null,
+                    configuration.PersistentRevisionRetentionCount,
+                    configuration.PersistentRevisionRetentionAge,
+                    configuration.PersistentRevisionCleanupBatchSize,
+                    out RevisionPruneResult r);
+                pruneResult = r;
+                return ok;
+            });
+
+            if (success)
+            {
+                if (pruneResult.RevisionsDeleted > 0 || pruneResult.BatchLimitReached)
+                    logger.LogDebug(
+                        "Pruned persistent key/value revisions: mode=sweep keys={Keys} deleted={Deleted} backlog={Backlog} elapsedMs={Elapsed} backend={Backend} retentionCount={RetentionCount} retentionAge={RetentionAge}",
+                        pruneResult.KeysVisited,
+                        pruneResult.RevisionsDeleted,
+                        pruneResult.BatchLimitReached,
+                        stopwatch.ElapsedMilliseconds,
+                        configuration.Storage,
+                        configuration.PersistentRevisionRetentionCount,
+                        configuration.PersistentRevisionRetentionAge
+                    );
+
+                fullSweepBacklogPending = pruneResult.BatchLimitReached;
+            }
+            else
+            {
+                logger.LogWarning(
+                    "Failed to run full revision sweep; will retry after next interval. backend={Backend}",
+                    configuration.Storage
+                );
+                fullSweepBacklogPending = true;
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Exception during full revision sweep; will retry after next interval. backend={Backend}", configuration.Storage);
+            fullSweepBacklogPending = true;
+        }
     }
 }

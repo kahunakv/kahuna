@@ -61,8 +61,15 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     private readonly ColumnFamilyHandle columnFamilyLocks;
     
     private readonly string path;
-    
+
     private readonly string dbRevision;
+
+    /// <summary>
+    /// Raw key bytes at which the next backend-wide revision sweep should resume, or <c>null</c> to
+    /// start from the beginning of the column family. Carried across sweep passes so each pass scans
+    /// a bounded slice of the keyspace instead of the whole column family every interval.
+    /// </summary>
+    private byte[]? sweepCursor;
 
     /// <summary>
     /// RocksDbPersistenceBackend is a persistence backend implementation based on RocksDB.
@@ -555,8 +562,210 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         int batchSize,
         out RevisionPruneResult result)
     {
-        result = new(KeysVisited: 0, RevisionsDeleted: 0, BatchLimitReached: false);
+        int keysVisited = 0;
+        int deleted = 0;
+        bool batchLimitReached = false;
+        List<string>? remaining = null;
+
+        if (keys is not null)
+        {
+            IList<string> keyList = keys as IList<string> ?? keys.ToList();
+
+            for (int i = 0; i < keyList.Count; i++)
+            {
+                if (deleted >= batchSize)
+                {
+                    // Batch full before reaching this key — everything from here on still needs work.
+                    batchLimitReached = true;
+                    for (int j = i; j < keyList.Count; j++)
+                        (remaining ??= []).Add(keyList[j]);
+                    break;
+                }
+
+                string key = keyList[i];
+                PruneRevisionsForKey(key, retentionCount, retentionAge, batchSize, ref deleted, out bool keyLimitReached);
+                keysVisited++;
+
+                if (keyLimitReached)
+                {
+                    // This key was only partially pruned, and the batch is now full.
+                    batchLimitReached = true;
+                    (remaining ??= []).Add(key);
+                    for (int j = i + 1; j < keyList.Count; j++)
+                        (remaining ??= []).Add(keyList[j]);
+                    break;
+                }
+            }
+        }
+        else
+        {
+            // Backend-wide sweep: visit each logical key via its ~CURRENT entry, resuming from the
+            // cursor left by the previous pass so each pass scans only a bounded slice (at most
+            // batchSize keys or batchSize deletes) instead of the whole column family.
+            int keyBudget = batchSize;
+            bool paused = false;
+
+            using Iterator iterator = db.NewIterator(cf: columnFamilyKeys);
+
+            if (sweepCursor is null)
+                iterator.SeekToFirst();
+            else
+                iterator.Seek(sweepCursor);
+
+            while (iterator.Valid())
+            {
+                if (deleted >= batchSize || keysVisited >= keyBudget)
+                {
+                    // Pause here; resume from the current (unprocessed) entry next pass.
+                    sweepCursor = iterator.Key().ToArray();
+                    batchLimitReached = true;
+                    paused = true;
+                    break;
+                }
+
+                byte[] rawKeyBytes = iterator.Key().ToArray();
+                string rawKey = Encoding.UTF8.GetString(rawKeyBytes);
+
+                if (rawKey.EndsWith(CurrentMarker, StringComparison.Ordinal))
+                {
+                    string logicalKey = rawKey[..^CurrentMarker.Length];
+                    PruneRevisionsForKey(logicalKey, retentionCount, retentionAge, batchSize, ref deleted, out bool keyLimitReached);
+                    keysVisited++;
+
+                    if (keyLimitReached)
+                    {
+                        // Key only partially pruned — resume at this same key next pass.
+                        sweepCursor = rawKeyBytes;
+                        batchLimitReached = true;
+                        paused = true;
+                        break;
+                    }
+                }
+
+                iterator.Next();
+            }
+
+            // Reached the end of the column family without pausing: full scan complete, wrap around.
+            if (!paused)
+                sweepCursor = null;
+        }
+
+        result = new(keysVisited, deleted, batchLimitReached, remaining);
         return true;
+    }
+
+    /// <summary>
+    /// Prunes old revision records for a single logical key, keeping the current revision
+    /// and any revisions within the configured count/age retention window.
+    /// </summary>
+    private void PruneRevisionsForKey(
+        string key,
+        int retentionCount,
+        TimeSpan retentionAge,
+        int batchSize,
+        ref int deleted,
+        out bool batchLimitReached)
+    {
+        batchLimitReached = false;
+
+        // Determine the current revision so we never delete its historical record.
+        string currentMarkerKey = key + CurrentMarker;
+        byte[] currentMarkerBytes = Encoding.UTF8.GetBytes(currentMarkerKey);
+
+        byte[]? currentData = db.Get(currentMarkerBytes, cf: columnFamilyKeys);
+        if (currentData is null)
+            return;
+
+        RocksDbKeyValueMessage currentMessage = UnserializeKeyValueMessage(currentData);
+        long currentRevision = currentMessage.Revision;
+
+        // Collect all revision entries for this key by seeking to "<key>~".
+        // Revision entries have numeric suffixes; ~CURRENT is skipped.
+        string revisionPrefix = key + "~";
+        byte[] prefixBytes = Encoding.UTF8.GetBytes(revisionPrefix);
+
+        bool needAge = retentionAge > TimeSpan.Zero;
+        long cutoffPhysical = needAge
+            ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - (long)retentionAge.TotalMilliseconds
+            : long.MinValue;
+
+        List<(long Revision, long LastModifiedPhysical, byte[] RawKeyBytes)> revisions = [];
+
+        using (Iterator iterator = db.NewIterator(cf: columnFamilyKeys))
+        {
+            iterator.Seek(prefixBytes);
+
+            while (iterator.Valid())
+            {
+                string entryKey = Encoding.UTF8.GetString(iterator.Key());
+
+                if (!entryKey.StartsWith(revisionPrefix, StringComparison.Ordinal))
+                    break;
+
+                // Skip the ~CURRENT sentinel — never a candidate for deletion.
+                if (entryKey.EndsWith(CurrentMarker, StringComparison.Ordinal))
+                {
+                    iterator.Next();
+                    continue;
+                }
+
+                // The suffix after "<key>~" must be a numeric revision.
+                string suffix = entryKey[revisionPrefix.Length..];
+                if (!long.TryParse(suffix, out long revisionNum))
+                {
+                    iterator.Next();
+                    continue;
+                }
+
+                long lastModifiedPhysical = 0;
+                if (needAge)
+                {
+                    RocksDbKeyValueMessage msg = UnserializeKeyValueMessage(iterator.Value());
+                    lastModifiedPhysical = msg.LastModifiedPhysical;
+                }
+
+                revisions.Add((revisionNum, lastModifiedPhysical, iterator.Key().ToArray()));
+                iterator.Next();
+            }
+        }
+
+        if (revisions.Count == 0)
+            return;
+
+        // Sort descending so index 0 is the newest revision.
+        revisions.Sort((a, b) => b.Revision.CompareTo(a.Revision));
+
+        using WriteBatch batch = new();
+        int deletedInBatch = 0;
+
+        for (int i = 0; i < revisions.Count; i++)
+        {
+            (long revNum, long lastModifiedPhysical, byte[] rawKeyBytes) = revisions[i];
+
+            // Always protect the current revision's historical record.
+            if (revNum == currentRevision)
+                continue;
+
+            bool deleteByCount = retentionCount > 0 && i >= retentionCount;
+            bool deleteByAge = needAge && lastModifiedPhysical < cutoffPhysical;
+
+            if (!deleteByCount && !deleteByAge)
+                continue;
+
+            if (deleted + deletedInBatch >= batchSize)
+            {
+                batchLimitReached = true;
+                break;
+            }
+
+            batch.Delete(rawKeyBytes, cf: columnFamilyKeys);
+            deletedInBatch++;
+        }
+
+        if (deletedInBatch > 0)
+            db.Write(batch, DefaultWriteOptions);
+
+        deleted += deletedInBatch;
     }
 
     public void Dispose()

@@ -318,6 +318,194 @@ public sealed class TestEmbeddedKahunaNode
     }
 
     [Fact]
+    public async Task TestFullSweepPrunesRevisionsNotReachedByTargetedCleanup()
+    {
+        string storagePath = CreateTempStoragePath();
+
+        try
+        {
+            const string key = "sweep/pre-existing/key1";
+            const string storageRevision = "sweep-tests";
+
+            // Phase 1: write revisions with retention disabled so nothing is pruned on write.
+            EmbeddedKahunaOptions phaseOneOptions = new()
+            {
+                Storage = "sqlite",
+                StoragePath = storagePath,
+                StorageRevision = storageRevision,
+                WalStorage = "memory",
+                InitialPartitions = 1,
+                DirtyObjectsWriterDelay = 60000   // Prevent timer from firing during writes.
+            };
+
+            await using (EmbeddedKahunaNode node = new(phaseOneOptions, loggerFactory))
+            {
+                await node.StartAsync(TestContext.Current.CancellationToken);
+
+                for (int i = 0; i < 6; i++)
+                {
+                    await node.Kahuna.LocateAndTrySetKeyValue(
+                        HLCTimestamp.Zero, key,
+                        Encoding.UTF8.GetBytes($"v{i}"),
+                        null, -1, KeyValueFlags.Set, 0,
+                        KeyValueDurability.Persistent,
+                        TestContext.Current.CancellationToken
+                    );
+                }
+
+                await node.FlushAsync();
+            }
+
+            Assert.Equal(6, CountRevisionRows(storagePath, key, storageRevision));
+
+            // Phase 2: restart with retention enabled.
+            // DirtyObjectsWriterDelay = 100 ms → timer fires at 100 ms and every 100 ms after.
+            // CleanupInterval = 50 ms → after the first 100 ms tick, (100 ms − 0 ms) ≥ 50 ms,
+            // so the sweep fires on the first cycle. CleanupOnWrite is off so only the sweep prunes.
+            EmbeddedKahunaOptions phaseTwoOptions = new()
+            {
+                Storage = "sqlite",
+                StoragePath = storagePath,
+                StorageRevision = storageRevision,
+                WalStorage = "memory",
+                InitialPartitions = 1,
+                DirtyObjectsWriterDelay = 100,
+                PersistentRevisionRetentionCount = 2,
+                PersistentRevisionCleanupOnWrite = false,
+                PersistentRevisionCleanupBatchSize = 1000,
+                PersistentRevisionCleanupInterval = TimeSpan.FromMilliseconds(50)
+            };
+
+            await using (EmbeddedKahunaNode node = new(phaseTwoOptions, loggerFactory))
+            {
+                await node.StartAsync(TestContext.Current.CancellationToken);
+
+                // 500 ms gives several timer cycles; the sweep fires on the first one where the
+                // 50 ms interval has elapsed since startup.
+                await Task.Delay(500, TestContext.Current.CancellationToken);
+            }
+
+            Assert.Equal(2, CountRevisionRows(storagePath, key, storageRevision));
+
+            PersistentKeyValue? current = ReadPersistedKeyValue(storagePath, key, storageRevision);
+            Assert.NotNull(current);
+        }
+        finally
+        {
+            TryDeleteDirectory(storagePath);
+        }
+    }
+
+    [Fact]
+    public async Task TestFullSweepDoesNotRunWhenRetentionDisabled()
+    {
+        string storagePath = CreateTempStoragePath();
+
+        try
+        {
+            const string key = "sweep/disabled/key1";
+            const string storageRevision = "sweep-disabled-tests";
+
+            // Fast timer, retention disabled.
+            EmbeddedKahunaOptions options = new()
+            {
+                Storage = "sqlite",
+                StoragePath = storagePath,
+                StorageRevision = storageRevision,
+                WalStorage = "memory",
+                InitialPartitions = 1,
+                DirtyObjectsWriterDelay = 100
+            };
+
+            await using (EmbeddedKahunaNode node = new(options, loggerFactory))
+            {
+                await node.StartAsync(TestContext.Current.CancellationToken);
+
+                for (int i = 0; i < 4; i++)
+                {
+                    await node.Kahuna.LocateAndTrySetKeyValue(
+                        HLCTimestamp.Zero, key,
+                        Encoding.UTF8.GetBytes($"v{i}"),
+                        null, -1, KeyValueFlags.Set, 0,
+                        KeyValueDurability.Persistent,
+                        TestContext.Current.CancellationToken
+                    );
+                }
+
+                await node.FlushAsync();
+
+                // Let the periodic timer fire several times; without retention config the
+                // sweep guard returns early immediately.
+                await Task.Delay(500, TestContext.Current.CancellationToken);
+            }
+
+            Assert.Equal(4, CountRevisionRows(storagePath, key, storageRevision));
+        }
+        finally
+        {
+            TryDeleteDirectory(storagePath);
+        }
+    }
+
+    [Fact]
+    public async Task TestFullSweepDoesNotRunBeforeInterval()
+    {
+        string storagePath = CreateTempStoragePath();
+
+        try
+        {
+            const string key = "sweep/interval/key1";
+            const string storageRevision = "sweep-interval-tests";
+
+            // Fast periodic timer (100 ms) but a 1-hour sweep interval.
+            // lastFullSweepUtc is set to DateTime.UtcNow at startup, so the first sweep
+            // cannot fire until at least 1 hour has elapsed — well beyond the 500 ms window.
+            EmbeddedKahunaOptions options = new()
+            {
+                Storage = "sqlite",
+                StoragePath = storagePath,
+                StorageRevision = storageRevision,
+                WalStorage = "memory",
+                InitialPartitions = 1,
+                DirtyObjectsWriterDelay = 100,
+                PersistentRevisionRetentionCount = 1,
+                PersistentRevisionCleanupOnWrite = false,
+                PersistentRevisionCleanupBatchSize = 1000,
+                PersistentRevisionCleanupInterval = TimeSpan.FromHours(1)
+            };
+
+            await using (EmbeddedKahunaNode node = new(options, loggerFactory))
+            {
+                await node.StartAsync(TestContext.Current.CancellationToken);
+
+                for (int i = 0; i < 5; i++)
+                {
+                    await node.Kahuna.LocateAndTrySetKeyValue(
+                        HLCTimestamp.Zero, key,
+                        Encoding.UTF8.GetBytes($"v{i}"),
+                        null, -1, KeyValueFlags.Set, 0,
+                        KeyValueDurability.Persistent,
+                        TestContext.Current.CancellationToken
+                    );
+                }
+
+                await node.FlushAsync();
+
+                // Let several periodic Flush cycles fire; the 1-hour interval gate must block
+                // the sweep on every one of them.
+                await Task.Delay(500, TestContext.Current.CancellationToken);
+            }
+
+            // Sweep never fired, so all 5 revision rows must still be present.
+            Assert.Equal(5, CountRevisionRows(storagePath, key, storageRevision));
+        }
+        finally
+        {
+            TryDeleteDirectory(storagePath);
+        }
+    }
+
+    [Fact]
     public async Task TestEmbeddedNodeSupportsRocksDbStorage()
     {
         string storagePath = CreateTempStoragePath();
@@ -409,6 +597,181 @@ public sealed class TestEmbeddedKahunaNode
         Assert.Equal(KeyValueResponseType.Set, response);
     }
 
+    [Fact]
+    public async Task TestFlushRunsTargetedRevisionCleanupAfterWrite()
+    {
+        string storagePath = CreateTempStoragePath();
+
+        try
+        {
+            const string key = "retention/targeted/key1";
+            const string storageRevision = "cleanup-tests";
+
+            EmbeddedKahunaOptions options = new()
+            {
+                Storage = "sqlite",
+                StoragePath = storagePath,
+                StorageRevision = storageRevision,
+                WalStorage = "memory",
+                InitialPartitions = 1,
+                DirtyObjectsWriterDelay = 60000,
+                PersistentRevisionRetentionCount = 3,
+                PersistentRevisionCleanupOnWrite = true,
+                PersistentRevisionCleanupBatchSize = 1000
+            };
+
+            await using (EmbeddedKahunaNode node = new(options, loggerFactory))
+            {
+                await node.StartAsync(TestContext.Current.CancellationToken);
+
+                // Write 7 revisions; with retention count 3, 4 old ones should be pruned.
+                for (int i = 0; i < 7; i++)
+                {
+                    byte[] value = Encoding.UTF8.GetBytes($"value-{i}");
+
+                    (KeyValueResponseType response, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+                        HLCTimestamp.Zero,
+                        key,
+                        value,
+                        null,
+                        -1,
+                        KeyValueFlags.Set,
+                        0,
+                        KeyValueDurability.Persistent,
+                        TestContext.Current.CancellationToken
+                    );
+
+                    Assert.Equal(KeyValueResponseType.Set, response);
+                }
+
+                // FlushAsync triggers FlushKeyValues → tracks key → RunTargetedRevisionCleanup.
+                await node.FlushAsync();
+            }
+
+            // Current row in keys table should survive.
+            PersistentKeyValue? current = ReadPersistedKeyValue(storagePath, key, storageRevision);
+            Assert.NotNull(current);
+            Assert.Equal("value-6", Encoding.UTF8.GetString(current.Value!));
+
+            // Only 3 revision rows should remain.
+            Assert.Equal(3, CountRevisionRows(storagePath, key, storageRevision));
+        }
+        finally
+        {
+            TryDeleteDirectory(storagePath);
+        }
+    }
+
+    [Fact]
+    public async Task TestFlushWithRetentionDisabledDoesNotPruneRevisions()
+    {
+        string storagePath = CreateTempStoragePath();
+
+        try
+        {
+            const string key = "retention/disabled/key1";
+            const string storageRevision = "no-cleanup-tests";
+
+            EmbeddedKahunaOptions options = new()
+            {
+                Storage = "sqlite",
+                StoragePath = storagePath,
+                StorageRevision = storageRevision,
+                WalStorage = "memory",
+                InitialPartitions = 1,
+                DirtyObjectsWriterDelay = 60000
+                // PersistentRevisionRetentionCount and Age are 0 by default — retention disabled.
+            };
+
+            await using (EmbeddedKahunaNode node = new(options, loggerFactory))
+            {
+                await node.StartAsync(TestContext.Current.CancellationToken);
+
+                for (int i = 0; i < 5; i++)
+                {
+                    byte[] value = Encoding.UTF8.GetBytes($"value-{i}");
+
+                    await node.Kahuna.LocateAndTrySetKeyValue(
+                        HLCTimestamp.Zero,
+                        key,
+                        value,
+                        null,
+                        -1,
+                        KeyValueFlags.Set,
+                        0,
+                        KeyValueDurability.Persistent,
+                        TestContext.Current.CancellationToken
+                    );
+                }
+
+                await node.FlushAsync();
+            }
+
+            // All 5 revision rows must remain because retention is disabled.
+            Assert.Equal(5, CountRevisionRows(storagePath, key, storageRevision));
+        }
+        finally
+        {
+            TryDeleteDirectory(storagePath);
+        }
+    }
+
+    [Fact]
+    public async Task TestFlushWithCleanupOnWriteDisabledDoesNotPruneRevisions()
+    {
+        string storagePath = CreateTempStoragePath();
+
+        try
+        {
+            const string key = "retention/onwrite-off/key1";
+            const string storageRevision = "onwrite-off-tests";
+
+            EmbeddedKahunaOptions options = new()
+            {
+                Storage = "sqlite",
+                StoragePath = storagePath,
+                StorageRevision = storageRevision,
+                WalStorage = "memory",
+                InitialPartitions = 1,
+                DirtyObjectsWriterDelay = 60000,
+                PersistentRevisionRetentionCount = 2,
+                PersistentRevisionCleanupOnWrite = false,
+                PersistentRevisionCleanupBatchSize = 1000
+            };
+
+            await using (EmbeddedKahunaNode node = new(options, loggerFactory))
+            {
+                await node.StartAsync(TestContext.Current.CancellationToken);
+
+                for (int i = 0; i < 5; i++)
+                {
+                    byte[] value = Encoding.UTF8.GetBytes($"value-{i}");
+
+                    await node.Kahuna.LocateAndTrySetKeyValue(
+                        HLCTimestamp.Zero,
+                        key,
+                        value,
+                        null,
+                        -1,
+                        KeyValueFlags.Set,
+                        0,
+                        KeyValueDurability.Persistent,
+                        TestContext.Current.CancellationToken
+                    );
+                }
+
+                await node.FlushAsync();
+            }
+
+            // CleanupOnWrite is off so no pruning should have occurred.
+            Assert.Equal(5, CountRevisionRows(storagePath, key, storageRevision));
+        }
+        finally
+        {
+            TryDeleteDirectory(storagePath);
+        }
+    }
+
     private static EmbeddedKahunaOptions CreateSqliteOptions(string storagePath)
     {
         return new()
@@ -442,9 +805,12 @@ public sealed class TestEmbeddedKahunaNode
         return storagePath;
     }
 
-    private static PersistentKeyValue? ReadPersistedKeyValue(string storagePath, string key)
+    private static PersistentKeyValue? ReadPersistedKeyValue(string storagePath, string key) =>
+        ReadPersistedKeyValue(storagePath, key, "flush-tests");
+
+    private static PersistentKeyValue? ReadPersistedKeyValue(string storagePath, string key, string storageRevision)
     {
-        foreach (string databasePath in Directory.EnumerateFiles(storagePath, "kahuna*_flush-tests.db"))
+        foreach (string databasePath in Directory.EnumerateFiles(storagePath, $"kahuna*_{storageRevision}.db"))
         {
             using SqliteConnection connection = new($"Data Source={databasePath};Mode=ReadOnly");
             connection.Open();
@@ -465,6 +831,25 @@ public sealed class TestEmbeddedKahunaNode
         }
 
         return null;
+    }
+
+    private static int CountRevisionRows(string storagePath, string key, string storageRevision)
+    {
+        int total = 0;
+
+        foreach (string databasePath in Directory.EnumerateFiles(storagePath, $"kahuna*_{storageRevision}.db"))
+        {
+            using SqliteConnection connection = new($"Data Source={databasePath};Mode=ReadOnly");
+            connection.Open();
+
+            using SqliteCommand command = connection.CreateCommand();
+            command.CommandText = "SELECT COUNT(*) FROM keys_revisions WHERE key = $key";
+            command.Parameters.AddWithValue("$key", key);
+
+            total += Convert.ToInt32(command.ExecuteScalar());
+        }
+
+        return total;
     }
 
     private static PersistentLock? ReadPersistedLock(string storagePath, string resource)
