@@ -453,9 +453,39 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to set key/value: " + response.Type, response.Type);
     }
 
-    public Task<(List<KahunaSetKeyValueResponseItem>, int)> TrySetManyKeyValues(string url, IEnumerable<KahunaSetKeyValueRequestItem> requestItems, CancellationToken cancellationToken)
+    public async Task<(List<KahunaSetKeyValueResponseItem>, int)> TrySetManyKeyValues(
+        string url,
+        IEnumerable<KahunaSetKeyValueRequestItem> requestItems,
+        CancellationToken cancellationToken
+    )
     {
-        throw new NotImplementedException();
+        KahunaSetManyKeyValueRequest request = new()
+        {
+            Items = [.. requestItems]
+        };
+
+        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaSetManyKeyValueRequest);
+
+        if (cancellationToken.IsCancellationRequested)
+            throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
+
+        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
+
+        KahunaSetManyKeyValueResponse? response = await retryPolicy.ExecuteAsync(() =>
+            url
+                .WithOAuthBearerToken("xxx")
+                .AppendPathSegments("v1/kv/try-set-many")
+                .WithHeader("Accept", "application/json")
+                .WithHeader("Content-Type", "application/json")
+                .WithSettings(o => o.HttpVersion = "2.0")
+                .PostStringAsync(payload, cancellationToken: cancellationToken)
+                .ReceiveJson<KahunaSetManyKeyValueResponse>())
+                .ConfigureAwait(false);
+
+        if (response is null)
+            throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+
+        return (response.Items ?? [], response.TimeElapsedMs);
     }
 
     public async Task<(List<KahunaDeleteKeyValueResponseItem>, int)> TryDeleteManyKeyValues(

@@ -13,6 +13,8 @@ namespace Kahuna.Shared.Communication.Rest;
 [JsonSerializable(typeof(KahunaSetKeyValueRequest))]
 [JsonSerializable(typeof(KahunaGetKeyValueRequest))]
 [JsonSerializable(typeof(KahunaDeleteKeyValueRequest))]
+[JsonSerializable(typeof(KahunaSetManyKeyValueRequest))]
+[JsonSerializable(typeof(KahunaSetManyKeyValueResponse))]
 [JsonSerializable(typeof(KahunaDeleteManyKeyValueRequest))]
 [JsonSerializable(typeof(KahunaDeleteManyKeyValueResponse))]
 [JsonSerializable(typeof(KahunaExtendKeyValueRequest))]

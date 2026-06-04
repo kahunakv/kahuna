@@ -165,6 +165,37 @@ public static class KeyValuesHandlers
             }*/
         });
 
+        app.MapPost("/v1/kv/try-set-many", async (KahunaSetManyKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
+        {
+            if (request.Items is null)
+            {
+                return new KahunaSetManyKeyValueResponse
+                {
+                    Items =
+                    [
+                        new KahunaSetKeyValueResponseItem
+                        {
+                            Type = KeyValueResponseType.InvalidInput
+                        }
+                    ],
+                    TimeElapsedMs = 0
+                };
+            }
+
+            ValueStopwatch stopwatch = ValueStopwatch.StartNew();
+
+            List<KahunaSetKeyValueResponseItem> responses = await keyValues.LocateAndTrySetManyKeyValue(
+                request.Items,
+                cancellationToken
+            );
+
+            return new KahunaSetManyKeyValueResponse
+            {
+                Items = responses,
+                TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
+            };
+        });
+
         app.MapPost("/v1/kv/try-delete-many", async (KahunaDeleteManyKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
             if (request.Items is null)
