@@ -415,6 +415,65 @@ public class KahunaClient
 
         return responseKeyValues;
     }
+
+    /// <summary>
+    /// Deletes multiple key-value entries in the Kahuna system.
+    /// </summary>
+    /// <param name="requestItems">The collection of delete requests to execute.</param>
+    /// <param name="cancellationToken">Token to monitor for cancellation requests.</param>
+    /// <returns>A task that represents the asynchronous operation.</returns>
+    public async Task<List<KahunaKeyValue>> DeleteManyKeyValues(IEnumerable<KahunaDeleteKeyValueRequestItem> requestItems, CancellationToken cancellationToken = default)
+    {
+        (List<KahunaDeleteKeyValueResponseItem> items, int timeElapsed) responses = await communication.TryDeleteManyKeyValues(
+            GetRoundRobinUrl(),
+            requestItems,
+            cancellationToken
+        ).ConfigureAwait(false);
+
+        List<KahunaKeyValue> responseKeyValues = new(responses.items.Count);
+
+        foreach (KahunaDeleteKeyValueResponseItem response in responses.items)
+        {
+            responseKeyValues.Add(new(
+                this,
+                response.Key ?? "",
+                response.Type == KeyValueResponseType.Deleted,
+                response.Revision,
+                response.Durability,
+                responses.timeElapsed
+            ));
+        }
+
+        return responseKeyValues;
+    }
+
+    /// <summary>
+    /// Deletes multiple keys in the Kahuna system with the same durability.
+    /// </summary>
+    /// <param name="keys">The keys to delete.</param>
+    /// <param name="durability">The durability level to apply to every request.</param>
+    /// <param name="cancellationToken">Token to monitor for cancellation requests.</param>
+    /// <returns>A task that represents the asynchronous operation.</returns>
+    public Task<List<KahunaKeyValue>> DeleteManyKeyValues(
+        IEnumerable<string> keys,
+        KeyValueDurability durability = KeyValueDurability.Persistent,
+        CancellationToken cancellationToken = default
+    )
+    {
+        List<KahunaDeleteKeyValueRequestItem> requestItems = [];
+
+        foreach (string key in keys)
+        {
+            requestItems.Add(new()
+            {
+                TransactionId = HLCTimestamp.Zero,
+                Key = key,
+                Durability = durability
+            });
+        }
+
+        return DeleteManyKeyValues(requestItems, cancellationToken);
+    }
     
     /// <summary>
     /// Set key to hold the string value. If key already holds a value, it is overwritten

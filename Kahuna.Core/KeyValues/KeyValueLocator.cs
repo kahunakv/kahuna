@@ -184,6 +184,73 @@ internal sealed class KeyValueLocator
         await interNodeCommunication.TrySetManyNodeKeyValue(leader, items, lockSync, responses, cancellationToken);
     }
 
+    public async Task<List<KahunaDeleteKeyValueResponseItem>> LocateAndTryDeleteManyKeyValue(
+        List<KahunaDeleteKeyValueRequestItem> deleteManyItems,
+        CancellationToken cancellationToken
+    )
+    {
+        string localNode = raft.GetLocalEndpoint();
+
+        Dictionary<string, List<KahunaDeleteKeyValueRequestItem>> acquisitionPlan = [];
+        List<KahunaDeleteKeyValueResponseItem> responses = new(deleteManyItems.Count);
+
+        foreach (KahunaDeleteKeyValueRequestItem item in deleteManyItems)
+        {
+            if (string.IsNullOrEmpty(item.Key))
+            {
+                responses.Add(new()
+                {
+                    Key = item.Key,
+                    Type = KeyValueResponseType.InvalidInput,
+                    Durability = item.Durability
+                });
+                continue;
+            }
+
+            int partitionId = raft.GetPartitionKey(item.Key);
+            string leader = await raft.WaitForLeader(partitionId, cancellationToken);
+
+            if (acquisitionPlan.TryGetValue(leader, out List<KahunaDeleteKeyValueRequestItem>? list))
+                list.Add(item);
+            else
+                acquisitionPlan[leader] = [item];
+        }
+
+        Lock lockSync = new();
+        List<Task> tasks = new(acquisitionPlan.Count);
+
+        foreach ((string leader, List<KahunaDeleteKeyValueRequestItem> items) in acquisitionPlan)
+            tasks.Add(TryDeleteManyNodeKeyValue(leader, localNode, items, lockSync, responses, cancellationToken));
+
+        await Task.WhenAll(tasks);
+
+        return responses;
+    }
+
+    private async Task TryDeleteManyNodeKeyValue(
+        string leader,
+        string localNode,
+        List<KahunaDeleteKeyValueRequestItem> items,
+        Lock lockSync,
+        List<KahunaDeleteKeyValueResponseItem> responses,
+        CancellationToken cancellationToken
+    )
+    {
+        logger.LogDebug("DELETE-MANY-KEYVALUE Redirect {Number} delete key/value pairs to node {Leader}", items.Count, leader);
+
+        if (leader == localNode)
+        {
+            List<KahunaDeleteKeyValueResponseItem> acquireResponses = await manager.DeleteManyNodeKeyValue(items);
+
+            lock (lockSync)
+                responses.AddRange(acquireResponses);
+
+            return;
+        }
+
+        await interNodeCommunication.TryDeleteManyNodeKeyValue(leader, items, lockSync, responses, cancellationToken);
+    }
+
     /// <summary>
     /// Locates the leader node for the given key and executes the TryDelete request.
     /// </summary>

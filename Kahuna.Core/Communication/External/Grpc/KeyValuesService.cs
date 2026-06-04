@@ -125,6 +125,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     {
         return await TrySetManyKeyValueInternal(request, context);
     }
+
+    public override async Task<GrpcTryDeleteManyKeyValueResponse> TryDeleteManyKeyValue(GrpcTryDeleteManyKeyValueRequest request, ServerCallContext context)
+    {
+        return await TryDeleteManyKeyValueInternal(request, context);
+    }
     
     /// <summary>
     /// Attempts to set many key-value pairs within the key-value store with additional parameters such as expiration, flags, and durability.
@@ -190,6 +195,59 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     private static IEnumerable<GrpcTrySetManyKeyValueResponseItem> GetResponseSetManyItems(List<KahunaSetKeyValueResponseItem> responses)
     {
         foreach (KahunaSetKeyValueResponseItem response in responses)
+        {
+            yield return new()
+            {
+                Type = (GrpcKeyValueResponseType)response.Type,
+                Key = response.Key,
+                Revision = response.Revision,
+                LastModifiedNode = response.LastModified.N,
+                LastModifiedPhysical = response.LastModified.L,
+                LastModifiedCounter = response.LastModified.C,
+                Durability = (GrpcKeyValueDurability)response.Durability
+            };
+        }
+    }
+
+    internal async Task<GrpcTryDeleteManyKeyValueResponse> TryDeleteManyKeyValueInternal(GrpcTryDeleteManyKeyValueRequest request, ServerCallContext context)
+    {
+        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
+
+        List<KahunaDeleteKeyValueResponseItem> responses = await keyValues.LocateAndTryDeleteManyKeyValue(
+            GetRequestDeleteManyItems(request.Items),
+            context.CancellationToken
+        );
+
+        GrpcTryDeleteManyKeyValueResponse response = new()
+        {
+            TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
+        };
+
+        response.Items.AddRange(GetResponseDeleteManyItems(responses));
+
+        return response;
+    }
+
+    private static List<KahunaDeleteKeyValueRequestItem> GetRequestDeleteManyItems(RepeatedField<GrpcTryDeleteManyKeyValueRequestItem> items)
+    {
+        List<KahunaDeleteKeyValueRequestItem> requestItems = new(items.Count);
+
+        foreach (GrpcTryDeleteManyKeyValueRequestItem item in items)
+        {
+            requestItems.Add(new()
+            {
+                TransactionId = new(item.TransactionIdNode, item.TransactionIdPhysical, item.TransactionIdCounter),
+                Key = item.Key,
+                Durability = (KeyValueDurability)item.Durability
+            });
+        }
+
+        return requestItems;
+    }
+
+    private static IEnumerable<GrpcTryDeleteManyKeyValueResponseItem> GetResponseDeleteManyItems(List<KahunaDeleteKeyValueResponseItem> responses)
+    {
+        foreach (KahunaDeleteKeyValueResponseItem response in responses)
         {
             yield return new()
             {

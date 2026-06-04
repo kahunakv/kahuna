@@ -664,6 +664,110 @@ public class KahunaTransactionSession : IAsyncDisposable
         
         return new(Client, key, success, revision, durability, timeElapsedMs);
     }
+
+    /// <summary>
+    /// Deletes multiple key-value pairs inside the current transaction session.
+    /// </summary>
+    /// <param name="requestItems">The delete requests to execute.</param>
+    /// <param name="cancellationToken">Token used to propagate cancellation requests.</param>
+    /// <returns>A task that resolves to the delete operation results.</returns>
+    public async Task<List<KahunaKeyValue>> DeleteManyKeyValues(
+        IEnumerable<KahunaDeleteKeyValueRequestItem> requestItems,
+        CancellationToken cancellationToken = default
+    )
+    {
+        if (Status != KahunaTransactionStatus.Pending)
+            throw new KahunaException("Cannot perform actions on a completed transaction.", KeyValueResponseType.Errored);
+
+        List<KahunaDeleteKeyValueRequestItem> items = [];
+
+        foreach (KahunaDeleteKeyValueRequestItem item in requestItems)
+        {
+            items.Add(new()
+            {
+                TransactionId = TransactionId,
+                Key = item.Key,
+                Durability = item.Durability
+            });
+        }
+
+        acquiredLocks ??= [];
+
+        foreach (KahunaDeleteKeyValueRequestItem item in items)
+        {
+            if (string.IsNullOrEmpty(item.Key) || acquiredLocks.Contains((item.Key, item.Durability)))
+                continue;
+
+            bool successLock = await Client.Communication.TryAcquireExclusiveKeyValueLock(
+                Url,
+                TransactionId,
+                item.Key,
+                item.Durability,
+                cancellationToken
+            ).ConfigureAwait(false);
+
+            if (successLock)
+                acquiredLocks.Add((item.Key, item.Durability));
+        }
+
+        (List<KahunaDeleteKeyValueResponseItem> responses, int timeElapsedMs) = await Client.Communication.TryDeleteManyKeyValues(
+            Url,
+            items,
+            cancellationToken
+        ).ConfigureAwait(false);
+
+        List<KahunaKeyValue> result = new(responses.Count);
+
+        foreach (KahunaDeleteKeyValueResponseItem response in responses)
+        {
+            bool success = response.Type == KeyValueResponseType.Deleted;
+
+            if (success)
+            {
+                modifiedKeys ??= [];
+                modifiedKeys.Add((response.Key ?? "", response.Durability));
+            }
+
+            result.Add(new(
+                Client,
+                response.Key ?? "",
+                success,
+                response.Revision,
+                response.Durability,
+                timeElapsedMs
+            ));
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Deletes multiple keys inside the current transaction session with the same durability.
+    /// </summary>
+    /// <param name="keys">The keys to delete.</param>
+    /// <param name="durability">The durability level to apply to every request.</param>
+    /// <param name="cancellationToken">Token used to propagate cancellation requests.</param>
+    /// <returns>A task that resolves to the delete operation results.</returns>
+    public Task<List<KahunaKeyValue>> DeleteManyKeyValues(
+        IEnumerable<string> keys,
+        KeyValueDurability durability = KeyValueDurability.Persistent,
+        CancellationToken cancellationToken = default
+    )
+    {
+        List<KahunaDeleteKeyValueRequestItem> requestItems = [];
+
+        foreach (string key in keys)
+        {
+            requestItems.Add(new()
+            {
+                TransactionId = TransactionId,
+                Key = key,
+                Durability = durability
+            });
+        }
+
+        return DeleteManyKeyValues(requestItems, cancellationToken);
+    }
     
     /// <summary>
     /// Get keys with a specific prefix

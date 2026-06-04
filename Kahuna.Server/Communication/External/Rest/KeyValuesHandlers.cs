@@ -4,6 +4,7 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Kommander;
+using Kommander.Diagnostics;
 using Kommander.Time;
 
 namespace Kahuna.Communication.External.Rest;
@@ -162,6 +163,37 @@ public static class KeyValuesHandlers
                 
                 return new() { Type = KeyValueResponseType.Errored };
             }*/
+        });
+
+        app.MapPost("/v1/kv/try-delete-many", async (KahunaDeleteManyKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
+        {
+            if (request.Items is null)
+            {
+                return new KahunaDeleteManyKeyValueResponse
+                {
+                    Items =
+                    [
+                        new KahunaDeleteKeyValueResponseItem
+                        {
+                            Type = KeyValueResponseType.InvalidInput
+                        }
+                    ],
+                    TimeElapsedMs = 0
+                };
+            }
+
+            ValueStopwatch stopwatch = ValueStopwatch.StartNew();
+
+            List<KahunaDeleteKeyValueResponseItem> responses = await keyValues.LocateAndTryDeleteManyKeyValue(
+                request.Items,
+                cancellationToken
+            );
+
+            return new KahunaDeleteManyKeyValueResponse
+            {
+                Items = responses,
+                TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
+            };
         });
 
         app.MapPost("/v1/kv/try-get", async (KahunaGetKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>

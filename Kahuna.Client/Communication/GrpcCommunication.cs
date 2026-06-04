@@ -377,6 +377,36 @@ public class GrpcCommunication : IKahunaCommunication
         return (GetSetManyKeyValueResponseItems(response.Items), response.TimeElapsedMs);
     }
 
+    public async Task<(List<KahunaDeleteKeyValueResponseItem>, int)> TryDeleteManyKeyValues(
+        string url,
+        IEnumerable<KahunaDeleteKeyValueRequestItem> requestItems,
+        CancellationToken cancellationToken
+    )
+    {
+        GrpcTryDeleteManyKeyValueRequest request = new();
+
+        request.Items.AddRange(GetDeleteManyKeyValueRequestItems(requestItems));
+
+        GrpcBatcher batcher = GetSharedBatcher(url);
+
+        if (cancellationToken.IsCancellationRequested)
+            throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
+
+        GrpcBatcherResponse batchResponse;
+
+        if (cancellationToken == CancellationToken.None)
+            batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+        else
+            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        GrpcTryDeleteManyKeyValueResponse? response = batchResponse.TryDeleteManyKeyValues;
+
+        if (response is null)
+            throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+
+        return (GetDeleteManyKeyValueResponseItems(response.Items), response.TimeElapsedMs);
+    }
+
     private static IEnumerable<GrpcTrySetManyKeyValueRequestItem> GetSetManyKeyValueRequestItems(IEnumerable<KahunaSetKeyValueRequestItem> requestItems)
     {                
         foreach (KahunaSetKeyValueRequestItem item in requestItems)
@@ -401,6 +431,40 @@ public class GrpcCommunication : IKahunaCommunication
             responseItems.Add(new()
             {
                 Key = item.Key,
+                Revision = item.Revision,
+                LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
+                Durability = (KeyValueDurability)item.Durability
+            });
+        }
+
+        return responseItems;
+    }
+
+    private static IEnumerable<GrpcTryDeleteManyKeyValueRequestItem> GetDeleteManyKeyValueRequestItems(IEnumerable<KahunaDeleteKeyValueRequestItem> requestItems)
+    {
+        foreach (KahunaDeleteKeyValueRequestItem item in requestItems)
+        {
+            yield return new()
+            {
+                TransactionIdNode = item.TransactionId.N,
+                TransactionIdPhysical = item.TransactionId.L,
+                TransactionIdCounter = item.TransactionId.C,
+                Key = item.Key,
+                Durability = (GrpcKeyValueDurability)item.Durability
+            };
+        }
+    }
+
+    private static List<KahunaDeleteKeyValueResponseItem> GetDeleteManyKeyValueResponseItems(RepeatedField<GrpcTryDeleteManyKeyValueResponseItem> grpcResponseItems)
+    {
+        List<KahunaDeleteKeyValueResponseItem> responseItems = new(grpcResponseItems.Count);
+
+        foreach (GrpcTryDeleteManyKeyValueResponseItem? item in grpcResponseItems)
+        {
+            responseItems.Add(new()
+            {
+                Key = item.Key,
+                Type = (KeyValueResponseType)item.Type,
                 Revision = item.Revision,
                 LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
                 Durability = (KeyValueDurability)item.Durability

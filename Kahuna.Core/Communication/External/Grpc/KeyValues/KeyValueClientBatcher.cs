@@ -50,6 +50,14 @@ internal sealed class KeyValueClientBatcher
                     }
                     break;
 
+                    case GrpcClientBatchType.TryDeleteManyKeyValue:
+                    {
+                        GrpcTryDeleteManyKeyValueRequest? deleteManyKeyRequest = request.TryDeleteManyKeyValue;
+
+                        tasks.Add(TryDeleteManyKeyValueDelayed(semaphore, request.RequestId, deleteManyKeyRequest, responseStream, context));
+                    }
+                    break;
+
                     case GrpcClientBatchType.TryGetKeyValue:
                     {
                         GrpcTryGetKeyValueRequest? getKeyRequest = request.TryGetKeyValue;
@@ -188,6 +196,26 @@ internal sealed class KeyValueClientBatcher
             Type = GrpcClientBatchType.TrySetManyKeyValue,
             RequestId = requestId,
             TrySetManyKeyValue = trySetResponse
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+
+    private async Task TryDeleteManyKeyValueDelayed(
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcTryDeleteManyKeyValueRequest deleteManyKeyRequest,
+        IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcTryDeleteManyKeyValueResponse tryDeleteManyResponse = await service.TryDeleteManyKeyValueInternal(deleteManyKeyRequest, context);
+
+        GrpcBatchClientKeyValueResponse response = new()
+        {
+            Type = GrpcClientBatchType.TryDeleteManyKeyValue,
+            RequestId = requestId,
+            TryDeleteManyKeyValue = tryDeleteManyResponse
         };
 
         await WriteResponseToStream(semaphore, responseStream, response, context);

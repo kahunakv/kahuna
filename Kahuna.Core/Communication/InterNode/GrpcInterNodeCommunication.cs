@@ -287,6 +287,37 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         }
     }
 
+    public async Task TryDeleteManyNodeKeyValue(
+        string node,
+        List<KahunaDeleteKeyValueRequestItem> items,
+        Lock lockSync,
+        List<KahunaDeleteKeyValueResponseItem> responses,
+        CancellationToken cancellationToken
+    )
+    {
+        GrpcTryDeleteManyKeyValueRequest request = new();
+
+        request.Items.Add(GetDeleteManyRequestItems(items));
+
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcTryDeleteManyKeyValueResponse remoteResponse = response.TryDeleteManyKeyValue!;
+
+        lock (lockSync)
+        {
+            foreach (GrpcTryDeleteManyKeyValueResponseItem item in remoteResponse.Items)
+                responses.Add(new()
+                {
+                    Key = item.Key,
+                    Type = (KeyValueResponseType)item.Type,
+                    Revision = item.Revision,
+                    LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
+                    Durability = (KeyValueDurability)item.Durability,
+                });
+        }
+    }
+
     /// <summary>
     /// 
     /// </summary>
@@ -315,6 +346,21 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
                 grpcItem.CompareValue = UnsafeByteOperations.UnsafeWrap(item.CompareValue);
 
             yield return grpcItem;
+        }
+    }
+
+    private static IEnumerable<GrpcTryDeleteManyKeyValueRequestItem> GetDeleteManyRequestItems(List<KahunaDeleteKeyValueRequestItem> items)
+    {
+        foreach (KahunaDeleteKeyValueRequestItem item in items)
+        {
+            yield return new()
+            {
+                TransactionIdNode = item.TransactionId.N,
+                TransactionIdPhysical = item.TransactionId.L,
+                TransactionIdCounter = item.TransactionId.C,
+                Key = item.Key,
+                Durability = (GrpcKeyValueDurability)item.Durability
+            };
         }
     }
 

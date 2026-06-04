@@ -26,6 +26,8 @@ public interface IInterNodeCommunication
     
     public Task TrySetManyNodeKeyValue(string node, List<KahunaSetKeyValueRequestItem> items, Lock lockSync, List<KahunaSetKeyValueResponseItem> responses, CancellationToken cancellationToken);
 
+    public Task TryDeleteManyNodeKeyValue(string node, List<KahunaDeleteKeyValueRequestItem> items, Lock lockSync, List<KahunaDeleteKeyValueResponseItem> responses, CancellationToken cancellationToken);
+
     public Task<(KeyValueResponseType, long, HLCTimestamp)> TryDeleteKeyValue(string node, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken);
 
     public Task<(KeyValueResponseType, long, HLCTimestamp)> TryExtendKeyValue(string node, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken);

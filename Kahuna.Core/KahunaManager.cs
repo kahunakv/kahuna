@@ -272,6 +272,11 @@ public sealed class KahunaManager : IKahuna, IDisposable
         );
     }
 
+    public Task<List<KahunaDeleteKeyValueResponseItem>> LocateAndTryDeleteManyKeyValue(List<KahunaDeleteKeyValueRequestItem> deleteManyItems, CancellationToken cancellationToken)
+    {
+        return keyValues.LocateAndTryDeleteManyKeyValue(deleteManyItems, cancellationToken);
+    }
+
     /// <summary>
     /// Locates the leader node for the given key and executes the TryGetValue request.
     /// </summary>
@@ -731,6 +736,11 @@ public sealed class KahunaManager : IKahuna, IDisposable
     )
     {
         return keyValues.TryDeleteKeyValue(transactionId, key, durability);
+    }
+
+    public Task<List<KahunaDeleteKeyValueResponseItem>> DeleteManyNodeKeyValue(List<KahunaDeleteKeyValueRequestItem> items)
+    {
+        return keyValues.DeleteManyNodeKeyValue(items);
     }
 
     /// <summary>

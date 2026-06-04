@@ -47,6 +47,11 @@ public class KahunaKeyValue
     public int TimeElapsedMs { get; }
 
     /// <summary>
+    /// Gets the durability associated with the key-value operation.
+    /// </summary>
+    public KeyValueDurability Durability => durability;
+
+    /// <summary>
     /// Represents a key-value operation result, encapsulating details such as success status, revision number,
     /// durability type, and time elapsed during the operation.
     /// </summary>

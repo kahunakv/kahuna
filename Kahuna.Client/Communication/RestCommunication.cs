@@ -458,6 +458,41 @@ public class RestCommunication : IKahunaCommunication
         throw new NotImplementedException();
     }
 
+    public async Task<(List<KahunaDeleteKeyValueResponseItem>, int)> TryDeleteManyKeyValues(
+        string url,
+        IEnumerable<KahunaDeleteKeyValueRequestItem> requestItems,
+        CancellationToken cancellationToken
+    )
+    {
+        KahunaDeleteManyKeyValueRequest request = new()
+        {
+            Items = [.. requestItems]
+        };
+
+        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaDeleteManyKeyValueRequest);
+
+        if (cancellationToken.IsCancellationRequested)
+            throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
+
+        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
+
+        KahunaDeleteManyKeyValueResponse? response = await retryPolicy.ExecuteAsync(() =>
+            url
+                .WithOAuthBearerToken("xxx")
+                .AppendPathSegments("v1/kv/try-delete-many")
+                .WithHeader("Accept", "application/json")
+                .WithHeader("Content-Type", "application/json")
+                .WithSettings(o => o.HttpVersion = "2.0")
+                .PostStringAsync(payload, cancellationToken: cancellationToken)
+                .ReceiveJson<KahunaDeleteManyKeyValueResponse>())
+                .ConfigureAwait(false);
+
+        if (response is null)
+            throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+
+        return (response.Items ?? [], response.TimeElapsedMs);
+    }
+
     /// <summary>
     /// Attempts to compare the specified value with an existing key's value and set a new value if they match.
     /// </summary>

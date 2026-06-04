@@ -1052,6 +1052,14 @@ internal sealed class KeyValueTransactionCoordinator
                 context.Result = await SetManyCommand.Execute(manager, context, ast, cancellationToken);
                 return;
             }
+
+            keys.Clear();
+
+            if (CanBatchBeDeleteMany(context, ast, keys))
+            {
+                context.Result = await DeleteManyCommand.Execute(manager, context, ast, cancellationToken);
+                return;
+            }
         }
         
         while (true)
@@ -1337,5 +1345,86 @@ internal sealed class KeyValueTransactionCoordinator
         }
 
         return areSets;
-    }    
+    }
+
+    private static bool CanBatchBeDeleteMany(KeyValueTransactionContext context, NodeAst ast, HashSet<(string, KeyValueDurability)> keys)
+    {
+        bool areDeletes = false;
+
+        while (true)
+        {
+            switch (ast.nodeType)
+            {
+                case NodeType.StmtList:
+                {
+                    if (ast.leftAst is not null)
+                    {
+                        if (!CanBatchBeDeleteMany(context, ast.leftAst, keys))
+                            return false;
+                    }
+
+                    if (ast.rightAst is not null)
+                    {
+                        ast = ast.rightAst!;
+                        continue;
+                    }
+
+                    break;
+                }
+
+                case NodeType.Delete:
+                {
+                    if (ast.leftAst is null)
+                        return false;
+
+                    string keyName;
+
+                    try
+                    {
+                        keyName = BaseCommand.GetKeyName(context, ast.leftAst);
+                    }
+                    catch (KahunaScriptException)
+                    {
+                        return false;
+                    }
+
+                    if (!keys.Add((keyName, KeyValueDurability.Persistent)))
+                        return false;
+
+                    areDeletes = true;
+                    break;
+                }
+
+                case NodeType.Edelete:
+                {
+                    if (ast.leftAst is null)
+                        return false;
+
+                    string keyName;
+
+                    try
+                    {
+                        keyName = BaseCommand.GetKeyName(context, ast.leftAst);
+                    }
+                    catch (KahunaScriptException)
+                    {
+                        return false;
+                    }
+
+                    if (!keys.Add((keyName, KeyValueDurability.Ephemeral)))
+                        return false;
+
+                    areDeletes = true;
+                    break;
+                }
+
+                default:
+                    return false;
+            }
+
+            break;
+        }
+
+        return areDeletes;
+    }
 }

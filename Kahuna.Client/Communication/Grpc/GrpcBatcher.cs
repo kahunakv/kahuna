@@ -166,6 +166,15 @@ internal sealed class GrpcBatcher
         return TryProcessQueue(grpcBatcherItem, promise);
     }
 
+    public Task<GrpcBatcherResponse> Enqueue(GrpcTryDeleteManyKeyValueRequest message)
+    {
+        TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
     /// <summary>
     /// Adds a key-value request to the batch processing queue and processes the queue as needed.
     /// </summary>
@@ -474,6 +483,11 @@ internal sealed class GrpcBatcher
             batchRequest.Type = GrpcClientBatchType.TrySetManyKeyValue;
             batchRequest.TrySetManyKeyValue = itemRequest.TrySetManyKeyValues;
         }
+        else if (itemRequest.TryDeleteManyKeyValues is not null)
+        {
+            batchRequest.Type = GrpcClientBatchType.TryDeleteManyKeyValue;
+            batchRequest.TryDeleteManyKeyValue = itemRequest.TryDeleteManyKeyValues;
+        }
         else if (itemRequest.TryGetKeyValue is not null)
         {
             batchRequest.Type = GrpcClientBatchType.TryGetKeyValue;
@@ -581,6 +595,10 @@ internal sealed class GrpcBatcher
                 
                     case GrpcClientBatchType.TrySetManyKeyValue:
                         item.Promise.SetResult(new(response.TrySetManyKeyValue));
+                        break;
+
+                    case GrpcClientBatchType.TryDeleteManyKeyValue:
+                        item.Promise.SetResult(new(response.TryDeleteManyKeyValue));
                         break;
                         
                     case GrpcClientBatchType.TryGetKeyValue:

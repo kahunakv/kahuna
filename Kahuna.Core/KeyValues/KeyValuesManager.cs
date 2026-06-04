@@ -253,6 +253,14 @@ internal sealed class KeyValuesManager
         return locator.LocateAndTrySetManyKeyValue(setManyItems, cancellationToken);
     }
 
+    public Task<List<KahunaDeleteKeyValueResponseItem>> LocateAndTryDeleteManyKeyValue(
+        List<KahunaDeleteKeyValueRequestItem> deleteManyItems,
+        CancellationToken cancellationToken
+    )
+    {
+        return locator.LocateAndTryDeleteManyKeyValue(deleteManyItems, cancellationToken);
+    }
+
     /// <summary>
     /// Locates the leader node for the given key and executes the TryGetValue request.
     /// </summary>
@@ -776,6 +784,92 @@ internal sealed class KeyValuesManager
                         Type = response.Type,
                         Revision = response.Revision,
                         LastModified = response.Ticket,
+                        Durability = item.Durability
+                    });
+            }
+            finally
+            {
+                KeyValueRequestPool.Return(request);
+            }
+        });
+
+        return responses;
+    }
+
+    public async Task<List<KahunaDeleteKeyValueResponseItem>> DeleteManyNodeKeyValue(List<KahunaDeleteKeyValueRequestItem> items)
+    {
+        Lock sync = new();
+        List<KahunaDeleteKeyValueResponseItem> responses = new(items.Count);
+
+        await items.ForEachAsync(5, async item =>
+        {
+            KeyValueRequest request = KeyValueRequestPool.Rent(
+                KeyValueRequestType.TryDelete,
+                item.TransactionId,
+                HLCTimestamp.Zero,
+                item.Key ?? "",
+                null,
+                null,
+                -1,
+                KeyValueFlags.None,
+                0,
+                HLCTimestamp.Zero,
+                item.Durability,
+                0,
+                0,
+                null
+            );
+
+            try
+            {
+                for (int i = 0; i < MaxRetries; i++)
+                {
+                    KeyValueResponse? response;
+
+                    if (item.Durability == KeyValueDurability.Ephemeral)
+                        response = await ephemeralKeyValuesRouter.Ask(request);
+                    else
+                        response = await persistentKeyValuesRouter.Ask(request);
+
+                    if (response is null)
+                    {
+                        lock (sync)
+                            responses.Add(new()
+                            {
+                                Key = item.Key ?? "",
+                                Type = KeyValueResponseType.Errored,
+                                Revision = -1,
+                                LastModified = HLCTimestamp.Zero,
+                                Durability = item.Durability
+                            });
+                        return;
+                    }
+
+                    if (response.Type == KeyValueResponseType.WaitingForReplication)
+                    {
+                        await Task.Delay(1);
+                        continue;
+                    }
+
+                    lock (sync)
+                        responses.Add(new()
+                        {
+                            Key = item.Key ?? "",
+                            Type = response.Type,
+                            Revision = response.Revision,
+                            LastModified = response.Ticket,
+                            Durability = item.Durability
+                        });
+                    return;
+                }
+
+                lock (sync)
+                    responses.Add(new()
+                    {
+                        Key = item.Key ?? "",
+                        Type = KeyValueResponseType.MustRetry,
+                        Revision = -1,
+                        LastModified = HLCTimestamp.Zero,
                         Durability = item.Durability
                     });
             }

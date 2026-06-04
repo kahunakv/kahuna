@@ -21,6 +21,8 @@ internal sealed class GrpcBatcherRequest
     public GrpcTrySetKeyValueRequest? TrySetKeyValue { get; }
 
     public GrpcTrySetManyKeyValueRequest? TrySetManyKeyValues { get; }
+
+    public GrpcTryDeleteManyKeyValueRequest? TryDeleteManyKeyValues { get; }
     
     public GrpcTryGetKeyValueRequest? TryGetKeyValue { get; }
     
@@ -72,6 +74,11 @@ internal sealed class GrpcBatcherRequest
     public GrpcBatcherRequest(GrpcTrySetManyKeyValueRequest trySetManyKeyValues)
     {
         TrySetManyKeyValues = trySetManyKeyValues;
+    }
+
+    public GrpcBatcherRequest(GrpcTryDeleteManyKeyValueRequest tryDeleteManyKeyValues)
+    {
+        TryDeleteManyKeyValues = tryDeleteManyKeyValues;
     }
     
     public GrpcBatcherRequest(GrpcTryGetKeyValueRequest tryGetKeyValue)

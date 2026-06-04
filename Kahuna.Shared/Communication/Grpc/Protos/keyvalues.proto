@@ -3,6 +3,7 @@ syntax = "proto3";
 service KeyValuer {
   rpc TrySetKeyValue (GrpcTrySetKeyValueRequest) returns (GrpcTrySetKeyValueResponse);
   rpc TrySetManyKeyValue (GrpcTrySetManyKeyValueRequest) returns (GrpcTrySetManyKeyValueResponse);
+  rpc TryDeleteManyKeyValue (GrpcTryDeleteManyKeyValueRequest) returns (GrpcTryDeleteManyKeyValueResponse);
   rpc TryExtendKeyValue (GrpcTryExtendKeyValueRequest) returns (GrpcTryExtendKeyValueResponse);
   rpc TryDeleteKeyValue (GrpcTryDeleteKeyValueRequest) returns (GrpcTryDeleteKeyValueResponse);
   rpc TryGetKeyValue (GrpcTryGetKeyValueRequest) returns (GrpcTryGetKeyValueResponse);
@@ -77,6 +78,34 @@ message GrpcTrySetManyKeyValueResponse {
 }
 
 message GrpcTrySetManyKeyValueResponseItem {
+  optional string ServedFrom = 1;
+  GrpcKeyValueResponseType Type = 2;
+  string Key = 3;
+  int64 Revision = 4;
+  int32 LastModifiedNode = 5;
+  int64 LastModifiedPhysical = 6;
+  uint32 LastModifiedCounter = 7;
+  GrpcKeyValueDurability Durability = 8;
+}
+
+message GrpcTryDeleteManyKeyValueRequest {
+  repeated GrpcTryDeleteManyKeyValueRequestItem Items = 1;
+}
+
+message GrpcTryDeleteManyKeyValueRequestItem {
+  int32 TransactionIdNode = 1;
+  int64 TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter = 3;
+  string Key = 4;
+  GrpcKeyValueDurability Durability = 5;
+}
+
+message GrpcTryDeleteManyKeyValueResponse {
+  repeated GrpcTryDeleteManyKeyValueResponseItem Items = 1;
+  int32 TimeElapsedMs = 7;
+}
+
+message GrpcTryDeleteManyKeyValueResponseItem {
   optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
   string Key = 3;
@@ -600,6 +629,7 @@ message GrpcBatchClientKeyValueRequest {
     GrpcStartTransactionRequest StartTransaction = 13;
     GrpcCommitTransactionRequest CommitTransaction = 14;
     GrpcRollbackTransactionRequest RollbackTransaction = 15;
+    GrpcTryDeleteManyKeyValueRequest TryDeleteManyKeyValue = 16;
   }
 }
 
@@ -621,6 +651,7 @@ message GrpcBatchClientKeyValueResponse
     GrpcStartTransactionResponse StartTransaction = 13;
     GrpcCommitTransactionResponse CommitTransaction = 14;
     GrpcRollbackTransactionResponse RollbackTransaction = 15;
+    GrpcTryDeleteManyKeyValueResponse TryDeleteManyKeyValue = 16;
   }
 }
 
@@ -653,6 +684,7 @@ message GrpcBatchServerKeyValueRequest {
     GrpcCommitTransactionRequest CommitTransaction = 26;
     GrpcRollbackTransactionRequest RollbackTransaction = 27;
     GrpcGetByRangeRequest GetByRange = 28;
+    GrpcTryDeleteManyKeyValueRequest TryDeleteManyKeyValue = 29;
   }
 }
 
@@ -686,6 +718,7 @@ message GrpcBatchServerKeyValueResponse
     GrpcCommitTransactionResponse CommitTransaction = 25;
     GrpcRollbackTransactionResponse RollbackTransaction = 26;
     GrpcGetByRangeResponse GetByRange = 27;
+    GrpcTryDeleteManyKeyValueResponse TryDeleteManyKeyValue = 28;
   }
 }
 
@@ -704,6 +737,7 @@ enum GrpcClientBatchType {
   TRY_START_TRANSACTION = 11;
   TRY_COMMIT_TRANSACTION = 12;
   TRY_ROLLBACK_TRANSACTION = 13;
+  TRY_DELETE_MANY_KEY_VALUE = 14;
 }
 
 enum GrpcServerBatchType {
@@ -733,6 +767,7 @@ enum GrpcServerBatchType {
   SERVER_TRY_COMMIT_TRANSACTION = 24;
   SERVER_TRY_ROLLBACK_TRANSACTION = 25;
   SERVER_TRY_GET_BY_RANGE = 26;
+  SERVER_TRY_DELETE_MANY_KEY_VALUE = 27;
 }
 
 enum GrpcKeyValueFlags {

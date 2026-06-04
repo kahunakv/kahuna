@@ -231,6 +231,48 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         }
     }
 
+    public async Task TryDeleteManyNodeKeyValue(
+        string node,
+        List<KahunaDeleteKeyValueRequestItem> items,
+        Lock lockSync,
+        List<KahunaDeleteKeyValueResponseItem> responses,
+        CancellationToken cancellationToken
+    )
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            ConcurrentBag<KahunaDeleteKeyValueResponseItem> bag = [];
+
+            foreach (KahunaDeleteKeyValueRequestItem item in items)
+            {
+                (KeyValueResponseType, long, HLCTimestamp) resp = await kahunaNode.TryDeleteKeyValue(
+                    item.TransactionId,
+                    item.Key ?? "",
+                    item.Durability
+                );
+
+                bag.Add(new()
+                {
+                    Key = item.Key,
+                    Type = resp.Item1,
+                    Revision = resp.Item2,
+                    LastModified = resp.Item3,
+                    Durability = item.Durability
+                });
+            }
+
+            foreach (KahunaDeleteKeyValueResponseItem responseBag in bag)
+            {
+                lock (lockSync)
+                    responses.Add(responseBag);
+            }
+
+            return;
+        }
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
     /// <summary>
     /// 
     /// </summary>
