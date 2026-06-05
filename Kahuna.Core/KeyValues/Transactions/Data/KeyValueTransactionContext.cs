@@ -137,6 +137,11 @@ internal sealed class KeyValueTransactionContext
     public HashSet<(string, KeyValueDurability)>? ModifiedKeys { get; set; }
 
     /// <summary>
+    /// Tracks the keys read during the transaction and their observed revisions.
+    /// </summary>
+    public Dictionary<(string, KeyValueDurability), KeyValueTransactionReadKey>? ReadKeys { get; set; }
+
+    /// <summary>
     /// Gets the collection of key-value parameters (placeholders) associated with the transaction context.
     /// </summary>
     /// <remarks>

@@ -1475,6 +1475,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             GetTransactionAcquiredOrModifiedKeys(request.AcquiredLocks).ToList(),
             GetTransactionAcquiredOrModifiedKeys(request.ModifiedKeys).ToList(),
+            GetTransactionReadKeys(request.ReadKeys).ToList(),
             context.CancellationToken
         );               
 
@@ -1541,6 +1542,20 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             {
                 Key = item.Key,
                 Durability = (KeyValueDurability)item.Durability
+            };
+        }
+    }
+    
+    private static IEnumerable<KeyValueTransactionReadKey> GetTransactionReadKeys(RepeatedField<GrpcTransactionReadKey> requestReadKeys)
+    {
+        foreach (GrpcTransactionReadKey item in requestReadKeys)
+        {
+            yield return new()
+            {
+                Key = item.Key,
+                Durability = (KeyValueDurability)item.Durability,
+                Exists = item.Exists,
+                Revision = item.Revision
             };
         }
     }

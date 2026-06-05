@@ -253,7 +253,7 @@ public class TestKeyValueScriptTransactions : BaseCluster
         Assert.Equal(KeyValueResponseType.Set, type);
         Assert.True(transactionId.L > 0);
         
-        KeyValueResponseType response = await kahuna2.LocateAndCommitTransaction(options.UniqueId, transactionId, [], [], TestContext.Current.CancellationToken);
+        KeyValueResponseType response = await kahuna2.LocateAndCommitTransaction(options.UniqueId, transactionId, [], [], [], TestContext.Current.CancellationToken);
         Assert.Equal(KeyValueResponseType.Committed, response);
         
         await LeaveCluster(node1, node2, node3);
@@ -317,6 +317,7 @@ public class TestKeyValueScriptTransactions : BaseCluster
             transactionId, 
             [new() { Key = "pp1", Durability = KeyValueDurability.Persistent }], 
             [new() { Key = "pp1", Durability = KeyValueDurability.Persistent }], 
+            [],
             TestContext.Current.CancellationToken
         );
         Assert.Equal(KeyValueResponseType.Committed, response);
@@ -375,6 +376,7 @@ public class TestKeyValueScriptTransactions : BaseCluster
             transactionId, 
             [new() { Key = "pp1", Durability = KeyValueDurability.Persistent }, new() { Key = "pp2", Durability = KeyValueDurability.Persistent }], 
             [new() { Key = "pp1", Durability = KeyValueDurability.Persistent }, new() { Key = "pp2", Durability = KeyValueDurability.Persistent }], 
+            [],
             TestContext.Current.CancellationToken
         );
         

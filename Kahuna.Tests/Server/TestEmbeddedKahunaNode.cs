@@ -189,6 +189,7 @@ public sealed class TestEmbeddedKahunaNode
             transactionId,
             [new() { Key = txKey, Durability = KeyValueDurability.Persistent }],
             [new() { Key = txKey, Durability = KeyValueDurability.Persistent }],
+            [],
             TestContext.Current.CancellationToken
         );
 

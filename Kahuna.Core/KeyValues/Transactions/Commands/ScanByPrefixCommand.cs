@@ -75,6 +75,8 @@ internal sealed class ScanByPrefixCommand : BaseCommand
         
         foreach ((string key, ReadOnlyKeyValueEntry valueContext) item in response.Items)
         {
+            RecordReadKey(context, item.key, durability, true, item.valueContext.Revision);
+
             values.Add(new()
             {
                 Key = item.key,

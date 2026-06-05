@@ -1163,7 +1163,8 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         string uniqueId, 
         HLCTimestamp timestamp, 
         List<KeyValueTransactionModifiedKey> acquiredLocks, 
-        List<KeyValueTransactionModifiedKey> modifiedKeys, 
+        List<KeyValueTransactionModifiedKey> modifiedKeys,
+        List<KeyValueTransactionReadKey> readKeys,
         CancellationToken cancellationToken
     )
     {
@@ -1182,6 +1183,9 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         
         if (modifiedKeys.Count > 0)
             request.ModifiedKeys.AddRange(GetArquiredOrModifiedItems(modifiedKeys));
+        
+        if (readKeys.Count > 0)
+            request.ReadKeys.AddRange(GetReadItems(readKeys));
         
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
         GrpcCommitTransactionResponse remoteResponse = response.CommitTransaction!;
@@ -1242,6 +1246,20 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             {
                 Key = item.Key,
                 Durability = (GrpcKeyValueDurability) item.Durability,
+            };
+        }
+    }
+    
+    private static IEnumerable<GrpcTransactionReadKey> GetReadItems(List<KeyValueTransactionReadKey> items)
+    {
+        foreach (KeyValueTransactionReadKey item in items)
+        {
+            yield return new()
+            {
+                Key = item.Key,
+                Durability = (GrpcKeyValueDurability)item.Durability,
+                Exists = item.Exists,
+                Revision = item.Revision
             };
         }
     }

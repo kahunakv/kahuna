@@ -1307,7 +1307,8 @@ public class GrpcCommunication : IKahunaCommunication
         string uniqueId, 
         HLCTimestamp transactionId,
         List<KeyValueTransactionModifiedKey> acquiredLocks, 
-        List<KeyValueTransactionModifiedKey> modifiedKeys, 
+        List<KeyValueTransactionModifiedKey> modifiedKeys,
+        List<KeyValueTransactionReadKey> readKeys,
         CancellationToken cancellationToken
     )
     {
@@ -1324,6 +1325,9 @@ public class GrpcCommunication : IKahunaCommunication
         
         if (modifiedKeys.Count > 0)
             request.ModifiedKeys.AddRange(GetTransactionAcquiredOrModifiedKeys(modifiedKeys));
+        
+        if (readKeys.Count > 0)
+            request.ReadKeys.AddRange(GetTransactionReadKeys(readKeys));
 
         int retries = 0;
         
@@ -1597,6 +1601,20 @@ public class GrpcCommunication : IKahunaCommunication
                 Key = modifiedKey.Key, 
                 Durability = (GrpcKeyValueDurability)modifiedKey.Durability
             };
+    }
+    
+    private static IEnumerable<GrpcTransactionReadKey> GetTransactionReadKeys(List<KeyValueTransactionReadKey> readKeys)
+    {
+        foreach (KeyValueTransactionReadKey readKey in readKeys)
+        {
+            yield return new()
+            {
+                Key = readKey.Key,
+                Durability = (GrpcKeyValueDurability)readKey.Durability,
+                Exists = readKey.Exists,
+                Revision = readKey.Revision
+            };
+        }
     }
 
     private static IEnumerable<GrpcKeyValueParameter> GetTransactionParameters(List<KeyValueParameter> parameters)

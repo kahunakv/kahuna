@@ -271,7 +271,8 @@ internal sealed class KeyValueTransactionCoordinator
     public async Task<KeyValueResponseType> CommitTransaction(
         HLCTimestamp transactionId,
         List<KeyValueTransactionModifiedKey> acquiredLocks,
-        List<KeyValueTransactionModifiedKey> modifiedKeys
+        List<KeyValueTransactionModifiedKey> modifiedKeys,
+        List<KeyValueTransactionReadKey> readKeys
     )
     {
         if (!sessions.TryGetValue(transactionId, out KeyValueTransactionContext? context))
@@ -295,6 +296,15 @@ internal sealed class KeyValueTransactionCoordinator
             {
                 context.ModifiedKeys ??= [];
                 context.ModifiedKeys.Add((modifiedKey.Key ?? "", modifiedKey.Durability));
+            }
+            
+            foreach (KeyValueTransactionReadKey readKey in readKeys)
+            {
+                if (string.IsNullOrEmpty(readKey.Key))
+                    continue;
+                
+                context.ReadKeys ??= [];
+                context.ReadKeys[(readKey.Key, readKey.Durability)] = readKey;
             }
 
             await TwoPhaseCommit(context, CancellationToken.None);
@@ -813,6 +823,9 @@ internal sealed class KeyValueTransactionCoordinator
         if (context.LocksAcquired is null || context.ModifiedKeys is null || context.ModifiedKeys.Count == 0)
             return;
 
+        if (!await ValidateReadSet(context, cancellationToken))
+            return;
+
         // Step 3: Prepare mutations
         (bool success, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>? mutationsPrepared) = await PrepareMutations(
             context,
@@ -836,6 +849,124 @@ internal sealed class KeyValueTransactionCoordinator
         // only receives Committed after the mutations are durably applied.
         await CommitMutations(context, mutationsPrepared);
     }
+
+    /// <summary>
+    /// Validates optimistic read dependencies against the current committed state before prepare.
+    /// </summary>
+    /// <param name="context">The transaction context containing observed reads.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>True when every read dependency still matches the committed state.</returns>
+    private async Task<bool> ValidateReadSet(KeyValueTransactionContext context, CancellationToken cancellationToken)
+    {
+        if (context.Locking != KeyValueTransactionLocking.Optimistic || context.ReadKeys is null || context.ReadKeys.Count == 0)
+            return true;
+
+        // Keys that are also modified are already protected by their write locks and revalidated
+        // during PrepareMutations, so re-reading them here would be redundant work.
+        List<KeyValueTransactionReadKey> toValidate = [];
+
+        foreach (KeyValueTransactionReadKey readKey in context.ReadKeys.Values)
+        {
+            if (string.IsNullOrEmpty(readKey.Key))
+                continue;
+
+            if (context.ModifiedKeys is not null && context.ModifiedKeys.Contains((readKey.Key, readKey.Durability)))
+                continue;
+
+            toValidate.Add(readKey);
+        }
+
+        if (toValidate.Count == 0)
+            return true;
+
+        // Validate the read dependencies concurrently: each check is an independent metadata read
+        // that may hit a different partition, so fanning out avoids paying latency sequentially.
+        Task<ReadValidationFailure?>[] tasks = new Task<ReadValidationFailure?>[toValidate.Count];
+
+        for (int i = 0; i < toValidate.Count; i++)
+            tasks[i] = ValidateReadKey(toValidate[i], cancellationToken);
+
+        ReadValidationFailure?[] failures = await Task.WhenAll(tasks);
+
+        // Report the first failure in read-set order so the abort reason is deterministic.
+        foreach (ReadValidationFailure? failure in failures)
+        {
+            if (failure is null)
+                continue;
+
+            context.Result = new()
+            {
+                Type = KeyValueResponseType.Aborted,
+                Reason = failure.Value.AbortReason
+            };
+
+            failure.Value.Log();
+
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Validates a single optimistic read dependency against the current committed state.
+    /// </summary>
+    /// <returns>A failure descriptor when the dependency no longer matches; otherwise null.</returns>
+    private async Task<ReadValidationFailure?> ValidateReadKey(KeyValueTransactionReadKey readKey, CancellationToken cancellationToken)
+    {
+        (KeyValueResponseType response, ReadOnlyKeyValueEntry? current) = await manager.LocateAndTryExistsValue(
+            HLCTimestamp.Zero,
+            readKey.Key!,
+            -1,
+            readKey.Durability,
+            cancellationToken
+        );
+
+        if (response is KeyValueResponseType.MustRetry or KeyValueResponseType.Errored or KeyValueResponseType.Aborted or KeyValueResponseType.WaitingForReplication)
+            return new(
+                $"Read dependency validation failed for {readKey.Key}: {response}",
+                () => logger.LogWarning(
+                    "Read dependency validation failed for {Key} {Durability}: {Response}",
+                    readKey.Key,
+                    readKey.Durability,
+                    response
+                )
+            );
+
+        bool existsNow = response == KeyValueResponseType.Exists && current is not null;
+
+        if (readKey.Exists != existsNow)
+            return new(
+                $"Read dependency changed for {readKey.Key}",
+                () => logger.LogDebug(
+                    "Read dependency changed for {Key} {Durability}: expected exists {ExpectedExists}, actual exists {ActualExists}",
+                    readKey.Key,
+                    readKey.Durability,
+                    readKey.Exists,
+                    existsNow
+                )
+            );
+
+        if (readKey.Exists && current!.Revision != readKey.Revision)
+            return new(
+                $"Read dependency revision changed for {readKey.Key}",
+                () => logger.LogDebug(
+                    "Read dependency revision changed for {Key} {Durability}: expected revision {ExpectedRevision}, actual revision {ActualRevision}",
+                    readKey.Key,
+                    readKey.Durability,
+                    readKey.Revision,
+                    current.Revision
+                )
+            );
+
+        return null;
+    }
+
+    /// <summary>
+    /// Describes a failed read-set validation: the abort reason surfaced to the client and a
+    /// deferred log action invoked only for the failure that is actually reported.
+    /// </summary>
+    private readonly record struct ReadValidationFailure(string AbortReason, Action Log);
 
     /// <summary>
     /// Executes a plan to prepare all the mutations for the modified keys in the transaction.

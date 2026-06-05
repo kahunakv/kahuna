@@ -57,6 +57,9 @@ internal sealed class GetCommand : BaseCommand
 
         if (type != KeyValueResponseType.Get || readOnlyContext is null)
         {
+            if (type == KeyValueResponseType.DoesNotExist)
+                RecordReadKey(context, keyName, durability, false, -1);
+
             if (ast.rightAst is not null)
                 context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new(KeyValueExpressionType.NullType));
             
@@ -74,6 +77,8 @@ internal sealed class GetCommand : BaseCommand
                 ]
             };
         }
+
+        RecordReadKey(context, keyName, durability, true, readOnlyContext.Revision);
         
         if (ast.rightAst is not null)
             context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new(

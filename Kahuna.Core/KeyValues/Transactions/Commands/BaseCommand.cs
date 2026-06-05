@@ -1,6 +1,7 @@
 
 using Kahuna.Server.ScriptParser;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues.Transactions.Commands;
 
@@ -21,6 +22,27 @@ internal abstract class BaseCommand
             NodeType.StringType => ast.yytext,
             NodeType.Placeholder => context.GetParameter(ast),
             _ => throw new KahunaScriptException($"Invalid key name type {ast.nodeType}", ast.yyline)
+        };
+    }
+
+    internal static void RecordReadKey(
+        KeyValueTransactionContext context,
+        string key,
+        KeyValueDurability durability,
+        bool exists,
+        long revision
+    )
+    {
+        if (context.Locking != KeyValueTransactionLocking.Optimistic)
+            return;
+
+        context.ReadKeys ??= [];
+        context.ReadKeys[(key, durability)] = new()
+        {
+            Key = key,
+            Durability = durability,
+            Exists = exists,
+            Revision = exists ? revision : -1
         };
     }
 }

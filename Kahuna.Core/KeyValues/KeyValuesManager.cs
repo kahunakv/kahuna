@@ -636,10 +636,11 @@ internal sealed class KeyValuesManager
         HLCTimestamp timestamp,
         List<KeyValueTransactionModifiedKey> acquiredLocks,
         List<KeyValueTransactionModifiedKey> modifiedKeys,
+        List<KeyValueTransactionReadKey> readKeys,
         CancellationToken cancellationToken
     )
     {
-        return locator.LocateAndCommitTransaction(uniqueId, timestamp, acquiredLocks, modifiedKeys, cancellationToken);
+        return locator.LocateAndCommitTransaction(uniqueId, timestamp, acquiredLocks, modifiedKeys, readKeys, cancellationToken);
     }
 
     /// <summary>
@@ -2103,10 +2104,11 @@ internal sealed class KeyValuesManager
     public Task<KeyValueResponseType> CommitTransaction(
         HLCTimestamp timestamp, 
         List<KeyValueTransactionModifiedKey> acquiredLocks, 
-        List<KeyValueTransactionModifiedKey> modifiedKeys
+        List<KeyValueTransactionModifiedKey> modifiedKeys,
+        List<KeyValueTransactionReadKey> readKeys
     )
     {
-        return txCoordinator.CommitTransaction(timestamp, acquiredLocks, modifiedKeys);
+        return txCoordinator.CommitTransaction(timestamp, acquiredLocks, modifiedKeys, readKeys);
     }
 
     /// <summary>

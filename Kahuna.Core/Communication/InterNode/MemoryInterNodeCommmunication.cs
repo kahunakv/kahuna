@@ -873,10 +873,10 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     /// <exception cref="KahunaServerException"></exception>
-    public async Task<KeyValueResponseType> CommitTransaction(string node, string uniqueId, HLCTimestamp timestamp, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken)
+    public async Task<KeyValueResponseType> CommitTransaction(string node, string uniqueId, HLCTimestamp timestamp, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, List<KeyValueTransactionReadKey> readKeys, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))        
-            return await kahunaNode.CommitTransaction(timestamp, acquiredLocks, modifiedKeys);        
+            return await kahunaNode.CommitTransaction(timestamp, acquiredLocks, modifiedKeys, readKeys);        
         
         throw new KahunaServerException($"The node {node} does not exist.");
     }

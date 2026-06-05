@@ -1059,6 +1059,7 @@ internal sealed class KeyValueLocator
         HLCTimestamp timestamp,
         List<KeyValueTransactionModifiedKey> acquiredLocks,
         List<KeyValueTransactionModifiedKey> modifiedKeys,
+        List<KeyValueTransactionReadKey> readKeys,
         CancellationToken cancellationToken
     )
     {
@@ -1068,7 +1069,7 @@ internal sealed class KeyValueLocator
         int partitionId = raft.GetPartitionKey(uniqueId);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
-            return await manager.CommitTransaction(timestamp, acquiredLocks, modifiedKeys);
+            return await manager.CommitTransaction(timestamp, acquiredLocks, modifiedKeys, readKeys);
             
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
@@ -1076,7 +1077,7 @@ internal sealed class KeyValueLocator
         
         logger.LogDebug("COMMIT-TRANSACTION Redirect {KeyValueName} to leader partition {Partition} at {Leader}", uniqueId, partitionId, leader);
         
-        return await interNodeCommunication.CommitTransaction(leader, uniqueId, timestamp, acquiredLocks, modifiedKeys, cancellationToken);
+        return await interNodeCommunication.CommitTransaction(leader, uniqueId, timestamp, acquiredLocks, modifiedKeys, readKeys, cancellationToken);
     }
 
     /// <summary>

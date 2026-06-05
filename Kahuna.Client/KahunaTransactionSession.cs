@@ -76,6 +76,11 @@ public class KahunaTransactionSession : IAsyncDisposable
     /// </summary>
     private HashSet<(string, KeyValueDurability)>? modifiedKeys;
 
+    /// <summary>
+    /// A set of key revisions observed by the transaction session.
+    /// </summary>
+    private Dictionary<(string, KeyValueDurability), KeyValueTransactionReadKey>? readKeys;
+
     private bool disposed;
     
     /// <summary>
@@ -126,6 +131,18 @@ public class KahunaTransactionSession : IAsyncDisposable
             throw new KahunaException($"Failed to acquire exclusive key/value lock for '{key}'.", KeyValueResponseType.Aborted);
 
         acquiredLocks.Add((key, durability));
+    }
+
+    private void RecordReadKey(string key, KeyValueDurability durability, bool exists, long revision)
+    {
+        readKeys ??= [];
+        readKeys[(key, durability)] = new()
+        {
+            Key = key,
+            Durability = durability,
+            Exists = exists,
+            Revision = revision
+        };
     }
     
     /// <summary>
@@ -476,6 +493,8 @@ public class KahunaTransactionSession : IAsyncDisposable
             cancellationToken
         ).ConfigureAwait(false);
         
+        RecordReadKey(key, durability, success, success ? revision : -1);
+        
         return new(Client, key, success, value, revision, durability, timeElapsedMs);
     }
     
@@ -502,6 +521,8 @@ public class KahunaTransactionSession : IAsyncDisposable
             durability, 
             cancellationToken
         ).ConfigureAwait(false);
+        
+        RecordReadKey(key, durability, success, success ? revision : -1);
         
         return new(Client, key, success, revision, durability, timeElapsedMs);
     }
@@ -731,7 +752,10 @@ public class KahunaTransactionSession : IAsyncDisposable
         List<KahunaKeyValue> result = new(kv.Count);
         
         foreach (KeyValueGetByBucketItem item in kv)
+        {
+            RecordReadKey(item.Key ?? "", durability, true, item.Revision);
             result.Add(new(Client, item.Key ?? "", true, item.Value, item.Revision, durability, 0));
+        }
 
         return result;
     }
@@ -784,12 +808,17 @@ public class KahunaTransactionSession : IAsyncDisposable
                 modifiedKeysList = [];
             }
             
+            List<KeyValueTransactionReadKey> readKeysList = readKeys is not null
+                ? readKeys.Values.ToList()
+                : [];
+            
             bool result = await Client.Communication.CommitTransactionSession(
                 Url,
                 UniqueId,
                 TransactionId,
                 acquiredLocksList,
                 modifiedKeysList,
+                readKeysList,
                 cancellationToken
             ).ConfigureAwait(false);
             

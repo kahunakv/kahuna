@@ -643,10 +643,11 @@ public sealed class KahunaManager : IKahuna, IDisposable
         HLCTimestamp timestamp, 
         List<KeyValueTransactionModifiedKey> acquiredLocks, 
         List<KeyValueTransactionModifiedKey> modifiedKeys,
+        List<KeyValueTransactionReadKey> readKeys,
         CancellationToken cancellationToken
     )
     {
-        return keyValues.LocateAndCommitTransaction(uniqueId, timestamp, acquiredLocks, modifiedKeys, cancellationToken);
+        return keyValues.LocateAndCommitTransaction(uniqueId, timestamp, acquiredLocks, modifiedKeys, readKeys, cancellationToken);
     }
 
     /// <summary>
@@ -957,10 +958,11 @@ public sealed class KahunaManager : IKahuna, IDisposable
     public Task<KeyValueResponseType> CommitTransaction(
         HLCTimestamp timestamp, 
         List<KeyValueTransactionModifiedKey> acquiredLocks, 
-        List<KeyValueTransactionModifiedKey> modifiedKeys
+        List<KeyValueTransactionModifiedKey> modifiedKeys,
+        List<KeyValueTransactionReadKey> readKeys
     )
     {
-        return keyValues.CommitTransaction(timestamp, acquiredLocks, modifiedKeys);
+        return keyValues.CommitTransaction(timestamp, acquiredLocks, modifiedKeys, readKeys);
     }
 
     /// <summary>

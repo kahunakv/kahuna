@@ -119,9 +119,9 @@ public class TestTransactionLockingAnomalies
 
             Assert.True(setResult.Success);
 
-            await session.Commit(cancellationToken);
+            bool committed = await session.Commit(cancellationToken);
 
-            return new(readValue, Committed: true, ErrorCode: null);
+            return new(readValue, Committed: committed, ErrorCode: committed ? null : KeyValueResponseType.Aborted);
         }
         catch (KahunaException exception) when (exception.KeyValueErrorCode is KeyValueResponseType.Aborted or KeyValueResponseType.MustRetry)
         {

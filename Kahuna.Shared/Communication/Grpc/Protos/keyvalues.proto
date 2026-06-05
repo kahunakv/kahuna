@@ -566,6 +566,7 @@ message GrpcCommitTransactionRequest
   uint32 TransactionIdCounter = 4;
   repeated GrpcTransactionModifiedKey AcquiredLocks = 5;
   repeated GrpcTransactionModifiedKey ModifiedKeys = 6;
+  repeated GrpcTransactionReadKey ReadKeys = 7;
 }
 
 message GrpcRollbackTransactionRequest
@@ -582,6 +583,14 @@ message GrpcTransactionModifiedKey
 {
   string Key = 1;
   GrpcKeyValueDurability Durability = 2;
+}
+
+message GrpcTransactionReadKey
+{
+  string Key = 1;
+  GrpcKeyValueDurability Durability = 2;
+  bool Exists = 3;
+  int64 Revision = 4;
 }
 
 message GrpcCommitTransactionResponse
