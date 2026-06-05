@@ -896,18 +896,41 @@ internal sealed class KeyValueTransactionCoordinator
         if (toValidate.Count == 0)
             return true;
 
-        // Validate the read dependencies concurrently: each check is an independent metadata read
-        // that may hit a different partition, so fanning out avoids paying latency sequentially.
-        Task<ReadValidationFailure?>[] tasks = new Task<ReadValidationFailure?>[toValidate.Count];
+        List<(string key, long revision, KeyValueDurability durability)> probes = new(toValidate.Count);
 
         for (int i = 0; i < toValidate.Count; i++)
-            tasks[i] = ValidateReadKey(toValidate[i], cancellationToken);
+            probes.Add((toValidate[i].Key!, -1, toValidate[i].Durability));
 
-        ReadValidationFailure?[] failures = await Task.WhenAll(tasks);
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> results =
+            await manager.LocateAndTryExistsManyValues(HLCTimestamp.Zero, probes, cancellationToken);
 
-        // Report the first failure in read-set order so the abort reason is deterministic.
-        foreach (ReadValidationFailure? failure in failures)
+        Dictionary<(string key, KeyValueDurability durability), (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry)> currentByKey = new(results.Count);
+
+        foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry) result in results)
+            currentByKey[(result.key, result.durability)] = (result.type, result.entry);
+
+        foreach (KeyValueTransactionReadKey readKey in toValidate)
         {
+            if (!currentByKey.TryGetValue((readKey.Key!, readKey.Durability), out (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) current))
+            {
+                context.Result = new()
+                {
+                    Type = KeyValueResponseType.Aborted,
+                    Reason = $"Read dependency validation failed for {readKey.Key}: {KeyValueResponseType.Errored}"
+                };
+
+                logger.LogWarning(
+                    "Read dependency validation failed for {Key} {Durability}: {Response}",
+                    readKey.Key,
+                    readKey.Durability,
+                    KeyValueResponseType.Errored
+                );
+
+                return false;
+            }
+
+            ReadValidationFailure? failure = ValidateReadKey(readKey, current.type, current.entry);
+
             if (failure is null)
                 continue;
 
@@ -929,16 +952,12 @@ internal sealed class KeyValueTransactionCoordinator
     /// Validates a single optimistic read dependency against the current committed state.
     /// </summary>
     /// <returns>A failure descriptor when the dependency no longer matches; otherwise null.</returns>
-    private async Task<ReadValidationFailure?> ValidateReadKey(KeyValueTransactionReadKey readKey, CancellationToken cancellationToken)
+    private ReadValidationFailure? ValidateReadKey(
+        KeyValueTransactionReadKey readKey,
+        KeyValueResponseType response,
+        ReadOnlyKeyValueEntry? current
+    )
     {
-        (KeyValueResponseType response, ReadOnlyKeyValueEntry? current) = await manager.LocateAndTryExistsValue(
-            HLCTimestamp.Zero,
-            readKey.Key!,
-            -1,
-            readKey.Durability,
-            cancellationToken
-        );
-
         if (response is KeyValueResponseType.MustRetry or KeyValueResponseType.Errored or KeyValueResponseType.Aborted or KeyValueResponseType.WaitingForReplication)
             return new(
                 $"Read dependency validation failed for {readKey.Key}: {response}",

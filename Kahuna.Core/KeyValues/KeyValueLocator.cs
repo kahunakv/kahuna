@@ -380,6 +380,140 @@ internal sealed class KeyValueLocator
         
         return await interNodeCommunication.TryExistsValue(leader, transactionId, key, revision, durability, cancellationToken);
     }
+
+    public async Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryExistsManyValues(
+        HLCTimestamp transactionId,
+        List<(string key, long revision, KeyValueDurability durability)> keys,
+        CancellationToken cancellationToken
+    )
+    {
+        if (keys.Count == 0)
+            return [(KeyValueResponseType.InvalidInput, string.Empty, KeyValueDurability.Persistent, null)];
+
+        string localNode = raft.GetLocalEndpoint();
+        Dictionary<string, List<(string key, long revision, KeyValueDurability durability)>> acquisitionPlan = [];
+
+        foreach ((string key, long revision, KeyValueDurability durability) item in keys)
+        {
+            if (string.IsNullOrEmpty(item.key))
+                return [(KeyValueResponseType.InvalidInput, item.key, item.durability, null)];
+
+            int partitionId = raft.GetPartitionKey(item.key);
+            string leader = await raft.WaitForLeader(partitionId, cancellationToken);
+
+            if (acquisitionPlan.TryGetValue(leader, out List<(string key, long revision, KeyValueDurability durability)>? list))
+                list.Add(item);
+            else
+                acquisitionPlan[leader] = [item];
+        }
+
+        Lock lockSync = new();
+        List<Task> tasks = new(acquisitionPlan.Count);
+        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = new(keys.Count);
+
+        foreach ((string leader, List<(string key, long revision, KeyValueDurability durability)> xkeys) in acquisitionPlan)
+            tasks.Add(TryExistsManyNodeValues(transactionId, leader, localNode, xkeys, lockSync, responses, cancellationToken));
+
+        await Task.WhenAll(tasks);
+
+        return responses;
+    }
+
+    public async Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(
+        HLCTimestamp transactionId,
+        List<(string key, long revision, KeyValueDurability durability)> keys,
+        CancellationToken cancellationToken
+    )
+    {
+        if (keys.Count == 0)
+            return [(KeyValueResponseType.InvalidInput, string.Empty, KeyValueDurability.Persistent, null)];
+
+        string localNode = raft.GetLocalEndpoint();
+        Dictionary<string, List<(string key, long revision, KeyValueDurability durability)>> acquisitionPlan = [];
+
+        foreach ((string key, long revision, KeyValueDurability durability) item in keys)
+        {
+            if (string.IsNullOrEmpty(item.key))
+                return [(KeyValueResponseType.InvalidInput, item.key, item.durability, null)];
+
+            int partitionId = raft.GetPartitionKey(item.key);
+            string leader = await raft.WaitForLeader(partitionId, cancellationToken);
+
+            if (acquisitionPlan.TryGetValue(leader, out List<(string key, long revision, KeyValueDurability durability)>? list))
+                list.Add(item);
+            else
+                acquisitionPlan[leader] = [item];
+        }
+
+        Lock lockSync = new();
+        List<Task> tasks = new(acquisitionPlan.Count);
+        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = new(keys.Count);
+
+        foreach ((string leader, List<(string key, long revision, KeyValueDurability durability)> xkeys) in acquisitionPlan)
+            tasks.Add(TryGetManyNodeValues(transactionId, leader, localNode, xkeys, lockSync, responses, cancellationToken));
+
+        await Task.WhenAll(tasks);
+
+        return responses;
+    }
+
+    private async Task TryExistsManyNodeValues(
+        HLCTimestamp transactionId,
+        string leader,
+        string localNode,
+        List<(string key, long revision, KeyValueDurability durability)> xkeys,
+        Lock lockSync,
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> responses,
+        CancellationToken cancellationToken
+    )
+    {
+        logger.LogDebug("EXISTS-KEYVALUE Redirect {Number} batched exists probes to node {Leader}", xkeys.Count, leader);
+
+        if (leader == localNode)
+        {
+            List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> readResponses =
+                await manager.TryExistsManyValues(transactionId, xkeys);
+
+            lock (lockSync)
+            {
+                foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry) item in readResponses)
+                    responses.Add((item.type, item.key, item.durability, item.entry));
+            }
+
+            return;
+        }
+
+        await interNodeCommunication.TryExistsManyNodeValues(leader, transactionId, xkeys, lockSync, responses, cancellationToken);
+    }
+
+    private async Task TryGetManyNodeValues(
+        HLCTimestamp transactionId,
+        string leader,
+        string localNode,
+        List<(string key, long revision, KeyValueDurability durability)> xkeys,
+        Lock lockSync,
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> responses,
+        CancellationToken cancellationToken
+    )
+    {
+        logger.LogDebug("GET-KEYVALUE Redirect {Number} batched gets to node {Leader}", xkeys.Count, leader);
+
+        if (leader == localNode)
+        {
+            List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> readResponses =
+                await manager.TryGetManyValues(transactionId, xkeys);
+
+            lock (lockSync)
+            {
+                foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry) item in readResponses)
+                    responses.Add((item.type, item.key, item.durability, item.entry));
+            }
+
+            return;
+        }
+
+        await interNodeCommunication.TryGetManyNodeValues(leader, transactionId, xkeys, lockSync, responses, cancellationToken);
+    }
     
     /// <summary>
     /// Locates the leader node for the given key and checks whether a live write intent from another

@@ -546,6 +546,111 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         ));
     }
 
+    public async Task TryGetManyNodeValues(
+        string node,
+        HLCTimestamp transactionId,
+        List<(string key, long revision, KeyValueDurability durability)> keys,
+        Lock lockSync,
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> responses,
+        CancellationToken cancellationToken
+    )
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcTryGetManyValuesRequest request = new()
+        {
+            TransactionIdNode = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C
+        };
+
+        request.Items.Add(GetTryManyValuesRequestItems(keys));
+
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcTryGetManyValuesResponse remoteResponse = response.TryGetManyValues!;
+
+        lock (lockSync)
+        {
+            foreach (GrpcTryGetManyValuesResponseItem item in remoteResponse.Items)
+                responses.Add(((KeyValueResponseType)item.Type, item.Key, (KeyValueDurability)item.Durability, GetReadOnlyKeyValueEntry(item)));
+        }
+    }
+
+    public async Task TryExistsManyNodeValues(
+        string node,
+        HLCTimestamp transactionId,
+        List<(string key, long revision, KeyValueDurability durability)> keys,
+        Lock lockSync,
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> responses,
+        CancellationToken cancellationToken
+    )
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcTryExistsManyValuesRequest request = new()
+        {
+            TransactionIdNode = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C
+        };
+
+        request.Items.Add(GetTryManyValuesRequestItems(keys));
+
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcTryExistsManyValuesResponse remoteResponse = response.TryExistsManyValues!;
+
+        lock (lockSync)
+        {
+            foreach (GrpcTryExistsManyValuesResponseItem item in remoteResponse.Items)
+                responses.Add(((KeyValueResponseType)item.Type, item.Key, (KeyValueDurability)item.Durability, GetReadOnlyKeyValueEntry(item)));
+        }
+    }
+
+    private static IEnumerable<GrpcTryManyValuesRequestItem> GetTryManyValuesRequestItems(
+        List<(string key, long revision, KeyValueDurability durability)> keys
+    )
+    {
+        foreach ((string key, long revision, KeyValueDurability durability) item in keys)
+        {
+            yield return new()
+            {
+                Key = item.key,
+                Revision = item.revision,
+                Durability = (GrpcKeyValueDurability)item.durability
+            };
+        }
+    }
+
+    private static ReadOnlyKeyValueEntry? GetReadOnlyKeyValueEntry(GrpcTryGetManyValuesResponseItem item)
+    {
+        if ((KeyValueResponseType)item.Type is not (KeyValueResponseType.Get or KeyValueResponseType.Exists))
+            return null;
+
+        return new(
+            item.Value.IsEmpty ? null : item.Value.ToByteArray(),
+            item.Revision,
+            new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter),
+            new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter),
+            new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
+            (KeyValueState)item.State
+        );
+    }
+
+    private static ReadOnlyKeyValueEntry? GetReadOnlyKeyValueEntry(GrpcTryExistsManyValuesResponseItem item)
+    {
+        if ((KeyValueResponseType)item.Type is not (KeyValueResponseType.Get or KeyValueResponseType.Exists))
+            return null;
+
+        return new(
+            null,
+            item.Revision,
+            new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter),
+            new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter),
+            new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
+            (KeyValueState)item.State
+        );
+    }
+
     /// <summary>
     /// Redirects a "check-write-intent" probe to the specified node.
     /// Used at commit time by optimistic transactions to detect concurrent writers (write-skew guard).

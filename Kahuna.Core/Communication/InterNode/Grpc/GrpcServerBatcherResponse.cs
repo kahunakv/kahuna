@@ -18,12 +18,16 @@ internal sealed class GrpcServerBatcherResponse
     public GrpcTryDeleteManyKeyValueResponse? TryDeleteManyKeyValue { get; }
     
     public GrpcTryGetKeyValueResponse? TryGetKeyValue { get; }
+
+    public GrpcTryGetManyValuesResponse? TryGetManyValues { get; }
     
     public GrpcTryDeleteKeyValueResponse? TryDeleteKeyValue { get; }
     
     public GrpcTryExtendKeyValueResponse? TryExtendKeyValue { get; }
 
     public GrpcTryExistsKeyValueResponse? TryExistsKeyValue { get; }
+
+    public GrpcTryExistsManyValuesResponse? TryExistsManyValues { get; }
 
     public GrpcTryCheckWriteIntentResponse? TryCheckWriteIntent { get; }
 
@@ -109,6 +113,11 @@ internal sealed class GrpcServerBatcherResponse
     {
         TryGetKeyValue = tryGetKeyValue;
     }
+
+    public GrpcServerBatcherResponse(GrpcTryGetManyValuesResponse tryGetManyValues)
+    {
+        TryGetManyValues = tryGetManyValues;
+    }
     
     public GrpcServerBatcherResponse(GrpcTryDeleteKeyValueResponse tryDeleteKeyValue)
     {
@@ -123,6 +132,11 @@ internal sealed class GrpcServerBatcherResponse
     public GrpcServerBatcherResponse(GrpcTryExistsKeyValueResponse tryExistsKeyValue)
     {
         TryExistsKeyValue = tryExistsKeyValue;
+    }
+
+    public GrpcServerBatcherResponse(GrpcTryExistsManyValuesResponse tryExistsManyValues)
+    {
+        TryExistsManyValues = tryExistsManyValues;
     }
 
     public GrpcServerBatcherResponse(GrpcTryCheckWriteIntentResponse tryCheckWriteIntent)

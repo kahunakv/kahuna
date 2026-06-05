@@ -364,6 +364,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return await TryGetKeyValueInternal(request, context);
     }
 
+    public override async Task<GrpcTryGetManyValuesResponse> TryGetManyValues(GrpcTryGetManyValuesRequest request, ServerCallContext context)
+    {
+        return await TryGetManyValuesInternal(request, context);
+    }
+
     /// <summary>
     /// Attempts to retrieve a key-value pair based on the specified request.
     /// </summary>
@@ -414,6 +419,18 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         };
     }
 
+    internal async Task<GrpcTryGetManyValuesResponse> TryGetManyValuesInternal(GrpcTryGetManyValuesRequest request, ServerCallContext context)
+    {
+        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.TryGetManyValues(
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
+            GetRequestManyValuesItems(request.Items)
+        );
+
+        GrpcTryGetManyValuesResponse response = new();
+        response.Items.Add(GetResponseGetManyValuesItems(responses));
+        return response;
+    }
+
     /// <summary>
     /// Handles the gRPC request to check if a specific key exists in the key-value store.
     /// </summary>
@@ -423,6 +440,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     public override async Task<GrpcTryExistsKeyValueResponse> TryExistsKeyValue(GrpcTryExistsKeyValueRequest request, ServerCallContext context)
     {
         return await TryExistsKeyValueInternal(request, context);
+    }
+
+    public override async Task<GrpcTryExistsManyValuesResponse> TryExistsManyValues(GrpcTryExistsManyValuesRequest request, ServerCallContext context)
+    {
+        return await TryExistsManyValuesInternal(request, context);
     }
 
     /// <summary>
@@ -470,6 +492,97 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             Type = (GrpcKeyValueResponseType)type,
             TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
         };
+    }
+
+    internal async Task<GrpcTryExistsManyValuesResponse> TryExistsManyValuesInternal(GrpcTryExistsManyValuesRequest request, ServerCallContext context)
+    {
+        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.TryExistsManyValues(
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
+            GetRequestManyValuesItems(request.Items)
+        );
+
+        GrpcTryExistsManyValuesResponse response = new();
+        response.Items.Add(GetResponseExistsManyValuesItems(responses));
+        return response;
+    }
+
+    private static List<(string key, long revision, KeyValueDurability durability)> GetRequestManyValuesItems(
+        RepeatedField<GrpcTryManyValuesRequestItem> items
+    )
+    {
+        List<(string key, long revision, KeyValueDurability durability)> rItems = new(items.Count);
+
+        foreach (GrpcTryManyValuesRequestItem item in items)
+            rItems.Add((item.Key, item.Revision, (KeyValueDurability)item.Durability));
+
+        return rItems;
+    }
+
+    private static IEnumerable<GrpcTryGetManyValuesResponseItem> GetResponseGetManyValuesItems(
+        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses
+    )
+    {
+        foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry) in responses)
+        {
+            GrpcTryGetManyValuesResponseItem item = new()
+            {
+                Type = (GrpcKeyValueResponseType)type,
+                Key = key,
+                Durability = (GrpcKeyValueDurability)durability
+            };
+
+            if (entry is not null)
+            {
+                item.Revision = entry.Revision;
+                item.ExpiresNode = entry.Expires.N;
+                item.ExpiresPhysical = entry.Expires.L;
+                item.ExpiresCounter = entry.Expires.C;
+                item.LastUsedNode = entry.LastUsed.N;
+                item.LastUsedPhysical = entry.LastUsed.L;
+                item.LastUsedCounter = entry.LastUsed.C;
+                item.LastModifiedNode = entry.LastModified.N;
+                item.LastModifiedPhysical = entry.LastModified.L;
+                item.LastModifiedCounter = entry.LastModified.C;
+                item.State = (GrpcKeyValueState)entry.State;
+
+                if (entry.Value is not null)
+                    item.Value = UnsafeByteOperations.UnsafeWrap(entry.Value);
+            }
+
+            yield return item;
+        }
+    }
+
+    private static IEnumerable<GrpcTryExistsManyValuesResponseItem> GetResponseExistsManyValuesItems(
+        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses
+    )
+    {
+        foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry) in responses)
+        {
+            GrpcTryExistsManyValuesResponseItem item = new()
+            {
+                Type = (GrpcKeyValueResponseType)type,
+                Key = key,
+                Durability = (GrpcKeyValueDurability)durability
+            };
+
+            if (entry is not null)
+            {
+                item.Revision = entry.Revision;
+                item.ExpiresNode = entry.Expires.N;
+                item.ExpiresPhysical = entry.Expires.L;
+                item.ExpiresCounter = entry.Expires.C;
+                item.LastUsedNode = entry.LastUsed.N;
+                item.LastUsedPhysical = entry.LastUsed.L;
+                item.LastUsedCounter = entry.LastUsed.C;
+                item.LastModifiedNode = entry.LastModified.N;
+                item.LastModifiedPhysical = entry.LastModified.L;
+                item.LastModifiedCounter = entry.LastModified.C;
+                item.State = (GrpcKeyValueState)entry.State;
+            }
+
+            yield return item;
+        }
     }
 
     internal async Task<GrpcTryCheckWriteIntentResponse> TryCheckWriteIntentInternal(GrpcTryCheckWriteIntentRequest request, ServerCallContext context)

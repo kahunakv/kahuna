@@ -296,6 +296,15 @@ public sealed class KahunaManager : IKahuna, IDisposable
     {
         return keyValues.LocateAndTryGetValue(transactionId, key, revision, durability, cancellationToken);
     }
+
+    public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(
+        HLCTimestamp transactionId,
+        List<(string key, long revision, KeyValueDurability durability)> keys,
+        CancellationToken cancellationToken
+    )
+    {
+        return keyValues.LocateAndTryGetManyValues(transactionId, keys, cancellationToken);
+    }
     
     /// <summary>
     /// Locates the leader node for the given key and executes the TryExistsValue request.
@@ -315,6 +324,15 @@ public sealed class KahunaManager : IKahuna, IDisposable
     )
     {
         return keyValues.LocateAndTryExistsValue(transactionId, key, revision, durability, cancellationToken);
+    }
+
+    public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryExistsManyValues(
+        HLCTimestamp transactionId,
+        List<(string key, long revision, KeyValueDurability durability)> keys,
+        CancellationToken cancellationToken
+    )
+    {
+        return keyValues.LocateAndTryExistsManyValues(transactionId, keys, cancellationToken);
     }
 
     public Task<KeyValueResponseType> LocateAndTryCheckWriteIntent(
@@ -788,13 +806,21 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="durability"></param>
     /// <returns></returns>
     public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(
-        HLCTimestamp transactionId, 
+        HLCTimestamp transactionId,
         string key, 
         long revision, 
         KeyValueDurability durability
     )
     {
         return keyValues.TryGetValue(transactionId, key, revision, durability);
+    }
+
+    public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryGetManyValues(
+        HLCTimestamp transactionId,
+        List<(string key, long revision, KeyValueDurability durability)> keys
+    )
+    {
+        return keyValues.TryGetManyValues(transactionId, keys);
     }
     
     /// <summary>
@@ -813,6 +839,14 @@ public sealed class KahunaManager : IKahuna, IDisposable
     )
     {
         return keyValues.TryExistsValue(transactionId, key, revision, durability);
+    }
+
+    public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryExistsManyValues(
+        HLCTimestamp transactionId,
+        List<(string key, long revision, KeyValueDurability durability)> keys
+    )
+    {
+        return keyValues.TryExistsManyValues(transactionId, keys);
     }
 
     public Task<KeyValueResponseType> TryCheckWriteIntentValue(

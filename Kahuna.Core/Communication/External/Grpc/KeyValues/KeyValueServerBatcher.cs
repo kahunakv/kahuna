@@ -78,6 +78,14 @@ internal sealed class KeyValueServerBatcher
                     }
                     break;
 
+                    case GrpcServerBatchType.ServerTryGetManyValues:
+                    {
+                        GrpcTryGetManyValuesRequest? getManyValuesRequest = request.TryGetManyValues;
+
+                        tasks.Add(TryGetManyValuesDelayed(semaphore, request.RequestId, getManyValuesRequest, responseStream, context));
+                    }
+                    break;
+
                     case GrpcServerBatchType.ServerTryDeleteKeyValue:
                     {
                         GrpcTryDeleteKeyValueRequest? deleteKeyRequest = request.TryDeleteKeyValue;
@@ -99,6 +107,14 @@ internal sealed class KeyValueServerBatcher
                         GrpcTryExistsKeyValueRequest? extendKeyRequest = request.TryExistsKeyValue;
 
                         tasks.Add(TryExistsKeyValueServerDelayed(semaphore, request.RequestId, extendKeyRequest, responseStream, context));
+                    }
+                    break;
+
+                    case GrpcServerBatchType.ServerTryExistsManyValues:
+                    {
+                        GrpcTryExistsManyValuesRequest? existsManyValuesRequest = request.TryExistsManyValues;
+
+                        tasks.Add(TryExistsManyValuesDelayed(semaphore, request.RequestId, existsManyValuesRequest, responseStream, context));
                     }
                     break;
 
@@ -371,6 +387,26 @@ internal sealed class KeyValueServerBatcher
         await WriteResponseToStream(semaphore, responseStream, response, context);
     }
 
+    private async Task TryGetManyValuesDelayed(
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcTryGetManyValuesRequest getManyValuesRequest,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcTryGetManyValuesResponse tryGetManyResponse = await service.TryGetManyValuesInternal(getManyValuesRequest, context);
+
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type = GrpcServerBatchType.ServerTryGetManyValues,
+            RequestId = requestId,
+            TryGetManyValues = tryGetManyResponse
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+
     private async Task TryDeleteKeyValueServerDelayed(
         SemaphoreSlim semaphore, 
         int requestId, 
@@ -426,6 +462,26 @@ internal sealed class KeyValueServerBatcher
             Type = GrpcServerBatchType.ServerTryExistsKeyValue,
             RequestId = requestId,
             TryExistsKeyValue = tryExistsResponse
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+
+    private async Task TryExistsManyValuesDelayed(
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcTryExistsManyValuesRequest existsManyValuesRequest,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcTryExistsManyValuesResponse tryExistsManyResponse = await service.TryExistsManyValuesInternal(existsManyValuesRequest, context);
+
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type = GrpcServerBatchType.ServerTryExistsManyValues,
+            RequestId = requestId,
+            TryExistsManyValues = tryExistsManyResponse
         };
 
         await WriteResponseToStream(semaphore, responseStream, response, context);

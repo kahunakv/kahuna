@@ -102,6 +102,15 @@ internal sealed class GrpcServerBatcher
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
+
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryGetManyValuesRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
     
     public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryDeleteKeyValueRequest message)
     {
@@ -122,6 +131,15 @@ internal sealed class GrpcServerBatcher
     }
     
     public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryExistsKeyValueRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryExistsManyValuesRequest message)
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -491,6 +509,11 @@ internal sealed class GrpcServerBatcher
             batchRequest.Type = GrpcServerBatchType.ServerTryGetKeyValue;
             batchRequest.TryGetKeyValue = itemRequest.TryGetKeyValue;
         }
+        else if (itemRequest.TryGetManyValues is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryGetManyValues;
+            batchRequest.TryGetManyValues = itemRequest.TryGetManyValues;
+        }
         else if (itemRequest.TryDeleteKeyValue is not null)
         {
             batchRequest.Type = GrpcServerBatchType.ServerTryDeleteKeyValue;
@@ -505,6 +528,11 @@ internal sealed class GrpcServerBatcher
         {
             batchRequest.Type = GrpcServerBatchType.ServerTryExistsKeyValue;
             batchRequest.TryExistsKeyValue = itemRequest.TryExistsKeyValue;
+        }
+        else if (itemRequest.TryExistsManyValues is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryExistsManyValues;
+            batchRequest.TryExistsManyValues = itemRequest.TryExistsManyValues;
         }
         else if (itemRequest.TryCheckWriteIntent is not null)
         {
@@ -706,6 +734,10 @@ internal sealed class GrpcServerBatcher
                         item.Promise.SetResult(new(response.TryGetKeyValue));
                         break;
 
+                    case GrpcServerBatchType.ServerTryGetManyValues:
+                        item.Promise.SetResult(new(response.TryGetManyValues));
+                        break;
+
                     case GrpcServerBatchType.ServerTryDeleteKeyValue:
                         item.Promise.SetResult(new(response.TryDeleteKeyValue));
                         break;
@@ -716,6 +748,10 @@ internal sealed class GrpcServerBatcher
 
                     case GrpcServerBatchType.ServerTryExistsKeyValue:
                         item.Promise.SetResult(new(response.TryExistsKeyValue));
+                        break;
+
+                    case GrpcServerBatchType.ServerTryExistsManyValues:
+                        item.Promise.SetResult(new(response.TryExistsManyValues));
                         break;
 
                     case GrpcServerBatchType.ServerTryCheckWriteIntent:

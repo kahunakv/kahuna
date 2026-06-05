@@ -300,6 +300,24 @@ internal sealed class KeyValuesManager
     {
         return locator.LocateAndTryExistsValue(transactionId, key, revision, durability, cancellationToken);
     }
+
+    public async Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryExistsManyValues(
+        HLCTimestamp transactionId,
+        List<(string key, long revision, KeyValueDurability durability)> keys,
+        CancellationToken cancellationToken
+    )
+    {
+        return await locator.LocateAndTryExistsManyValues(transactionId, keys, cancellationToken);
+    }
+
+    public async Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(
+        HLCTimestamp transactionId,
+        List<(string key, long revision, KeyValueDurability durability)> keys,
+        CancellationToken cancellationToken
+    )
+    {
+        return await locator.LocateAndTryGetManyValues(transactionId, keys, cancellationToken);
+    }
     
     /// <summary>
     /// Locates the leader node for the given key and checks whether a live write intent from another
@@ -1166,6 +1184,66 @@ internal sealed class KeyValuesManager
         finally
         {
             KeyValueRequestPool.Return(request);
+        }
+    }
+
+    public async Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryGetManyValues(
+        HLCTimestamp transactionId,
+        List<(string key, long revision, KeyValueDurability durability)> keys
+    )
+    {
+        Task<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>[] tasks = new Task<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>[keys.Count];
+
+        for (int i = 0; i < keys.Count; i++)
+        {
+            (string key, long revision, KeyValueDurability durability) item = keys[i];
+            tasks[i] = TryGetManyValue(item);
+        }
+
+        return [.. await Task.WhenAll(tasks)];
+
+        async Task<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> TryGetManyValue(
+            (string key, long revision, KeyValueDurability durability) item
+        )
+        {
+            (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await TryGetValue(
+                transactionId,
+                item.key,
+                item.revision,
+                item.durability
+            );
+
+            return (type, item.key, item.durability, entry);
+        }
+    }
+
+    public async Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryExistsManyValues(
+        HLCTimestamp transactionId,
+        List<(string key, long revision, KeyValueDurability durability)> keys
+    )
+    {
+        Task<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>[] tasks = new Task<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>[keys.Count];
+
+        for (int i = 0; i < keys.Count; i++)
+        {
+            (string key, long revision, KeyValueDurability durability) item = keys[i];
+            tasks[i] = TryExistsManyValue(item);
+        }
+
+        return [.. await Task.WhenAll(tasks)];
+
+        async Task<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> TryExistsManyValue(
+            (string key, long revision, KeyValueDurability durability) item
+        )
+        {
+            (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await TryExistsValue(
+                transactionId,
+                item.key,
+                item.revision,
+                item.durability
+            );
+
+            return (type, item.key, item.durability, entry);
         }
     }
 

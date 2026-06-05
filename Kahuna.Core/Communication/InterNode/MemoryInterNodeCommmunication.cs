@@ -375,6 +375,61 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
+    public async Task TryGetManyNodeValues(
+        string node,
+        HLCTimestamp transactionId,
+        List<(string key, long revision, KeyValueDurability durability)> keys,
+        Lock lockSync,
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> responses,
+        CancellationToken cancellationToken
+    )
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> readResponses =
+                await kahunaNode.TryGetManyValues(transactionId, keys);
+
+            AddToReadManyResponses(readResponses, lockSync, responses);
+            return;
+        }
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public async Task TryExistsManyNodeValues(
+        string node,
+        HLCTimestamp transactionId,
+        List<(string key, long revision, KeyValueDurability durability)> keys,
+        Lock lockSync,
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> responses,
+        CancellationToken cancellationToken
+    )
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> readResponses =
+                await kahunaNode.TryExistsManyValues(transactionId, keys);
+
+            AddToReadManyResponses(readResponses, lockSync, responses);
+            return;
+        }
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    private static void AddToReadManyResponses(
+        IEnumerable<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> items,
+        Lock lockSync,
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> responses
+    )
+    {
+        foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry) in items)
+        {
+            lock (lockSync)
+                responses.Add((type, key, durability, entry));
+        }
+    }
+
     public async Task<KeyValueResponseType> TryCheckWriteIntentValue(
         string node,
         HLCTimestamp transactionId,

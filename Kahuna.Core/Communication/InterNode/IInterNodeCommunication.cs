@@ -36,6 +36,10 @@ public interface IInterNodeCommunication
 
     public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryExistsValue(string node, HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken);
 
+    public Task TryGetManyNodeValues(string node, HLCTimestamp transactionId, List<(string key, long revision, KeyValueDurability durability)> keys, Lock lockSync, List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> responses, CancellationToken cancellationToken);
+
+    public Task TryExistsManyNodeValues(string node, HLCTimestamp transactionId, List<(string key, long revision, KeyValueDurability durability)> keys, Lock lockSync, List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> responses, CancellationToken cancellationToken);
+
     public Task<KeyValueResponseType> TryCheckWriteIntentValue(string node, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken);
 
     public Task<(KeyValueResponseType, string, KeyValueDurability)> TryAcquireExclusiveLock(string node, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken);

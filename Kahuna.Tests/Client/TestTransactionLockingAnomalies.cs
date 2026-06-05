@@ -469,6 +469,500 @@ public class TestTransactionLockingAnomalies
         await inflightSession.Rollback(cancellationToken);
     }
 
+    [Theory, CombinatorialData]
+    public async Task TestPhantomInsertUnderBucketRead(
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType,
+        [CombinatorialValues(KeyValueTransactionLocking.Optimistic, KeyValueTransactionLocking.Pessimistic)] KeyValueTransactionLocking locking,
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+        KahunaClient client = GetClientByType(clientType);
+
+        await AssertClusterAvailable(client, cancellationToken);
+
+        string prefix = $"tx-anomaly/{Guid.NewGuid():N}/users/active";
+        string existingKey = $"{prefix}/1";
+        string concurrentInsertKey = $"{prefix}/2";
+        string staleInsertKey = $"{prefix}/3";
+
+        KahunaKeyValue initial = await client.SetKeyValue(
+            existingKey,
+            "existing",
+            10000,
+            durability: durability,
+            cancellationToken: cancellationToken
+        );
+        Assert.True(initial.Success);
+
+        await using KahunaTransactionSession staleSession = await client.StartTransactionSession(
+            new()
+            {
+                Locking = locking,
+                Timeout = 5000
+            },
+            cancellationToken
+        );
+
+        List<KahunaKeyValue> visibleUsers = await staleSession.GetByBucket(prefix, durability, cancellationToken);
+        Assert.Single(visibleUsers);
+        Assert.Equal(existingKey, visibleUsers[0].Key);
+
+        Task<SimpleCommitAttempt> concurrentInsertTask = ExecuteInsertAttempt(
+            client,
+            concurrentInsertKey,
+            "concurrent",
+            locking,
+            durability,
+            cancellationToken
+        );
+
+        bool concurrentCommittedBeforeStaleCommit = await TryAwaitSuccess(
+            concurrentInsertTask,
+            TimeSpan.FromMilliseconds(250),
+            cancellationToken
+        );
+
+        KahunaKeyValue staleInsert = await staleSession.SetKeyValue(
+            staleInsertKey,
+            "stale",
+            10000,
+            durability: durability,
+            cancellationToken: cancellationToken
+        );
+        Assert.True(staleInsert.Success);
+
+        CommitAttempt staleCommit = await CommitTransactionAttempt(staleSession, cancellationToken);
+        SimpleCommitAttempt concurrentInsert = await concurrentInsertTask;
+
+        List<KahunaKeyValue> finalUsers = await client.GetByBucket(prefix, durability, cancellationToken);
+        string[] finalKeys = finalUsers
+            .Select(item => item.Key)
+            .OrderBy(key => key, StringComparer.Ordinal)
+            .ToArray();
+
+        if (locking == KeyValueTransactionLocking.Pessimistic)
+        {
+            Assert.False(concurrentCommittedBeforeStaleCommit && staleCommit.Committed);
+            Assert.True(finalUsers.Count <= 2);
+            Assert.DoesNotContain(finalKeys, key => key == concurrentInsertKey && finalKeys.Contains(staleInsertKey));
+        }
+        else
+        {
+            // Optimistic bucket reads currently validate returned keys, not unseen future inserts.
+            // If predicate dependencies are later tracked, this branch can be tightened.
+            if (staleCommit.Committed && concurrentInsert.Committed)
+                Assert.Equal([existingKey, concurrentInsertKey, staleInsertKey], finalKeys);
+            else
+                Assert.True(finalUsers.Count <= 2);
+        }
+    }
+
+    [Theory, CombinatorialData]
+    public async Task TestNonRepeatableReadInsideOneTransaction(
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType,
+        [CombinatorialValues(KeyValueTransactionLocking.Optimistic, KeyValueTransactionLocking.Pessimistic)] KeyValueTransactionLocking locking,
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+        KahunaClient client = GetClientByType(clientType);
+
+        await AssertClusterAvailable(client, cancellationToken);
+
+        string prefix = $"tx-anomaly/{Guid.NewGuid():N}";
+        string accountKey = $"{prefix}/account";
+        string observedKey = $"{prefix}/observed";
+
+        KahunaKeyValue seeded = await client.SetKeyValue(
+            accountKey,
+            "100",
+            10000,
+            durability: durability,
+            cancellationToken: cancellationToken
+        );
+        Assert.True(seeded.Success);
+
+        NonRepeatableReadSchedule schedule = new();
+
+        Task<NonRepeatableReadAttempt> readerTask = ExecuteNonRepeatableReadAttempt(
+            client,
+            accountKey,
+            observedKey,
+            locking,
+            durability,
+            schedule,
+            cancellationToken
+        );
+
+        await schedule.WaitForFirstRead(cancellationToken);
+
+        Task<SimpleCommitAttempt> writerTask = ExecuteValueUpdateAttempt(
+            client,
+            accountKey,
+            "200",
+            locking,
+            durability,
+            cancellationToken
+        );
+
+        bool writerCommittedBeforeSecondRead = await TryAwaitSuccess(
+            writerTask,
+            TimeSpan.FromMilliseconds(250),
+            cancellationToken
+        );
+
+        schedule.AllowSecondRead();
+
+        NonRepeatableReadAttempt reader = await readerTask;
+        SimpleCommitAttempt writer = await writerTask;
+
+        KahunaKeyValue finalAccount = await client.GetKeyValue(accountKey, durability, cancellationToken);
+        KahunaKeyValue finalObserved = await client.GetKeyValue(observedKey, durability, cancellationToken);
+
+        Assert.True(finalAccount.Success);
+
+        if (locking == KeyValueTransactionLocking.Pessimistic)
+        {
+            Assert.False(writerCommittedBeforeSecondRead);
+            Assert.True(reader.Committed);
+            Assert.Equal(100, reader.FirstRead);
+            Assert.Equal(100, reader.SecondRead);
+            Assert.True(finalObserved.Success);
+            Assert.Equal("100:100", finalObserved.ValueAsString());
+        }
+        else
+        {
+            Assert.True(writerCommittedBeforeSecondRead);
+            Assert.True(writer.Committed);
+            Assert.False(reader.Committed);
+            Assert.Equal(100, reader.FirstRead);
+            Assert.Equal("200", finalAccount.ValueAsString());
+            Assert.False(finalObserved.Success);
+        }
+
+        Assert.False(reader.Committed && reader.FirstRead != reader.SecondRead);
+    }
+
+    [Theory, CombinatorialData]
+    public async Task TestDirtyReadAndUncommittedWriteVisibility(
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType,
+        [CombinatorialValues(KeyValueTransactionLocking.Optimistic, KeyValueTransactionLocking.Pessimistic)] KeyValueTransactionLocking locking,
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+        KahunaClient client = GetClientByType(clientType);
+
+        await AssertClusterAvailable(client, cancellationToken);
+
+        string prefix = $"tx-anomaly/{Guid.NewGuid():N}/dirty";
+        string keyX = $"{prefix}/x";
+        string keyY = $"{prefix}/y";
+
+        Assert.True((await client.SetKeyValue(
+            keyX,
+            "committed",
+            10000,
+            durability: durability,
+            cancellationToken: cancellationToken
+        )).Success);
+        Assert.True((await client.SetKeyValue(
+            keyY,
+            "stable",
+            10000,
+            durability: durability,
+            cancellationToken: cancellationToken
+        )).Success);
+
+        await using KahunaTransactionSession writerSession = await client.StartTransactionSession(
+            new() { Locking = locking, Timeout = 5000 },
+            cancellationToken
+        );
+
+        KahunaKeyValue uncommittedWrite = await writerSession.SetKeyValue(
+            keyX,
+            "uncommitted",
+            10000,
+            durability: durability,
+            cancellationToken: cancellationToken
+        );
+        Assert.True(uncommittedWrite.Success);
+
+        KahunaKeyValue outsideRead = await client.GetKeyValue(keyX, durability, cancellationToken);
+        Assert.True(outsideRead.Success);
+
+        await using KahunaTransactionSession readerSession = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Optimistic, Timeout = 5000 },
+            cancellationToken
+        );
+        KahunaKeyValue transactionalRead = await readerSession.GetKeyValue(keyX, durability, cancellationToken);
+        Assert.True(transactionalRead.Success);
+
+        KahunaKeyValueTransactionResult scriptRead = await client.ExecuteKeyValueTransactionScript(
+            GetSingleReadScript(durability, keyX),
+            cancellationToken: cancellationToken
+        );
+        Assert.Equal(KeyValueResponseType.Get, scriptRead.Type);
+
+        List<KahunaKeyValue> bucketItems = await client.GetByBucket(prefix, durability, cancellationToken);
+        List<KahunaKeyValue> prefixItems = await client.ScanAllByPrefix(prefix, durability, cancellationToken);
+
+        KahunaKeyValue bucketX = Assert.Single(bucketItems, item => item.Key == keyX);
+        KahunaKeyValue prefixX = Assert.Single(prefixItems, item => item.Key == keyX);
+
+        Assert.Equal("committed", outsideRead.ValueAsString());
+        Assert.Equal("committed", transactionalRead.ValueAsString());
+        Assert.Equal("committed", scriptRead.FirstValueAsString);
+        Assert.Equal("committed", bucketX.ValueAsString());
+        Assert.Equal("committed", prefixX.ValueAsString());
+
+        bool rolledBack = await writerSession.Rollback(cancellationToken);
+        Assert.True(rolledBack);
+
+        KahunaKeyValue finalX = await client.GetKeyValue(keyX, durability, cancellationToken);
+        Assert.True(finalX.Success);
+        Assert.Equal("committed", finalX.ValueAsString());
+    }
+
+    [Theory, CombinatorialData]
+    public async Task TestLockReleaseAfterAbortRollbackTimeoutAndFailedPrepare(
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType,
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability,
+        [CombinatorialValues(false, true)] bool asyncRelease,
+        [CombinatorialValues(
+            LockReleaseScenario.ExplicitRollback,
+            LockReleaseScenario.ScriptError,
+            LockReleaseScenario.Timeout,
+            LockReleaseScenario.FailedPrepareConflict
+        )] LockReleaseScenario scenario
+    )
+    {
+        CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+        KahunaClient client = GetClientByType(clientType);
+
+        await AssertClusterAvailable(client, cancellationToken);
+
+        string prefix = $"tx-anomaly/{Guid.NewGuid():N}/release";
+        string lockedKey = $"{prefix}/locked-key";
+
+        if (scenario == LockReleaseScenario.FailedPrepareConflict)
+        {
+            KahunaKeyValue seeded = await client.SetKeyValue(
+                lockedKey,
+                "0",
+                10000,
+                durability: durability,
+                cancellationToken: cancellationToken
+            );
+            Assert.True(seeded.Success);
+        }
+
+        switch (scenario)
+        {
+            case LockReleaseScenario.ExplicitRollback:
+                await ExecuteExplicitRollbackScenario(client, lockedKey, durability, asyncRelease, cancellationToken);
+                break;
+            case LockReleaseScenario.ScriptError:
+                await ExecuteScriptErrorScenario(client, lockedKey, durability, asyncRelease, cancellationToken);
+                break;
+            case LockReleaseScenario.Timeout:
+                await ExecuteTimeoutReleaseScenario(client, lockedKey, durability, asyncRelease, cancellationToken);
+                return;
+            case LockReleaseScenario.FailedPrepareConflict:
+                await ExecuteFailedPrepareConflictScenario(client, lockedKey, durability, asyncRelease, cancellationToken);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(scenario), scenario, null);
+        }
+
+        await AssertSubsequentPessimisticWriteSucceeds(client, lockedKey, durability, asyncRelease, cancellationToken);
+    }
+
+    [Theory, CombinatorialData]
+    public async Task TestMultiKeyAtomicityUnderConflict(
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType,
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+        KahunaClient client = GetClientByType(clientType);
+
+        await AssertClusterAvailable(client, cancellationToken);
+
+        string prefix = $"tx-anomaly/{Guid.NewGuid():N}/atomic";
+        string keyA = $"{prefix}/a";
+        string keyB = $"{prefix}/b";
+        string keyC = $"{prefix}/c";
+
+        Assert.True((await client.SetKeyValue(keyA, "0", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+        Assert.True((await client.SetKeyValue(keyB, "0", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+        Assert.True((await client.SetKeyValue(keyC, "0", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+
+        await using KahunaTransactionSession tx1 = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Optimistic, Timeout = 5000 },
+            cancellationToken
+        );
+
+        KahunaKeyValue initialA = await tx1.GetKeyValue(keyA, durability, cancellationToken);
+        KahunaKeyValue initialB = await tx1.GetKeyValue(keyB, durability, cancellationToken);
+        KahunaKeyValue initialC = await tx1.GetKeyValue(keyC, durability, cancellationToken);
+
+        Assert.True(initialA.Success);
+        Assert.True(initialB.Success);
+        Assert.True(initialC.Success);
+        Assert.Equal(0, initialA.ValueAsLong());
+        Assert.Equal(0, initialB.ValueAsLong());
+        Assert.Equal(0, initialC.ValueAsLong());
+
+        SimpleCommitAttempt conflictWriter = await ExecuteValueUpdateAttempt(
+            client,
+            keyB,
+            "2",
+            KeyValueTransactionLocking.Pessimistic,
+            durability,
+            cancellationToken
+        );
+        Assert.True(conflictWriter.Committed);
+
+        CommitAttempt tx1Commit;
+
+        try
+        {
+            Assert.True((await tx1.SetKeyValue(keyA, "1", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+            Assert.True((await tx1.SetKeyValue(keyB, "1", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+            Assert.True((await tx1.SetKeyValue(keyC, "1", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+
+            tx1Commit = await CommitTransactionAttempt(tx1, cancellationToken);
+        }
+        catch (KahunaException exception) when (exception.KeyValueErrorCode is KeyValueResponseType.Aborted or KeyValueResponseType.MustRetry)
+        {
+            tx1Commit = new(false, exception.KeyValueErrorCode);
+        }
+
+        Assert.False(tx1Commit.Committed);
+        Assert.True(tx1Commit.ErrorCode is KeyValueResponseType.Aborted or KeyValueResponseType.MustRetry);
+
+        KahunaKeyValue finalA = await client.GetKeyValue(keyA, durability, cancellationToken);
+        KahunaKeyValue finalB = await client.GetKeyValue(keyB, durability, cancellationToken);
+        KahunaKeyValue finalC = await client.GetKeyValue(keyC, durability, cancellationToken);
+
+        Assert.True(finalA.Success);
+        Assert.True(finalB.Success);
+        Assert.True(finalC.Success);
+
+        Assert.Equal("0", finalA.ValueAsString());
+        Assert.Equal("2", finalB.ValueAsString());
+        Assert.Equal("0", finalC.ValueAsString());
+    }
+
+    [Theory, CombinatorialData]
+    public async Task TestReadYourOwnWritesWithinTransaction(
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType,
+        [CombinatorialValues(KeyValueTransactionLocking.Optimistic, KeyValueTransactionLocking.Pessimistic)] KeyValueTransactionLocking locking,
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+        KahunaClient client = GetClientByType(clientType);
+
+        await AssertClusterAvailable(client, cancellationToken);
+
+        string prefix = $"tx-anomaly/{Guid.NewGuid():N}/ryow";
+        string updatedKey = $"{prefix}/updated";
+        string insertedKey = $"{prefix}/inserted";
+        string deletedKey = $"{prefix}/deleted";
+
+        Assert.True((await client.SetKeyValue(updatedKey, "before", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+        Assert.True((await client.SetKeyValue(deletedKey, "to-delete", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+
+        await using KahunaTransactionSession session = await client.StartTransactionSession(
+            new() { Locking = locking, Timeout = 5000 },
+            cancellationToken
+        );
+
+        KahunaKeyValue updatedWrite = await session.SetKeyValue(
+            updatedKey,
+            "after",
+            10000,
+            durability: durability,
+            cancellationToken: cancellationToken
+        );
+        KahunaKeyValue insertedWrite = await session.SetKeyValue(
+            insertedKey,
+            "created",
+            10000,
+            durability: durability,
+            cancellationToken: cancellationToken
+        );
+        KahunaKeyValue deletedWrite = await session.DeleteKeyValue(
+            deletedKey,
+            durability,
+            cancellationToken
+        );
+
+        Assert.True(updatedWrite.Success);
+        Assert.True(insertedWrite.Success);
+        Assert.True(deletedWrite.Success);
+
+        KahunaKeyValue updatedInTx = await session.GetKeyValue(updatedKey, durability, cancellationToken);
+        KahunaKeyValue insertedInTx = await session.GetKeyValue(insertedKey, durability, cancellationToken);
+        KahunaKeyValue deletedInTx = await session.GetKeyValue(deletedKey, durability, cancellationToken);
+
+        Assert.True(updatedInTx.Success);
+        Assert.True(insertedInTx.Success);
+        Assert.False(deletedInTx.Success);
+        Assert.Equal("after", updatedInTx.ValueAsString());
+        Assert.Equal("created", insertedInTx.ValueAsString());
+
+        KeyValueGetByRangePageResult rangeInTx = await session.GetByRange(
+            prefix,
+            null,
+            true,
+            null,
+            true,
+            durability: durability,
+            cancellationToken: cancellationToken
+        );
+
+        KahunaKeyValueTransactionResult scriptRead = await client.ExecuteKeyValueTransactionScript(
+            GetSingleReadScript(durability, updatedKey),
+            cancellationToken: cancellationToken
+        );
+
+        KahunaKeyValue updatedOutsideBeforeCommit = await client.GetKeyValue(updatedKey, durability, cancellationToken);
+        KahunaKeyValue insertedOutsideBeforeCommit = await client.GetKeyValue(insertedKey, durability, cancellationToken);
+        KahunaKeyValue deletedOutsideBeforeCommit = await client.GetKeyValue(deletedKey, durability, cancellationToken);
+
+        Assert.Equal(KeyValueResponseType.Get, scriptRead.Type);
+        Assert.Equal("before", scriptRead.FirstValueAsString);
+
+        Assert.True(updatedOutsideBeforeCommit.Success);
+        Assert.False(insertedOutsideBeforeCommit.Success);
+        Assert.True(deletedOutsideBeforeCommit.Success);
+        Assert.Equal("before", updatedOutsideBeforeCommit.ValueAsString());
+        Assert.Equal("to-delete", deletedOutsideBeforeCommit.ValueAsString());
+
+        KeyValueGetByBucketItem updatedInRange = Assert.Single(rangeInTx.Items, item => item.Key == updatedKey);
+        KeyValueGetByBucketItem insertedInRange = Assert.Single(rangeInTx.Items, item => item.Key == insertedKey);
+        Assert.DoesNotContain(rangeInTx.Items, item => item.Key == deletedKey);
+        Assert.Equal("after", updatedInRange.Value is not null ? System.Text.Encoding.UTF8.GetString(updatedInRange.Value) : null);
+        Assert.Equal("created", insertedInRange.Value is not null ? System.Text.Encoding.UTF8.GetString(insertedInRange.Value) : null);
+
+        CommitAttempt commit = await CommitTransactionAttempt(session, cancellationToken);
+        Assert.True(commit.Committed);
+
+        KahunaKeyValue updatedAfterCommit = await client.GetKeyValue(updatedKey, durability, cancellationToken);
+        KahunaKeyValue insertedAfterCommit = await client.GetKeyValue(insertedKey, durability, cancellationToken);
+        KahunaKeyValue deletedAfterCommit = await client.GetKeyValue(deletedKey, durability, cancellationToken);
+
+        Assert.True(updatedAfterCommit.Success);
+        Assert.True(insertedAfterCommit.Success);
+        Assert.False(deletedAfterCommit.Success);
+        Assert.Equal("after", updatedAfterCommit.ValueAsString());
+        Assert.Equal("created", insertedAfterCommit.ValueAsString());
+    }
+
     /// <summary>
     /// Verifies that a pessimistic GetByBucket acquires a prefix lock that blocks
     /// phantom inserts (new keys under the same prefix) until the transaction commits.
@@ -820,6 +1314,333 @@ public class TestTransactionLockingAnomalies
         {
             await using KahunaTransactionSession session = await client.StartTransactionSession(
                 new() { Locking = KeyValueTransactionLocking.Pessimistic, Timeout = 5000 },
+                cancellationToken
+            );
+
+            KahunaKeyValue setResult = await session.SetKeyValue(
+                key, value, 10000, durability: durability, cancellationToken: cancellationToken
+            );
+            Assert.True(setResult.Success);
+
+            bool committed = await session.Commit(cancellationToken);
+            return new(committed, committed ? null : KeyValueResponseType.Aborted);
+        }
+        catch (KahunaException exception) when (exception.KeyValueErrorCode is
+            KeyValueResponseType.Aborted or
+            KeyValueResponseType.MustRetry or
+            KeyValueResponseType.AlreadyLocked)
+        {
+            return new(false, exception.KeyValueErrorCode);
+        }
+    }
+
+    private static async Task<NonRepeatableReadAttempt> ExecuteNonRepeatableReadAttempt(
+        KahunaClient client,
+        string accountKey,
+        string observedKey,
+        KeyValueTransactionLocking locking,
+        KeyValueDurability durability,
+        NonRepeatableReadSchedule schedule,
+        CancellationToken cancellationToken
+    )
+    {
+        long? firstRead = null;
+        long? secondRead = null;
+
+        try
+        {
+            await using KahunaTransactionSession session = await client.StartTransactionSession(
+                new() { Locking = locking, Timeout = 5000 },
+                cancellationToken
+            );
+
+            KahunaKeyValue first = await session.GetKeyValue(accountKey, durability, cancellationToken);
+            Assert.True(first.Success);
+            firstRead = first.ValueAsLong();
+
+            schedule.MarkFirstReadComplete();
+            await schedule.WaitForSecondReadRelease(cancellationToken);
+
+            KahunaKeyValue second = await session.GetKeyValue(accountKey, durability, cancellationToken);
+            Assert.True(second.Success);
+            secondRead = second.ValueAsLong();
+
+            KahunaKeyValue observedWrite = await session.SetKeyValue(
+                observedKey,
+                $"{firstRead.Value}:{secondRead.Value}",
+                10000,
+                durability: durability,
+                cancellationToken: cancellationToken
+            );
+            Assert.True(observedWrite.Success);
+
+            bool committed = await session.Commit(cancellationToken);
+            return new(firstRead.Value, secondRead.Value, committed, committed ? null : KeyValueResponseType.Aborted);
+        }
+        catch (KahunaException exception) when (exception.KeyValueErrorCode is KeyValueResponseType.Aborted or KeyValueResponseType.MustRetry)
+        {
+            return new(firstRead ?? -1, secondRead ?? -1, false, exception.KeyValueErrorCode);
+        }
+    }
+
+    private static async Task ExecuteExplicitRollbackScenario(
+        KahunaClient client,
+        string lockedKey,
+        KeyValueDurability durability,
+        bool asyncRelease,
+        CancellationToken cancellationToken
+    )
+    {
+        await using KahunaTransactionSession session = await client.StartTransactionSession(
+            new()
+            {
+                Locking = KeyValueTransactionLocking.Pessimistic,
+                Timeout = 5000,
+                AsyncRelease = asyncRelease
+            },
+            cancellationToken
+        );
+
+        KahunaKeyValue setResult = await session.SetKeyValue(
+            lockedKey,
+            "temp",
+            10000,
+            durability: durability,
+            cancellationToken: cancellationToken
+        );
+        Assert.True(setResult.Success);
+
+        bool rolledBack = await session.Rollback(cancellationToken);
+        Assert.True(rolledBack);
+    }
+
+    private static async Task ExecuteScriptErrorScenario(
+        KahunaClient client,
+        string lockedKey,
+        KeyValueDurability durability,
+        bool asyncRelease,
+        CancellationToken cancellationToken
+    )
+    {
+        string setCommand = durability == KeyValueDurability.Persistent ? "SET" : "ESET";
+        string asyncReleaseValue = asyncRelease ? "true" : "false";
+
+        string script = $$"""
+        BEGIN (locking="pessimistic", asyncRelease="{{asyncReleaseValue}}")
+         {{setCommand}} @key 'temp' EX 10000
+         THROW 'boom'
+        END
+        """;
+
+        try
+        {
+            await client.ExecuteKeyValueTransactionScript(
+                script,
+                parameters: [new() { Key = "@key", Value = lockedKey }],
+                cancellationToken: cancellationToken
+            );
+
+            Assert.Fail("Expected the script error scenario to throw.");
+        }
+        catch (KahunaException exception)
+        {
+            Assert.Equal(KeyValueResponseType.Errored, exception.KeyValueErrorCode);
+        }
+    }
+
+    private static async Task ExecuteTimeoutReleaseScenario(
+        KahunaClient client,
+        string lockedKey,
+        KeyValueDurability durability,
+        bool asyncRelease,
+        CancellationToken cancellationToken
+    )
+    {
+        KahunaTransactionSession session = await client.StartTransactionSession(
+            new()
+            {
+                Locking = KeyValueTransactionLocking.Pessimistic,
+                Timeout = 100,
+                AsyncRelease = asyncRelease
+            },
+            cancellationToken
+        );
+
+        try
+        {
+            KahunaKeyValue setResult = await session.SetKeyValue(
+                lockedKey,
+                "temp",
+                10000,
+                durability: durability,
+                cancellationToken: cancellationToken
+            );
+            Assert.True(setResult.Success);
+
+            await Task.Delay(300, cancellationToken);
+
+            await AssertSubsequentPessimisticWriteSucceeds(client, lockedKey, durability, asyncRelease, cancellationToken);
+        }
+        finally
+        {
+            try
+            {
+                await session.Rollback(cancellationToken);
+            }
+            catch (KahunaException exception) when (exception.KeyValueErrorCode is KeyValueResponseType.Aborted or KeyValueResponseType.MustRetry or KeyValueResponseType.Errored)
+            {
+                // The transaction may already have been reaped by timeout.
+            }
+
+            await session.DisposeAsync();
+        }
+    }
+
+    private static async Task ExecuteFailedPrepareConflictScenario(
+        KahunaClient client,
+        string lockedKey,
+        KeyValueDurability durability,
+        bool asyncRelease,
+        CancellationToken cancellationToken
+    )
+    {
+        TxSchedule schedule = new();
+
+        Task<TransactionAttempt> firstAttempt = ExecuteOptimisticConflictAttempt(
+            client,
+            lockedKey,
+            "1",
+            durability,
+            asyncRelease,
+            schedule,
+            cancellationToken
+        );
+        Task<TransactionAttempt> secondAttempt = ExecuteOptimisticConflictAttempt(
+            client,
+            lockedKey,
+            "2",
+            durability,
+            asyncRelease,
+            schedule,
+            cancellationToken
+        );
+
+        await schedule.WaitForBothReads(cancellationToken);
+        schedule.AllowWrites();
+
+        TransactionAttempt[] attempts = await Task.WhenAll(firstAttempt, secondAttempt);
+
+        Assert.Equal(1, attempts.Count(attempt => attempt.Committed));
+        Assert.Equal(1, attempts.Count(attempt => attempt.ErrorCode is KeyValueResponseType.Aborted or KeyValueResponseType.MustRetry));
+    }
+
+    private static async Task<TransactionAttempt> ExecuteOptimisticConflictAttempt(
+        KahunaClient client,
+        string key,
+        string value,
+        KeyValueDurability durability,
+        bool asyncRelease,
+        TxSchedule schedule,
+        CancellationToken cancellationToken
+    )
+    {
+        long? readValue = null;
+
+        try
+        {
+            await using KahunaTransactionSession session = await client.StartTransactionSession(
+                new()
+                {
+                    Locking = KeyValueTransactionLocking.Optimistic,
+                    Timeout = 5000,
+                    AsyncRelease = asyncRelease
+                },
+                cancellationToken
+            );
+
+            KahunaKeyValue currentValue = await session.GetKeyValue(key, durability, cancellationToken);
+            Assert.True(currentValue.Success);
+            readValue = currentValue.ValueAsLong();
+
+            schedule.MarkReadComplete();
+            await schedule.ReleaseWrites(cancellationToken);
+
+            KahunaKeyValue setResult = await session.SetKeyValue(
+                key,
+                value,
+                10000,
+                durability: durability,
+                cancellationToken: cancellationToken
+            );
+            Assert.True(setResult.Success);
+
+            bool committed = await session.Commit(cancellationToken);
+            return new(readValue, committed, committed ? null : KeyValueResponseType.Aborted);
+        }
+        catch (KahunaException exception) when (exception.KeyValueErrorCode is KeyValueResponseType.Aborted or KeyValueResponseType.MustRetry)
+        {
+            return new(readValue, false, exception.KeyValueErrorCode);
+        }
+    }
+
+    private static async Task AssertSubsequentPessimisticWriteSucceeds(
+        KahunaClient client,
+        string lockedKey,
+        KeyValueDurability durability,
+        bool asyncRelease,
+        CancellationToken cancellationToken
+    )
+    {
+        using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(3));
+
+        await using KahunaTransactionSession session = await client.StartTransactionSession(
+            new()
+            {
+                Locking = KeyValueTransactionLocking.Pessimistic,
+                Timeout = 1000,
+                AsyncRelease = asyncRelease
+            },
+            timeout.Token
+        );
+
+        KahunaKeyValue setResult = await session.SetKeyValue(
+            lockedKey,
+            "released",
+            10000,
+            durability: durability,
+            cancellationToken: timeout.Token
+        );
+        Assert.True(setResult.Success);
+
+        bool committed = await session.Commit(timeout.Token);
+        Assert.True(committed);
+
+        KahunaKeyValue finalValue = await client.GetKeyValue(lockedKey, durability, timeout.Token);
+        Assert.True(finalValue.Success);
+        Assert.Equal("released", finalValue.ValueAsString());
+    }
+
+    private static string GetSingleReadScript(KeyValueDurability durability, string key)
+    {
+        return durability == KeyValueDurability.Persistent
+            ? $"GET `{key}`"
+            : $"EGET `{key}`";
+    }
+
+    private static async Task<SimpleCommitAttempt> ExecuteInsertAttempt(
+        KahunaClient client,
+        string key,
+        string value,
+        KeyValueTransactionLocking locking,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        try
+        {
+            await using KahunaTransactionSession session = await client.StartTransactionSession(
+                new() { Locking = locking, Timeout = 5000 },
                 cancellationToken
             );
 
@@ -1338,6 +2159,33 @@ public class TestTransactionLockingAnomalies
         }
     }
 
+    private sealed class NonRepeatableReadSchedule
+    {
+        private readonly TaskCompletionSource firstReadCompleted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private readonly TaskCompletionSource secondReadReleased = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void MarkFirstReadComplete()
+        {
+            firstReadCompleted.TrySetResult();
+        }
+
+        public Task WaitForFirstRead(CancellationToken cancellationToken)
+        {
+            return firstReadCompleted.Task.WaitAsync(cancellationToken);
+        }
+
+        public Task WaitForSecondReadRelease(CancellationToken cancellationToken)
+        {
+            return secondReadReleased.Task.WaitAsync(cancellationToken);
+        }
+
+        public void AllowSecondRead()
+        {
+            secondReadReleased.TrySetResult();
+        }
+    }
+
     private sealed record TransactionAttempt(long? ReadValue, bool Committed, KeyValueResponseType? ErrorCode);
 
     private sealed record StaleReadAttempt(long ReadValue, bool Committed, KeyValueResponseType? ErrorCode);
@@ -1355,4 +2203,19 @@ public class TestTransactionLockingAnomalies
     private sealed record ScriptAttempt(bool Committed, KeyValueResponseType? ErrorCode);
 
     private sealed record CommitAttempt(bool Committed, KeyValueResponseType? ErrorCode);
+
+    private sealed record NonRepeatableReadAttempt(
+        long FirstRead,
+        long SecondRead,
+        bool Committed,
+        KeyValueResponseType? ErrorCode
+    );
+
+    public enum LockReleaseScenario
+    {
+        ExplicitRollback,
+        ScriptError,
+        Timeout,
+        FailedPrepareConflict
+    }
 }
