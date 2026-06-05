@@ -16,6 +16,8 @@ namespace Kahuna.Client;
 /// </remarks>
 public class KahunaTransactionSession : IAsyncDisposable
 {
+    private const int DefaultTransactionTimeoutMs = 5000;
+
     /// <summary>
     /// Gets the instance of the KahunaClient used by the current KahunaTransactionSession.
     /// This property encapsulates the client responsible for handling communication and operations within the transaction context.
@@ -40,6 +42,11 @@ public class KahunaTransactionSession : IAsyncDisposable
     /// This property determines whether the transaction operates under a pessimistic or optimistic locking strategy, influencing how data consistency and concurrency are managed.
     /// </summary>
     private KeyValueTransactionLocking Locking { get; set; }
+
+    /// <summary>
+    /// Lease duration used for key write intents acquired by this transaction session.
+    /// </summary>
+    private int TransactionTimeout { get; }
 
     /// <summary>
     /// Gets or sets the current status of the transaction session.
@@ -78,14 +85,47 @@ public class KahunaTransactionSession : IAsyncDisposable
     /// <param name="url"></param>
     /// <param name="uniqueId"></param>
     /// <param name="transactionId"></param>
-    /// <param name="locking"></param> 
-    public KahunaTransactionSession(KahunaClient client, string url, string uniqueId, HLCTimestamp transactionId, KeyValueTransactionLocking locking)
+    /// <param name="locking"></param>
+    /// <param name="transactionTimeout"></param>
+    public KahunaTransactionSession(KahunaClient client, string url, string uniqueId, HLCTimestamp transactionId, KeyValueTransactionLocking locking, int transactionTimeout)
     {
         Client = client;
         Url = url;
         UniqueId = uniqueId;
         TransactionId = transactionId;
         Locking = locking;
+        TransactionTimeout = transactionTimeout > 0 ? transactionTimeout : DefaultTransactionTimeoutMs;
+    }
+
+    private async Task AcquireExclusiveKeyValueLock(string key, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        acquiredLocks ??= [];
+
+        if (acquiredLocks.Contains((key, durability)))
+            return;
+
+        bool successLock;
+
+        try
+        {
+            successLock = await Client.Communication.TryAcquireExclusiveKeyValueLock(
+                Url,
+                TransactionId,
+                key,
+                TransactionTimeout,
+                durability,
+                cancellationToken
+            ).ConfigureAwait(false);
+        }
+        catch (KahunaException ex) when (ex.KeyValueErrorCode is KeyValueResponseType.AlreadyLocked or KeyValueResponseType.MustRetry)
+        {
+            throw new KahunaException($"Failed to acquire exclusive key/value lock for '{key}': {ex.KeyValueErrorCode}.", KeyValueResponseType.Aborted);
+        }
+
+        if (!successLock)
+            throw new KahunaException($"Failed to acquire exclusive key/value lock for '{key}'.", KeyValueResponseType.Aborted);
+
+        acquiredLocks.Add((key, durability));
     }
     
     /// <summary>
@@ -107,15 +147,8 @@ public class KahunaTransactionSession : IAsyncDisposable
     {       
         if (Status != KahunaTransactionStatus.Pending)
             throw new KahunaException("Cannot perform actions on a completed transaction.", KeyValueResponseType.Errored);
-        
-        acquiredLocks ??= [];
 
-        if (!acquiredLocks.Contains((key, durability)))
-        {
-            bool successLock = await Client.Communication.TryAcquireExclusiveKeyValueLock(Url, TransactionId, key, durability, cancellationToken);
-            if (successLock)
-                acquiredLocks.Add((key, durability));
-        }
+        await AcquireExclusiveKeyValueLock(key, durability, cancellationToken);
         
         (bool success, long revision, int timeElapsedMs) = await Client.Communication.TrySetKeyValue(
             Url,
@@ -156,15 +189,8 @@ public class KahunaTransactionSession : IAsyncDisposable
     {
         if (Status != KahunaTransactionStatus.Pending)
             throw new KahunaException("Cannot perform actions on a completed transaction.", KeyValueResponseType.Errored);
-        
-        acquiredLocks ??= [];
 
-        if (!acquiredLocks.Contains((key, durability)))
-        {
-            bool successLock = await Client.Communication.TryAcquireExclusiveKeyValueLock(Url, TransactionId, key, durability, cancellationToken);
-            if (successLock)
-                acquiredLocks.Add((key, durability));
-        }
+        await AcquireExclusiveKeyValueLock(key, durability, cancellationToken);
         
         byte[] valueBytes = Encoding.UTF8.GetBytes(value);
         
@@ -210,15 +236,8 @@ public class KahunaTransactionSession : IAsyncDisposable
     {
         if (Status != KahunaTransactionStatus.Pending)
             throw new KahunaException("Cannot perform actions on a completed transaction.", KeyValueResponseType.Errored);
-        
-        acquiredLocks ??= [];
 
-        if (!acquiredLocks.Contains((key, durability)))
-        {
-            bool successLock = await Client.Communication.TryAcquireExclusiveKeyValueLock(Url, TransactionId, key, durability, cancellationToken);
-            if (successLock)
-                acquiredLocks.Add((key, durability));
-        }
+        await AcquireExclusiveKeyValueLock(key, durability, cancellationToken);
                        
         (bool success, long revision, int timeElapsedMs) = await Client.Communication.TrySetKeyValue(
             Url, 
@@ -266,15 +285,8 @@ public class KahunaTransactionSession : IAsyncDisposable
     {
         if (Status != KahunaTransactionStatus.Pending)
             throw new KahunaException("Cannot perform actions on a completed transaction.", KeyValueResponseType.Errored);
-        
-        acquiredLocks ??= [];
 
-        if (!acquiredLocks.Contains((key, durability)))
-        {
-            bool successLock = await Client.Communication.TryAcquireExclusiveKeyValueLock(Url, TransactionId, key, durability, cancellationToken);
-            if (successLock)
-                acquiredLocks.Add((key, durability));
-        }
+        await AcquireExclusiveKeyValueLock(key, durability, cancellationToken);
         
         (bool success, long revision, int timeElapsedMs) = await Client.Communication.TryCompareValueAndSetKeyValue(
             Url, 
@@ -323,15 +335,8 @@ public class KahunaTransactionSession : IAsyncDisposable
     {
         if (Status != KahunaTransactionStatus.Pending)
             throw new KahunaException("Cannot perform actions on a completed transaction.", KeyValueResponseType.Errored);
-        
-        acquiredLocks ??= [];
 
-        if (!acquiredLocks.Contains((key, durability)))
-        {
-            bool successLock = await Client.Communication.TryAcquireExclusiveKeyValueLock(Url, TransactionId, key, durability, cancellationToken);
-            if (successLock)
-                acquiredLocks.Add((key, durability));
-        }
+        await AcquireExclusiveKeyValueLock(key, durability, cancellationToken);
         
         byte[] valueBytes = Encoding.UTF8.GetBytes(value);
         
@@ -378,14 +383,7 @@ public class KahunaTransactionSession : IAsyncDisposable
         if (Status != KahunaTransactionStatus.Pending)
             throw new KahunaException("Cannot perform actions on a completed transaction.", KeyValueResponseType.Errored);
 
-        acquiredLocks ??= [];
-
-        if (!acquiredLocks.Contains((key, durability)))
-        {
-            bool successLock = await Client.Communication.TryAcquireExclusiveKeyValueLock(Url, TransactionId, key, durability, cancellationToken);
-            if (successLock)
-                acquiredLocks.Add((key, durability));
-        }
+        await AcquireExclusiveKeyValueLock(key, durability, cancellationToken);
         
         (bool success, long revision, int timeElapsedMs) = await Client.Communication.TryCompareRevisionAndSetKeyValue(
             Url, 
@@ -429,15 +427,8 @@ public class KahunaTransactionSession : IAsyncDisposable
     {
         if (Status != KahunaTransactionStatus.Pending)
             throw new KahunaException("Cannot perform actions on a completed transaction.", KeyValueResponseType.Errored);
-        
-        acquiredLocks ??= [];
 
-        if (!acquiredLocks.Contains((key, durability)))
-        {
-            bool successLock = await Client.Communication.TryAcquireExclusiveKeyValueLock(Url, TransactionId, key, durability, cancellationToken);
-            if (successLock)
-                acquiredLocks.Add((key, durability));
-        }
+        await AcquireExclusiveKeyValueLock(key, durability, cancellationToken);
         
         byte[] valueBytes = Encoding.UTF8.GetBytes(value);
         
@@ -474,16 +465,7 @@ public class KahunaTransactionSession : IAsyncDisposable
             throw new KahunaException("Cannot perform actions on a completed transaction.", KeyValueResponseType.Errored);
         
         if (Locking == KeyValueTransactionLocking.Pessimistic)
-        {
-            acquiredLocks ??= [];
-
-            if (!acquiredLocks.Contains((key, durability)))
-            {
-                bool successLock = await Client.Communication.TryAcquireExclusiveKeyValueLock(Url, TransactionId, key, durability, cancellationToken);
-                if (successLock)
-                    acquiredLocks.Add((key, durability));
-            }
-        }
+            await AcquireExclusiveKeyValueLock(key, durability, cancellationToken);
         
         (bool success, byte[]? value, long revision, int timeElapsedMs) = await Client.Communication.TryGetKeyValue(
             Url, 
@@ -510,16 +492,7 @@ public class KahunaTransactionSession : IAsyncDisposable
             throw new KahunaException("Cannot perform actions on a completed transaction.", KeyValueResponseType.Errored);
         
         if (Locking == KeyValueTransactionLocking.Pessimistic)
-        {
-            acquiredLocks ??= [];
-
-            if (!acquiredLocks.Contains((key, durability)))
-            {
-                bool successLock = await Client.Communication.TryAcquireExclusiveKeyValueLock(Url, TransactionId, key, durability, cancellationToken);
-                if (successLock)
-                    acquiredLocks.Add((key, durability));
-            }
-        }
+            await AcquireExclusiveKeyValueLock(key, durability, cancellationToken);
         
         (bool success, long revision, int timeElapsedMs) = await Client.Communication.TryExistsKeyValue(
             Url,
@@ -550,15 +523,8 @@ public class KahunaTransactionSession : IAsyncDisposable
     {
         if (Status != KahunaTransactionStatus.Pending)
             throw new KahunaException("Cannot perform actions on a completed transaction.", KeyValueResponseType.Errored);
-        
-        acquiredLocks ??= [];
 
-        if (!acquiredLocks.Contains((key, durability)))
-        {
-            bool successLock = await Client.Communication.TryAcquireExclusiveKeyValueLock(Url, TransactionId, key, durability, cancellationToken);
-            if (successLock)
-                acquiredLocks.Add((key, durability));
-        }
+        await AcquireExclusiveKeyValueLock(key, durability, cancellationToken);
         
         (bool success, long revision, int timeElapsedMs) = await Client.Communication.TryExtendKeyValue(
             Url, 
@@ -595,15 +561,8 @@ public class KahunaTransactionSession : IAsyncDisposable
     {
         if (Status != KahunaTransactionStatus.Pending)
             throw new KahunaException("Cannot perform actions on a completed transaction.", KeyValueResponseType.Errored);
-        
-        acquiredLocks ??= [];
 
-        if (!acquiredLocks.Contains((key, durability)))
-        {
-            bool successLock = await Client.Communication.TryAcquireExclusiveKeyValueLock(Url, TransactionId, key, durability, cancellationToken);
-            if (successLock)
-                acquiredLocks.Add((key, durability));
-        }
+        await AcquireExclusiveKeyValueLock(key, durability, cancellationToken);
         
         (bool success, long revision, int timeElapsedMs) = await Client.Communication.TryExtendKeyValue(
             Url, 
@@ -638,15 +597,8 @@ public class KahunaTransactionSession : IAsyncDisposable
     {
         if (Status != KahunaTransactionStatus.Pending)
             throw new KahunaException("Cannot perform actions on a completed transaction.", KeyValueResponseType.Errored);
-        
-        acquiredLocks ??= [];
 
-        if (!acquiredLocks.Contains((key, durability)))
-        {
-            bool successLock = await Client.Communication.TryAcquireExclusiveKeyValueLock(Url, TransactionId, key, durability, cancellationToken);
-            if (successLock)
-                acquiredLocks.Add((key, durability));
-        }
+        await AcquireExclusiveKeyValueLock(key, durability, cancellationToken);
         
         (bool success, long revision, int timeElapsedMs) = await Client.Communication.TryDeleteKeyValue(
             Url,
@@ -691,23 +643,12 @@ public class KahunaTransactionSession : IAsyncDisposable
             });
         }
 
-        acquiredLocks ??= [];
-
         foreach (KahunaDeleteKeyValueRequestItem item in items)
         {
-            if (string.IsNullOrEmpty(item.Key) || acquiredLocks.Contains((item.Key, item.Durability)))
+            if (string.IsNullOrEmpty(item.Key))
                 continue;
 
-            bool successLock = await Client.Communication.TryAcquireExclusiveKeyValueLock(
-                Url,
-                TransactionId,
-                item.Key,
-                item.Durability,
-                cancellationToken
-            ).ConfigureAwait(false);
-
-            if (successLock)
-                acquiredLocks.Add((item.Key, item.Durability));
+            await AcquireExclusiveKeyValueLock(item.Key, item.Durability, cancellationToken);
         }
 
         (List<KahunaDeleteKeyValueResponseItem> responses, int timeElapsedMs) = await Client.Communication.TryDeleteManyKeyValues(

@@ -1020,14 +1020,15 @@ public class GrpcCommunication : IKahunaCommunication
     /// A task that represents the asynchronous operation. The task result is a boolean indicating whether the lock was successfully acquired.
     /// </returns>
     /// <exception cref="KahunaException">Thrown if the lock acquisition process fails or encounters an error.</exception>
-    public async Task<bool> TryAcquireExclusiveKeyValueLock(string url, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<bool> TryAcquireExclusiveKeyValueLock(string url, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcTryAcquireExclusiveLockRequest request = new()
         {
             TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
-            Key = key,             
+            Key = key,
+            ExpiresMs = expiresMs,
             Durability = (GrpcKeyValueDurability)durability
         };
 

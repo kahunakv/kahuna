@@ -96,10 +96,19 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             return KeyValueStaticResponses.ErroredResponse;
         }
 
-        // Higher transactions has seen the committed value 
-        foreach ((HLCTimestamp key, KeyValueMvccEntry _) in entry.MvccEntries)
+        // Higher transactions with staged mutations have seen the committed value.
+        // Read-only MVCC snapshots must not abort the lock owner; otherwise two
+        // optimistic read-modify-write transactions can both abort when the lower
+        // transaction wins the write lock and the higher transaction only read.
+        foreach ((HLCTimestamp key, KeyValueMvccEntry otherMvccEntry) in entry.MvccEntries)
         {
-            if (key.CompareTo(message.TransactionId) > 0)
+            bool hasStagedMutation =
+                otherMvccEntry.Revision != entry.Revision ||
+                otherMvccEntry.State != entry.State ||
+                otherMvccEntry.Expires != entry.Expires ||
+                otherMvccEntry.LastModified != entry.LastModified;
+            
+            if (hasStagedMutation && key.CompareTo(message.TransactionId) > 0)
             {
                 context.Logger.LogWarning("Transaction {TransactionId} conflicts with {ExistingTransactionId} [5]", message.TransactionId, key);
             

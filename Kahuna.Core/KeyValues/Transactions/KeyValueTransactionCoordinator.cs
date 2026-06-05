@@ -832,11 +832,9 @@ internal sealed class KeyValueTransactionCoordinator
             return;
         }
 
-        // Step 4.b: Prepare mutations of successful preparations
-        if (context.AsyncRelease)
-            _ = CommitMutations(context, mutationsPrepared);
-        else
-            await CommitMutations(context, mutationsPrepared);
+        // Step 4.b: Commit prepared mutations. This must be awaited so the client
+        // only receives Committed after the mutations are durably applied.
+        await CommitMutations(context, mutationsPrepared);
     }
 
     /// <summary>
@@ -957,7 +955,14 @@ internal sealed class KeyValueTransactionCoordinator
             );
 
             if (response != KeyValueResponseType.Committed)
+            {
+                string reason = $"Failed to commit mutation {key}: {response}";
+                context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = reason };
+
                 logger.LogWarning("CommitMutations: {Type} {Key} {TicketId}", response, key, ticketId);
+
+                throw new KahunaAbortedException(reason);
+            }
 
             if (!context.SetState(KeyValueTransactionState.Committed, KeyValueTransactionState.Committing))
                 throw new KahunaAbortedException("Failed to set transaction state to Committed");
@@ -974,7 +979,14 @@ internal sealed class KeyValueTransactionCoordinator
         foreach ((KeyValueResponseType response, string key, long commitIndex, KeyValueDurability durability) in responses)
         {
             if (response != KeyValueResponseType.Committed)
+            {
+                string reason = $"Failed to commit mutation {key}: {response}";
+                context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = reason };
+
                 logger.LogWarning("CommitMutations {Type} {Key} {TicketId} {Durability}", response, key, commitIndex, durability);
+
+                throw new KahunaAbortedException(reason);
+            }
         }
 
         if (!context.SetState(KeyValueTransactionState.Committed, KeyValueTransactionState.Committing))

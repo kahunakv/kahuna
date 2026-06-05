@@ -43,7 +43,7 @@ public interface IKahunaCommunication
 
      Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransactionScript(string url, byte[] script, string? hash, List<KeyValueParameter>? parameters, CancellationToken cancellationToken);
 
-     Task<bool> TryAcquireExclusiveKeyValueLock(string url, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken);
+     Task<bool> TryAcquireExclusiveKeyValueLock(string url, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken);
 
      Task<List<KeyValueGetByBucketItem>> GetByBucket(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken);
      

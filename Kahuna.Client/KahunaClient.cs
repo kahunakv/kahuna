@@ -956,7 +956,7 @@ public class KahunaClient
             cancellationToken
         ).ConfigureAwait(false);
         
-        return new(this, result.url, uniqueId, result.transactionId, options.Locking);
+        return new(this, result.url, uniqueId, result.transactionId, options.Locking, options.Timeout);
     }
 
     /// <summary>

@@ -1037,7 +1037,7 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to execute key/value transaction:" + response.Type, response.Type);
     }
 
-    public Task<bool> TryAcquireExclusiveKeyValueLock(string url, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken)
+    public Task<bool> TryAcquireExclusiveKeyValueLock(string url, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         throw new NotImplementedException();
     }
