@@ -192,8 +192,18 @@ internal sealed class TrySetHandler : BaseHandler
             mvccEntry.Revision++;
             mvccEntry.LastUsed = currentTime;
             mvccEntry.LastModified = currentTime;
-            mvccEntry.State = KeyValueState.Set;                       
-            
+            mvccEntry.State = KeyValueState.Set;
+
+            // Set write intent so concurrent transactions detect this pending write during ValidateReadSet.
+            // Without this, optimistic transactions writing different keys can both pass validation and commit,
+            // producing write skew. The intent is cleared by TryReleaseExclusiveLock on abort or
+            // overwritten by TryPrepareMutationsHandler on the commit path.
+            entry.WriteIntent ??= new()
+            {
+                TransactionId = message.TransactionId,
+                Expires = currentTime + 15000
+            };
+
             return new(KeyValueResponseType.Set, mvccEntry.Revision, currentTime);
         }
         
@@ -248,10 +258,12 @@ internal sealed class TrySetHandler : BaseHandler
             return CreateProposal(message, entry, proposal, currentTime);
 
         if (entry.Revisions is not null)
-            RemoveExpiredRevisions(entry, proposal.Revision);        
-        
-        entry.Revisions ??= new();                       
+            RemoveExpiredRevisions(entry, proposal.Revision);
+
+        bool revisionsCreated = entry.Revisions is null;
+        entry.Revisions ??= new();
         entry.Revisions.Add(entry.Revision, entry.Value);
+        context.AdjustEstimatedEntryBytes(KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreated, entry.Value));
 
         int previousValueLength = entry.Value?.Length ?? 0;
         

@@ -50,10 +50,12 @@ internal sealed class CompleteProposalHandler : BaseHandler
         }
         
         if (entry.Revisions is not null)
-            RemoveExpiredRevisions(entry, proposal.Revision);        
-        
-        entry.Revisions ??= new();                       
+            RemoveExpiredRevisions(entry, proposal.Revision);
+
+        bool revisionsCreated = entry.Revisions is null;
+        entry.Revisions ??= new();
         entry.Revisions.Add(entry.Revision, entry.Value);
+        context.AdjustEstimatedEntryBytes(KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreated, entry.Value));
 
         int previousValueLength = entry.Value?.Length ?? 0;
 

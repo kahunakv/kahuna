@@ -207,18 +207,25 @@ internal abstract class BaseHandler
             return;
 
         int toBeKept = context.Configuration.RevisionsToKeepCached;
-            
+
         foreach (KeyValuePair<long, byte[]?> kv in entry.Revisions)
         {
-            if (kv.Key < (refRevision - toBeKept))                
+            if (kv.Key < (refRevision - toBeKept))
                 revisionsToRemove.Add(kv.Key);
         }
 
         if (revisionsToRemove.Count > 0)
         {
-            foreach (long revision in revisionsToRemove)                
-                entry.Revisions.Remove(revision);                
-            
+            long bytesFreed = 0;
+
+            foreach (long revision in revisionsToRemove)
+            {
+                entry.Revisions.TryGetValue(revision, out byte[]? removedValue);
+                bytesFreed += KeyValueStoreAccounting.EstimateRevisionRemovedBytes(removedValue);
+                entry.Revisions.Remove(revision);
+            }
+
+            context.AdjustEstimatedEntryBytes(-bytesFreed);
             revisionsToRemove.Clear();
         }
     }

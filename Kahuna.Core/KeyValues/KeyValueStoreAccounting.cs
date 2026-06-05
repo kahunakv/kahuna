@@ -13,9 +13,27 @@ using Kommander.Time;
 internal static class KeyValueStoreAccounting
 {
     public const int EntryOverheadBytes = 128;
-    private const int DictionaryOverheadBytes = 64;
-    private const int RevisionEntryOverheadBytes = 16;
+    internal const int DictionaryOverheadBytes = 64;
+    internal const int RevisionEntryOverheadBytes = 16;
     private const int MvccEntryOverheadBytes = 64;
+
+    /// <summary>
+    /// Bytes charged when a new revision entry is archived into entry.Revisions.
+    /// Pass dictionaryJustCreated=true when entry.Revisions was null before this call.
+    /// </summary>
+    internal static long EstimateRevisionAddedBytes(bool dictionaryJustCreated, byte[]? archivedValue)
+    {
+        long bytes = sizeof(long) + RevisionEntryOverheadBytes + (archivedValue?.Length ?? 0);
+        if (dictionaryJustCreated)
+            bytes += DictionaryOverheadBytes;
+        return bytes;
+    }
+
+    /// <summary>
+    /// Bytes to reclaim when a single revision entry is removed from entry.Revisions.
+    /// </summary>
+    internal static long EstimateRevisionRemovedBytes(byte[]? archivedValue)
+        => sizeof(long) + RevisionEntryOverheadBytes + (archivedValue?.Length ?? 0);
 
     public static long EstimateEntryBytes(string key, KeyValueEntry entry)
     {

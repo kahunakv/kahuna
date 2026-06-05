@@ -78,6 +78,271 @@ public class TestTransactionLockingAnomalies
         }
     }
 
+    [Theory, CombinatorialData]
+    public async Task TestStaleReadFollowedByWrite(
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType,
+        [CombinatorialValues(KeyValueTransactionLocking.Optimistic, KeyValueTransactionLocking.Pessimistic)] KeyValueTransactionLocking locking,
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+        KahunaClient client = GetClientByType(clientType);
+
+        await AssertClusterAvailable(client, cancellationToken);
+
+        string prefix = $"tx-anomaly/{Guid.NewGuid():N}";
+        string keyA = $"{prefix}/a";
+        string keyB = $"{prefix}/b";
+
+        KahunaKeyValue initialA = await client.SetKeyValue(
+            keyA,
+            "10",
+            10000,
+            durability: durability,
+            cancellationToken: cancellationToken
+        );
+        KahunaKeyValue initialB = await client.SetKeyValue(
+            keyB,
+            "0",
+            10000,
+            durability: durability,
+            cancellationToken: cancellationToken
+        );
+
+        Assert.True(initialA.Success);
+        Assert.True(initialB.Success);
+
+        StaleReadSchedule schedule = new();
+
+        Task<StaleReadAttempt> staleWriterTask = ExecuteStaleReadAttempt(
+            client,
+            keyA,
+            keyB,
+            locking,
+            durability,
+            schedule,
+            cancellationToken
+        );
+
+        await schedule.WaitForRead(cancellationToken);
+
+        Task<SimpleCommitAttempt> freshWriterTask = ExecuteFreshWriterAttempt(
+            client,
+            keyA,
+            locking,
+            durability,
+            cancellationToken
+        );
+
+        bool freshWriterCommittedBeforeStaleWrite = await TryAwaitSuccess(freshWriterTask, TimeSpan.FromMilliseconds(250), cancellationToken);
+
+        schedule.AllowWrite();
+
+        StaleReadAttempt staleWriter = await staleWriterTask;
+        SimpleCommitAttempt freshWriter = await freshWriterTask;
+
+        KahunaKeyValue finalA = await client.GetKeyValue(keyA, durability, cancellationToken);
+        KahunaKeyValue finalB = await client.GetKeyValue(keyB, durability, cancellationToken);
+
+        Assert.True(finalA.Success);
+        Assert.True(finalB.Success);
+
+        if (locking == KeyValueTransactionLocking.Optimistic)
+        {
+            Assert.Equal(10, staleWriter.ReadValue);
+            Assert.True(freshWriterCommittedBeforeStaleWrite);
+            Assert.True(freshWriter.Committed);
+            Assert.False(staleWriter.Committed);
+            Assert.Equal(20, finalA.ValueAsLong());
+            Assert.Equal(0, finalB.ValueAsLong());
+        }
+        else
+        {
+            Assert.True(staleWriter.ReadValue is 10 or 20);
+
+            if (freshWriterCommittedBeforeStaleWrite)
+            {
+                Assert.False(staleWriter.Committed);
+            }
+            else if (staleWriter.Committed)
+            {
+                Assert.Equal(11, finalB.ValueAsLong());
+            }
+        }
+
+        Assert.False(freshWriterCommittedBeforeStaleWrite && staleWriter.Committed && staleWriter.ReadValue == 10);
+        Assert.False(finalA.ValueAsLong() == 20 && finalB.ValueAsLong() == 11 && freshWriterCommittedBeforeStaleWrite && staleWriter.Committed);
+    }
+
+    [Theory, CombinatorialData]
+    public async Task TestWriteSkewOnConcreteKeysInteractive(
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType,
+        [CombinatorialValues(KeyValueTransactionLocking.Optimistic, KeyValueTransactionLocking.Pessimistic)] KeyValueTransactionLocking locking,
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+        KahunaClient client = GetClientByType(clientType);
+
+        await AssertClusterAvailable(client, cancellationToken);
+
+        string prefix = $"tx-anomaly/{Guid.NewGuid():N}/doctors";
+        string aliceKey = $"{prefix}/alice";
+        string bobKey = $"{prefix}/bob";
+
+        await SeedDoctors(client, aliceKey, bobKey, durability, cancellationToken);
+
+        TxSchedule schedule = new();
+
+        Task<WriteSkewAttempt> aliceAttemptTask = ExecuteInteractiveWriteSkewAttempt(
+            client,
+            aliceKey,
+            bobKey,
+            aliceKey,
+            locking,
+            durability,
+            schedule,
+            cancellationToken
+        );
+        Task<WriteSkewAttempt> bobAttemptTask = ExecuteInteractiveWriteSkewAttempt(
+            client,
+            aliceKey,
+            bobKey,
+            bobKey,
+            locking,
+            durability,
+            schedule,
+            cancellationToken
+        );
+
+        if (locking == KeyValueTransactionLocking.Optimistic)
+        {
+            await schedule.WaitForBothReads(cancellationToken);
+        }
+        else
+        {
+            await schedule.TryWaitForBothReads(TimeSpan.FromMilliseconds(250), cancellationToken);
+        }
+
+        schedule.AllowWrites();
+
+        WriteSkewAttempt[] attempts = await Task.WhenAll(aliceAttemptTask, bobAttemptTask);
+        int committedCount = attempts.Count(attempt => attempt.Committed);
+        int abortedCount = attempts.Count(attempt => attempt.ErrorCode is KeyValueResponseType.Aborted or KeyValueResponseType.MustRetry);
+
+        KahunaKeyValue finalAlice = await client.GetKeyValue(aliceKey, durability, cancellationToken);
+        KahunaKeyValue finalBob = await client.GetKeyValue(bobKey, durability, cancellationToken);
+
+        Assert.True(finalAlice.Success);
+        Assert.True(finalBob.Success);
+
+        bool aliceOnCall = finalAlice.ValueAsBool();
+        bool bobOnCall = finalBob.ValueAsBool();
+
+        Assert.True(aliceOnCall || bobOnCall);
+
+        // Only assert exactly-one-off-call when someone actually committed a write;
+        // when both abort (mutual write-intent conflict), both remain on-call which is still safe.
+        if (attempts.Any(a => a.Committed && a.AttemptedWrite))
+            Assert.NotEqual(aliceOnCall, bobOnCall);
+
+        if (locking == KeyValueTransactionLocking.Optimistic)
+        {
+            Assert.All(attempts, attempt =>
+            {
+                Assert.True(attempt.AliceWasTrue);
+                Assert.True(attempt.BobWasTrue);
+                Assert.True(attempt.AttemptedWrite);
+            });
+
+            // Mutual write-intent conflict may cause both transactions to abort (0 commits); that is
+            // still correct isolation — the invariant above confirms no write skew occurred.
+            Assert.InRange(committedCount, 0, 1);
+            Assert.InRange(abortedCount, 1, 2);
+        }
+        else
+        {
+            if (committedCount == 2)
+            {
+                Assert.Contains(attempts, attempt => attempt.AttemptedWrite);
+                Assert.Contains(attempts, attempt => !attempt.AttemptedWrite);
+            }
+        }
+
+        Assert.False(attempts.All(attempt => attempt.Committed && attempt.AttemptedWrite));
+    }
+
+    [Theory, CombinatorialData]
+    public async Task TestWriteSkewOnConcreteKeysScriptGetByBucket(
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType,
+        [CombinatorialValues(KeyValueTransactionLocking.Optimistic, KeyValueTransactionLocking.Pessimistic)] KeyValueTransactionLocking locking,
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+        KahunaClient client = GetClientByType(clientType);
+
+        await AssertClusterAvailable(client, cancellationToken);
+
+        string prefix = $"tx-anomaly/{Guid.NewGuid():N}/doctors";
+        string aliceKey = $"{prefix}/alice";
+        string bobKey = $"{prefix}/bob";
+
+        await SeedDoctors(client, aliceKey, bobKey, durability, cancellationToken);
+
+        string script = GetWriteSkewBucketScript(locking, durability);
+
+        Task<ScriptAttempt> aliceScriptTask = ExecuteWriteSkewScriptAttempt(
+            client,
+            script,
+            prefix,
+            aliceKey,
+            cancellationToken
+        );
+        Task<ScriptAttempt> bobScriptTask = ExecuteWriteSkewScriptAttempt(
+            client,
+            script,
+            prefix,
+            bobKey,
+            cancellationToken
+        );
+
+        ScriptAttempt[] attempts = await Task.WhenAll(aliceScriptTask, bobScriptTask);
+        int committedCount = attempts.Count(attempt => attempt.Committed);
+        int abortedCount = attempts.Count(attempt => attempt.ErrorCode is KeyValueResponseType.Aborted or KeyValueResponseType.MustRetry);
+
+        KahunaKeyValue finalAlice = await client.GetKeyValue(aliceKey, durability, cancellationToken);
+        KahunaKeyValue finalBob = await client.GetKeyValue(bobKey, durability, cancellationToken);
+
+        Assert.True(finalAlice.Success);
+        Assert.True(finalBob.Success);
+
+        bool aliceOnCall = finalAlice.ValueAsBool();
+        bool bobOnCall = finalBob.ValueAsBool();
+
+        Assert.True(aliceOnCall || bobOnCall);
+
+        // Only assert exactly-one-off-call when someone actually committed a write;
+        // when both abort (write-intent conflict during validation), both remain on-call which is still safe.
+        if (committedCount > 0)
+            Assert.NotEqual(aliceOnCall, bobOnCall);
+
+        if (locking == KeyValueTransactionLocking.Optimistic)
+        {
+            // Mutual write-intent conflict may cause both transactions to abort (0 commits); that is
+            // still correct isolation — the invariant above confirms no write skew occurred.
+            Assert.InRange(committedCount, 0, 1);
+            Assert.InRange(abortedCount, 1, 2);
+
+            // Verify the anomaly was prevented: both committing with writes would be write skew.
+            Assert.False(attempts.All(attempt => attempt.Committed));
+        }
+        else
+        {
+            Assert.InRange(committedCount, 1, 2);
+        }
+    }
+
     private static async Task<TransactionAttempt> ExecuteLostUpdateAttempt(
         KahunaClient client,
         string key,
@@ -126,6 +391,249 @@ public class TestTransactionLockingAnomalies
         catch (KahunaException exception) when (exception.KeyValueErrorCode is KeyValueResponseType.Aborted or KeyValueResponseType.MustRetry)
         {
             return new(readValue, Committed: false, ErrorCode: exception.KeyValueErrorCode);
+        }
+    }
+
+    private static async Task<StaleReadAttempt> ExecuteStaleReadAttempt(
+        KahunaClient client,
+        string keyA,
+        string keyB,
+        KeyValueTransactionLocking locking,
+        KeyValueDurability durability,
+        StaleReadSchedule schedule,
+        CancellationToken cancellationToken
+    )
+    {
+        long? readValue = null;
+
+        try
+        {
+            await using KahunaTransactionSession session = await client.StartTransactionSession(
+                new()
+                {
+                    Locking = locking,
+                    Timeout = 5000
+                },
+                cancellationToken
+            );
+
+            KahunaKeyValue currentA = await session.GetKeyValue(keyA, durability, cancellationToken);
+            Assert.True(currentA.Success);
+
+            readValue = currentA.ValueAsLong();
+
+            schedule.MarkReadComplete();
+            await schedule.WaitForWriteRelease(cancellationToken);
+
+            KahunaKeyValue setResult = await session.SetKeyValue(
+                keyB,
+                (readValue.Value + 1).ToString(),
+                10000,
+                durability: durability,
+                cancellationToken: cancellationToken
+            );
+
+            Assert.True(setResult.Success);
+
+            bool committed = await session.Commit(cancellationToken);
+
+            return new(readValue.Value, committed, committed ? null : KeyValueResponseType.Aborted);
+        }
+        catch (KahunaException exception) when (exception.KeyValueErrorCode is KeyValueResponseType.Aborted or KeyValueResponseType.MustRetry)
+        {
+            return new(readValue ?? -1, false, exception.KeyValueErrorCode);
+        }
+    }
+
+    private static async Task<WriteSkewAttempt> ExecuteInteractiveWriteSkewAttempt(
+        KahunaClient client,
+        string aliceKey,
+        string bobKey,
+        string doctorToDisableKey,
+        KeyValueTransactionLocking locking,
+        KeyValueDurability durability,
+        TxSchedule schedule,
+        CancellationToken cancellationToken
+    )
+    {
+        bool aliceWasTrue = false;
+        bool bobWasTrue = false;
+        bool attemptedWrite = false;
+
+        try
+        {
+            await using KahunaTransactionSession session = await client.StartTransactionSession(
+                new()
+                {
+                    Locking = locking,
+                    Timeout = 5000
+                },
+                cancellationToken
+            );
+
+            KahunaKeyValue alice = await session.GetKeyValue(aliceKey, durability, cancellationToken);
+            KahunaKeyValue bob = await session.GetKeyValue(bobKey, durability, cancellationToken);
+
+            Assert.True(alice.Success);
+            Assert.True(bob.Success);
+
+            aliceWasTrue = alice.ValueAsBool();
+            bobWasTrue = bob.ValueAsBool();
+
+            schedule.MarkReadComplete();
+            await schedule.ReleaseWrites(cancellationToken);
+
+            if (aliceWasTrue && bobWasTrue)
+            {
+                attemptedWrite = true;
+
+                KahunaKeyValue setResult = await session.SetKeyValue(
+                    doctorToDisableKey,
+                    "false",
+                    10000,
+                    durability: durability,
+                    cancellationToken: cancellationToken
+                );
+
+                Assert.True(setResult.Success);
+            }
+
+            bool committed = await session.Commit(cancellationToken);
+
+            return new(aliceWasTrue, bobWasTrue, attemptedWrite, committed, committed ? null : KeyValueResponseType.Aborted);
+        }
+        catch (KahunaException exception) when (exception.KeyValueErrorCode is KeyValueResponseType.Aborted or KeyValueResponseType.MustRetry)
+        {
+            return new(aliceWasTrue, bobWasTrue, attemptedWrite, false, exception.KeyValueErrorCode);
+        }
+    }
+
+    private static async Task<ScriptAttempt> ExecuteWriteSkewScriptAttempt(
+        KahunaClient client,
+        string script,
+        string prefix,
+        string doctorKey,
+        CancellationToken cancellationToken
+    )
+    {
+        try
+        {
+            await client.ExecuteKeyValueTransactionScript(
+                script,
+                null,
+                [
+                    new() { Key = "@prefix", Value = prefix },
+                    new() { Key = "@doctor", Value = doctorKey }
+                ],
+                cancellationToken
+            );
+
+            return new(true, null);
+        }
+        catch (KahunaException exception) when (exception.KeyValueErrorCode is KeyValueResponseType.Aborted or KeyValueResponseType.MustRetry)
+        {
+            return new(false, exception.KeyValueErrorCode);
+        }
+    }
+
+    private static string GetWriteSkewBucketScript(KeyValueTransactionLocking locking, KeyValueDurability durability)
+    {
+        string lockingValue = locking == KeyValueTransactionLocking.Optimistic ? "optimistic" : "pessimistic";
+        string getCommand = durability == KeyValueDurability.Persistent ? "GET BY BUCKET" : "EGET BY BUCKET";
+        string setCommand = durability == KeyValueDurability.Persistent ? "SET" : "ESET";
+
+        return $$"""
+        BEGIN (locking="{{lockingValue}}")
+         LET oncall = {{getCommand}} @prefix
+         SLEEP 200
+         IF count(oncall) = 2 THEN
+          IF to_bool(oncall[0]) THEN
+           IF to_bool(oncall[1]) THEN
+            {{setCommand}} @doctor false EX 10000
+           END
+          END
+         END
+         COMMIT
+        END
+        """;
+    }
+
+    private static async Task SeedDoctors(
+        KahunaClient client,
+        string aliceKey,
+        string bobKey,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        KahunaKeyValue alice = await client.SetKeyValue(
+            aliceKey,
+            "true",
+            10000,
+            durability: durability,
+            cancellationToken: cancellationToken
+        );
+        KahunaKeyValue bob = await client.SetKeyValue(
+            bobKey,
+            "true",
+            10000,
+            durability: durability,
+            cancellationToken: cancellationToken
+        );
+
+        Assert.True(alice.Success);
+        Assert.True(bob.Success);
+    }
+
+    private static async Task<SimpleCommitAttempt> ExecuteFreshWriterAttempt(
+        KahunaClient client,
+        string keyA,
+        KeyValueTransactionLocking locking,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        try
+        {
+            await using KahunaTransactionSession session = await client.StartTransactionSession(
+                new()
+                {
+                    Locking = locking,
+                    Timeout = 5000
+                },
+                cancellationToken
+            );
+
+            KahunaKeyValue setResult = await session.SetKeyValue(
+                keyA,
+                "20",
+                10000,
+                durability: durability,
+                cancellationToken: cancellationToken
+            );
+
+            Assert.True(setResult.Success);
+
+            bool committed = await session.Commit(cancellationToken);
+
+            return new(committed, committed ? null : KeyValueResponseType.Aborted);
+        }
+        catch (KahunaException exception) when (exception.KeyValueErrorCode is KeyValueResponseType.Aborted or KeyValueResponseType.MustRetry)
+        {
+            return new(false, exception.KeyValueErrorCode);
+        }
+    }
+
+    private static async Task<bool> TryAwaitSuccess(Task<SimpleCommitAttempt> task, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        try
+        {
+            SimpleCommitAttempt result = await task.WaitAsync(timeout, cancellationToken);
+            return result.Committed;
+        }
+        catch (TimeoutException)
+        {
+            return false;
         }
     }
 
@@ -205,5 +713,46 @@ public class TestTransactionLockingAnomalies
         }
     }
 
+    private sealed class StaleReadSchedule
+    {
+        private readonly TaskCompletionSource readCompleted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private readonly TaskCompletionSource writeReleased = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void MarkReadComplete()
+        {
+            readCompleted.TrySetResult();
+        }
+
+        public Task WaitForRead(CancellationToken cancellationToken)
+        {
+            return readCompleted.Task.WaitAsync(cancellationToken);
+        }
+
+        public Task WaitForWriteRelease(CancellationToken cancellationToken)
+        {
+            return writeReleased.Task.WaitAsync(cancellationToken);
+        }
+
+        public void AllowWrite()
+        {
+            writeReleased.TrySetResult();
+        }
+    }
+
     private sealed record TransactionAttempt(long? ReadValue, bool Committed, KeyValueResponseType? ErrorCode);
+
+    private sealed record StaleReadAttempt(long ReadValue, bool Committed, KeyValueResponseType? ErrorCode);
+
+    private sealed record SimpleCommitAttempt(bool Committed, KeyValueResponseType? ErrorCode);
+
+    private sealed record WriteSkewAttempt(
+        bool AliceWasTrue,
+        bool BobWasTrue,
+        bool AttemptedWrite,
+        bool Committed,
+        KeyValueResponseType? ErrorCode
+    );
+
+    private sealed record ScriptAttempt(bool Committed, KeyValueResponseType? ErrorCode);
 }

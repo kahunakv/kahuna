@@ -96,10 +96,12 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             if (entry.Revisions is not null)
                 RemoveExpiredRevisions(entry, proposal.Revision);
 
+            bool revisionsCreatedEphemeral = entry.Revisions is null;
             entry.Revisions ??= new();
             // Idempotent archive (see the persistent path below): a revision can recur across a
             // delete→re-set cycle; Dictionary.Add would throw and corrupt the commit.
             entry.Revisions[entry.Revision] = entry.Value;
+            context.AdjustEstimatedEntryBytes(KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreatedEphemeral, entry.Value));
 
             previousValueLength = entry.Value?.Length ?? 0;
 
@@ -137,6 +139,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         if (entry.Revisions is not null)
             RemoveExpiredRevisions(entry, proposal.Revision);
                
+        bool revisionsCreatedPersistent = entry.Revisions is null;
         entry.Revisions ??= new();
         // Idempotent archive: a revision number can recur across a delete→re-set cycle for the same
         // key. Dictionary.Add throws on a duplicate key, and that exception used to abort the index
@@ -144,6 +147,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         // its unique-index entry stuck in the Deleted state (orphaned row → broken PK lookups and
         // duplicate inserts). Overwriting is safe: the same revision carries the same value.
         entry.Revisions[entry.Revision] = entry.Value;
+        context.AdjustEstimatedEntryBytes(KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreatedPersistent, entry.Value));
 
         previousValueLength = entry.Value?.Length ?? 0;
 
