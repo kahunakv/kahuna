@@ -189,9 +189,13 @@ public sealed class KeyValueRequest : IConsistentHashable
 
     public int GetHash()
     {
-        if (Type is KeyValueRequestType.GetByBucket or KeyValueRequestType.GetByRange or KeyValueRequestType.ScanByPrefix)
+        if (Type is KeyValueRequestType.GetByBucket
+            or KeyValueRequestType.GetByRange
+            or KeyValueRequestType.ScanByPrefix
+            or KeyValueRequestType.TryAcquireExclusivePrefixLock
+            or KeyValueRequestType.TryReleaseExclusivePrefixLock)
             return (int)HashUtils.SimpleHash(Key);
-        
+
         return (int)HashUtils.InversePrefixedStaticHash(Key, '/');
     }
 }

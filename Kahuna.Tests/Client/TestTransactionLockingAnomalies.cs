@@ -469,6 +469,177 @@ public class TestTransactionLockingAnomalies
         await inflightSession.Rollback(cancellationToken);
     }
 
+    /// <summary>
+    /// Verifies that a pessimistic GetByBucket acquires a prefix lock that blocks
+    /// phantom inserts (new keys under the same prefix) until the transaction commits.
+    /// </summary>
+    [Theory, CombinatorialData]
+    public async Task TestPrefixLockBlocksPhantomInsert(
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType,
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+        KahunaClient client = GetClientByType(clientType);
+
+        await AssertClusterAvailable(client, cancellationToken);
+
+        string prefix = $"tx-anomaly/{Guid.NewGuid():N}/phantom";
+        string keyA = $"{prefix}/a";
+        string keyB = $"{prefix}/b";
+        string phantomKey = $"{prefix}/c";
+
+        Assert.True((await client.SetKeyValue(keyA, "1", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+        Assert.True((await client.SetKeyValue(keyB, "2", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+
+        await using KahunaTransactionSession bucketSession = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Pessimistic, Timeout = 5000 },
+            cancellationToken
+        );
+
+        // Acquiring the prefix lock via GetByBucket must happen before the concurrent write attempt.
+        List<KahunaKeyValue> bucketItems = await bucketSession.GetByBucket(prefix, durability, cancellationToken);
+        Assert.Equal(2, bucketItems.Count);
+
+        // Concurrent tx tries to insert a brand-new key under the locked prefix.
+        Task<SimpleCommitAttempt> phantomWriteTask = ExecutePhantomInsertAttempt(
+            client, phantomKey, "phantom", durability, cancellationToken
+        );
+
+        // Give the concurrent tx time to attempt and fail (or complete).
+        bool phantomCommittedWhileLocked = await TryAwaitSuccess(
+            phantomWriteTask, TimeSpan.FromMilliseconds(500), cancellationToken
+        );
+
+        CommitAttempt bucketCommit = await CommitTransactionAttempt(bucketSession, cancellationToken);
+        SimpleCommitAttempt phantomWrite = await phantomWriteTask;
+
+        Assert.True(bucketCommit.Committed);
+        // The phantom must not have committed while the prefix lock was held.
+        Assert.False(phantomCommittedWhileLocked);
+        // The phantom write should have been rejected (not silently succeeded with no write).
+        Assert.False(phantomWrite.Committed);
+
+        // After the prefix lock is released, a fresh unconditional write must succeed.
+        KahunaKeyValue afterRelease = await client.SetKeyValue(
+            phantomKey, "phantom-after", 10000, durability: durability, cancellationToken: cancellationToken
+        );
+        Assert.True(afterRelease.Success);
+    }
+
+    /// <summary>
+    /// Verifies that calling GetByBucket twice with the same prefix inside a single pessimistic
+    /// transaction is idempotent — the prefix lock is not acquired twice and the transaction
+    /// commits cleanly.
+    /// </summary>
+    [Theory, CombinatorialData]
+    public async Task TestPrefixLockIdempotentForSamePrefix(
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType,
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+        KahunaClient client = GetClientByType(clientType);
+
+        await AssertClusterAvailable(client, cancellationToken);
+
+        string prefix = $"tx-anomaly/{Guid.NewGuid():N}/idempotent";
+        string keyA = $"{prefix}/a";
+
+        Assert.True((await client.SetKeyValue(keyA, "hello", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+
+        await using KahunaTransactionSession session = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Pessimistic, Timeout = 5000 },
+            cancellationToken
+        );
+
+        List<KahunaKeyValue> firstScan = await session.GetByBucket(prefix, durability, cancellationToken);
+        List<KahunaKeyValue> secondScan = await session.GetByBucket(prefix, durability, cancellationToken);
+
+        Assert.Single(firstScan);
+        Assert.Single(secondScan);
+        Assert.Equal(firstScan[0].Key, secondScan[0].Key);
+
+        CommitAttempt commit = await CommitTransactionAttempt(session, cancellationToken);
+        Assert.True(commit.Committed);
+    }
+
+    /// <summary>
+    /// Verifies that rolling back a pessimistic transaction releases the prefix lock so that
+    /// subsequent transactions can write freely under the same prefix.
+    /// </summary>
+    [Theory, CombinatorialData]
+    public async Task TestPrefixLockReleasedAfterRollback(
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType,
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+        KahunaClient client = GetClientByType(clientType);
+
+        await AssertClusterAvailable(client, cancellationToken);
+
+        string prefix = $"tx-anomaly/{Guid.NewGuid():N}/rollback";
+        string keyA = $"{prefix}/a";
+        string keyB = $"{prefix}/b";
+
+        Assert.True((await client.SetKeyValue(keyA, "original", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+
+        await using KahunaTransactionSession session = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Pessimistic, Timeout = 5000 },
+            cancellationToken
+        );
+
+        List<KahunaKeyValue> bucketItems = await session.GetByBucket(prefix, durability, cancellationToken);
+        Assert.Single(bucketItems);
+
+        bool rolled = await session.Rollback(cancellationToken);
+        Assert.True(rolled);
+
+        // After rollback the prefix lock must be released so writes under the prefix succeed.
+        KahunaKeyValue newEntry = await client.SetKeyValue(
+            keyB, "new-entry", 10000, durability: durability, cancellationToken: cancellationToken
+        );
+        Assert.True(newEntry.Success);
+
+        // The original key must be unchanged (rollback did not write anything).
+        KahunaKeyValue finalA = await client.GetKeyValue(keyA, durability, cancellationToken);
+        Assert.True(finalA.Success);
+        Assert.Equal("original", finalA.ValueAsString());
+    }
+
+    private static async Task<SimpleCommitAttempt> ExecutePhantomInsertAttempt(
+        KahunaClient client,
+        string key,
+        string value,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        try
+        {
+            await using KahunaTransactionSession session = await client.StartTransactionSession(
+                new() { Locking = KeyValueTransactionLocking.Pessimistic, Timeout = 5000 },
+                cancellationToken
+            );
+
+            KahunaKeyValue setResult = await session.SetKeyValue(
+                key, value, 10000, durability: durability, cancellationToken: cancellationToken
+            );
+            Assert.True(setResult.Success);
+
+            bool committed = await session.Commit(cancellationToken);
+            return new(committed, committed ? null : KeyValueResponseType.Aborted);
+        }
+        catch (KahunaException exception) when (exception.KeyValueErrorCode is
+            KeyValueResponseType.Aborted or
+            KeyValueResponseType.MustRetry or
+            KeyValueResponseType.AlreadyLocked)
+        {
+            return new(false, exception.KeyValueErrorCode);
+        }
+    }
+
     private static async Task<TransactionAttempt> ExecuteLostUpdateAttempt(
         KahunaClient client,
         string key,

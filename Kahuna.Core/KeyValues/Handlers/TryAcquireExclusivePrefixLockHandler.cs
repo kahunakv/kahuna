@@ -94,12 +94,13 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
         if (entry.WriteIntent is not null)
         {
             // if the transactionId is the same owner no need to acquire the lock
-            if (entry.WriteIntent.TransactionId == transactionId) 
+            if (entry.WriteIntent.TransactionId == transactionId)
                 return KeyValueStaticResponses.LockedResponse;
 
-            // Check if the lease is still active
-            if (entry.WriteIntent.Expires != HLCTimestamp.Zero && entry.WriteIntent.Expires - currentTime > TimeSpan.Zero)            
-                return KeyValueStaticResponses.AlreadyLockedResponse;
+            // Another transaction holds a live write intent on this key. Skip overwriting it —
+            // the LocksByPrefix entry is enough to block that transaction's commit as a phantom.
+            if (entry.WriteIntent.Expires != HLCTimestamp.Zero && entry.WriteIntent.Expires - currentTime > TimeSpan.Zero)
+                return KeyValueStaticResponses.LockedResponse;
         }
 
         entry.WriteIntent = new()
