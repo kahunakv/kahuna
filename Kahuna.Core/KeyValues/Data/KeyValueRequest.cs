@@ -193,7 +193,9 @@ public sealed class KeyValueRequest : IConsistentHashable
             or KeyValueRequestType.GetByRange
             or KeyValueRequestType.ScanByPrefix
             or KeyValueRequestType.TryAcquireExclusivePrefixLock
-            or KeyValueRequestType.TryReleaseExclusivePrefixLock)
+            or KeyValueRequestType.TryReleaseExclusivePrefixLock
+            or KeyValueRequestType.TryAcquireExclusiveRangeLock
+            or KeyValueRequestType.TryReleaseExclusiveRangeLock)
             return (int)HashUtils.SimpleHash(Key);
 
         return (int)HashUtils.InversePrefixedStaticHash(Key, '/');

@@ -12,8 +12,10 @@ service KeyValuer {
   rpc TryAcquireExclusiveLock (GrpcTryAcquireExclusiveLockRequest) returns (GrpcTryAcquireExclusiveLockResponse);
   rpc TryAcquireManyExclusiveLocks (GrpcTryAcquireManyExclusiveLocksRequest) returns (GrpcTryAcquireManyExclusiveLocksResponse);
   rpc TryAcquireExclusivePrefixLock (GrpcTryAcquireExclusivePrefixLockRequest) returns (GrpcTryAcquireExclusivePrefixLockResponse);
+  rpc TryAcquireExclusiveRangeLock (GrpcTryAcquireExclusiveRangeLockRequest) returns (GrpcTryAcquireExclusiveRangeLockResponse);
   rpc TryReleaseExclusiveLock (GrpcTryReleaseExclusiveLockRequest) returns (GrpcTryReleaseExclusiveLockResponse);
   rpc TryReleaseExclusivePrefixLock (GrpcTryReleaseExclusivePrefixLockRequest) returns (GrpcTryReleaseExclusivePrefixLockResponse);
+  rpc TryReleaseExclusiveRangeLock (GrpcTryReleaseExclusiveRangeLockRequest) returns (GrpcTryReleaseExclusiveRangeLockResponse);
   rpc TryReleaseManyExclusiveLocks (GrpcTryReleaseManyExclusiveLocksRequest) returns (GrpcTryReleaseManyExclusiveLocksResponse);
   rpc TryPrepareMutations (GrpcTryPrepareMutationsRequest) returns (GrpcTryPrepareMutationsResponse);
   rpc TryPrepareManyMutations (GrpcTryPrepareManyMutationsRequest) returns (GrpcTryPrepareManyMutationsResponse);
@@ -24,6 +26,7 @@ service KeyValuer {
   rpc ScanByPrefix (GrpcScanByPrefixRequest) returns (GrpcScanByPrefixResponse);
   rpc ScanAllByPrefix (GrpcScanAllByPrefixRequest) returns (GrpcScanAllByPrefixResponse);
   rpc GetByBucket (GrpcGetByBucketRequest) returns (GrpcGetByBucketResponse);
+  rpc GetByRange (GrpcGetByRangeRequest) returns (GrpcGetByRangeResponse);
   rpc GetByRangeStream (GrpcGetByRangeRequest) returns (stream GrpcGetByRangePageResponse);
   rpc StartTransaction (GrpcStartTransactionRequest) returns (GrpcStartTransactionResponse);
   rpc CommitTransaction (GrpcCommitTransactionRequest) returns (GrpcCommitTransactionResponse);
@@ -347,6 +350,41 @@ message GrpcTryReleaseExclusivePrefixLockRequest {
 }
 
 message GrpcTryReleaseExclusivePrefixLockResponse {
+  optional string ServedFrom = 1;
+  GrpcKeyValueResponseType Type = 2;
+}
+
+message GrpcTryAcquireExclusiveRangeLockRequest {
+  int32  TransactionIdNode      = 1;
+  int64  TransactionIdPhysical  = 2;
+  uint32 TransactionIdCounter   = 3;
+  string Prefix                 = 4;
+  optional string StartKey      = 5;
+  bool   StartInclusive         = 6;
+  optional string EndKey        = 7;
+  bool   EndInclusive           = 8;
+  int32  ExpiresMs              = 9;
+  GrpcKeyValueDurability Durability = 10;
+}
+
+message GrpcTryAcquireExclusiveRangeLockResponse {
+  optional string ServedFrom = 1;
+  GrpcKeyValueResponseType Type = 2;
+}
+
+message GrpcTryReleaseExclusiveRangeLockRequest {
+  int32  TransactionIdNode      = 1;
+  int64  TransactionIdPhysical  = 2;
+  uint32 TransactionIdCounter   = 3;
+  string Prefix                 = 4;
+  optional string StartKey      = 5;
+  bool   StartInclusive         = 6;
+  optional string EndKey        = 7;
+  bool   EndInclusive           = 8;
+  GrpcKeyValueDurability Durability = 9;
+}
+
+message GrpcTryReleaseExclusiveRangeLockResponse {
   optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
 }
@@ -708,6 +746,8 @@ message GrpcBatchServerKeyValueRequest {
     GrpcGetByRangeRequest GetByRange = 28;
     GrpcTryDeleteManyKeyValueRequest TryDeleteManyKeyValue = 29;
     GrpcTryCheckWriteIntentRequest TryCheckWriteIntent = 30;
+    GrpcTryAcquireExclusiveRangeLockRequest TryAcquireExclusiveRangeLock = 31;
+    GrpcTryReleaseExclusiveRangeLockRequest TryReleaseExclusiveRangeLock = 32;
   }
 }
 
@@ -743,6 +783,8 @@ message GrpcBatchServerKeyValueResponse
     GrpcGetByRangeResponse GetByRange = 27;
     GrpcTryDeleteManyKeyValueResponse TryDeleteManyKeyValue = 28;
     GrpcTryCheckWriteIntentResponse TryCheckWriteIntent = 29;
+    GrpcTryAcquireExclusiveRangeLockResponse TryAcquireExclusiveRangeLock = 30;
+    GrpcTryReleaseExclusiveRangeLockResponse TryReleaseExclusiveRangeLock = 31;
   }
 }
 
@@ -793,6 +835,8 @@ enum GrpcServerBatchType {
   SERVER_TRY_GET_BY_RANGE = 26;
   SERVER_TRY_DELETE_MANY_KEY_VALUE = 27;
   SERVER_TRY_CHECK_WRITE_INTENT = 28;
+  SERVER_TRY_ACQUIRE_EXCLUSIVE_RANGE_LOCK = 29;
+  SERVER_TRY_RELEASE_EXCLUSIVE_RANGE_LOCK = 30;
 }
 
 enum GrpcKeyValueFlags {

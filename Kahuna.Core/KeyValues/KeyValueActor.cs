@@ -50,9 +50,15 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// can add/modify/delete the keys in the prefix.
     /// </summary>
     private readonly Dictionary<string, KeyValueWriteIntent> locksByPrefix = new();
-    
+
     /// <summary>
-    /// 
+    /// Stores range locks per prefix. Each entry is a list because multiple transactions
+    /// may hold non-overlapping range locks under the same prefix simultaneously.
+    /// </summary>
+    private readonly Dictionary<string, List<KeyValueRangeLock>> locksByRange = new();
+
+    /// <summary>
+    ///
     /// </summary>
     private readonly Dictionary<int, KeyValueProposal> proposals = new();
 
@@ -168,6 +174,10 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// </summary>
     private readonly TryReleaseExclusivePrefixLockHandler tryReleaseExclusivePrefixLockHandler;
 
+    private readonly TryAcquireExclusiveRangeLockHandler tryAcquireExclusiveRangeLockHandler;
+
+    private readonly TryReleaseExclusiveRangeLockHandler tryReleaseExclusiveRangeLockHandler;
+
     /// <summary>
     /// Handles the preparation phase for mutations in the key/value store in the Two-Phase-Commit (2PC) protocol.
     /// This component ensures that any necessary preconditions, validations and conflict resolution
@@ -239,14 +249,15 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         
         KeyValueContext context = new(
             actorContext,
-            keyValuesStore, 
-            locksByPrefix, 
+            keyValuesStore,
+            locksByPrefix,
+            locksByRange,
             proposals,
-            backgroundWriter, 
+            backgroundWriter,
             proposalRouter,
-            persistenceBackend, 
-            raft, 
-            configuration, 
+            persistenceBackend,
+            raft,
+            configuration,
             logger
         );
 
@@ -264,6 +275,8 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         tryAcquireExclusivePrefixLockHandler = new(context);
         tryReleaseExclusiveLockHandler = new(context);
         tryReleaseExclusivePrefixLockHandler = new(context);
+        tryAcquireExclusiveRangeLockHandler = new(context);
+        tryReleaseExclusiveRangeLockHandler = new(context);
         tryPrepareMutationsHandler = new(context);
         tryCommitMutationsHandler = new(context);
         tryRollbackMutationsHandler = new(context);
@@ -325,8 +338,10 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.TryCheckWriteIntent => await TryCheckWriteIntent(message),
                 KeyValueRequestType.TryAcquireExclusiveLock => await TryAcquireExclusiveLock(message),
                 KeyValueRequestType.TryAcquireExclusivePrefixLock => TryAcquireExclusivePrefixLock(message),
+                KeyValueRequestType.TryAcquireExclusiveRangeLock => AcquireExclusiveRangeLock(message),
                 KeyValueRequestType.TryReleaseExclusiveLock => await TryReleaseExclusiveLock(message),
                 KeyValueRequestType.TryReleaseExclusivePrefixLock => TryReleaseExclusivePrefixLock(message),
+                KeyValueRequestType.TryReleaseExclusiveRangeLock => ReleaseExclusiveRangeLock(message),
                 KeyValueRequestType.TryPrepareMutations => await TryPrepareMutations(message),
                 KeyValueRequestType.TryCommitMutations => await TryCommitMutations(message),
                 KeyValueRequestType.TryRollbackMutations => await TryRollbackMutations(message),
@@ -495,6 +510,16 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private KeyValueResponse TryReleaseExclusivePrefixLock(KeyValueRequest message)
     {
         return tryReleaseExclusivePrefixLockHandler.Execute(message);
+    }
+
+    private KeyValueResponse AcquireExclusiveRangeLock(KeyValueRequest message)
+    {
+        return tryAcquireExclusiveRangeLockHandler.Execute(message);
+    }
+
+    private KeyValueResponse ReleaseExclusiveRangeLock(KeyValueRequest message)
+    {
+        return tryReleaseExclusiveRangeLockHandler.Execute(message);
     }
     
     /// <summary>

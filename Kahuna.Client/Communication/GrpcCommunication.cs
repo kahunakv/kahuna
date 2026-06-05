@@ -1124,6 +1124,156 @@ public class GrpcCommunication : IKahunaCommunication
         await client.TryReleaseExclusivePrefixLockAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<bool> TryAcquireExclusiveRangeKeyValueLock(
+        string url,
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey, bool endInclusive,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        GrpcTryAcquireExclusiveRangeLockRequest request = new()
+        {
+            TransactionIdNode = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
+            Prefix = prefix,
+            StartInclusive = startInclusive,
+            EndInclusive = endInclusive,
+            ExpiresMs = expiresMs,
+            Durability = (GrpcKeyValueDurability)durability
+        };
+
+        if (startKey is not null) request.StartKey = startKey;
+        if (endKey is not null)   request.EndKey   = endKey;
+
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
+        KeyValuer.KeyValuerClient client = new(channel);
+
+        for (int retries = 0; retries < 5; retries++)
+        {
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
+
+            GrpcTryAcquireExclusiveRangeLockResponse response = await client.TryAcquireExclusiveRangeLockAsync(
+                request, cancellationToken: cancellationToken
+            ).ConfigureAwait(false);
+
+            if (response.Type == GrpcKeyValueResponseType.TypeLocked)
+                return true;
+
+            if (response.Type == GrpcKeyValueResponseType.TypeAlreadyLocked)
+                throw new KahunaException($"Failed to acquire exclusive range lock for '{prefix}': AlreadyLocked.", KeyValueResponseType.Aborted);
+
+            if (response.Type != GrpcKeyValueResponseType.TypeMustRetry)
+                throw new KahunaException($"Failed to acquire exclusive range lock for '{prefix}'.", KeyValueResponseType.Aborted);
+
+            logger?.LogDebug("Server asked to retry acquire range key/value lock");
+        }
+
+        throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
+    }
+
+    public async Task TryReleaseExclusiveRangeKeyValueLock(
+        string url,
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey, bool endInclusive,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        GrpcTryReleaseExclusiveRangeLockRequest request = new()
+        {
+            TransactionIdNode = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
+            Prefix = prefix,
+            StartInclusive = startInclusive,
+            EndInclusive = endInclusive,
+            Durability = (GrpcKeyValueDurability)durability
+        };
+
+        if (startKey is not null) request.StartKey = startKey;
+        if (endKey is not null)   request.EndKey   = endKey;
+
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
+        KeyValuer.KeyValuerClient client = new(channel);
+
+        await client.TryReleaseExclusiveRangeLockAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<KeyValueGetByRangePageResult> GetByRange(
+        string url,
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey, bool endInclusive,
+        int limit,
+        HLCTimestamp readTimestamp,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        GrpcGetByRangeRequest request = new()
+        {
+            TransactionIdNode = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
+            Prefix = prefix,
+            StartInclusive = startInclusive,
+            EndInclusive = endInclusive,
+            Limit = limit,
+            ReadTimestampNode = readTimestamp.N,
+            ReadTimestampPhysical = readTimestamp.L,
+            ReadTimestampCounter = readTimestamp.C,
+            Durability = (GrpcKeyValueDurability)durability
+        };
+
+        if (startKey is not null) request.StartKey = startKey;
+        if (endKey is not null)   request.EndKey   = endKey;
+
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
+        KeyValuer.KeyValuerClient client = new(channel);
+
+        for (int retries = 0; retries < 5; retries++)
+        {
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
+
+            GrpcGetByRangeResponse response = await client.GetByRangeAsync(
+                request, cancellationToken: cancellationToken
+            ).ConfigureAwait(false);
+
+            if (response.Type == GrpcKeyValueResponseType.TypeGot || response.Type == GrpcKeyValueResponseType.TypeDoesNotExist)
+            {
+                return new()
+                {
+                    Items = response.Items.Select(x => new KeyValueGetByBucketItem
+                    {
+                        Key = x.Key,
+                        Value = x.Value.ToByteArray(),
+                        Revision = x.Revision,
+                        LastModified = new(x.LastModifiedNode, x.LastModifiedPhysical, x.LastModifiedCounter)
+                    }).ToList(),
+                    NextCursor = response.HasNextCursor ? response.NextCursor : null,
+                    HasMore = response.HasMore
+                };
+            }
+
+            if (response.Type != GrpcKeyValueResponseType.TypeMustRetry)
+                throw new KahunaException($"Failed to get by range for '{prefix}'.", KeyValueResponseType.Errored);
+
+            logger?.LogDebug("Server asked to retry get by range");
+        }
+
+        throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
+    }
+
     private static List<KahunaKeyValueTransactionResultValue> GetTransactionValues(RepeatedField<GrpcTryExecuteTransactionResponseValue> responseValues)
     {
         List<KahunaKeyValueTransactionResultValue> values = new(responseValues.Count);

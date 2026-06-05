@@ -26,14 +26,14 @@ public abstract class BaseCluster
             Host = "localhost",
             Port = 8001,
             InitialPartitions = partitions,
-            StartElectionTimeout = 500,
-            EndElectionTimeout = 1500,
+            StartElectionTimeout = 50,
+            EndElectionTimeout = 150,
             CompactEveryOperations = 1000,
             CompactNumberEntries = 50
         };
-        
+
         RaftManager raft = new(
-            config, 
+            config,
             new StaticDiscovery([new("localhost:8002"), new("localhost:8003")]),
             wal,
             communication,
@@ -78,14 +78,14 @@ public abstract class BaseCluster
             Host = "localhost",
             Port = 8002,
             InitialPartitions = partitions,
-            StartElectionTimeout = 500,
-            EndElectionTimeout = 1500,
+            StartElectionTimeout = 50,
+            EndElectionTimeout = 150,
             CompactEveryOperations = 1000,
             CompactNumberEntries = 50
         };
-        
+
         RaftManager raft = new(
-            config, 
+            config,
             new StaticDiscovery([new("localhost:8001"), new("localhost:8003")]),
             wal,
             communication,
@@ -130,14 +130,14 @@ public abstract class BaseCluster
             Host = "localhost",
             Port = 8003,
             InitialPartitions = partitions,
-            StartElectionTimeout = 500,
-            EndElectionTimeout = 1500,
-            CompactEveryOperations = 1000,            
+            StartElectionTimeout = 50,
+            EndElectionTimeout = 150,
+            CompactEveryOperations = 1000,
             CompactNumberEntries = 50
         };
-        
+
         RaftManager raft = new(
-            config, 
+            config,
             new StaticDiscovery([new("localhost:8001"), new("localhost:8002")]),
             wal,
             communication,

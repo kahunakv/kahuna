@@ -430,7 +430,32 @@ internal sealed class KeyValuesManager
     {
         return locator.LocateAndTryReleaseExclusivePrefixLock(transactionId, prefixKey, durability, cancellationToken);
     }
-    
+
+    public Task<KeyValueResponseType> LocateAndTryAcquireExclusiveRangeLock(
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        return locator.LocateAndTryAcquireExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, cancellationToken);
+    }
+
+    public Task<KeyValueResponseType> LocateAndTryReleaseExclusiveRangeLock(
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        return locator.LocateAndTryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken);
+    }
+
     /// <summary>
     /// Locates the leader node for the given keys and executes the TryReleaseManyExclusiveLocks requests
     /// </summary>
@@ -1482,6 +1507,129 @@ internal sealed class KeyValuesManager
         }
     }
     
+    public async Task<KeyValueResponseType> TryAcquireExclusiveRangeLock(
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        int expiresMs,
+        KeyValueDurability durability
+    )
+    {
+        KeyValueRequest request = KeyValueRequestPool.Rent(
+            KeyValueRequestType.TryAcquireExclusiveRangeLock,
+            transactionId,
+            HLCTimestamp.Zero,
+            prefix,
+            null,
+            null,
+            -1,
+            KeyValueFlags.None,
+            expiresMs,
+            HLCTimestamp.Zero,
+            durability,
+            0,
+            0,
+            null
+        );
+
+        request.StartKey       = startKey;
+        request.StartInclusive = startInclusive;
+        request.EndKey         = endKey;
+        request.EndInclusive   = endInclusive;
+
+        try
+        {
+            for (int i = 0; i < MaxRetries; i++)
+            {
+                KeyValueResponse? response;
+
+                if (durability == KeyValueDurability.Ephemeral)
+                    response = await ephemeralKeyValuesRouter.Ask(request);
+                else
+                    response = await persistentKeyValuesRouter.Ask(request);
+
+                if (response is null)
+                    return KeyValueResponseType.Errored;
+
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
+
+                return response.Type;
+            }
+
+            return KeyValueResponseType.MustRetry;
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
+    }
+
+    public async Task<KeyValueResponseType> TryReleaseExclusiveRangeLock(
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        KeyValueDurability durability
+    )
+    {
+        KeyValueRequest request = KeyValueRequestPool.Rent(
+            KeyValueRequestType.TryReleaseExclusiveRangeLock,
+            transactionId,
+            HLCTimestamp.Zero,
+            prefix,
+            null,
+            null,
+            -1,
+            KeyValueFlags.None,
+            0,
+            HLCTimestamp.Zero,
+            durability,
+            0,
+            0,
+            null
+        );
+
+        request.StartKey       = startKey;
+        request.StartInclusive = startInclusive;
+        request.EndKey         = endKey;
+        request.EndInclusive   = endInclusive;
+
+        try
+        {
+            for (int i = 0; i < MaxRetries; i++)
+            {
+                KeyValueResponse? response;
+
+                if (durability == KeyValueDurability.Ephemeral)
+                    response = await ephemeralKeyValuesRouter.Ask(request);
+                else
+                    response = await persistentKeyValuesRouter.Ask(request);
+
+                if (response is null)
+                    return KeyValueResponseType.Errored;
+
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
+
+                return response.Type;
+            }
+
+            return KeyValueResponseType.MustRetry;
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
+    }
+
     /// <summary>
     /// Passes a TryAcquireExclusiveLock request to the key/value actor for the given keys.
     /// </summary>

@@ -744,15 +744,15 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public async Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(
-        string node, 
-        HLCTimestamp transactionId, 
-        string prefixKey, 
-        KeyValueDurability durability, 
+        string node,
+        HLCTimestamp transactionId,
+        string prefixKey,
+        KeyValueDurability durability,
         CancellationToken cancellationToken
     )
     {
-        GrpcServerBatcher batcher = GetSharedBatcher(node);               
-        
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
         GrpcTryReleaseExclusivePrefixLockRequest request = new()
         {
             TransactionIdNode = transactionId.N,
@@ -761,12 +761,78 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             PrefixKey = prefixKey,
             Durability = (GrpcKeyValueDurability)durability,
         };
-        
+
         GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTryReleaseExclusivePrefixLockResponse remoteResponse = response.TryReleaseExclusivePrefixLock!;
-        
+
         remoteResponse.ServedFrom = $"https://{node}";
 
+        return (KeyValueResponseType)remoteResponse.Type;
+    }
+
+    public async Task<KeyValueResponseType> TryAcquireExclusiveRangeLock(
+        string node,
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcTryAcquireExclusiveRangeLockRequest request = new()
+        {
+            TransactionIdNode     = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter  = transactionId.C,
+            Prefix                = prefix,
+            StartInclusive        = startInclusive,
+            EndInclusive          = endInclusive,
+            ExpiresMs             = expiresMs,
+            Durability            = (GrpcKeyValueDurability)durability,
+        };
+
+        if (startKey is not null) request.StartKey = startKey;
+        if (endKey   is not null) request.EndKey   = endKey;
+
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcTryAcquireExclusiveRangeLockResponse remoteResponse = response.TryAcquireExclusiveRangeLock!;
+        remoteResponse.ServedFrom = $"https://{node}";
+        return (KeyValueResponseType)remoteResponse.Type;
+    }
+
+    public async Task<KeyValueResponseType> TryReleaseExclusiveRangeLock(
+        string node,
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcTryReleaseExclusiveRangeLockRequest request = new()
+        {
+            TransactionIdNode     = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter  = transactionId.C,
+            Prefix                = prefix,
+            StartInclusive        = startInclusive,
+            EndInclusive          = endInclusive,
+            Durability            = (GrpcKeyValueDurability)durability,
+        };
+
+        if (startKey is not null) request.StartKey = startKey;
+        if (endKey   is not null) request.EndKey   = endKey;
+
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcTryReleaseExclusiveRangeLockResponse remoteResponse = response.TryReleaseExclusiveRangeLock!;
+        remoteResponse.ServedFrom = $"https://{node}";
         return (KeyValueResponseType)remoteResponse.Type;
     }
 

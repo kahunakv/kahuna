@@ -608,6 +608,206 @@ public class TestTransactionLockingAnomalies
         Assert.Equal("original", finalA.ValueAsString());
     }
 
+    /// <summary>
+    /// Verifies that a pessimistic GetByRange acquires a range lock that blocks
+    /// phantom inserts into the locked range until the transaction commits.
+    /// </summary>
+    [Theory, CombinatorialData]
+    public async Task TestRangeLockBlocksPhantomInsert(
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType,
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+        KahunaClient client = GetClientByType(clientType);
+
+        await AssertClusterAvailable(client, cancellationToken);
+
+        string prefix = $"tx-anomaly/{Guid.NewGuid():N}/range-phantom";
+        string keyA = $"{prefix}/a";
+        string keyB = $"{prefix}/b";
+        string phantomKey = $"{prefix}/c";
+
+        Assert.True((await client.SetKeyValue(keyA, "1", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+        Assert.True((await client.SetKeyValue(keyB, "2", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+
+        await using KahunaTransactionSession rangeSession = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Pessimistic, Timeout = 5000 },
+            cancellationToken
+        );
+
+        // Acquire range lock via GetByRange — covers [prefix/a .. prefix/z]
+        KeyValueGetByRangePageResult rangeResult = await rangeSession.GetByRange(
+            prefix, $"{prefix}/a", true, $"{prefix}/z", true,
+            durability: durability, cancellationToken: cancellationToken
+        );
+        Assert.Equal(2, rangeResult.Items.Count);
+
+        // Concurrent tx tries to insert a brand-new key inside the locked range.
+        Task<SimpleCommitAttempt> phantomWriteTask = ExecutePhantomInsertAttempt(
+            client, phantomKey, "phantom", durability, cancellationToken
+        );
+
+        bool phantomCommittedWhileLocked = await TryAwaitSuccess(
+            phantomWriteTask, TimeSpan.FromMilliseconds(500), cancellationToken
+        );
+
+        CommitAttempt rangeCommit = await CommitTransactionAttempt(rangeSession, cancellationToken);
+        SimpleCommitAttempt phantomWrite = await phantomWriteTask;
+
+        Assert.True(rangeCommit.Committed);
+        Assert.False(phantomCommittedWhileLocked);
+        Assert.False(phantomWrite.Committed);
+
+        // After the range lock is released, a fresh write must succeed.
+        KahunaKeyValue afterRelease = await client.SetKeyValue(
+            phantomKey, "phantom-after", 10000, durability: durability, cancellationToken: cancellationToken
+        );
+        Assert.True(afterRelease.Success);
+    }
+
+    /// <summary>
+    /// Verifies that calling GetByRange twice with the same range inside a single pessimistic
+    /// transaction is idempotent — the range lock is not acquired twice and the transaction
+    /// commits cleanly.
+    /// </summary>
+    [Theory, CombinatorialData]
+    public async Task TestRangeLockIdempotentForSameRange(
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType,
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+        KahunaClient client = GetClientByType(clientType);
+
+        await AssertClusterAvailable(client, cancellationToken);
+
+        string prefix = $"tx-anomaly/{Guid.NewGuid():N}/range-idempotent";
+        string keyA = $"{prefix}/a";
+
+        Assert.True((await client.SetKeyValue(keyA, "hello", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+
+        await using KahunaTransactionSession session = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Pessimistic, Timeout = 5000 },
+            cancellationToken
+        );
+
+        KeyValueGetByRangePageResult firstScan = await session.GetByRange(
+            prefix, null, true, null, true, durability: durability, cancellationToken: cancellationToken
+        );
+        KeyValueGetByRangePageResult secondScan = await session.GetByRange(
+            prefix, null, true, null, true, durability: durability, cancellationToken: cancellationToken
+        );
+
+        Assert.Single(firstScan.Items);
+        Assert.Single(secondScan.Items);
+        Assert.Equal(firstScan.Items[0].Key, secondScan.Items[0].Key);
+
+        CommitAttempt commit = await CommitTransactionAttempt(session, cancellationToken);
+        Assert.True(commit.Committed);
+    }
+
+    /// <summary>
+    /// Verifies that rolling back a pessimistic transaction releases the range lock so that
+    /// subsequent transactions can write freely inside the range.
+    /// </summary>
+    [Theory, CombinatorialData]
+    public async Task TestRangeLockReleasedAfterRollback(
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType,
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+        KahunaClient client = GetClientByType(clientType);
+
+        await AssertClusterAvailable(client, cancellationToken);
+
+        string prefix = $"tx-anomaly/{Guid.NewGuid():N}/range-rollback";
+        string keyA = $"{prefix}/a";
+        string keyB = $"{prefix}/b";
+
+        Assert.True((await client.SetKeyValue(keyA, "original", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+
+        await using KahunaTransactionSession session = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Pessimistic, Timeout = 5000 },
+            cancellationToken
+        );
+
+        KeyValueGetByRangePageResult rangeItems = await session.GetByRange(
+            prefix, null, true, null, true, durability: durability, cancellationToken: cancellationToken
+        );
+        Assert.Single(rangeItems.Items);
+
+        bool rolled = await session.Rollback(cancellationToken);
+        Assert.True(rolled);
+
+        // After rollback the range lock must be released so writes inside the range succeed.
+        KahunaKeyValue newEntry = await client.SetKeyValue(
+            keyB, "new-entry", 10000, durability: durability, cancellationToken: cancellationToken
+        );
+        Assert.True(newEntry.Success);
+
+        KahunaKeyValue finalA = await client.GetKeyValue(keyA, durability, cancellationToken);
+        Assert.True(finalA.Success);
+        Assert.Equal("original", finalA.ValueAsString());
+    }
+
+    /// <summary>
+    /// Verifies that a range lock with an explicit EndKey only blocks writes within
+    /// the bounded range — a key outside the end boundary commits freely.
+    /// </summary>
+    [Theory, CombinatorialData]
+    public async Task TestRangeLockRespectsEndKey(
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType,
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+        KahunaClient client = GetClientByType(clientType);
+
+        await AssertClusterAvailable(client, cancellationToken);
+
+        string prefix = $"tx-anomaly/{Guid.NewGuid():N}/range-endkey";
+        string keyA = $"{prefix}/a";
+        string keyInsideRange = $"{prefix}/b";    // inside [prefix/a .. prefix/c]
+        string keyOutsideRange = $"{prefix}/z";   // outside [prefix/a .. prefix/c]
+
+        Assert.True((await client.SetKeyValue(keyA, "1", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+
+        await using KahunaTransactionSession rangeSession = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Pessimistic, Timeout = 5000 },
+            cancellationToken
+        );
+
+        // Lock only the range [prefix/a .. prefix/c].
+        await rangeSession.GetByRange(
+            prefix, $"{prefix}/a", true, $"{prefix}/c", true,
+            durability: durability, cancellationToken: cancellationToken
+        );
+
+        // A key outside the range should commit immediately.
+        Task<SimpleCommitAttempt> outsideTask = ExecutePhantomInsertAttempt(
+            client, keyOutsideRange, "outside", durability, cancellationToken
+        );
+        SimpleCommitAttempt outsideCommit = await outsideTask.WaitAsync(TimeSpan.FromSeconds(3), cancellationToken);
+        Assert.True(outsideCommit.Committed);
+
+        // A key inside the range must be blocked.
+        Task<SimpleCommitAttempt> insideTask = ExecutePhantomInsertAttempt(
+            client, keyInsideRange, "inside", durability, cancellationToken
+        );
+        bool insideCommittedWhileLocked = await TryAwaitSuccess(
+            insideTask, TimeSpan.FromMilliseconds(500), cancellationToken
+        );
+        Assert.False(insideCommittedWhileLocked);
+
+        CommitAttempt rangeCommit = await CommitTransactionAttempt(rangeSession, cancellationToken);
+        SimpleCommitAttempt insideWrite = await insideTask;
+
+        Assert.True(rangeCommit.Committed);
+        Assert.False(insideWrite.Committed);
+    }
+
     private static async Task<SimpleCommitAttempt> ExecutePhantomInsertAttempt(
         KahunaClient client,
         string key,

@@ -27,7 +27,9 @@ internal sealed class KeyValueContext
     public BTree<string, KeyValueEntry> Store  { get; }
     
     public Dictionary<string, KeyValueWriteIntent> LocksByPrefix  { get; }
-    
+
+    public Dictionary<string, List<KeyValueRangeLock>> LocksByRange { get; }
+
     public Dictionary<int, KeyValueProposal> Proposals { get; }
 
     public KahunaConfiguration Configuration  { get; }
@@ -42,9 +44,10 @@ internal sealed class KeyValueContext
             : Math.Max(Configuration.CacheEntriesToRemove, 1);
     
     public KeyValueContext(
-        IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext, 
+        IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext,
         BTree<string, KeyValueEntry> store,
         Dictionary<string, KeyValueWriteIntent> locksByPrefix,
+        Dictionary<string, List<KeyValueRangeLock>> locksByRange,
         Dictionary<int, KeyValueProposal> proposals,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IActorRef<BalancingActor<KeyValueProposalActor, KeyValueProposalRequest>, KeyValueProposalRequest> proposalRouter,
@@ -57,6 +60,7 @@ internal sealed class KeyValueContext
         ActorContext = actorContext;
         Store = store;
         LocksByPrefix = locksByPrefix;
+        LocksByRange = locksByRange;
         Proposals = proposals;
         BackgroundWriter = backgroundWriter;
         ProposalRouter = proposalRouter;

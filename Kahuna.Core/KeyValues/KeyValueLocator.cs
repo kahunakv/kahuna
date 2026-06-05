@@ -604,6 +604,59 @@ internal sealed class KeyValueLocator
         return await interNodeCommunication.TryReleaseExclusivePrefixLock(leader, transactionId, prefixKey, durability, cancellationToken);
     }
     
+    public async Task<KeyValueResponseType> LocateAndTryAcquireExclusiveRangeLock(
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        if (string.IsNullOrEmpty(prefix))
+            return KeyValueResponseType.InvalidInput;
+
+        int partitionId = raft.GetPrefixPartitionKey(prefix);
+
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+            return await manager.TryAcquireExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability);
+
+        string leader = await raft.WaitForLeader(partitionId, cancellationToken);
+        if (leader == raft.GetLocalEndpoint())
+            return KeyValueResponseType.MustRetry;
+
+        logger.LogDebug("ACQUIRE-RANGE-LOCK-KEYVALUE Redirect {Prefix} to leader partition {Partition} at {Leader}", prefix, partitionId, leader);
+
+        return await interNodeCommunication.TryAcquireExclusiveRangeLock(leader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, cancellationToken);
+    }
+
+    public async Task<KeyValueResponseType> LocateAndTryReleaseExclusiveRangeLock(
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        if (string.IsNullOrEmpty(prefix))
+            return KeyValueResponseType.InvalidInput;
+
+        int partitionId = raft.GetPrefixPartitionKey(prefix);
+
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+            return await manager.TryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability);
+
+        string leader = await raft.WaitForLeader(partitionId, cancellationToken);
+        if (leader == raft.GetLocalEndpoint())
+            return KeyValueResponseType.MustRetry;
+
+        logger.LogDebug("RELEASE-RANGE-LOCK-KEYVALUE Redirect {Prefix} to leader partition {Partition} at {Leader}", prefix, partitionId, leader);
+
+        return await interNodeCommunication.TryReleaseExclusiveRangeLock(leader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken);
+    }
+
     /// <summary>
     /// Locates the leader node for the given keys and executes the TryReleaseManyExclusiveLocks request.
     /// </summary>

@@ -719,14 +719,79 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         };
     }
     
+    public override async Task<GrpcTryAcquireExclusiveRangeLockResponse> TryAcquireExclusiveRangeLock(
+        GrpcTryAcquireExclusiveRangeLockRequest request,
+        ServerCallContext context
+    )
+    {
+        return await TryAcquireExclusiveRangeLockInternal(request, context);
+    }
+
+    internal async Task<GrpcTryAcquireExclusiveRangeLockResponse> TryAcquireExclusiveRangeLockInternal(GrpcTryAcquireExclusiveRangeLockRequest request, ServerCallContext context)
+    {
+        if (string.IsNullOrEmpty(request.Prefix))
+            return new() { Type = GrpcKeyValueResponseType.TypeInvalidInput };
+
+        string? startKey = request.HasStartKey ? request.StartKey : null;
+        string? endKey   = request.HasEndKey   ? request.EndKey   : null;
+
+        KeyValueResponseType type = await keyValues.LocateAndTryAcquireExclusiveRangeLock(
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
+            request.Prefix,
+            startKey, request.StartInclusive,
+            endKey,   request.EndInclusive,
+            request.ExpiresMs,
+            (KeyValueDurability)request.Durability,
+            context.CancellationToken
+        );
+
+        return new() { Type = (GrpcKeyValueResponseType)type };
+    }
+
+    public override async Task<GrpcTryReleaseExclusiveRangeLockResponse> TryReleaseExclusiveRangeLock(
+        GrpcTryReleaseExclusiveRangeLockRequest request,
+        ServerCallContext context
+    )
+    {
+        return await TryReleaseExclusiveRangeLockInternal(request, context);
+    }
+
+    internal async Task<GrpcTryReleaseExclusiveRangeLockResponse> TryReleaseExclusiveRangeLockInternal(GrpcTryReleaseExclusiveRangeLockRequest request, ServerCallContext context)
+    {
+        if (string.IsNullOrEmpty(request.Prefix))
+            return new() { Type = GrpcKeyValueResponseType.TypeInvalidInput };
+
+        string? startKey = request.HasStartKey ? request.StartKey : null;
+        string? endKey   = request.HasEndKey   ? request.EndKey   : null;
+
+        KeyValueResponseType type = await keyValues.LocateAndTryReleaseExclusiveRangeLock(
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
+            request.Prefix,
+            startKey, request.StartInclusive,
+            endKey,   request.EndInclusive,
+            (KeyValueDurability)request.Durability,
+            context.CancellationToken
+        );
+
+        return new() { Type = (GrpcKeyValueResponseType)type };
+    }
+
+    public override async Task<GrpcGetByRangeResponse> GetByRange(
+        GrpcGetByRangeRequest request,
+        ServerCallContext context
+    )
+    {
+        return await GetByRangeInternal(request, context);
+    }
+
     /// <summary>
-    /// Receives requests for the key/value "ReleaseManyExclusiveLocks" service 
+    /// Receives requests for the key/value "ReleaseManyExclusiveLocks" service
     /// </summary>
     /// <param name="request"></param>
     /// <param name="context"></param>
     /// <returns></returns>
     public override async Task<GrpcTryReleaseManyExclusiveLocksResponse> TryReleaseManyExclusiveLocks(
-        GrpcTryReleaseManyExclusiveLocksRequest request, 
+        GrpcTryReleaseManyExclusiveLocksRequest request,
         ServerCallContext context
     )
     {

@@ -600,6 +600,7 @@ public sealed class TestKeyValueCollection
             null!,
             store,
             new Dictionary<string, KeyValueWriteIntent>(),
+            new Dictionary<string, List<KeyValueRangeLock>>(),
             new Dictionary<int, KeyValueProposal>(),
             null!,
             null!,

@@ -211,6 +211,15 @@ internal sealed class GrpcServerBatcher
         return TryProcessQueue(grpcBatcherItem, promise);
     }
     
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryAcquireExclusiveRangeLockRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
     public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryReleaseExclusivePrefixLockRequest message)
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -219,7 +228,16 @@ internal sealed class GrpcServerBatcher
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
-    
+
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryReleaseExclusiveRangeLockRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
     public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryReleaseManyExclusiveLocksRequest message)
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -523,6 +541,11 @@ internal sealed class GrpcServerBatcher
             batchRequest.Type = GrpcServerBatchType.ServerTryAcquireExclusivePrefixLock;
             batchRequest.TryAcquireExclusivePrefixLock = itemRequest.TryAcquireExclusivePrefixLock;
         }
+        else if (itemRequest.TryAcquireExclusiveRangeLock is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryAcquireExclusiveRangeLock;
+            batchRequest.TryAcquireExclusiveRangeLock = itemRequest.TryAcquireExclusiveRangeLock;
+        }
         else if (itemRequest.TryAcquireManyExclusiveLocks is not null)
         {
             batchRequest.Type = GrpcServerBatchType.ServerTryAcquireManyExclusiveLocks;
@@ -537,6 +560,11 @@ internal sealed class GrpcServerBatcher
         {
             batchRequest.Type = GrpcServerBatchType.ServerTryReleaseExclusivePrefixLock;
             batchRequest.TryReleaseExclusivePrefixLock = itemRequest.TryReleaseExclusivePrefixLock;
+        }
+        else if (itemRequest.TryReleaseExclusiveRangeLock is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryReleaseExclusiveRangeLock;
+            batchRequest.TryReleaseExclusiveRangeLock = itemRequest.TryReleaseExclusiveRangeLock;
         }
         else if (itemRequest.TryReleaseManyExclusiveLocks is not null)
         {
@@ -717,7 +745,11 @@ internal sealed class GrpcServerBatcher
                     case GrpcServerBatchType.ServerTryAcquireExclusivePrefixLock:
                         item.Promise.SetResult(new(response.TryAcquireExclusivePrefixLock));
                         break;
-                    
+
+                    case GrpcServerBatchType.ServerTryAcquireExclusiveRangeLock:
+                        item.Promise.SetResult(new(response.TryAcquireExclusiveRangeLock));
+                        break;
+
                     case GrpcServerBatchType.ServerTryAcquireManyExclusiveLocks:
                         item.Promise.SetResult(new(response.TryAcquireManyExclusiveLocks));
                         break;
@@ -729,7 +761,11 @@ internal sealed class GrpcServerBatcher
                     case GrpcServerBatchType.ServerTryReleaseExclusivePrefixLock:
                         item.Promise.SetResult(new(response.TryReleaseExclusivePrefixLock));
                         break;
-                    
+
+                    case GrpcServerBatchType.ServerTryReleaseExclusiveRangeLock:
+                        item.Promise.SetResult(new(response.TryReleaseExclusiveRangeLock));
+                        break;
+
                     case GrpcServerBatchType.ServerTryReleaseManyExclusiveLocks:
                         item.Promise.SetResult(new(response.TryReleaseManyExclusiveLocks));
                         break;

@@ -156,8 +156,22 @@ internal sealed class KeyValueServerBatcher
 
                         tasks.Add(TryReleaseExclusivePrefixLockDelayed(semaphore, request.RequestId, tryReleaseExclusivePrefixLockRequest, responseStream, context));
                     }
-                        break;
-                    
+                    break;
+
+                    case GrpcServerBatchType.ServerTryAcquireExclusiveRangeLock:
+                    {
+                        GrpcTryAcquireExclusiveRangeLockRequest? req = request.TryAcquireExclusiveRangeLock;
+                        tasks.Add(TryAcquireExclusiveRangeLockDelayed(semaphore, request.RequestId, req, responseStream, context));
+                    }
+                    break;
+
+                    case GrpcServerBatchType.ServerTryReleaseExclusiveRangeLock:
+                    {
+                        GrpcTryReleaseExclusiveRangeLockRequest? req = request.TryReleaseExclusiveRangeLock;
+                        tasks.Add(TryReleaseExclusiveRangeLockDelayed(semaphore, request.RequestId, req, responseStream, context));
+                    }
+                    break;
+
                     case GrpcServerBatchType.ServerTryReleaseManyExclusiveLocks:
                     {
                         GrpcTryReleaseManyExclusiveLocksRequest? tryReleaseManyExclusiveLocksRequest = request.TryReleaseManyExclusiveLocks;
@@ -557,10 +571,50 @@ internal sealed class KeyValueServerBatcher
         await WriteResponseToStream(semaphore, responseStream, response, context);
     }
     
+    private async Task TryAcquireExclusiveRangeLockDelayed(
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcTryAcquireExclusiveRangeLockRequest request,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcTryAcquireExclusiveRangeLockResponse resp = await service.TryAcquireExclusiveRangeLockInternal(request, context);
+
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type = GrpcServerBatchType.ServerTryAcquireExclusiveRangeLock,
+            RequestId = requestId,
+            TryAcquireExclusiveRangeLock = resp
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+
+    private async Task TryReleaseExclusiveRangeLockDelayed(
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcTryReleaseExclusiveRangeLockRequest request,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcTryReleaseExclusiveRangeLockResponse resp = await service.TryReleaseExclusiveRangeLockInternal(request, context);
+
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type = GrpcServerBatchType.ServerTryReleaseExclusiveRangeLock,
+            RequestId = requestId,
+            TryReleaseExclusiveRangeLock = resp
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+
     private async Task TryReleaseManyExclusiveLocksDelayed(
-        SemaphoreSlim semaphore, 
-        int requestId, 
-        GrpcTryReleaseManyExclusiveLocksRequest tryReleaseManyExclusiveLocksnRequest, 
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcTryReleaseManyExclusiveLocksRequest tryReleaseManyExclusiveLocksnRequest,
         IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
         ServerCallContext context
     )

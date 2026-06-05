@@ -456,9 +456,34 @@ public sealed class KahunaManager : IKahuna, IDisposable
     {
         return keyValues.LocateAndTryReleaseExclusivePrefixLock(transactionId, prefixKey, durability, cancellationToken);
     }
-    
+
+    public Task<KeyValueResponseType> LocateAndTryAcquireExclusiveRangeLock(
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        return keyValues.LocateAndTryAcquireExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, cancellationToken);
+    }
+
+    public Task<KeyValueResponseType> LocateAndTryReleaseExclusiveRangeLock(
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        return keyValues.LocateAndTryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken);
+    }
+
     /// <summary>
-    /// Locates the leader node for the given keysx and executes the TryReleaseExclusiveLock request. 
+    /// Locates the leader node for the given keysx and executes the TryReleaseExclusiveLock request.
     /// </summary>
     /// <param name="transactionId"></param>
     /// <param name="keys"></param>
@@ -856,6 +881,16 @@ public sealed class KahunaManager : IKahuna, IDisposable
     public Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability)
     {
         return keyValues.TryReleaseExclusivePrefixLock(transactionId, prefixKey, durability);
+    }
+
+    public Task<KeyValueResponseType> TryAcquireExclusiveRangeLock(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability)
+    {
+        return keyValues.TryAcquireExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability);
+    }
+
+    public Task<KeyValueResponseType> TryReleaseExclusiveRangeLock(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability)
+    {
+        return keyValues.TryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability);
     }
 
     /// <summary>
