@@ -163,22 +163,24 @@ public class TestKeyValueTransactions
         BEGIN (locking="optimistic")
          LET av = GET @keyA
          LET bv = GET @keyB
+         SLEEP 500
          IF to_int(av) + to_int(bv) = 20 THEN
           SET @keyA 0
          END
          COMMIT
-        END 
+        END
         """;
-        
+
         const string script2 = """
         BEGIN (locking="optimistic")
          LET av = GET @keyA
          LET bv = GET @keyB
+         SLEEP 100
          IF to_int(av) + to_int(bv) = 20 THEN
           SET @keyB 0
          END
          COMMIT
-        END 
+        END
         """;
 
         try
