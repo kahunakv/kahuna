@@ -1042,6 +1042,16 @@ public class RestCommunication : IKahunaCommunication
         throw new NotImplementedException();
     }
 
+    public Task<bool> TryAcquireExclusivePrefixKeyValueLock(string url, HLCTimestamp transactionId, string prefixKey, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        throw new NotImplementedException();
+    }
+
+    public Task TryReleaseExclusivePrefixKeyValueLock(string url, HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        throw new NotImplementedException();
+    }
+
     public Task<List<KeyValueGetByBucketItem>> GetByBucket(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         throw new NotImplementedException();

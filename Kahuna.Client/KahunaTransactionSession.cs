@@ -70,6 +70,11 @@ public class KahunaTransactionSession : IAsyncDisposable
     /// A set of acquired locks within the transaction session.
     /// </summary>
     private HashSet<(string, KeyValueDurability)>? acquiredLocks;
+
+    /// <summary>
+    /// A set of acquired prefix locks within the transaction session.
+    /// </summary>
+    private HashSet<(string prefixKey, KeyValueDurability)>? acquiredPrefixLocks;
     
     /// <summary>
     /// A set of modified keys within the transaction session.
@@ -131,6 +136,50 @@ public class KahunaTransactionSession : IAsyncDisposable
             throw new KahunaException($"Failed to acquire exclusive key/value lock for '{key}'.", KeyValueResponseType.Aborted);
 
         acquiredLocks.Add((key, durability));
+    }
+
+    private async Task AcquireExclusivePrefixLock(string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        acquiredPrefixLocks ??= [];
+
+        if (acquiredPrefixLocks.Contains((prefixKey, durability)))
+            return;
+
+        bool successLock = await Client.Communication.TryAcquireExclusivePrefixKeyValueLock(
+            Url,
+            TransactionId,
+            prefixKey,
+            TransactionTimeout,
+            durability,
+            cancellationToken
+        ).ConfigureAwait(false);
+
+        if (!successLock)
+            throw new KahunaException($"Failed to acquire exclusive prefix lock for '{prefixKey}'.", KeyValueResponseType.Aborted);
+
+        acquiredPrefixLocks.Add((prefixKey, durability));
+    }
+
+    private async Task ReleaseAllPrefixLocks(CancellationToken cancellationToken)
+    {
+        if (acquiredPrefixLocks is null)
+            return;
+
+        foreach ((string prefixKey, KeyValueDurability durability) in acquiredPrefixLocks)
+        {
+            try
+            {
+                await Client.Communication.TryReleaseExclusivePrefixKeyValueLock(
+                    Url, TransactionId, prefixKey, durability, cancellationToken
+                ).ConfigureAwait(false);
+            }
+            catch
+            {
+                // best-effort release
+            }
+        }
+
+        acquiredPrefixLocks = null;
     }
 
     private void RecordReadKey(string key, KeyValueDurability durability, bool exists, long revision)
@@ -743,24 +792,18 @@ public class KahunaTransactionSession : IAsyncDisposable
         if (Status != KahunaTransactionStatus.Pending)
             throw new KahunaException("Cannot perform actions on a completed transaction.", KeyValueResponseType.Errored);
 
+        // For pessimistic transactions, acquire an exclusive prefix lock BEFORE scanning so that
+        // no concurrent writer can insert, modify, or delete keys under this prefix between the
+        // scan and the commit (prevents phantom reads and write-skew on the bucket).
+        if (Locking == KeyValueTransactionLocking.Pessimistic)
+            await AcquireExclusivePrefixLock(prefixKey, durability, cancellationToken).ConfigureAwait(false);
+
         List<KeyValueGetByBucketItem> kv = await Client.Communication.GetByBucket(
             Url,
             prefixKey,
             durability,
             cancellationToken
         ).ConfigureAwait(false);
-
-        // For pessimistic transactions, acquire an exclusive lock on each returned key so that
-        // concurrent writers cannot modify the observed set between the scan and the commit.
-        // This mirrors how GetKeyValue acquires a per-key lock before reading.
-        if (Locking == KeyValueTransactionLocking.Pessimistic)
-        {
-            foreach (KeyValueGetByBucketItem item in kv)
-            {
-                if (!string.IsNullOrEmpty(item.Key))
-                    await AcquireExclusiveKeyValueLock(item.Key, durability, cancellationToken).ConfigureAwait(false);
-            }
-        }
 
         List<KahunaKeyValue> result = new(kv.Count);
 
@@ -837,7 +880,9 @@ public class KahunaTransactionSession : IAsyncDisposable
             
             if (result)
                 Status = KahunaTransactionStatus.Committed;
-            
+
+            await ReleaseAllPrefixLocks(cancellationToken).ConfigureAwait(false);
+
             return result;
         }
         finally
@@ -888,6 +933,8 @@ public class KahunaTransactionSession : IAsyncDisposable
 
             if (result)
                 Status = KahunaTransactionStatus.Rolledback;
+
+            await ReleaseAllPrefixLocks(cancellationToken).ConfigureAwait(false);
 
             return result;
         }

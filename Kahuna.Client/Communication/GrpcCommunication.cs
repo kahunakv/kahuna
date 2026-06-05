@@ -1068,6 +1068,62 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to acquire key/value lock: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
 
+    public async Task<bool> TryAcquireExclusivePrefixKeyValueLock(string url, HLCTimestamp transactionId, string prefixKey, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        GrpcTryAcquireExclusivePrefixLockRequest request = new()
+        {
+            TransactionIdNode = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
+            PrefixKey = prefixKey,
+            ExpiresMs = expiresMs,
+            Durability = (GrpcKeyValueDurability)durability
+        };
+
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
+        KeyValuer.KeyValuerClient client = new(channel);
+
+        for (int retries = 0; retries < 5; retries++)
+        {
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
+
+            GrpcTryAcquireExclusivePrefixLockResponse response = await client.TryAcquireExclusivePrefixLockAsync(
+                request, cancellationToken: cancellationToken
+            ).ConfigureAwait(false);
+
+            if (response.Type == GrpcKeyValueResponseType.TypeLocked)
+                return true;
+
+            if (response.Type is GrpcKeyValueResponseType.TypeAlreadyLocked)
+                throw new KahunaException($"Failed to acquire exclusive prefix lock for '{prefixKey}': AlreadyLocked.", KeyValueResponseType.Aborted);
+
+            if (response.Type != GrpcKeyValueResponseType.TypeMustRetry)
+                throw new KahunaException($"Failed to acquire exclusive prefix lock for '{prefixKey}'.", KeyValueResponseType.Aborted);
+
+            logger?.LogDebug("Server asked to retry acquire prefix key/value lock");
+        }
+
+        throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
+    }
+
+    public async Task TryReleaseExclusivePrefixKeyValueLock(string url, HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        GrpcTryReleaseExclusivePrefixLockRequest request = new()
+        {
+            TransactionIdNode = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
+            PrefixKey = prefixKey,
+            Durability = (GrpcKeyValueDurability)durability
+        };
+
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
+        KeyValuer.KeyValuerClient client = new(channel);
+
+        await client.TryReleaseExclusivePrefixLockAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+    }
+
     private static List<KahunaKeyValueTransactionResultValue> GetTransactionValues(RepeatedField<GrpcTryExecuteTransactionResponseValue> responseValues)
     {
         List<KahunaKeyValueTransactionResultValue> values = new(responseValues.Count);
