@@ -84,16 +84,15 @@ internal sealed class TryExistsHandler : BaseHandler
             entry.ReplicationIntent = null;
         }
         
-        // Validate if there's an exclusive key acquired on the lock and whether it is expired
-        // if we find expired write intents we can remove it to allow new transactions to proceed
+        // A live write intent from another transaction is not a blocking condition for reads.
+        // Exists checks read the committed state regardless of pending writes (read-committed semantics).
         if (entry?.WriteIntent != null)
         {
             if (entry.WriteIntent.TransactionId != message.TransactionId)
             {
-                if (entry.WriteIntent.Expires - currentTime > TimeSpan.Zero)                
-                    return KeyValueStaticResponses.MustRetryResponse;
-                
-                entry.WriteIntent = null;
+                if (entry.WriteIntent.Expires - currentTime <= TimeSpan.Zero)
+                    entry.WriteIntent = null;
+                // live write intent from another tx: fall through to committed state
             }
         }
         

@@ -141,15 +141,17 @@ internal sealed class TryGetByBucketHandler : BaseHandler
         }
         
         // Validate if there's an exclusive key acquired on the lock and whether it is expired
-        // if we find expired write intents we can remove it to allow new transactions to proceed
+        // if we find expired write intents we can remove it to allow new transactions to proceed.
+        // Unlike TryGet/TryExists, a bucket scan reads the *committed* state of every key, so a
+        // live write intent from another transaction is not a blocking condition — we fall through
+        // to read entry.Value / entry.State (the last committed snapshot).
         if (entry?.WriteIntent != null)
         {
             if (entry.WriteIntent.TransactionId != transactionId)
             {
-                if (entry.WriteIntent.Expires - currentTime > TimeSpan.Zero)                
-                    return KeyValueStaticResponses.MustRetryResponse;
-                
-                entry.WriteIntent = null;
+                if (entry.WriteIntent.Expires - currentTime <= TimeSpan.Zero)
+                    entry.WriteIntent = null;
+                // else: live write intent from another tx — fall through to committed state
             }
         }
 
@@ -197,7 +199,7 @@ internal sealed class TryGetByBucketHandler : BaseHandler
             return new(KeyValueResponseType.Get, readOnlyKeyValueEntry);
         }
 
-        if (entry is null || entry.State == KeyValueState.Deleted || entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
+        if (entry is null || entry.State is KeyValueState.Deleted or KeyValueState.Undefined || entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
             return KeyValueStaticResponses.DoesNotExistContextResponse;
 
         entry.LastUsed = currentTime;

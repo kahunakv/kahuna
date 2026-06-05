@@ -307,14 +307,24 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryExistsValue(
-        HLCTimestamp transactionId, 
-        string key, 
-        long revision, 
-        KeyValueDurability durability, 
+        HLCTimestamp transactionId,
+        string key,
+        long revision,
+        KeyValueDurability durability,
         CancellationToken cancellationToken
     )
     {
         return keyValues.LocateAndTryExistsValue(transactionId, key, revision, durability, cancellationToken);
+    }
+
+    public Task<KeyValueResponseType> LocateAndTryCheckWriteIntent(
+        HLCTimestamp transactionId,
+        string key,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        return keyValues.LocateAndTryCheckWriteIntent(transactionId, key, durability, cancellationToken);
     }
 
     /// <summary>
@@ -771,17 +781,26 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="durability"></param>
     /// <returns></returns>
     public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryExistsValue(
-        HLCTimestamp transactionId, 
-        string key, 
-        long revision, 
+        HLCTimestamp transactionId,
+        string key,
+        long revision,
         KeyValueDurability durability
     )
     {
         return keyValues.TryExistsValue(transactionId, key, revision, durability);
     }
 
+    public Task<KeyValueResponseType> TryCheckWriteIntentValue(
+        HLCTimestamp transactionId,
+        string key,
+        KeyValueDurability durability
+    )
+    {
+        return keyValues.TryCheckWriteIntentValue(transactionId, key, durability);
+    }
+
     /// <summary>
-    /// 
+    ///
     /// </summary>
     /// <param name="transactionId"></param>
     /// <param name="key"></param>

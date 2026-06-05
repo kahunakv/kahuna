@@ -472,6 +472,21 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         };
     }
 
+    internal async Task<GrpcTryCheckWriteIntentResponse> TryCheckWriteIntentInternal(GrpcTryCheckWriteIntentRequest request, ServerCallContext context)
+    {
+        if (string.IsNullOrEmpty(request.Key))
+            return new() { Type = GrpcKeyValueResponseType.TypeInvalidInput };
+
+        KeyValueResponseType type = await keyValues.LocateAndTryCheckWriteIntent(
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
+            request.Key,
+            (KeyValueDurability)request.Durability,
+            context.CancellationToken
+        );
+
+        return new() { ServedFrom = "", Type = (GrpcKeyValueResponseType)type };
+    }
+
     /// <summary>
     /// Attempts to acquire an exclusive lock on a key-value resource.
     /// </summary>

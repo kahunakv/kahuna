@@ -740,17 +740,30 @@ public class KahunaTransactionSession : IAsyncDisposable
     /// <returns></returns>
     public async Task<List<KahunaKeyValue>> GetByBucket(string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken = default)
     {
-        /// @todo try to acquire lock on prefixKey
-        
+        if (Status != KahunaTransactionStatus.Pending)
+            throw new KahunaException("Cannot perform actions on a completed transaction.", KeyValueResponseType.Errored);
+
         List<KeyValueGetByBucketItem> kv = await Client.Communication.GetByBucket(
-            Url, 
-            prefixKey, 
-            durability, 
+            Url,
+            prefixKey,
+            durability,
             cancellationToken
         ).ConfigureAwait(false);
-        
+
+        // For pessimistic transactions, acquire an exclusive lock on each returned key so that
+        // concurrent writers cannot modify the observed set between the scan and the commit.
+        // This mirrors how GetKeyValue acquires a per-key lock before reading.
+        if (Locking == KeyValueTransactionLocking.Pessimistic)
+        {
+            foreach (KeyValueGetByBucketItem item in kv)
+            {
+                if (!string.IsNullOrEmpty(item.Key))
+                    await AcquireExclusiveKeyValueLock(item.Key, durability, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
         List<KahunaKeyValue> result = new(kv.Count);
-        
+
         foreach (KeyValueGetByBucketItem item in kv)
         {
             RecordReadKey(item.Key ?? "", durability, true, item.Revision);

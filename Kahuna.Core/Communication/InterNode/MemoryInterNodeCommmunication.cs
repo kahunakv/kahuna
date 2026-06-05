@@ -361,17 +361,31 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <returns></returns>
     /// <exception cref="KahunaServerException"></exception>
     public async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryExistsValue(
-        string node, 
-        HLCTimestamp transactionId, 
-        string key, 
-        long revision, 
-        KeyValueDurability durability, 
+        string node,
+        HLCTimestamp transactionId,
+        string key,
+        long revision,
+        KeyValueDurability durability,
         CancellationToken cancellationToken
     )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
             return await kahunaNode.TryExistsValue(transactionId, key, revision, durability);
-        
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public async Task<KeyValueResponseType> TryCheckWriteIntentValue(
+        string node,
+        HLCTimestamp transactionId,
+        string key,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+            return await kahunaNode.TryCheckWriteIntentValue(transactionId, key, durability);
+
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 

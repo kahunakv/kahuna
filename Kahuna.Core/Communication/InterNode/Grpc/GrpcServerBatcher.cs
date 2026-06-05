@@ -130,6 +130,15 @@ internal sealed class GrpcServerBatcher
         return TryProcessQueue(grpcBatcherItem, promise);
     }
     
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryCheckWriteIntentRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
     public Task<GrpcServerBatcherResponse> Enqueue(GrpcGetByBucketRequest message)
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -479,6 +488,11 @@ internal sealed class GrpcServerBatcher
             batchRequest.Type = GrpcServerBatchType.ServerTryExistsKeyValue;
             batchRequest.TryExistsKeyValue = itemRequest.TryExistsKeyValue;
         }
+        else if (itemRequest.TryCheckWriteIntent is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryCheckWriteIntent;
+            batchRequest.TryCheckWriteIntent = itemRequest.TryCheckWriteIntent;
+        }
         else if (itemRequest.GetByBucket is not null)
         {
             batchRequest.Type = GrpcServerBatchType.ServerTryGetByBucket;
@@ -675,7 +689,11 @@ internal sealed class GrpcServerBatcher
                     case GrpcServerBatchType.ServerTryExistsKeyValue:
                         item.Promise.SetResult(new(response.TryExistsKeyValue));
                         break;
-                    
+
+                    case GrpcServerBatchType.ServerTryCheckWriteIntent:
+                        item.Promise.SetResult(new(response.TryCheckWriteIntent));
+                        break;
+
                     case GrpcServerBatchType.ServerTryGetByBucket:
                         item.Promise.SetResult(new(response.GetByBucket));
                         break;

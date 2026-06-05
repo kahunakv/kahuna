@@ -136,6 +136,8 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// </summary>
     private readonly TryExistsHandler tryExistsHandler;
 
+    private readonly TryCheckWriteIntentHandler tryCheckWriteIntentHandler;
+
     /// <summary>
     /// Manages the operation to attempt acquiring an exclusive lock on a key
     /// within the key-value store. This handler ensures that only one client
@@ -257,6 +259,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         tryGetByBucketHandler = new(context);
         tryGetByRangeHandler = new(context);
         tryExistsHandler = new(context);
+        tryCheckWriteIntentHandler = new(context);
         tryAcquireExclusiveLockHandler = new(context);
         tryAcquireExclusivePrefixLockHandler = new(context);
         tryReleaseExclusiveLockHandler = new(context);
@@ -319,6 +322,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.TryDelete => await TryDelete(message),
                 KeyValueRequestType.TryGet => await TryGet(message),
                 KeyValueRequestType.TryExists => await TryExists(message),
+                KeyValueRequestType.TryCheckWriteIntent => await TryCheckWriteIntent(message),
                 KeyValueRequestType.TryAcquireExclusiveLock => await TryAcquireExclusiveLock(message),
                 KeyValueRequestType.TryAcquireExclusivePrefixLock => TryAcquireExclusivePrefixLock(message),
                 KeyValueRequestType.TryReleaseExclusiveLock => await TryReleaseExclusiveLock(message),
@@ -446,6 +450,11 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private Task<KeyValueResponse> TryExists(KeyValueRequest message)
     {
         return tryExistsHandler.Execute(message);
+    }
+
+    private Task<KeyValueResponse> TryCheckWriteIntent(KeyValueRequest message)
+    {
+        return tryCheckWriteIntentHandler.Execute(message);
     }
     
     /// <summary>

@@ -547,6 +547,36 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     }
 
     /// <summary>
+    /// Redirects a "check-write-intent" probe to the specified node.
+    /// Used at commit time by optimistic transactions to detect concurrent writers (write-skew guard).
+    /// Returns Aborted when a conflicting write intent is found; DoesNotExist otherwise.
+    /// </summary>
+    public async Task<KeyValueResponseType> TryCheckWriteIntentValue(
+        string node,
+        HLCTimestamp transactionId,
+        string key,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        GrpcTryCheckWriteIntentRequest request = new()
+        {
+            TransactionIdNode = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
+            Key = key,
+            Durability = (GrpcKeyValueDurability)durability,
+        };
+
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcTryCheckWriteIntentResponse remoteResponse = response.TryCheckWriteIntent!;
+
+        return (KeyValueResponseType)remoteResponse.Type;
+    }
+
+    /// <summary>
     /// Redirects an "acquire-exclusive-lock" key/value operation to the specified node.
     /// </summary>
     /// <param name="node">The target node to initiate the lock coordination.</param>

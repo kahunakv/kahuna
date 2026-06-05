@@ -257,14 +257,15 @@ internal sealed class TryGetByRangeHandler : BaseHandler
             entry.ReplicationIntent = null;
         }
 
+        // A live write intent from another transaction is not a blocking condition for reads.
+        // Range scans read the committed state (entry.Value / MVCC snapshot) regardless of pending writes.
         if (entry?.WriteIntent != null)
         {
             if (entry.WriteIntent.TransactionId != transactionId)
             {
-                if (entry.WriteIntent.Expires - currentTime > TimeSpan.Zero)
-                    return KeyValueStaticResponses.MustRetryResponse;
-
-                entry.WriteIntent = null;
+                if (entry.WriteIntent.Expires - currentTime <= TimeSpan.Zero)
+                    entry.WriteIntent = null;
+                // live write intent from another tx: fall through to committed state
             }
         }
 
@@ -342,7 +343,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         if (!readTimestamp.IsNull() && entry is not null && entry.LastModified > readTimestamp)
             return KeyValueStaticResponses.DoesNotExistContextResponse;
 
-        if (entry is null || entry.State == KeyValueState.Deleted ||
+        if (entry is null || entry.State is KeyValueState.Deleted or KeyValueState.Undefined ||
             entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
             return KeyValueStaticResponses.DoesNotExistContextResponse;
 

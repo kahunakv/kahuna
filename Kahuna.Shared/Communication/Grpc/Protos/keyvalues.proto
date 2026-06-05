@@ -251,6 +251,19 @@ message GrpcTryAcquireExclusiveLockResponse {
   GrpcKeyValueResponseType Type = 2;
 }
 
+message GrpcTryCheckWriteIntentRequest {
+  int32 TransactionIdNode = 1;
+  int64 TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter = 3;
+  string Key = 4;
+  GrpcKeyValueDurability Durability = 5;
+}
+
+message GrpcTryCheckWriteIntentResponse {
+  optional string ServedFrom = 1;
+  GrpcKeyValueResponseType Type = 2;
+}
+
 message GrpcTryAcquireExclusivePrefixLockRequest {
   int32 TransactionIdNode = 1;
   int64 TransactionIdPhysical = 2;
@@ -694,6 +707,7 @@ message GrpcBatchServerKeyValueRequest {
     GrpcRollbackTransactionRequest RollbackTransaction = 27;
     GrpcGetByRangeRequest GetByRange = 28;
     GrpcTryDeleteManyKeyValueRequest TryDeleteManyKeyValue = 29;
+    GrpcTryCheckWriteIntentRequest TryCheckWriteIntent = 30;
   }
 }
 
@@ -728,6 +742,7 @@ message GrpcBatchServerKeyValueResponse
     GrpcRollbackTransactionResponse RollbackTransaction = 26;
     GrpcGetByRangeResponse GetByRange = 27;
     GrpcTryDeleteManyKeyValueResponse TryDeleteManyKeyValue = 28;
+    GrpcTryCheckWriteIntentResponse TryCheckWriteIntent = 29;
   }
 }
 
@@ -777,6 +792,7 @@ enum GrpcServerBatchType {
   SERVER_TRY_ROLLBACK_TRANSACTION = 25;
   SERVER_TRY_GET_BY_RANGE = 26;
   SERVER_TRY_DELETE_MANY_KEY_VALUE = 27;
+  SERVER_TRY_CHECK_WRITE_INTENT = 28;
 }
 
 enum GrpcKeyValueFlags {

@@ -382,6 +382,35 @@ internal sealed class KeyValueLocator
     }
     
     /// <summary>
+    /// Locates the leader node for the given key and checks whether a live write intent from another
+    /// transaction exists. Used at commit time by optimistic transactions as a write-skew guard.
+    /// Returns Aborted when a conflicting write intent is found; DoesNotExist otherwise.
+    /// </summary>
+    public async Task<KeyValueResponseType> LocateAndTryCheckWriteIntent(
+        HLCTimestamp transactionId,
+        string key,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        if (string.IsNullOrEmpty(key))
+            return KeyValueResponseType.InvalidInput;
+
+        int partitionId = raft.GetPartitionKey(key);
+
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+            return await manager.TryCheckWriteIntentValue(transactionId, key, durability);
+
+        string leader = await raft.WaitForLeader(partitionId, cancellationToken);
+        if (leader == raft.GetLocalEndpoint())
+            return KeyValueResponseType.MustRetry;
+
+        logger.LogDebug("CHECK-WRITE-INTENT Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
+
+        return await interNodeCommunication.TryCheckWriteIntentValue(leader, transactionId, key, durability, cancellationToken);
+    }
+
+    /// <summary>
     /// Locates the leader node for the given key and executes the TryAcquireExclusiveLock request.
     /// </summary>
     /// <param name="transactionId"></param>

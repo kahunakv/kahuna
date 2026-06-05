@@ -86,16 +86,17 @@ internal sealed class TryGetHandler : BaseHandler
             entry.ReplicationIntent = null;
         }
         
-        // Validate if there's an exclusive key acquired on the lock and whether it is expired
-        // if we find expired write intents we can remove it to allow new transactions to proceed
+        // A live write intent from another transaction is not a blocking condition for reads.
+        // Reads use read-committed semantics: entry.Value / MVCC snapshot is the committed state
+        // regardless of any pending write. Only clear expired intents as housekeeping.
+        // (Write operations and TryExists for ValidateReadSet still block on write intents.)
         if (entry?.WriteIntent != null)
         {
             if (entry.WriteIntent.TransactionId != message.TransactionId)
             {
-                if (entry.WriteIntent.Expires - currentTime > TimeSpan.Zero)                
-                    return new(KeyValueResponseType.MustRetry, 0);
-                
-                entry.WriteIntent = null;
+                if (entry.WriteIntent.Expires - currentTime <= TimeSpan.Zero)
+                    entry.WriteIntent = null;
+                // live write intent from another tx: fall through to committed state
             }
         }
         

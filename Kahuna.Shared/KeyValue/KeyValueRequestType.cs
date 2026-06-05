@@ -26,5 +26,6 @@ public enum KeyValueRequestType
     GetByRange,
     CompleteProposal,
     ReleaseProposal,
-    Collect
+    Collect,
+    TryCheckWriteIntent
 }

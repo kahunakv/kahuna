@@ -343,6 +343,132 @@ public class TestTransactionLockingAnomalies
         }
     }
 
+    [Theory, CombinatorialData]
+    public async Task TestBucketMvccVisibilityAndReturnedKeyConflicts(
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType,
+        [CombinatorialValues(KeyValueTransactionLocking.Optimistic, KeyValueTransactionLocking.Pessimistic)] KeyValueTransactionLocking locking,
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+        KahunaClient client = GetClientByType(clientType);
+
+        await AssertClusterAvailable(client, cancellationToken);
+
+        string prefix = $"tx-anomaly/{Guid.NewGuid():N}/items";
+        string keyA = $"{prefix}/a";
+        string keyB = $"{prefix}/b";
+        string keyDeleted = $"{prefix}/deleted";
+        string keyExpired = $"{prefix}/expired";
+        string keyInflight = $"{prefix}/inflight";
+        string summaryKey = $"{prefix}/summary";
+
+        await SeedBucketVisibilityState(client, keyA, keyB, keyDeleted, keyExpired, durability, cancellationToken);
+
+        await using KahunaTransactionSession inflightSession = await client.StartTransactionSession(
+            new()
+            {
+                Locking = KeyValueTransactionLocking.Optimistic,
+                Timeout = 5000
+            },
+            cancellationToken
+        );
+
+        KahunaKeyValue inflightWrite = await inflightSession.SetKeyValue(
+            keyInflight,
+            "hidden",
+            10000,
+            durability: durability,
+            cancellationToken: cancellationToken
+        );
+        Assert.True(inflightWrite.Success);
+
+        await using KahunaTransactionSession bucketSession = await client.StartTransactionSession(
+            new()
+            {
+                Locking = locking,
+                Timeout = 5000
+            },
+            cancellationToken
+        );
+
+        List<KahunaKeyValue> bucketItems = await bucketSession.GetByBucket(prefix, durability, cancellationToken);
+        string[] bucketKeys = bucketItems
+            .Select(item => item.Key)
+            .OrderBy(key => key, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal([keyA, keyB], bucketKeys);
+        Assert.DoesNotContain(bucketItems, item => item.Key == keyDeleted);
+        Assert.DoesNotContain(bucketItems, item => item.Key == keyExpired);
+        Assert.DoesNotContain(bucketItems, item => item.Key == keyInflight);
+
+        Task<SimpleCommitAttempt> updaterTask = ExecuteValueUpdateAttempt(
+            client,
+            keyA,
+            "new-a",
+            locking,
+            durability,
+            cancellationToken
+        );
+
+        bool updaterCommittedBeforeBucketCommit = await TryAwaitSuccess(
+            updaterTask,
+            TimeSpan.FromMilliseconds(250),
+            cancellationToken
+        );
+
+        KahunaKeyValue summaryWrite = await bucketSession.SetKeyValue(
+            summaryKey,
+            bucketItems.Count.ToString(),
+            10000,
+            durability: durability,
+            cancellationToken: cancellationToken
+        );
+        Assert.True(summaryWrite.Success);
+
+        CommitAttempt bucketCommit = await CommitTransactionAttempt(bucketSession, cancellationToken);
+        SimpleCommitAttempt updater = await updaterTask;
+
+        KahunaKeyValue finalA = await client.GetKeyValue(keyA, durability, cancellationToken);
+        KahunaKeyValue finalB = await client.GetKeyValue(keyB, durability, cancellationToken);
+        KahunaKeyValue finalSummary = await client.GetKeyValue(summaryKey, durability, cancellationToken);
+        KahunaKeyValue finalInflight = await client.GetKeyValue(keyInflight, durability, cancellationToken);
+
+        Assert.True(finalA.Success);
+        Assert.True(finalB.Success);
+        Assert.Equal("old-b", finalB.ValueAsString());
+        Assert.False(finalInflight.Success);
+
+        if (locking == KeyValueTransactionLocking.Optimistic)
+        {
+            Assert.True(updaterCommittedBeforeBucketCommit);
+            Assert.True(updater.Committed);
+            Assert.False(bucketCommit.Committed);
+            Assert.Equal("new-a", finalA.ValueAsString());
+            Assert.False(finalSummary.Success);
+        }
+        else
+        {
+            Assert.False(updaterCommittedBeforeBucketCommit && updater.Committed);
+
+            if (bucketCommit.Committed)
+            {
+                Assert.True(finalSummary.Success);
+                Assert.Equal("2", finalSummary.ValueAsString());
+            }
+
+            if (updater.Committed)
+                Assert.Equal("new-a", finalA.ValueAsString());
+            else
+                Assert.Equal("old-a", finalA.ValueAsString());
+        }
+
+        Assert.False(bucketCommit.Committed && updaterCommittedBeforeBucketCommit && updater.Committed);
+
+        await inflightSession.Rollback(cancellationToken);
+    }
+
     private static async Task<TransactionAttempt> ExecuteLostUpdateAttempt(
         KahunaClient client,
         string key,
@@ -536,6 +662,60 @@ public class TestTransactionLockingAnomalies
         }
     }
 
+    private static async Task<SimpleCommitAttempt> ExecuteValueUpdateAttempt(
+        KahunaClient client,
+        string key,
+        string value,
+        KeyValueTransactionLocking locking,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        try
+        {
+            await using KahunaTransactionSession session = await client.StartTransactionSession(
+                new()
+                {
+                    Locking = locking,
+                    Timeout = 5000
+                },
+                cancellationToken
+            );
+
+            KahunaKeyValue setResult = await session.SetKeyValue(
+                key,
+                value,
+                10000,
+                durability: durability,
+                cancellationToken: cancellationToken
+            );
+            Assert.True(setResult.Success);
+
+            bool committed = await session.Commit(cancellationToken);
+            return new(committed, committed ? null : KeyValueResponseType.Aborted);
+        }
+        catch (KahunaException exception) when (exception.KeyValueErrorCode is KeyValueResponseType.Aborted or KeyValueResponseType.MustRetry)
+        {
+            return new(false, exception.KeyValueErrorCode);
+        }
+    }
+
+    private static async Task<CommitAttempt> CommitTransactionAttempt(
+        KahunaTransactionSession session,
+        CancellationToken cancellationToken
+    )
+    {
+        try
+        {
+            bool committed = await session.Commit(cancellationToken);
+            return new(committed, committed ? null : KeyValueResponseType.Aborted);
+        }
+        catch (KahunaException exception) when (exception.KeyValueErrorCode is KeyValueResponseType.Aborted or KeyValueResponseType.MustRetry)
+        {
+            return new(false, exception.KeyValueErrorCode);
+        }
+    }
+
     private static string GetWriteSkewBucketScript(KeyValueTransactionLocking locking, KeyValueDurability durability)
     {
         string lockingValue = locking == KeyValueTransactionLocking.Optimistic ? "optimistic" : "pessimistic";
@@ -583,6 +763,53 @@ public class TestTransactionLockingAnomalies
 
         Assert.True(alice.Success);
         Assert.True(bob.Success);
+    }
+
+    private static async Task SeedBucketVisibilityState(
+        KahunaClient client,
+        string keyA,
+        string keyB,
+        string keyDeleted,
+        string keyExpired,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        Assert.True((await client.SetKeyValue(
+            keyA,
+            "old-a",
+            10000,
+            durability: durability,
+            cancellationToken: cancellationToken
+        )).Success);
+        Assert.True((await client.SetKeyValue(
+            keyB,
+            "old-b",
+            10000,
+            durability: durability,
+            cancellationToken: cancellationToken
+        )).Success);
+
+        KahunaKeyValue deleted = await client.SetKeyValue(
+            keyDeleted,
+            "to-delete",
+            10000,
+            durability: durability,
+            cancellationToken: cancellationToken
+        );
+        Assert.True(deleted.Success);
+        Assert.True((await client.DeleteKeyValue(keyDeleted, durability, cancellationToken)).Success);
+
+        KahunaKeyValue expired = await client.SetKeyValue(
+            keyExpired,
+            "to-expire",
+            150,
+            durability: durability,
+            cancellationToken: cancellationToken
+        );
+        Assert.True(expired.Success);
+
+        await Task.Delay(300, cancellationToken);
     }
 
     private static async Task<SimpleCommitAttempt> ExecuteFreshWriterAttempt(
@@ -755,4 +982,6 @@ public class TestTransactionLockingAnomalies
     );
 
     private sealed record ScriptAttempt(bool Committed, KeyValueResponseType? ErrorCode);
+
+    private sealed record CommitAttempt(bool Committed, KeyValueResponseType? ErrorCode);
 }

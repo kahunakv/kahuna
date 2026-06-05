@@ -826,7 +826,13 @@ internal sealed class KeyValueTransactionCoordinator
         if (!await ValidateReadSet(context, cancellationToken))
             return;
 
-        // Step 3: Prepare mutations
+        // Step 3: Prepare mutations (places write intents on the write set) BEFORE checking for
+        // concurrent writers on the read set. CheckReadSetForConflicts detects write intents placed
+        // by other transactions on keys this transaction read but did not write. For the check to
+        // be effective the current transaction must have already placed its own write intents first:
+        // only then can a racing peer's CheckReadSetForConflicts see them and abort. Without this
+        // ordering both transactions can pass the check before either has placed any write intent,
+        // causing both to commit — a write-skew anomaly.
         (bool success, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>? mutationsPrepared) = await PrepareMutations(
             context,
             cancellationToken
@@ -838,6 +844,17 @@ internal sealed class KeyValueTransactionCoordinator
         if (!success)
         {
             // Step 4.a: Rollback mutations in the case of failures
+            if (context.AsyncRelease)
+                _ = RollbackMutations(context, mutationsPrepared);
+            else
+                await RollbackMutations(context, mutationsPrepared);
+            return;
+        }
+
+        // Step 3b: Now that our write intents are visible, check whether a concurrent transaction
+        // holds a write intent on any key we read (but did not write). If so, abort and roll back.
+        if (!await CheckReadSetForConflicts(context, cancellationToken))
+        {
             if (context.AsyncRelease)
                 _ = RollbackMutations(context, mutationsPrepared);
             else
@@ -967,6 +984,78 @@ internal sealed class KeyValueTransactionCoordinator
     /// deferred log action invoked only for the failure that is actually reported.
     /// </summary>
     private readonly record struct ReadValidationFailure(string AbortReason, Action Log);
+
+    /// <summary>
+    /// Probes the read-set for concurrent writers (write-skew guard) — optimistic transactions only.
+    ///
+    /// For each key in the read-set that is NOT in the write-set, we check whether a live write intent
+    /// from a different transaction is present.  If one is found the calling transaction is aborted:
+    /// the concurrent writer may commit a value that this transaction has already read, which would
+    /// violate serializability.
+    ///
+    /// Pessimistic transactions skip this check entirely — exclusive locks already guarantee that no
+    /// concurrent writer can hold an intent on any key that was read by a locked transaction.
+    /// </summary>
+    private async Task<bool> CheckReadSetForConflicts(KeyValueTransactionContext context, CancellationToken cancellationToken)
+    {
+        if (context.Locking != KeyValueTransactionLocking.Optimistic || context.ReadKeys is null || context.ReadKeys.Count == 0)
+            return true;
+
+        List<KeyValueTransactionReadKey> toCheck = [];
+
+        foreach (KeyValueTransactionReadKey readKey in context.ReadKeys.Values)
+        {
+            if (string.IsNullOrEmpty(readKey.Key))
+                continue;
+
+            if (context.ModifiedKeys is not null && context.ModifiedKeys.Contains((readKey.Key, readKey.Durability)))
+                continue;
+
+            toCheck.Add(readKey);
+        }
+
+        if (toCheck.Count == 0)
+            return true;
+
+        Task<KeyValueResponseType>[] tasks = new Task<KeyValueResponseType>[toCheck.Count];
+
+        for (int i = 0; i < toCheck.Count; i++)
+        {
+            KeyValueTransactionReadKey readKey = toCheck[i];
+            tasks[i] = manager.LocateAndTryCheckWriteIntent(
+                context.TransactionId,
+                readKey.Key!,
+                readKey.Durability,
+                cancellationToken
+            );
+        }
+
+        KeyValueResponseType[] results = await Task.WhenAll(tasks);
+
+        for (int i = 0; i < results.Length; i++)
+        {
+            if (results[i] != KeyValueResponseType.Aborted)
+                continue;
+
+            string key = toCheck[i].Key!;
+
+            context.Result = new()
+            {
+                Type = KeyValueResponseType.Aborted,
+                Reason = $"Concurrent write intent detected on read key {key}"
+            };
+
+            logger.LogDebug(
+                "Write-skew guard aborted optimistic transaction {TransactionId}: concurrent writer on {Key}",
+                context.TransactionId,
+                key
+            );
+
+            return false;
+        }
+
+        return true;
+    }
 
     /// <summary>
     /// Executes a plan to prepare all the mutations for the modified keys in the transaction.

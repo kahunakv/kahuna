@@ -24,7 +24,9 @@ internal sealed class GrpcServerBatcherResponse
     public GrpcTryExtendKeyValueResponse? TryExtendKeyValue { get; }
 
     public GrpcTryExistsKeyValueResponse? TryExistsKeyValue { get; }
-    
+
+    public GrpcTryCheckWriteIntentResponse? TryCheckWriteIntent { get; }
+
     public GrpcGetByBucketResponse? GetByBucket { get; }
 
     public GrpcGetByRangeResponse? GetByRange { get; }
@@ -118,7 +120,12 @@ internal sealed class GrpcServerBatcherResponse
     {
         TryExistsKeyValue = tryExistsKeyValue;
     }
-    
+
+    public GrpcServerBatcherResponse(GrpcTryCheckWriteIntentResponse tryCheckWriteIntent)
+    {
+        TryCheckWriteIntent = tryCheckWriteIntent;
+    }
+
     public GrpcServerBatcherResponse(GrpcGetByBucketResponse getByBucket)
     {
         GetByBucket = getByBucket;

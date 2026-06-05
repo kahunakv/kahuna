@@ -302,6 +302,20 @@ internal sealed class KeyValuesManager
     }
     
     /// <summary>
+    /// Locates the leader node for the given key and checks whether a live write intent from another
+    /// transaction exists. Used at commit time by optimistic transactions as a write-skew guard.
+    /// </summary>
+    public Task<KeyValueResponseType> LocateAndTryCheckWriteIntent(
+        HLCTimestamp transactionId,
+        string key,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        return locator.LocateAndTryCheckWriteIntent(transactionId, key, durability, cancellationToken);
+    }
+
+    /// <summary>
     /// Locates the leader node for the given key and executes the TryDelete request.
     /// </summary>
     /// <param name="transactionId"></param>
@@ -1129,7 +1143,49 @@ internal sealed class KeyValuesManager
             KeyValueRequestPool.Return(request);
         }
     }
-    
+
+    /// <summary>
+    /// Checks whether the given key has a live write intent from a transaction other than the caller.
+    /// Used at commit time by optimistic transactions to detect concurrent writers (write-skew guard).
+    /// Returns Aborted when a conflicting write intent is found; DoesNotExist otherwise.
+    /// </summary>
+    public async Task<KeyValueResponseType> TryCheckWriteIntentValue(
+        HLCTimestamp transactionId,
+        string key,
+        KeyValueDurability durability
+    )
+    {
+        KeyValueRequest request = KeyValueRequestPool.Rent(
+            KeyValueRequestType.TryCheckWriteIntent,
+            transactionId,
+            HLCTimestamp.Zero,
+            key,
+            null,
+            null,
+            -1,
+            KeyValueFlags.None,
+            0,
+            HLCTimestamp.Zero,
+            durability,
+            0,
+            0,
+            null
+        );
+
+        try
+        {
+            KeyValueResponse? response = durability == KeyValueDurability.Ephemeral
+                ? await ephemeralKeyValuesRouter.Ask(request)
+                : await persistentKeyValuesRouter.Ask(request);
+
+            return response?.Type ?? KeyValueResponseType.Errored;
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
+    }
+
     /// <summary>
     /// Passes a TryAcquireExclusiveLock request to the key/value actor for the given keyValue name.
     /// </summary>

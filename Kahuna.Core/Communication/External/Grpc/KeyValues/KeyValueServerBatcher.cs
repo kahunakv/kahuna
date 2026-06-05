@@ -101,7 +101,15 @@ internal sealed class KeyValueServerBatcher
                         tasks.Add(TryExistsKeyValueServerDelayed(semaphore, request.RequestId, extendKeyRequest, responseStream, context));
                     }
                     break;
-                    
+
+                    case GrpcServerBatchType.ServerTryCheckWriteIntent:
+                    {
+                        GrpcTryCheckWriteIntentRequest? checkWriteIntentRequest = request.TryCheckWriteIntent;
+
+                        tasks.Add(TryCheckWriteIntentServerDelayed(semaphore, request.RequestId, checkWriteIntentRequest, responseStream, context));
+                    }
+                    break;
+
                     case GrpcServerBatchType.ServerTryExecuteTransactionScript:
                     {
                         GrpcTryExecuteTransactionScriptRequest? tryExecuteTransactionScriptRequest = request.TryExecuteTransactionScript;
@@ -409,10 +417,30 @@ internal sealed class KeyValueServerBatcher
         await WriteResponseToStream(semaphore, responseStream, response, context);
     }
 
+    private async Task TryCheckWriteIntentServerDelayed(
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcTryCheckWriteIntentRequest checkWriteIntentRequest,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcTryCheckWriteIntentResponse tryCheckWriteIntentResponse = await service.TryCheckWriteIntentInternal(checkWriteIntentRequest, context);
+
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type = GrpcServerBatchType.ServerTryCheckWriteIntent,
+            RequestId = requestId,
+            TryCheckWriteIntent = tryCheckWriteIntentResponse
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+
     private async Task TryExecuteTransactionServerDelayed(
-        SemaphoreSlim semaphore, 
-        int requestId, 
-        GrpcTryExecuteTransactionScriptRequest tryExecuteTransactionRequest, 
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcTryExecuteTransactionScriptRequest tryExecuteTransactionRequest,
         IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
         ServerCallContext context
     )
