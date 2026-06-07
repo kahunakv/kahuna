@@ -22,6 +22,11 @@ public sealed class KahunaConfiguration
     public string StorageRevision { get; set; } = "";
     
     public TimeSpan ScriptCacheExpiration { get; set; }
+
+    /// <summary>
+    /// Maximum number of entries the script cache may hold. New entries are dropped when the limit is reached.
+    /// </summary>
+    public int ScriptCacheMaxEntries { get; set; } = 1_000;
     
     public int DefaultTransactionTimeout { get; set; }
     

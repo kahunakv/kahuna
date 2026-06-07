@@ -3,26 +3,24 @@ namespace Kahuna.Server.ScriptParser;
 
 /// <summary>
 /// Represents a cache entry for a script. Each entry contains the script's hash,
-/// its abstract syntax tree (AST) and an expiration date and time.
+/// its abstract syntax tree (AST) and an expiration timestamp (Environment.TickCount64, milliseconds).
 /// </summary>
 public sealed class ScriptCacheEntry
 {
     public string Hash { get; }
-    
+
     public NodeAst Ast { get; }
-    
-    public DateTime Expiration { get; set; }
 
     /// <summary>
-    /// Constructor
+    /// Absolute expiry expressed as <see cref="Environment.TickCount64"/> milliseconds.
+    /// Using a monotonic source avoids clock-adjustment surprises.
     /// </summary>
-    /// <param name="hash"></param>
-    /// <param name="ast"></param>
-    /// <param name="expiration"></param>
-    public ScriptCacheEntry(string hash, NodeAst ast, DateTime expiration)
+    public long ExpiresAt { get; set; }
+
+    public ScriptCacheEntry(string hash, NodeAst ast, long expiresAt)
     {
         Hash = hash;
         Ast = ast;
-        Expiration = expiration;
+        ExpiresAt = expiresAt;
     }
 }

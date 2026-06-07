@@ -49,10 +49,10 @@ internal sealed partial class scriptParser
     {
         if (!string.IsNullOrEmpty(hash) && Cache.TryGetValue(hash, out ScriptCacheEntry? cached))
         {
-            cached.Expiration = DateTime.UtcNow + configuration.ScriptCacheExpiration;
-            
+            cached.ExpiresAt = Environment.TickCount64 + (long)configuration.ScriptCacheExpiration.TotalMilliseconds;
+
             logger.LogDebug("Retrieved script from cache {Hash}", hash);
-            
+
             return cached.Ast;
         }
         
@@ -83,11 +83,11 @@ internal sealed partial class scriptParser
 
         NodeAst? root = CurrentSemanticValue.n;
 
-        if (!string.IsNullOrEmpty(hash))
+        if (!string.IsNullOrEmpty(hash) && Cache.Count < configuration.ScriptCacheMaxEntries)
         {
             logger.LogDebug("Added script to cache {Hash}", hash);
-            
-            Cache.TryAdd(hash, new(hash, root, DateTime.UtcNow + configuration.ScriptCacheExpiration));
+
+            Cache.TryAdd(hash, new(hash, root, Environment.TickCount64 + (long)configuration.ScriptCacheExpiration.TotalMilliseconds));
         }
 
         return root;
