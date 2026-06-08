@@ -22,7 +22,7 @@ namespace RadLine
 
         public int GetHashCode(KeyBinding obj)
         {
-#if NET5_0
+#if NET5_0_OR_GREATER
             return HashCode.Combine(obj.Key, obj.Modifiers);
 #else
             unchecked

@@ -54,7 +54,7 @@ internal sealed class CompleteProposalHandler : BaseHandler
 
         bool revisionsCreated = entry.Revisions is null;
         entry.Revisions ??= new();
-        entry.Revisions.Add(entry.Revision, entry.Value);
+        entry.Revisions[entry.Revision] = new KeyValueRevisionEntry(entry.Value, entry.LastModified, entry.Expires, entry.State);
         context.AdjustEstimatedEntryBytes(KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreated, entry.Value));
 
         int previousValueLength = entry.Value?.Length ?? 0;

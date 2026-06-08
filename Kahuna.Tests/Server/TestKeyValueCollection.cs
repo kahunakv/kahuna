@@ -196,7 +196,7 @@ public sealed class TestKeyValueCollection
         };
 
         for (int i = 0; i < 20; i++)
-            entry.Revisions[i] = Encoding.UTF8.GetBytes("revision-" + i);
+            entry.Revisions[i] = new KeyValueRevisionEntry(Encoding.UTF8.GetBytes("revision-" + i), now, HLCTimestamp.Zero, KeyValueState.Set);
 
         context.InsertStoreEntry("hot/key", entry);
 
@@ -226,7 +226,7 @@ public sealed class TestKeyValueCollection
         };
 
         for (int i = 0; i < 20; i++)
-            entry.Revisions[i] = Encoding.UTF8.GetBytes("revision-" + i);
+            entry.Revisions[i] = new KeyValueRevisionEntry(Encoding.UTF8.GetBytes("revision-" + i), now, HLCTimestamp.Zero, KeyValueState.Set);
 
         context.InsertStoreEntry("hot/key", entry);
 
@@ -257,7 +257,7 @@ public sealed class TestKeyValueCollection
 
         byte[] revisionPayload = new byte[1024];
         for (int i = 0; i < 20; i++)
-            entry.Revisions[i] = revisionPayload;
+            entry.Revisions[i] = new KeyValueRevisionEntry(revisionPayload, now, HLCTimestamp.Zero, KeyValueState.Set);
 
         context.InsertStoreEntry("hot/key", entry);
         long bytesBeforeTrim = context.ApproximateStoreBytes;

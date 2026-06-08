@@ -43,15 +43,15 @@ internal static class KeyValueStoreAccounting
         return bytes;
     }
 
-    private static long EstimateRevisionBytes(Dictionary<long, byte[]?>? revisions)
+    private static long EstimateRevisionBytes(Dictionary<long, KeyValueRevisionEntry>? revisions)
     {
         if (revisions is null || revisions.Count == 0)
             return 0;
 
         long bytes = DictionaryOverheadBytes;
 
-        foreach (byte[]? value in revisions.Values)
-            bytes += sizeof(long) + RevisionEntryOverheadBytes + (value?.Length ?? 0);
+        foreach (KeyValueRevisionEntry revision in revisions.Values)
+            bytes += sizeof(long) + RevisionEntryOverheadBytes + (revision.Value?.Length ?? 0);
 
         return bytes;
     }

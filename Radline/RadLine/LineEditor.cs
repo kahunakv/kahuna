@@ -18,7 +18,7 @@ namespace RadLine
         private readonly InputBuffer _input;
 
         public KeyBindings KeyBindings { get; }
-        public bool MultiLine { get; init; }
+        public bool MultiLine { get; init; } = false;
         public string Text { get; init; } = string.Empty;
 
         public ILineEditorPrompt Prompt { get; init; } = new LineEditorPrompt("[yellow]>[/]");
@@ -169,7 +169,7 @@ namespace RadLine
                     }
                     else
                     {
-                        command = KeyBindings.GetCommand(key.Value.Key, key.Value.Modifiers);
+                        command = GetCommand(state, key.Value);
                     }
                 }
 
@@ -189,6 +189,24 @@ namespace RadLine
                 // Render the line
                 _renderer.RenderLine(state);
             }
+        }
+
+        private LineEditorCommand? GetCommand(LineEditorState state, ConsoleKeyInfo key)
+        {
+            if (MultiLine && state.LineCount > 1 && key.Modifiers == 0)
+            {
+                if (key.Key == ConsoleKey.UpArrow && !state.IsFirstLine)
+                {
+                    return new MoveUpCommand();
+                }
+
+                if (key.Key == ConsoleKey.DownArrow && !state.IsLastLine)
+                {
+                    return new MoveDownCommand();
+                }
+            }
+
+            return KeyBindings.GetCommand(key.Key, key.Modifiers);
         }
 
         private void MoveUp(LineEditorState state)
@@ -268,10 +286,10 @@ namespace RadLine
             }
         }
 
-        private bool SetContent(LineEditorState state, LineBuffer[]? lines)
+        private bool SetContent(LineEditorState state, IList<LineBuffer>? lines)
         {
             // Nothing to set?
-            if (lines == null || lines.Length == 0)
+            if (lines == null || lines.Count == 0)
             {
                 return false;
             }
@@ -289,7 +307,7 @@ namespace RadLine
             builder.Append("\u001b[?25l");
 
             // Add all the lines
-            foreach (LineBuffer line in lines)
+            foreach (var line in lines)
             {
                 state.AddLine(line.Content);
             }

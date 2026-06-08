@@ -175,6 +175,9 @@ public sealed class KahunaCommandLineOptions
     [Option("disable-persistent-revision-cleanup-on-write", Required = false, HelpText = "Disable targeted persistent revision cleanup after key/value writes")]
     public bool DisablePersistentRevisionCleanupOnWrite { get; set; }
 
+    [Option("raft-allow-insecure-certificate-validation", Required = false, HelpText = "Skip TLS certificate validation for inter-node Raft gRPC connections (use only in dev/test environments)")]
+    public bool RaftAllowInsecureCertificateValidation { get; set; }
+
     /// <summary>
     /// Resolves cleanup-on-write for server startup. Enabled by default; use
     /// <see cref="DisablePersistentRevisionCleanupOnWrite"/> to turn it off from the CLI.

@@ -284,20 +284,12 @@ internal sealed class TryGetByRangeHandler : BaseHandler
             {
                 // Snapshot check (MVCC path, no prior write by this tx).
                 // entry.LastModified > readTimestamp means the *current* revision was committed
-                // after the snapshot was captured.  The faithful behavior would be to return the
-                // pre-snapshot value.  We cannot do that here because:
-                //   • entry.Revisions (populated only for ephemeral keys by TrySetHandler) maps
-                //     {revision_number → byte[]}, with NO per-revision timestamp.  Without a
-                //     timestamp we cannot identify which revision was the last one ≤ readTimestamp.
-                //   • For persistent keys entry.Revisions is null (TrySetHandler returns before
-                //     the Revisions block for persistent durability).
-                //   • There may have been multiple writes after the snapshot; the immediately
-                //     previous revision might itself be post-snapshot.
-                // Until a timestamp-versioned revision history (e.g. {revision, LastModified}[])
-                // is added, we fall back to DoesNotExist — the key is treated as invisible rather
-                // than returning a potentially misleading post-snapshot intermediate value.
-                // TODO: add per-revision timestamps to entry.Revisions so the last revision
-                //       whose LastModified ≤ readTimestamp can be served here.
+                // after this transaction's snapshot. Unlike the non-transactional path (which now
+                // serves the historical revision via TryGetRevisionAtOrBefore), this path keeps the
+                // conservative drop on purpose: the early-conflict check below (entry.Revision >
+                // mvccEntry.Revision ⇒ Aborted) treats a key that advanced past the snapshot as a
+                // read-write conflict for the enclosing transaction. Serving an old revision here
+                // would silently weaken that isolation guarantee, so the key stays invisible.
                 if (!readTimestamp.IsNull() && entry.LastModified > readTimestamp)
                     return KeyValueStaticResponses.DoesNotExistContextResponse;
 
@@ -333,15 +325,28 @@ internal sealed class TryGetByRangeHandler : BaseHandler
             return new(KeyValueResponseType.Get, readOnlyKeyValueEntry);
         }
 
-        // Non-transactional snapshot visibility check (same limitation as the MVCC path above).
-        // A key whose current revision was committed after the snapshot ideally returns the
-        // pre-snapshot value, but entry.Revisions carries no per-revision timestamps so we
-        // cannot recover it.  The key is treated as DoesNotExist for this page rather than
-        // returning a post-snapshot or arbitrary historical value.
-        // TODO: add per-revision timestamps to KeyValueEntry.Revisions and serve the last
-        //       revision whose LastModified ≤ readTimestamp here.
+        // Non-transactional snapshot visibility check.
+        // When the current revision was committed after the snapshot, serve the most recent
+        // archived revision whose LastModified ≤ readTimestamp (snapshot isolation) instead of
+        // dropping the key. If no such revision is retained (key didn't exist at the snapshot,
+        // or the revision was trimmed / lives only on disk), the key is invisible for this page.
         if (!readTimestamp.IsNull() && entry is not null && entry.LastModified > readTimestamp)
-            return KeyValueStaticResponses.DoesNotExistContextResponse;
+        {
+            if (!entry.TryGetRevisionAtOrBefore(readTimestamp, out long snapRevision, out KeyValueRevisionEntry snapshot))
+                return KeyValueStaticResponses.DoesNotExistContextResponse;
+
+            if (snapshot.State is KeyValueState.Deleted or KeyValueState.Undefined ||
+                (snapshot.Expires != HLCTimestamp.Zero && snapshot.Expires - currentTime < TimeSpan.Zero))
+                return KeyValueStaticResponses.DoesNotExistContextResponse;
+
+            return new(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
+                snapshot.Value,
+                snapRevision,
+                snapshot.Expires,
+                currentTime,
+                snapshot.LastModified,
+                snapshot.State));
+        }
 
         if (entry is null || entry.State is KeyValueState.Deleted or KeyValueState.Undefined ||
             entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)

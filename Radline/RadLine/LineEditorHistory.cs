@@ -32,7 +32,7 @@ namespace RadLine
             for (int index = 0; index < lines.Length; index++)
                 buffers[index] = new LineBuffer(lines[index]);
 
-            _history.AddLast(buffers);
+            Add(buffers);
         }
 
         internal void Reset()

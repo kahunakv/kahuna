@@ -40,10 +40,10 @@ internal sealed class TryGetHandler : BaseHandler
             
             if (entry?.Revisions != null)
             {
-                if (entry.Revisions.TryGetValue(message.CompareRevision, out byte[]? revisionValue))
+                if (entry.Revisions.TryGetValue(message.CompareRevision, out KeyValueRevisionEntry revisionEntry))
                 {
                     return new(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
-                        revisionValue,
+                        revisionEntry.Value,
                         message.CompareRevision,
                         HLCTimestamp.Zero,
                         HLCTimestamp.Zero,

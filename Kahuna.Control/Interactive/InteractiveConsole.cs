@@ -10,6 +10,7 @@ using System.Diagnostics;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using Grpc.Core;
 using Kahuna.Client;
 using Kahuna.Control.Commands;
 using Kahuna.Shared.KeyValue;
@@ -331,6 +332,10 @@ public static class InteractiveConsole
                 }
 
                 await RunCommand(connection, scripts, history, commandTrim, options);
+            }
+            catch (RpcException ex) when (ex.StatusCode is StatusCode.Cancelled or StatusCode.Unavailable or StatusCode.Internal)
+            {
+                AnsiConsole.MarkupLine("[red]Cannot connect to the server.[/] Check that the server is running and the connection settings are correct.\n");
             }
             catch (Exception ex)
             {

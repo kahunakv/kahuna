@@ -157,6 +157,10 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
         NodeId = opts.RaftNodeId,
         Host = opts.RaftHost,
         Port = opts.RaftPort,
+        TransportSecurity = new()
+        {
+            AllowInsecureCertificateValidation = opts.RaftAllowInsecureCertificateValidation
+        },
         InitialPartitions = opts.InitialClusterPartitions,
         HttpScheme = opts.RaftHttpScheme,
         HttpAuthBearerToken = opts.RaftHttpAuthBearerToken,
