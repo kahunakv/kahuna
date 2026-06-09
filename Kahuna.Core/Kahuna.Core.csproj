@@ -41,7 +41,7 @@
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.16" />
     <PackageReference Include="Microsoft.Extensions.ObjectPool" Version="9.0.16" />
     <PackageReference Include="Nixie" Version="1.1.7" />
-    <PackageReference Include="Kommander" Version="0.10.13" />
+    <PackageReference Include="Kommander" Version="0.10.14" />
     <PackageReference Include="Polly.Contrib.WaitAndRetry" Version="1.1.1" />
     <PackageReference Include="YaccLexTools" Version="1.2.3" />
   </ItemGroup>
@@ -57,6 +57,9 @@
       <Generator>MSBuild:Compile</Generator>
     </Protobuf>
     <Protobuf Include="Replication\Protos\keyvalue_message.proto">
+      <Generator>MSBuild:Compile</Generator>
+    </Protobuf>
+    <Protobuf Include="Replication\Protos\rangemap_message.proto">
       <Generator>MSBuild:Compile</Generator>
     </Protobuf>
     <Protobuf Include="Persistence\Protos\rocksdb.proto">

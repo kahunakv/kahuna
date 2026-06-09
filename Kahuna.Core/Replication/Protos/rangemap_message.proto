@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package Kahuna.Server.Replication.Protos;
+
+// A single contiguous key-range routing record (mirrors RangeDescriptor).
+message RangeDescriptorMessage {
+  string keySpace = 1;
+  optional string startKey = 2;  // absent = -inf within keySpace
+  optional string endKey = 3;    // absent = +inf within keySpace
+  int32 partitionId = 4;
+  int64 generation = 5;
+}
+
+// A full snapshot of the range-descriptor map, replicated on the meta partition.
+// Snapshot (not delta) semantics: each committed entry fully replaces the map, so
+// replaying the meta log on restore/failover converges on the latest map.
+message RangeMapMessage {
+  repeated RangeDescriptorMessage descriptors = 1;
+}

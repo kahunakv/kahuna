@@ -7,6 +7,7 @@ using Kommander.Time;
 
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Locks;
 using Kahuna.Server.Persistence;
@@ -1124,6 +1125,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
         return log.LogType switch
         {
             ReplicationTypes.KeyValues => await keyValues.OnLogRestored(partitionId, log),
+            ReplicationTypes.RangeMap => await keyValues.OnLogRestored(partitionId, log),
             ReplicationTypes.Locks => await locks.OnLogRestored(partitionId, log),
             _ => true
         };
@@ -1134,6 +1136,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
         return log.LogType switch
         {
             ReplicationTypes.KeyValues => await keyValues.OnReplicationReceived(partitionId, log),
+            ReplicationTypes.RangeMap => await keyValues.OnReplicationReceived(partitionId, log),
             ReplicationTypes.Locks => await locks.OnReplicationReceived(partitionId, log),
             _ => true
         };
@@ -1146,4 +1149,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
     }
 
     internal Task RunCollectOnAllInstancesAsync() => keyValues.RunCollectOnAllInstancesAsync();
+
+    /// <summary>The replicated range-descriptor map (design §4, Task 2).</summary>
+    internal RangeMapStore RangeMapStore => keyValues.RangeMapStore;
 }

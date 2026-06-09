@@ -8,6 +8,7 @@ using Kommander.Time;
 using Kommander.Support.Parallelization;
 
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Persistence;
@@ -60,7 +61,9 @@ internal sealed class KeyValuesManager
     private readonly KeyValueRestorer restorer;
 
     private readonly KeyValueReplicator replicator;
-    
+
+    private readonly RangeMapStore rangeMapStore;
+
     /// <summary>
     /// Constructor
     /// </summary>
@@ -106,7 +109,14 @@ internal sealed class KeyValuesManager
 
         restorer = new(backgroundWriter, raft, logger);
         replicator = new(backgroundWriter, raft, logger);
+        rangeMapStore = new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
     }
+
+    /// <summary>
+    /// The replicated range-descriptor map (design §4, Task 2). The single writer is
+    /// <see cref="RangeMapStore.MutateAsync"/>; routing (Tasks 3+) reads <see cref="RangeMapStore.Current"/>.
+    /// </summary>
+    internal RangeMapStore RangeMapStore => rangeMapStore;
     
     private IActorRef<BalancingActor<KeyValueProposalActor, KeyValueProposalRequest>, KeyValueProposalRequest> GetProposalRouter(
         KahunaConfiguration configuration
@@ -188,6 +198,9 @@ internal sealed class KeyValuesManager
     /// <returns></returns>
     public Task<bool> OnLogRestored(int partitionId, RaftLog log)
     {
+        if (log.LogType == ReplicationTypes.RangeMap)
+            return Task.FromResult(rangeMapStore.Restore(partitionId, log));
+
         return Task.FromResult(log.LogType != ReplicationTypes.KeyValues || restorer.Restore(partitionId, log));
     }
 
@@ -199,6 +212,9 @@ internal sealed class KeyValuesManager
     /// <returns></returns>
     public Task<bool> OnReplicationReceived(int partitionId, RaftLog log)
     {
+        if (log.LogType == ReplicationTypes.RangeMap)
+            return Task.FromResult(rangeMapStore.Replicate(partitionId, log));
+
         return Task.FromResult(log.LogType != ReplicationTypes.KeyValues || replicator.Replicate(partitionId, log));
     }
 

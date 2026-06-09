@@ -9,6 +9,12 @@ namespace Kahuna.Server.Replication;
 public static class ReplicationTypes
 {
     public const string Locks = "lock";
-    
+
     public const string KeyValues = "kv";
+
+    /// <summary>
+    /// The range-descriptor map snapshot, replicated on the meta partition
+    /// (<see cref="Kahuna.Server.KeyValues.Ranges.RangeMapStore.MetaPartitionId"/>).
+    /// </summary>
+    public const string RangeMap = "rangemap";
 }

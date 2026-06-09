@@ -67,4 +67,17 @@ public static class ReplicationSerializer
         using MemoryStream memoryStream = manager.GetStream(serializedData);
         return KeyValueMessage.Parser.ParseFrom(memoryStream);
     }
+
+    public static byte[] Serialize(RangeMapMessage message)
+    {
+        using MemoryStream memoryStream = manager.GetStream();
+        message.WriteTo(memoryStream);
+        return memoryStream.ToArray();
+    }
+
+    public static RangeMapMessage UnserializeRangeMapMessage(ReadOnlySpan<byte> serializedData)
+    {
+        using MemoryStream memoryStream = manager.GetStream(serializedData);
+        return RangeMapMessage.Parser.ParseFrom(memoryStream);
+    }
 }
