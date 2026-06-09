@@ -64,6 +64,12 @@ internal sealed class KeyValuesManager
 
     private readonly RangeMapStore rangeMapStore;
 
+    private readonly KvStateMachineTransfer kvStateMachineTransfer;
+
+    private readonly KeySpaceRegistry keySpaceRegistry = new();
+
+    private RangeSplitter? rangeSplitter;
+
     /// <summary>
     /// Constructor
     /// </summary>
@@ -91,7 +97,11 @@ internal sealed class KeyValuesManager
         this.persistenceBackend = persistenceBackend;
         
         scriptParserEvicter = actorSystem.Spawn<ScriptParserEvicterActor, ScriptParserEvicterRequest>("script-parser-evicter", logger);
-        
+
+        // Construct the range-descriptor map before the proposal router — the proposal actors carry it
+        // for the Task 4 generation fence.
+        rangeMapStore = new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
+
         proposalRouter = GetProposalRouter(configuration);
         ephemeralKeyValuesRouter = GetEphemeralRouter(configuration);
         persistentKeyValuesRouter = GetConsistentRouter(configuration);
@@ -105,19 +115,44 @@ internal sealed class KeyValuesManager
         );
 
         txCoordinator = new(this, configuration, raft, logger);
-        locator = new(this, configuration, raft, interNodeCommunication, logger);
+        locator = new(this, configuration, raft, interNodeCommunication, keySpaceRegistry, logger);
 
         restorer = new(backgroundWriter, raft, logger);
         replicator = new(backgroundWriter, raft, logger);
-        rangeMapStore = new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
+        kvStateMachineTransfer = new(this, persistenceBackend, logger);
+
+        // RangeSplitter depends on this (KeyValuesManager) being fully constructed, so we assign
+        // after all other fields are set.
+        rangeSplitter = new(raft, rangeMapStore, kvStateMachineTransfer, this, logger);
     }
 
     /// <summary>
-    /// The replicated range-descriptor map (design §4, Task 2). The single writer is
+    /// The replicated range-descriptor map. The single writer is
     /// <see cref="RangeMapStore.MutateAsync"/>; routing (Tasks 3+) reads <see cref="RangeMapStore.Current"/>.
     /// </summary>
     internal RangeMapStore RangeMapStore => rangeMapStore;
-    
+
+    /// <summary>
+    /// The key-range data-movement primitive (Task 5). Registered with Kommander via
+    /// <c>RegisterStateMachineTransfer</c>; Task 6 calls its native export/import directly.
+    /// </summary>
+    internal KvStateMachineTransfer KvStateMachineTransfer => kvStateMachineTransfer;
+
+    /// <summary>
+    /// The per-node key-space routing registry. Task 9 registers row/index spaces as
+    /// key-range here; <c>{db}/meta</c> and system spaces stay hash-routed (the default).
+    /// </summary>
+    internal KeySpaceRegistry KeySpaceRegistry => keySpaceRegistry;
+
+    /// <summary>
+    /// Resolves a key to its owning <c>(partitionId, generation)</c> via the key-order router
+    /// Reads the live <see cref="RangeMapStore.Current"/> snapshot.
+    /// </summary>
+    internal (int PartitionId, long Generation) LocateRange(string key) => locator.LocateRange(key);
+
+    /// <summary>The split-transaction executor (Task 6). Splits a key range at a given split key.</summary>
+    internal RangeSplitter RangeSplitter => rangeSplitter!;
+
     private IActorRef<BalancingActor<KeyValueProposalActor, KeyValueProposalRequest>, KeyValueProposalRequest> GetProposalRouter(
         KahunaConfiguration configuration
     )
@@ -126,10 +161,12 @@ internal sealed class KeyValuesManager
 
         for (int i = 0; i < configuration.KeyValueWorkers; i++)
             proposalInstances.Add(actorSystem.Spawn<KeyValueProposalActor, KeyValueProposalRequest>(
-                "proposal-keyvalue-" + i, 
-                raft, 
-                persistenceBackend, 
+                "proposal-keyvalue-" + i,
+                raft,
+                persistenceBackend,
                 configuration,
+                keySpaceRegistry,
+                rangeMapStore,
                 logger
             ));
         
@@ -151,11 +188,13 @@ internal sealed class KeyValuesManager
 
         for (int i = 0; i < configuration.KeyValueWorkers; i++)
             ephemeralInstances.Add(actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
-                "ephemeral-keyvalue-" + i, 
-                backgroundWriter, 
+                "ephemeral-keyvalue-" + i,
+                backgroundWriter,
                 proposalRouter,
-                persistenceBackend,                
+                persistenceBackend,
                 raft,
+                keySpaceRegistry,
+                rangeMapStore,
                 configuration,
                 logger
             ));
@@ -178,11 +217,13 @@ internal sealed class KeyValuesManager
 
         for (int i = 0; i < configuration.KeyValueWorkers; i++)
             persistentInstances.Add(actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
-                "persistent-keyvalue-" + i, 
-                backgroundWriter, 
+                "persistent-keyvalue-" + i,
+                backgroundWriter,
                 proposalRouter,
-                persistenceBackend,                 
-                raft, 
+                persistenceBackend,
+                raft,
+                keySpaceRegistry,
+                rangeMapStore,
                 configuration,
                 logger
             ));
@@ -249,10 +290,11 @@ internal sealed class KeyValuesManager
         KeyValueFlags flags,
         int expiresMs,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        long routedGeneration = 0
     )
     {
-        return locator.LocateAndTrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, cancellationToken);
+        return locator.LocateAndTrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, cancellationToken, routedGeneration);
     }
 
     /// <summary>
@@ -512,14 +554,15 @@ internal sealed class KeyValuesManager
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
     public Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> LocateAndTryPrepareMutations(
-        HLCTimestamp transactionId, 
-        HLCTimestamp commitId, 
-        string key, 
-        KeyValueDurability durability, 
-        CancellationToken cancelationToken
+        HLCTimestamp transactionId,
+        HLCTimestamp commitId,
+        string key,
+        KeyValueDurability durability,
+        CancellationToken cancelationToken,
+        long routedGeneration = 0
     )
     {
-        return locator.LocateAndTryPrepareMutations(transactionId, commitId, key, durability, cancelationToken);
+        return locator.LocateAndTryPrepareMutations(transactionId, commitId, key, durability, cancelationToken, routedGeneration);
     }
     
     /// <summary>
@@ -750,31 +793,34 @@ internal sealed class KeyValuesManager
     /// <returns></returns>
     public async Task<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValue(
         HLCTimestamp transactionId,
-        string key, 
-        byte[]? value, 
+        string key,
+        byte[]? value,
         byte[]? compareValue,
         long compareRevision,
         KeyValueFlags flags,
-        int expiresMs, 
-        KeyValueDurability durability
+        int expiresMs,
+        KeyValueDurability durability,
+        long routedGeneration = 0
     )
     {
         KeyValueRequest request = KeyValueRequestPool.Rent(
-            KeyValueRequestType.TrySet, 
+            KeyValueRequestType.TrySet,
             transactionId,
             HLCTimestamp.Zero,
-            key, 
-            value, 
+            key,
+            value,
             compareValue,
             compareRevision,
             flags,
-            expiresMs, 
+            expiresMs,
             HLCTimestamp.Zero,
             durability,
             0,
             0,
             null
         );
+
+        request.RoutedGeneration = routedGeneration;
 
         try
         {
@@ -820,21 +866,23 @@ internal sealed class KeyValuesManager
         await items.ForEachAsync(5, async item =>
         {
             KeyValueRequest request = KeyValueRequestPool.Rent(
-                KeyValueRequestType.TrySet, 
+                KeyValueRequestType.TrySet,
                 item.TransactionId,
                 HLCTimestamp.Zero,
-                item.Key ?? "", 
-                item.Value, 
+                item.Key ?? "",
+                item.Value,
                 item.CompareValue,
                 item.CompareRevision,
                 item.Flags,
-                item.ExpiresMs, 
+                item.ExpiresMs,
                 HLCTimestamp.Zero,
                 item.Durability,
                 0,
                 0,
                 null
             );
+
+            request.RoutedGeneration = item.RoutedGeneration;
 
             try
             {
@@ -1791,28 +1839,31 @@ internal sealed class KeyValuesManager
     /// <param name="durability"></param>
     /// <returns></returns>
     public async Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> TryPrepareMutations(
-        HLCTimestamp transactionId, 
-        HLCTimestamp commitId, 
-        string key, 
-        KeyValueDurability durability
+        HLCTimestamp transactionId,
+        HLCTimestamp commitId,
+        string key,
+        KeyValueDurability durability,
+        long routedGeneration = 0
     )
     {
         KeyValueRequest request = KeyValueRequestPool.Rent(
-            KeyValueRequestType.TryPrepareMutations, 
-            transactionId, 
+            KeyValueRequestType.TryPrepareMutations,
+            transactionId,
             commitId,
-            key, 
-            null, 
+            key,
+            null,
             null,
             -1,
             KeyValueFlags.None,
-            0, 
+            0,
             HLCTimestamp.Zero,
             durability,
             0,
             0,
             null
         );
+
+        request.RoutedGeneration = routedGeneration;
 
         try
         {

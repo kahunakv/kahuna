@@ -25,7 +25,7 @@ internal interface IPersistenceBackend
 
     public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit);
 
-    /// <summary>
+/// <summary>
     /// Prunes persisted key/value revision history according to retention policy.
     /// </summary>
     /// <param name="keys">Target keys to prune, or <c>null</c> for a backend-wide sweep.</param>

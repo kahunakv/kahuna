@@ -186,7 +186,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         if (!context.Raft.Joined)
             return (true, -1, 0);
 
-        int partitionId = context.Raft.GetPartitionKey(key);
+        int partitionId = ResolvePartition(key);
 
         (bool success, RaftOperationStatus status, long commitLogId) = await context.Raft.CommitLogs(
             partitionId,

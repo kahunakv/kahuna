@@ -1,6 +1,7 @@
 
 using Google.Protobuf;
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
@@ -33,6 +34,22 @@ internal abstract class BaseHandler
     {
         this.context = context;
     }
+
+    /// <summary>
+    /// Resolves <paramref name="key"/> to its owning partition id. Key-range spaces look up the
+    /// live descriptor; hash spaces use <see cref="DataPartitionRouter"/> over the user partitions
+    /// <c>[1, InitialPartitions]</c>. Both routing call sites (locator and handlers) must call
+    /// <see cref="RangeRouting.Locate"/> so they cannot drift.
+    /// </summary>
+    protected int ResolvePartition(string key)
+    {
+        (int partitionId, _) = RangeRouting.Locate(
+            context.KeySpaceRegistry,
+            context.RangeMapStore.Current,
+            new DataPartitionRouter(context.Raft),
+            key);
+        return partitionId;
+    }
     
     /// <summary>
     /// Creates a proposal for a key/value operation and sends it to the proposal actor for replication.
@@ -50,6 +67,10 @@ internal abstract class BaseHandler
             return KeyValueStaticResponses.ErroredResponse;
             
         int currentProposalId = Interlocked.Increment(ref proposalId);
+
+        // Carry the key-range routing generation from the request into the proposal so the proposal
+        // actor's generation fence (Task 4) can reject a stale-routed write. 0 for hash spaces.
+        proposal.RoutedGeneration = message.RoutedGeneration;
 
         entry.ReplicationIntent = new()
         {
@@ -85,7 +106,7 @@ internal abstract class BaseHandler
         if (!context.Raft.Joined)
             return true;
 
-        int partitionId = context.Raft.GetPartitionKey(proposal.Key);
+        int partitionId = ResolvePartition(proposal.Key);
 
         KeyValueMessage kvm = new()
         {
@@ -157,7 +178,7 @@ internal abstract class BaseHandler
             if (durability == KeyValueDurability.Persistent)
             {
                 if (readKeyValueEntry is null)
-                    entry = await context.Raft.ReadScheduler.EnqueueTask(context.Raft.GetPartitionKey(key), () => context.PersistenceBackend.GetKeyValue(key));
+                    entry = await context.Raft.ReadScheduler.EnqueueTask(ResolvePartition(key), () => context.PersistenceBackend.GetKeyValue(key));
                 else
                     entry = new()
                     {

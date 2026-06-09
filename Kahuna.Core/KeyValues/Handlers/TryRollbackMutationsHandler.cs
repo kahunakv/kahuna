@@ -114,7 +114,7 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
         if (!context.Raft.Joined)
             return (true, 0);
 
-        int partitionId = context.Raft.GetPartitionKey(key);
+        int partitionId = ResolvePartition(key);
 
         (bool success, RaftOperationStatus status, long logIndex) = await context.Raft.RollbackLogs(
             partitionId,

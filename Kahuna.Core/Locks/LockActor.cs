@@ -7,6 +7,7 @@ using Kommander.Time;
 
 using System.Diagnostics;
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Locks.Data;
 using Kahuna.Server.Locks.Logging;
 using Kahuna.Server.Persistence;
@@ -39,7 +40,9 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
     private readonly IPersistenceBackend persistenceBackend;
 
     private readonly IRaft raft;
-    
+
+    private readonly DataPartitionRouter dataPartitionRouter;
+
     private readonly KahunaConfiguration configuration;
 
     private readonly Dictionary<string, LockEntry> locks = new();
@@ -78,6 +81,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         this.proposalRouter = proposalRouter;
         this.persistenceBackend = persistenceBackend;
         this.raft = raft;
+        this.dataPartitionRouter = new DataPartitionRouter(raft);
         this.configuration = configuration;
         this.logger = logger;
     }
@@ -324,7 +328,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         {
             if (durability == LockDurability.Persistent)
             {
-                entry = await raft.ReadScheduler.EnqueueTask(raft.GetPartitionKey(resource), () => persistenceBackend.GetLock(resource));
+                entry = await raft.ReadScheduler.EnqueueTask(dataPartitionRouter.Locate(resource), () => persistenceBackend.GetLock(resource));
                 if (entry is not null)
                 {
                     entry.LastUsed = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());

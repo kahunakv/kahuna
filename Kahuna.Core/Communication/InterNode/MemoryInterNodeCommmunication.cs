@@ -143,21 +143,22 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <returns></returns>
     /// <exception cref="KahunaServerException"></exception>
     public async Task<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValue(
-        string node, 
+        string node,
         HLCTimestamp transactionId,
-        string key, 
-        byte[]? value, 
-        byte[]? compareValue, 
-        long compareRevision, 
-        KeyValueFlags flags, 
-        int expiresMs, 
-        KeyValueDurability durability, 
+        string key,
+        byte[]? value,
+        byte[]? compareValue,
+        long compareRevision,
+        KeyValueFlags flags,
+        int expiresMs,
+        KeyValueDurability durability,
+        long routedGeneration,
         CancellationToken cancellationToken
     )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.TrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability);
-        
+            return await kahunaNode.TrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, routedGeneration);
+
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
@@ -185,14 +186,15 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             foreach (KahunaSetKeyValueRequestItem item in items)
             {
                 (KeyValueResponseType, long, HLCTimestamp) resp = await kahunaNode.TrySetKeyValue(
-                    item.TransactionId, 
+                    item.TransactionId,
                     item.Key ?? "",
-                    item.Value, 
-                    item.CompareValue, 
+                    item.Value,
+                    item.CompareValue,
                     item.CompareRevision,
                     item.Flags,
                     item.ExpiresMs,
-                    item.Durability
+                    item.Durability,
+                    item.RoutedGeneration
                 );
                 
                 bag.Add(new()
@@ -684,17 +686,18 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <returns></returns>
     /// <exception cref="KahunaServerException"></exception>
     public async Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> TryPrepareMutations(
-        string node, 
-        HLCTimestamp transactionId, 
+        string node,
+        HLCTimestamp transactionId,
         HLCTimestamp commitId,
-        string key, 
-        KeyValueDurability durability, 
+        string key,
+        KeyValueDurability durability,
+        long routedGeneration,
         CancellationToken cancellationToken
     )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.TryPrepareMutations(transactionId, commitId, key, durability);
-        
+            return await kahunaNode.TryPrepareMutations(transactionId, commitId, key, durability, routedGeneration);
+
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 

@@ -1849,4 +1849,17 @@ public class GrpcCommunication : IKahunaCommunication
     {
         return new(() => new(url));
     }
+
+    public async Task<bool> RegisterKeyRange(string url, string keySpace, CancellationToken cancellationToken)
+    {
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
+        KeyValuer.KeyValuerClient client = new(channel);
+
+        GrpcRegisterKeyRangeResponse response = await client.RegisterKeyRangeAsync(new()
+        {
+            KeySpace = keySpace
+        }, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        return response.Success;
+    }
 }

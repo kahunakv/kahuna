@@ -213,6 +213,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         KeyValueFlags flags,
         int expiresMs,
         KeyValueDurability durability,
+        long routedGeneration,
         CancellationToken cancellationToken
     )
     {
@@ -226,6 +227,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             Flags = (GrpcKeyValueFlags) flags,
             ExpiresMs = expiresMs,
             Durability = (GrpcKeyValueDurability) durability,
+            RoutedGeneration = routedGeneration,
         };
         
         if (value is not null)
@@ -336,7 +338,8 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
                 CompareRevision = item.CompareRevision,
                 Flags = (GrpcKeyValueFlags) item.Flags,
                 ExpiresMs = item.ExpiresMs,
-                Durability = (GrpcKeyValueDurability) item.Durability
+                Durability = (GrpcKeyValueDurability) item.Durability,
+                RoutedGeneration = item.RoutedGeneration,
             };
 
             if (item.Value is not null)
@@ -991,18 +994,19 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     }
     
     public async Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> TryPrepareMutations(
-        string node, HLCTimestamp transactionId, 
-        HLCTimestamp commitId, 
-        string key, 
-        KeyValueDurability durability, 
+        string node, HLCTimestamp transactionId,
+        HLCTimestamp commitId,
+        string key,
+        KeyValueDurability durability,
+        long routedGeneration,
         CancellationToken cancellationToken
     )
     {
         //GrpcChannel channel = SharedChannels.GetChannel(node);
         //KeyValuer.KeyValuerClient client = new(channel);
-        
+
         GrpcServerBatcher batcher = GetSharedBatcher(node);
-        
+
         GrpcTryPrepareMutationsRequest request = new()
         {
             TransactionIdNode = transactionId.N,
@@ -1012,7 +1016,8 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             CommitIdPhysical = commitId.L,
             CommitIdCounter = commitId.C,
             Key = key,
-            Durability = (GrpcKeyValueDurability)durability
+            Durability = (GrpcKeyValueDurability)durability,
+            RoutedGeneration = routedGeneration,
         };
         
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);

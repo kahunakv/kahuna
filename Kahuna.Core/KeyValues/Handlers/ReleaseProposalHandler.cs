@@ -1,4 +1,6 @@
 
+using Kahuna.Shared.KeyValue;
+
 namespace Kahuna.Server.KeyValues.Handlers;
 
 internal sealed class ReleaseProposalHandler : BaseHandler
@@ -49,11 +51,17 @@ internal sealed class ReleaseProposalHandler : BaseHandler
         entry.ReplicationIntent = null;
         context.Proposals.Remove(message.ProposalId);
 
+        // A fence-rejected proposal (key-range generation moved) resolves as MustRetry so the client
+        // re-resolves LocateRange and retries on the correct partition (Task 4); otherwise Errored.
+        KeyValueResponse response = (message.Flags & KeyValueFlags.FenceRetry) != 0
+            ? new KeyValueResponse(KeyValueResponseType.MustRetry, 0)
+            : KeyValueStaticResponses.ErroredResponse;
+
         if (message.Promise is null)
             return KeyValueStaticResponses.LockedResponse;
-        
-        message.Promise.TrySetResult(KeyValueStaticResponses.ErroredResponse);
-                
-        return KeyValueStaticResponses.ErroredResponse;
+
+        message.Promise.TrySetResult(response);
+
+        return response;
     }
 }

@@ -7,6 +7,7 @@ using System.Collections.Concurrent;
 
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 
@@ -25,8 +26,12 @@ internal sealed class KeyValueLocator
     
     private readonly IInterNodeCommunication interNodeCommunication;
 
+    private readonly KeySpaceRegistry keySpaceRegistry;
+
+    private readonly DataPartitionRouter dataPartitionRouter;
+
     private readonly ILogger<IKahuna> logger;
-    
+
     /// <summary>
     /// Constructor
     /// </summary>
@@ -34,12 +39,14 @@ internal sealed class KeyValueLocator
     /// <param name="configuration"></param>
     /// <param name="raft"></param>
     /// <param name="interNodeCommunication"></param>
+    /// <param name="keySpaceRegistry"></param>
     /// <param name="logger"></param>
     public KeyValueLocator(
-        KeyValuesManager manager, 
-        KahunaConfiguration configuration, 
-        IRaft raft, 
-        IInterNodeCommunication interNodeCommunication, 
+        KeyValuesManager manager,
+        KahunaConfiguration configuration,
+        IRaft raft,
+        IInterNodeCommunication interNodeCommunication,
+        KeySpaceRegistry keySpaceRegistry,
         ILogger<IKahuna> logger
     )
     {
@@ -47,8 +54,32 @@ internal sealed class KeyValueLocator
         this.configuration = configuration;
         this.raft = raft;
         this.interNodeCommunication = interNodeCommunication;
+        this.keySpaceRegistry = keySpaceRegistry;
+        this.dataPartitionRouter = new DataPartitionRouter(raft);
         this.logger = logger;
     }
+
+    /// <summary>
+    /// The key-order router: resolves <paramref name="key"/> to <c>(partitionId,
+    /// generation)</c> through the range-descriptor map for key-range spaces, or falls back to the
+    /// hash router (<c>GetPartitionKey</c>) for hash spaces. Added in Task 3 — <b>no caller is
+    /// switched to it yet</b> (that is Task 9, which also points <c>KeyValueProposalActor</c> at the
+    /// same <see cref="RangeRouting.Locate"/> so the two routing sites cannot drift).
+    /// </summary>
+    public (int PartitionId, long Generation) LocateRange(string key) =>
+        RangeRouting.Locate(keySpaceRegistry, manager.RangeMapStore.Current, dataPartitionRouter, key);
+
+    /// <summary>Routes a per-key operation via <see cref="RangeRouting.Locate"/>.</summary>
+    private int RouteKey(string key) =>
+        RangeRouting.Locate(keySpaceRegistry, manager.RangeMapStore.Current, dataPartitionRouter, key).PartitionId;
+
+    /// <summary>
+    /// Routes a prefix/bucket operation. A bare prefix (no trailing <c>/</c>) is the key space
+    /// itself; appending <c>/</c> lets <see cref="KeySpaceRegistry.ExtractKeySpace"/> strip it
+    /// back to the prefix, consistent with how real keys look (<c>"t:r/0001"</c> → space <c>"t:r"</c>).
+    /// </summary>
+    private int RoutePrefixKey(string prefix) =>
+        RangeRouting.Locate(keySpaceRegistry, manager.RangeMapStore.Current, dataPartitionRouter, prefix + "/").PartitionId;
 
     /// <summary>
     /// Locates the leader node for the given key and executes the TrySet request.
@@ -72,47 +103,66 @@ internal sealed class KeyValueLocator
         KeyValueFlags flags,
         int expiresMs,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        long routedGeneration = 0
     )
     {
         if (string.IsNullOrEmpty(key) || expiresMs < 0)
             return (KeyValueResponseType.InvalidInput, 0, HLCTimestamp.Zero);
 
-        int partitionId = raft.GetPartitionKey(key);
+        // Key-range spaces route + fence via the descriptor map. Hash spaces use DataPartitionRouter.
+        // routedGeneration is non-zero when this call arrived via an inter-node redirect; the coordinator's
+        // generation is preserved so the remote fence checks against the coordinator's view, catching the
+        // case where the coordinator is fresher (split applied there but not yet here) or staler (split
+        // applied here but not there — fence fails → MustRetry → coordinator re-resolves).
+        int partitionId;
+        if (RangeRouting.IsKeyRange(keySpaceRegistry, key))
+        {
+            long freshGeneration;
+            (partitionId, freshGeneration) = LocateRange(key);
+            if (routedGeneration == 0)
+                routedGeneration = freshGeneration;
+        }
+        else
+        {
+            partitionId = dataPartitionRouter.Locate(key);
+        }
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
         {
             return await manager.TrySetKeyValue(
                 transactionId,
-                key, 
+                key,
                 value,
                 compareValue,
                 compareRevision,
                 flags,
-                expiresMs, 
-                durability
+                expiresMs,
+                durability,
+                routedGeneration
             );
         }
-            
+
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
             return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
-        
-        ValueStopwatch stopwatch = ValueStopwatch.StartNew();              
-        
+
+        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
+
         (KeyValueResponseType, long, HLCTimestamp) response = await interNodeCommunication.TrySetKeyValue(
             leader,
-            transactionId, 
-            key, 
-            value, 
-            compareValue, 
-            compareRevision, 
-            flags, 
-            expiresMs, 
-            durability, 
+            transactionId,
+            key,
+            value,
+            compareValue,
+            compareRevision,
+            flags,
+            expiresMs,
+            durability,
+            routedGeneration,
             cancellationToken
-        );               
-        
+        );
+
         logger.LogDebug("SET-KEYVALUE Redirected {Key} to leader partition {Partition} at {Leader} Time={Elapsed}ms", key, partitionId, leader, stopwatch.GetElapsedMilliseconds());
 
         return response;
@@ -138,7 +188,22 @@ internal sealed class KeyValueLocator
             if (string.IsNullOrEmpty(key.Key))
                 return [new KahunaSetKeyValueResponseItem { Key = key.Key, Type = KeyValueResponseType.InvalidInput, Durability = key.Durability }];
 
-            int partitionId = raft.GetPartitionKey(key.Key);
+            int partitionId;
+            if (RangeRouting.IsKeyRange(keySpaceRegistry, key.Key))
+            {
+                long freshGeneration;
+                (partitionId, freshGeneration) = LocateRange(key.Key);
+                // Preserve a coordinator-supplied generation (non-zero = already redirected once);
+                // on the first call resolve fresh and stamp it so the remote fence can check it.
+                if (key.RoutedGeneration == 0)
+                    key.RoutedGeneration = freshGeneration;
+            }
+            else
+            {
+                partitionId = dataPartitionRouter.Locate(key.Key);
+                // Hash path: no generation fence, RoutedGeneration stays 0.
+            }
+
             string leader = await raft.WaitForLeader(partitionId, cancellationToken);
             
             if (acquisitionPlan.TryGetValue(leader, out List<KahunaSetKeyValueRequestItem>? list))
@@ -207,7 +272,7 @@ internal sealed class KeyValueLocator
                 continue;
             }
 
-            int partitionId = raft.GetPartitionKey(item.Key);
+            int partitionId = RouteKey(item.Key);
             string leader = await raft.WaitForLeader(partitionId, cancellationToken);
 
             if (acquisitionPlan.TryGetValue(leader, out List<KahunaDeleteKeyValueRequestItem>? list))
@@ -269,7 +334,7 @@ internal sealed class KeyValueLocator
         if (string.IsNullOrEmpty(key))
             return (KeyValueResponseType.InvalidInput, 0, HLCTimestamp.Zero);
         
-        int partitionId = raft.GetPartitionKey(key);
+        int partitionId = RouteKey(key);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryDeleteKeyValue(transactionId, key, durability);
@@ -297,7 +362,7 @@ internal sealed class KeyValueLocator
         if (string.IsNullOrEmpty(key))
             return (KeyValueResponseType.InvalidInput, 0, HLCTimestamp.Zero);
         
-        int partitionId = raft.GetPartitionKey(key);
+        int partitionId = RouteKey(key);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryExtendKeyValue(transactionId, key, expiresMs, durability);
@@ -330,7 +395,7 @@ internal sealed class KeyValueLocator
         if (string.IsNullOrEmpty(key))
             return (KeyValueResponseType.InvalidInput, null);
         
-        int partitionId = raft.GetPartitionKey(key);
+        int partitionId = RouteKey(key);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryGetValue(transactionId, key, revision, durability);
@@ -367,7 +432,7 @@ internal sealed class KeyValueLocator
         if (string.IsNullOrEmpty(key))
             return (KeyValueResponseType.InvalidInput, null);
         
-        int partitionId = raft.GetPartitionKey(key);
+        int partitionId = RouteKey(key);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryExistsValue(transactionId, key, revision, durability);
@@ -398,7 +463,7 @@ internal sealed class KeyValueLocator
             if (string.IsNullOrEmpty(item.key))
                 return [(KeyValueResponseType.InvalidInput, item.key, item.durability, null)];
 
-            int partitionId = raft.GetPartitionKey(item.key);
+            int partitionId = RouteKey(item.key);
             string leader = await raft.WaitForLeader(partitionId, cancellationToken);
 
             if (acquisitionPlan.TryGetValue(leader, out List<(string key, long revision, KeyValueDurability durability)>? list))
@@ -436,7 +501,7 @@ internal sealed class KeyValueLocator
             if (string.IsNullOrEmpty(item.key))
                 return [(KeyValueResponseType.InvalidInput, item.key, item.durability, null)];
 
-            int partitionId = raft.GetPartitionKey(item.key);
+            int partitionId = RouteKey(item.key);
             string leader = await raft.WaitForLeader(partitionId, cancellationToken);
 
             if (acquisitionPlan.TryGetValue(leader, out List<(string key, long revision, KeyValueDurability durability)>? list))
@@ -530,7 +595,7 @@ internal sealed class KeyValueLocator
         if (string.IsNullOrEmpty(key))
             return KeyValueResponseType.InvalidInput;
 
-        int partitionId = raft.GetPartitionKey(key);
+        int partitionId = RouteKey(key);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryCheckWriteIntentValue(transactionId, key, durability);
@@ -558,7 +623,7 @@ internal sealed class KeyValueLocator
         if (string.IsNullOrEmpty(key))
             return (KeyValueResponseType.InvalidInput, key, durability);
         
-        int partitionId = raft.GetPartitionKey(key);
+        int partitionId = RouteKey(key);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
             return await manager.TryAcquireExclusiveLock(transactionId, key, expiresMs, durability);
@@ -591,8 +656,14 @@ internal sealed class KeyValueLocator
     {
         if (string.IsNullOrEmpty(prefixKey))
             return KeyValueResponseType.InvalidInput;
-        
-        int partitionId = raft.GetPrefixPartitionKey(prefixKey);
+
+        if (!RangeRouting.IsPrefixOpSafe(keySpaceRegistry, manager.RangeMapStore.Current, prefixKey))
+        {
+            logger.LogWarning("ACQUIRE-PREFIX-LOCK: prefix {Prefix} spans a split key-range space — multi-range prefix-lock not yet supported (Task 11)", prefixKey);
+            return KeyValueResponseType.Errored;
+        }
+
+        int partitionId = RoutePrefixKey(prefixKey);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability);
@@ -628,7 +699,7 @@ internal sealed class KeyValueLocator
             if (string.IsNullOrEmpty(key.key))
                 return [(KeyValueResponseType.InvalidInput, key.key, key.durability)];
 
-            int partitionId = raft.GetPartitionKey(key.key);
+            int partitionId = RouteKey(key.key);
             string leader = await raft.WaitForLeader(partitionId, cancelationToken);
             
             if (acquisitionPlan.TryGetValue(leader, out List<(string key, int expiresMs, KeyValueDurability durability)>? list))
@@ -691,7 +762,7 @@ internal sealed class KeyValueLocator
         if (string.IsNullOrEmpty(key))
             return (KeyValueResponseType.InvalidInput, key);
         
-        int partitionId = raft.GetPartitionKey(key);
+        int partitionId = RouteKey(key);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryReleaseExclusiveLock(transactionId, key, durability);
@@ -723,8 +794,14 @@ internal sealed class KeyValueLocator
     {
         if (string.IsNullOrEmpty(prefixKey))
             return KeyValueResponseType.InvalidInput;
-        
-        int partitionId = raft.GetPrefixPartitionKey(prefixKey);
+
+        if (!RangeRouting.IsPrefixOpSafe(keySpaceRegistry, manager.RangeMapStore.Current, prefixKey))
+        {
+            logger.LogWarning("RELEASE-PREFIX-LOCK: prefix {Prefix} spans a split key-range space — multi-range prefix-lock not yet supported (Task 11)", prefixKey);
+            return KeyValueResponseType.Errored;
+        }
+
+        int partitionId = RoutePrefixKey(prefixKey);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryReleaseExclusivePrefixLock(transactionId, prefixKey, durability);
@@ -751,7 +828,13 @@ internal sealed class KeyValueLocator
         if (string.IsNullOrEmpty(prefix))
             return KeyValueResponseType.InvalidInput;
 
-        int partitionId = raft.GetPrefixPartitionKey(prefix);
+        if (!RangeRouting.IsPrefixOpSafe(keySpaceRegistry, manager.RangeMapStore.Current, prefix))
+        {
+            logger.LogWarning("ACQUIRE-RANGE-LOCK: prefix {Prefix} spans a split key-range space — multi-range range-lock not yet supported (Task 11)", prefix);
+            return KeyValueResponseType.Errored;
+        }
+
+        int partitionId = RoutePrefixKey(prefix);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryAcquireExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability);
@@ -777,7 +860,13 @@ internal sealed class KeyValueLocator
         if (string.IsNullOrEmpty(prefix))
             return KeyValueResponseType.InvalidInput;
 
-        int partitionId = raft.GetPrefixPartitionKey(prefix);
+        if (!RangeRouting.IsPrefixOpSafe(keySpaceRegistry, manager.RangeMapStore.Current, prefix))
+        {
+            logger.LogWarning("RELEASE-RANGE-LOCK: prefix {Prefix} spans a split key-range space — multi-range range-lock not yet supported (Task 11)", prefix);
+            return KeyValueResponseType.Errored;
+        }
+
+        int partitionId = RoutePrefixKey(prefix);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability);
@@ -813,7 +902,7 @@ internal sealed class KeyValueLocator
             if (string.IsNullOrEmpty(key.key))
                 return [(KeyValueResponseType.InvalidInput, key.key, key.durability)];
 
-            int partitionId = raft.GetPartitionKey(key.key);
+            int partitionId = RouteKey(key.key);
             string leader = await raft.WaitForLeader(partitionId, cancelationToken);
             
             if (acquisitionPlan.TryGetValue(leader, out List<(string key, KeyValueDurability durability)>? list))
@@ -873,28 +962,35 @@ internal sealed class KeyValueLocator
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
     public async Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> LocateAndTryPrepareMutations(
-        HLCTimestamp transactionId, 
-        HLCTimestamp commitId, 
-        string key, 
-        KeyValueDurability durability, 
-        CancellationToken cancelationToken
+        HLCTimestamp transactionId,
+        HLCTimestamp commitId,
+        string key,
+        KeyValueDurability durability,
+        CancellationToken cancelationToken,
+        long routedGeneration = 0
     )
     {
         if (string.IsNullOrEmpty(key))
             return (KeyValueResponseType.InvalidInput, HLCTimestamp.Zero, key, durability);
-        
-        int partitionId = raft.GetPartitionKey(key);
+
+        // Resolve both partition and generation; preserve the coordinator's generation when redirected.
+        int partitionId;
+        long freshGeneration;
+        (partitionId, freshGeneration) = RangeRouting.Locate(
+            keySpaceRegistry, manager.RangeMapStore.Current, dataPartitionRouter, key);
+        if (routedGeneration == 0)
+            routedGeneration = freshGeneration;
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
-            return await manager.TryPrepareMutations(transactionId, commitId, key, durability);
-            
+            return await manager.TryPrepareMutations(transactionId, commitId, key, durability, routedGeneration);
+
         string leader = await raft.WaitForLeader(partitionId, cancelationToken);
         if (leader == raft.GetLocalEndpoint())
             return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero, key, durability);
-        
+
         logger.LogDebug("PREPARE-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
-        
-        return await interNodeCommunication.TryPrepareMutations(leader, transactionId, commitId, key, durability, cancelationToken);
+
+        return await interNodeCommunication.TryPrepareMutations(leader, transactionId, commitId, key, durability, routedGeneration, cancelationToken);
     }
     
     /// <summary>
@@ -921,7 +1017,7 @@ internal sealed class KeyValueLocator
             if (string.IsNullOrEmpty(key.key))
                 return [(KeyValueResponseType.InvalidInput, HLCTimestamp.Zero, key.key, key.durability)];
 
-            int partitionId = raft.GetPartitionKey(key.key);
+            int partitionId = RouteKey(key.key);
             string leader = await raft.WaitForLeader(partitionId, cancelationToken);
             
             if (acquisitionPlan.TryGetValue(leader, out List<(string key, KeyValueDurability durability)>? list))
@@ -986,7 +1082,7 @@ internal sealed class KeyValueLocator
         if (string.IsNullOrEmpty(key))
             return (KeyValueResponseType.InvalidInput, 0);
         
-        int partitionId = raft.GetPartitionKey(key);
+        int partitionId = RouteKey(key);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
             return await manager.TryCommitMutations(transactionId, key, ticketId, durability);
@@ -1022,7 +1118,7 @@ internal sealed class KeyValueLocator
             if (string.IsNullOrEmpty(key.key))
                 return [(KeyValueResponseType.InvalidInput, key.key, 0, key.durability)];
 
-            int partitionId = raft.GetPartitionKey(key.key);
+            int partitionId = RouteKey(key.key);
             string leader = await raft.WaitForLeader(partitionId, cancelationToken);
             
             if (acquisitionPlan.TryGetValue(leader, out List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>? list))
@@ -1086,7 +1182,7 @@ internal sealed class KeyValueLocator
         if (string.IsNullOrEmpty(key))
             return (KeyValueResponseType.InvalidInput, 0);
         
-        int partitionId = raft.GetPartitionKey(key);
+        int partitionId = RouteKey(key);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
             return await manager.TryRollbackMutations(transactionId, key, ticketId, durability);
@@ -1122,7 +1218,7 @@ internal sealed class KeyValueLocator
             if (string.IsNullOrEmpty(key.key))
                 return [(KeyValueResponseType.InvalidInput, key.key, 0, key.durability)];
 
-            int partitionId = raft.GetPartitionKey(key.key);
+            int partitionId = RouteKey(key.key);
             string leader = await raft.WaitForLeader(partitionId, cancelationToken);
             
             if (acquisitionPlan.TryGetValue(leader, out List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>? list))
@@ -1184,8 +1280,14 @@ internal sealed class KeyValueLocator
     {
         if (string.IsNullOrEmpty(prefixedKey))
             return new(KeyValueResponseType.Errored, []);
-        
-        int partitionId = raft.GetPrefixPartitionKey(prefixedKey);
+
+        if (!RangeRouting.IsPrefixOpSafe(keySpaceRegistry, manager.RangeMapStore.Current, prefixedKey))
+        {
+            logger.LogWarning("GET-BY-BUCKET: prefix {Prefix} spans a split key-range space — multi-range bucket scan not yet supported (Task 10)", prefixedKey);
+            return new(KeyValueResponseType.Errored, []);
+        }
+
+        int partitionId = RoutePrefixKey(prefixedKey);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.GetByBucket(transactionId, prefixedKey, durability);
@@ -1219,7 +1321,13 @@ internal sealed class KeyValueLocator
         if (string.IsNullOrEmpty(prefix))
             return new(KeyValueResponseType.Errored, [], null, false);
 
-        int partitionId = raft.GetPrefixPartitionKey(prefix);
+        if (!RangeRouting.IsPrefixOpSafe(keySpaceRegistry, manager.RangeMapStore.Current, prefix))
+        {
+            logger.LogWarning("GET-BY-RANGE: prefix {Prefix} spans a split key-range space — multi-range ordered scan not yet supported (Task 10)", prefix);
+            return new(KeyValueResponseType.Errored, [], null, false);
+        }
+
+        int partitionId = RoutePrefixKey(prefix);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.GetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability);
@@ -1245,7 +1353,7 @@ internal sealed class KeyValueLocator
         if (string.IsNullOrEmpty(options.UniqueId))
             return new(KeyValueResponseType.Errored, HLCTimestamp.Zero);
         
-        int partitionId = raft.GetPartitionKey(options.UniqueId);
+        int partitionId = dataPartitionRouter.Locate(options.UniqueId);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.StartTransaction(options);
@@ -1282,7 +1390,7 @@ internal sealed class KeyValueLocator
         if (string.IsNullOrEmpty(uniqueId))
             return KeyValueResponseType.Errored;
         
-        int partitionId = raft.GetPartitionKey(uniqueId);
+        int partitionId = dataPartitionRouter.Locate(uniqueId);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.CommitTransaction(timestamp, acquiredLocks, modifiedKeys, readKeys);
@@ -1316,7 +1424,7 @@ internal sealed class KeyValueLocator
         if (string.IsNullOrEmpty(uniqueId))
             return KeyValueResponseType.Errored;
         
-        int partitionId = raft.GetPartitionKey(uniqueId);
+        int partitionId = dataPartitionRouter.Locate(uniqueId);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.RollbackTransaction(timestamp, acquiredLocks, modifiedKeys);

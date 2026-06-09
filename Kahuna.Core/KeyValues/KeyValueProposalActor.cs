@@ -3,6 +3,7 @@ using Google.Protobuf;
 using Nixie;
 using Kommander;
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
@@ -19,6 +20,12 @@ internal sealed class KeyValueProposalActor : IActor<KeyValueProposalRequest>
 
     private readonly KahunaConfiguration configuration;
 
+    private readonly KeySpaceRegistry keySpaceRegistry;
+
+    private readonly RangeMapStore rangeMapStore;
+
+    private readonly DataPartitionRouter dataPartitionRouter;
+
     private readonly ILogger<IKahuna> logger;
 
     public KeyValueProposalActor(
@@ -26,12 +33,17 @@ internal sealed class KeyValueProposalActor : IActor<KeyValueProposalRequest>
         IRaft raft,
         IPersistenceBackend persistenceBackend,
         KahunaConfiguration configuration,
+        KeySpaceRegistry keySpaceRegistry,
+        RangeMapStore rangeMapStore,
         ILogger<IKahuna> logger
     )
     {
         this.raft = raft;
         this.persistenceBackend = persistenceBackend;
         this.configuration = configuration;
+        this.keySpaceRegistry = keySpaceRegistry;
+        this.rangeMapStore = rangeMapStore;
+        this.dataPartitionRouter = new DataPartitionRouter(raft);
         this.logger = logger;
     }
 
@@ -42,8 +54,47 @@ internal sealed class KeyValueProposalActor : IActor<KeyValueProposalRequest>
         
         KeyValueProposal proposal = message.Proposal;
         HLCTimestamp currentTime = message.Timestamp;
-        int partitionId = raft.GetPartitionKey(proposal.Key);
-        
+
+        int partitionId;
+
+        // Generation fence (Task 4, design §4). For key-range spaces the partition + generation come
+        // from the replicated descriptor map; if the range moved or split since the request routed
+        // (no covering descriptor, or a bumped generation), reject with MustRetry so the client
+        // re-resolves LocateRange and retries — never a double-apply into the stale partition. Hash
+        // spaces keep the static GetPartitionKey routing and are not fenced.
+        if (RangeRouting.IsKeyRange(keySpaceRegistry, proposal.Key))
+        {
+            if (!RangeRouting.TryFenceKeyRange(rangeMapStore.Current, proposal.Key, proposal.RoutedGeneration, out partitionId))
+            {
+                logger.LogWarning(
+                    "Generation fence rejected key/value {Key} RoutedGen={Gen} — range moved/split; MustRetry",
+                    proposal.Key, proposal.RoutedGeneration);
+
+                message.KeyValueActor.Send(new(
+                    KeyValueRequestType.ReleaseProposal,
+                    HLCTimestamp.Zero,
+                    HLCTimestamp.Zero,
+                    proposal.Key,
+                    null,
+                    null,
+                    -1,
+                    KeyValueFlags.FenceRetry,
+                    0,
+                    HLCTimestamp.Zero,
+                    proposal.Durability,
+                    message.ProposalId,
+                    0,
+                    message.Promise
+                ));
+
+                return;
+            }
+        }
+        else
+        {
+            partitionId = dataPartitionRouter.Locate(proposal.Key);
+        }
+
         KeyValueMessage kvm = new()
         {
             Type = (int)message.Type,

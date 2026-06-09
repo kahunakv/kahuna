@@ -83,6 +83,10 @@ public sealed class KahunaManager : IKahuna, IDisposable
         this.locks = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);
         this.keyValues = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);
         this.sequencer = new(keyValues, logger);
+
+        // Register the key-range data-movement hook (Task 5) once, here, so every host (embedded,
+        // server, tests) gets it uniformly without reaching across the internal API boundary.
+        raft.RegisterStateMachineTransfer(keyValues.KvStateMachineTransfer);
     }
 
     public void Dispose()
@@ -243,19 +247,21 @@ public sealed class KahunaManager : IKahuna, IDisposable
         KeyValueFlags flags,
         int expiresMs,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        long routedGeneration = 0
     )
     {
         return await keyValues.LocateAndTrySetKeyValue(
-            transactionId, 
-            key, 
-            value, 
-            compareValue, 
-            compareRevision, 
-            flags, 
-            expiresMs, 
-            durability, 
-            cancellationToken
+            transactionId,
+            key,
+            value,
+            compareValue,
+            compareRevision,
+            flags,
+            expiresMs,
+            durability,
+            cancellationToken,
+            routedGeneration
         );
     }
 
@@ -529,12 +535,13 @@ public sealed class KahunaManager : IKahuna, IDisposable
     public Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> LocateAndTryPrepareMutations(
         HLCTimestamp transactionId,
         HLCTimestamp commitId,
-        string key, 
-        KeyValueDurability durability, 
-        CancellationToken cancellationToken
+        string key,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken,
+        long routedGeneration = 0
     )
     {
-        return keyValues.LocateAndTryPrepareMutations(transactionId, commitId, key, durability, cancellationToken);
+        return keyValues.LocateAndTryPrepareMutations(transactionId, commitId, key, durability, cancellationToken, routedGeneration);
     }
 
     /// <summary>
@@ -738,24 +745,26 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <returns></returns>
     public Task<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValue(
         HLCTimestamp transactionId,
-        string key, 
+        string key,
         byte[]? value,
         byte[]? compareValue,
         long compareRevision,
         KeyValueFlags flags,
-        int expiresMs, 
-        KeyValueDurability durability
+        int expiresMs,
+        KeyValueDurability durability,
+        long routedGeneration = 0
     )
     {
         return keyValues.TrySetKeyValue(
-            transactionId, 
-            key, 
-            value, 
-            compareValue, 
-            compareRevision, 
-            flags, 
-            expiresMs, 
-            durability
+            transactionId,
+            key,
+            value,
+            compareValue,
+            compareRevision,
+            flags,
+            expiresMs,
+            durability,
+            routedGeneration
         );
     }
 
@@ -939,11 +948,12 @@ public sealed class KahunaManager : IKahuna, IDisposable
     public Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> TryPrepareMutations(
         HLCTimestamp transactionId,
         HLCTimestamp commitId,
-        string key, 
-        KeyValueDurability durability
+        string key,
+        KeyValueDurability durability,
+        long routedGeneration = 0
     )
     {
-        return keyValues.TryPrepareMutations(transactionId, commitId, key, durability);
+        return keyValues.TryPrepareMutations(transactionId, commitId, key, durability, routedGeneration);
     }
 
     /// <summary>
@@ -1150,6 +1160,31 @@ public sealed class KahunaManager : IKahuna, IDisposable
 
     internal Task RunCollectOnAllInstancesAsync() => keyValues.RunCollectOnAllInstancesAsync();
 
-    /// <summary>The replicated range-descriptor map (design §4, Task 2).</summary>
+    /// <summary>The replicated range-descriptor map.</summary>
     internal RangeMapStore RangeMapStore => keyValues.RangeMapStore;
+
+    /// <summary>The per-node key-space routing registry (Task 3).</summary>
+    internal KeySpaceRegistry KeySpaceRegistry => keyValues.KeySpaceRegistry;
+
+    /// <inheritdoc/>
+    public void RegisterKeyRange(string keySpace) => keyValues.KeySpaceRegistry.RegisterKeyRange(keySpace);
+
+    /// <summary>The key-range data-movement primitive (Task 5); register with <c>IRaft.RegisterStateMachineTransfer</c>.</summary>
+    internal KvStateMachineTransfer KvStateMachineTransfer => keyValues.KvStateMachineTransfer;
+
+    /// <summary>Resolves a key to its owning <c>(partitionId, generation)</c> (Task 3 key-order router).</summary>
+    internal (int PartitionId, long Generation) LocateRange(string key) => keyValues.LocateRange(key);
+
+    /// <summary>The split-transaction executor (Task 6).</summary>
+    internal RangeSplitter RangeSplitter => keyValues.RangeSplitter;
+
+    /// <summary>
+    /// Issues a persistent key-range write on the <b>local</b> node carrying an explicit routed
+    /// generation (Task 4 fence). Must be called on the descriptor partition's leader. Lets tests
+    /// inject a stale generation; production routes through the locator which captures the live one.
+    /// </summary>
+    internal Task<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValueRanged(
+        HLCTimestamp transactionId, string key, byte[]? value, long routedGeneration) =>
+        keyValues.TrySetKeyValue(transactionId, key, value, null, -1, KeyValueFlags.Set, 0,
+            KeyValueDurability.Persistent, routedGeneration);
 }

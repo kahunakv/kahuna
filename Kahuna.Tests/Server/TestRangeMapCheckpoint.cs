@@ -1,6 +1,6 @@
-using Kahuna.Server.Communication.Internode;
-using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Ranges;
+using Kahuna.Server.Replication;
+using Kahuna.Server.Replication.Protos;
 using Kommander;
 using Kommander.Communication.Memory;
 using Kommander.Data;
@@ -8,18 +8,18 @@ using Kommander.Discovery;
 using Kommander.Time;
 using Kommander.WAL;
 using Microsoft.Extensions.Logging;
-using Nixie;
 
 namespace Kahuna.Tests.Server;
 
 /// <summary>
-/// Durability + checkpoint tests for the range-descriptor map (Task 2c). The map's only durable
-/// home is the meta partition, so before Kommander compacts that WAL we persist a full snapshot to
-/// disk. These tests prove the snapshot alone reconstructs the map (the property that makes
-/// compaction safe) and that periodic checkpointing is leader-only. A single-node cluster keeps the
-/// node a stable leader of the meta partition.
+/// Durability tests for the range-descriptor map (Task 2c). The map's only durable home is the meta
+/// partition, so before Kommander compacts that WAL we persist a full snapshot to disk; on restart
+/// the map is reconstructed from disk and refined by replaying the WAL tail. These tests exercise
+/// the disk round-trip directly through the <c>Replicate</c> apply seam — no cluster or leader
+/// election needed, so they run in milliseconds. The leader-only checkpoint path is covered by the
+/// 3-node harness in <see cref="TestRangeMapReplication"/>.
 /// </summary>
-public sealed class TestRangeMapCheckpoint : IDisposable
+public sealed class TestRangeMapCheckpoint : BaseCluster, IDisposable
 {
     private readonly ILogger<IRaft> raftLogger;
     private readonly ILogger<IKahuna> kahunaLogger;
@@ -42,116 +42,69 @@ public sealed class TestRangeMapCheckpoint : IDisposable
         try { Directory.Delete(tempDir, recursive: true); } catch { /* best effort */ }
     }
 
-    private static RangeDescriptor RowRange(int partitionId, long generation = 1) => new()
+    /// <summary>
+    /// An unjoined RaftManager — cheap to construct and never elects. The durability paths
+    /// (<c>Replicate</c> → <c>PersistToDisk</c>, and <c>LoadFromDisk</c> on construction) never touch
+    /// Raft, so no cluster is needed to test snapshot persistence.
+    /// </summary>
+    private RaftManager UnjoinedRaft() => new(
+        new RaftConfiguration { NodeName = "t", NodeId = 1, Host = "localhost", Port = 8201, InitialPartitions = 2 },
+        new StaticDiscovery([]),
+        new InMemoryWAL(raftLogger),
+        new InMemoryCommunication(),
+        new HybridLogicalClock(),
+        raftLogger);
+
+    /// <summary>Builds a committed meta-partition log entry carrying a full snapshot of the given descriptors.</summary>
+    private static RaftLog RangeMapLog(params (string keySpace, int partitionId)[] descriptors)
     {
-        KeySpace = "t:r", StartKey = null, EndKey = null, PartitionId = partitionId, Generation = generation
-    };
+        RangeMapMessage message = new();
+        foreach ((string keySpace, int partitionId) in descriptors)
+            message.Descriptors.Add(new RangeDescriptorMessage { KeySpace = keySpace, PartitionId = partitionId, Generation = 1 });
 
-    /// <summary>Brings up a single-node cluster whose KahunaManager persists snapshots under <paramref name="revision"/>.</summary>
-    private async Task<(RaftManager Raft, KahunaManager Kahuna)> BuildSingleNode(string revision)
-    {
-        MemoryInterNodeCommmunication interNode = new();
-        InMemoryCommunication comm = new();
-
-        ActorSystem actorSystem = new(logger: raftLogger);
-
-        RaftConfiguration config = new()
-        {
-            NodeName = "kahuna1",
-            NodeId = 1,
-            Host = "localhost",
-            Port = 8101,
-            InitialPartitions = 2, // partition 1 = meta map, partition 2 = data
-            StartElectionTimeout = 50,
-            EndElectionTimeout = 150
-        };
-
-        RaftManager raft = new(
-            config,
-            new StaticDiscovery([]),
-            new InMemoryWAL(raftLogger),
-            comm,
-            new HybridLogicalClock(),
-            raftLogger);
-
-        KahunaConfiguration kahunaConfiguration = new()
-        {
-            HttpsCertificate = "",
-            HttpsCertificatePassword = "",
-            LocksWorkers = 4,
-            KeyValueWorkers = 4,
-            BackgroundWriterWorkers = 1,
-            Storage = "memory",
-            StoragePath = tempDir,
-            StorageRevision = revision,
-            DefaultTransactionTimeout = 5000,
-            ScriptCacheExpiration = TimeSpan.FromMinutes(1),
-        };
-
-        KahunaManager kahuna = new(actorSystem, raft, kahunaConfiguration, interNode, kahunaLogger);
-
-        interNode.SetNodes(new() { { "localhost:8101", kahuna } });
-        comm.SetNodes(new() { { "localhost:8101", raft } });
-
-        raft.OnLogRestored += kahuna.OnLogRestored;
-        raft.OnReplicationReceived += kahuna.OnReplicationReceived;
-        raft.OnReplicationError += kahuna.OnReplicationError;
-
-        await raft.JoinCluster();
-
-        CancellationToken ct = TestContext.Current.CancellationToken;
-        for (int partition = 1; partition <= 2; partition++)
-            while (!await raft.AmILeader(partition, ct))
-                await Task.Delay(50, ct);
-
-        return (raft, kahuna);
+        return new RaftLog { LogType = ReplicationTypes.RangeMap, LogData = ReplicationSerializer.Serialize(message) };
     }
 
     // ── Snapshot_DurableAcrossFreshStore_WithoutWalReplay ────────────────────────
 
     [Fact]
-    public async Task Snapshot_DurableAcrossFreshStore_WithoutWalReplay()
+    public void Snapshot_DurableAcrossFreshStore_WithoutWalReplay()
     {
         const string revision = "rev-durable";
-        (RaftManager raft, KahunaManager kahuna) = await BuildSingleNode(revision);
-        try
-        {
-            bool committed = await kahuna.RangeMapStore.MutateAsync(
-                _ => [RowRange(2)], TestContext.Current.CancellationToken);
-            Assert.True(committed);
+        RaftManager raft = UnjoinedRaft();
 
-            // A brand-new store pointed at the same path/revision must reconstruct the map purely
-            // from the on-disk snapshot — it never sees a WAL entry. This is exactly what keeps the
-            // map alive after the meta WAL is checkpointed + compacted.
-            RangeMapStore fresh = new(raft, tempDir, revision, kahunaLogger);
+        // Applying a committed meta entry (the follower/restore path) persists the snapshot to disk.
+        RangeMapStore store = new(raft, tempDir, revision, kahunaLogger);
+        Assert.True(store.Replicate(RangeMapStore.MetaPartitionId, RangeMapLog(("t:r", 2))));
 
-            RangeDescriptor? descriptor = fresh.Current.Find("t:r", "anything");
-            Assert.NotNull(descriptor);
-            Assert.Equal(2, descriptor!.PartitionId);
-        }
-        finally
-        {
-            await raft.LeaveCluster(dispose: true);
-        }
+        // A fresh store at the same path/revision rebuilds purely from disk — it never sees a WAL
+        // entry. This is exactly what keeps the map alive after the meta WAL is checkpointed +
+        // compacted (Task 2c).
+        RangeMapStore fresh = new(raft, tempDir, revision, kahunaLogger);
+
+        RangeDescriptor? descriptor = fresh.Current.Find("t:r", "anything");
+        Assert.NotNull(descriptor);
+        Assert.Equal(2, descriptor!.PartitionId);
     }
 
-    // ── Checkpoint_OnLeaderSucceeds ──────────────────────────────────────────────
+    // ── EmptySnapshot_RoundTripsThroughDisk ──────────────────────────────────────
 
     [Fact]
-    public async Task Checkpoint_OnLeaderSucceeds()
+    public void EmptySnapshot_RoundTripsThroughDisk()
     {
-        (RaftManager raft, KahunaManager kahuna) = await BuildSingleNode("rev-leader");
-        try
-        {
-            await kahuna.RangeMapStore.MutateAsync(_ => [RowRange(2)], TestContext.Current.CancellationToken);
+        const string revision = "rev-empty";
+        RaftManager raft = UnjoinedRaft();
 
-            bool checkpointed = await kahuna.RangeMapStore.CheckpointNowAsync(TestContext.Current.CancellationToken);
-            Assert.True(checkpointed);
-        }
-        finally
-        {
-            await raft.LeaveCluster(dispose: true);
-        }
+        RangeMapStore store = new(raft, tempDir, revision, kahunaLogger);
+        Assert.True(store.Replicate(RangeMapStore.MetaPartitionId, RangeMapLog(("t:r", 2))));
+
+        // Clear back to empty — the end state of a drop-table / full merge (0-byte snapshot).
+        Assert.True(store.Replicate(RangeMapStore.MetaPartitionId, RangeMapLog()));
+        Assert.Empty(store.Current.Descriptors);
+
+        RangeMapStore fresh = new(raft, tempDir, revision, kahunaLogger);
+        Assert.Empty(fresh.Current.Descriptors);
+        Assert.Null(fresh.Current.Find("t:r", "anything"));
     }
 
     // ── Checkpoint_OnNonLeaderIsNoop ─────────────────────────────────────────────
@@ -159,45 +112,51 @@ public sealed class TestRangeMapCheckpoint : IDisposable
     [Fact]
     public async Task Checkpoint_OnNonLeaderIsNoop()
     {
-        // A store over a raft that never joined a cluster is not the meta leader.
-        ActorSystem actorSystem = new(logger: raftLogger);
-        RaftConfiguration config = new()
-        {
-            NodeName = "kahuna9", NodeId = 9, Host = "localhost", Port = 8109, InitialPartitions = 2
-        };
-        RaftManager raft = new(
-            config, new StaticDiscovery([]), new InMemoryWAL(raftLogger),
-            new InMemoryCommunication(), new HybridLogicalClock(), raftLogger);
-
-        RangeMapStore store = new(raft, tempDir, "rev-noleader", kahunaLogger);
+        // A store over a raft that never joined a cluster is not the meta leader: checkpoint is a
+        // no-op (returns false) and never throws.
+        RangeMapStore store = new(UnjoinedRaft(), tempDir, "rev-noleader", kahunaLogger);
 
         bool checkpointed = await store.CheckpointNowAsync(TestContext.Current.CancellationToken);
         Assert.False(checkpointed);
     }
 
-    // ── EmptySnapshot_RoundTripsThroughDisk ──────────────────────────────────────
+    // ── Checkpoint_OnLeaderSucceeds ──────────────────────────────────────────────
 
     [Fact]
-    public async Task EmptySnapshot_RoundTripsThroughDisk()
+    public async Task Checkpoint_OnLeaderSucceeds()
     {
-        const string revision = "rev-empty";
-        (RaftManager raft, KahunaManager kahuna) = await BuildSingleNode(revision);
+        // The one genuinely cluster-dependent check: a real meta-partition leader can checkpoint.
+        // Uses the canonical BaseCluster helper rather than a bespoke harness.
+        (IRaft raft1, IRaft raft2, IRaft raft3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+            await AssembleThreNodeCluster("memory", 2, raftLogger, kahunaLogger);
+
         try
         {
-            // Populate, then clear back to empty — the end state of a drop-table / full merge.
-            Assert.True(await kahuna.RangeMapStore.MutateAsync(_ => [RowRange(2)], TestContext.Current.CancellationToken));
-            Assert.True(await kahuna.RangeMapStore.MutateAsync(_ => [], TestContext.Current.CancellationToken));
+            CancellationToken ct = TestContext.Current.CancellationToken;
+            (IRaft, IKahuna)[] nodes = [(raft1, kahuna1), (raft2, kahuna2), (raft3, kahuna3)];
 
-            Assert.Empty(kahuna.RangeMapStore.Current.Descriptors);
+            KahunaManager leader = (KahunaManager)await MetaLeaderKahuna(nodes, ct);
 
-            // The on-disk snapshot is the empty map, and a fresh store loads it as empty (not stale).
-            RangeMapStore fresh = new(raft, tempDir, revision, kahunaLogger);
-            Assert.Empty(fresh.Current.Descriptors);
-            Assert.Null(fresh.Current.Find("t:r", "anything"));
+            Assert.True(await leader.RangeMapStore.MutateAsync(
+                _ => [new RangeDescriptor { KeySpace = "t:r", PartitionId = 2, Generation = 1 }], ct));
+
+            Assert.True(await leader.RangeMapStore.CheckpointNowAsync(ct));
         }
         finally
         {
-            await raft.LeaveCluster(dispose: true);
+            await LeaveCluster(raft1, raft2, raft3);
+        }
+    }
+
+    private static async Task<IKahuna> MetaLeaderKahuna((IRaft Raft, IKahuna Kahuna)[] nodes, CancellationToken ct)
+    {
+        while (true)
+        {
+            foreach ((IRaft raft, IKahuna kahuna) in nodes)
+                if (await raft.AmILeader(RangeMapStore.MetaPartitionId, ct))
+                    return kahuna;
+
+            await Task.Delay(50, ct);
         }
     }
 }

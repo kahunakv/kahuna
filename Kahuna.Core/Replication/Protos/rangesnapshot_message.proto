@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package Kahuna.Server.Replication.Protos;
+
+// One key/value entry in a range-transfer snapshot. Carries every field needed for a
+// byte-identical round-trip (mirrors ReadOnlyKeyValueEntry, incl. State which KeyValueMessage lacks).
+message RangeSnapshotEntry {
+  string key = 1;
+  optional bytes value = 2;
+  int64 revision = 3;
+  int32 expiresNode = 4;
+  int64 expiresPhysical = 5;
+  uint32 expiresCounter = 6;
+  int32 lastUsedNode = 7;
+  int64 lastUsedPhysical = 8;
+  uint32 lastUsedCounter = 9;
+  int32 lastModifiedNode = 10;
+  int64 lastModifiedPhysical = 11;
+  uint32 lastModifiedCounter = 12;
+  int32 state = 13;
+}
+
+// A bounded, checksummed page of a range snapshot (Task 5, design §5.3 "bound + checksum each page").
+// The export stream is a sequence of length-delimited RangeSnapshotPage messages.
+message RangeSnapshotPage {
+  repeated RangeSnapshotEntry entries = 1;
+  uint64 checksum = 2;   // FNV-1a 64 over the serialized entries; verified on import.
+  bool hasMore = 3;
+}

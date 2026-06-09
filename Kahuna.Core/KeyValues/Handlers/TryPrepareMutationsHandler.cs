@@ -4,6 +4,7 @@ using Google.Protobuf;
 using Kommander;
 using Kommander.Time;
 
+using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
 using Kahuna.Shared.KeyValue;
@@ -139,7 +140,20 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
 
         if (message.Durability != KeyValueDurability.Persistent)
             return KeyValueStaticResponses.PrepareResponse;
-        
+
+        // Key-range generation fence for 2PC (Task 4 §4 — Prepare path). A non-zero RoutedGeneration
+        // was set by the locator at route time; if the descriptor was bumped since then (split or
+        // cutover) the proposal would land on the stale partition. Reject with MustRetry so the
+        // coordinator re-resolves and retries the transaction on the correct partition.
+        if (RangeRouting.IsKeyRange(context.KeySpaceRegistry, message.Key) &&
+            !RangeRouting.TryFenceKeyRange(context.RangeMapStore.Current, message.Key, message.RoutedGeneration, out _))
+        {
+            context.Logger.LogWarning(
+                "2PC prepare fence rejected key {Key} RoutedGen={Gen} — range moved/split; MustRetry",
+                message.Key, message.RoutedGeneration);
+            return new(KeyValueResponseType.MustRetry, 0);
+        }
+
         KeyValueProposal proposal = new(
             message.Type,
             message.Key,
@@ -179,7 +193,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         if (!context.Raft.Joined)
             return (true, HLCTimestamp.Zero);        
 
-        int partitionId = context.Raft.GetPartitionKey(proposal.Key);
+        int partitionId = ResolvePartition(proposal.Key);
 
         KeyValueMessage kvm = new()
         {

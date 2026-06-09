@@ -168,6 +168,7 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
         return items;
     }
 
+
     public bool PruneKeyValueRevisions(
         IReadOnlyCollection<string>? keys,
         int retentionCount,

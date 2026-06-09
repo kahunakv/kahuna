@@ -1152,4 +1152,9 @@ public class RestCommunication : IKahunaCommunication
 
         return response;
     }
+
+    public Task<bool> RegisterKeyRange(string url, string keySpace, CancellationToken cancellationToken)
+    {
+        throw new NotSupportedException("RegisterKeyRange is not available over the REST transport; use the gRPC transport.");
+    }
 }

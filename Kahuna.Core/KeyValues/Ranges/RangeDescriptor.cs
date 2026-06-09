@@ -14,7 +14,6 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// <see cref="EndKey"/> = +inf.
 /// </para>
 ///
-/// See <c>docs/spec-range-splits.md</c> §4 and <c>docs/spec-range-splits-tasks.md</c> Task 1.
 /// </summary>
 internal sealed record RangeDescriptor
 {
@@ -30,7 +29,7 @@ internal sealed record RangeDescriptor
     /// <summary>The Raft group currently serving this range.</summary>
     public required int PartitionId { get; init; }
 
-    /// <summary>Bumped on every split/merge/move — fences stale routing (design §4).</summary>
+    /// <summary>Bumped on every split/merge/move — fences stale routing.</summary>
     public long Generation { get; init; }
 
     /// <summary>

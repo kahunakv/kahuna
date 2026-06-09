@@ -3,6 +3,7 @@ using Kahuna;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Handlers;
+using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Persistence;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Utils;
@@ -606,6 +607,8 @@ public sealed class TestKeyValueCollection
             null!,
             null!,
             raft,
+            new KeySpaceRegistry(),
+            new RangeMapStore(raft, null, null, logger),
             configuration,
             logger
         );

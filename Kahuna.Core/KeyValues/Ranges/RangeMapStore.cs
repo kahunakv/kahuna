@@ -7,7 +7,7 @@ using Kahuna.Server.Replication.Protos;
 namespace Kahuna.Server.KeyValues.Ranges;
 
 /// <summary>
-/// The replicated source of truth for the range-descriptor map (design §4, Task 2). Wraps an
+/// The replicated source of truth for the range-descriptor map. Wraps an
 /// immutable in-memory <see cref="RangeMap"/> and keeps it consistent across the cluster by
 /// committing every change through the Raft meta partition.
 ///
@@ -23,7 +23,7 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// </para>
 ///
 /// <para>
-/// <b>Single writer (§5.4).</b> <see cref="MutateAsync"/> is the only mutator. It is serialized on
+/// <b>Single writer.</b> <see cref="MutateAsync"/> is the only mutator. It is serialized on
 /// this node by <see cref="mutateGate"/> and globally by the meta partition's Raft log, so the
 /// committed history of the map is linear and every committed map satisfies
 /// <see cref="RangeMap.Validate"/> (invariant G1). Snapshot (not delta) semantics: each entry
@@ -93,7 +93,7 @@ internal sealed class RangeMapStore
     public RangeMap Current => current;
 
     /// <summary>
-    /// The single descriptor-map writer (§5.4). Computes the next descriptor set from the current
+    /// The single descriptor-map writer. Computes the next descriptor set from the current
     /// one via <paramref name="transform"/>, validates it, then commits it as one replicated meta
     /// entry on <see cref="MetaPartitionId"/>. Leader-only — Kommander rejects the
     /// <see cref="IRaft.ReplicateLogs(int,string,byte[],bool,System.Threading.CancellationToken,long)"/>

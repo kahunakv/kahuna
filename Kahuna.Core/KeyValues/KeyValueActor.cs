@@ -4,6 +4,7 @@ using Kommander;
 using System.Diagnostics;
 using Google.Protobuf;
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Persistence;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Server.KeyValues.Handlers;
@@ -240,6 +241,8 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         IActorRef<BalancingActor<KeyValueProposalActor, KeyValueProposalRequest>, KeyValueProposalRequest> proposalRouter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
+        KeySpaceRegistry keySpaceRegistry,
+        RangeMapStore rangeMapStore,
         KahunaConfiguration configuration,
         ILogger<IKahuna> logger
     )
@@ -257,6 +260,8 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
             proposalRouter,
             persistenceBackend,
             raft,
+            keySpaceRegistry,
+            rangeMapStore,
             configuration,
             logger
         );

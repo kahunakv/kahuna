@@ -3,6 +3,7 @@ using Google.Protobuf;
 using Nixie;
 using Kommander;
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Locks.Data;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
@@ -20,8 +21,10 @@ internal sealed class LockProposalActor : IActor<LockProposalRequest>
 
     private readonly KahunaConfiguration configuration;
 
+    private readonly DataPartitionRouter dataPartitionRouter;
+
     private readonly ILogger<IKahuna> logger;
-    
+
     public LockProposalActor(
         IActorContext<LockProposalActor, LockProposalRequest> context,
         IRaft raft,
@@ -33,6 +36,7 @@ internal sealed class LockProposalActor : IActor<LockProposalRequest>
         this.raft = raft;
         this.persistenceBackend = persistenceBackend;
         this.configuration = configuration;
+        this.dataPartitionRouter = new DataPartitionRouter(raft);
         this.logger = logger;
     }
     
@@ -43,7 +47,7 @@ internal sealed class LockProposalActor : IActor<LockProposalRequest>
         
         LockProposal proposal = message.Proposal;
         HLCTimestamp currentTime = message.Timestamp;
-        int partitionId = raft.GetPartitionKey(proposal.Resource);
+        int partitionId = dataPartitionRouter.Locate(proposal.Resource);
 
         LockMessage lockMessage = new()
         {

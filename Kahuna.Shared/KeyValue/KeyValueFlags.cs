@@ -13,5 +13,12 @@ public enum KeyValueFlags
     SetIfExists = 1 << 2,            // 4
     SetIfNotExists = 1 << 3,         // 8
     SetIfEqualToValue = 1 << 4,      // 16
-    SetIfEqualToRevision = 1 << 5    // 32
+    SetIfEqualToRevision = 1 << 5,   // 32
+
+    /// <summary>
+    /// Internal signal on a ReleaseProposal: the proposal was rejected by the key-range generation
+    /// fence (Task 4), so the release resolves the client promise as <c>MustRetry</c> (re-resolve
+    /// LocateRange and retry), not <c>Errored</c>.
+    /// </summary>
+    FenceRetry = 1 << 6              // 64
 }

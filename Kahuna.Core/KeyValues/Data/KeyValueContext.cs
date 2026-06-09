@@ -3,6 +3,7 @@ using Nixie;
 using Kommander;
 using Kahuna.Utils;
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
@@ -21,6 +22,10 @@ internal sealed class KeyValueContext
     public IActorRef<BalancingActor<KeyValueProposalActor, KeyValueProposalRequest>, KeyValueProposalRequest> ProposalRouter { get; }
     
     public IRaft Raft  { get; }
+
+    public KeySpaceRegistry KeySpaceRegistry { get; }
+
+    public RangeMapStore RangeMapStore { get; }
 
     public IPersistenceBackend PersistenceBackend  { get; }
 
@@ -53,6 +58,8 @@ internal sealed class KeyValueContext
         IActorRef<BalancingActor<KeyValueProposalActor, KeyValueProposalRequest>, KeyValueProposalRequest> proposalRouter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
+        KeySpaceRegistry keySpaceRegistry,
+        RangeMapStore rangeMapStore,
         KahunaConfiguration configuration,
         ILogger<IKahuna> logger
     )
@@ -66,6 +73,8 @@ internal sealed class KeyValueContext
         ProposalRouter = proposalRouter;
         PersistenceBackend = persistenceBackend;
         Raft = raft;
+        KeySpaceRegistry = keySpaceRegistry;
+        RangeMapStore = rangeMapStore;
         Configuration = configuration;
         Logger = logger;
     }

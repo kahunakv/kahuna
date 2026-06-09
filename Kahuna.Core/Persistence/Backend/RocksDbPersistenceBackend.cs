@@ -468,6 +468,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         return result;
     }
 
+
     /// <summary>
     /// Serializes a provided <see cref="RocksDbLockMessage"/> instance into a byte array.
     /// This method ensures that larger messages, in particular those with an Owner

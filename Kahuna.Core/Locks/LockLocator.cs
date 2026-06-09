@@ -2,6 +2,7 @@
 using Kahuna.Server.Communication.Internode;
 using Kommander;
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Locks.Data;
 using Kahuna.Shared.Locks;
 
@@ -17,6 +18,8 @@ internal sealed class LockLocator
     private readonly KahunaConfiguration configuration;
 
     private readonly IRaft raft;
+
+    private readonly DataPartitionRouter dataPartitionRouter;
 
     private readonly IInterNodeCommunication interNodeCommunication;
 
@@ -35,6 +38,7 @@ internal sealed class LockLocator
         this.manager = manager;
         this.configuration = configuration;
         this.raft = raft;
+        this.dataPartitionRouter = new DataPartitionRouter(raft);
         this.interNodeCommunication = interNodeCommunication;
         this.logger = logger;
     }
@@ -53,7 +57,7 @@ internal sealed class LockLocator
         if (string.IsNullOrEmpty(resource) || owner.Length == 0 || expiresMs <= 0)
             return (LockResponseType.InvalidInput, 0);
 
-        int partitionId = raft.GetPartitionKey(resource);
+        int partitionId = dataPartitionRouter.Locate(resource);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryLock(resource, owner, expiresMs, durability);
@@ -81,7 +85,7 @@ internal sealed class LockLocator
         if (string.IsNullOrEmpty(resource) || owner.Length == 0 || expiresMs <= 0)
             return (LockResponseType.InvalidInput, 0);
 
-        int partitionId = raft.GetPartitionKey(resource);
+        int partitionId = dataPartitionRouter.Locate(resource);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryExtendLock(resource, owner, expiresMs, durability);
@@ -109,7 +113,7 @@ internal sealed class LockLocator
         if (string.IsNullOrEmpty(resource) || owner.Length == 0)
             return LockResponseType.InvalidInput;
 
-        int partitionId = raft.GetPartitionKey(resource);
+        int partitionId = dataPartitionRouter.Locate(resource);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryUnlock(resource, owner, durability);
@@ -135,7 +139,7 @@ internal sealed class LockLocator
         if (string.IsNullOrEmpty(resource))
             return (LockResponseType.InvalidInput, null);
 
-        int partitionId = raft.GetPartitionKey(resource);
+        int partitionId = dataPartitionRouter.Locate(resource);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.GetLock(resource, durability);

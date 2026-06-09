@@ -94,14 +94,15 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         
         (KeyValueResponseType response, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTrySetKeyValue(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            request.Key, 
+            request.Key,
             value,
             compareValue,
             request.CompareRevision,
             (KeyValueFlags)request.Flags,
-            request.ExpiresMs, 
+            request.ExpiresMs,
             (KeyValueDurability)request.Durability,
-            context.CancellationToken
+            context.CancellationToken,
+            request.RoutedGeneration
         );
 
         return new()
@@ -185,7 +186,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 CompareRevision = item.CompareRevision,
                 ExpiresMs = item.ExpiresMs,
                 Flags = (KeyValueFlags)item.Flags,
-                Durability = (KeyValueDurability)item.Durability
+                Durability = (KeyValueDurability)item.Durability,
+                RoutedGeneration = item.RoutedGeneration,
             });
         }
 
@@ -986,9 +988,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         (KeyValueResponseType type, HLCTimestamp proposalTicket, _, _) = await keyValues.LocateAndTryPrepareMutations(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             new(request.CommitIdNode, request.CommitIdPhysical, request.CommitIdCounter),
-            request.Key, 
-            (KeyValueDurability)request.Durability, 
-            context.CancellationToken
+            request.Key,
+            (KeyValueDurability)request.Durability,
+            context.CancellationToken,
+            request.RoutedGeneration
         );
 
         return new()
@@ -1822,5 +1825,17 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     )
     {
         await serverBatcher.BatchServerKeyValueRequests(requestStream, responseStream, context);
+    }
+
+    /// <summary>
+    /// Registers a key space as key-range routed on this node. Node-local; must be called on every
+    /// node in the cluster at startup before data operations for the space begin.
+    /// </summary>
+    public override Task<GrpcRegisterKeyRangeResponse> RegisterKeyRange(
+        GrpcRegisterKeyRangeRequest request,
+        ServerCallContext context)
+    {
+        keyValues.RegisterKeyRange(request.KeySpace);
+        return Task.FromResult(new GrpcRegisterKeyRangeResponse { Success = true });
     }
 }

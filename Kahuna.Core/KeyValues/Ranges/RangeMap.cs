@@ -3,7 +3,7 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// <summary>
 /// In-memory <c>key → range</c> lookup over a set of <see cref="RangeDescriptor"/>s, grouped by
 /// key space and kept sorted by <see cref="RangeDescriptor.StartKey"/> (ordinal). This is the
-/// read side of the range-descriptor map (design §4); Task 2 makes it the replicated source of
+/// read side of the range-descriptor map; Task 2 makes it the replicated source of
 /// truth on the meta partition. Task 1 is pure in-memory with no Raft.
 ///
 /// <para>
@@ -71,7 +71,7 @@ internal sealed class RangeMap
     }
 
     /// <summary>
-    /// Verifies the no-gap/no-overlap invariant (design §5) for every key space: within a key
+    /// Verifies the no-gap/no-overlap invariant for every key space: within a key
     /// space the descriptors must be contiguous and non-overlapping, each range non-empty, with
     /// a null bound only at the corresponding extreme. Returns false with a human-readable
     /// <paramref name="error"/> on the first violation. This is invariant <b>G1</b> in the task

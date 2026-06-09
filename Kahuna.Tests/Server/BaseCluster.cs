@@ -13,6 +13,13 @@ namespace Kahuna.Tests.Server;
 
 public abstract class BaseCluster
 {
+    /// <summary>
+    /// Base for the per-node deterministic election seeds (Kommander 0.10.16 <c>ElectionTimeoutSeed</c>).
+    /// Each node adds its NodeId so the three nodes get distinct, reproducible election timers — a
+    /// shared seed would make all nodes time out together (split-vote deadlock).
+    /// </summary>
+    private const int ElectionTimeoutSeedBase = 91000;
+
     private static (IRaft, IKahuna) GetNode1(MemoryInterNodeCommmunication interNodeCommmunication, InMemoryCommunication communication, string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger)
     {
         IWAL wal = GetWAL(walStorage, raftLogger);
@@ -28,6 +35,11 @@ public abstract class BaseCluster
             InitialPartitions = partitions,
             StartElectionTimeout = 50,
             EndElectionTimeout = 150,
+            // Deterministic election timers (Kommander 0.10.16): each node uses a DISTINCT seed so
+            // their per-partition timeouts differ (a shared seed yields identical timers → split-vote
+            // deadlock). Fixed seeds make elections reproducible — no run-to-run split-vote retries,
+            // which is the main source of cluster-test flakiness/variance.
+            ElectionTimeoutSeed = ElectionTimeoutSeedBase + 1,
             CompactEveryOperations = 1000,
             CompactNumberEntries = 50
         };
@@ -80,6 +92,7 @@ public abstract class BaseCluster
             InitialPartitions = partitions,
             StartElectionTimeout = 50,
             EndElectionTimeout = 150,
+            ElectionTimeoutSeed = ElectionTimeoutSeedBase + 2, // distinct per node (see GetNode1)
             CompactEveryOperations = 1000,
             CompactNumberEntries = 50
         };
@@ -132,6 +145,7 @@ public abstract class BaseCluster
             InitialPartitions = partitions,
             StartElectionTimeout = 50,
             EndElectionTimeout = 150,
+            ElectionTimeoutSeed = ElectionTimeoutSeedBase + 3, // distinct per node (see GetNode1)
             CompactEveryOperations = 1000,
             CompactNumberEntries = 50
         };

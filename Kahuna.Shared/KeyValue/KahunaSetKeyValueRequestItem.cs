@@ -28,4 +28,7 @@ public sealed class KahunaSetKeyValueRequestItem
     
     [JsonPropertyName("durability")]
     public KeyValueDurability Durability { get; set; }
+
+    [JsonPropertyName("routedGeneration")]
+    public long RoutedGeneration { get; set; }
 }

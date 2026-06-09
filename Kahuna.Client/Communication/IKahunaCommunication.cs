@@ -74,4 +74,6 @@ public interface IKahunaCommunication
      Task<(SequenceResponseType, SequenceAllocation, int)> ReserveSequenceRange(string url, string name, int count, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken);
 
      Task<(SequenceResponseType, int)> DeleteSequence(string url, string name, SequenceDurability durability, CancellationToken cancellationToken);
+
+     Task<bool> RegisterKeyRange(string url, string keySpace, CancellationToken cancellationToken);
 }
