@@ -40,6 +40,9 @@ internal sealed class RangeMergeTrigger
     private readonly int minMergeSize;
     private readonly ILogger<IKahuna> logger;
 
+    // Partition IDs whose RemovePartitionAsync failed on a prior tick; retried each invocation.
+    private readonly HashSet<int> pendingRemovals = [];
+
     public RangeMergeTrigger(
         IRaft raft,
         RangeMapStore rangeMapStore,
@@ -64,6 +67,28 @@ internal sealed class RangeMergeTrigger
         // RemovePartitionAsync requires system-leader; MergeAsync/MutateAsync requires meta-leader.
         if (!await raft.AmILeader(0, ct) || !await raft.AmILeader(RangeMapStore.MetaPartitionId, ct))
             return 0;
+
+        // Retry any partition removals that failed on a previous tick.
+        if (pendingRemovals.Count > 0)
+        {
+            var retried = new List<int>(pendingRemovals);
+            foreach (int partId in retried)
+            {
+                ct.ThrowIfCancellationRequested();
+                var retryResult = await raft.RemovePartitionAsync(partId, ct);
+                if (retryResult.Success)
+                {
+                    pendingRemovals.Remove(partId);
+                    logger.LogInformation("RangeMergeTrigger: retry-retired P{Id}", partId);
+                }
+                else
+                {
+                    logger.LogWarning(
+                        "RangeMergeTrigger: retry RemovePartitionAsync({Id}) still failed: {Status}",
+                        partId, retryResult.Status);
+                }
+            }
+        }
 
         RangeMap map = rangeMapStore.Current;
 
@@ -110,8 +135,9 @@ internal sealed class RangeMergeTrigger
 
                 if (!removeResult.Success)
                 {
+                    pendingRemovals.Add(outcome.RetiredPartitionId);
                     logger.LogWarning(
-                        "RangeMergeTrigger: RemovePartitionAsync({Id}) failed for {Space}: {Status}",
+                        "RangeMergeTrigger: RemovePartitionAsync({Id}) failed for {Space}: {Status} — queued for retry",
                         outcome.RetiredPartitionId, keySpace, removeResult.Status);
                 }
                 else
