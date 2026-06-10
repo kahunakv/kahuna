@@ -94,12 +94,14 @@ public class TestDeleteManyKeyValues : BaseCluster
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
 
-        string existingKey = await GetKeyLedByNode(node1);
+        KahunaManager km1 = (KahunaManager)kahuna1;
+
+        string existingKey = await GetKeyLedByNode(node1, km1);
         string missingKey;
 
         do
         {
-            missingKey = await GetKeyLedByNode(node1);
+            missingKey = await GetKeyLedByNode(node1, km1);
         } while (missingKey == existingKey);
 
         (KeyValueResponseType setType, _, _) = await kahuna1.LocateAndTrySetKeyValue(
@@ -290,12 +292,12 @@ END
         return $"srv-delete-many-{Guid.NewGuid():N}";
     }
 
-    private static async Task<string> GetKeyLedByNode(IRaft raft)
+    private static async Task<string> GetKeyLedByNode(IRaft raft, KahunaManager kahuna)
     {
         while (true)
         {
             string key = GetRandomKeyName();
-            int partitionId = raft.GetPartitionKey(key);
+            int partitionId = kahuna.GetDataPartitionForKey(key);
 
             if (await raft.AmILeader(partitionId, TestContext.Current.CancellationToken))
                 return key;

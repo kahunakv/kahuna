@@ -142,6 +142,36 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-max-entries-per-compaction", Required = false, HelpText = "Maximum Raft WAL entries to process per compaction run", Default = 5000)]
     public int RaftMaxEntriesPerCompaction { get; set; } = 5000;
 
+    [Option("raft-election-timeout-seed", Required = false, HelpText = "Seed for deterministic Raft election timeouts (0 = random, non-zero = deterministic; for testing only)", Default = 0)]
+    public int RaftElectionTimeoutSeed { get; set; }
+
+    [Option("raft-max-queued-client-proposals", Required = false, HelpText = "Maximum client proposals queued per partition before backpressure kicks in", Default = 2048)]
+    public int RaftMaxQueuedClientProposals { get; set; } = 2048;
+
+    [Option("raft-max-wal-queue-depth-per-partition", Required = false, HelpText = "Per-partition WAL write queue depth limit", Default = 4096)]
+    public int RaftMaxWalQueueDepthPerPartition { get; set; } = 4096;
+
+    [Option("raft-max-global-wal-queue-depth", Required = false, HelpText = "Global WAL write queue depth limit across all partitions (0 = unlimited)", Default = 0)]
+    public int RaftMaxGlobalWalQueueDepth { get; set; }
+
+    [Option("raft-max-wal-batch-size", Required = false, HelpText = "Maximum WAL writes batched per storage flush", Default = 256)]
+    public int RaftMaxWalBatchSize { get; set; } = 256;
+
+    [Option("raft-max-drain-quantum-control", Required = false, HelpText = "Max control-plane operations drained per executor wake cycle", Default = 8)]
+    public int RaftMaxDrainQuantumControl { get; set; } = 8;
+
+    [Option("raft-max-drain-quantum-replication", Required = false, HelpText = "Max replication operations drained per executor wake cycle", Default = 4)]
+    public int RaftMaxDrainQuantumReplication { get; set; } = 4;
+
+    [Option("raft-max-drain-quantum-client", Required = false, HelpText = "Max client operations drained per executor wake cycle", Default = 2)]
+    public int RaftMaxDrainQuantumClient { get; set; } = 2;
+
+    [Option("raft-max-drain-quantum-maintenance", Required = false, HelpText = "Max maintenance operations drained per executor wake cycle", Default = 1)]
+    public int RaftMaxDrainQuantumMaintenance { get; set; } = 1;
+
+    [Option("raft-transport-security", Required = false, HelpText = "Transport security and node authentication settings (JSON; prefer --raft-allow-insecure-certificate-validation for simple dev overrides)", Default = "")]
+    public string RaftTransportSecurity { get; set; } = "";
+
     [Option("script-cache-expiration", Required = false, HelpText = "Script cache expiration (in seconds)", Default = 600)]
     public int ScriptCacheExpiration { get; set; } = 600;
 

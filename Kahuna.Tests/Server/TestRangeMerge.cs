@@ -60,6 +60,30 @@ public sealed class TestRangeMerge : BaseCluster
         Assert.Fail("Timed out waiting for condition.");
     }
 
+    /// <summary>
+    /// Forces <paramref name="target"/> to become leader of both the system partition (P0) and
+    /// <see cref="RangeMapStore.MetaPartitionId"/>, then waits until both roles are confirmed.
+    /// Eliminates the leadership-race that otherwise causes <see cref="RangeMapStore.MutateAsync"/>
+    /// to return <c>NodeIsNotLeader</c> mid-merge.
+    /// </summary>
+    private static async Task<KahunaManager> ForceDualLeaderAsync(
+        (IRaft Raft, KahunaManager Kahuna) target, CancellationToken ct)
+    {
+        await target.Raft.ForceLeaderForTestingAsync(0, ct);
+        await target.Raft.ForceLeaderForTestingAsync(RangeMapStore.MetaPartitionId, ct);
+
+        long deadline = Environment.TickCount64 + 10_000;
+        while (Environment.TickCount64 < deadline)
+        {
+            if (await target.Raft.AmILeader(0, ct) &&
+                await target.Raft.AmILeader(RangeMapStore.MetaPartitionId, ct))
+                return target.Kahuna;
+            await Task.Delay(25, ct);
+        }
+        Assert.Fail("ForceDualLeaderAsync: node did not become dual-leader within 10 s.");
+        return null!;
+    }
+
     private static byte[] V(string s) => Encoding.UTF8.GetBytes(s);
 
     /// <summary>
@@ -244,21 +268,23 @@ public sealed class TestRangeMerge : BaseCluster
         {
             CancellationToken ct = TestContext.Current.CancellationToken;
 
-            (IRaft _, KahunaManager metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
-            MergeOutcome outcome = await metaLeader.RangeMerger.MergeAsync(Space, left, right, ct);
+            // Pin P0 (system) and P1 (meta) to nodes[0] so MutateAsync cannot lose leadership
+            // mid-merge and RemovePartitionAsync can be called on the same node.
+            KahunaManager dualLeader = await ForceDualLeaderAsync(nodes[0], ct);
+
+            MergeOutcome outcome = await dualLeader.RangeMerger.MergeAsync(Space, left, right, ct);
             Assert.True(outcome.IsSuccess);
 
             int retiredId = outcome.RetiredPartitionId;
             Assert.Equal(right.PartitionId, retiredId);
 
-            // Remove the retired partition via the system-partition leader.
-            (IRaft sysRaft, KahunaManager _) = await LeaderOf(0, nodes);
-            RaftPartitionLifecycleResult removeResult = await sysRaft.RemovePartitionAsync(retiredId, ct);
+            // Remove the retired partition — nodes[0] is now the system-partition leader.
+            RaftPartitionLifecycleResult removeResult = await nodes[0].Item1.RemovePartitionAsync(retiredId, ct);
             Assert.True(removeResult.Success);
 
             // The descriptor map must reflect the merge: one descriptor, covering the full range.
-            await WaitFor(() => metaLeader.RangeMapStore.Current.FindAll(Space).Count == 1);
-            Assert.Single(metaLeader.RangeMapStore.Current.FindAll(Space));
+            await WaitFor(() => dualLeader.RangeMapStore.Current.FindAll(Space).Count == 1);
+            Assert.Single(dualLeader.RangeMapStore.Current.FindAll(Space));
         }
         finally
         {

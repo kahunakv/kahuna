@@ -1182,6 +1182,13 @@ public sealed class KahunaManager : IKahuna, IDisposable
     internal RangeMerger RangeMerger => keyValues.RangeMerger;
 
     /// <summary>
+    /// Returns the data partition id that <paramref name="key"/> routes to under Kahuna's own
+    /// consistent-hash assignment. Matches the routing used by <c>LocateAndTrySetKeyValue</c> and
+    /// all other locating operations, so callers can find the right leader without guessing.
+    /// </summary>
+    public int GetDataPartitionForKey(string key) => keyValues.LocateRange(key).PartitionId;
+
+    /// <summary>
     /// Checks every KeyRange descriptor and splits any that exceed the configured size threshold.
     /// Returns the number of splits performed. Only executes on the node that holds leadership
     /// of both the system partition (0) and meta partition (1).

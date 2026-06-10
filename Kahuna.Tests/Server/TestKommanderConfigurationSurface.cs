@@ -31,7 +31,17 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.WriteIOThreads)] = nameof(KahunaCommandLineOptions.WriteIOThreads),
         [nameof(RaftConfiguration.CompactEveryOperations)] = nameof(KahunaCommandLineOptions.RaftCompactEveryOperations),
         [nameof(RaftConfiguration.CompactNumberEntries)] = nameof(KahunaCommandLineOptions.RaftCompactNumberEntries),
-        [nameof(RaftConfiguration.MaxEntriesPerCompaction)] = nameof(KahunaCommandLineOptions.RaftMaxEntriesPerCompaction)
+        [nameof(RaftConfiguration.MaxEntriesPerCompaction)] = nameof(KahunaCommandLineOptions.RaftMaxEntriesPerCompaction),
+        [nameof(RaftConfiguration.ElectionTimeoutSeed)] = nameof(KahunaCommandLineOptions.RaftElectionTimeoutSeed),
+        [nameof(RaftConfiguration.MaxQueuedClientProposalsPerPartition)] = nameof(KahunaCommandLineOptions.RaftMaxQueuedClientProposals),
+        [nameof(RaftConfiguration.MaxWalQueueDepthPerPartition)] = nameof(KahunaCommandLineOptions.RaftMaxWalQueueDepthPerPartition),
+        [nameof(RaftConfiguration.MaxGlobalWalQueueDepth)] = nameof(KahunaCommandLineOptions.RaftMaxGlobalWalQueueDepth),
+        [nameof(RaftConfiguration.MaxWalBatchSize)] = nameof(KahunaCommandLineOptions.RaftMaxWalBatchSize),
+        [nameof(RaftConfiguration.MaxDrainQuantumControl)] = nameof(KahunaCommandLineOptions.RaftMaxDrainQuantumControl),
+        [nameof(RaftConfiguration.MaxDrainQuantumReplication)] = nameof(KahunaCommandLineOptions.RaftMaxDrainQuantumReplication),
+        [nameof(RaftConfiguration.MaxDrainQuantumClient)] = nameof(KahunaCommandLineOptions.RaftMaxDrainQuantumClient),
+        [nameof(RaftConfiguration.MaxDrainQuantumMaintenance)] = nameof(KahunaCommandLineOptions.RaftMaxDrainQuantumMaintenance),
+        [nameof(RaftConfiguration.TransportSecurity)] = nameof(KahunaCommandLineOptions.RaftTransportSecurity)
     };
 
     [Fact]

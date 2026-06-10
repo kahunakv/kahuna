@@ -182,6 +182,15 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
         WriteIOThreads = opts.WriteIOThreads,
         CompactEveryOperations = opts.RaftCompactEveryOperations,
         CompactNumberEntries = opts.RaftCompactNumberEntries,
-        MaxEntriesPerCompaction = opts.RaftMaxEntriesPerCompaction
+        MaxEntriesPerCompaction = opts.RaftMaxEntriesPerCompaction,
+        ElectionTimeoutSeed = opts.RaftElectionTimeoutSeed == 0 ? null : opts.RaftElectionTimeoutSeed,
+        MaxQueuedClientProposalsPerPartition = opts.RaftMaxQueuedClientProposals,
+        MaxWalQueueDepthPerPartition = opts.RaftMaxWalQueueDepthPerPartition,
+        MaxGlobalWalQueueDepth = opts.RaftMaxGlobalWalQueueDepth,
+        MaxWalBatchSize = opts.RaftMaxWalBatchSize,
+        MaxDrainQuantumControl = opts.RaftMaxDrainQuantumControl,
+        MaxDrainQuantumReplication = opts.RaftMaxDrainQuantumReplication,
+        MaxDrainQuantumClient = opts.RaftMaxDrainQuantumClient,
+        MaxDrainQuantumMaintenance = opts.RaftMaxDrainQuantumMaintenance
     };
 }
