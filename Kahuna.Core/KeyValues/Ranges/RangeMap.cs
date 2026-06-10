@@ -70,6 +70,41 @@ internal sealed class RangeMap
         return candidate.Contains(key) ? candidate : null;
     }
 
+    /// <summary>Returns all descriptors for <paramref name="keySpace"/> in StartKey order.</summary>
+    public IReadOnlyList<RangeDescriptor> FindAll(string keySpace) =>
+        bySpace.TryGetValue(keySpace, out RangeDescriptor[]? ranges)
+            ? ranges
+            : Array.Empty<RangeDescriptor>();
+
+    /// <summary>
+    /// Returns descriptors for <paramref name="keySpace"/> whose half-open interval
+    /// <c>[StartKey, EndKey)</c> intersects <c>[<paramref name="startKey"/>,
+    /// <paramref name="endKey"/>)</c>, in StartKey order.
+    /// Null <paramref name="startKey"/> = −∞; null <paramref name="endKey"/> = +∞.
+    /// </summary>
+    public IReadOnlyList<RangeDescriptor> FindIntersecting(string keySpace, string? startKey, string? endKey)
+    {
+        if (!bySpace.TryGetValue(keySpace, out RangeDescriptor[]? ranges) || ranges.Length == 0)
+            return Array.Empty<RangeDescriptor>();
+
+        var result = new List<RangeDescriptor>();
+        foreach (RangeDescriptor d in ranges)
+        {
+            // [D.Start, D.End) intersects [startKey, endKey) iff D.End > startKey && D.Start < endKey
+            bool endAfterQueryStart = d.EndKey is null                                      // D extends to +∞
+                                   || startKey is null                                       // query starts at -∞
+                                   || string.CompareOrdinal(d.EndKey, startKey) > 0;
+
+            bool startBeforeQueryEnd = d.StartKey is null                                   // D starts at -∞
+                                    || endKey is null                                        // query extends to +∞
+                                    || string.CompareOrdinal(d.StartKey, endKey) < 0;
+
+            if (endAfterQueryStart && startBeforeQueryEnd)
+                result.Add(d);
+        }
+        return result;
+    }
+
     /// <summary>
     /// Verifies the no-gap/no-overlap invariant for every key space: within a key
     /// space the descriptors must be contiguous and non-overlapping, each range non-empty, with

@@ -1270,41 +1270,110 @@ internal sealed class KeyValueLocator
 
     /// <summary>
     /// Locates the appropriate node for the specified key prefix and retrieves the corresponding key-value items.
+    /// For unsplit spaces routes to the single partition leader. For split key-range spaces fans out across
+    /// all descriptors sequentially, pages through each with <see cref="QueryDescriptorRange"/>, and returns
+    /// the concatenated result (Task 10b multi-range GetByBucket).
+    ///
+    /// <para>
+    /// <b>Performance notes (deferred optimisations):</b>
+    /// <list type="bullet">
+    ///   <item>Fan-out is sequential. A future improvement may issue descriptors in parallel via a
+    ///     bounded <c>Task.WhenAll</c> when the descriptor count exceeds a threshold.</item>
+    ///   <item>No per-leader coalescing. When multiple ranges share a leader, separate paged RPC
+    ///     streams are opened. A future improvement should group by leader and issue one stream per
+    ///     leader.</item>
+    ///   <item>Full materialisation. The entire bucket is buffered before returning. Callers that
+    ///     need bounded memory over a large split bucket should use the paged
+    ///     <see cref="LocateAndGetByRange"/> / <c>LocateAndScanRange</c> path instead.</item>
+    /// </list>
+    /// </para>
     /// </summary>
-    /// <param name="transactionId">The timestamp of the transaction used for locating and fetching records.</param>
-    /// <param name="prefixedKey">The key prefix used to search and retrieve matching key-value pairs.</param>
-    /// <param name="durability">Specifies the durability requirement for the operation, such as Ephemeral or Persistent.</param>
-    /// <param name="cancellationToken">A token to monitor for cancellation requests during the operation.</param>
-    /// <returns>Returns a <see cref="KeyValueGetByBucketResult"/> containing the result of the operation with key-value items and response type.</returns>
     public async Task<KeyValueGetByBucketResult> LocateAndGetByBucket(HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(prefixedKey))
             return new(KeyValueResponseType.Errored, []);
 
-        if (!RangeRouting.IsPrefixOpSafe(keySpaceRegistry, manager.RangeMapStore.Current, prefixedKey))
+        // Fast path: unsplit (or hash/schema-log) space — single partition, no fan-out overhead.
+        if (RangeRouting.IsPrefixOpSafe(keySpaceRegistry, manager.RangeMapStore.Current, prefixedKey))
         {
-            logger.LogWarning("GET-BY-BUCKET: prefix {Prefix} spans a split key-range space — multi-range bucket scan not yet supported (Task 10)", prefixedKey);
-            return new(KeyValueResponseType.Errored, []);
+            int singlePartitionId = RoutePrefixKey(prefixedKey);
+
+            if (!raft.Joined || await raft.AmILeader(singlePartitionId, cancellationToken))
+                return await manager.GetByBucket(transactionId, prefixedKey, durability);
+
+            string singleLeader = await raft.WaitForLeader(singlePartitionId, cancellationToken);
+            if (singleLeader == raft.GetLocalEndpoint())
+                return new(KeyValueResponseType.MustRetry, []);
+
+            logger.LogDebug("GETPREFIX-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", prefixedKey, singlePartitionId, singleLeader);
+
+            return await interNodeCommunication.GetByBucket(singleLeader, transactionId, prefixedKey, durability, cancellationToken);
         }
 
-        int partitionId = RoutePrefixKey(prefixedKey);
+        // Multi-range path (Task 10b): key-range space is split; fan out to all descriptors.
+        // Snapshot the map once — safe for the same reason as LocateAndGetByRange: orphan retention
+        // + MVCC means the source partition still answers snapshot reads even after a cutover.
+        string keySpace = KeySpaceRegistry.ExtractKeySpace(prefixedKey + "/");
+        IReadOnlyList<RangeDescriptor> descriptors =
+            manager.RangeMapStore.Current.FindAll(keySpace);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
-            return await manager.GetByBucket(transactionId, prefixedKey, durability);
-            
-        string leader = await raft.WaitForLeader(partitionId, cancellationToken);
-        if (leader == raft.GetLocalEndpoint())
-            return new(KeyValueResponseType.MustRetry, []);
-        
-        logger.LogDebug("GETPREFIX-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", prefixedKey, partitionId, leader);
-        
-        return await interNodeCommunication.GetByBucket(leader, transactionId, prefixedKey, durability, cancellationToken);               
+        if (descriptors.Count == 0)
+            return new(KeyValueResponseType.Get, []);
+
+        // Within-call snapshot safety: a split landing between two descriptors' queries means the
+        // second descriptor's source partition is queried with a now-stale routing entry. This is
+        // safe for the same reason as the per-page re-resolution note in LocateAndGetByRange: Task 6
+        // orphan-retains [K,E) on the source partition after a cutover, so a fixed readTimestamp
+        // (MVCC) still resolves correctly from there. The caller sees a consistent snapshot of the
+        // moment this call started; a stale partition returns all snapshot-committed data it holds.
+        const int bucketPageSize = 512;
+        var allItems = new List<(string, ReadOnlyKeyValueEntry)>();
+
+        foreach (RangeDescriptor descriptor in descriptors)
+        {
+            (string? clStart, bool clStartInc, string? clEnd, bool clEndInc) =
+                ClipRange(null, true, null, false, descriptor);
+
+            string? cursorKey = clStart;
+            bool    cursorInc = clStartInc;
+
+            while (true)
+            {
+                KeyValueGetByRangeResult page = await QueryDescriptorRange(
+                    descriptor.PartitionId, transactionId, prefixedKey,
+                    cursorKey, cursorInc, clEnd, clEndInc,
+                    bucketPageSize, HLCTimestamp.Zero, durability, cancellationToken);
+
+                if (page.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+                    return new(page.Type, []);
+
+                if (page.Type != KeyValueResponseType.Get)
+                    break;
+
+                allItems.AddRange(page.Items);
+
+                if (!page.HasMore || page.NextCursor is null)
+                    break;
+
+                if (!KeyValueRangeCursor.TryDecode(page.NextCursor, out string lastKey, out _, out _, out _))
+                    break;
+
+                cursorKey = lastKey;
+                cursorInc = false;
+            }
+        }
+
+        // No explicit sort needed: FindAll returns descriptors in StartKey order, ranges are disjoint
+        // (no-overlap invariant), and each range's pages are key-sorted — so the concatenation is
+        // already globally ordered, exactly as in LocateAndGetByRange.
+        return new(KeyValueResponseType.Get, allItems);
     }
 
     /// <summary>
     /// Locates the leader for the given prefix and executes a bounded, cursor-paged range scan.
-    /// When the leader is remote, the request is forwarded via the inter-node batch channel so
-    /// the leader processes exactly one page without buffering the full table.
+    /// For unsplit spaces routes to the single partition leader directly. For split key-range spaces
+    /// fans out across all intersecting descriptors in StartKey order, clips each sub-range, and
+    /// merges results maintaining key order (Task 10 multi-range stitch).
     /// </summary>
     public async Task<KeyValueGetByRangeResult> LocateAndGetByRange(
         HLCTimestamp transactionId,
@@ -1321,14 +1390,96 @@ internal sealed class KeyValueLocator
         if (string.IsNullOrEmpty(prefix))
             return new(KeyValueResponseType.Errored, [], null, false);
 
-        if (!RangeRouting.IsPrefixOpSafe(keySpaceRegistry, manager.RangeMapStore.Current, prefix))
+        // Fast path: unsplit space (or hash space) — single partition, no fan-out overhead.
+        if (RangeRouting.IsPrefixOpSafe(keySpaceRegistry, manager.RangeMapStore.Current, prefix))
         {
-            logger.LogWarning("GET-BY-RANGE: prefix {Prefix} spans a split key-range space — multi-range ordered scan not yet supported (Task 10)", prefix);
-            return new(KeyValueResponseType.Errored, [], null, false);
+            int singlePartitionId = RoutePrefixKey(prefix);
+
+            if (!raft.Joined || await raft.AmILeader(singlePartitionId, cancellationToken))
+                return await manager.GetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability);
+
+            string singleLeader = await raft.WaitForLeader(singlePartitionId, cancellationToken);
+            if (singleLeader == raft.GetLocalEndpoint())
+                return new(KeyValueResponseType.MustRetry, [], null, false);
+
+            logger.LogDebug("GETRANGE-KEYVALUE Redirect {Prefix} to leader partition {Partition} at {Leader}", prefix, singlePartitionId, singleLeader);
+
+            return await interNodeCommunication.GetByRange(singleLeader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
         }
 
-        int partitionId = RoutePrefixKey(prefix);
+        // Multi-range path: key-range space has been split; fan out across intersecting descriptors.
+        // RangeMap is snapshotted once for this page. A split landing mid-fan-out means the loop
+        // may query a now-stale source partition, but that is safe: Task 6 orphan-retains [K,E) on
+        // the source, so the fixed readTimestamp (MVCC) still resolves correctly from there. The
+        // next page re-resolves RangeMapStore.Current fresh and routes to the new partition.
+        string keySpace = KeySpaceRegistry.ExtractKeySpace(prefix + "/");
+        RangeMap rangeMap = manager.RangeMapStore.Current;
+        IReadOnlyList<RangeDescriptor> descriptors = rangeMap.FindIntersecting(keySpace, startKey, endKey);
 
+        if (descriptors.Count == 0)
+            return new(KeyValueResponseType.Get, [], null, false);
+
+        var accumulated = new List<(string, ReadOnlyKeyValueEntry)>();
+        int remaining   = limit > 0 ? limit : int.MaxValue;
+        bool hasMore    = false;
+
+        foreach (RangeDescriptor descriptor in descriptors)
+        {
+            if (remaining <= 0) { hasMore = true; break; }
+
+            (string? clStart, bool clStartInc, string? clEnd, bool clEndInc) =
+                ClipRange(startKey, startInclusive, endKey, endInclusive, descriptor);
+
+            int pageLimit = remaining == int.MaxValue ? 0 : remaining;
+
+            KeyValueGetByRangeResult part = await QueryDescriptorRange(
+                descriptor.PartitionId, transactionId, prefix,
+                clStart, clStartInc, clEnd, clEndInc,
+                pageLimit, readTimestamp, durability, cancellationToken);
+
+            if (part.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+                return part;
+
+            if (part.Type != KeyValueResponseType.Get)
+                continue;
+
+            accumulated.AddRange(part.Items);
+
+            if (limit > 0)
+                remaining -= part.Items.Count;
+
+            if (part.HasMore) { hasMore = true; break; }
+        }
+
+        if (accumulated.Count == 0)
+            return new(KeyValueResponseType.Get, [], null, false);
+
+        string? cursor = null;
+        if (hasMore)
+        {
+            string lastKey = accumulated[^1].Item1;
+            HLCTimestamp ts = readTimestamp.IsNull() ? HLCTimestamp.Zero : readTimestamp;
+            // Intentionally generation-free: each page re-resolves FindIntersecting from lastKey
+            // against the live map, so a split between pages is handled unconditionally — no
+            // generation miss-detection needed. Do not add rangeGeneration here.
+            cursor = KeyValueRangeCursor.Encode(lastKey, durability, prefix, ts);
+        }
+
+        return new(KeyValueResponseType.Get, accumulated, cursor, hasMore);
+    }
+
+    /// <summary>Routes a GetByRange page to <paramref name="partitionId"/>'s leader.</summary>
+    private async Task<KeyValueGetByRangeResult> QueryDescriptorRange(
+        int partitionId,
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        int limit,
+        HLCTimestamp readTimestamp,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken)
+    {
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.GetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability);
 
@@ -1336,9 +1487,67 @@ internal sealed class KeyValueLocator
         if (leader == raft.GetLocalEndpoint())
             return new(KeyValueResponseType.MustRetry, [], null, false);
 
-        logger.LogDebug("GETRANGE-KEYVALUE Redirect {Prefix} to leader partition {Partition} at {Leader}", prefix, partitionId, leader);
-
         return await interNodeCommunication.GetByRange(leader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
+    }
+
+    /// <summary>
+    /// Clips the caller's query range <c>[queryStart, queryEnd)</c> to the descriptor's half-open
+    /// interval <c>[d.StartKey, d.EndKey)</c>, preserving the caller's inclusive/exclusive flags
+    /// where they dominate; the descriptor boundary is always inclusive at start, exclusive at end.
+    /// </summary>
+    private static (string? start, bool startInc, string? end, bool endInc) ClipRange(
+        string? queryStart, bool queryStartInc,
+        string? queryEnd,   bool queryEndInc,
+        RangeDescriptor d)
+    {
+        string? clStart;
+        bool    clStartInc;
+
+        if (d.StartKey is null)
+        {
+            // descriptor starts at -∞; query start is the effective lower bound
+            clStart    = queryStart;
+            clStartInc = queryStartInc;
+        }
+        else if (queryStart is null)
+        {
+            // query unbounded below; descriptor's start is the effective lower bound (inclusive)
+            clStart    = d.StartKey;
+            clStartInc = true;
+        }
+        else
+        {
+            int cmp = string.CompareOrdinal(queryStart, d.StartKey);
+            if (cmp >= 0) { clStart = queryStart; clStartInc = queryStartInc; }
+            else          { clStart = d.StartKey;  clStartInc = true; }
+        }
+
+        string? clEnd;
+        bool    clEndInc;
+
+        if (d.EndKey is null && queryEnd is null)
+        {
+            clEnd    = null;
+            clEndInc = false;
+        }
+        else if (d.EndKey is null)
+        {
+            clEnd    = queryEnd;
+            clEndInc = queryEndInc;
+        }
+        else if (queryEnd is null)
+        {
+            clEnd    = d.EndKey;
+            clEndInc = false;  // descriptor boundary is always exclusive
+        }
+        else
+        {
+            int cmp = string.CompareOrdinal(queryEnd, d.EndKey);
+            if (cmp <= 0) { clEnd = queryEnd;  clEndInc = queryEndInc; }
+            else          { clEnd = d.EndKey;   clEndInc = false; }
+        }
+
+        return (clStart, clStartInc, clEnd, clEndInc);
     }
 
     /// <summary>

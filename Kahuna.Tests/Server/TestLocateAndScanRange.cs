@@ -1,8 +1,11 @@
 
 using System.Text;
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Shared.KeyValue;
 using Kommander;
+using Kommander.Data;
+using Kommander.System;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
 
@@ -353,5 +356,429 @@ public class TestLocateAndScanRange : BaseCluster
         Assert.Equal(byOne,    byFive);
         Assert.Equal(byFive,   byHundred);
         Assert.Equal(30,       byOne.Count);
+    }
+
+    // ── Task 10: multi-range stitch ───────────────────────────────────────────
+
+    private const string SplitSpace = "tbl:r";
+
+    private static async Task<(IRaft, KahunaManager)> LeaderOf(int partition, (IRaft Raft, KahunaManager Kahuna)[] nodes)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        while (true)
+        {
+            foreach ((IRaft raft, KahunaManager kahuna) in nodes)
+                if (await raft.AmILeader(partition, ct))
+                    return (raft, kahuna);
+            await Task.Delay(50, ct);
+        }
+    }
+
+    private static async Task WaitUntilScan(Func<bool> predicate, int timeoutMs = 10000)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        long deadline = Environment.TickCount64 + timeoutMs;
+        while (Environment.TickCount64 < deadline)
+        {
+            if (predicate()) return;
+            await Task.Delay(25, ct);
+        }
+        Assert.Fail("Timed out waiting for condition.");
+    }
+
+    private static async Task WaitUntilScanAsync(Func<Task<bool>> predicate, int timeoutMs = 10000)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        long deadline = Environment.TickCount64 + timeoutMs;
+        while (Environment.TickCount64 < deadline)
+        {
+            if (await predicate()) return;
+            await Task.Delay(25, ct);
+        }
+        Assert.Fail("Timed out waiting for async condition.");
+    }
+
+    /// <summary>
+    /// Task 10 — Scan_SpanningMultipleRanges_ReturnsFullOrderedResult
+    ///
+    /// Seeds keys into a key-range space, splits it at the midpoint, then verifies that
+    /// LocateAndScanRange returns every key in order with no gaps, stitching across both partitions.
+    /// </summary>
+    [Fact]
+    public async Task Scan_SpanningMultipleRanges_ReturnsFullOrderedResult()
+    {
+        (IRaft r1, IRaft r2, IRaft r3, IKahuna k1, IKahuna k2, IKahuna k3) =
+            await AssembleThreNodeCluster("memory", 4, raftLogger, kahunaLogger);
+
+        (IRaft Raft, KahunaManager Kahuna)[] nodes =
+            [(r1, (KahunaManager)k1), (r2, (KahunaManager)k2), (r3, (KahunaManager)k3)];
+
+        try
+        {
+            CancellationToken ct = TestContext.Current.CancellationToken;
+
+            // Register the space as key-range on all nodes.
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                kahuna.RegisterKeyRange(SplitSpace);
+
+            // Seed the initial full-range descriptor on P2.
+            (IRaft _, KahunaManager metaLeader) =
+                await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+
+            bool committed = await metaLeader.RangeMapStore.MutateAsync(
+                _ => [new RangeDescriptor
+                {
+                    KeySpace    = SplitSpace,
+                    StartKey    = null,
+                    EndKey      = null,
+                    PartitionId = RangeMapStore.FirstDataPartitionId,
+                    Generation  = 1
+                }], ct);
+            Assert.True(committed);
+
+            // Wait for descriptor to reach all nodes.
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                await WaitUntilScan(
+                    () => kahuna.RangeMapStore.Current.Find(SplitSpace, SplitSpace + "/x") is not null);
+
+            // Seed 20 keys: /0000 … /0019.
+            const int total = 20;
+            (IRaft _, KahunaManager dataLeader) =
+                await LeaderOf(RangeMapStore.FirstDataPartitionId, nodes);
+
+            for (int i = 0; i < total; i++)
+            {
+                (KeyValueResponseType t, _, _) = await dataLeader.TrySetKeyValue(
+                    HLCTimestamp.Zero, $"{SplitSpace}/{i:D4}",
+                    Encoding.UTF8.GetBytes("v" + i),
+                    null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent);
+                Assert.Equal(KeyValueResponseType.Set, t);
+            }
+
+            // Wait for all keys to be visible from all nodes before splitting.
+            for (int i = 0; i < total; i++)
+            {
+                string key = $"{SplitSpace}/{i:D4}";
+                foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                    await WaitUntilScanAsync(async () =>
+                    {
+                        (KeyValueResponseType rt, _) =
+                            await kahuna.TryGetValue(HLCTimestamp.Zero, key, 0, KeyValueDurability.Persistent);
+                        return rt == KeyValueResponseType.Get;
+                    });
+            }
+
+            // Perform the split at /0010.
+            string splitKey = $"{SplitSpace}/0010";
+            (IRaft sysRaft, KahunaManager _) = await LeaderOf(0, nodes);
+
+            int newPartitionId = RangeSplitter.ComputeNextPartitionId(metaLeader.RangeMapStore.Current);
+            RaftPartitionLifecycleResult createResult =
+                await sysRaft.CreatePartitionAsync(newPartitionId, RaftRoutingMode.Unrouted, null, ct);
+            Assert.True(createResult.Success, "CreatePartitionAsync failed");
+
+            SplitOutcome outcome = await metaLeader.RangeSplitter.SplitAsync(
+                SplitSpace, splitKey, newPartitionId, ct);
+            Assert.True(outcome.IsSuccess, $"Split failed: {outcome.Status}");
+
+            // Wait for the two-descriptor map to reach all nodes.
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                await WaitUntilScan(() =>
+                {
+                    RangeMap m = kahuna.RangeMapStore.Current;
+                    return m.Find(SplitSpace, SplitSpace + "/0005") is not null &&
+                           m.Find(SplitSpace, SplitSpace + "/0015") is not null &&
+                           m.Find(SplitSpace, SplitSpace + "/0005")!.PartitionId !=
+                           m.Find(SplitSpace, SplitSpace + "/0015")!.PartitionId;
+                });
+
+            // Scan from k2 — it may be redirected across two partition leaders.
+            List<(string, ReadOnlyKeyValueEntry)> items = await Drain(
+                k2.LocateAndScanRange(
+                    HLCTimestamp.Zero, SplitSpace,
+                    null, true, null, false,
+                    pageSize: 7, KeyValueDurability.Persistent, ct));
+
+            Assert.Equal(total, items.Count);
+
+            // All keys distinct and in ascending ordinal order.
+            for (int i = 1; i < items.Count; i++)
+                Assert.True(string.CompareOrdinal(items[i].Item1, items[i - 1].Item1) > 0,
+                    $"Order violation at index {i}: {items[i - 1].Item1} vs {items[i].Item1}");
+
+            // Every expected key is present.
+            HashSet<string> got = items.Select(x => x.Item1).ToHashSet(StringComparer.Ordinal);
+            for (int i = 0; i < total; i++)
+                Assert.Contains($"{SplitSpace}/{i:D4}", got);
+        }
+        finally
+        {
+            await LeaveCluster(r1, r2, r3);
+        }
+    }
+
+    /// <summary>
+    /// Task 10 — Scan_SplitMidIteration_NoDuplicateOrMissingRows
+    ///
+    /// Captures the complete key set before a split, then re-scans after the split, and verifies
+    /// the post-split scan returns exactly the same keys (no duplicates, no missing rows).
+    /// </summary>
+    [Fact]
+    public async Task Scan_SplitMidIteration_NoDuplicateOrMissingRows()
+    {
+        (IRaft r1, IRaft r2, IRaft r3, IKahuna k1, IKahuna k2, IKahuna k3) =
+            await AssembleThreNodeCluster("memory", 4, raftLogger, kahunaLogger);
+
+        (IRaft Raft, KahunaManager Kahuna)[] nodes =
+            [(r1, (KahunaManager)k1), (r2, (KahunaManager)k2), (r3, (KahunaManager)k3)];
+
+        try
+        {
+            CancellationToken ct = TestContext.Current.CancellationToken;
+            const string space   = "tbl2:r";
+            const int    total   = 30;
+
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                kahuna.RegisterKeyRange(space);
+
+            (IRaft _, KahunaManager metaLeader) =
+                await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+
+            bool committed = await metaLeader.RangeMapStore.MutateAsync(
+                _ => [new RangeDescriptor
+                {
+                    KeySpace    = space,
+                    StartKey    = null,
+                    EndKey      = null,
+                    PartitionId = RangeMapStore.FirstDataPartitionId,
+                    Generation  = 1
+                }], ct);
+            Assert.True(committed);
+
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                await WaitUntilScan(
+                    () => kahuna.RangeMapStore.Current.Find(space, space + "/x") is not null);
+
+            (IRaft _, KahunaManager dataLeader) =
+                await LeaderOf(RangeMapStore.FirstDataPartitionId, nodes);
+
+            for (int i = 0; i < total; i++)
+            {
+                (KeyValueResponseType t, _, _) = await dataLeader.TrySetKeyValue(
+                    HLCTimestamp.Zero, $"{space}/{i:D4}",
+                    Encoding.UTF8.GetBytes("v" + i),
+                    null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent);
+                Assert.Equal(KeyValueResponseType.Set, t);
+            }
+
+            for (int i = 0; i < total; i++)
+            {
+                string key = $"{space}/{i:D4}";
+                foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                    await WaitUntilScanAsync(async () =>
+                    {
+                        (KeyValueResponseType rt, _) =
+                            await kahuna.TryGetValue(HLCTimestamp.Zero, key, 0, KeyValueDurability.Persistent);
+                        return rt == KeyValueResponseType.Get;
+                    });
+            }
+
+            // Baseline scan (unsplit — single partition).
+            List<string> baseline = (await Drain(k1.LocateAndScanRange(
+                HLCTimestamp.Zero, space, null, true, null, false,
+                pageSize: 10, KeyValueDurability.Persistent, ct)))
+                .Select(x => x.Item1).ToList();
+            Assert.Equal(total, baseline.Count);
+
+            // Split at /0015.
+            string splitKey = $"{space}/0015";
+            (IRaft sysRaft, KahunaManager _) = await LeaderOf(0, nodes);
+
+            int newPart = RangeSplitter.ComputeNextPartitionId(metaLeader.RangeMapStore.Current);
+            RaftPartitionLifecycleResult cr =
+                await sysRaft.CreatePartitionAsync(newPart, RaftRoutingMode.Unrouted, null, ct);
+            Assert.True(cr.Success);
+
+            SplitOutcome outcome = await metaLeader.RangeSplitter.SplitAsync(space, splitKey, newPart, ct);
+            Assert.True(outcome.IsSuccess, $"Split failed: {outcome.Status}");
+
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                await WaitUntilScan(() =>
+                {
+                    RangeMap m = kahuna.RangeMapStore.Current;
+                    return m.Find(space, space + "/0005") is not null &&
+                           m.Find(space, space + "/0020") is not null &&
+                           m.Find(space, space + "/0005")!.PartitionId !=
+                           m.Find(space, space + "/0020")!.PartitionId;
+                });
+
+            // Post-split scan must match the baseline exactly.
+            List<string> afterSplit = (await Drain(k3.LocateAndScanRange(
+                HLCTimestamp.Zero, space, null, true, null, false,
+                pageSize: 5, KeyValueDurability.Persistent, ct)))
+                .Select(x => x.Item1).ToList();
+
+            Assert.Equal(baseline.Count, afterSplit.Count);
+            Assert.Equal(baseline, afterSplit);
+        }
+        finally
+        {
+            await LeaveCluster(r1, r2, r3);
+        }
+    }
+
+    /// <summary>
+    /// Task 10 — Scan_SplitMidIteration_ResumesViaCursor
+    ///
+    /// Fetches page 1 of a paged scan, then splits the space, then resumes from the returned
+    /// cursor. Verifies that the full result set (page 1 + resumed pages) equals the pre-split
+    /// baseline exactly — no duplicates, no missing rows — proving the cursor's lastKey survives
+    /// a concurrent split without needing to encode the range generation.
+    /// </summary>
+    [Fact]
+    public async Task Scan_SplitMidIteration_ResumesViaCursor()
+    {
+        (IRaft r1, IRaft r2, IRaft r3, IKahuna k1, IKahuna k2, IKahuna k3) =
+            await AssembleThreNodeCluster("memory", 4, raftLogger, kahunaLogger);
+
+        (IRaft Raft, KahunaManager Kahuna)[] nodes =
+            [(r1, (KahunaManager)k1), (r2, (KahunaManager)k2), (r3, (KahunaManager)k3)];
+
+        try
+        {
+            CancellationToken ct = TestContext.Current.CancellationToken;
+            const string space   = "tbl3:r";
+            const int    total   = 20;
+            const int    pageOne = 5;    // keys returned before the split
+            const string splitAt = "tbl3:r/0010"; // splits at the midpoint
+
+            // ── setup ─────────────────────────────────────────────────────────
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                kahuna.RegisterKeyRange(space);
+
+            (IRaft _, KahunaManager metaLeader) =
+                await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+
+            bool committed = await metaLeader.RangeMapStore.MutateAsync(
+                _ => [new RangeDescriptor
+                {
+                    KeySpace    = space,
+                    StartKey    = null,
+                    EndKey      = null,
+                    PartitionId = RangeMapStore.FirstDataPartitionId,
+                    Generation  = 1
+                }], ct);
+            Assert.True(committed);
+
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                await WaitUntilScan(
+                    () => kahuna.RangeMapStore.Current.Find(space, space + "/x") is not null);
+
+            (IRaft _, KahunaManager dataLeader) =
+                await LeaderOf(RangeMapStore.FirstDataPartitionId, nodes);
+
+            for (int i = 0; i < total; i++)
+            {
+                (KeyValueResponseType t, _, _) = await dataLeader.TrySetKeyValue(
+                    HLCTimestamp.Zero, $"{space}/{i:D4}",
+                    Encoding.UTF8.GetBytes("v" + i),
+                    null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent);
+                Assert.Equal(KeyValueResponseType.Set, t);
+            }
+
+            for (int i = 0; i < total; i++)
+            {
+                string key = $"{space}/{i:D4}";
+                foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                    await WaitUntilScanAsync(async () =>
+                    {
+                        (KeyValueResponseType rt, _) =
+                            await kahuna.TryGetValue(HLCTimestamp.Zero, key, 0, KeyValueDurability.Persistent);
+                        return rt == KeyValueResponseType.Get;
+                    });
+            }
+
+            // ── baseline (unsplit, from k1) ────────────────────────────────────
+            List<string> baseline = (await Drain(k1.LocateAndScanRange(
+                HLCTimestamp.Zero, space, null, true, null, false,
+                pageSize: 100, KeyValueDurability.Persistent, ct)))
+                .Select(x => x.Item1).ToList();
+            Assert.Equal(total, baseline.Count);
+
+            // ── page 1: fetch first pageOne items before the split ────────────
+            KeyValueGetByRangeResult page1 = await k1.LocateAndGetByRange(
+                HLCTimestamp.Zero, space,
+                null, true, null, false,
+                pageOne, HLCTimestamp.Zero,
+                KeyValueDurability.Persistent, ct);
+
+            Assert.Equal(KeyValueResponseType.Get, page1.Type);
+            Assert.Equal(pageOne, page1.Items.Count);
+            Assert.True(page1.HasMore, "Expected HasMore after page 1");
+            Assert.NotNull(page1.NextCursor);
+
+            List<string> collected = page1.Items.Select(x => x.Item1).ToList();
+
+            // ── split at /0010 while cursor is held ────────────────────────────
+            (IRaft sysRaft, KahunaManager _) = await LeaderOf(0, nodes);
+
+            int newPart = RangeSplitter.ComputeNextPartitionId(metaLeader.RangeMapStore.Current);
+            RaftPartitionLifecycleResult cr =
+                await sysRaft.CreatePartitionAsync(newPart, RaftRoutingMode.Unrouted, null, ct);
+            Assert.True(cr.Success);
+
+            SplitOutcome outcome = await metaLeader.RangeSplitter.SplitAsync(space, splitAt, newPart, ct);
+            Assert.True(outcome.IsSuccess, $"Split failed: {outcome.Status}");
+
+            // Wait for the two-descriptor map on all nodes.
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                await WaitUntilScan(() =>
+                {
+                    RangeMap m = kahuna.RangeMapStore.Current;
+                    return m.Find(space, space + "/0005") is not null &&
+                           m.Find(space, space + "/0015") is not null &&
+                           m.Find(space, space + "/0005")!.PartitionId !=
+                           m.Find(space, space + "/0015")!.PartitionId;
+                });
+
+            // ── resume from cursor across the now-split map ────────────────────
+            // Decode cursor to get lastKey; each subsequent page uses lastKey as exclusive start.
+            string? cursorStr = page1.NextCursor;
+            while (cursorStr is not null)
+            {
+                Assert.True(
+                    KeyValueRangeCursor.TryDecode(cursorStr, out string lastKey, out _, out _, out _),
+                    "Cursor decode failed");
+
+                KeyValueGetByRangeResult next = await k2.LocateAndGetByRange(
+                    HLCTimestamp.Zero, space,
+                    lastKey, false, null, false,
+                    pageOne, HLCTimestamp.Zero,
+                    KeyValueDurability.Persistent, ct);
+
+                Assert.Equal(KeyValueResponseType.Get, next.Type);
+                collected.AddRange(next.Items.Select(x => x.Item1));
+
+                cursorStr = next.HasMore ? next.NextCursor : null;
+            }
+
+            // ── assert: same set as the pre-split baseline ─────────────────────
+            Assert.Equal(baseline.Count, collected.Count);
+
+            // No duplicates.
+            Assert.Equal(collected.Count, collected.Distinct(StringComparer.Ordinal).Count());
+
+            // Keys in ascending order.
+            for (int i = 1; i < collected.Count; i++)
+                Assert.True(string.CompareOrdinal(collected[i], collected[i - 1]) > 0,
+                    $"Order violation at {i}: {collected[i - 1]} vs {collected[i]}");
+
+            // Exact match with baseline.
+            Assert.Equal(baseline, collected);
+        }
+        finally
+        {
+            await LeaveCluster(r1, r2, r3);
+        }
     }
 }
