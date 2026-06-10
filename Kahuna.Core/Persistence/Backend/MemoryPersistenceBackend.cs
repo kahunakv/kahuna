@@ -99,16 +99,10 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
         return keyValues.GetValueOrDefault(keyName);
     }
 
-    /// <summary>
-    /// 
-    /// </summary>
-    /// <param name="keyName"></param>
-    /// <param name="revision"></param>
-    /// <returns></returns>
-    /// <exception cref="NotImplementedException"></exception>
     public KeyValueEntry? GetKeyValueRevision(string keyName, long revision)
     {
-        throw new NotImplementedException();
+        // The memory backend stores only the current value — no revision history.
+        return null;
     }
 
     /// <summary>
