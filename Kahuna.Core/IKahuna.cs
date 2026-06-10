@@ -187,4 +187,11 @@ public interface IKahuna
     /// both the system partition (0) and meta partition (1); returns 0 on other nodes.
     /// </summary>
     public Task<int> TriggerAutoSplitAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Scans all KeyRange spaces for adjacent under-min descriptor pairs and merges them.
+    /// Only executes on the node that simultaneously holds leadership of both the system partition (0)
+    /// and meta partition (1); returns 0 on other nodes.
+    /// </summary>
+    public Task<int> TriggerAutoMergeAsync(CancellationToken ct = default);
 }

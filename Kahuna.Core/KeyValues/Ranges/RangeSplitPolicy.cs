@@ -47,6 +47,13 @@ internal static class RangeSplitPolicy
         if (sample.Count < threshold)
             return null;
 
+        // Guard: if the sample can't produce two halves each with minRangeSize keys,
+        // refuse to split. This can happen when threshold < 2*minRangeSize (misconfiguration)
+        // or when the sample is genuinely too small. Math.Clamp(x, lo, hi) throws when lo > hi,
+        // so we must check before reaching it.
+        if (sample.Count < 2 * minRangeSize)
+            return null;
+
         int splitIndex = IsMonotonicAppend(sample)
             ? ComputePercentileIndex(sample.Count, 75)
             : ComputePercentileIndex(sample.Count, 50);
@@ -107,19 +114,18 @@ internal static class RangeSplitPolicy
         (int)Math.Round(count * percentile / 100.0);
 
     /// <summary>
-    /// Returns the timestamp of the <paramref name="n"/>-th largest entry (1-based)
-    /// using partial selection to avoid a full sort.
+    /// Returns the timestamp of the <paramref name="n"/>-th largest entry (1-based).
+    /// Uses a full O(n log n) sort on a copied timestamp list; the list is bounded by
+    /// <see cref="RangeSplitTrigger.MaxSampleKeys"/> so this is acceptable.
     /// </summary>
     private static HLCTimestamp GetNthLargestTimestamp(
         IReadOnlyList<(string Key, HLCTimestamp LastModified)> sample,
         int n)
     {
-        // Copy just the timestamps into a local list for partial sort.
         List<HLCTimestamp> ts = new(sample.Count);
         foreach ((_, HLCTimestamp lm) in sample)
             ts.Add(lm);
 
-        // Partial descending sort: we only need the nth element.
         ts.Sort((a, b) => b.CompareTo(a));
         return ts[n - 1];
     }

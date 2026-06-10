@@ -1178,6 +1178,9 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <summary>The split-transaction executor (Task 6).</summary>
     internal RangeSplitter RangeSplitter => keyValues.RangeSplitter;
 
+    /// <summary>The merge-transaction executor (Task 8).</summary>
+    internal RangeMerger RangeMerger => keyValues.RangeMerger;
+
     /// <summary>
     /// Checks every KeyRange descriptor and splits any that exceed the configured size threshold.
     /// Returns the number of splits performed. Only executes on the node that holds leadership
@@ -1192,6 +1195,20 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// </summary>
     internal Task<int> TriggerAutoSplitAsync(int threshold, int minRangeSize, CancellationToken ct = default) =>
         keyValues.TriggerAutoSplitAsync(threshold, minRangeSize, ct);
+
+    /// <summary>
+    /// Scans all KeyRange spaces for adjacent under-min descriptor pairs and merges them.
+    /// Returns the number of merges performed. Only executes on the dual-leader node.
+    /// </summary>
+    public Task<int> TriggerAutoMergeAsync(CancellationToken ct = default) =>
+        keyValues.TriggerAutoMergeAsync(ct);
+
+    /// <summary>
+    /// Test-seam overload: runs the auto-merge trigger with an explicit <paramref name="minMergeSize"/>
+    /// instead of the production config value.
+    /// </summary>
+    internal Task<int> TriggerAutoMergeAsync(int minMergeSize, CancellationToken ct = default) =>
+        keyValues.TriggerAutoMergeAsync(minMergeSize, ct);
 
     /// <summary>
     /// Issues a persistent key-range write on the <b>local</b> node carrying an explicit routed

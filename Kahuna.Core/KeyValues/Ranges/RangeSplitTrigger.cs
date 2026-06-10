@@ -26,6 +26,18 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// accumulating up to <see cref="MaxSampleKeys"/> keys. The sample is representative
 /// enough for the policy; it is not a full count.
 /// </para>
+///
+/// <para>
+/// <b>Size dimension.</b> "Size" is measured in sampled key count, not bytes or request load.
+/// Byte-size and load-based splitting are explicitly deferred to Task 12.
+/// </para>
+///
+/// <para>
+/// <b>Local-node sampling.</b> <c>manager.GetByRange</c> reads the local node's actor state.
+/// This is correct today because the persistence backend is node-global (every replica holds all
+/// keys). If storage is ever partitioned so that only the data-partition leader holds a range's
+/// rows, sampling must be redirected to that leader instead.
+/// </para>
 /// </summary>
 internal sealed class RangeSplitTrigger
 {

@@ -93,4 +93,11 @@ public sealed class KahunaConfiguration
     /// Prevents trivially small child ranges.
     /// </summary>
     public int RangeSplitMinRangeSize { get; set; } = 10;
+
+    /// <summary>
+    /// Maximum number of keys a KeyRange descriptor may contain before it is no longer
+    /// considered an under-min merge candidate. When two adjacent descriptors both have fewer
+    /// than this value the auto-merge trigger coalesces them. 0 disables auto-merge.
+    /// </summary>
+    public int RangeMergeMinSize { get; set; } = 10;
 }

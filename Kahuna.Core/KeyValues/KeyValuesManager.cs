@@ -72,6 +72,10 @@ internal sealed class KeyValuesManager
 
     private RangeSplitTrigger? rangeSplitTrigger;
 
+    private RangeMerger? rangeMerger;
+
+    private RangeMergeTrigger? rangeMergeTrigger;
+
     /// <summary>
     /// Constructor
     /// </summary>
@@ -125,8 +129,34 @@ internal sealed class KeyValuesManager
 
         // RangeSplitter and RangeSplitTrigger both depend on this (KeyValuesManager) being fully
         // constructed, so we assign after all other fields are set.
-        rangeSplitter      = new(raft, rangeMapStore, kvStateMachineTransfer, this, logger);
-        rangeSplitTrigger  = new(raft, rangeMapStore, rangeSplitter, this, configuration, logger);
+        rangeSplitter     = new(raft, rangeMapStore, kvStateMachineTransfer, this, logger);
+        rangeSplitTrigger = new(raft, rangeMapStore, rangeSplitter, this, configuration, logger);
+        rangeMerger       = new(raft, rangeMapStore, kvStateMachineTransfer, this, logger);
+        rangeMergeTrigger = new(raft, rangeMapStore, rangeMerger, configuration, logger);
+
+        // Periodic split checker: fires on every CollectionInterval and calls TriggerAsync.
+        // Only executes the actual split work when this node is the dual-leader (guard is inside
+        // RangeSplitTrigger.TriggerAsync); on all other nodes it returns 0 immediately.
+        if (configuration.RangeSplitThreshold > 0)
+        {
+            actorSystem.Spawn<RangeSplitCheckerActor, RangeSplitCheckerRequest>(
+                "range-split-checker",
+                rangeSplitTrigger,
+                configuration,
+                logger
+            );
+        }
+
+        // Periodic merge checker: same dual-leader guard inside RangeMergeTrigger.TriggerAsync.
+        if (configuration.RangeMergeMinSize > 0)
+        {
+            actorSystem.Spawn<RangeMergeCheckerActor, RangeMergeCheckerRequest>(
+                "range-merge-checker",
+                rangeMergeTrigger,
+                configuration,
+                logger
+            );
+        }
     }
 
     /// <summary>
@@ -155,6 +185,27 @@ internal sealed class KeyValuesManager
 
     /// <summary>The split-transaction executor (Task 6). Splits a key range at a given split key.</summary>
     internal RangeSplitter RangeSplitter => rangeSplitter!;
+
+    /// <summary>The merge-transaction executor (Task 8). Merges adjacent under-min ranges.</summary>
+    internal RangeMerger RangeMerger => rangeMerger!;
+
+    /// <summary>
+    /// Scans all KeyRange spaces for under-min adjacent descriptor pairs and merges them.
+    /// Delegates to <see cref="RangeMergeTrigger.TriggerAsync"/>; returns the number of merges performed.
+    /// </summary>
+    internal Task<int> TriggerAutoMergeAsync(CancellationToken ct = default) =>
+        rangeMergeTrigger!.TriggerAsync(ct);
+
+    /// <summary>
+    /// Test-seam overload: runs the auto-merge trigger with an explicit <paramref name="minMergeSize"/>
+    /// instead of the configured value.
+    /// </summary>
+    internal Task<int> TriggerAutoMergeAsync(int minMergeSize, CancellationToken ct = default)
+    {
+        var cfg = new Configuration.KahunaConfiguration { RangeMergeMinSize = minMergeSize };
+        var trigger = new RangeMergeTrigger(raft, rangeMapStore, rangeMerger!, cfg, logger);
+        return trigger.TriggerAsync(ct);
+    }
 
     /// <summary>
     /// Checks every KeyRange descriptor and splits any that exceed the configured threshold.
