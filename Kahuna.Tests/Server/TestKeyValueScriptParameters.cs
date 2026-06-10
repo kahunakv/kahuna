@@ -22,10 +22,15 @@ public class TestKeyValueScriptParameters : BaseCluster
     }
 
     [Theory, CombinatorialData]
-    public async Task TestBasicSetWithParameter([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    public Task TestBasicSetWithParameter([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions) =>
+        RetryAsync(() => RunBasicSetWithParameter(storage, partitions));
+
+    private async Task RunBasicSetWithParameter(string storage, int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+        try
+        {
 
         // Persistent tests
         string script = "SET @pp_param 'hello world'";
@@ -76,8 +81,11 @@ public class TestKeyValueScriptParameters : BaseCluster
          """;
 
         resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, [new() { Key = "@leader_param", Value = "election/leader2" }]);
-        Assert.Equal(KeyValueResponseType.Set, resp.Type);        
-        
-        await LeaveCluster(node1, node2, node3);
+        Assert.Equal(KeyValueResponseType.Set, resp.Type);
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
     }
 }

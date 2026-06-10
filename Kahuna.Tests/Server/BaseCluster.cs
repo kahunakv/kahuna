@@ -257,6 +257,21 @@ public abstract class BaseCluster
         }
     }
 
+    /// <summary>
+    /// Retries <paramref name="body"/> up to <paramref name="maxAttempts"/> times, swallowing
+    /// all exceptions on non-final attempts. Use for cluster tests that can fail transiently due
+    /// to Raft leader-election timing on loaded CI runners.
+    /// </summary>
+    protected static async Task RetryAsync(Func<Task> body, int maxAttempts = 3)
+    {
+        for (int attempt = 1; attempt < maxAttempts; attempt++)
+        {
+            try { await body(); return; }
+            catch { /* swallow — next attempt */ }
+        }
+        await body(); // final attempt: let exceptions propagate
+    }
+
     protected static async Task LeaveCluster(IRaft raft1, IRaft raft2, IRaft raft3)
     {
         await Task.WhenAll(

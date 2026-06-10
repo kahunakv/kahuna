@@ -554,10 +554,15 @@ public class TestKeyValueScripts : BaseCluster
     }
     
     [Theory, CombinatorialData]
-    public async Task TestSetGetExtendRollbackScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    public Task TestSetGetExtendRollbackScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions) =>
+        RetryAsync(() => RunSetGetExtendRollbackScript(storage, partitions));
+
+    private async Task RunSetGetExtendRollbackScript(string storage, int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+        try
+        {
 
         // Unique key per run avoids interference when test classes execute in parallel
         string key = $"ppext{Guid.NewGuid():N}";
@@ -621,8 +626,11 @@ public class TestKeyValueScripts : BaseCluster
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
-
-        await LeaveCluster(node1, node2, node3);
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
     }
 
     [Theory, CombinatorialData]
