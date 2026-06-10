@@ -28,25 +28,19 @@ internal sealed class KeyValueLocator
 
     private readonly KeySpaceRegistry keySpaceRegistry;
 
+    private readonly RangeQuiesceStore quiesceStore;
+
     private readonly DataPartitionRouter dataPartitionRouter;
 
     private readonly ILogger<IKahuna> logger;
 
-    /// <summary>
-    /// Constructor
-    /// </summary>
-    /// <param name="manager"></param>
-    /// <param name="configuration"></param>
-    /// <param name="raft"></param>
-    /// <param name="interNodeCommunication"></param>
-    /// <param name="keySpaceRegistry"></param>
-    /// <param name="logger"></param>
     public KeyValueLocator(
         KeyValuesManager manager,
         KahunaConfiguration configuration,
         IRaft raft,
         IInterNodeCommunication interNodeCommunication,
         KeySpaceRegistry keySpaceRegistry,
+        RangeQuiesceStore quiesceStore,
         ILogger<IKahuna> logger
     )
     {
@@ -55,6 +49,7 @@ internal sealed class KeyValueLocator
         this.raft = raft;
         this.interNodeCommunication = interNodeCommunication;
         this.keySpaceRegistry = keySpaceRegistry;
+        this.quiesceStore = quiesceStore;
         this.dataPartitionRouter = new DataPartitionRouter(raft);
         this.logger = logger;
     }
@@ -122,6 +117,12 @@ internal sealed class KeyValueLocator
             (partitionId, freshGeneration) = LocateRange(key);
             if (routedGeneration == 0)
                 routedGeneration = freshGeneration;
+
+            // F3: direct writes to a range currently being split are blocked pre-route.
+            // The quiesce is set by RangeSplitter between the catch-up export and the cutover
+            // commit; clients retry after cutover and the locator resolves the new partition.
+            if (quiesceStore.IsQuiesced(key))
+                return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
         }
         else
         {
@@ -821,6 +822,26 @@ internal sealed class KeyValueLocator
         return await interNodeCommunication.TryReleaseExclusivePrefixLock(leader, transactionId, prefixKey, durability, cancellationToken);
     }
     
+    /// <summary>
+    /// Acquires an exclusive range lock covering <c>[startKey, endKey)</c> within <paramref name="prefix"/>.
+    /// Fan-outs to one sub-lock per intersecting <see cref="RangeDescriptor"/>; rolls back partial
+    /// acquisitions on failure.
+    ///
+    /// <para><b>Local-snapshot fence (F2).</b> After acquiring all sub-locks the method re-reads
+    /// <see cref="RangeMapStore.Current"/> and compares descriptor sets via
+    /// <see cref="DescriptorSetStable"/>. If any descriptor was added, removed, or bumped (a split
+    /// or merge committed in the acquire window <em>and replicated to this node</em>), all sub-locks
+    /// are released and <c>MustRetry</c> is returned so the caller re-routes on the fresh map.</para>
+    ///
+    /// <para><b>Limitation — local-node visibility only.</b> The fence compares two consecutive
+    /// reads of this node's local descriptor map. A split that committed on the meta-partition leader
+    /// but has not yet replicated here is invisible to both reads: the lock lands on the pre-split
+    /// partition and a writer on an ahead node that already sees the new partition is not blocked.
+    /// The write-path generation fence (carried on every <c>TrySet</c> / 2PC-prepare RPC) remains
+    /// the primary serializability guard; this fence is a best-effort defence for the
+    /// frequently-consistent case. Fully closing the cross-node skew window would require the lock
+    /// to carry and verify a descriptor generation end-to-end against the writer's view.</para>
+    /// </summary>
     public Task<KeyValueResponseType> LocateAndTryAcquireExclusiveRangeLock(
         HLCTimestamp transactionId,
         string prefix,
@@ -941,9 +962,11 @@ internal sealed class KeyValueLocator
 
     /// <summary>
     /// Returns true when both snapshots cover the same descriptors in the same order with the
-    /// same generations. Used as the acquire-time generation fence: if false, a split committed
-    /// in the window between <c>FindIntersecting</c> and the sub-lock RPCs, and the caller must
-    /// roll back acquired sub-locks and retry.
+    /// same generations. Used as the acquire-time generation fence: if false, a split or merge
+    /// committed <em>and replicated to this node</em> in the window between
+    /// <c>FindIntersecting</c> and the sub-lock RPCs, and the caller must roll back acquired
+    /// sub-locks and retry. Splits that have not yet replicated here are not detected — see the
+    /// <c>LocateAndTryAcquireExclusiveRangeLock</c> doc for the full local-snapshot caveat.
     /// </summary>
     private static bool DescriptorSetStable(
         IReadOnlyList<RangeDescriptor> before,
@@ -1449,24 +1472,35 @@ internal sealed class KeyValueLocator
     /// <summary>
     /// Locates the appropriate node for the specified key prefix and retrieves the corresponding key-value items.
     /// For unsplit spaces routes to the single partition leader. For split key-range spaces fans out across
-    /// all descriptors sequentially, pages through each with <see cref="QueryDescriptorRange"/>, and returns
-    /// the concatenated result (Task 10b multi-range GetByBucket).
+    /// all descriptors in parallel (F5), pages through each with <see cref="QueryDescriptorRange"/>, and
+    /// returns the concatenated result (Task 10b multi-range GetByBucket, F5 parallel upgrade).
     ///
     /// <para>
-    /// <b>Performance notes (deferred optimisations):</b>
-    /// <list type="bullet">
-    ///   <item>Fan-out is sequential. A future improvement may issue descriptors in parallel via a
-    ///     bounded <c>Task.WhenAll</c> when the descriptor count exceeds a threshold.</item>
-    ///   <item>No per-leader coalescing. When multiple ranges share a leader, separate paged RPC
-    ///     streams are opened. A future improvement should group by leader and issue one stream per
-    ///     leader.</item>
-    ///   <item>Full materialisation. The entire bucket is buffered before returning. Callers that
-    ///     need bounded memory over a large split bucket should use the paged
-    ///     <see cref="LocateAndGetByRange"/> / <c>LocateAndScanRange</c> path instead.</item>
-    /// </list>
+    /// <b>Fan-out model (F5):</b> all descriptors are queried concurrently via <c>Task.WhenAll</c>,
+    /// bounded by <c>MaxParallelBucketDescriptors</c>. On gRPC transport the concurrent per-leader
+    /// streams are coalesced by <c>GrpcServerBatcher</c> into one streaming connection per leader
+    /// endpoint. Full materialisation: the entire bucket is buffered before returning; callers needing
+    /// bounded-memory streaming should use <see cref="LocateAndGetByRange"/> instead.
     /// </para>
     /// </summary>
-    public async Task<KeyValueGetByBucketResult> LocateAndGetByBucket(HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    public Task<KeyValueGetByBucketResult> LocateAndGetByBucket(
+        HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability,
+        CancellationToken cancellationToken) =>
+        LocateAndGetByBucket(transactionId, prefixedKey, durability, cancellationToken, null, null);
+
+    /// <summary>
+    /// Internal overload with test hooks.
+    /// <paramref name="beforeQuery"/> is called (with the descriptor index) after the semaphore is
+    /// acquired but before the first page RPC for that descriptor — lets tests gate all tasks to prove
+    /// concurrency.
+    /// <paramref name="afterDescriptor"/> is called after all pages for a descriptor are collected —
+    /// lets tests inject a mid-fan-out split for <c>Bucket_SplitMidScan_NoDupNoMissing</c>.
+    /// </summary>
+    internal async Task<KeyValueGetByBucketResult> LocateAndGetByBucket(
+        HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability,
+        CancellationToken cancellationToken,
+        Func<int, Task>? beforeQuery,
+        Func<int, Task>? afterDescriptor)
     {
         if (string.IsNullOrEmpty(prefixedKey))
             return new(KeyValueResponseType.Errored, []);
@@ -1488,32 +1522,66 @@ internal sealed class KeyValueLocator
             return await interNodeCommunication.GetByBucket(singleLeader, transactionId, prefixedKey, durability, cancellationToken);
         }
 
-        // Multi-range path (Task 10b): key-range space is split; fan out to all descriptors.
-        // Snapshot the map once — safe for the same reason as LocateAndGetByRange: orphan retention
-        // + MVCC means the source partition still answers snapshot reads even after a cutover.
+        // Multi-range path (F5 parallel): key-range space is split; fan out to all descriptors
+        // concurrently. Snapshot the map once — safe because orphan retention + MVCC means the source
+        // partition still answers snapshot reads for stale entries after a cutover.
         string keySpace = KeySpaceRegistry.ExtractKeySpace(prefixedKey + "/");
-        IReadOnlyList<RangeDescriptor> descriptors =
-            manager.RangeMapStore.Current.FindAll(keySpace);
+        IReadOnlyList<RangeDescriptor> descriptors = manager.RangeMapStore.Current.FindAll(keySpace);
 
         if (descriptors.Count == 0)
             return new(KeyValueResponseType.Get, []);
 
-        // Within-call snapshot safety: a split landing between two descriptors' queries means the
-        // second descriptor's source partition is queried with a now-stale routing entry. This is
-        // safe for the same reason as the per-page re-resolution note in LocateAndGetByRange: Task 6
-        // orphan-retains [K,E) on the source partition after a cutover, so a fixed readTimestamp
-        // (MVCC) still resolves correctly from there. The caller sees a consistent snapshot of the
-        // moment this call started; a stale partition returns all snapshot-committed data it holds.
         const int bucketPageSize = 512;
-        var allItems = new List<(string, ReadOnlyKeyValueEntry)>();
+        const int maxParallelDescriptors = 8;
 
-        foreach (RangeDescriptor descriptor in descriptors)
+        using var sem = new SemaphoreSlim(maxParallelDescriptors, maxParallelDescriptors);
+
+        // Pre-allocate one slot per descriptor; tasks write by index so no lock is needed.
+        var slots = new (KeyValueResponseType Type, List<(string, ReadOnlyKeyValueEntry)> Items)[descriptors.Count];
+
+        Task[] fanOutTasks = Enumerable.Range(0, descriptors.Count)
+            .Select(idx => FetchDescriptorSlotAsync(
+                idx, descriptors[idx], transactionId, prefixedKey,
+                durability, cancellationToken, bucketPageSize, sem, slots,
+                beforeQuery, afterDescriptor))
+            .ToArray();
+
+        await Task.WhenAll(fanOutTasks);
+
+        // Propagate any early-exit response (MustRetry / WaitingForReplication).
+        foreach ((KeyValueResponseType type, _) in slots)
+            if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+                return new(type, []);
+
+        // Concatenate in descriptor StartKey order (FindAll is sorted; ranges are disjoint, so
+        // the concatenation is already globally ordered — same guarantee as the sequential version).
+        var allItems = new List<(string, ReadOnlyKeyValueEntry)>();
+        foreach ((_, List<(string, ReadOnlyKeyValueEntry)> items) in slots)
+            allItems.AddRange(items);
+
+        return new(KeyValueResponseType.Get, allItems);
+    }
+
+    private async Task FetchDescriptorSlotAsync(
+        int idx, RangeDescriptor descriptor,
+        HLCTimestamp transactionId, string prefixedKey,
+        KeyValueDurability durability, CancellationToken cancellationToken,
+        int bucketPageSize, SemaphoreSlim sem,
+        (KeyValueResponseType, List<(string, ReadOnlyKeyValueEntry)>)[] slots,
+        Func<int, Task>? beforeQuery, Func<int, Task>? afterDescriptor)
+    {
+        await sem.WaitAsync(cancellationToken);
+        try
         {
+            if (beforeQuery is not null)
+                await beforeQuery(idx);
+
             (string? clStart, bool clStartInc, string? clEnd, bool clEndInc) =
                 ClipRange(null, true, null, false, descriptor);
 
             string? cursorKey = clStart;
             bool    cursorInc = clStartInc;
+            var items = new List<(string, ReadOnlyKeyValueEntry)>();
 
             while (true)
             {
@@ -1523,12 +1591,15 @@ internal sealed class KeyValueLocator
                     bucketPageSize, HLCTimestamp.Zero, durability, cancellationToken);
 
                 if (page.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
-                    return new(page.Type, []);
+                {
+                    slots[idx] = (page.Type, []);
+                    return;
+                }
 
                 if (page.Type != KeyValueResponseType.Get)
                     break;
 
-                allItems.AddRange(page.Items);
+                items.AddRange(page.Items);
 
                 if (!page.HasMore || page.NextCursor is null)
                     break;
@@ -1539,12 +1610,16 @@ internal sealed class KeyValueLocator
                 cursorKey = lastKey;
                 cursorInc = false;
             }
-        }
 
-        // No explicit sort needed: FindAll returns descriptors in StartKey order, ranges are disjoint
-        // (no-overlap invariant), and each range's pages are key-sorted — so the concatenation is
-        // already globally ordered, exactly as in LocateAndGetByRange.
-        return new(KeyValueResponseType.Get, allItems);
+            slots[idx] = (KeyValueResponseType.Get, items);
+
+            if (afterDescriptor is not null)
+                await afterDescriptor(idx);
+        }
+        finally
+        {
+            sem.Release();
+        }
     }
 
     /// <summary>

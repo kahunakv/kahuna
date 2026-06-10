@@ -530,4 +530,65 @@ public sealed class TestRangeSplit : BaseCluster
             await LeaveCluster(nodes[0].Item1, nodes[1].Item1, nodes[2].Item1);
         }
     }
+
+    // ── Split_DirectWriteDuringQuiesce_MustRetry ──────────────────────────────────
+
+    /// <summary>
+    /// Verifies F3 — direct (non-2PC) writes to a range that is currently quiesced for splitting
+    /// return <c>MustRetry</c>. After the split window closes the same write succeeds.
+    ///
+    /// <para>
+    /// The test uses <c>SplitAsyncWithHook</c> to inject a direct <c>LocateAndTrySetKeyValue</c>
+    /// call while the quiesce is active (between catch-up import and cutover). After the split
+    /// completes the same write must succeed on the node that ran the split.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task Split_DirectWriteDuringQuiesce_MustRetry()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        const string key = Space + "/quiesce-key";
+        const string val = "quiesced-write";
+
+        ((IRaft, KahunaManager)[] nodes, KahunaManager metaLeader, _, KahunaManager _) =
+            await Setup([Space + "/a"], [Space + "/z"]);
+
+        try
+        {
+            (IRaft sysRaft, KahunaManager _) = await LeaderOf(SystemPartition, nodes);
+            int newPartitionId = RangeSplitter.ComputeNextPartitionId(metaLeader.RangeMapStore.Current);
+
+            RaftPartitionLifecycleResult createResult =
+                await sysRaft.CreatePartitionAsync(newPartitionId, RaftRoutingMode.Unrouted, null, ct);
+            Assert.True(createResult.Success);
+
+            KeyValueResponseType? duringQuiesceResult = null;
+
+            SplitOutcome outcome = await metaLeader.SplitAsyncWithHook(
+                Space, Space + "/m", newPartitionId,
+                duringQuiesce: async () =>
+                {
+                    // Direct write into the quiesced range: must be bounced with MustRetry.
+                    (KeyValueResponseType rt, _, _) = await metaLeader.LocateAndTrySetKeyValue(
+                        HLCTimestamp.Zero, key, V(val),
+                        null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+                    duringQuiesceResult = rt;
+                },
+                ct);
+
+            Assert.True(outcome.IsSuccess, $"Split failed: {outcome.Status}");
+            Assert.Equal(KeyValueResponseType.MustRetry, duringQuiesceResult);
+
+            // After the split the quiesce is released — the same write now succeeds.
+            (KeyValueResponseType afterRt, _, _) = await metaLeader.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, key, V(val),
+                null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, afterRt);
+        }
+        finally
+        {
+            await LeaveCluster(nodes[0].Item1, nodes[1].Item1, nodes[2].Item1);
+        }
+    }
 }

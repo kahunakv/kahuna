@@ -1221,6 +1221,32 @@ public sealed class KahunaManager : IKahuna, IDisposable
             KeyValueDurability.Persistent, routedGeneration);
 
     /// <summary>
+    /// Test seam: executes a split with a callback invoked inside the quiesce window (after catch-up
+    /// import, before cutover). Lets F3 tests race a direct write into the window to verify
+    /// <c>MustRetry</c> is returned.
+    /// </summary>
+    internal Task<SplitOutcome> SplitAsyncWithHook(
+        string keySpace,
+        string splitKey,
+        int newPartitionId,
+        Func<Task> duringQuiesce,
+        CancellationToken ct = default) =>
+        keyValues.RangeSplitter.SplitAsync(keySpace, splitKey, newPartitionId, duringQuiesce, ct);
+
+    /// <summary>
+    /// Test seam (F5): <paramref name="beforeQuery"/> is called before each descriptor's paged query
+    /// starts; <paramref name="afterDescriptor"/> is called after each descriptor's pages are fully
+    /// collected. Used by <c>Bucket_FanOut_IsParallelAndLeaderCoalesced</c> (gate-based concurrency
+    /// proof) and <c>Bucket_SplitMidScan_NoDupNoMissing</c> (mid-fan-out split injection).
+    /// </summary>
+    internal Task<KeyValueGetByBucketResult> LocateAndGetByBucketWithHooks(
+        HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability,
+        CancellationToken cancellationToken,
+        Func<int, Task>? beforeQuery, Func<int, Task>? afterDescriptor) =>
+        keyValues.LocateAndGetByBucketWithHooks(
+            transactionId, prefixedKey, durability, cancellationToken, beforeQuery, afterDescriptor);
+
+    /// <summary>
     /// Test seam: acquires a range lock with a callback invoked after the initial
     /// <c>FindIntersecting</c> snapshot but before any sub-lock RPC. Lets tests inject a split
     /// into that window to drive the generation fence deterministically.

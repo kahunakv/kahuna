@@ -15,6 +15,11 @@ namespace Kahuna.Server.Communication.Internode;
 /// </summary>
 public class MemoryInterNodeCommmunication : IInterNodeCommunication
 {
+    private int getByRangeCallCount;
+
+    /// <summary>Number of <c>GetByRange</c> RPCs dispatched to a remote node. Used by F5 fan-out tests.</summary>
+    public int GetByRangeCallCount => Volatile.Read(ref getByRangeCallCount);
+
     /// <summary>
     /// Stores the mapping of node names to their respective `IKahuna` instances.
     /// </summary>
@@ -926,6 +931,8 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
 
     public async Task<KeyValueGetByRangeResult> GetByRange(string node, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
     {
+        Interlocked.Increment(ref getByRangeCallCount);
+
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
             return await kahunaNode.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
 

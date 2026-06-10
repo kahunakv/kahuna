@@ -26,16 +26,22 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// </para>
 ///
 /// <para>
-/// <b>Quiesce scope and known lost-write window.</b> The exclusive range lock blocks concurrent
-/// 2PC commits on <c>[K,E)</c> during the catch-up window. Non-2PC (direct <c>TrySet</c>) writes
-/// are <b>not</b> blocked. A direct write that arrives on P <em>after</em> the catch-up export
-/// (step 7) but <em>before</em> the cutover commit (step 8) is correctly routed to P at write
-/// time (so the generation fence cannot reject it), commits on P, is absent from the catch-up
-/// snapshot, and after cutover routes to P' — where it never arrives. That write is silently
-/// lost. This is a real gap in the §5.5 "atomic or it doesn't happen" guarantee for non-2PC
-/// writes. <b>Deferred:</b> closing it requires a proposal-actor quiesce flag that parks direct
-/// writes to <c>[K,E)</c> during the catch-up window and replays them after import, similar to
-/// how the 2PC lock quiesces transactional writes. Tracked as a follow-up to Task 6.
+/// <b>Quiesce scope (F3).</b> The exclusive range lock blocks concurrent 2PC commits on
+/// <c>[K,E)</c> during the catch-up window. F3 adds a best-effort quiesce for direct
+/// (non-2PC) writes via <see cref="RangeQuiesceStore"/>: between the lock acquisition and its
+/// release, the locator pre-route check on the split-executor node returns <c>MustRetry</c> for
+/// any direct write that falls in <c>[K,E)</c>. The client retries after cutover and is then
+/// routed to P'.
+/// </para>
+///
+/// <para>
+/// <b>Remaining cross-node gap.</b> The quiesce check is performed in the locator on the node
+/// running the split. A direct write that arrives on a <em>different</em> node during the same
+/// window bypasses the check: it routes to P (generation fence passes), commits on P, is absent
+/// from the catch-up snapshot, and after cutover routes to P' — where it never arrives. That
+/// write is silently lost. Fully closing the window requires replicating the quiesce state to the
+/// data-partition proposal actor so the check can be enforced on every replica. <b>Deferred to
+/// Phase G</b> (partition-scoped storage).
 /// </para>
 ///
 /// <para>
@@ -73,6 +79,7 @@ internal sealed class RangeSplitter
     private readonly IRaft raft;
     private readonly RangeMapStore rangeMapStore;
     private readonly KvStateMachineTransfer transfer;
+    private readonly RangeQuiesceStore quiesceStore;
     private readonly KeyValuesManager manager;
     private readonly ILogger<IKahuna> logger;
 
@@ -80,12 +87,14 @@ internal sealed class RangeSplitter
         IRaft raft,
         RangeMapStore rangeMapStore,
         KvStateMachineTransfer transfer,
+        RangeQuiesceStore quiesceStore,
         KeyValuesManager manager,
         ILogger<IKahuna> logger)
     {
         this.raft = raft;
         this.rangeMapStore = rangeMapStore;
         this.transfer = transfer;
+        this.quiesceStore = quiesceStore;
         this.manager = manager;
         this.logger = logger;
     }
@@ -109,10 +118,24 @@ internal sealed class RangeSplitter
     /// <c>MutateAsync</c> to succeed.
     /// </para>
     /// </summary>
-    public async Task<SplitOutcome> SplitAsync(
+    public Task<SplitOutcome> SplitAsync(
         string keySpace,
         string splitKey,
         int newPartitionId,
+        CancellationToken ct = default) =>
+        SplitAsync(keySpace, splitKey, newPartitionId, null, ct);
+
+    /// <summary>
+    /// Internal overload for tests: <paramref name="duringQuiesce"/> is invoked between the
+    /// catch-up import and the cutover commit, while the range is quiesced. Used by
+    /// <c>Split_DirectWriteDuringQuiesce_MustRetry</c> (F3) to race a direct write into
+    /// the quiesce window.
+    /// </summary>
+    internal async Task<SplitOutcome> SplitAsync(
+        string keySpace,
+        string splitKey,
+        int newPartitionId,
+        Func<Task>? duringQuiesce,
         CancellationToken ct = default)
     {
         // ── 1. Locate the covering range R = [S,E)@P ────────────────────────────
@@ -186,6 +209,9 @@ internal sealed class RangeSplitter
             return SplitOutcome.QuiesceFailed;
         }
 
+        // F3: quiesce direct (non-2PC) writes to [K,E) for the duration of the split window.
+        quiesceStore.Quiesce(keySpace, splitKey, descriptor.EndKey);
+
         try
         {
             // ── 7. Final catch-up export: capture writes since snapshotTs ────────
@@ -195,6 +221,10 @@ internal sealed class RangeSplitter
                 keySpace, splitKey, descriptor.EndKey, catchupTs, KeyValueDurability.Persistent, ct);
 
             await transfer.ImportRangeAsync(catchupSnapshot, ct);
+
+            // F3 test seam: allow the caller to race a direct write while quiesced.
+            if (duringQuiesce is not null)
+                await duringQuiesce();
 
             // ── 8. Atomic cutover ────────────────────────────────────────────────
             // Replace R with [S,K)@P and [K,E)@P' — both get generation+1 to invalidate any
@@ -269,6 +299,9 @@ internal sealed class RangeSplitter
         }
         finally
         {
+            // F3: release the direct-write quiesce before releasing the range lock.
+            quiesceStore.Release(keySpace, splitKey, descriptor.EndKey);
+
             // ── 9. Release quiesce lock (fence now protects P' via gen+1) ────────
             await manager.LocateAndTryReleaseExclusiveRangeLock(
                 splitTxId,

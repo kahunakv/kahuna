@@ -64,6 +64,8 @@ internal sealed class KeyValuesManager
 
     private readonly RangeMapStore rangeMapStore;
 
+    private readonly RangeQuiesceStore rangeQuiesceStore = new();
+
     private readonly KvStateMachineTransfer kvStateMachineTransfer;
 
     private readonly KeySpaceRegistry keySpaceRegistry = new();
@@ -121,7 +123,7 @@ internal sealed class KeyValuesManager
         );
 
         txCoordinator = new(this, configuration, raft, logger);
-        locator = new(this, configuration, raft, interNodeCommunication, keySpaceRegistry, logger);
+        locator = new(this, configuration, raft, interNodeCommunication, keySpaceRegistry, rangeQuiesceStore, logger);
 
         restorer = new(backgroundWriter, raft, logger);
         replicator = new(backgroundWriter, raft, logger);
@@ -129,7 +131,7 @@ internal sealed class KeyValuesManager
 
         // RangeSplitter and RangeSplitTrigger both depend on this (KeyValuesManager) being fully
         // constructed, so we assign after all other fields are set.
-        rangeSplitter     = new(raft, rangeMapStore, kvStateMachineTransfer, this, logger);
+        rangeSplitter     = new(raft, rangeMapStore, kvStateMachineTransfer, rangeQuiesceStore, this, logger);
         rangeSplitTrigger = new(raft, rangeMapStore, rangeSplitter, this, configuration, logger);
         rangeMerger       = new(raft, rangeMapStore, kvStateMachineTransfer, this, logger);
         rangeMergeTrigger = new(raft, rangeMapStore, rangeMerger, configuration, logger);
@@ -740,6 +742,12 @@ internal sealed class KeyValuesManager
     {
         return locator.LocateAndGetByBucket(transactionId, prefixedKey, durability, cancellationToken);
     }
+
+    internal Task<KeyValueGetByBucketResult> LocateAndGetByBucketWithHooks(
+        HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability,
+        CancellationToken cancellationToken,
+        Func<int, Task>? beforeQuery, Func<int, Task>? afterDescriptor) =>
+        locator.LocateAndGetByBucket(transactionId, prefixedKey, durability, cancellationToken, beforeQuery, afterDescriptor);
 
     public Task<KeyValueGetByRangeResult> LocateAndGetByRange(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
     {

@@ -187,14 +187,32 @@ public abstract class BaseCluster
     {
         InMemoryCommunication raftCommunication = new();
         MemoryInterNodeCommmunication interNodeCommmunication = new();
-        
+
         (IRaft raft1, IKahuna kahuna1) = GetNode1(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger);
         (IRaft raft2, IKahuna kahuna2) = GetNode2(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger);
         (IRaft raft3, IKahuna kahuna3) = GetNode3(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger);
-        
+
         await WaitForClusterToAssemble(interNodeCommmunication, raftCommunication, partitions, raft1, raft2, raft3, kahuna1, kahuna2, kahuna3);
-        
+
         return (raft1, raft2, raft3, kahuna1, kahuna2, kahuna3);
+    }
+
+    /// <summary>
+    /// Variant that also returns the shared <see cref="MemoryInterNodeCommmunication"/> instance so
+    /// tests can inspect transport-level counters (e.g. <see cref="MemoryInterNodeCommmunication.GetByRangeCallCount"/>).
+    /// </summary>
+    protected static async Task<(IRaft, IRaft, IRaft, IKahuna, IKahuna, IKahuna, MemoryInterNodeCommmunication)> AssembleThreNodeClusterWithTransport(string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger)
+    {
+        InMemoryCommunication raftCommunication = new();
+        MemoryInterNodeCommmunication interNodeCommmunication = new();
+
+        (IRaft raft1, IKahuna kahuna1) = GetNode1(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger);
+        (IRaft raft2, IKahuna kahuna2) = GetNode2(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger);
+        (IRaft raft3, IKahuna kahuna3) = GetNode3(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger);
+
+        await WaitForClusterToAssemble(interNodeCommmunication, raftCommunication, partitions, raft1, raft2, raft3, kahuna1, kahuna2, kahuna3);
+
+        return (raft1, raft2, raft3, kahuna1, kahuna2, kahuna3, interNodeCommmunication);
     }
     
     private static async Task WaitForClusterToAssemble(

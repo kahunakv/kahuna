@@ -81,25 +81,57 @@ internal sealed class RangeMap
     /// <c>[StartKey, EndKey)</c> intersects <c>[<paramref name="startKey"/>,
     /// <paramref name="endKey"/>)</c>, in StartKey order.
     /// Null <paramref name="startKey"/> = −∞; null <paramref name="endKey"/> = +∞.
+    /// O(log n + k) where k is the number of matching descriptors: a binary search locates
+    /// the first candidate (rightmost descriptor with StartKey ≤ startKey), then a forward
+    /// scan stops as soon as D.StartKey ≥ endKey.
     /// </summary>
     public IReadOnlyList<RangeDescriptor> FindIntersecting(string keySpace, string? startKey, string? endKey)
     {
         if (!bySpace.TryGetValue(keySpace, out RangeDescriptor[]? ranges) || ranges.Length == 0)
             return Array.Empty<RangeDescriptor>();
 
-        var result = new List<RangeDescriptor>();
-        foreach (RangeDescriptor d in ranges)
+        // Binary-search for the rightmost descriptor with StartKey ≤ startKey.
+        // Descriptors before it have EndKey ≤ startKey (no-gap invariant) and cannot intersect.
+        int first = 0;
+        if (startKey is not null)
         {
-            // [D.Start, D.End) intersects [startKey, endKey) iff D.End > startKey && D.Start < endKey
-            bool endAfterQueryStart = d.EndKey is null                                      // D extends to +∞
-                                   || startKey is null                                       // query starts at -∞
+            int lo = 0, hi = ranges.Length - 1;
+            while (lo <= hi)
+            {
+                int mid = lo + ((hi - lo) >> 1);
+                if (StartLessOrEqual(ranges[mid].StartKey, startKey))
+                {
+                    first = mid;
+                    lo = mid + 1;
+                }
+                else
+                {
+                    hi = mid - 1;
+                }
+            }
+        }
+
+        var result = new List<RangeDescriptor>();
+        for (int i = first; i < ranges.Length; i++)
+        {
+            RangeDescriptor d = ranges[i];
+
+            // [D.Start, D.End) intersects [startKey, endKey) iff D.End > startKey && D.Start < endKey.
+            // D.End > startKey: guaranteed for i > first by the no-gap invariant (D.StartKey >
+            // startKey implies D.EndKey > D.StartKey > startKey); still checked for i == first.
+            bool endAfterQueryStart = d.EndKey is null
+                                   || startKey is null
                                    || string.CompareOrdinal(d.EndKey, startKey) > 0;
 
-            bool startBeforeQueryEnd = d.StartKey is null                                   // D starts at -∞
-                                    || endKey is null                                        // query extends to +∞
+            // D.Start < endKey: once false, all subsequent descriptors also fail (sorted order).
+            bool startBeforeQueryEnd = d.StartKey is null
+                                    || endKey is null
                                     || string.CompareOrdinal(d.StartKey, endKey) < 0;
 
-            if (endAfterQueryStart && startBeforeQueryEnd)
+            if (!startBeforeQueryEnd)
+                break;
+
+            if (endAfterQueryStart)
                 result.Add(d);
         }
         return result;

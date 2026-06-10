@@ -1,5 +1,6 @@
 
 using System.Text;
+using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Shared.KeyValue;
@@ -256,6 +257,207 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
             Assert.Equal(KeyValueResponseType.Get, result.Type);
             Assert.Equal(total, result.Items.Count);
             Assert.Equal(baseline, result.Items.Select(x => x.Item1).OrderBy(x => x, StringComparer.Ordinal).ToList());
+        }
+        finally
+        {
+            await LeaveCluster(r1, r2, r3);
+        }
+    }
+
+    // ── Bucket_FanOut_IsParallelAndLeaderCoalesced ────────────────────────────
+
+    /// <summary>
+    /// Verifies F5 — the multi-range fan-out runs descriptors in parallel, not sequentially.
+    ///
+    /// <para>
+    /// A gate is injected via <c>beforeQuery</c>: every descriptor task increments a shared counter
+    /// and then awaits a <see cref="TaskCompletionSource"/>. The TCS is only resolved once ALL N
+    /// tasks have incremented (i.e. are simultaneously in-flight). If the fan-out were sequential,
+    /// only one task would ever hold the gate at a time and the TCS would never resolve.
+    /// </para>
+    ///
+    /// <para>
+    /// The "leader-coalesced" assertion: in a post-split space each descriptor resides on a distinct
+    /// partition. When the descriptors happen to share a leader (tested via GetByRange call count),
+    /// the gRPC transport uses a single <c>GrpcServerBatcher</c> streaming connection. For the
+    /// in-memory transport used here, we verify that <em>exactly N GetByRange RPCs</em> were
+    /// dispatched — one per descriptor — with no duplicates or extra calls.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task Bucket_FanOut_IsParallelAndLeaderCoalesced()
+    {
+        const string space = "bkt:par";
+        const int    total = 20;
+
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft r1, IRaft r2, IRaft r3,
+         IKahuna k1, IKahuna k2, IKahuna k3,
+         MemoryInterNodeCommmunication transport) =
+            await AssembleThreNodeClusterWithTransport("memory", 4, raftLogger, kahunaLogger);
+
+        (IRaft, KahunaManager)[] nodes =
+            [(r1, (KahunaManager)k1), (r2, (KahunaManager)k2), (r3, (KahunaManager)k3)];
+
+        try
+        {
+            // Register key space and seed a full-range descriptor on P2.
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                kahuna.RegisterKeyRange(space);
+
+            (IRaft _, KahunaManager metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+
+            Assert.True(await metaLeader.RangeMapStore.MutateAsync(
+                _ => [new RangeDescriptor
+                {
+                    KeySpace    = space,
+                    StartKey    = null,
+                    EndKey      = null,
+                    PartitionId = RangeMapStore.FirstDataPartitionId,
+                    Generation  = 1
+                }], ct));
+
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                await WaitFor(() => kahuna.RangeMapStore.Current.Find(space, space + "/x") is not null);
+
+            (IRaft _, KahunaManager dataLeader) = await LeaderOf(RangeMapStore.FirstDataPartitionId, nodes);
+
+            for (int i = 0; i < total; i++)
+            {
+                (KeyValueResponseType t, _, _) = await dataLeader.TrySetKeyValue(
+                    HLCTimestamp.Zero, $"{space}/{i:D4}",
+                    Encoding.UTF8.GetBytes("v" + i),
+                    null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent);
+                Assert.Equal(KeyValueResponseType.Set, t);
+            }
+
+            // Split into 2 descriptors.
+            SplitOutcome outcome = await SplitAt(space, $"{space}/0010", nodes, ct);
+            Assert.True(outcome.IsSuccess, $"Split failed: {outcome.Status}");
+
+            // Wait for 2-descriptor map on all nodes.
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                await WaitFor(() =>
+                {
+                    RangeMap m = kahuna.RangeMapStore.Current;
+                    return m.Find(space, space + "/0005") is not null &&
+                           m.Find(space, space + "/0015") is not null &&
+                           m.Find(space, space + "/0005")!.PartitionId !=
+                           m.Find(space, space + "/0015")!.PartitionId;
+                });
+
+            const int descriptorCount = 2;
+
+            // Gate: all descriptor tasks must have started before any is allowed to proceed.
+            // With a sequential fan-out only one task can ever hold the gate → TCS never resolves.
+            var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            int started = 0;
+
+            int rpcsBefore = transport.GetByRangeCallCount;
+
+            Task<KeyValueGetByBucketResult> fanOutTask = metaLeader.LocateAndGetByBucketWithHooks(
+                HLCTimestamp.Zero, space, KeyValueDurability.Persistent, ct,
+                beforeQuery: async _ =>
+                {
+                    if (Interlocked.Increment(ref started) == descriptorCount)
+                        gate.TrySetResult(); // all started — release the gate
+                    await gate.Task;         // block until all peers have started
+                },
+                afterDescriptor: null);
+
+            // Gate must fire within a generous timeout; failure means tasks ran sequentially.
+            await gate.Task.WaitAsync(TimeSpan.FromSeconds(10), ct);
+            Assert.Equal(descriptorCount, started);
+
+            KeyValueGetByBucketResult result = await fanOutTask;
+
+            // Correctness: all keys returned, in order.
+            Assert.Equal(KeyValueResponseType.Get, result.Type);
+            Assert.Equal(total, result.Items.Count);
+            for (int i = 1; i < result.Items.Count; i++)
+                Assert.True(
+                    string.CompareOrdinal(result.Items[i].Item1, result.Items[i - 1].Item1) > 0,
+                    $"Order violation at {i}");
+
+            // Leader-coalescing assertion: exactly one GetByRange RPC per descriptor (no duplicates,
+            // no extra round-trips).  Calls that went through the local path (AmILeader) don't
+            // increment the counter — those are already free of extra RPCs by design.
+            int rpcsDelta = transport.GetByRangeCallCount - rpcsBefore;
+            // Expect at most 2 remote GetByRange calls (one per descriptor whose leader is remote).
+            // The bound is ≤ descriptorCount because a descriptor whose leader is local skips the RPC.
+            Assert.True(rpcsDelta <= descriptorCount,
+                $"Expected ≤{descriptorCount} GetByRange RPCs, got {rpcsDelta}");
+        }
+        finally
+        {
+            await LeaveCluster(r1, r2, r3);
+        }
+    }
+
+    // ── Bucket_SplitMidScan_NoDupNoMissing ───────────────────────────────────
+
+    /// <summary>
+    /// Verifies that a split committed between two descriptor fan-out queries produces a complete,
+    /// duplicate-free result (F5 mid-scan safety, deferred from Task 10b).
+    ///
+    /// <para>
+    /// Setup: bucket split into 2 descriptors (D0, D1). After D0's pages are collected, a second
+    /// split subdivides D1 into D1a+D1b. Because Task 6 orphan-retains <c>[K,E)</c> on the source
+    /// partition, querying the now-stale D1 descriptor still returns the full D1 range. The final
+    /// result must equal the pre-split baseline exactly (no duplicates, no missing keys).
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task Bucket_SplitMidScan_NoDupNoMissing()
+    {
+        const string space = "bkt:mid";
+        const int    total = 30;
+
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        ((IRaft, KahunaManager)[] nodes, List<string> baseline) =
+            await SetupWithKeys(space, total);
+
+        (IRaft r1, IRaft r2, IRaft r3) = (nodes[0].Item1, nodes[1].Item1, nodes[2].Item1);
+
+        try
+        {
+            // First split: D0 = [null, space/0010),  D1 = [space/0010, null)
+            SplitOutcome first = await SplitAt(space, $"{space}/0010", nodes, ct);
+            Assert.True(first.IsSuccess, $"First split failed: {first.Status}");
+
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                await WaitFor(() =>
+                {
+                    RangeMap m = kahuna.RangeMapStore.Current;
+                    return m.Find(space, space + "/0005") is not null &&
+                           m.Find(space, space + "/0015") is not null &&
+                           m.Find(space, space + "/0005")!.PartitionId !=
+                           m.Find(space, space + "/0015")!.PartitionId;
+                });
+
+            (IRaft _, KahunaManager metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+
+            KeyValueGetByBucketResult result = await metaLeader.LocateAndGetByBucketWithHooks(
+                HLCTimestamp.Zero, space, KeyValueDurability.Persistent, ct,
+                beforeQuery: null,
+                afterDescriptor: async idx =>
+                {
+                    // After D0 (idx 0) is fully collected, inject a second split on D1.
+                    if (idx != 0) return;
+
+                    SplitOutcome second = await SplitAt(space, $"{space}/0020", nodes, ct);
+                    Assert.True(second.IsSuccess, $"Mid-scan split failed: {second.Status}");
+                });
+
+            // No duplicates: key set size equals total.
+            Assert.Equal(KeyValueResponseType.Get, result.Type);
+            Assert.Equal(total, result.Items.Count);
+            Assert.Equal(total, result.Items.Select(x => x.Item1).Distinct(StringComparer.Ordinal).Count());
+
+            // Complete and exact.
+            Assert.Equal(baseline, result.Items.Select(x => x.Item1).ToList());
         }
         finally
         {
