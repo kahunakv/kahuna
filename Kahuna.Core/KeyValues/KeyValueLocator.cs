@@ -659,8 +659,11 @@ internal sealed class KeyValueLocator
 
         if (!RangeRouting.IsPrefixOpSafe(keySpaceRegistry, manager.RangeMapStore.Current, prefixKey))
         {
-            logger.LogWarning("ACQUIRE-PREFIX-LOCK: prefix {Prefix} spans a split key-range space — multi-range prefix-lock not yet supported (Task 11)", prefixKey);
-            return KeyValueResponseType.Errored;
+            // Deprecated by design: a prefix lock is a single-partition bucket lock and cannot cover
+            // a key space that has been key-range split across partitions. Callers must use the
+            // per-range exclusive range lock instead (TryAcquireExclusiveRangeLock, design §8).
+            logger.LogWarning("ACQUIRE-PREFIX-LOCK: prefix {Prefix} is on a key-range-split space — prefix locks are unsupported there; use a range lock", prefixKey);
+            return KeyValueResponseType.PrefixLockUnsupportedOnRangedSpace;
         }
 
         int partitionId = RoutePrefixKey(prefixKey);
@@ -797,8 +800,11 @@ internal sealed class KeyValueLocator
 
         if (!RangeRouting.IsPrefixOpSafe(keySpaceRegistry, manager.RangeMapStore.Current, prefixKey))
         {
-            logger.LogWarning("RELEASE-PREFIX-LOCK: prefix {Prefix} spans a split key-range space — multi-range prefix-lock not yet supported (Task 11)", prefixKey);
-            return KeyValueResponseType.Errored;
+            // Deprecated by design (see acquire): prefix locks are unsupported on key-range-split
+            // spaces. A release on such a space can only be a caller error — there is no prefix lock
+            // to release — so surface the typed response rather than a generic error.
+            logger.LogWarning("RELEASE-PREFIX-LOCK: prefix {Prefix} is on a key-range-split space — prefix locks are unsupported there; use a range lock", prefixKey);
+            return KeyValueResponseType.PrefixLockUnsupportedOnRangedSpace;
         }
 
         int partitionId = RoutePrefixKey(prefixKey);
@@ -828,24 +834,118 @@ internal sealed class KeyValueLocator
         if (string.IsNullOrEmpty(prefix))
             return KeyValueResponseType.InvalidInput;
 
-        if (!RangeRouting.IsPrefixOpSafe(keySpaceRegistry, manager.RangeMapStore.Current, prefix))
+        IReadOnlyList<RangeDescriptor> descriptors =
+            manager.RangeMapStore.Current.FindIntersecting(prefix, startKey, endKey);
+
+        if (descriptors.Count == 0)
         {
-            logger.LogWarning("ACQUIRE-RANGE-LOCK: prefix {Prefix} spans a split key-range space — multi-range range-lock not yet supported (Task 11)", prefix);
-            return KeyValueResponseType.Errored;
+            // Hash-space or range space with no descriptors yet: single-partition path.
+            // Hash spaces never split, so no generation fence is needed.
+            int hashPartitionId = RoutePrefixKey(prefix);
+            return await AcquireRangeLockOnPartition(transactionId, hashPartitionId, prefix,
+                startKey, startInclusive, endKey, endInclusive, expiresMs, durability, cancellationToken);
         }
 
-        int partitionId = RoutePrefixKey(prefix);
+        if (descriptors.Count == 1)
+        {
+            KeyValueResponseType result = await AcquireRangeLockOnPartition(
+                transactionId, descriptors[0].PartitionId, prefix,
+                startKey, startInclusive, endKey, endInclusive, expiresMs, durability, cancellationToken);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
-            return await manager.TryAcquireExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability);
+            if (result != KeyValueResponseType.Locked)
+                return result;
 
-        string leader = await raft.WaitForLeader(partitionId, cancellationToken);
-        if (leader == raft.GetLocalEndpoint())
+            // Generation fence: a split that committed after FindIntersecting but before the
+            // sub-lock RPC would leave P' un-locked. Re-check the map; if the descriptor set
+            // changed, roll back and signal the caller to re-resolve.
+            if (!DescriptorSetStable(descriptors, manager.RangeMapStore.Current.FindIntersecting(prefix, startKey, endKey)))
+            {
+                KeyValueResponseType rel = await ReleaseRangeLockOnPartition(transactionId, descriptors[0].PartitionId, prefix,
+                    startKey, startInclusive, endKey, endInclusive, durability, cancellationToken);
+
+                if (rel != KeyValueResponseType.Unlocked)
+                    logger.LogWarning("ACQUIRE-RANGE-LOCK {Prefix} P{Pid}: fence rollback release returned {Status} — sub-lock leaks until TTL",
+                        prefix, descriptors[0].PartitionId, rel);
+
+                return KeyValueResponseType.MustRetry;
+            }
+
+            return KeyValueResponseType.Locked;
+        }
+
+        // Multi-descriptor: per-range sub-locks with roll-back on partial failure.
+        var acquired = new List<(int PartitionId, string? ClampStart, bool ClampStartIncl, string? ClampEnd, bool ClampEndIncl)>(descriptors.Count);
+
+        foreach (RangeDescriptor desc in descriptors)
+        {
+            (string? cs, bool csI, string? ce, bool ceI) = ClipRange(
+                startKey, startInclusive, endKey, endInclusive, desc);
+
+            KeyValueResponseType result = await AcquireRangeLockOnPartition(
+                transactionId, desc.PartitionId, prefix, cs, csI, ce, ceI, expiresMs, durability, cancellationToken);
+
+            if (result == KeyValueResponseType.Locked)
+            {
+                acquired.Add((desc.PartitionId, cs, csI, ce, ceI));
+                continue;
+            }
+
+            foreach ((int pid, string? rcs, bool rcsi, string? rce, bool rcei) in acquired)
+            {
+                KeyValueResponseType rel = await ReleaseRangeLockOnPartition(
+                    transactionId, pid, prefix, rcs, rcsi, rce, rcei, durability, cancellationToken);
+
+                if (rel != KeyValueResponseType.Unlocked)
+                    logger.LogWarning("ACQUIRE-RANGE-LOCK {Prefix} P{Pid}: partial-acquire rollback release returned {Status} — sub-lock leaks until TTL",
+                        prefix, pid, rel);
+            }
+
+            return result;
+        }
+
+        // Generation fence: re-check after all sub-locks are held. If the map changed
+        // (split committed in the acquire window), roll everything back and MustRetry.
+        if (!DescriptorSetStable(descriptors, manager.RangeMapStore.Current.FindIntersecting(prefix, startKey, endKey)))
+        {
+            logger.LogDebug("ACQUIRE-RANGE-LOCK {Prefix}: descriptor set changed during acquisition — MustRetry", prefix);
+
+            foreach ((int pid, string? rcs, bool rcsi, string? rce, bool rcei) in acquired)
+            {
+                KeyValueResponseType rel = await ReleaseRangeLockOnPartition(
+                    transactionId, pid, prefix, rcs, rcsi, rce, rcei, durability, cancellationToken);
+
+                if (rel != KeyValueResponseType.Unlocked)
+                    logger.LogWarning("ACQUIRE-RANGE-LOCK {Prefix} P{Pid}: fence rollback release returned {Status} — sub-lock leaks until TTL",
+                        prefix, pid, rel);
+            }
+
             return KeyValueResponseType.MustRetry;
+        }
 
-        logger.LogDebug("ACQUIRE-RANGE-LOCK-KEYVALUE Redirect {Prefix} to leader partition {Partition} at {Leader}", prefix, partitionId, leader);
+        return KeyValueResponseType.Locked;
+    }
 
-        return await interNodeCommunication.TryAcquireExclusiveRangeLock(leader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, cancellationToken);
+    /// <summary>
+    /// Returns true when both snapshots cover the same descriptors in the same order with the
+    /// same generations. Used as the acquire-time generation fence: if false, a split committed
+    /// in the window between <c>FindIntersecting</c> and the sub-lock RPCs, and the caller must
+    /// roll back acquired sub-locks and retry.
+    /// </summary>
+    private static bool DescriptorSetStable(
+        IReadOnlyList<RangeDescriptor> before,
+        IReadOnlyList<RangeDescriptor> after)
+    {
+        if (before.Count != after.Count)
+            return false;
+
+        for (int i = 0; i < before.Count; i++)
+        {
+            if (before[i].PartitionId != after[i].PartitionId ||
+                before[i].Generation  != after[i].Generation)
+                return false;
+        }
+
+        return true;
     }
 
     public async Task<KeyValueResponseType> LocateAndTryReleaseExclusiveRangeLock(
@@ -860,14 +960,78 @@ internal sealed class KeyValueLocator
         if (string.IsNullOrEmpty(prefix))
             return KeyValueResponseType.InvalidInput;
 
-        if (!RangeRouting.IsPrefixOpSafe(keySpaceRegistry, manager.RangeMapStore.Current, prefix))
+        IReadOnlyList<RangeDescriptor> descriptors =
+            manager.RangeMapStore.Current.FindIntersecting(prefix, startKey, endKey);
+
+        if (descriptors.Count == 0)
         {
-            logger.LogWarning("RELEASE-RANGE-LOCK: prefix {Prefix} spans a split key-range space — multi-range range-lock not yet supported (Task 11)", prefix);
-            return KeyValueResponseType.Errored;
+            int hashPartitionId = RoutePrefixKey(prefix);
+            return await ReleaseRangeLockOnPartition(transactionId, hashPartitionId, prefix,
+                startKey, startInclusive, endKey, endInclusive, durability, cancellationToken);
         }
 
-        int partitionId = RoutePrefixKey(prefix);
+        if (descriptors.Count == 1)
+        {
+            return await ReleaseRangeLockOnPartition(transactionId, descriptors[0].PartitionId, prefix,
+                startKey, startInclusive, endKey, endInclusive, durability, cancellationToken);
+        }
 
+        // Release all sub-locks even if one fails (best-effort). Return Unlocked only when
+        // every descriptor released successfully; return the first non-Unlocked result otherwise
+        // so the caller knows at least one sub-lock was not cleaned up.
+        KeyValueResponseType firstFailure = KeyValueResponseType.Unlocked;
+        foreach (RangeDescriptor desc in descriptors)
+        {
+            (string? cs, bool csI, string? ce, bool ceI) = ClipRange(
+                startKey, startInclusive, endKey, endInclusive, desc);
+
+            KeyValueResponseType rel = await ReleaseRangeLockOnPartition(
+                transactionId, desc.PartitionId, prefix, cs, csI, ce, ceI, durability, cancellationToken);
+
+            if (rel != KeyValueResponseType.Unlocked)
+            {
+                logger.LogWarning("RELEASE-RANGE-LOCK {Prefix} P{Pid}: release returned {Status} — sub-lock leaks until TTL",
+                    prefix, desc.PartitionId, rel);
+
+                if (firstFailure == KeyValueResponseType.Unlocked)
+                    firstFailure = rel;
+            }
+        }
+
+        return firstFailure;
+    }
+
+    private async Task<KeyValueResponseType> AcquireRangeLockOnPartition(
+        HLCTimestamp transactionId,
+        int partitionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken)
+    {
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+            return await manager.TryAcquireExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability);
+
+        string leader = await raft.WaitForLeader(partitionId, cancellationToken);
+        if (leader == raft.GetLocalEndpoint())
+            return KeyValueResponseType.MustRetry;
+
+        logger.LogDebug("ACQUIRE-RANGE-LOCK-KEYVALUE Redirect {Prefix} P{Partition} → {Leader}", prefix, partitionId, leader);
+
+        return await interNodeCommunication.TryAcquireExclusiveRangeLock(leader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, cancellationToken);
+    }
+
+    private async Task<KeyValueResponseType> ReleaseRangeLockOnPartition(
+        HLCTimestamp transactionId,
+        int partitionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken)
+    {
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability);
 
@@ -875,7 +1039,7 @@ internal sealed class KeyValueLocator
         if (leader == raft.GetLocalEndpoint())
             return KeyValueResponseType.MustRetry;
 
-        logger.LogDebug("RELEASE-RANGE-LOCK-KEYVALUE Redirect {Prefix} to leader partition {Partition} at {Leader}", prefix, partitionId, leader);
+        logger.LogDebug("RELEASE-RANGE-LOCK-KEYVALUE Redirect {Prefix} P{Partition} → {Leader}", prefix, partitionId, leader);
 
         return await interNodeCommunication.TryReleaseExclusiveRangeLock(leader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken);
     }

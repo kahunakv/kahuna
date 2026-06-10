@@ -1,7 +1,11 @@
 using System.Text;
+using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Locks;
 using Kahuna.Server.Locks.Data;
+using Kahuna.Shared.KeyValue;
 using Kommander;
+using Kommander.Time;
 using Kahuna.Shared.Locks;
 using Microsoft.Extensions.Logging;
 
@@ -281,5 +285,229 @@ public class TestLocks : BaseCluster
         await node1.LeaveCluster(true);
         await node2.LeaveCluster(true);
         await node3.LeaveCluster(true);
+    }
+
+    // ── Per-range lock tests (Task 11) ───────────────────────────────────────────
+
+    private const string RlSpace = "t:rl";
+    private const string RlSplit = RlSpace + "/m";
+
+    private static async Task<(IRaft Raft, KahunaManager Kahuna)> RlLeaderOf(
+        int partition, (IRaft, KahunaManager)[] nodes)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        while (true)
+        {
+            foreach ((IRaft raft, KahunaManager kahuna) in nodes)
+                if (await raft.AmILeader(partition, ct))
+                    return (raft, kahuna);
+            await Task.Delay(50, ct);
+        }
+    }
+
+    private static async Task RlWaitUntil(Func<bool> predicate, int timeoutMs = 8000)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        long deadline = Environment.TickCount64 + timeoutMs;
+        while (Environment.TickCount64 < deadline)
+        {
+            if (predicate()) return;
+            await Task.Delay(25, ct);
+        }
+        Assert.Fail("Timed out waiting for condition.");
+    }
+
+    /// <summary>
+    /// 4-partition cluster with <see cref="RlSpace"/> seeded with two adjacent descriptors:
+    /// <c>[−∞, t:rl/m)@P2</c> and <c>[t:rl/m, +∞)@P3</c>.
+    /// Uses direct <c>MutateAsync</c> (same pattern as <see cref="TestRangeMerge"/>) —
+    /// P2 and P3 already exist in a 4-partition cluster so no <c>CreatePartitionAsync</c> needed.
+    /// </summary>
+    private async Task<(IRaft, KahunaManager)[]> SetupSplitKeyspace()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft r1, IRaft r2, IRaft r3, IKahuna k1, IKahuna k2, IKahuna k3) =
+            await AssembleThreNodeCluster("memory", 4, raftLogger, kahunaLogger);
+
+        (IRaft, KahunaManager)[] nodes =
+            [(r1, (KahunaManager)k1), (r2, (KahunaManager)k2), (r3, (KahunaManager)k3)];
+
+        foreach ((IRaft _, KahunaManager kahuna) in nodes)
+            kahuna.RegisterKeyRange(RlSpace);
+
+        const int leftPid  = RangeMapStore.FirstDataPartitionId;     // P2
+        const int rightPid = RangeMapStore.FirstDataPartitionId + 1; // P3
+
+        (IRaft _, KahunaManager metaLeader) = await RlLeaderOf(RangeMapStore.MetaPartitionId, nodes);
+        bool seeded = await metaLeader.RangeMapStore.MutateAsync(_ => [
+            new RangeDescriptor { KeySpace = RlSpace, StartKey = null,    EndKey = RlSplit, PartitionId = leftPid,  Generation = 1 },
+            new RangeDescriptor { KeySpace = RlSpace, StartKey = RlSplit, EndKey = null,    PartitionId = rightPid, Generation = 1 }
+        ], ct);
+        Assert.True(seeded);
+
+        foreach ((IRaft _, KahunaManager kahuna) in nodes)
+            await RlWaitUntil(() => kahuna.RangeMapStore.Current.FindAll(RlSpace).Count == 2);
+
+        return nodes;
+    }
+
+    /// <summary>
+    /// Core payoff: holding an exclusive lock on <c>[−∞, t:rl/m)</c> (left half) must NOT block
+    /// a concurrent write to the right half <c>[t:rl/m, +∞)</c>.
+    /// </summary>
+    [Fact]
+    public async Task RangeLock_DisjointRange_NotBlocked()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (IRaft, KahunaManager)[] nodes = await SetupSplitKeyspace();
+        try
+        {
+            IKahuna node = nodes[0].Item2;
+
+            HLCTimestamp tx1 = nodes[0].Item1.HybridLogicalClock.TrySendOrLocalEvent(nodes[0].Item1.GetLocalNodeId());
+
+            // Acquire exclusive range lock on the LEFT half [−∞, t:rl/m) for TX1.
+            KeyValueResponseType lockResult = await node.LocateAndTryAcquireExclusiveRangeLock(
+                tx1, RlSpace, null, true, RlSplit, false, 30_000, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Locked, lockResult);
+
+            // A DIFFERENT transaction writes to the RIGHT half — must succeed.
+            HLCTimestamp tx2 = nodes[0].Item1.HybridLogicalClock.TrySendOrLocalEvent(nodes[0].Item1.GetLocalNodeId());
+            (KeyValueResponseType writeResult, _, _) = await node.LocateAndTrySetKeyValue(
+                tx2, RlSpace + "/z", Encoding.UTF8.GetBytes("v"), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+
+            Assert.Equal(KeyValueResponseType.Set, writeResult);
+        }
+        finally
+        {
+            foreach ((IRaft raft, KahunaManager _) in nodes)
+                await raft.LeaveCluster(true);
+        }
+    }
+
+    /// <summary>
+    /// Safety: a conflicting range lock on the SAME range by a different transaction must be
+    /// rejected (no over-narrowing of the lock scope).
+    /// </summary>
+    [Fact]
+    public async Task RangeLock_SameRange_StillContends()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (IRaft, KahunaManager)[] nodes = await SetupSplitKeyspace();
+        try
+        {
+            IKahuna node = nodes[0].Item2;
+
+            HLCTimestamp tx1 = nodes[0].Item1.HybridLogicalClock.TrySendOrLocalEvent(nodes[0].Item1.GetLocalNodeId());
+            HLCTimestamp tx2 = nodes[0].Item1.HybridLogicalClock.TrySendOrLocalEvent(nodes[0].Item1.GetLocalNodeId());
+
+            KeyValueResponseType first = await node.LocateAndTryAcquireExclusiveRangeLock(
+                tx1, RlSpace, null, true, RlSplit, false, 30_000, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Locked, first);
+
+            // TX2 tries the same range — must be blocked.
+            KeyValueResponseType second = await node.LocateAndTryAcquireExclusiveRangeLock(
+                tx2, RlSpace, null, true, RlSplit, false, 30_000, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.AlreadyLocked, second);
+        }
+        finally
+        {
+            foreach ((IRaft raft, KahunaManager _) in nodes)
+                await raft.LeaveCluster(true);
+        }
+    }
+
+    /// <summary>
+    /// A full-range lock <c>[−∞, +∞)</c> spanning both descriptors acquires sub-locks on each
+    /// partition; writes to BOTH halves are blocked, and both are unblocked after the lock is released.
+    /// </summary>
+    [Fact]
+    public async Task RangeLock_ScopedToTouchedRanges()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (IRaft, KahunaManager)[] nodes = await SetupSplitKeyspace();
+        try
+        {
+            IKahuna node = nodes[0].Item2;
+
+            HLCTimestamp tx1 = nodes[0].Item1.HybridLogicalClock.TrySendOrLocalEvent(nodes[0].Item1.GetLocalNodeId());
+
+            // Full-range lock spans both descriptors.
+            KeyValueResponseType locked = await node.LocateAndTryAcquireExclusiveRangeLock(
+                tx1, RlSpace, null, true, null, false, 30_000, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Locked, locked);
+
+            // Writes from another transaction to BOTH halves must be blocked.
+            HLCTimestamp tx2 = nodes[0].Item1.HybridLogicalClock.TrySendOrLocalEvent(nodes[0].Item1.GetLocalNodeId());
+
+            (KeyValueResponseType leftWrite, _, _) = await node.LocateAndTrySetKeyValue(
+                tx2, RlSpace + "/a", Encoding.UTF8.GetBytes("v"), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.MustRetry, leftWrite);
+
+            (KeyValueResponseType rightWrite, _, _) = await node.LocateAndTrySetKeyValue(
+                tx2, RlSpace + "/z", Encoding.UTF8.GetBytes("v"), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.MustRetry, rightWrite);
+
+            // Release the full-range lock.
+            KeyValueResponseType released = await node.LocateAndTryReleaseExclusiveRangeLock(
+                tx1, RlSpace, null, true, null, false, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Unlocked, released);
+
+            // After release, both halves must be writable again.
+            (KeyValueResponseType leftAfter, _, _) = await node.LocateAndTrySetKeyValue(
+                tx2, RlSpace + "/a", Encoding.UTF8.GetBytes("v"), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, leftAfter);
+
+            (KeyValueResponseType rightAfter, _, _) = await node.LocateAndTrySetKeyValue(
+                tx2, RlSpace + "/z", Encoding.UTF8.GetBytes("v"), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, rightAfter);
+        }
+        finally
+        {
+            foreach ((IRaft raft, KahunaManager _) in nodes)
+                await raft.LeaveCluster(true);
+        }
+    }
+
+    /// <summary>
+    /// Deprecation (F4): the legacy exclusive <b>prefix</b> lock is unsupported on a key-range-split
+    /// space and must return the typed <see cref="KeyValueResponseType.PrefixLockUnsupportedOnRangedSpace"/>
+    /// — not a generic <c>Errored</c> — so callers migrate to the range lock deliberately. Both
+    /// acquire and release surface the typed response.
+    /// </summary>
+    [Fact]
+    public async Task PrefixLock_OnSplitSpace_ReturnsTypedUnsupported()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (IRaft, KahunaManager)[] nodes = await SetupSplitKeyspace();
+        try
+        {
+            IKahuna node = nodes[0].Item2;
+            HLCTimestamp tx = nodes[0].Item1.HybridLogicalClock.TrySendOrLocalEvent(nodes[0].Item1.GetLocalNodeId());
+
+            KeyValueResponseType acquire = await node.LocateAndTryAcquireExclusivePrefixLock(
+                tx, RlSpace, 30_000, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.PrefixLockUnsupportedOnRangedSpace, acquire);
+
+            KeyValueResponseType release = await node.LocateAndTryReleaseExclusivePrefixLock(
+                tx, RlSpace, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.PrefixLockUnsupportedOnRangedSpace, release);
+
+            // The range lock IS supported on the same space (the designed replacement).
+            KeyValueResponseType rangeLock = await node.LocateAndTryAcquireExclusiveRangeLock(
+                tx, RlSpace, null, true, null, false, 30_000, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Locked, rangeLock);
+        }
+        finally
+        {
+            foreach ((IRaft raft, KahunaManager _) in nodes)
+                await raft.LeaveCluster(true);
+        }
     }
 }

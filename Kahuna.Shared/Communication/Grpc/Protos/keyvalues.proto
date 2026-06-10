@@ -952,6 +952,7 @@ enum GrpcKeyValueResponseType {
   TYPE_ABORTED = 102;
   TYPE_DOES_NOT_EXIST = 103;
   TYPE_ALREADY_LOCKED = 104;
+  TYPE_PREFIX_LOCK_UNSUPPORTED_ON_RANGED_SPACE = 105;
 }
 
 enum GrpcKeyValueDurability {
