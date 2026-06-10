@@ -1179,6 +1179,21 @@ public sealed class KahunaManager : IKahuna, IDisposable
     internal RangeSplitter RangeSplitter => keyValues.RangeSplitter;
 
     /// <summary>
+    /// Checks every KeyRange descriptor and splits any that exceed the configured size threshold.
+    /// Returns the number of splits performed. Only executes on the node that holds leadership
+    /// of both the system partition (0) and meta partition (1).
+    /// </summary>
+    public Task<int> TriggerAutoSplitAsync(CancellationToken ct = default) =>
+        keyValues.TriggerAutoSplitAsync(ct);
+
+    /// <summary>
+    /// Test-seam overload: runs the auto-split trigger with an explicit <paramref name="threshold"/>
+    /// and <paramref name="minRangeSize"/> instead of the production config values.
+    /// </summary>
+    internal Task<int> TriggerAutoSplitAsync(int threshold, int minRangeSize, CancellationToken ct = default) =>
+        keyValues.TriggerAutoSplitAsync(threshold, minRangeSize, ct);
+
+    /// <summary>
     /// Issues a persistent key-range write on the <b>local</b> node carrying an explicit routed
     /// generation (Task 4 fence). Must be called on the descriptor partition's leader. Lets tests
     /// inject a stale generation; production routes through the locator which captures the live one.

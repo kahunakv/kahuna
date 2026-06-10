@@ -70,6 +70,8 @@ internal sealed class KeyValuesManager
 
     private RangeSplitter? rangeSplitter;
 
+    private RangeSplitTrigger? rangeSplitTrigger;
+
     /// <summary>
     /// Constructor
     /// </summary>
@@ -121,9 +123,10 @@ internal sealed class KeyValuesManager
         replicator = new(backgroundWriter, raft, logger);
         kvStateMachineTransfer = new(this, persistenceBackend, logger);
 
-        // RangeSplitter depends on this (KeyValuesManager) being fully constructed, so we assign
-        // after all other fields are set.
-        rangeSplitter = new(raft, rangeMapStore, kvStateMachineTransfer, this, logger);
+        // RangeSplitter and RangeSplitTrigger both depend on this (KeyValuesManager) being fully
+        // constructed, so we assign after all other fields are set.
+        rangeSplitter      = new(raft, rangeMapStore, kvStateMachineTransfer, this, logger);
+        rangeSplitTrigger  = new(raft, rangeMapStore, rangeSplitter, this, configuration, logger);
     }
 
     /// <summary>
@@ -152,6 +155,28 @@ internal sealed class KeyValuesManager
 
     /// <summary>The split-transaction executor (Task 6). Splits a key range at a given split key.</summary>
     internal RangeSplitter RangeSplitter => rangeSplitter!;
+
+    /// <summary>
+    /// Checks every KeyRange descriptor and splits any that exceed the configured threshold.
+    /// Delegates to <see cref="RangeSplitTrigger.TriggerAsync"/>; returns the number of splits performed.
+    /// </summary>
+    internal Task<int> TriggerAutoSplitAsync(CancellationToken ct = default) =>
+        rangeSplitTrigger!.TriggerAsync(ct);
+
+    /// <summary>
+    /// Test-seam overload: runs the auto-split trigger with an explicit <paramref name="threshold"/>
+    /// and <paramref name="minRangeSize"/> instead of the configured values.
+    /// </summary>
+    internal Task<int> TriggerAutoSplitAsync(int threshold, int minRangeSize, CancellationToken ct = default)
+    {
+        var cfg = new Configuration.KahunaConfiguration
+        {
+            RangeSplitThreshold    = threshold,
+            RangeSplitMinRangeSize = minRangeSize
+        };
+        var trigger = new RangeSplitTrigger(raft, rangeMapStore, rangeSplitter!, this, cfg, logger);
+        return trigger.TriggerAsync(ct);
+    }
 
     private IActorRef<BalancingActor<KeyValueProposalActor, KeyValueProposalRequest>, KeyValueProposalRequest> GetProposalRouter(
         KahunaConfiguration configuration

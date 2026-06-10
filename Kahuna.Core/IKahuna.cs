@@ -180,4 +180,11 @@ public interface IKahuna
     /// it is not replicated). Idempotent.
     /// </summary>
     public void RegisterKeyRange(string keySpace);
+
+    /// <summary>
+    /// Checks every KeyRange descriptor and splits any that exceed the configured size threshold.
+    /// Returns the number of splits performed. Only executes on the node holding leadership of
+    /// both the system partition (0) and meta partition (1); returns 0 on other nodes.
+    /// </summary>
+    public Task<int> TriggerAutoSplitAsync(CancellationToken ct = default);
 }

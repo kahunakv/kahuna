@@ -81,4 +81,16 @@ public sealed class KahunaConfiguration
     /// Queue keys touched by writes for targeted persistent revision cleanup.
     /// </summary>
     public bool PersistentRevisionCleanupOnWrite { get; set; } = true;
+
+    /// <summary>
+    /// Number of keys a KeyRange descriptor must contain before the auto-split trigger
+    /// considers splitting it. 0 disables auto-split.
+    /// </summary>
+    public int RangeSplitThreshold { get; set; } = 1_000;
+
+    /// <summary>
+    /// Minimum number of keys each half must have after a range split.
+    /// Prevents trivially small child ranges.
+    /// </summary>
+    public int RangeSplitMinRangeSize { get; set; } = 10;
 }
