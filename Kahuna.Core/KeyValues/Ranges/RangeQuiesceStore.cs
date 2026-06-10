@@ -21,7 +21,7 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// </summary>
 internal sealed class RangeQuiesceStore
 {
-    private volatile int count;
+    private int count;
     private readonly List<(string KeySpace, string? StartKey, string? EndKey)> active = [];
     private readonly Lock sync = new();
 

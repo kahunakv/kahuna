@@ -93,6 +93,8 @@ public sealed class KahunaManager : IKahuna, IDisposable
     {
         GC.SuppressFinalize(this);
 
+        keyValues.Dispose();
+
         if (persistenceBackend is IDisposable disposable)
             disposable.Dispose();
     }
@@ -1248,10 +1250,10 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// </summary>
     internal Task<KeyValueGetByBucketResult> LocateAndGetByBucketWithHooks(
         HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability,
-        CancellationToken cancellationToken,
-        Func<int, Task>? beforeQuery, Func<int, Task>? afterDescriptor) =>
+        Func<int, Task>? beforeQuery, Func<int, Task>? afterDescriptor,
+        CancellationToken cancellationToken) =>
         keyValues.LocateAndGetByBucketWithHooks(
-            transactionId, prefixedKey, durability, cancellationToken, beforeQuery, afterDescriptor);
+            transactionId, prefixedKey, durability, beforeQuery, afterDescriptor, cancellationToken);
 
     /// <summary>
     /// Test seam: acquires a range lock with a callback invoked after the initial
@@ -1265,9 +1267,9 @@ public sealed class KahunaManager : IKahuna, IDisposable
         string? endKey,   bool endInclusive,
         int expiresMs,
         KeyValueDurability durability,
-        CancellationToken cancellationToken,
-        Func<Task> afterSnapshot
+        Func<Task> afterSnapshot,
+        CancellationToken cancellationToken
     ) => keyValues.LocateAndTryAcquireExclusiveRangeLockWithHook(
             transactionId, prefix, startKey, startInclusive, endKey, endInclusive,
-            expiresMs, durability, cancellationToken, afterSnapshot);
+            expiresMs, durability, afterSnapshot, cancellationToken);
 }

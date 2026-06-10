@@ -31,7 +31,7 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// latest map and re-applying the same entry is idempotent.
 /// </para>
 /// </summary>
-internal sealed class RangeMapStore
+internal sealed class RangeMapStore : IDisposable
 {
     /// <summary>
     /// The well-known Kahuna partition that hosts the range-descriptor map. Always exists
@@ -346,5 +346,10 @@ internal sealed class RangeMapStore
                 Generation = descriptorMessage.Generation
             };
         }
+    }
+
+    public void Dispose()
+    {
+        mutateGate.Dispose();
     }
 }

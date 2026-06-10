@@ -26,7 +26,7 @@ namespace Kahuna.Server.KeyValues;
 /// and durability. This class interacts with various components such as Raft for consensus,
 /// persistence backends, and inter-node communication in a distributed environment.
 /// </summary>
-internal sealed class KeyValuesManager
+internal sealed class KeyValuesManager : IDisposable
 {
     private const int MaxRetries = 3;
     
@@ -605,11 +605,11 @@ internal sealed class KeyValuesManager
         string? endKey,   bool endInclusive,
         int expiresMs,
         KeyValueDurability durability,
-        CancellationToken cancellationToken,
-        Func<Task> afterSnapshot
+        Func<Task> afterSnapshot,
+        CancellationToken cancellationToken
     )
     {
-        return locator.LocateAndTryAcquireExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, cancellationToken, afterSnapshot);
+        return locator.LocateAndTryAcquireExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, afterSnapshot, cancellationToken);
     }
 
     public Task<KeyValueResponseType> LocateAndTryReleaseExclusiveRangeLock(
@@ -745,9 +745,9 @@ internal sealed class KeyValuesManager
 
     internal Task<KeyValueGetByBucketResult> LocateAndGetByBucketWithHooks(
         HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability,
-        CancellationToken cancellationToken,
-        Func<int, Task>? beforeQuery, Func<int, Task>? afterDescriptor) =>
-        locator.LocateAndGetByBucket(transactionId, prefixedKey, durability, cancellationToken, beforeQuery, afterDescriptor);
+        Func<int, Task>? beforeQuery, Func<int, Task>? afterDescriptor,
+        CancellationToken cancellationToken) =>
+        locator.LocateAndGetByBucket(transactionId, prefixedKey, durability, beforeQuery, afterDescriptor, cancellationToken);
 
     public Task<KeyValueGetByRangeResult> LocateAndGetByRange(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
     {
@@ -2587,4 +2587,6 @@ internal sealed class KeyValuesManager
 
         await Task.WhenAll(tasks);
     }
+
+    public void Dispose() => rangeMapStore.Dispose();
 }

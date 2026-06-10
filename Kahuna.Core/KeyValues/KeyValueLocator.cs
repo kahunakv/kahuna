@@ -850,7 +850,7 @@ internal sealed class KeyValueLocator
         int expiresMs,
         KeyValueDurability durability,
         CancellationToken cancellationToken
-    ) => LocateAndTryAcquireExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, cancellationToken, null);
+    ) => LocateAndTryAcquireExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, null, cancellationToken);
 
     internal async Task<KeyValueResponseType> LocateAndTryAcquireExclusiveRangeLock(
         HLCTimestamp transactionId,
@@ -859,8 +859,8 @@ internal sealed class KeyValueLocator
         string? endKey,   bool endInclusive,
         int expiresMs,
         KeyValueDurability durability,
-        CancellationToken cancellationToken,
-        Func<Task>? afterSnapshot
+        Func<Task>? afterSnapshot,
+        CancellationToken cancellationToken
     )
     {
         if (string.IsNullOrEmpty(prefix))
@@ -1502,7 +1502,7 @@ internal sealed class KeyValueLocator
     public Task<KeyValueGetByBucketResult> LocateAndGetByBucket(
         HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability,
         CancellationToken cancellationToken) =>
-        LocateAndGetByBucket(transactionId, prefixedKey, durability, cancellationToken, null, null);
+        LocateAndGetByBucket(transactionId, prefixedKey, durability, null, null, cancellationToken);
 
     /// <summary>
     /// Internal overload with test hooks.
@@ -1514,9 +1514,9 @@ internal sealed class KeyValueLocator
     /// </summary>
     internal async Task<KeyValueGetByBucketResult> LocateAndGetByBucket(
         HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability,
-        CancellationToken cancellationToken,
         Func<int, Task>? beforeQuery,
-        Func<int, Task>? afterDescriptor)
+        Func<int, Task>? afterDescriptor,
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(prefixedKey))
             return new(KeyValueResponseType.Errored, []);
@@ -1558,8 +1558,8 @@ internal sealed class KeyValueLocator
         Task[] fanOutTasks = Enumerable.Range(0, descriptors.Count)
             .Select(idx => FetchDescriptorSlotAsync(
                 idx, descriptors[idx], transactionId, prefixedKey,
-                durability, cancellationToken, bucketPageSize, sem, slots,
-                beforeQuery, afterDescriptor))
+                durability, bucketPageSize, sem, slots,
+                beforeQuery, afterDescriptor, cancellationToken))
             .ToArray();
 
         await Task.WhenAll(fanOutTasks);
@@ -1581,10 +1581,11 @@ internal sealed class KeyValueLocator
     private async Task FetchDescriptorSlotAsync(
         int idx, RangeDescriptor descriptor,
         HLCTimestamp transactionId, string prefixedKey,
-        KeyValueDurability durability, CancellationToken cancellationToken,
+        KeyValueDurability durability,
         int bucketPageSize, SemaphoreSlim sem,
         (KeyValueResponseType, List<(string, ReadOnlyKeyValueEntry)>)[] slots,
-        Func<int, Task>? beforeQuery, Func<int, Task>? afterDescriptor)
+        Func<int, Task>? beforeQuery, Func<int, Task>? afterDescriptor,
+        CancellationToken cancellationToken)
     {
         await sem.WaitAsync(cancellationToken);
         try

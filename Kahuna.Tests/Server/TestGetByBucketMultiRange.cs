@@ -374,14 +374,15 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
             int rpcsBefore = transport.GetByRangeCallCount;
 
             Task<KeyValueGetByBucketResult> fanOutTask = metaLeader.LocateAndGetByBucketWithHooks(
-                HLCTimestamp.Zero, space, KeyValueDurability.Persistent, ct,
+                HLCTimestamp.Zero, space, KeyValueDurability.Persistent,
                 beforeQuery: async _ =>
                 {
                     if (Interlocked.Increment(ref started) == descriptorCount)
                         gate.TrySetResult(); // all started — release the gate
                     await gate.Task;         // block until all peers have started
                 },
-                afterDescriptor: null);
+                afterDescriptor: null,
+                cancellationToken: ct);
 
             // Gate must fire within a generous timeout; failure means tasks ran sequentially.
             await gate.Task.WaitAsync(TimeSpan.FromSeconds(10), ct);
@@ -467,7 +468,7 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
             (IRaft _, KahunaManager metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
 
             KeyValueGetByBucketResult result = await metaLeader.LocateAndGetByBucketWithHooks(
-                HLCTimestamp.Zero, space, KeyValueDurability.Persistent, ct,
+                HLCTimestamp.Zero, space, KeyValueDurability.Persistent,
                 beforeQuery: null,
                 afterDescriptor: async idx =>
                 {
@@ -476,7 +477,8 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
 
                     SplitOutcome second = await SplitAt(space, $"{space}/0020", nodes, ct);
                     Assert.True(second.IsSuccess, $"Mid-scan split failed: {second.Status}");
-                });
+                },
+                cancellationToken: ct);
 
             // No duplicates: key set size equals total.
             Assert.Equal(KeyValueResponseType.Get, result.Type);

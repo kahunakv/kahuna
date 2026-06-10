@@ -516,7 +516,7 @@ public class TestLocks : BaseCluster
             // Inject a split into the window between FindIntersecting and AcquireRangeLockOnPartition.
             // The hook commits a split so the post-acquire fence sees a changed descriptor set.
             KeyValueResponseType fenced = await node.AcquireExclusiveRangeLockWithHook(
-                tx1, RlSpace, null, true, null, false, 30_000, KeyValueDurability.Persistent, ct,
+                tx1, RlSpace, null, true, null, false, 30_000, KeyValueDurability.Persistent,
                 afterSnapshot: async () =>
                 {
                     bool split = await metaLeader.RangeMapStore.MutateAsync(_ => [
@@ -527,7 +527,8 @@ public class TestLocks : BaseCluster
 
                     // Wait for the new map to propagate to this node before the fence re-checks.
                     await RlWaitUntil(() => node.RangeMapStore.Current.FindAll(RlSpace).Count == 2);
-                });
+                },
+                cancellationToken: ct);
 
             Assert.Equal(KeyValueResponseType.MustRetry, fenced);
 

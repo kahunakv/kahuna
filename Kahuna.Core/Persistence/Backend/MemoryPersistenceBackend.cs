@@ -14,8 +14,10 @@ namespace Kahuna.Server.Persistence.Backend;
 internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
 {
     private readonly ConcurrentDictionary<string, LockEntry> locks = new();
-    
+
     private readonly ConcurrentDictionary<string, KeyValueEntry> keyValues = new();
+
+    private readonly ConcurrentDictionary<string, ConcurrentDictionary<long, KeyValueEntry>> keyValueRevisions = new();
 
     /// <summary>
     /// Stores locks in the persistence backend. Updates existing locks or adds new ones
@@ -63,27 +65,32 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
     {
         foreach (PersistenceRequestItem item in items)
         {
+            KeyValueEntry entry = new()
+            {
+                Value = item.Value,
+                Revision = item.Revision,
+                Expires = new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter),
+                LastUsed = new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter),
+                LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
+                State = (KeyValueState)item.State
+            };
+
             if (keyValues.TryGetValue(item.Key, out KeyValueEntry? keyValueContext))
             {
                 keyValueContext.Value = item.Value;
-                keyValueContext.Expires = new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter);
+                keyValueContext.Expires = entry.Expires;
                 keyValueContext.Revision = item.Revision;
-                keyValueContext.LastUsed = new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter);
-                keyValueContext.LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter);
-                keyValueContext.State = (KeyValueState)item.State;
+                keyValueContext.LastUsed = entry.LastUsed;
+                keyValueContext.LastModified = entry.LastModified;
+                keyValueContext.State = entry.State;
             }
             else
             {
-                keyValues.TryAdd(item.Key, new()
-                {
-                    Value = item.Value,
-                    Revision = item.Revision,
-                    Expires = new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter),
-                    LastUsed = new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter),
-                    LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
-                    State = (KeyValueState)item.State
-                });
+                keyValues.TryAdd(item.Key, entry);
             }
+
+            ConcurrentDictionary<long, KeyValueEntry> revisions = keyValueRevisions.GetOrAdd(item.Key, _ => new());
+            revisions[item.Revision] = entry;
         }
 
         return true;
@@ -101,7 +108,10 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
 
     public KeyValueEntry? GetKeyValueRevision(string keyName, long revision)
     {
-        // The memory backend stores only the current value — no revision history.
+        if (keyValueRevisions.TryGetValue(keyName, out ConcurrentDictionary<long, KeyValueEntry>? revisions) &&
+            revisions.TryGetValue(revision, out KeyValueEntry? entry))
+            return entry;
+
         return null;
     }
 
@@ -170,7 +180,52 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
         int batchSize,
         out RevisionPruneResult result)
     {
-        result = new(KeysVisited: 0, RevisionsDeleted: 0, BatchLimitReached: false);
+        int keysVisited = 0;
+        int deleted = 0;
+
+        IEnumerable<string> targets = keys is { Count: > 0 }
+            ? keys
+            : keyValueRevisions.Keys;
+
+        long cutoffTicks = retentionAge > TimeSpan.Zero
+            ? (DateTimeOffset.UtcNow - retentionAge).ToUnixTimeMilliseconds()
+            : long.MinValue;
+
+        foreach (string key in targets)
+        {
+            if (!keyValueRevisions.TryGetValue(key, out ConcurrentDictionary<long, KeyValueEntry>? revisions))
+                continue;
+
+            keysVisited++;
+
+            List<long> ordered = [.. revisions.Keys.OrderByDescending(r => r)];
+
+            for (int i = 0; i < ordered.Count; i++)
+            {
+                long rev = ordered[i];
+
+                bool tooOld = cutoffTicks > long.MinValue &&
+                              revisions.TryGetValue(rev, out KeyValueEntry? e) &&
+                              e.LastModified.L < cutoffTicks;
+
+                bool overflow = retentionCount > 0 && i >= retentionCount;
+
+                if (tooOld || overflow)
+                {
+                    if (revisions.TryRemove(rev, out _))
+                    {
+                        deleted++;
+                        if (deleted >= batchSize)
+                        {
+                            result = new(keysVisited, deleted, BatchLimitReached: true);
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        result = new(keysVisited, deleted, BatchLimitReached: false);
         return true;
     }
 
