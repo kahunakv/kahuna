@@ -821,7 +821,7 @@ internal sealed class KeyValueLocator
         return await interNodeCommunication.TryReleaseExclusivePrefixLock(leader, transactionId, prefixKey, durability, cancellationToken);
     }
     
-    public async Task<KeyValueResponseType> LocateAndTryAcquireExclusiveRangeLock(
+    public Task<KeyValueResponseType> LocateAndTryAcquireExclusiveRangeLock(
         HLCTimestamp transactionId,
         string prefix,
         string? startKey, bool startInclusive,
@@ -829,6 +829,17 @@ internal sealed class KeyValueLocator
         int expiresMs,
         KeyValueDurability durability,
         CancellationToken cancellationToken
+    ) => LocateAndTryAcquireExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, cancellationToken, null);
+
+    internal async Task<KeyValueResponseType> LocateAndTryAcquireExclusiveRangeLock(
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken,
+        Func<Task>? afterSnapshot
     )
     {
         if (string.IsNullOrEmpty(prefix))
@@ -836,6 +847,9 @@ internal sealed class KeyValueLocator
 
         IReadOnlyList<RangeDescriptor> descriptors =
             manager.RangeMapStore.Current.FindIntersecting(prefix, startKey, endKey);
+
+        if (afterSnapshot != null)
+            await afterSnapshot();
 
         if (descriptors.Count == 0)
         {

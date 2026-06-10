@@ -596,6 +596,20 @@ internal sealed class KeyValuesManager
         return locator.LocateAndTryAcquireExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, cancellationToken);
     }
 
+    internal Task<KeyValueResponseType> LocateAndTryAcquireExclusiveRangeLockWithHook(
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken,
+        Func<Task> afterSnapshot
+    )
+    {
+        return locator.LocateAndTryAcquireExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, cancellationToken, afterSnapshot);
+    }
+
     public Task<KeyValueResponseType> LocateAndTryReleaseExclusiveRangeLock(
         HLCTimestamp transactionId,
         string prefix,

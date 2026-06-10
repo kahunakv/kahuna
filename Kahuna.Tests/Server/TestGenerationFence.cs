@@ -45,6 +45,19 @@ public sealed class TestGenerationFence : BaseCluster
         }
     }
 
+    private static async Task<KahunaManager> NonLeaderOf(int partition, (IRaft, KahunaManager)[] nodes)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        while (true)
+        {
+            foreach ((IRaft raft, KahunaManager kahuna) in nodes)
+                if (!await raft.AmILeader(partition, ct))
+                    return kahuna;
+
+            await Task.Delay(50, ct);
+        }
+    }
+
     /// <summary>Assembles a 4-partition cluster, registers the ranged space on every node, seeds one descriptor.</summary>
     private async Task<((IRaft, KahunaManager)[] Nodes, KahunaManager DataLeader)> Setup()
     {
@@ -150,6 +163,132 @@ public sealed class TestGenerationFence : BaseCluster
                 HLCTimestamp.Zero, Space + "/0001", V("v"), routedGeneration: fresh);
 
             Assert.Equal(KeyValueResponseType.Set, retried);
+        }
+        finally
+        {
+            await LeaveCluster(nodes[0].Item1, nodes[1].Item1, nodes[2].Item1);
+        }
+    }
+
+    // ── BatchSet_ZeroGeneration_LocatorStampsLiveGeneration ──────────────────────
+
+    /// <summary>
+    /// A client that sends RoutedGeneration = 0 (the default) relies on the locator to resolve
+    /// and stamp the current generation. The item should be Set, confirming the
+    /// populate-when-0 branch fires.
+    /// </summary>
+    [Fact]
+    public async Task BatchSet_ZeroGeneration_LocatorStampsLiveGeneration()
+    {
+        ((IRaft, KahunaManager)[] nodes, KahunaManager dataLeader) = await Setup();
+        try
+        {
+            CancellationToken ct = TestContext.Current.CancellationToken;
+
+            // RoutedGeneration left at 0 — the locator must stamp freshGeneration from LocateRange.
+            List<KahunaSetKeyValueResponseItem> responses = await dataLeader.LocateAndTrySetManyKeyValue(
+                [new() { Key = Space + "/zero1", Value = V("v"), RoutedGeneration = 0, Durability = KeyValueDurability.Persistent }],
+                ct);
+
+            Assert.Equal(KeyValueResponseType.Set, responses.Single().Type);
+        }
+        finally
+        {
+            await LeaveCluster(nodes[0].Item1, nodes[1].Item1, nodes[2].Item1);
+        }
+    }
+
+    // ── BatchSet_StaleGeneration_ItemFenced ──────────────────────────────────────
+
+    /// <summary>
+    /// A batched set whose ranged item carries a pre-split generation is rejected with MustRetry
+    /// for that item; the item with the current generation is applied successfully.
+    /// </summary>
+    [Fact]
+    public async Task BatchSet_StaleGeneration_ItemFenced()
+    {
+        ((IRaft, KahunaManager)[] nodes, KahunaManager dataLeader) = await Setup();
+        try
+        {
+            CancellationToken ct = TestContext.Current.CancellationToken;
+
+            List<KahunaSetKeyValueRequestItem> items =
+            [
+                new() { Key = Space + "/batch1", Value = V("v1"), RoutedGeneration = SeedGeneration - 1, Durability = KeyValueDurability.Persistent },
+                new() { Key = Space + "/batch2", Value = V("v2"), RoutedGeneration = SeedGeneration,     Durability = KeyValueDurability.Persistent },
+            ];
+
+            List<KahunaSetKeyValueResponseItem> responses = await dataLeader.LocateAndTrySetManyKeyValue(items, ct);
+
+            KahunaSetKeyValueResponseItem staleResp = responses.Single(r => r.Key == Space + "/batch1");
+            KahunaSetKeyValueResponseItem freshResp = responses.Single(r => r.Key == Space + "/batch2");
+
+            Assert.Equal(KeyValueResponseType.MustRetry, staleResp.Type);
+            Assert.Equal(KeyValueResponseType.Set,       freshResp.Type);
+        }
+        finally
+        {
+            await LeaveCluster(nodes[0].Item1, nodes[1].Item1, nodes[2].Item1);
+        }
+    }
+
+    // ── BatchSet_CrossNode_FencedLikeSingleKey ───────────────────────────────────
+
+    /// <summary>
+    /// A batch submitted from a non-leader node is redirected to the leader; each item's
+    /// RoutedGeneration is preserved across the redirect and the fence behaves identically
+    /// to the single-key path.
+    /// </summary>
+    [Fact]
+    public async Task BatchSet_CrossNode_FencedLikeSingleKey()
+    {
+        ((IRaft, KahunaManager)[] nodes, _) = await Setup();
+        try
+        {
+            CancellationToken ct = TestContext.Current.CancellationToken;
+
+            // Find a node that is not the data-partition leader so the locator will redirect.
+            KahunaManager nonLeader = await NonLeaderOf(DataPartition, nodes);
+
+            // Stale generation via cross-node redirect → MustRetry.
+            List<KahunaSetKeyValueResponseItem> staleResponses = await nonLeader.LocateAndTrySetManyKeyValue(
+                [new() { Key = Space + "/cross1", Value = V("v"), RoutedGeneration = SeedGeneration - 1, Durability = KeyValueDurability.Persistent }],
+                ct);
+            Assert.Equal(KeyValueResponseType.MustRetry, staleResponses.Single().Type);
+
+            // Fresh generation via cross-node redirect → Set (same as single-key TrySetKeyValue).
+            List<KahunaSetKeyValueResponseItem> freshResponses = await nonLeader.LocateAndTrySetManyKeyValue(
+                [new() { Key = Space + "/cross1", Value = V("v"), RoutedGeneration = SeedGeneration, Durability = KeyValueDurability.Persistent }],
+                ct);
+            Assert.Equal(KeyValueResponseType.Set, freshResponses.Single().Type);
+        }
+        finally
+        {
+            await LeaveCluster(nodes[0].Item1, nodes[1].Item1, nodes[2].Item1);
+        }
+    }
+
+    // ── BatchSet_ZeroGeneration_LocatorStampsCurrent ─────────────────────────────
+
+    /// <summary>
+    /// A batched item left with the default <c>RoutedGeneration = 0</c> (what a real client sends)
+    /// must be stamped by the locator with the live descriptor generation and applied — proving the
+    /// populate-when-0 path, not just the pre-stamped fence path.
+    /// </summary>
+    [Fact]
+    public async Task BatchSet_ZeroGeneration_LocatorStampsCurrent()
+    {
+        ((IRaft, KahunaManager)[] nodes, KahunaManager dataLeader) = await Setup();
+        try
+        {
+            CancellationToken ct = TestContext.Current.CancellationToken;
+
+            // RoutedGeneration not set → defaults to 0; the locator resolves the current generation.
+            List<KahunaSetKeyValueResponseItem> responses = await dataLeader.LocateAndTrySetManyKeyValue(
+                [new() { Key = Space + "/zerogen", Value = V("v"), Durability = KeyValueDurability.Persistent }],
+                ct);
+
+            Assert.Equal(KeyValueResponseType.Set, responses.Single().Type);
         }
         finally
         {

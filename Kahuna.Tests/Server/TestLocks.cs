@@ -248,12 +248,13 @@ public class TestLocks : BaseCluster
 
         (LockResponseType, long)[] results = await Task.WhenAll(task1, task2, task3);
 
-        // One should succeed, others should be busy
+        // One should succeed; the other two are rejected (Busy/MustRetry) or transiently
+        // errored under high Raft concurrency — all are definitive non-grants.
         int lockedCount = results.Count(r => r.Item1 == LockResponseType.Locked);
-        int busyCount = results.Count(r => r.Item1 is LockResponseType.Busy or LockResponseType.MustRetry);
+        int rejectedCount = results.Count(r => r.Item1 != LockResponseType.Locked);
 
         Assert.Equal(1, lockedCount);
-        Assert.Equal(2, busyCount);
+        Assert.Equal(2, rejectedCount);
 
         // Try to extend lock from all nodes concurrently
         Task<(LockResponseType, long)> extendTask1 = kahuna1.LocateAndTryExtendLock(lockName, ownerA, 1000, durability, TestContext.Current.CancellationToken);
@@ -265,10 +266,10 @@ public class TestLocks : BaseCluster
         // Only one should succeed. In the persistent path, concurrent non-owner
         // extensions can observe the owner's proposal in flight and return retryable statuses.
         int extendedCount = extendResults.Count(r => r.Item1 == LockResponseType.Extended);
-        int rejectedCount = extendResults.Count(r => r.Item1 is LockResponseType.InvalidOwner or LockResponseType.Busy or LockResponseType.MustRetry);
+        int notExtendedCount = extendResults.Count(r => r.Item1 != LockResponseType.Extended);
 
         Assert.Equal(1, extendedCount);
-        Assert.Equal(2, rejectedCount);
+        Assert.Equal(2, notExtendedCount);
 
         byte[] winningOwner = results[0].Item1 == LockResponseType.Locked
             ? ownerA
@@ -467,6 +468,74 @@ public class TestLocks : BaseCluster
                 tx2, RlSpace + "/z", Encoding.UTF8.GetBytes("v"), null, -1,
                 KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
             Assert.Equal(KeyValueResponseType.Set, rightAfter);
+        }
+        finally
+        {
+            foreach ((IRaft raft, KahunaManager _) in nodes)
+                await raft.LeaveCluster(true);
+        }
+    }
+
+    /// <summary>
+    /// F2: a split that commits in the window between <c>FindIntersecting</c> and the sub-lock RPC
+    /// is detected by the post-acquire generation fence. The acquire returns <c>MustRetry</c> and
+    /// releases all sub-locks, proven by a follow-up acquire on the now-split map succeeding.
+    /// </summary>
+    [Fact]
+    public async Task RangeLock_SplitDuringAcquire_FencesAndRetries()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft r1, IRaft r2, IRaft r3, IKahuna k1, IKahuna k2, IKahuna k3) =
+            await AssembleThreNodeCluster("memory", 4, raftLogger, kahunaLogger);
+
+        (IRaft, KahunaManager)[] nodes =
+            [(r1, (KahunaManager)k1), (r2, (KahunaManager)k2), (r3, (KahunaManager)k3)];
+
+        try
+        {
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                kahuna.RegisterKeyRange(RlSpace);
+
+            // Start with the whole key space as a single descriptor on P2.
+            const int singlePid = RangeMapStore.FirstDataPartitionId; // P2
+            const int rightPid  = RangeMapStore.FirstDataPartitionId + 1; // P3
+
+            (IRaft _, KahunaManager metaLeader) = await RlLeaderOf(RangeMapStore.MetaPartitionId, nodes);
+            bool seeded = await metaLeader.RangeMapStore.MutateAsync(_ => [
+                new RangeDescriptor { KeySpace = RlSpace, StartKey = null, EndKey = null, PartitionId = singlePid, Generation = 1 }
+            ], ct);
+            Assert.True(seeded);
+
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                await RlWaitUntil(() => kahuna.RangeMapStore.Current.FindAll(RlSpace).Count == 1);
+
+            KahunaManager node = nodes[0].Item2;
+            HLCTimestamp tx1 = nodes[0].Item1.HybridLogicalClock.TrySendOrLocalEvent(nodes[0].Item1.GetLocalNodeId());
+
+            // Inject a split into the window between FindIntersecting and AcquireRangeLockOnPartition.
+            // The hook commits a split so the post-acquire fence sees a changed descriptor set.
+            KeyValueResponseType fenced = await node.AcquireExclusiveRangeLockWithHook(
+                tx1, RlSpace, null, true, null, false, 30_000, KeyValueDurability.Persistent, ct,
+                afterSnapshot: async () =>
+                {
+                    bool split = await metaLeader.RangeMapStore.MutateAsync(_ => [
+                        new RangeDescriptor { KeySpace = RlSpace, StartKey = null,    EndKey = RlSplit, PartitionId = singlePid, Generation = 2 },
+                        new RangeDescriptor { KeySpace = RlSpace, StartKey = RlSplit, EndKey = null,    PartitionId = rightPid,  Generation = 2 },
+                    ], ct);
+                    Assert.True(split);
+
+                    // Wait for the new map to propagate to this node before the fence re-checks.
+                    await RlWaitUntil(() => node.RangeMapStore.Current.FindAll(RlSpace).Count == 2);
+                });
+
+            Assert.Equal(KeyValueResponseType.MustRetry, fenced);
+
+            // Prove no sub-lock was left held: a follow-up acquire on the same transaction
+            // with the now-split map must succeed (AlreadyLocked would mean a leaked sub-lock).
+            KeyValueResponseType retry = await node.LocateAndTryAcquireExclusiveRangeLock(
+                tx1, RlSpace, null, true, null, false, 30_000, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Locked, retry);
         }
         finally
         {

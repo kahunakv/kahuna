@@ -1219,4 +1219,22 @@ public sealed class KahunaManager : IKahuna, IDisposable
         HLCTimestamp transactionId, string key, byte[]? value, long routedGeneration) =>
         keyValues.TrySetKeyValue(transactionId, key, value, null, -1, KeyValueFlags.Set, 0,
             KeyValueDurability.Persistent, routedGeneration);
+
+    /// <summary>
+    /// Test seam: acquires a range lock with a callback invoked after the initial
+    /// <c>FindIntersecting</c> snapshot but before any sub-lock RPC. Lets tests inject a split
+    /// into that window to drive the generation fence deterministically.
+    /// </summary>
+    internal Task<KeyValueResponseType> AcquireExclusiveRangeLockWithHook(
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken,
+        Func<Task> afterSnapshot
+    ) => keyValues.LocateAndTryAcquireExclusiveRangeLockWithHook(
+            transactionId, prefix, startKey, startInclusive, endKey, endInclusive,
+            expiresMs, durability, cancellationToken, afterSnapshot);
 }
