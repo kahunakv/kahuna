@@ -1477,9 +1477,25 @@ internal sealed class KeyValueLocator
     ///
     /// <para>
     /// <b>Fan-out model (F5):</b> all descriptors are queried concurrently via <c>Task.WhenAll</c>,
-    /// bounded by <c>MaxParallelBucketDescriptors</c>. On gRPC transport the concurrent per-leader
-    /// streams are coalesced by <c>GrpcServerBatcher</c> into one streaming connection per leader
-    /// endpoint. Full materialisation: the entire bucket is buffered before returning; callers needing
+    /// bounded by <c>MaxParallelBucketDescriptors = 8</c>. One <see cref="QueryDescriptorRange"/> task
+    /// is issued per descriptor; the concurrency limit ensures the fan-out does not stampede the cluster
+    /// with descriptors at the boundaries of that limit.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Leader coalescing — transport-delegated, locator-level deferred.</b> When several descriptors
+    /// share the same leader endpoint, this method still issues one <see cref="QueryDescriptorRange"/>
+    /// call per descriptor (not one per unique leader). On the gRPC transport, concurrent calls to the
+    /// same endpoint are automatically multiplexed onto a single streaming connection by
+    /// <c>GrpcServerBatcher</c>, so the wire cost is already one stream per leader — but the locator
+    /// does not merge the descriptor ranges before dispatching. True locator-level grouping (resolve
+    /// leaders → merge adjacent same-leader ranges → one <c>GetByRange</c> per leader) would further
+    /// reduce RPC message count on the in-memory and gRPC transports alike; that optimisation is
+    /// deferred to a future task.
+    /// </para>
+    ///
+    /// <para>
+    /// Full materialisation: the entire bucket is buffered before returning. Callers needing
     /// bounded-memory streaming should use <see cref="LocateAndGetByRange"/> instead.
     /// </para>
     /// </summary>

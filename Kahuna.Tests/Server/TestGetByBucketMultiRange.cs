@@ -264,28 +264,32 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
         }
     }
 
-    // ── Bucket_FanOut_IsParallelAndLeaderCoalesced ────────────────────────────
+    // ── Bucket_FanOut_IsParallel ──────────────────────────────────────────────
 
     /// <summary>
-    /// Verifies F5 — the multi-range fan-out runs descriptors in parallel, not sequentially.
+    /// Verifies F5 — the multi-range fan-out runs all descriptor queries in parallel, not
+    /// sequentially.
     ///
     /// <para>
-    /// A gate is injected via <c>beforeQuery</c>: every descriptor task increments a shared counter
-    /// and then awaits a <see cref="TaskCompletionSource"/>. The TCS is only resolved once ALL N
-    /// tasks have incremented (i.e. are simultaneously in-flight). If the fan-out were sequential,
-    /// only one task would ever hold the gate at a time and the TCS would never resolve.
+    /// <b>Concurrency proof (gate mechanism):</b> a <c>beforeQuery</c> hook is injected into every
+    /// descriptor task. Each task increments a shared counter and then awaits a
+    /// <see cref="TaskCompletionSource"/>. The TCS is resolved only once ALL N tasks have incremented
+    /// (i.e. are simultaneously in-flight past the gate). A sequential fan-out could never reach
+    /// that condition — only one task would ever hold the gate at a time — so the gate would never
+    /// resolve and the <c>WaitAsync</c> timeout would fire as a test failure.
     /// </para>
     ///
     /// <para>
-    /// The "leader-coalesced" assertion: in a post-split space each descriptor resides on a distinct
-    /// partition. When the descriptors happen to share a leader (tested via GetByRange call count),
-    /// the gRPC transport uses a single <c>GrpcServerBatcher</c> streaming connection. For the
-    /// in-memory transport used here, we verify that <em>exactly N GetByRange RPCs</em> were
-    /// dispatched — one per descriptor — with no duplicates or extra calls.
+    /// <b>RPC-count sanity check:</b> verifies that at most one remote <c>GetByRange</c> call is
+    /// issued per descriptor (≤ N total). This catches duplicated fan-out but does not prove
+    /// leader-level coalescing: when two descriptors share a leader each still gets its own call.
+    /// Locator-level coalescing (resolve leaders → merge adjacent same-leader ranges → one call per
+    /// unique leader) is deferred; on the gRPC transport the concurrent streams to the same leader
+    /// endpoint are already batched by <c>GrpcServerBatcher</c> at the connection level.
     /// </para>
     /// </summary>
     [Fact]
-    public async Task Bucket_FanOut_IsParallelAndLeaderCoalesced()
+    public async Task Bucket_FanOut_IsParallel()
     {
         const string space = "bkt:par";
         const int    total = 20;
@@ -323,14 +327,27 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
 
             (IRaft _, KahunaManager dataLeader) = await LeaderOf(RangeMapStore.FirstDataPartitionId, nodes);
 
+            var keys = new List<string>(total);
             for (int i = 0; i < total; i++)
             {
+                string key = $"{space}/{i:D4}";
                 (KeyValueResponseType t, _, _) = await dataLeader.TrySetKeyValue(
-                    HLCTimestamp.Zero, $"{space}/{i:D4}",
+                    HLCTimestamp.Zero, key,
                     Encoding.UTF8.GetBytes("v" + i),
                     null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent);
                 Assert.Equal(KeyValueResponseType.Set, t);
+                keys.Add(key);
             }
+
+            // Wait for all writes to be visible on every node before probing HalfHasKeysAsync.
+            foreach (string k in keys)
+                foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                    await WaitForAsync(async () =>
+                    {
+                        (KeyValueResponseType rt, _) =
+                            await kahuna.TryGetValue(HLCTimestamp.Zero, k, 0, KeyValueDurability.Persistent);
+                        return rt == KeyValueResponseType.Get;
+                    });
 
             // Split into 2 descriptors.
             SplitOutcome outcome = await SplitAt(space, $"{space}/0010", nodes, ct);
@@ -380,14 +397,13 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
                     string.CompareOrdinal(result.Items[i].Item1, result.Items[i - 1].Item1) > 0,
                     $"Order violation at {i}");
 
-            // Leader-coalescing assertion: exactly one GetByRange RPC per descriptor (no duplicates,
-            // no extra round-trips).  Calls that went through the local path (AmILeader) don't
-            // increment the counter — those are already free of extra RPCs by design.
+            // No-duplication check: at most one remote GetByRange RPC per descriptor.
+            // Descriptors whose leader is the local node skip the transport entirely (AmILeader path),
+            // so rpcsDelta can be anywhere from 0 (all local) to descriptorCount (all remote).
+            // A value > descriptorCount would indicate duplicated fan-out work.
             int rpcsDelta = transport.GetByRangeCallCount - rpcsBefore;
-            // Expect at most 2 remote GetByRange calls (one per descriptor whose leader is remote).
-            // The bound is ≤ descriptorCount because a descriptor whose leader is local skips the RPC.
             Assert.True(rpcsDelta <= descriptorCount,
-                $"Expected ≤{descriptorCount} GetByRange RPCs, got {rpcsDelta}");
+                $"Expected ≤{descriptorCount} remote GetByRange RPCs (one per remote-leader descriptor), got {rpcsDelta}");
         }
         finally
         {
@@ -406,6 +422,17 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
     /// split subdivides D1 into D1a+D1b. Because Task 6 orphan-retains <c>[K,E)</c> on the source
     /// partition, querying the now-stale D1 descriptor still returns the full D1 range. The final
     /// result must equal the pre-split baseline exactly (no duplicates, no missing keys).
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Timing note.</b> Under the F5 parallel fan-out, D0 and D1 query concurrently. The
+    /// <c>afterDescriptor(0)</c> hook fires after D0's pages are fully collected, but D1's query
+    /// may already be complete by that point — so the second split is not guaranteed to land
+    /// <em>during</em> D1's read window. The test therefore validates snapshot-stability and
+    /// orphan-retention (the result is correct regardless of whether the split raced D1 or not),
+    /// not a deterministic mid-D1-scan race injection. A precise concurrent-read race test would
+    /// require blocking D1's first page RPC until the split commits, which needs a deeper
+    /// transport-level gate not provided here.
     /// </para>
     /// </summary>
     [Fact]
