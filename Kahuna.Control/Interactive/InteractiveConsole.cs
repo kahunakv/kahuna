@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using System.Diagnostics;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
@@ -31,9 +30,9 @@ public static class InteractiveConsole
     public static async Task Run(KahunaClient connection, KahunaControlOptions options)
     {
         Assembly assembly = Assembly.GetExecutingAssembly();
-        FileVersionInfo fvi = FileVersionInfo.GetVersionInfo(assembly.Location);
+        string version = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion?.Split('+')[0] ?? "0.0.0";
 
-        AnsiConsole.MarkupLine("[green]Kahuna Shell {0} (beta)[/]\n", fvi.FileMajorPart + "." + fvi.FileMinorPart + "." + fvi.FileBuildPart);
+        AnsiConsole.MarkupLine("[green]Kahuna Shell {0} (beta)[/]\n", version);
 
         string historyPath = string.Concat(Path.GetTempPath(), Path.PathSeparator, "kahuna.history.json");
         List<string> history = await GetHistory(historyPath);
