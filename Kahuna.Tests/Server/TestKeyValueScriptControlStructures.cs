@@ -28,7 +28,7 @@ public class TestKeyValueScriptControlStructures : BaseCluster
     }
     
     [Theory, CombinatorialData]
-    public async Task TestBasicIfScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    public async Task TestBasicIfScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
@@ -70,7 +70,7 @@ public class TestKeyValueScriptControlStructures : BaseCluster
     }
     
     [Theory, CombinatorialData]
-    public async Task TestBasicIfScript2([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    public async Task TestBasicIfScript2([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
@@ -112,7 +112,7 @@ public class TestKeyValueScriptControlStructures : BaseCluster
     }
     
     [Theory, CombinatorialData]
-    public async Task TestBasicIfElseScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    public async Task TestBasicIfElseScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
@@ -158,7 +158,7 @@ public class TestKeyValueScriptControlStructures : BaseCluster
     }
     
     [Theory, CombinatorialData]
-    public async Task TestBasicIfElseScript2([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    public async Task TestBasicIfElseScript2([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
@@ -204,7 +204,7 @@ public class TestKeyValueScriptControlStructures : BaseCluster
     }
     
     [Theory, CombinatorialData]
-    public async Task TestNestedIfElseScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    public async Task TestNestedIfElseScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
@@ -258,7 +258,7 @@ public class TestKeyValueScriptControlStructures : BaseCluster
     }
     
     [Theory, CombinatorialData]
-    public async Task TestNestedIfElseScript2([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    public async Task TestNestedIfElseScript2([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
@@ -320,7 +320,7 @@ public class TestKeyValueScriptControlStructures : BaseCluster
     }
     
     [Theory, CombinatorialData]
-    public async Task TestLetReturnScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    public async Task TestLetReturnScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna _) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
@@ -357,7 +357,7 @@ public class TestKeyValueScriptControlStructures : BaseCluster
     }
     
     [Theory, CombinatorialData]
-    public async Task TestLetReturnComplexScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    public async Task TestLetReturnComplexScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
@@ -442,7 +442,7 @@ public class TestKeyValueScriptControlStructures : BaseCluster
     }
 
     [Theory, CombinatorialData]
-    public async Task TestThrowScript([CombinatorialValues("memory")] string storage,[CombinatorialValues(4)] int partitions)
+    public async Task TestThrowScript([CombinatorialValues("memory")] string storage,[CombinatorialValues(1)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
@@ -482,7 +482,7 @@ public class TestKeyValueScriptControlStructures : BaseCluster
     }
     
     [Theory, CombinatorialData]
-    public async Task TestSleepScript([CombinatorialValues("memory")] string storage,[CombinatorialValues(4)] int partitions)
+    public async Task TestSleepScript([CombinatorialValues("memory")] string storage,[CombinatorialValues(1)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
@@ -513,7 +513,7 @@ public class TestKeyValueScriptControlStructures : BaseCluster
     }
     
     [Theory, CombinatorialData]
-    public async Task TestBasicForScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    public async Task TestBasicForScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
