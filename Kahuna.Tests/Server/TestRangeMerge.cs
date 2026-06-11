@@ -362,34 +362,39 @@ public sealed class TestRangeMerge : BaseCluster
         (IRaft, KahunaManager)[] nodes =
             [(r1, (KahunaManager)k1), (r2, (KahunaManager)k2), (r3, (KahunaManager)k3)];
 
-        foreach ((IRaft _, KahunaManager kahuna) in nodes)
-            kahuna.RegisterKeyRange(spaceABC);
+        try
+        {
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                kahuna.RegisterKeyRange(spaceABC);
 
-        (IRaft _, KahunaManager metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+            (IRaft _, KahunaManager metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
 
-        // Three adjacent descriptors [null,"k010") [k010,"k020") [k020,null) on P2, P3, P4.
-        const string kAB = spaceABC + "/k010";
-        const string kBC = spaceABC + "/k020";
-        var dA = new RangeDescriptor { KeySpace = spaceABC, StartKey = null, EndKey = kAB, PartitionId = 2, Generation = 1 };
-        var dB = new RangeDescriptor { KeySpace = spaceABC, StartKey = kAB,  EndKey = kBC, PartitionId = 3, Generation = 1 };
-        var dC = new RangeDescriptor { KeySpace = spaceABC, StartKey = kBC,  EndKey = null, PartitionId = 4, Generation = 1 };
+            // Three adjacent descriptors [null,"k010") [k010,"k020") [k020,null) on P2, P3, P4.
+            const string kAB = spaceABC + "/k010";
+            const string kBC = spaceABC + "/k020";
+            var dA = new RangeDescriptor { KeySpace = spaceABC, StartKey = null, EndKey = kAB, PartitionId = 2, Generation = 1 };
+            var dB = new RangeDescriptor { KeySpace = spaceABC, StartKey = kAB,  EndKey = kBC, PartitionId = 3, Generation = 1 };
+            var dC = new RangeDescriptor { KeySpace = spaceABC, StartKey = kBC,  EndKey = null, PartitionId = 4, Generation = 1 };
 
-        bool committed = await metaLeader.RangeMapStore.MutateAsync(_ => [dA, dB, dC], ct);
-        Assert.True(committed);
+            bool committed = await metaLeader.RangeMapStore.MutateAsync(_ => [dA, dB, dC], ct);
+            Assert.True(committed);
 
-        foreach ((IRaft _, KahunaManager kahuna) in nodes)
-            await WaitFor(() => kahuna.RangeMapStore.Current.FindAll(spaceABC).Count == 3);
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                await WaitFor(() => kahuna.RangeMapStore.Current.FindAll(spaceABC).Count == 3);
 
-        // All three ranges are empty (0 keys < any minMergeSize threshold).
-        // FindMergeCandidatesAsync must return exactly ONE non-overlapping pair: (A,B).
-        List<(RangeDescriptor Left, RangeDescriptor Right)> candidates =
-            await metaLeader.RangeMerger.FindMergeCandidatesAsync(spaceABC, minMergeSize: 10, ct);
+            // All three ranges are empty (0 keys < any minMergeSize threshold).
+            // FindMergeCandidatesAsync must return exactly ONE non-overlapping pair: (A,B).
+            List<(RangeDescriptor Left, RangeDescriptor Right)> candidates =
+                await metaLeader.RangeMerger.FindMergeCandidatesAsync(spaceABC, minMergeSize: 10, ct);
 
-        Assert.Single(candidates);
-        Assert.Equal(dA.PartitionId, candidates[0].Left.PartitionId);
-        Assert.Equal(dB.PartitionId, candidates[0].Right.PartitionId);
-
-        await LeaveCluster(r1, r2, r3);
+            Assert.Single(candidates);
+            Assert.Equal(dA.PartitionId, candidates[0].Left.PartitionId);
+            Assert.Equal(dB.PartitionId, candidates[0].Right.PartitionId);
+        }
+        finally
+        {
+            await LeaveCluster(r1, r2, r3);
+        }
     }
 
     // ── AutoMerge_DualLeader_MergesUnderMinRanges ─────────────────────────────
