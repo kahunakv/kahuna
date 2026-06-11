@@ -12,14 +12,16 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// committing every change through the Raft meta partition.
 ///
 /// <para>
-/// <b>Where it lives.</b> The Kommander <i>system</i> partition (id 0) is reserved for the
-/// partition-map coordinator and only accepts its own <c>_RaftSystem</c> log type, so it cannot
-/// host application data. Instead the map is replicated on <b>Kahuna partition
-/// <see cref="MetaPartitionId"/> (= 1)</b> — an ordinary replicated partition whose committed and
-/// restored logs reach Kahuna's <c>OnReplicationReceived</c>/<c>OnLogRestored</c> callbacks. Ranged
-/// <i>data</i> therefore lives on partitions ≥ 2 (the reservation contract enforced by
-/// <see cref="MutateAsync"/> and consulted by routing in Tasks 3/9). See
-/// <c>docs/spec-range-splits-kommander-flag.md</c>.
+/// <b>Where it lives.</b> As of Kommander 0.11.0 the <i>system</i> partition (id 0) hosts consumer
+/// data alongside the partition-map coordinator, distinguished by log type: the coordinator owns the
+/// <c>_RaftSystem</c> type while any other type is routed to Kahuna's
+/// <c>OnReplicationReceived</c>/<c>OnLogRestored</c> callbacks. The map is therefore replicated on
+/// <b><see cref="MetaPartitionId"/> (= 0)</b> using <see cref="ReplicationTypes.RangeMap"/>. Hosting
+/// the map on P0 collapses the old P0+P1 leader colocation: partition lifecycle
+/// (<c>CreatePartitionAsync</c>/<c>RemovePartitionAsync</c>) and the map cutover both require the
+/// <b>P0 leader</b>, so a single split/merge orchestrator needs to lead only P0. Ranged <i>data</i>
+/// lives on partitions ≥ 1 (P0 is reserved for the map + coordinator; the reservation contract is
+/// enforced by <see cref="MutateAsync"/> and consulted by routing).
 /// </para>
 ///
 /// <para>
@@ -34,13 +36,15 @@ namespace Kahuna.Server.KeyValues.Ranges;
 internal sealed class RangeMapStore : IDisposable
 {
     /// <summary>
-    /// The well-known Kahuna partition that hosts the range-descriptor map. Always exists
-    /// (<c>InitialPartitions &gt; 0</c> is enforced). Ranged data lives on partitions ≥ 2.
+    /// The partition that hosts the range-descriptor map: the Kommander system partition (id 0),
+    /// shared with the partition-map coordinator by log type (Kommander 0.11.0+). Always exists.
+    /// Ranged data lives on partitions ≥ <see cref="FirstDataPartitionId"/>.
     /// </summary>
-    public const int MetaPartitionId = 1;
+    public const int MetaPartitionId = 0;
 
-    /// <summary>Lowest partition id usable for ranged data (partition 1 is reserved for the map).</summary>
-    public const int FirstDataPartitionId = 2;
+    /// <summary>Lowest partition id usable for ranged data (partition 0 is reserved for the map +
+    /// system coordinator).</summary>
+    public const int FirstDataPartitionId = 1;
 
     /// <summary>Default number of committed mutations between meta-partition checkpoints (Task 2c).</summary>
     public const int DefaultCheckpointEveryMutations = 32;
@@ -120,7 +124,8 @@ internal sealed class RangeMapStore : IDisposable
                 return false;
             }
 
-            // Reservation contract: ranged data never lives on the meta partition (or below it).
+            // Reservation contract: ranged data never lives on the meta partition (P0, shared with
+            // the system coordinator). Data partitions are >= FirstDataPartitionId (1).
             foreach (RangeDescriptor descriptor in next)
             {
                 if (descriptor.PartitionId < FirstDataPartitionId)

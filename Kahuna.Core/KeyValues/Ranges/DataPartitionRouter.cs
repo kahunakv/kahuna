@@ -8,14 +8,13 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// (Kommander only hosts groups; its partitions are <c>Unrouted</c>, design §7.4).
 ///
 /// <para>
-/// The hash pool is <b>all user partitions <c>[1, InitialPartitions]</c></b>. Partition 0 is
-/// Kommander's reserved system partition and never receives data. Partition 1 (which also hosts the
-/// replicated meta map, <see cref="RangeMapStore.MetaPartitionId"/>) <b>is</b> in the pool: hash data
-/// may share it with the meta map — they coexist via distinct replication log types, and reserving a
-/// whole Raft group for the (low-volume) meta map would idle a partition, costly at small
-/// <c>InitialPartitions</c>. Only <i>key-range</i> data avoids partition 1 — splits always allocate
-/// fresh partitions <c>≥ <see cref="RangeMapStore.FirstDataPartitionId"/></c> (2), enforced by
-/// <see cref="RangeMapStore.MutateAsync"/>.
+/// The hash pool is <b>all user partitions <c>[1, InitialPartitions]</c></b>. Partition 0 is the
+/// Kommander system partition; it hosts the replicated meta map
+/// (<see cref="RangeMapStore.MetaPartitionId"/>) alongside the partition-map coordinator (by log
+/// type, Kommander 0.11.0+) and is <b>not</b> in the data pool. Every user partition from 1 upward
+/// carries hash data; key-range data also starts at partition <c>≥
+/// <see cref="RangeMapStore.FirstDataPartitionId"/></c> (1), with splits allocating fresh higher ids,
+/// enforced by <see cref="RangeMapStore.MutateAsync"/>.
 /// </para>
 ///
 /// <para>
@@ -26,7 +25,7 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// </summary>
 internal sealed class DataPartitionRouter
 {
-    /// <summary>The lowest partition in the hash pool. Partition 0 is Kommander's system partition.</summary>
+    /// <summary>The lowest partition in the hash pool. Partition 0 is the system/meta partition.</summary>
     private const int FirstUserPartitionId = 1;
 
     private readonly IRaft raft;

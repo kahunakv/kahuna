@@ -49,25 +49,26 @@ public sealed class TestRangeSplit : BaseCluster
     }
 
     /// <summary>
-    /// Creates a new Unrouted partition on the system-partition leader (step 4 of the split),
-    /// then calls <see cref="RangeSplitter.SplitAsync"/> on the meta-partition leader.
-    /// The two leadership constraints are satisfied on the respective nodes.
+    /// Creates a new Unrouted partition (step 4 of the split) and then calls
+    /// <see cref="RangeSplitter.SplitAsync"/>. Since Kommander 0.11.0 the meta map shares the system
+    /// partition (P0), so <c>CreatePartitionAsync</c> (system-leader) and the cutover (meta-leader)
+    /// require the <b>same</b> node; resolve one P0 leader and drive both steps through it (resolving
+    /// them separately would open a staleness window if P0 re-elects between the two lookups).
     /// </summary>
     private static async Task<SplitOutcome> SplitViaLeaders(
         string space, string splitKey, (IRaft, KahunaManager)[] nodes, CancellationToken ct)
     {
-        (IRaft sysRaft, KahunaManager _) = await LeaderOf(SystemPartition, nodes);
-        (IRaft _, KahunaManager metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+        (IRaft leaderRaft, KahunaManager leader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
 
-        int newPartitionId = RangeSplitter.ComputeNextPartitionId(metaLeader.RangeMapStore.Current);
+        int newPartitionId = RangeSplitter.ComputeNextPartitionId(leader.RangeMapStore.Current);
 
         RaftPartitionLifecycleResult createResult =
-            await sysRaft.CreatePartitionAsync(newPartitionId, RaftRoutingMode.Unrouted, null, ct);
+            await leaderRaft.CreatePartitionAsync(newPartitionId, RaftRoutingMode.Unrouted, null, ct);
 
         if (!createResult.Success)
             return SplitOutcome.PartitionCreationFailed;
 
-        return await metaLeader.RangeSplitter.SplitAsync(space, splitKey, newPartitionId, ct);
+        return await leader.RangeSplitter.SplitAsync(space, splitKey, newPartitionId, ct);
     }
 
     private static async Task WaitUntil(Func<bool> predicate, int timeoutMs = 8000)
@@ -464,7 +465,7 @@ public sealed class TestRangeSplit : BaseCluster
         CancellationToken ct = TestContext.Current.CancellationToken;
 
         // Setup writes straddleKey to disk (so the entry exists for GetKeyValueEntry).
-        ((IRaft, KahunaManager)[] nodes, KahunaManager metaLeader, _, KahunaManager _) =
+        ((IRaft, KahunaManager)[] nodes, KahunaManager _, _, KahunaManager _) =
             await Setup([], [Space + "/straddleKey"]);
 
         try
@@ -475,8 +476,11 @@ public sealed class TestRangeSplit : BaseCluster
             const long BumpedGen = 2;
 
             // Bump the descriptor before starting the 2PC, simulating a split cutover that happens
-            // between when the locator resolved gen=1 and when the Prepare is issued.
-            Assert.True(await metaLeader.RangeMapStore.MutateAsync(
+            // between when the locator resolved gen=1 and when the Prepare is issued. Re-resolve the
+            // current P0 (meta) leader at point-of-use — the leader cached by Setup may have re-elected
+            // since (P0 now carries the meta-map writes), which would fail the mutation as non-leader.
+            (IRaft _, KahunaManager currentMetaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+            Assert.True(await currentMetaLeader.RangeMapStore.MutateAsync(
                 _ => [new RangeDescriptor
                 {
                     KeySpace = Space,

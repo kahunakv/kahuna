@@ -13,11 +13,11 @@ namespace Kahuna.Tests.Server;
 /// Acceptance tests for the automatic merge trigger (RangeMergeTrigger / TriggerAutoMergeAsync).
 ///
 /// <para>
-/// <b>Dual-leader requirement.</b> RangeMergeTrigger.TriggerAsync guards itself with
-/// <c>AmILeader(0) &amp;&amp; AmILeader(MetaPartitionId)</c>; any node that does not hold both
-/// roles returns 0 immediately. In a 3-node cluster with independent per-partition election
-/// timers, colocation on one node is not guaranteed. To avoid vacuous passes the tests use
-/// <c>ForceLeaderForTestingAsync</c> to explicitly colocate both roles on nodes[0] before
+/// <b>Leader requirement.</b> RangeMergeTrigger.TriggerAsync guards itself with
+/// <c>AmILeader(MetaPartitionId)</c>; since the meta map shares the system partition (P0,
+/// Kommander 0.11.0+), a single P0 leadership grant covers both partition lifecycle and the
+/// descriptor cutover. A node that is not the P0 leader returns 0 immediately. To avoid vacuous
+/// passes the tests use <c>ForceLeaderForTestingAsync</c> to put P0 leadership on nodes[0] before
 /// exercising the trigger.
 /// </para>
 /// </summary>
@@ -62,25 +62,25 @@ public sealed class TestAutoMerge : BaseCluster
     }
 
     /// <summary>
-    /// Forces <paramref name="target"/> to become leader of both partition 0 (system) and
-    /// <see cref="RangeMapStore.MetaPartitionId"/>, then waits until both roles are confirmed.
+    /// Forces <paramref name="target"/> to become leader of the system/meta partition (P0), then
+    /// waits until the role is confirmed. Since Kommander 0.11.0 the meta map shares P0, so a single
+    /// P0 leadership grant satisfies both <c>CreatePartitionAsync</c>/<c>RemovePartitionAsync</c>
+    /// (system-leader) and the descriptor cutover (meta-leader) — no dual-partition colocation.
     /// Uses <c>ForceLeaderForTestingAsync</c> — deterministic, not probabilistic.
     /// </summary>
-    private static async Task<KahunaManager> ForceDualLeaderAsync(
+    private static async Task<KahunaManager> ForceMetaLeaderAsync(
         (IRaft Raft, KahunaManager Kahuna) target, CancellationToken ct)
     {
-        await target.Raft.ForceLeaderForTestingAsync(0, ct);
         await target.Raft.ForceLeaderForTestingAsync(RangeMapStore.MetaPartitionId, ct);
 
         long deadline = Environment.TickCount64 + 10_000;
         while (Environment.TickCount64 < deadline)
         {
-            if (await target.Raft.AmILeader(0, ct) &&
-                await target.Raft.AmILeader(RangeMapStore.MetaPartitionId, ct))
+            if (await target.Raft.AmILeader(RangeMapStore.MetaPartitionId, ct))
                 return target.Kahuna;
             await Task.Delay(25, ct);
         }
-        Assert.Fail("ForceDualLeaderAsync: nodes[0] did not become dual-leader within 10 s.");
+        Assert.Fail("ForceMetaLeaderAsync: nodes[0] did not become P0 leader within 10 s.");
         return null!; // unreachable
     }
 
@@ -206,8 +206,8 @@ public sealed class TestAutoMerge : BaseCluster
         {
             CancellationToken ct = TestContext.Current.CancellationToken;
 
-            // Deterministically colocate system (P0) and meta (P1) leadership on nodes[0].
-            KahunaManager dualLeader = await ForceDualLeaderAsync(nodes[0], ct);
+            // Deterministically put system/meta (P0) leadership on nodes[0] so the trigger runs.
+            KahunaManager dualLeader = await ForceMetaLeaderAsync(nodes[0], ct);
 
             int merges = await dualLeader.TriggerAutoMergeAsync(minMergeSize, ct);
             Assert.Equal(1, merges);
@@ -247,8 +247,8 @@ public sealed class TestAutoMerge : BaseCluster
         {
             CancellationToken ct = TestContext.Current.CancellationToken;
 
-            // Force dual leadership so the trigger actually runs (not silently skipped).
-            KahunaManager dualLeader = await ForceDualLeaderAsync(nodes[0], ct);
+            // Force P0 (system/meta) leadership so the trigger actually runs (not silently skipped).
+            KahunaManager dualLeader = await ForceMetaLeaderAsync(nodes[0], ct);
 
             int merges = await dualLeader.TriggerAutoMergeAsync(minMergeSize, ct);
             Assert.Equal(0, merges);

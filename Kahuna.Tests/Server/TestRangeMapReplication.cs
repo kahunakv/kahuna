@@ -14,8 +14,8 @@ namespace Kahuna.Tests.Server;
 
 /// <summary>
 /// Replication tests for the range-descriptor map (Task 2). The map is the replicated source of
-/// truth, hosted on the Kahuna meta partition (<see cref="RangeMapStore.MetaPartitionId"/> = 1) —
-/// not the Kommander system partition (id 0), which rejects application logs. These tests run a
+/// truth, hosted on the system/meta partition (<see cref="RangeMapStore.MetaPartitionId"/> = 0) —
+/// shared with the Kommander partition-map coordinator by log type (0.11.0+). These tests run a
 /// real 3-node cluster and exercise the three commit paths: WAL replay on restart
 /// (<c>OnLogRestored</c>), follower replication + failover (<c>OnReplicationReceived</c>), and the
 /// single-writer serialization of <see cref="RangeMapStore.MutateAsync"/>.
@@ -58,7 +58,7 @@ public sealed class TestRangeMapReplication
             NodeId = nodeId,
             Host = "localhost",
             Port = port,
-            InitialPartitions = 2, // partition 1 = meta map, partition 2 = data
+            InitialPartitions = 2, // meta map on P0 (system); partitions 1, 2 = data
             StartElectionTimeout = 50,
             EndElectionTimeout = 150,
             CompactEveryOperations = 1000,
@@ -342,13 +342,13 @@ public sealed class TestRangeMapReplication
         }
     }
 
-    // ── MetaPartition_IsOne_DataPartitionsAreTwoPlus ─────────────────────────────
+    // ── MetaPartition_IsZero_DataPartitionsAreOnePlus ────────────────────────────
 
     [Fact]
-    public async Task MetaPartition_IsOne_DataPartitionsAreTwoPlus()
+    public async Task MetaPartition_IsZero_DataPartitionsAreOnePlus()
     {
-        Assert.Equal(1, RangeMapStore.MetaPartitionId);
-        Assert.Equal(2, RangeMapStore.FirstDataPartitionId);
+        Assert.Equal(0, RangeMapStore.MetaPartitionId);
+        Assert.Equal(1, RangeMapStore.FirstDataPartitionId);
 
         Node[] nodes = await Assemble("memory",
             [Guid.NewGuid().ToString(), Guid.NewGuid().ToString(), Guid.NewGuid().ToString()]);
@@ -356,17 +356,17 @@ public sealed class TestRangeMapReplication
         {
             Node leader = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
 
-            // A descriptor naming the reserved meta partition (1) is rejected — ranged data lives on >= 2.
+            // A descriptor naming the reserved system/meta partition (0) is rejected — ranged data lives on >= 1.
             bool rejectedMeta = await leader.Kahuna.RangeMapStore.MutateAsync(
-                _ => [RowRange(1)], TestContext.Current.CancellationToken);
+                _ => [RowRange(0)], TestContext.Current.CancellationToken);
             Assert.False(rejectedMeta);
             Assert.Empty(leader.Kahuna.RangeMapStore.Current.Descriptors);
 
-            // A descriptor on a data partition (>= 2) commits.
+            // A descriptor on a data partition (>= 1) commits.
             bool acceptedData = await leader.Kahuna.RangeMapStore.MutateAsync(
-                _ => [RowRange(2)], TestContext.Current.CancellationToken);
+                _ => [RowRange(1)], TestContext.Current.CancellationToken);
             Assert.True(acceptedData);
-            Assert.All(leader.Kahuna.RangeMapStore.Current.Descriptors, d => Assert.True(d.PartitionId >= 2));
+            Assert.All(leader.Kahuna.RangeMapStore.Current.Descriptors, d => Assert.True(d.PartitionId >= 1));
         }
         finally
         {

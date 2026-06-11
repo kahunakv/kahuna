@@ -73,7 +73,9 @@ internal sealed class GrpcServerBatcherResponse
     
     
     public GrpcRollbackTransactionResponse? RollbackTransaction { get; }
-    
+
+    public GrpcEnsureKeyRangeSeededResponse? EnsureKeyRangeSeeded { get; }
+
     public GrpcServerBatcherResponse(GrpcTryLockResponse tryLock)
     {
         TryLock = tryLock;
@@ -247,5 +249,10 @@ internal sealed class GrpcServerBatcherResponse
     public GrpcServerBatcherResponse(GrpcRollbackTransactionResponse rollbackTransaction)
     {
         RollbackTransaction = rollbackTransaction;
+    }
+
+    public GrpcServerBatcherResponse(GrpcEnsureKeyRangeSeededResponse ensureKeyRangeSeeded)
+    {
+        EnsureKeyRangeSeeded = ensureKeyRangeSeeded;
     }
 }

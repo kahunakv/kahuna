@@ -33,34 +33,40 @@ public class TestKeyValueScriptControlStructures : BaseCluster
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
 
-        // Persistent tests
-        string script = """
-        SET pp 'other world'                
-        IF true THEN
-            SET pp 'hello world' EX 1000        
-        END                               
-        GET pp
-        """;
+        try
+        {
+            // Persistent tests
+            string script = """
+            SET pp 'other world'                
+            IF true THEN
+                SET pp 'hello world' EX 1000        
+            END                               
+            GET pp
+            """;
 
-        KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(1, resp.Revision);
-        Assert.Equal("hello world"u8.ToArray(), resp.Value);
+            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(1, resp.Revision);
+            Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
-        script = """
-          ESET pp 'other world'                
-          IF true THEN
-              ESET pp 'hello world' EX 1000        
-          END                               
-          EGET pp
-          """;
+            script = """
+              ESET pp 'other world'                
+              IF true THEN
+                  ESET pp 'hello world' EX 1000        
+              END                               
+              EGET pp
+              """;
 
-        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(1, resp.Revision);
-        Assert.Equal("hello world"u8.ToArray(), resp.Value);
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(1, resp.Revision);
+            Assert.Equal("hello world"u8.ToArray(), resp.Value);
 
-        await LeaveCluster(node1, node2, node3);
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
     }
     
     [Theory, CombinatorialData]
@@ -69,34 +75,40 @@ public class TestKeyValueScriptControlStructures : BaseCluster
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
 
-        // Persistent tests
-        string script = """
-        SET pp 'other world'                
-        IF false THEN
-            SET pp 'hello world' EX 1000        
-        END                               
-        GET pp
-        """;
+        try
+        {
+            // Persistent tests
+            string script = """
+            SET pp 'other world'                
+            IF false THEN
+                SET pp 'hello world' EX 1000        
+            END                               
+            GET pp
+            """;
 
-        KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
-        Assert.Equal("other world"u8.ToArray(), resp.Value);
+            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(0, resp.Revision);
+            Assert.Equal("other world"u8.ToArray(), resp.Value);
         
-        script = """
-          ESET pp 'other world'                
-          IF false THEN
-              ESET pp 'hello world' EX 1000        
-          END                               
-          EGET pp
-          """;
+            script = """
+              ESET pp 'other world'                
+              IF false THEN
+                  ESET pp 'hello world' EX 1000        
+              END                               
+              EGET pp
+              """;
 
-        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(0, resp.Revision);
-        Assert.Equal("other world"u8.ToArray(), resp.Value);
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(0, resp.Revision);
+            Assert.Equal("other world"u8.ToArray(), resp.Value);
         
-        await LeaveCluster(node1, node2, node3);
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
     }
     
     [Theory, CombinatorialData]
@@ -105,38 +117,44 @@ public class TestKeyValueScriptControlStructures : BaseCluster
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
 
-        // Persistent tests
-        string script = """
-        SET pp 'other world'                
-        IF true THEN
-            SET pp 'hello world' EX 1000
-        ELSE       
-            SET pp 'big world' EX 1000
-        END
-        GET pp
-        """;
+        try
+        {
+            // Persistent tests
+            string script = """
+            SET pp 'other world'                
+            IF true THEN
+                SET pp 'hello world' EX 1000
+            ELSE       
+                SET pp 'big world' EX 1000
+            END
+            GET pp
+            """;
 
-        KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(1, resp.Revision);
-        Assert.Equal("hello world"u8.ToArray(), resp.Value);
+            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(1, resp.Revision);
+            Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
-        script = """
-          ESET pp 'other world'                
-          IF true THEN
-              ESET pp 'hello world' EX 1000
-          ELSE       
-              ESET pp 'big world' EX 1000    
-          END                               
-          EGET pp
-          """;
+            script = """
+              ESET pp 'other world'                
+              IF true THEN
+                  ESET pp 'hello world' EX 1000
+              ELSE       
+                  ESET pp 'big world' EX 1000    
+              END                               
+              EGET pp
+              """;
 
-        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(1, resp.Revision);
-        Assert.Equal("hello world"u8.ToArray(), resp.Value);
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(1, resp.Revision);
+            Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
-        await LeaveCluster(node1, node2, node3);
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
     }
     
     [Theory, CombinatorialData]
@@ -145,38 +163,44 @@ public class TestKeyValueScriptControlStructures : BaseCluster
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
 
-        // Persistent tests
-        string script = """
-        SET pp 'other world'                
-        IF false THEN
-            SET pp 'hello world' EX 1000
-        ELSE
-            SET pp 'big world' EX 1000
-        END                               
-        GET pp
-        """;
+        try
+        {
+            // Persistent tests
+            string script = """
+            SET pp 'other world'                
+            IF false THEN
+                SET pp 'hello world' EX 1000
+            ELSE
+                SET pp 'big world' EX 1000
+            END                               
+            GET pp
+            """;
 
-        KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(1, resp.Revision);
-        Assert.Equal("big world"u8.ToArray(), resp.Value);
+            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(1, resp.Revision);
+            Assert.Equal("big world"u8.ToArray(), resp.Value);
         
-        script = """
-          ESET pp 'other world'                
-          IF false THEN
-              ESET pp 'hello world' EX 1000
-          ELSE
-              ESET pp 'big world' EX 1000    
-          END                               
-          EGET pp
-          """;
+            script = """
+              ESET pp 'other world'                
+              IF false THEN
+                  ESET pp 'hello world' EX 1000
+              ELSE
+                  ESET pp 'big world' EX 1000    
+              END                               
+              EGET pp
+              """;
 
-        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(1, resp.Revision);
-        Assert.Equal("big world"u8.ToArray(), resp.Value);
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(1, resp.Revision);
+            Assert.Equal("big world"u8.ToArray(), resp.Value);
         
-        await LeaveCluster(node1, node2, node3);
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
     }
     
     [Theory, CombinatorialData]
@@ -185,46 +209,52 @@ public class TestKeyValueScriptControlStructures : BaseCluster
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
 
-        // Persistent tests
-        string script = """
-        SET pp 'other world'    
-        IF true THEN
+        try
+        {
+            // Persistent tests
+            string script = """
+            SET pp 'other world'    
             IF true THEN
-               SET pp 'hello world' EX 1000
-            ELSE
-               SET pp 'old world' EX 1000
+                IF true THEN
+                   SET pp 'hello world' EX 1000
+                ELSE
+                   SET pp 'old world' EX 1000
+                END
+            ELSE       
+                SET pp 'big world' EX 1000
             END
-        ELSE       
-            SET pp 'big world' EX 1000
-        END
-        GET pp
-        """;
+            GET pp
+            """;
 
-        KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(1, resp.Revision);
-        Assert.Equal("hello world"u8.ToArray(), resp.Value);
+            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(1, resp.Revision);
+            Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
-        script = """
-          ESET pp 'other world'    
-          IF true THEN
+            script = """
+              ESET pp 'other world'    
               IF true THEN
-                 ESET pp 'hello world' EX 1000
-              ELSE
-                 ESET pp 'old world' EX 1000
+                  IF true THEN
+                     ESET pp 'hello world' EX 1000
+                  ELSE
+                     ESET pp 'old world' EX 1000
+                  END
+              ELSE       
+                  ESET pp 'big world' EX 1000
               END
-          ELSE       
-              ESET pp 'big world' EX 1000
-          END
-          EGET pp
-          """;
+              EGET pp
+              """;
 
-        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(1, resp.Revision);
-        Assert.Equal("hello world"u8.ToArray(), resp.Value);
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(1, resp.Revision);
+            Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
-        await LeaveCluster(node1, node2, node3);
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
     }
     
     [Theory, CombinatorialData]
@@ -233,54 +263,60 @@ public class TestKeyValueScriptControlStructures : BaseCluster
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
 
-        // Persistent tests
-        string script = """
-        SET pp 'other world'    
-        IF false THEN
-            IF true THEN
-               SET pp 'hello world' EX 1000
-            ELSE
-               SET pp 'old world' EX 1000
-            END
-        ELSE       
+        try
+        {
+            // Persistent tests
+            string script = """
+            SET pp 'other world'    
             IF false THEN
-               SET pp 'hello world' EX 1000
-            ELSE
-               SET pp 'big world' EX 1000
+                IF true THEN
+                   SET pp 'hello world' EX 1000
+                ELSE
+                   SET pp 'old world' EX 1000
+                END
+            ELSE       
+                IF false THEN
+                   SET pp 'hello world' EX 1000
+                ELSE
+                   SET pp 'big world' EX 1000
+                END
             END
-        END
-        GET pp
-        """;
+            GET pp
+            """;
 
-        KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(1, resp.Revision);
-        Assert.Equal("big world"u8.ToArray(), resp.Value);
+            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(1, resp.Revision);
+            Assert.Equal("big world"u8.ToArray(), resp.Value);
         
-        script = """
-          ESET pp 'other world'    
-          IF false THEN
-              IF true THEN
-                 ESET pp 'hello world' EX 1000
-              ELSE
-                 ESET pp 'old world' EX 1000
-              END
-          ELSE       
+            script = """
+              ESET pp 'other world'    
               IF false THEN
-                 ESET pp 'hello world' EX 1000
-              ELSE
-                 ESET pp 'big world' EX 1000
+                  IF true THEN
+                     ESET pp 'hello world' EX 1000
+                  ELSE
+                     ESET pp 'old world' EX 1000
+                  END
+              ELSE       
+                  IF false THEN
+                     ESET pp 'hello world' EX 1000
+                  ELSE
+                     ESET pp 'big world' EX 1000
+                  END
               END
-          END
-          EGET pp
-          """;
+              EGET pp
+              """;
 
-        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(1, resp.Revision);
-        Assert.Equal("big world"u8.ToArray(), resp.Value);
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(1, resp.Revision);
+            Assert.Equal("big world"u8.ToArray(), resp.Value);
         
-        await LeaveCluster(node1, node2, node3);
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
     }
     
     [Theory, CombinatorialData]
@@ -289,29 +325,35 @@ public class TestKeyValueScriptControlStructures : BaseCluster
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna _) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
 
-        // Persistent tests
-        string script = """
-        LET my_var = 'hello world'                               
-        RETURN my_var
-        """;
+        try
+        {
+            // Persistent tests
+            string script = """
+            LET my_var = 'hello world'                               
+            RETURN my_var
+            """;
 
-        KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(-1, resp.Revision);
-        Assert.Equal("hello world"u8.ToArray(), resp.Value);
+            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(-1, resp.Revision);
+            Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
-        script = """
-          LET my_var = 'hello world'                               
-          LET my_var = 'another world'
-          RETURN my_var
-          """;
+            script = """
+              LET my_var = 'hello world'                               
+              LET my_var = 'another world'
+              RETURN my_var
+              """;
 
-        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(-1, resp.Revision);
-        Assert.Equal("another world"u8.ToArray(), resp.Value);
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(-1, resp.Revision);
+            Assert.Equal("another world"u8.ToArray(), resp.Value);
 
-        await LeaveCluster(node1, node2, node3);
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
     }
     
     [Theory, CombinatorialData]
@@ -320,77 +362,83 @@ public class TestKeyValueScriptControlStructures : BaseCluster
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
 
-        // Persistent tests
-        string script = """
-        LET my_var = (100 + 50) * 2 - 1                               
-        RETURN my_var
-        """;
+        try
+        {
+            // Persistent tests
+            string script = """
+            LET my_var = (100 + 50) * 2 - 1                               
+            RETURN my_var
+            """;
 
-        KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(-1, resp.Revision);
-        Assert.Equal("299", Encoding.UTF8.GetString(resp.Value ?? []));
+            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(-1, resp.Revision);
+            Assert.Equal("299", Encoding.UTF8.GetString(resp.Value ?? []));
         
-        script = """
-          LET my_var = (100 + 50) * 2 - 1                               
-          LET my_var = my_var + (100 + 50) * 2 - 1
-          RETURN my_var
-          """;
+            script = """
+              LET my_var = (100 + 50) * 2 - 1                               
+              LET my_var = my_var + (100 + 50) * 2 - 1
+              RETURN my_var
+              """;
 
-        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(-1, resp.Revision);
-        Assert.Equal("598", Encoding.UTF8.GetString(resp.Value ?? []));
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(-1, resp.Revision);
+            Assert.Equal("598", Encoding.UTF8.GetString(resp.Value ?? []));
         
-        script = """
-          LET my_var = true          
-          RETURN my_var
-          """;
+            script = """
+              LET my_var = true          
+              RETURN my_var
+              """;
 
-        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(-1, resp.Revision);
-        Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(-1, resp.Revision);
+            Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
         
-        script = """
-          LET my_var = null          
-          RETURN my_var
-          """;
+            script = """
+              LET my_var = null          
+              RETURN my_var
+              """;
 
-        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(-1, resp.Revision);
-        Assert.Equal("", Encoding.UTF8.GetString(resp.Value ?? []));
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(-1, resp.Revision);
+            Assert.Equal("", Encoding.UTF8.GetString(resp.Value ?? []));
         
-         script = """
-          LET my_var = 10.5          
-          RETURN my_var
-          """;
+             script = """
+              LET my_var = 10.5          
+              RETURN my_var
+              """;
 
-        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(-1, resp.Revision);
-        Assert.Equal("10.5", Encoding.UTF8.GetString(resp.Value ?? []));
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(-1, resp.Revision);
+            Assert.Equal("10.5", Encoding.UTF8.GetString(resp.Value ?? []));
         
-        script = """
-          LET my_var = 10.5          
-          LET my_var2 = 0.5
-          RETURN my_var + my_var2
-          """;
+            script = """
+              LET my_var = 10.5          
+              LET my_var2 = 0.5
+              RETURN my_var + my_var2
+              """;
 
-        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(-1, resp.Revision);
-        Assert.Equal("11", Encoding.UTF8.GetString(resp.Value ?? []));
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(-1, resp.Revision);
+            Assert.Equal("11", Encoding.UTF8.GetString(resp.Value ?? []));
         
-        script = "RETURN (100 + 50) * 2 - 1";
+            script = "RETURN (100 + 50) * 2 - 1";
 
-        resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(-1, resp.Revision);
-        Assert.Equal("299", Encoding.UTF8.GetString(resp.Value ?? []));
+            resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(-1, resp.Revision);
+            Assert.Equal("299", Encoding.UTF8.GetString(resp.Value ?? []));
 
-        await LeaveCluster(node1, node2, node3);
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
     }
 
     [Theory, CombinatorialData]
@@ -399,32 +447,38 @@ public class TestKeyValueScriptControlStructures : BaseCluster
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
 
-        // Persistent tests
-        string script = "throw 'my exception'";
+        try
+        {
+            // Persistent tests
+            string script = "throw 'my exception'";
 
-        KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Errored, resp.Type);        
-        Assert.Equal("my exception at line 1", resp.Reason);
+            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Errored, resp.Type);        
+            Assert.Equal("my exception at line 1", resp.Reason);
 
-        script = "throw 100";
+            script = "throw 100";
 
-        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Errored, resp.Type);        
-        Assert.Equal("100 at line 1", resp.Reason);
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Errored, resp.Type);        
+            Assert.Equal("100 at line 1", resp.Reason);
         
-        script = "throw false";
+            script = "throw false";
 
-        resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Errored, resp.Type);        
-        Assert.Equal("false at line 1", resp.Reason);
+            resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Errored, resp.Type);        
+            Assert.Equal("false at line 1", resp.Reason);
         
-        script = "throw null";
+            script = "throw null";
 
-        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Errored, resp.Type);        
-        Assert.Equal("(null) at line 1", resp.Reason);
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Errored, resp.Type);        
+            Assert.Equal("(null) at line 1", resp.Reason);
         
-        await LeaveCluster(node1, node2, node3);
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
     }
     
     [Theory, CombinatorialData]
@@ -433,23 +487,29 @@ public class TestKeyValueScriptControlStructures : BaseCluster
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
         
-        string script = "sleep 1050 return true";
+        try
+        {
+            string script = "sleep 1050 return true";
         
-        Stopwatch stopwatch = Stopwatch.StartNew();
+            Stopwatch stopwatch = Stopwatch.StartNew();
 
-        KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);        
-        Assert.True(stopwatch.ElapsedMilliseconds >= 1000);
+            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);        
+            Assert.True(stopwatch.ElapsedMilliseconds >= 1000);
 
-        stopwatch.Restart();
+            stopwatch.Restart();
 
-        script = "sleep 3050 return true";
+            script = "sleep 3050 return true";
 
-        resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);        
-        Assert.True(stopwatch.ElapsedMilliseconds >= 3000);
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);        
+            Assert.True(stopwatch.ElapsedMilliseconds >= 3000);
         
-        await LeaveCluster(node1, node2, node3);
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
     }
     
     [Theory, CombinatorialData]
@@ -458,48 +518,54 @@ public class TestKeyValueScriptControlStructures : BaseCluster
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
 
-        // Persistent tests
-        string script = """
-        let total = 0
-        for x in 1..10 do
-            let total = total + x
-        end
-        return total
-        """;
+        try
+        {
+            // Persistent tests
+            string script = """
+            let total = 0
+            for x in 1..10 do
+                let total = total + x
+            end
+            return total
+            """;
 
-        KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(-1, resp.Revision);
-        Assert.Equal("55", Encoding.UTF8.GetString(resp.Value ?? []));
+            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(-1, resp.Revision);
+            Assert.Equal("55", Encoding.UTF8.GetString(resp.Value ?? []));
         
-        script = """
-         let total = 0
-         for x in 10..1 do
-             let total = total + x
-         end
-         return total
-         """;
+            script = """
+             let total = 0
+             for x in 10..1 do
+                 let total = total + x
+             end
+             return total
+             """;
 
-        resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(-1, resp.Revision);
-        Assert.Equal("10", Encoding.UTF8.GetString(resp.Value ?? []));
+            resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(-1, resp.Revision);
+            Assert.Equal("10", Encoding.UTF8.GetString(resp.Value ?? []));
         
-        script = """
-         let r_start = 0
-         let r_end = 9
-         let total = 0
-         for x in r_start..r_end do
-             let total = total + x
-         end
-         return total
-         """;
+            script = """
+             let r_start = 0
+             let r_end = 9
+             let total = 0
+             for x in r_start..r_end do
+                 let total = total + x
+             end
+             return total
+             """;
 
-        resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-        Assert.Equal(KeyValueResponseType.Get, resp.Type);
-        Assert.Equal(-1, resp.Revision);
-        Assert.Equal("36", Encoding.UTF8.GetString(resp.Value ?? []));
+            resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(-1, resp.Revision);
+            Assert.Equal("36", Encoding.UTF8.GetString(resp.Value ?? []));
 
-        await LeaveCluster(node1, node2, node3);
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
     }
 }

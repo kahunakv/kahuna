@@ -346,6 +346,15 @@ internal sealed class GrpcServerBatcher
         return TryProcessQueue(grpcBatcherItem, promise);
     }
 
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcEnsureKeyRangeSeededRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
     private Task<GrpcServerBatcherResponse> TryProcessQueue(GrpcServerBatcherItem grpcBatcherItem, TaskCompletionSource<GrpcServerBatcherResponse> promise)
     {
         inbox.Enqueue(grpcBatcherItem);
@@ -644,6 +653,11 @@ internal sealed class GrpcServerBatcher
             batchRequest.Type = GrpcServerBatchType.ServerTryRollbackTransaction;
             batchRequest.RollbackTransaction = itemRequest.RollbackTransaction;
         }
+        else if (itemRequest.EnsureKeyRangeSeeded is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryEnsureKeyRangeSeeded;
+            batchRequest.EnsureKeyRangeSeeded = itemRequest.EnsureKeyRangeSeeded;
+        }
         else
             throw new KahunaServerException("Unknown request type");
 
@@ -842,7 +856,11 @@ internal sealed class GrpcServerBatcher
                         item.Promise.SetResult(new(response.RollbackTransaction));
                         break;
 
-                    case GrpcServerBatchType.ServerTypeNone:                    
+                    case GrpcServerBatchType.ServerTryEnsureKeyRangeSeeded:
+                        item.Promise.SetResult(new(response.EnsureKeyRangeSeeded));
+                        break;
+
+                    case GrpcServerBatchType.ServerTypeNone:
                     default:
                         item.Promise.SetException(new KahunaServerException("Unknown response type: " + response.Type));
                         break;

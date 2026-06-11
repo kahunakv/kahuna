@@ -34,6 +34,8 @@ internal sealed class KeyValuesManager : IDisposable
 
     private readonly IRaft raft;
 
+    private readonly IInterNodeCommunication interNodeCommunication;
+
     private readonly IPersistenceBackend persistenceBackend;
 
     private readonly ILogger<IKahuna> logger;
@@ -99,6 +101,7 @@ internal sealed class KeyValuesManager : IDisposable
     {
         this.actorSystem = actorSystem;
         this.raft = raft;
+        this.interNodeCommunication = interNodeCommunication;
         this.backgroundWriter = backgroundWriter;
         this.logger = logger;
 
@@ -178,6 +181,132 @@ internal sealed class KeyValuesManager : IDisposable
     /// key-range here; <c>{db}/meta</c> and system spaces stay hash-routed (the default).
     /// </summary>
     internal KeySpaceRegistry KeySpaceRegistry => keySpaceRegistry;
+
+    /// <summary>
+    /// Generation stamped on an auto-seeded initial descriptor. Must be &gt;= 1 so it acts as a real
+    /// routing fence (0 is the hash-mode "no fence" sentinel); splits/merges bump it from here.
+    /// </summary>
+    private const long InitialSeedGeneration = 1;
+
+    /// <summary>
+    /// Flips <paramref name="keySpace"/> to key-range routing on this node and, on the meta-partition
+    /// leader, auto-seeds its initial whole-space descriptor (<c>[-inf, +inf)</c>) if none exists yet.
+    /// <para>
+    /// <see cref="KeySpaceRegistry.RegisterKeyRange"/> alone only changes the routing <i>mode</i>; until
+    /// a covering descriptor exists, routing a key throws "no range descriptor covers key". This makes
+    /// registration self-sufficient: callers no longer reach into the internal <see cref="RangeMapStore"/>
+    /// to bootstrap the first range. The seed is the trivial whole-space range — no key-distribution or
+    /// PK-type knowledge is needed; real boundaries are discovered later by the auto-splitter from live
+    /// data.
+    /// </para>
+    /// <para>
+    /// The mode flip is node-local (every node must call this). The seed is a single replicated meta-log
+    /// write that only the meta-partition (<see cref="RangeMapStore.MetaPartitionId"/>) leader can commit;
+    /// on any other node the seed step is a no-op and the descriptor arrives by replication. Idempotent:
+    /// safe to call repeatedly and from every node. <b>Multi-node note:</b> if no node that leads the meta
+    /// partition ever calls this for the space, it stays unseeded — same dual-leader coordination caveat
+    /// the auto-splitter carries. For single-node / colocated-leader deployments it just works.
+    /// </para>
+    /// </summary>
+    /// <returns><c>true</c> iff this call committed the seed descriptor.</returns>
+    internal async Task<bool> RegisterKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default)
+    {
+        // Key-range sharding needs at least one data partition (>= FirstDataPartitionId = 1). Since
+        // the meta map shares the system partition (P0), even a single user partition (P1) can host
+        // ranged data, so InitialPartitions = 1 is fully supported. The guard only trips on a
+        // degenerate InitialPartitions = 0 misconfiguration, where it degrades to a no-op instead of
+        // seeding onto a non-existent partition.
+        if (raft.Configuration.InitialPartitions < RangeMapStore.FirstDataPartitionId)
+            return false;
+
+        keySpaceRegistry.RegisterKeyRange(keySpace);
+        return await EnsureKeyRangeSeededAsync(keySpace, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<bool> EnsureKeyRangeSeededAsync(string keySpace, CancellationToken cancellationToken)
+    {
+        // Fast path: a covering descriptor already exists (seeded earlier, or replicated from the leader).
+        if (rangeMapStore.Current.FindAll(keySpace).Count > 0)
+            return false;
+
+        // Only the meta-partition leader can commit the seed. If this node is not the leader,
+        // resolve the current leader and forward the seed request to it. Then wait for the descriptor
+        // to replicate to this node so follow-on routes on this node see it immediately.
+        if (!await raft.AmILeader(RangeMapStore.MetaPartitionId, cancellationToken).ConfigureAwait(false))
+        {
+            string leader = await raft.WaitForLeader(RangeMapStore.MetaPartitionId, cancellationToken).ConfigureAwait(false);
+            if (leader == raft.GetLocalEndpoint())
+            {
+                // We just became leader between the AmILeader check and WaitForLeader — fall through to seed locally.
+            }
+            else
+            {
+                bool forwarded = await interNodeCommunication.EnsureKeyRangeSeeded(leader, keySpace, cancellationToken).ConfigureAwait(false);
+                // Wait for the descriptor to replicate to this node (the calling node registered the space
+                // mode-flip but doesn't have the descriptor yet).
+                if (rangeMapStore.Current.FindAll(keySpace).Count == 0)
+                {
+                    long deadline = Environment.TickCount64 + 10_000;
+                    while (Environment.TickCount64 < deadline && rangeMapStore.Current.FindAll(keySpace).Count == 0)
+                        await Task.Delay(25, cancellationToken).ConfigureAwait(false);
+                }
+                return forwarded;
+            }
+        }
+
+        int seedPartition = SeedPartitionFor(keySpace);
+
+        // Tracks whether this call actually appended the seed. A concurrent seed of the same space
+        // can land between the fast-path check and the mutate gate; in that race the transform returns
+        // the map unchanged and MutateAsync still re-replicates it (returning true), so we cannot infer
+        // "I committed the seed" from MutateAsync's result alone.
+        bool committed = false;
+
+        bool ok = await rangeMapStore.MutateAsync(current =>
+        {
+            // Re-check under the mutate gate: a concurrent seed of the same space may have landed.
+            foreach (RangeDescriptor existing in current)
+                if (string.Equals(existing.KeySpace, keySpace, StringComparison.Ordinal))
+                    return current; // already seeded — leave the map untouched (committed stays false)
+
+            RangeDescriptor[] next = new RangeDescriptor[current.Count + 1];
+            for (int i = 0; i < current.Count; i++)
+                next[i] = current[i];
+
+            next[current.Count] = new RangeDescriptor
+            {
+                KeySpace = keySpace,
+                StartKey = null,
+                EndKey = null,
+                PartitionId = seedPartition,
+                Generation = InitialSeedGeneration
+            };
+
+            committed = true;
+            return next;
+        }, cancellationToken).ConfigureAwait(false);
+
+        return ok && committed;
+    }
+
+    /// <summary>
+    /// Picks the data partition for a key space's initial descriptor: a deterministic hash over the
+    /// data-partition pool <c>[<see cref="RangeMapStore.FirstDataPartitionId"/>, InitialPartitions]</c>
+    /// (key-range data never lives on the reserved system/meta partition 0). Spreads different spaces'
+    /// initial ranges across partitions instead of piling them all on partition 1.
+    /// </summary>
+    private int SeedPartitionFor(string keySpace)
+    {
+        int poolSize = raft.Configuration.InitialPartitions;
+        int dataPartitions = poolSize - (RangeMapStore.FirstDataPartitionId - 1); // count of [1 .. poolSize]
+        if (dataPartitions < 1)
+            throw new KahunaServerException(
+                $"Key-range space '{keySpace}' requires at least {RangeMapStore.FirstDataPartitionId} partition(s) " +
+                $"(InitialPartitions={poolSize}); key-range data cannot live on the reserved partition 0.");
+
+        int offset = (int)(HashUtils.SimpleHash(keySpace) % (ulong)dataPartitions);
+        return RangeMapStore.FirstDataPartitionId + offset;
+    }
 
     /// <summary>
     /// Resolves a key to its owning <c>(partitionId, generation)</c> via the key-order router

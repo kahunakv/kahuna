@@ -821,6 +821,7 @@ message GrpcBatchServerKeyValueRequest {
     GrpcTryCheckWriteIntentRequest TryCheckWriteIntent = 32;
     GrpcTryAcquireExclusiveRangeLockRequest TryAcquireExclusiveRangeLock = 33;
     GrpcTryReleaseExclusiveRangeLockRequest TryReleaseExclusiveRangeLock = 34;
+    GrpcEnsureKeyRangeSeededRequest EnsureKeyRangeSeeded = 35;
   }
 }
 
@@ -860,6 +861,7 @@ message GrpcBatchServerKeyValueResponse
     GrpcTryCheckWriteIntentResponse TryCheckWriteIntent = 31;
     GrpcTryAcquireExclusiveRangeLockResponse TryAcquireExclusiveRangeLock = 32;
     GrpcTryReleaseExclusiveRangeLockResponse TryReleaseExclusiveRangeLock = 33;
+    GrpcEnsureKeyRangeSeededResponse EnsureKeyRangeSeeded = 34;
   }
 }
 
@@ -868,6 +870,14 @@ message GrpcRegisterKeyRangeRequest {
 }
 
 message GrpcRegisterKeyRangeResponse {
+  bool Success = 1;
+}
+
+message GrpcEnsureKeyRangeSeededRequest {
+  string KeySpace = 1;
+}
+
+message GrpcEnsureKeyRangeSeededResponse {
   bool Success = 1;
 }
 
@@ -922,6 +932,7 @@ enum GrpcServerBatchType {
   SERVER_TRY_CHECK_WRITE_INTENT = 30;
   SERVER_TRY_ACQUIRE_EXCLUSIVE_RANGE_LOCK = 31;
   SERVER_TRY_RELEASE_EXCLUSIVE_RANGE_LOCK = 32;
+  SERVER_TRY_ENSURE_KEY_RANGE_SEEDED = 33;
 }
 
 enum GrpcKeyValueFlags {

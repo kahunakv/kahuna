@@ -1496,12 +1496,32 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         return responses;
     }
     
+    public async Task<bool> EnsureKeyRangeSeeded(string node, string keySpace, CancellationToken cancellationToken)
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcEnsureKeyRangeSeededRequest request = new()
+        {
+            KeySpace = keySpace,
+        };
+
+        GrpcServerBatcherResponse batchResponse;
+
+        if (cancellationToken == CancellationToken.None)
+            batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+        else
+            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        GrpcEnsureKeyRangeSeededResponse remoteResponse = batchResponse.EnsureKeyRangeSeeded!;
+        return remoteResponse.Success;
+    }
+
     private static GrpcServerBatcher GetSharedBatcher(string url)
     {
         Lazy<GrpcServerBatcher> lazyBatchers = batchers.GetOrAdd(url, GetSharedBatchers);
         return lazyBatchers.Value;
     }
-    
+
     private static Lazy<GrpcServerBatcher> GetSharedBatchers(string url)
     {
         return new(() => new(url));

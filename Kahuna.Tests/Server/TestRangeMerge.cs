@@ -61,26 +61,25 @@ public sealed class TestRangeMerge : BaseCluster
     }
 
     /// <summary>
-    /// Forces <paramref name="target"/> to become leader of both the system partition (P0) and
-    /// <see cref="RangeMapStore.MetaPartitionId"/>, then waits until both roles are confirmed.
-    /// Eliminates the leadership-race that otherwise causes <see cref="RangeMapStore.MutateAsync"/>
-    /// to return <c>NodeIsNotLeader</c> mid-merge.
+    /// Forces <paramref name="target"/> to become leader of the system/meta partition (P0), then
+    /// waits until the role is confirmed. Since the meta map shares P0 (Kommander 0.11.0+), one P0
+    /// leadership grant covers partition lifecycle and the descriptor cutover. Eliminates the
+    /// leadership-race that otherwise causes <see cref="RangeMapStore.MutateAsync"/> to return
+    /// <c>NodeIsNotLeader</c> mid-merge.
     /// </summary>
-    private static async Task<KahunaManager> ForceDualLeaderAsync(
+    private static async Task<KahunaManager> ForceMetaLeaderAsync(
         (IRaft Raft, KahunaManager Kahuna) target, CancellationToken ct)
     {
-        await target.Raft.ForceLeaderForTestingAsync(0, ct);
         await target.Raft.ForceLeaderForTestingAsync(RangeMapStore.MetaPartitionId, ct);
 
         long deadline = Environment.TickCount64 + 10_000;
         while (Environment.TickCount64 < deadline)
         {
-            if (await target.Raft.AmILeader(0, ct) &&
-                await target.Raft.AmILeader(RangeMapStore.MetaPartitionId, ct))
+            if (await target.Raft.AmILeader(RangeMapStore.MetaPartitionId, ct))
                 return target.Kahuna;
             await Task.Delay(25, ct);
         }
-        Assert.Fail("ForceDualLeaderAsync: node did not become dual-leader within 10 s.");
+        Assert.Fail("ForceMetaLeaderAsync: node did not become P0 leader within 10 s.");
         return null!;
     }
 
@@ -270,7 +269,7 @@ public sealed class TestRangeMerge : BaseCluster
 
             // Pin P0 (system) and P1 (meta) to nodes[0] so MutateAsync cannot lose leadership
             // mid-merge and RemovePartitionAsync can be called on the same node.
-            KahunaManager dualLeader = await ForceDualLeaderAsync(nodes[0], ct);
+            KahunaManager dualLeader = await ForceMetaLeaderAsync(nodes[0], ct);
 
             MergeOutcome outcome = await dualLeader.RangeMerger.MergeAsync(Space, left, right, ct);
             Assert.True(outcome.IsSuccess);

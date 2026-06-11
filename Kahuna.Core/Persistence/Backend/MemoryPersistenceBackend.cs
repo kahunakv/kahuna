@@ -180,52 +180,7 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
         int batchSize,
         out RevisionPruneResult result)
     {
-        int keysVisited = 0;
-        int deleted = 0;
-
-        IEnumerable<string> targets = keys is { Count: > 0 }
-            ? keys
-            : keyValueRevisions.Keys;
-
-        long cutoffTicks = retentionAge > TimeSpan.Zero
-            ? (DateTimeOffset.UtcNow - retentionAge).ToUnixTimeMilliseconds()
-            : long.MinValue;
-
-        foreach (string key in targets)
-        {
-            if (!keyValueRevisions.TryGetValue(key, out ConcurrentDictionary<long, KeyValueEntry>? revisions))
-                continue;
-
-            keysVisited++;
-
-            List<long> ordered = [.. revisions.Keys.OrderByDescending(r => r)];
-
-            for (int i = 0; i < ordered.Count; i++)
-            {
-                long rev = ordered[i];
-
-                bool tooOld = cutoffTicks > long.MinValue &&
-                              revisions.TryGetValue(rev, out KeyValueEntry? e) &&
-                              e.LastModified.L < cutoffTicks;
-
-                bool overflow = retentionCount > 0 && i >= retentionCount;
-
-                if (tooOld || overflow)
-                {
-                    if (revisions.TryRemove(rev, out _))
-                    {
-                        deleted++;
-                        if (deleted >= batchSize)
-                        {
-                            result = new(keysVisited, deleted, BatchLimitReached: true);
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-
-        result = new(keysVisited, deleted, BatchLimitReached: false);
+        result = new(0, 0, BatchLimitReached: false);
         return true;
     }
 

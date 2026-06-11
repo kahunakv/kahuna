@@ -188,6 +188,13 @@ internal sealed class KeyValueServerBatcher
                     }
                     break;
 
+                    case GrpcServerBatchType.ServerTryEnsureKeyRangeSeeded:
+                    {
+                        GrpcEnsureKeyRangeSeededRequest? req = request.EnsureKeyRangeSeeded;
+                        tasks.Add(EnsureKeyRangeSeededDelayed(semaphore, request.RequestId, req, responseStream, context));
+                    }
+                    break;
+
                     case GrpcServerBatchType.ServerTryReleaseManyExclusiveLocks:
                     {
                         GrpcTryReleaseManyExclusiveLocksRequest? tryReleaseManyExclusiveLocksRequest = request.TryReleaseManyExclusiveLocks;
@@ -665,6 +672,30 @@ internal sealed class KeyValueServerBatcher
         };
 
         await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+
+    private async Task EnsureKeyRangeSeededDelayed(
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcEnsureKeyRangeSeededRequest request,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context)
+    {
+        await semaphore.WaitAsync(context.CancellationToken);
+        try
+        {
+            GrpcEnsureKeyRangeSeededResponse resp = await service.EnsureKeyRangeSeededInternal(request, context);
+            await responseStream.WriteAsync(new GrpcBatchServerKeyValueResponse
+            {
+                Type = GrpcServerBatchType.ServerTryEnsureKeyRangeSeeded,
+                RequestId = requestId,
+                EnsureKeyRangeSeeded = resp
+            });
+        }
+        finally
+        {
+            semaphore.Release();
+        }
     }
 
     private async Task TryReleaseManyExclusiveLocksDelayed(

@@ -72,7 +72,9 @@ internal sealed class GrpcServerBatcherRequest
     public GrpcCommitTransactionRequest? CommitTransaction { get; }
     
     public GrpcRollbackTransactionRequest? RollbackTransaction { get; }
-    
+
+    public GrpcEnsureKeyRangeSeededRequest? EnsureKeyRangeSeeded { get; }
+
     public GrpcServerBatcherRequest(GrpcTryLockRequest tryLock)
     {
         TryLock = tryLock;
@@ -246,5 +248,10 @@ internal sealed class GrpcServerBatcherRequest
     public GrpcServerBatcherRequest(GrpcRollbackTransactionRequest rollbackTransaction)
     {
         RollbackTransaction = rollbackTransaction;
+    }
+
+    public GrpcServerBatcherRequest(GrpcEnsureKeyRangeSeededRequest ensureKeyRangeSeeded)
+    {
+        EnsureKeyRangeSeeded = ensureKeyRangeSeeded;
     }
 }

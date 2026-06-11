@@ -1171,6 +1171,10 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <inheritdoc/>
     public void RegisterKeyRange(string keySpace) => keyValues.KeySpaceRegistry.RegisterKeyRange(keySpace);
 
+    /// <inheritdoc/>
+    public Task<bool> RegisterKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default) =>
+        keyValues.RegisterKeyRangeAsync(keySpace, cancellationToken);
+
     /// <summary>The key-range data-movement primitive (Task 5); register with <c>IRaft.RegisterStateMachineTransfer</c>.</summary>
     internal KvStateMachineTransfer KvStateMachineTransfer => keyValues.KvStateMachineTransfer;
 

@@ -63,9 +63,10 @@ internal sealed class RangeMergeTrigger
     /// </summary>
     public async Task<int> TriggerAsync(CancellationToken ct = default)
     {
-        // Guard: only run on the node that is leader of both system (0) and meta (1) partitions.
-        // RemovePartitionAsync requires system-leader; MergeAsync/MutateAsync requires meta-leader.
-        if (!await raft.AmILeader(0, ct) || !await raft.AmILeader(RangeMapStore.MetaPartitionId, ct))
+        // Guard: only run on the system-partition (P0) leader. Since Kommander 0.11.0 the meta map
+        // shares P0, so RemovePartitionAsync (system-leader) and MergeAsync/MutateAsync (meta-leader)
+        // require the same node — the old P0+P1 colocation requirement is gone.
+        if (!await raft.AmILeader(RangeMapStore.MetaPartitionId, ct))
             return 0;
 
         // Retry any partition removals that failed on a previous tick.

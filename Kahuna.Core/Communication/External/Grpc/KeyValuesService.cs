@@ -1838,4 +1838,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         keyValues.RegisterKeyRange(request.KeySpace);
         return Task.FromResult(new GrpcRegisterKeyRangeResponse { Success = true });
     }
+
+    internal async Task<GrpcEnsureKeyRangeSeededResponse> EnsureKeyRangeSeededInternal(GrpcEnsureKeyRangeSeededRequest request, ServerCallContext context)
+    {
+        bool success = await keyValues.RegisterKeyRangeAsync(request.KeySpace, context.CancellationToken);
+        return new GrpcEnsureKeyRangeSeededResponse { Success = success };
+    }
 }

@@ -178,8 +178,24 @@ public interface IKahuna
     /// Marks <paramref name="keySpace"/> as key-range routed on this node. Must be called on every
     /// node at startup before accepting writes for the space (registry is node-local in-memory state;
     /// it is not replicated). Idempotent.
+    /// <para>
+    /// This only flips the routing <i>mode</i>; it does not create the initial range descriptor, so a
+    /// subsequent write throws until one exists. Prefer <see cref="RegisterKeyRangeAsync"/>, which also
+    /// auto-seeds the initial whole-space descriptor on the meta-partition leader.
+    /// </para>
     /// </summary>
     public void RegisterKeyRange(string keySpace);
+
+    /// <summary>
+    /// Marks <paramref name="keySpace"/> as key-range routed on this node <b>and</b> auto-seeds its
+    /// initial whole-space descriptor (<c>[-inf, +inf)</c>) on the meta-partition leader if none exists.
+    /// Call on every node at startup; the mode flip is node-local while the seed is a single replicated
+    /// meta write that only the meta-partition leader commits (a no-op elsewhere — the descriptor arrives
+    /// by replication). Idempotent. The seed needs no key-distribution or PK-type knowledge: it is the
+    /// trivial whole-space range, and the auto-splitter discovers real boundaries later from live data.
+    /// </summary>
+    /// <returns><c>true</c> iff this call committed the seed descriptor.</returns>
+    public Task<bool> RegisterKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Checks every KeyRange descriptor and splits any that exceed the configured size threshold.
