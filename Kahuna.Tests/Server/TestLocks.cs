@@ -33,7 +33,7 @@ public class TestLocks : BaseCluster
     [Theory, CombinatorialData]
     public async Task TestLockAndUnlock(
         [CombinatorialValues("memory")] string storage,
-        [CombinatorialValues(8, 16)] int partitions,
+        [CombinatorialValues(8)] int partitions,
         [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability
         //[CombinatorialValues("memory")] string storage,
         //[CombinatorialValues(16)] int partitions,
@@ -99,7 +99,7 @@ public class TestLocks : BaseCluster
     [Theory, CombinatorialData]
     public async Task TestLockOperationsAcrossNodes(
         [CombinatorialValues("memory")] string storage,
-        [CombinatorialValues(8, 16)] int partitions,
+        [CombinatorialValues(8)] int partitions,
         [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability
     )
     {

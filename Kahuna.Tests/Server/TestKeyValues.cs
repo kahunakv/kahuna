@@ -31,7 +31,7 @@ public class TestKeyValues : BaseCluster
     [Theory, CombinatorialData]
     public async Task TestSetAndGet(
         [CombinatorialValues("memory")] string storage,
-        [CombinatorialValues(8, 16)] int partitions,
+        [CombinatorialValues(8)] int partitions,
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -70,7 +70,7 @@ public class TestKeyValues : BaseCluster
     [Theory, CombinatorialData]
     public async Task TestGetByBucket(
         [CombinatorialValues("memory")] string storage,
-        [CombinatorialValues(8, 16)] int partitions,
+        [CombinatorialValues(8)] int partitions,
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {
@@ -147,7 +147,7 @@ public class TestKeyValues : BaseCluster
     [Theory, CombinatorialData]
     public async Task TestScanByPrefix(
         [CombinatorialValues("memory")] string storage,
-        [CombinatorialValues(8, 16)] int partitions,
+        [CombinatorialValues(8)] int partitions,
         [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
     )
     {

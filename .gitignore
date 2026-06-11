@@ -30,3 +30,4 @@ Nixie
 .vscode
 Kahuna.Server/*.lst
 nupkgs
+specs/
