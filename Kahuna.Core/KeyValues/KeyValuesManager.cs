@@ -113,6 +113,13 @@ internal sealed class KeyValuesManager : IDisposable
         // for the Task 4 generation fence.
         rangeMapStore = new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
 
+        // Sync the per-node key-space registry with any descriptors loaded from the durable snapshot.
+        // RangeMapStore.LoadFromDisk (called above) restores the range map but does not touch the
+        // registry — they are separate objects. Without this call, a node that restarts with a
+        // non-empty snapshot treats all key spaces as hash-routed (the default) until the first
+        // live RegisterKeyRangeAsync call, causing routing mismatches in the 2PC prepare path.
+        SyncKeySpaceRegistryFromRangeMap();
+
         proposalRouter = GetProposalRouter(configuration);
         ephemeralKeyValuesRouter = GetEphemeralRouter(configuration);
         persistentKeyValuesRouter = GetConsistentRouter(configuration);
@@ -447,7 +454,14 @@ internal sealed class KeyValuesManager : IDisposable
     public Task<bool> OnLogRestored(int partitionId, RaftLog log)
     {
         if (log.LogType == ReplicationTypes.RangeMap)
-            return Task.FromResult(rangeMapStore.Restore(partitionId, log));
+        {
+            bool result = rangeMapStore.Restore(partitionId, log);
+            // A replayed range-descriptor entry may introduce key spaces that are not yet in the
+            // per-node KeySpaceRegistry. Sync so that routing on this node matches the restored map.
+            if (result)
+                SyncKeySpaceRegistryFromRangeMap();
+            return Task.FromResult(result);
+        }
 
         return Task.FromResult(log.LogType != ReplicationTypes.KeyValues || restorer.Restore(partitionId, log));
     }
@@ -461,9 +475,43 @@ internal sealed class KeyValuesManager : IDisposable
     public Task<bool> OnReplicationReceived(int partitionId, RaftLog log)
     {
         if (log.LogType == ReplicationTypes.RangeMap)
-            return Task.FromResult(rangeMapStore.Replicate(partitionId, log));
+        {
+            bool result = rangeMapStore.Replicate(partitionId, log);
+            // Keep the per-node KeySpaceRegistry in sync with every replicated range-descriptor
+            // update. Without this, follower nodes that receive a new key-range descriptor via Raft
+            // still route the corresponding key space via hash (the default), causing 2PC prepare
+            // to be sent to the wrong partition and the transaction to be aborted.
+            if (result)
+                SyncKeySpaceRegistryFromRangeMap();
+            return Task.FromResult(result);
+        }
 
         return Task.FromResult(log.LogType != ReplicationTypes.KeyValues || replicator.Replicate(partitionId, log));
+    }
+
+    /// <summary>
+    /// Registers every key space that has a descriptor in the current range map into the local
+    /// <see cref="KeySpaceRegistry"/>. This is the missing link between the replicated/restored
+    /// range-descriptor map and the per-node routing-mode table: the map is shared across the
+    /// cluster via Raft, but the registry is node-local and must be kept in sync explicitly.
+    /// <para>
+    /// Any key space present in the range map was placed there through <see cref="MutateAsync"/>,
+    /// which in turn requires passing through <see cref="KeySpaceRegistry.RegisterKeyRange"/> on
+    /// the seeding node. That path already enforces all validity rules (e.g. non-empty, not a
+    /// reserved space). Re-applying those rules here would duplicate consumer-specific knowledge
+    /// inside Kahuna; instead we call <c>RegisterKeyRange</c> unconditionally and let it enforce
+    /// its own invariants if a descriptor ever arrives with an invalid key space.
+    /// </para>
+    /// </summary>
+    private void SyncKeySpaceRegistryFromRangeMap()
+    {
+        foreach (RangeDescriptor descriptor in rangeMapStore.Current.Descriptors)
+        {
+            if (string.IsNullOrEmpty(descriptor.KeySpace))
+                continue;
+
+            keySpaceRegistry.RegisterKeyRange(descriptor.KeySpace);
+        }
     }
 
     /// <summary>
