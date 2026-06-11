@@ -136,42 +136,53 @@ The descriptor map is the source of truth for routing. If it's wrong or inconsis
 to the wrong place. So it must itself be **consistent and replicated** — exactly the guarantee
 a Raft group gives.
 
-Kahuna stores all descriptors on a dedicated **meta partition**: **partition 1**.
+Kahuna stores all descriptors on the **meta partition**: **partition 0**, the Kommander system
+partition, shared with the partition-map coordinator.
 
 ```
-Partition 0  →  Kommander's reserved system partition. Hands-off; it bypasses Kahuna's
-                callbacks entirely. Never used for data.
+Partition 0  →  the SYSTEM + META partition. Hosts Kommander's partition-map coordinator AND
+                Kahuna's replicated RangeMap, distinguished by log type (see below). Never
+                holds key-range data. Not in the hash pool.
 
-Partition 1  →  the META partition. Holds the replicated RangeMap (the descriptors).
-                Also participates in the hash pool, so hash-mode data may share it.
-
-Partition 2+ →  DATA partitions. Key-range data always lands here (never on P1).
+Partition 1+ →  DATA partitions. Every user partition from 1 upward carries hash data;
+                key-range data also lives here (≥ partition 1). Splits allocate fresh higher ids.
 ```
 
-Why partition 1 and not partition 0? Partition 0 is Kommander-internal: it only accepts a
-special system log type and routes its committed entries to Kommander's own coordinator,
-*never* to Kahuna's `OnLogRestored` / `OnReplicationReceived` callbacks. We need the
-descriptor writes to reach Kahuna's apply logic, so we use an ordinary replicated partition —
-partition 1 — which always exists (`InitialPartitions > 0` is enforced) and is well-known.
+Why partition 0? It used to be off-limits: Kommander reserved P0 for its own coordinator and
+routed *every* committed P0 entry there, never to Kahuna's `OnLogRestored` /
+`OnReplicationReceived` callbacks. As of **Kommander 0.11.0**, P0 dispatches committed entries
+**by log type**: the coordinator's own `_RaftSystem` entries go to the coordinator, and any
+other log type is routed to the consumer (Kahuna) callbacks. That lets the descriptor map live
+on P0 alongside the coordinator.
+
+This collapses a coordination headache. Creating and removing the data partitions a split/merge
+needs (`CreatePartitionAsync` / `RemovePartitionAsync`) requires the **P0 leader**, and the
+descriptor-map cutover requires the **meta-partition leader**. With the map on P0 those are the
+**same** leader — so a split/merge orchestrator only has to lead one partition (P0). Before the
+move, the map lived on a separate partition 1, and an orchestrator had to lead both P0 *and* P1
+at once — a colocation that isn't guaranteed in a multi-partition cluster (see §8).
 
 ### RangeMapStore — the single writer
 
 `RangeMapStore.cs` owns the descriptor map. Its rules:
 
 - **One writer.** All descriptor mutations funnel through `MutateAsync`, which only commits via
-  a replicated partition-1 log entry, and only on the partition-1 leader. Serializing every
-  change on one Raft log is what makes the no-gap/no-overlap invariant easy to hold — there is
-  never a torn or racing update.
+  a replicated P0 log entry, and only on the P0 leader. Serializing every change on one Raft log
+  is what makes the no-gap/no-overlap invariant easy to hold — there is never a torn or racing
+  update.
 
 - **A dedicated log type.** Descriptor entries use `ReplicationTypes.RangeMap`, distinct from
-  the normal `ReplicationTypes.KeyValues`. When a log entry arrives on partition 1 with the
-  `RangeMap` type, it rebuilds the in-memory map instead of going through the KV path.
+  the normal `ReplicationTypes.KeyValues` and from the coordinator's `_RaftSystem`. This is what
+  lets the map coexist on P0 with the coordinator: when a committed P0 entry has the `RangeMap`
+  type, it rebuilds the in-memory map instead of going through the KV path or the coordinator.
 
 - **Durable checkpoint.** Here's a subtle trap to be aware of. The descriptor map's only
-  durable home is partition 1's write-ahead log. But Kommander **compacts** (trims) committed
-  log entries older than the last checkpoint — and a checkpoint marker carries *no state
-  snapshot*. So naively checkpointing partition 1 would delete the very entries that hold the
-  map, and a restart would rebuild an **empty map** → silent data loss.
+  durable home is P0's write-ahead log. But Kommander **compacts** (trims) committed log entries
+  older than the last checkpoint — and a checkpoint marker carries *no state snapshot*. So
+  naively checkpointing P0 would delete the very entries that hold the map, and a restart would
+  rebuild an **empty map** → silent data loss. (The coordinator keeps its own state durable
+  independently, so the consumer checkpoint is safe for *its* entries — but only because of the
+  snapshot discipline below.)
 
   The fix: before every checkpoint, `RangeMapStore` writes a full snapshot of the map to a file
   (`{StoragePath}/rangemap_{revision}.snapshot`, atomic temp-write + rename). On startup it
@@ -218,9 +229,9 @@ the descriptor map; everything else hashes.
 
 `DataPartitionRouter.cs` is Kahuna's *own* hash assignment. Crucially, Kahuna owns this — it no
 longer delegates to Kommander's `GetPartitionKey`. It hashes a key over the user-partition pool
-`[1, InitialPartitions]` using `HashUtils.InversePrefixedHash(key, '/')`. Note partition 1 *is*
-in the pool — hash data and the meta map coexist on it via distinct log types. Hash-mode
-descriptors return `Generation = 0` (no fence; hash spaces never split).
+`[1, InitialPartitions]` using `HashUtils.InversePrefixedHash(key, '/')`. P0 hosts the meta map
++ coordinator and is **not** in the pool; every user partition from 1 upward carries hash data.
+Hash-mode descriptors return `Generation = 0` (no fence; hash spaces never split).
 
 ### The two routing call sites (a maintenance hazard you must respect)
 
@@ -305,13 +316,13 @@ Step by step:
    split again. A `min-range-size` guard prevents splitting into a tiny/empty half (avoids
    thrashing). See `RangeSplitPolicy.cs`.
 
-2. **Create the target partition P'.** This needs `IRaft.CreatePartitionAsync`. **Gotcha:**
-   that call requires the caller to be the **system-partition (0) leader**, while the cutover
-   (step 5) requires the **meta-partition (1) leader** — and those are often *different nodes*.
-   So `SplitAsync` takes a **pre-created** `newPartitionId`: the caller creates P' on the P0
-   leader first, then calls `SplitAsync` on the P1 leader. The test helper `SplitViaLeaders`
-   shows this two-step dance. In production, the auto-splitter needs one node leading both P0
-   and P1 (see §8).
+2. **Create the target partition P'.** This needs `IRaft.CreatePartitionAsync`, which requires
+   the caller to be the **system-partition (0) leader**. The cutover (step 5) requires the
+   **meta-partition leader** — and since the map lives on P0, that's the *same* leader. So one
+   node leading P0 can do both. `SplitAsync` still takes a **pre-created** `newPartitionId` (the
+   caller creates P' first, then calls `SplitAsync`), but both steps now route through the single
+   P0 leader. The test helper `SplitViaLeaders` resolves that one leader and drives both steps
+   through it.
 
 3. **Transfer the data** for `[K, E)` from P to P'. Done in two passes by
    `KvStateMachineTransfer.cs`: a **bulk export** at a fixed MVCC snapshot timestamp, then a
@@ -327,7 +338,7 @@ Step by step:
      `[K, E)` quiesced right after taking the range lock; the locator checks `IsQuiesced`
      pre-route and bounces direct writes to a quiescing range with `MustRetry`.
 
-5. **Atomic cutover.** One `MutateAsync` meta-transaction on partition 1: bump generations,
+5. **Atomic cutover.** One `MutateAsync` meta-transaction on P0: bump generations,
    write the two new descriptors (`[S,K)@P` and `[K,E)@P'`), remove the old one. Because
    `MutateAsync` is the single serialized writer, overlap is impossible. After commit, routing
    sends `[K, E)` traffic to P'. In-flight requests against P for `[K, E)` fail the generation
@@ -436,13 +447,14 @@ Splits and merges don't have to be manual. Two background actors watch the range
   `pendingRemovals` set and retries them each tick, so a transient removal failure doesn't
   permanently orphan an empty Raft group.
 
-> **Operational gotcha:** both auto-split and auto-merge require **one node to lead both
-> partition 0 and partition 1** simultaneously — because creating/removing a partition needs the
-> P0 leader and the cutover needs the P1 leader, and the trigger runs on a single node. In a
-> multi-partition cluster this colocation isn't guaranteed. The tests *force* it
-> (`ForceLeaderForTestingAsync` on both P0 and P1). Whether to require this colocation in
-> production, or to split the orchestration across two nodes with an RPC, is an open design
-> decision — flagged, not yet resolved.
+> **Operational note:** both auto-split and auto-merge run only on the **P0 leader** — the
+> trigger guards itself with `AmILeader(P0)` and returns early otherwise. Creating/removing a
+> partition needs the P0 leader and the cutover needs the meta-partition leader, and since the
+> map lives on P0 those are the same node — so a single P0 leadership grant is enough. (Before
+> the map moved to P0 this required one node to lead *both* P0 and the separate meta partition
+> simultaneously, which isn't guaranteed in a multi-partition cluster; that colocation
+> requirement is now gone.) The tests put P0 leadership on one node with
+> `ForceLeaderForTestingAsync` so the trigger actually runs.
 
 ---
 
@@ -471,11 +483,11 @@ Putting it all together, here's a write to a key-range space, start to finish:
 
    --- meanwhile, a split of range [users/0250, users/0700) at users/0500 ---
 
-6. RangeSplitter, on the node leading both P0 and P1:
-     - creates partition 8 (on the P0 leader),
+6. RangeSplitter, on the P0 leader (system + meta):
+     - creates partition 8 (CreatePartitionAsync, P0 leader),
      - quiesces [users/0500, users/0700) (range lock + RangeQuiesceStore),
      - bulk + catch-up exports that slice to P8,
-     - MutateAsync cutover on P1: P6 keeps [0250,0500) gen 43,
+     - MutateAsync cutover on P0: P6 keeps [0250,0500) gen 43,
        P8 gets [0500,0700) gen 43, old descriptor removed,
      - releases the quiesce.
 
@@ -533,8 +545,8 @@ Once storage is partition-scoped, the follow-on work becomes *real* instead of v
   Kommander only exposes cluster-wide `JoinCluster`; this needs per-group
   `AddServer`/`RemoveServer`. Per Kahuna's rule, that's a Kommander capability to add, not a
   Kahuna workaround.
-- **Meta-range sharding** — if partition 1 itself gets hot, shard the descriptor map across
-  several meta partitions (CRDB-style meta/meta ranges).
+- **Meta-range sharding** — if the meta partition (P0) itself gets hot, shard the descriptor map
+  across several meta partitions (CRDB-style meta/meta ranges).
 - **Serializability (SSI)** — the per-range locks are the foundation for a serializable
   isolation layer; that's a separate design.
 
@@ -557,8 +569,9 @@ A condensed checklist — violating any of these silently corrupts the system:
 5. **Never range-split the schema log.** `{db}/meta` (CamusDB's DDL log) must stay
    single-partition for total ordering — the registry rejects ranging it.
 6. **Snapshot before checkpoint** in `RangeMapStore` — reversing it loses the map on restart.
-7. **Key-range data lives on partition ≥ 2.** Partition 0 is Kommander-reserved; partition 1 is
-   the meta map (plus hash pool). Splits always allocate fresh partitions ≥ 2.
+7. **Key-range data lives on partition ≥ 1.** Partition 0 is the shared system + meta partition
+   (coordinator + descriptor map, by log type) and never holds data. Splits allocate fresh
+   higher-id partitions.
 8. **Missing Kommander primitive? Flag it upstream, don't work around it in Kahuna.**
 
 ---
@@ -571,7 +584,7 @@ Everything lives under `Kahuna.Core/KeyValues/Ranges/` unless noted.
 |---|---|
 | `RangeDescriptor.cs` | The `(KeySpace, StartKey, EndKey, PartitionId, Generation)` record. |
 | `RangeMap.cs` | Sorted descriptor set; `Find`, `FindIntersecting`, `Validate`. |
-| `RangeMapStore.cs` | Replicated meta map on partition 1; `MutateAsync` (single writer); durable snapshot + checkpoint. |
+| `RangeMapStore.cs` | Replicated meta map on P0 (shared with the system coordinator by log type); `MutateAsync` (single writer); durable snapshot + checkpoint. |
 | `RoutingMode.cs` | The `Hash` / `KeyRange` enum. |
 | `KeySpaceRegistry.cs` | Per-key-space mode lookup (prefix before last `/`). |
 | `DataPartitionRouter.cs` | Kahuna's hash assignment over user partitions `[1, N]`. |
