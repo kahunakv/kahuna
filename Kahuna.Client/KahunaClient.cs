@@ -974,8 +974,8 @@ public class KahunaClient
     {
         IEnumerable<TimeSpan> backoffDelays = Backoff.DecorrelatedJitterBackoffV2(
             medianFirstRetryDelay: TimeSpan.FromMilliseconds(50),
-            retryCount: 5
-        );
+            retryCount: 10
+        ).Select(t => TimeSpan.FromMilliseconds(Math.Min(t.TotalMilliseconds, 500)));
         
         foreach (TimeSpan timeSpan in backoffDelays)
         {

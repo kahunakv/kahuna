@@ -29,5 +29,6 @@ Nixie
 .idea
 .vscode
 Kahuna.Server/*.lst
-nupkgs
+nupkgs/
+nupkg/
 specs/
