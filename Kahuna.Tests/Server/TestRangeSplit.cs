@@ -567,6 +567,9 @@ public sealed class TestRangeSplit : BaseCluster
                 await sysRaft.CreatePartitionAsync(newPartitionId, RaftRoutingMode.Unrouted, null, ct);
             Assert.True(createResult.Success);
 
+            // Re-acquire meta leader: CreatePartitionAsync can trigger re-elections.
+            (_, metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+
             KeyValueResponseType? duringQuiesceResult = null;
 
             SplitOutcome outcome = await metaLeader.SplitAsyncWithHook(

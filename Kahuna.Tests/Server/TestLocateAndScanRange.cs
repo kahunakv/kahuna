@@ -477,6 +477,9 @@ public class TestLocateAndScanRange : BaseCluster
                 await sysRaft.CreatePartitionAsync(newPartitionId, RaftRoutingMode.Unrouted, null, ct);
             Assert.True(createResult.Success, "CreatePartitionAsync failed");
 
+            // Re-acquire meta leader: CreatePartitionAsync can trigger re-elections.
+            (_, metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+
             SplitOutcome outcome = await metaLeader.RangeSplitter.SplitAsync(
                 SplitSpace, splitKey, newPartitionId, ct);
             Assert.True(outcome.IsSuccess, $"Split failed: {outcome.Status}");
@@ -598,6 +601,9 @@ public class TestLocateAndScanRange : BaseCluster
             RaftPartitionLifecycleResult cr =
                 await sysRaft.CreatePartitionAsync(newPart, RaftRoutingMode.Unrouted, null, ct);
             Assert.True(cr.Success);
+
+            // Re-acquire meta leader: CreatePartitionAsync can trigger re-elections.
+            (_, metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
 
             SplitOutcome outcome = await metaLeader.RangeSplitter.SplitAsync(space, splitKey, newPart, ct);
             Assert.True(outcome.IsSuccess, $"Split failed: {outcome.Status}");
@@ -726,6 +732,9 @@ public class TestLocateAndScanRange : BaseCluster
             RaftPartitionLifecycleResult cr =
                 await sysRaft.CreatePartitionAsync(newPart, RaftRoutingMode.Unrouted, null, ct);
             Assert.True(cr.Success);
+
+            // Re-acquire meta leader: CreatePartitionAsync can trigger re-elections.
+            (_, metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
 
             SplitOutcome outcome = await metaLeader.RangeSplitter.SplitAsync(space, splitAt, newPart, ct);
             Assert.True(outcome.IsSuccess, $"Split failed: {outcome.Status}");
