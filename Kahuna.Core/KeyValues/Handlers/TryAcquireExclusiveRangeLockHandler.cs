@@ -23,20 +23,49 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
         if (message.TransactionId == HLCTimestamp.Zero)
             return KeyValueStaticResponses.ErroredResponse;
 
-        // Idempotency check: same tx, same range → already locked
         if (context.LocksByRange.TryGetValue(message.Key, out List<KeyValueRangeLock>? existingLocks))
         {
+            // Idempotency / upgrade: same tx, same range bounds
             foreach (KeyValueRangeLock existing in existingLocks)
             {
-                if (existing.TransactionId == message.TransactionId
-                    && existing.StartKey == message.StartKey
-                    && existing.EndKey == message.EndKey
-                    && existing.StartInclusive == message.StartInclusive
-                    && existing.EndInclusive == message.EndInclusive)
-                    return KeyValueStaticResponses.LockedResponse;
+                if (existing.TransactionId != message.TransactionId)
+                    continue;
+                if (existing.StartKey != message.StartKey
+                    || existing.EndKey != message.EndKey
+                    || existing.StartInclusive != message.StartInclusive
+                    || existing.EndInclusive != message.EndInclusive)
+                    continue;
+
+                // S → X upgrade: must pass the same conflict gate as a fresh Exclusive acquire.
+                // Another tx may hold an overlapping Shared lock (S∩S coexistence made that reachable).
+                // Promoting without checking would leave X(tx1) ∩ S(tx2) — a matrix violation.
+                if (message.RangeLockMode == RangeLockMode.Exclusive && existing.Mode == RangeLockMode.Shared)
+                {
+                    foreach (KeyValueRangeLock other in existingLocks)
+                    {
+                        if (other.TransactionId == message.TransactionId)
+                            continue;
+                        if (other.Expires != HLCTimestamp.Zero && other.Expires - currentTime <= TimeSpan.Zero)
+                            continue;
+                        if (RangesOverlap(message.StartKey, message.StartInclusive, message.EndKey, message.EndInclusive,
+                                other.StartKey, other.StartInclusive, other.EndKey, other.EndInclusive))
+                            return KeyValueStaticResponses.AlreadyLockedResponse;
+                    }
+
+                    // Partial-failure inherited from original code: if TryLock fails midway,
+                    // some keys already hold intents while the lock stays Shared. The caller
+                    // will see a non-Locked response and should abort/retry the transaction;
+                    // the orphaned intents expire naturally via their TTL.
+                    KeyValueResponse intents = PlaceWriteIntents(currentTime, message);
+                    if (intents.Type != KeyValueResponseType.Locked)
+                        return intents;
+                    existing.Mode = RangeLockMode.Exclusive;
+                }
+                // X → S downgrade or same-mode re-entry: no-op.
+                return KeyValueStaticResponses.LockedResponse;
             }
 
-            // Conflict check: another active transaction has an overlapping range lock
+            // Conflict check: S∩S coexist; any pairing involving X conflicts.
             foreach (KeyValueRangeLock existing in existingLocks)
             {
                 if (existing.TransactionId == message.TransactionId)
@@ -44,6 +73,9 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
 
                 if (existing.Expires != HLCTimestamp.Zero && existing.Expires - currentTime <= TimeSpan.Zero)
                     continue; // expired
+
+                if (message.RangeLockMode == RangeLockMode.Shared && existing.Mode == RangeLockMode.Shared)
+                    continue; // S∩S always compatible
 
                 if (RangesOverlap(message.StartKey, message.StartInclusive, message.EndKey, message.EndInclusive,
                         existing.StartKey, existing.StartInclusive, existing.EndKey, existing.EndInclusive))
@@ -56,14 +88,13 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
 
     private KeyValueResponse LockExistingKeysByRange(HLCTimestamp currentTime, KeyValueRequest message)
     {
-        string start = message.StartKey ?? message.Key;
-        bool startIncl = message.StartKey is null || message.StartInclusive;
-
-        foreach ((string key, KeyValueEntry entry) in context.Store.GetByRange(start, startIncl, message.EndKey, message.EndInclusive, int.MaxValue))
+        // Exclusive acquires place per-key write intents so existing keys are immediately locked.
+        // Shared acquires skip intents — write-path conflict is enforced by TrySetHandler / T2.
+        if (message.RangeLockMode == RangeLockMode.Exclusive)
         {
-            KeyValueResponse response = TryLock(currentTime, message.TransactionId, key, message.ExpiresMs, entry);
-            if (response.Type != KeyValueResponseType.Locked)
-                return response;
+            KeyValueResponse intents = PlaceWriteIntents(currentTime, message);
+            if (intents.Type != KeyValueResponseType.Locked)
+                return intents;
         }
 
         KeyValueRangeLock rangeLock = new()
@@ -74,6 +105,7 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
             StartInclusive = message.StartInclusive,
             EndKey         = message.EndKey,
             EndInclusive   = message.EndInclusive,
+            Mode           = message.RangeLockMode,
         };
 
         if (!context.LocksByRange.TryGetValue(message.Key, out List<KeyValueRangeLock>? locks))
@@ -83,6 +115,21 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
         }
 
         locks.Add(rangeLock);
+
+        return KeyValueStaticResponses.LockedResponse;
+    }
+
+    private KeyValueResponse PlaceWriteIntents(HLCTimestamp currentTime, KeyValueRequest message)
+    {
+        string start = message.StartKey ?? message.Key;
+        bool startIncl = message.StartKey is null || message.StartInclusive;
+
+        foreach ((string key, KeyValueEntry entry) in context.Store.GetByRange(start, startIncl, message.EndKey, message.EndInclusive, int.MaxValue))
+        {
+            KeyValueResponse response = TryLock(currentTime, message.TransactionId, key, message.ExpiresMs, entry);
+            if (response.Type != KeyValueResponseType.Locked)
+                return response;
+        }
 
         return KeyValueStaticResponses.LockedResponse;
     }

@@ -141,6 +141,10 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         if (message.Durability != KeyValueDurability.Persistent)
             return KeyValueStaticResponses.PrepareResponse;
 
+        // Phantom enforcement: reject if a foreign tx holds a range lock covering this key.
+        if (RangeLockChecks.KeyCoveredByForeignRangeLock(context, message.Key, entry.Bucket, message.TransactionId, message.CommitId))
+            return new(KeyValueResponseType.MustRetry, 0);
+
         // Key-range generation fence for 2PC (Task 4 §4 — Prepare path). A non-zero RoutedGeneration
         // was set by the locator at route time; if the descriptor was bumped since then (split or
         // cutover) the proposal would land on the stale partition. Reject with MustRetry so the

@@ -61,6 +61,9 @@ public sealed class KeyValueRequest : IConsistentHashable
     /// <summary>Range scan: whether the upper bound is inclusive.</summary>
     public bool EndInclusive { get; internal set; }
 
+    /// <summary>Mode for range-lock acquire requests (Exclusive = 0 default, Shared = 1).</summary>
+    public RangeLockMode RangeLockMode { get; internal set; }
+
     /// <summary>Range scan: maximum items to return per page.</summary>
     public int Limit { get; internal set; }
 
@@ -190,6 +193,7 @@ public sealed class KeyValueRequest : IConsistentHashable
         EndKey = null;
         StartInclusive = false;
         EndInclusive = false;
+        RangeLockMode = RangeLockMode.Exclusive;
         Limit = 0;
         ReadTimestamp = HLCTimestamp.Zero;
     }

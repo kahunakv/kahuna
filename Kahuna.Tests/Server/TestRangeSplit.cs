@@ -535,6 +535,73 @@ public sealed class TestRangeSplit : BaseCluster
         }
     }
 
+    // ── SharedLock_SurvivesSplit_MatrixHolds ─────────────────────────────────────
+
+    private static HLCTimestamp NextTx(IRaft raft) =>
+        raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+    /// <summary>
+    /// T4 acceptance test — verifies that a Shared range lock acquired on the original
+    /// partition (P2) before a split is NOT wiped out by the split, and that the S/X
+    /// compatibility matrix still holds on P2 after the split completes.
+    ///
+    /// <para>Sequence:</para>
+    /// <list type="number">
+    ///   <item>tx1 acquires Shared on [−∞, +∞) via P2 leader.</item>
+    ///   <item>Split at <c>Space + "/m"</c> — P2 retains [Space, Space+"/m"), new partition gets [Space+"/m", +∞).</item>
+    ///   <item>tx2 acquires Shared on [−∞, +∞) via P2 leader → Locked (S∩S coexist, proves Mode=Shared survived).</item>
+    ///   <item>tx3 acquires Exclusive on [−∞, +∞) via P2 leader → AlreadyLocked (X conflicts with Shared, proves matrix).</item>
+    /// </list>
+    /// </summary>
+    [Fact]
+    public async Task SharedLock_SurvivesSplit_MatrixHolds()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        ((IRaft, KahunaManager)[] nodes, _, KahunaManager dataLeader, _) =
+            await Setup([Space + "/a"], [Space + "/z"]);
+
+        try
+        {
+            // Locate P2's Raft leader so we can mint HLC timestamps.
+            (IRaft p2Raft, KahunaManager p2Leader) = await LeaderOf(RangeMapStore.FirstDataPartitionId, nodes);
+
+            HLCTimestamp tx1 = NextTx(p2Raft);
+
+            // Step 1: tx1 acquires Shared over the whole range on P2.
+            KeyValueResponseType sharedBefore = await dataLeader.TryAcquireRangeLock(
+                tx1, Space, null, true, null, false, 60_000,
+                KeyValueDurability.Persistent, RangeLockMode.Shared);
+            Assert.Equal(KeyValueResponseType.Locked, sharedBefore);
+
+            // Step 2: split at Space+"/m" — P2 keeps the left half; the new partition takes the right.
+            SplitOutcome outcome = await SplitViaLeaders(Space, Space + "/m", nodes, ct);
+            Assert.True(outcome.IsSuccess, $"Split failed: {outcome.Status}");
+
+            // Re-acquire P2 leader reference (split can trigger re-elections).
+            (p2Raft, p2Leader) = await LeaderOf(RangeMapStore.FirstDataPartitionId, nodes);
+
+            HLCTimestamp tx2 = NextTx(p2Raft);
+            HLCTimestamp tx3 = NextTx(p2Raft);
+
+            // Step 3: tx2 Shared on P2 → Locked (S∩S; proves tx1's lock Mode=Shared survived the split).
+            KeyValueResponseType sharedAfter = await p2Leader.TryAcquireRangeLock(
+                tx2, Space, null, true, null, false, 60_000,
+                KeyValueDurability.Persistent, RangeLockMode.Shared);
+            Assert.Equal(KeyValueResponseType.Locked, sharedAfter);
+
+            // Step 4: tx3 Exclusive on P2 → AlreadyLocked (X conflicts with the two live Shared locks).
+            KeyValueResponseType exclusiveAfter = await p2Leader.TryAcquireRangeLock(
+                tx3, Space, null, true, null, false, 60_000,
+                KeyValueDurability.Persistent, RangeLockMode.Exclusive);
+            Assert.Equal(KeyValueResponseType.AlreadyLocked, exclusiveAfter);
+        }
+        finally
+        {
+            await LeaveCluster(nodes[0].Item1, nodes[1].Item1, nodes[2].Item1);
+        }
+    }
+
     // ── Split_DirectWriteDuringQuiesce_MustRetry ──────────────────────────────────
 
     /// <summary>

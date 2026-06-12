@@ -75,6 +75,10 @@ internal sealed class TryDeleteHandler : BaseHandler
             }
         }
 
+        // Validate if the key falls within any active range lock from another transaction
+        if (RangeLockChecks.KeyCoveredByForeignRangeLock(context, message.Key, entry.Bucket, message.TransactionId, currentTime))
+            return new(KeyValueResponseType.MustRetry, 0);
+
         // Temporarily store the value in the MVCC entry if the transaction ID is set
         if (message.TransactionId != HLCTimestamp.Zero)
         {

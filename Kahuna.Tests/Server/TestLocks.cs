@@ -576,6 +576,58 @@ public class TestLocks : BaseCluster
     }
 
     /// <summary>
+    /// T3 — mode forwarded through the full locator stack (non-leader → leader).
+    ///
+    /// A Shared lock acquired via a non-leader node must be forwarded to the partition leader and
+    /// land with Mode == Shared, so a second overlapping Shared acquire from a different tx also
+    /// succeeds. An Exclusive acquire from a third tx over the same range must then be rejected.
+    /// </summary>
+    [Fact]
+    public async Task SharedRangeLock_ForwardedFromNonLeader_IsHonored()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (IRaft, KahunaManager)[] nodes = await SetupSplitKeyspace();
+        try
+        {
+            // Find the leader and a non-leader for the LEFT partition (P2).
+            const int leftPid = RangeMapStore.FirstDataPartitionId;
+
+            (IRaft leaderRaft, KahunaManager _) = await RlLeaderOf(leftPid, nodes);
+
+            // Pick a non-leader node to drive the acquire — the locator will forward to the leader.
+            (IRaft nonLeaderRaft, KahunaManager nonLeaderKahuna) = nodes
+                .First(n => n.Item1 != leaderRaft);
+
+            HLCTimestamp tx1 = nonLeaderRaft.HybridLogicalClock.TrySendOrLocalEvent(nonLeaderRaft.GetLocalNodeId());
+            HLCTimestamp tx2 = nonLeaderRaft.HybridLogicalClock.TrySendOrLocalEvent(nonLeaderRaft.GetLocalNodeId());
+            HLCTimestamp tx3 = nonLeaderRaft.HybridLogicalClock.TrySendOrLocalEvent(nonLeaderRaft.GetLocalNodeId());
+
+            // tx1 acquires Shared on the LEFT half [−∞, RlSplit) via the non-leader.
+            KeyValueResponseType r1 = await nonLeaderKahuna.LocateAndTryAcquireRangeLock(
+                tx1, RlSpace, null, true, RlSplit, false, 30_000, KeyValueDurability.Persistent,
+                RangeLockMode.Shared, ct);
+            Assert.Equal(KeyValueResponseType.Locked, r1);
+
+            // tx2 acquires Shared on the same range from the same non-leader — S∩S must coexist.
+            KeyValueResponseType r2 = await nonLeaderKahuna.LocateAndTryAcquireRangeLock(
+                tx2, RlSpace, null, true, RlSplit, false, 30_000, KeyValueDurability.Persistent,
+                RangeLockMode.Shared, ct);
+            Assert.Equal(KeyValueResponseType.Locked, r2);
+
+            // tx3 tries Exclusive on the same range — must be blocked (both S locks are live).
+            KeyValueResponseType r3 = await nonLeaderKahuna.LocateAndTryAcquireRangeLock(
+                tx3, RlSpace, null, true, RlSplit, false, 30_000, KeyValueDurability.Persistent,
+                RangeLockMode.Exclusive, ct);
+            Assert.Equal(KeyValueResponseType.AlreadyLocked, r3);
+        }
+        finally
+        {
+            foreach ((IRaft raft, KahunaManager _) in nodes)
+                await raft.LeaveCluster(true);
+        }
+    }
+
+    /// <summary>
     /// Deprecation (F4): the legacy exclusive <b>prefix</b> lock is unsupported on a key-range-split
     /// space and must return the typed <see cref="KeyValueResponseType.PrefixLockUnsupportedOnRangedSpace"/>
     /// — not a generic <c>Errored</c> — so callers migrate to the range lock deliberately. Both

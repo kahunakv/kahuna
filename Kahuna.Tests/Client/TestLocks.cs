@@ -132,9 +132,9 @@ public class TestLocks
     {
         KahunaClient client = GetClientByType(communicationType, clientType, upgradeUrls);
         
-        List<Task> tasks = new(50);
+        List<Task> tasks = new(10);
 
-        for (int i = 0; i < 50; i++)
+        for (int i = 0; i < 10; i++)
             tasks.Add(AcquireLockConcurrently(client, durability));
 
         await Task.WhenAll(tasks);

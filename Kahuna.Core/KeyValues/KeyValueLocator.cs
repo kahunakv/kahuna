@@ -842,6 +842,17 @@ internal sealed class KeyValueLocator
     /// frequently-consistent case. Fully closing the cross-node skew window would require the lock
     /// to carry and verify a descriptor generation end-to-end against the writer's view.</para>
     /// </summary>
+    public Task<KeyValueResponseType> LocateAndTryAcquireRangeLock(
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        int expiresMs,
+        KeyValueDurability durability,
+        RangeLockMode mode,
+        CancellationToken cancellationToken
+    ) => LocateAndTryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, null, cancellationToken);
+
     public Task<KeyValueResponseType> LocateAndTryAcquireExclusiveRangeLock(
         HLCTimestamp transactionId,
         string prefix,
@@ -850,15 +861,27 @@ internal sealed class KeyValueLocator
         int expiresMs,
         KeyValueDurability durability,
         CancellationToken cancellationToken
-    ) => LocateAndTryAcquireExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, null, cancellationToken);
+    ) => LocateAndTryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, RangeLockMode.Exclusive, null, cancellationToken);
 
-    internal async Task<KeyValueResponseType> LocateAndTryAcquireExclusiveRangeLock(
+    internal Task<KeyValueResponseType> LocateAndTryAcquireExclusiveRangeLock(
         HLCTimestamp transactionId,
         string prefix,
         string? startKey, bool startInclusive,
         string? endKey,   bool endInclusive,
         int expiresMs,
         KeyValueDurability durability,
+        Func<Task>? afterSnapshot,
+        CancellationToken cancellationToken
+    ) => LocateAndTryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, RangeLockMode.Exclusive, afterSnapshot, cancellationToken);
+
+    internal async Task<KeyValueResponseType> LocateAndTryAcquireRangeLock(
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        int expiresMs,
+        KeyValueDurability durability,
+        RangeLockMode mode,
         Func<Task>? afterSnapshot,
         CancellationToken cancellationToken
     )
@@ -878,14 +901,14 @@ internal sealed class KeyValueLocator
             // Hash spaces never split, so no generation fence is needed.
             int hashPartitionId = RoutePrefixKey(prefix);
             return await AcquireRangeLockOnPartition(transactionId, hashPartitionId, prefix,
-                startKey, startInclusive, endKey, endInclusive, expiresMs, durability, cancellationToken);
+                startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, cancellationToken);
         }
 
         if (descriptors.Count == 1)
         {
             KeyValueResponseType result = await AcquireRangeLockOnPartition(
                 transactionId, descriptors[0].PartitionId, prefix,
-                startKey, startInclusive, endKey, endInclusive, expiresMs, durability, cancellationToken);
+                startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, cancellationToken);
 
             if (result != KeyValueResponseType.Locked)
                 return result;
@@ -917,7 +940,7 @@ internal sealed class KeyValueLocator
                 startKey, startInclusive, endKey, endInclusive, desc);
 
             KeyValueResponseType result = await AcquireRangeLockOnPartition(
-                transactionId, desc.PartitionId, prefix, cs, csI, ce, ceI, expiresMs, durability, cancellationToken);
+                transactionId, desc.PartitionId, prefix, cs, csI, ce, ceI, expiresMs, durability, mode, cancellationToken);
 
             if (result == KeyValueResponseType.Locked)
             {
@@ -1046,10 +1069,11 @@ internal sealed class KeyValueLocator
         string? endKey,   bool endInclusive,
         int expiresMs,
         KeyValueDurability durability,
+        RangeLockMode mode,
         CancellationToken cancellationToken)
     {
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
-            return await manager.TryAcquireExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability);
+            return await manager.TryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode);
 
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
@@ -1057,7 +1081,7 @@ internal sealed class KeyValueLocator
 
         logger.LogDebug("ACQUIRE-RANGE-LOCK-KEYVALUE Redirect {Prefix} P{Partition} → {Leader}", prefix, partitionId, leader);
 
-        return await interNodeCommunication.TryAcquireExclusiveRangeLock(leader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, cancellationToken);
+        return await interNodeCommunication.TryAcquireRangeLock(leader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, cancellationToken);
     }
 
     private async Task<KeyValueResponseType> ReleaseRangeLockOnPartition(

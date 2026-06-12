@@ -850,13 +850,14 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         string? startKey = request.HasStartKey ? request.StartKey : null;
         string? endKey   = request.HasEndKey   ? request.EndKey   : null;
 
-        KeyValueResponseType type = await keyValues.LocateAndTryAcquireExclusiveRangeLock(
+        KeyValueResponseType type = await keyValues.LocateAndTryAcquireRangeLock(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Prefix,
             startKey, request.StartInclusive,
             endKey,   request.EndInclusive,
             request.ExpiresMs,
             (KeyValueDurability)request.Durability,
+            (RangeLockMode)request.Mode,
             context.CancellationToken
         );
 

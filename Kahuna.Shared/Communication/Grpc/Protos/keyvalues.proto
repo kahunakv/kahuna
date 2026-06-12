@@ -435,6 +435,7 @@ message GrpcTryAcquireExclusiveRangeLockRequest {
   bool   EndInclusive           = 8;
   int32  ExpiresMs              = 9;
   GrpcKeyValueDurability Durability = 10;
+  GrpcRangeLockMode Mode        = 11;
 }
 
 message GrpcTryAcquireExclusiveRangeLockResponse {
@@ -933,6 +934,11 @@ enum GrpcServerBatchType {
   SERVER_TRY_ACQUIRE_EXCLUSIVE_RANGE_LOCK = 31;
   SERVER_TRY_RELEASE_EXCLUSIVE_RANGE_LOCK = 32;
   SERVER_TRY_ENSURE_KEY_RANGE_SEEDED = 33;
+}
+
+enum GrpcRangeLockMode {
+  GRPC_RANGE_LOCK_EXCLUSIVE = 0;
+  GRPC_RANGE_LOCK_SHARED    = 1;
 }
 
 enum GrpcKeyValueFlags {

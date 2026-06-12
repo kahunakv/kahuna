@@ -597,7 +597,24 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    public async Task<KeyValueResponseType> TryAcquireExclusiveRangeLock(
+    public async Task<KeyValueResponseType> TryAcquireRangeLock(
+        string node,
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        int expiresMs,
+        KeyValueDurability durability,
+        RangeLockMode mode,
+        CancellationToken cancellationToken
+    )
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+            return await kahunaNode.TryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode);
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public Task<KeyValueResponseType> TryAcquireExclusiveRangeLock(
         string node,
         HLCTimestamp transactionId,
         string prefix,
@@ -606,12 +623,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         int expiresMs,
         KeyValueDurability durability,
         CancellationToken cancellationToken
-    )
-    {
-        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.TryAcquireExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability);
-        throw new KahunaServerException($"The node {node} does not exist.");
-    }
+    ) => TryAcquireRangeLock(node, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, RangeLockMode.Exclusive, cancellationToken);
 
     public async Task<KeyValueResponseType> TryReleaseExclusiveRangeLock(
         string node,

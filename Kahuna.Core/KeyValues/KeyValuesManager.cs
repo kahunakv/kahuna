@@ -762,6 +762,17 @@ internal sealed class KeyValuesManager : IDisposable
         return locator.LocateAndTryReleaseExclusivePrefixLock(transactionId, prefixKey, durability, cancellationToken);
     }
 
+    public Task<KeyValueResponseType> LocateAndTryAcquireRangeLock(
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        int expiresMs,
+        KeyValueDurability durability,
+        RangeLockMode mode,
+        CancellationToken cancellationToken
+    ) => locator.LocateAndTryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, cancellationToken);
+
     public Task<KeyValueResponseType> LocateAndTryAcquireExclusiveRangeLock(
         HLCTimestamp transactionId,
         string prefix,
@@ -770,10 +781,7 @@ internal sealed class KeyValuesManager : IDisposable
         int expiresMs,
         KeyValueDurability durability,
         CancellationToken cancellationToken
-    )
-    {
-        return locator.LocateAndTryAcquireExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, cancellationToken);
-    }
+    ) => locator.LocateAndTryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, RangeLockMode.Exclusive, cancellationToken);
 
     internal Task<KeyValueResponseType> LocateAndTryAcquireExclusiveRangeLockWithHook(
         HLCTimestamp transactionId,
@@ -784,10 +792,7 @@ internal sealed class KeyValuesManager : IDisposable
         KeyValueDurability durability,
         Func<Task> afterSnapshot,
         CancellationToken cancellationToken
-    )
-    {
-        return locator.LocateAndTryAcquireExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, afterSnapshot, cancellationToken);
-    }
+    ) => locator.LocateAndTryAcquireExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, afterSnapshot, cancellationToken);
 
     public Task<KeyValueResponseType> LocateAndTryReleaseExclusiveRangeLock(
         HLCTimestamp transactionId,
@@ -1924,13 +1929,23 @@ internal sealed class KeyValuesManager : IDisposable
         }
     }
     
-    public async Task<KeyValueResponseType> TryAcquireExclusiveRangeLock(
+    public Task<KeyValueResponseType> TryAcquireExclusiveRangeLock(
         HLCTimestamp transactionId,
         string prefix,
         string? startKey, bool startInclusive,
         string? endKey,   bool endInclusive,
         int expiresMs,
         KeyValueDurability durability
+    ) => TryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, RangeLockMode.Exclusive);
+
+    public async Task<KeyValueResponseType> TryAcquireRangeLock(
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        int expiresMs,
+        KeyValueDurability durability,
+        RangeLockMode mode
     )
     {
         KeyValueRequest request = KeyValueRequestPool.Rent(
@@ -1954,6 +1969,7 @@ internal sealed class KeyValuesManager : IDisposable
         request.StartInclusive = startInclusive;
         request.EndKey         = endKey;
         request.EndInclusive   = endInclusive;
+        request.RangeLockMode  = mode;
 
         try
         {

@@ -878,7 +878,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         return (KeyValueResponseType)remoteResponse.Type;
     }
 
-    public async Task<KeyValueResponseType> TryAcquireExclusiveRangeLock(
+    public async Task<KeyValueResponseType> TryAcquireRangeLock(
         string node,
         HLCTimestamp transactionId,
         string prefix,
@@ -886,6 +886,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         string? endKey,   bool endInclusive,
         int expiresMs,
         KeyValueDurability durability,
+        RangeLockMode mode,
         CancellationToken cancellationToken
     )
     {
@@ -901,6 +902,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             EndInclusive          = endInclusive,
             ExpiresMs             = expiresMs,
             Durability            = (GrpcKeyValueDurability)durability,
+            Mode                  = (GrpcRangeLockMode)mode,
         };
 
         if (startKey is not null) request.StartKey = startKey;
@@ -911,6 +913,17 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         remoteResponse.ServedFrom = $"https://{node}";
         return (KeyValueResponseType)remoteResponse.Type;
     }
+
+    public Task<KeyValueResponseType> TryAcquireExclusiveRangeLock(
+        string node,
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    ) => TryAcquireRangeLock(node, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, RangeLockMode.Exclusive, cancellationToken);
 
     public async Task<KeyValueResponseType> TryReleaseExclusiveRangeLock(
         string node,

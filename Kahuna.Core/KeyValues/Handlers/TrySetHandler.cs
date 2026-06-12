@@ -121,20 +121,8 @@ internal sealed class TrySetHandler : BaseHandler
         }
 
         // Validate if the key falls within any active range lock from another transaction
-        if (entry.Bucket is not null && context.LocksByRange.TryGetValue(entry.Bucket, out List<KeyValueRangeLock>? rangeLocks))
-        {
-            foreach (KeyValueRangeLock rangeLock in rangeLocks)
-            {
-                if (rangeLock.TransactionId == message.TransactionId)
-                    continue;
-
-                if (rangeLock.Expires != HLCTimestamp.Zero && rangeLock.Expires - currentTime <= TimeSpan.Zero)
-                    continue; // expired — will be cleaned up on release
-
-                if (KeyInRange(message.Key, rangeLock))
-                    return new(KeyValueResponseType.MustRetry, 0);
-            }
-        }
+        if (RangeLockChecks.KeyCoveredByForeignRangeLock(context, message.Key, entry.Bucket, message.TransactionId, currentTime))
+            return new(KeyValueResponseType.MustRetry, 0);
 
         HLCTimestamp newExpires = message.ExpiresMs > 0 ? (currentTime + message.ExpiresMs) : HLCTimestamp.Zero;
         
@@ -295,20 +283,4 @@ internal sealed class TrySetHandler : BaseHandler
         return new(KeyValueResponseType.Set, entry.Revision);
     }
 
-    private static bool KeyInRange(string key, KeyValueRangeLock rangeLock)
-    {
-        if (rangeLock.StartKey is not null)
-        {
-            int cmp = string.Compare(key, rangeLock.StartKey, StringComparison.Ordinal);
-            if (rangeLock.StartInclusive ? cmp < 0 : cmp <= 0)
-                return false;
-        }
-        if (rangeLock.EndKey is not null)
-        {
-            int cmp = string.Compare(key, rangeLock.EndKey, StringComparison.Ordinal);
-            if (rangeLock.EndInclusive ? cmp > 0 : cmp >= 0)
-                return false;
-        }
-        return true;
-    }
 }
