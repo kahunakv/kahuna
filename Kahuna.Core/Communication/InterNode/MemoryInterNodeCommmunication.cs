@@ -1029,4 +1029,23 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
+
+    public async Task<List<KeyValueRangeLock>> GetRangeLocks(string node, string keySpace, CancellationToken cancellationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+            return await kahunaNode.GetRangeLocks(keySpace);
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public async Task ImportRangeLocks(string node, string keySpace, List<KeyValueRangeLock> locks, CancellationToken cancellationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            await kahunaNode.ImportRangeLocks(keySpace, locks);
+            return;
+        }
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
 }

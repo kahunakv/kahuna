@@ -1845,4 +1845,55 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         bool success = await keyValues.RegisterKeyRangeAsync(request.KeySpace, context.CancellationToken);
         return new GrpcEnsureKeyRangeSeededResponse { Success = success };
     }
+
+    internal async Task<GrpcGetRangeLocksResponse> GetRangeLocksInternal(GrpcGetRangeLocksRequest request, ServerCallContext context)
+    {
+        List<KeyValueRangeLock> locks = await keyValues.GetRangeLocks(request.KeySpace);
+        GrpcGetRangeLocksResponse response = new();
+
+        foreach (KeyValueRangeLock rl in locks)
+        {
+            GrpcRangeLockEntry entry = new()
+            {
+                TransactionIdNode     = rl.TransactionId.N,
+                TransactionIdPhysical = rl.TransactionId.L,
+                TransactionIdCounter  = rl.TransactionId.C,
+                StartInclusive        = rl.StartInclusive,
+                EndInclusive          = rl.EndInclusive,
+                Mode                  = (GrpcRangeLockMode)rl.Mode,
+                ExpiresNode           = rl.Expires.N,
+                ExpiresPhysical       = rl.Expires.L,
+                ExpiresCounter        = rl.Expires.C,
+            };
+
+            if (rl.StartKey is not null) entry.StartKey = rl.StartKey;
+            if (rl.EndKey is not null) entry.EndKey = rl.EndKey;
+
+            response.Locks.Add(entry);
+        }
+
+        return response;
+    }
+
+    internal async Task<GrpcImportRangeLocksResponse> ImportRangeLocksInternal(GrpcImportRangeLocksRequest request, ServerCallContext context)
+    {
+        List<KeyValueRangeLock> locks = new(request.Locks.Count);
+
+        foreach (GrpcRangeLockEntry entry in request.Locks)
+        {
+            locks.Add(new KeyValueRangeLock
+            {
+                TransactionId  = new HLCTimestamp(entry.TransactionIdNode, entry.TransactionIdPhysical, entry.TransactionIdCounter),
+                StartKey       = entry.HasStartKey ? entry.StartKey : null,
+                StartInclusive = entry.StartInclusive,
+                EndKey         = entry.HasEndKey ? entry.EndKey : null,
+                EndInclusive   = entry.EndInclusive,
+                Mode           = (RangeLockMode)entry.Mode,
+                Expires        = new HLCTimestamp(entry.ExpiresNode, entry.ExpiresPhysical, entry.ExpiresCounter),
+            });
+        }
+
+        await keyValues.ImportRangeLocks(request.KeySpace, locks);
+        return new GrpcImportRangeLocksResponse { Success = true };
+    }
 }

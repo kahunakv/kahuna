@@ -3,7 +3,7 @@ using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues;
 
-internal sealed class KeyValueRangeLock
+public sealed class KeyValueRangeLock
 {
     public HLCTimestamp  TransactionId  { get; set; }
     public HLCTimestamp  Expires        { get; set; }

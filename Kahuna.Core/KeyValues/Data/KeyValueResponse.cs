@@ -62,6 +62,11 @@ public sealed class KeyValueResponse
     /// Used in the 'get by range' operation to return a paged result with cursor.
     /// </summary>
     public KeyValueGetByRangeResult? RangeResult { get; }
+
+    /// <summary>
+    /// Used by GetRangeLocks to return the live range-lock entries for a key space.
+    /// </summary>
+    public List<KeyValueRangeLock>? RangeLockList { get; private set; }
     
     /// <summary>
     /// Construtor
@@ -108,4 +113,7 @@ public sealed class KeyValueResponse
         Type = type;
         RangeResult = rangeResult;
     }
+
+    public static KeyValueResponse ForRangeLocks(List<KeyValueRangeLock> locks) =>
+        new(KeyValueResponseType.RangeLocks) { RangeLockList = locks };
 }

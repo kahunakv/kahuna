@@ -355,6 +355,24 @@ internal sealed class GrpcServerBatcher
         return TryProcessQueue(grpcBatcherItem, promise);
     }
 
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcGetRangeLocksRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcImportRangeLocksRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
     private Task<GrpcServerBatcherResponse> TryProcessQueue(GrpcServerBatcherItem grpcBatcherItem, TaskCompletionSource<GrpcServerBatcherResponse> promise)
     {
         inbox.Enqueue(grpcBatcherItem);
@@ -658,6 +676,16 @@ internal sealed class GrpcServerBatcher
             batchRequest.Type = GrpcServerBatchType.ServerTryEnsureKeyRangeSeeded;
             batchRequest.EnsureKeyRangeSeeded = itemRequest.EnsureKeyRangeSeeded;
         }
+        else if (itemRequest.GetRangeLocks is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryGetRangeLocks;
+            batchRequest.GetRangeLocks = itemRequest.GetRangeLocks;
+        }
+        else if (itemRequest.ImportRangeLocks is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryImportRangeLocks;
+            batchRequest.ImportRangeLocks = itemRequest.ImportRangeLocks;
+        }
         else
             throw new KahunaServerException("Unknown request type");
 
@@ -858,6 +886,14 @@ internal sealed class GrpcServerBatcher
 
                     case GrpcServerBatchType.ServerTryEnsureKeyRangeSeeded:
                         item.Promise.SetResult(new(response.EnsureKeyRangeSeeded));
+                        break;
+
+                    case GrpcServerBatchType.ServerTryGetRangeLocks:
+                        item.Promise.SetResult(new(response.GetRangeLocks));
+                        break;
+
+                    case GrpcServerBatchType.ServerTryImportRangeLocks:
+                        item.Promise.SetResult(new(response.ImportRangeLocks));
                         break;
 
                     case GrpcServerBatchType.ServerTypeNone:

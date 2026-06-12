@@ -64,6 +64,9 @@ public sealed class KeyValueRequest : IConsistentHashable
     /// <summary>Mode for range-lock acquire requests (Exclusive = 0 default, Shared = 1).</summary>
     public RangeLockMode RangeLockMode { get; internal set; }
 
+    /// <summary>Lock entries to inject into LocksByRange for ImportRangeLocks requests.</summary>
+    public List<KeyValueRangeLock>? RangeLockImportList { get; internal set; }
+
     /// <summary>Range scan: maximum items to return per page.</summary>
     public int Limit { get; internal set; }
 
@@ -194,6 +197,7 @@ public sealed class KeyValueRequest : IConsistentHashable
         StartInclusive = false;
         EndInclusive = false;
         RangeLockMode = RangeLockMode.Exclusive;
+        RangeLockImportList = null;
         Limit = 0;
         ReadTimestamp = HLCTimestamp.Zero;
     }
@@ -206,7 +210,9 @@ public sealed class KeyValueRequest : IConsistentHashable
             or KeyValueRequestType.TryAcquireExclusivePrefixLock
             or KeyValueRequestType.TryReleaseExclusivePrefixLock
             or KeyValueRequestType.TryAcquireExclusiveRangeLock
-            or KeyValueRequestType.TryReleaseExclusiveRangeLock)
+            or KeyValueRequestType.TryReleaseExclusiveRangeLock
+            or KeyValueRequestType.GetRangeLocks
+            or KeyValueRequestType.ImportRangeLocks)
             return (int)HashUtils.SimpleHash(Key);
 
         return (int)HashUtils.InversePrefixedStaticHash(Key, '/');

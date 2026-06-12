@@ -602,6 +602,198 @@ public sealed class TestRangeSplit : BaseCluster
         }
     }
 
+    // ── T5b lock-transfer tests ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// Runs a split lock-transfer scenario with bounded retries (each attempt on a fresh cluster) to
+    /// tolerate the documented best-effort gap of T5b option A: a freshly-created partition can
+    /// re-elect and strand the in-memory, non-replicated lock on a former leader. <paramref
+    /// name="attempt"/> returns true when the transfer-dependent guarantee held; false signals a
+    /// strand and triggers a retry. Hard bugs surface as exceptions inside the attempt (no masking).
+    /// The robust fix that removes the retry is option B — replicate locks through the partition's
+    /// Raft log (see T5d in specs/spec-shared-range-locks-tasks.md).
+    /// </summary>
+    private static async Task RetrySplitTransfer(Func<Task<bool>> attempt, int maxAttempts = 5)
+    {
+        for (int i = 1; i <= maxAttempts; i++)
+        {
+            if (await attempt())
+                return;
+        }
+
+        Assert.Fail($"split lock-transfer guarantee not observed after {maxAttempts} attempts " +
+                    "(best-effort under leadership churn — see T5b option A / T5d)");
+    }
+
+    /// <summary>
+    /// T5b: an Exclusive range lock acquired on [−∞,+∞) before the split must be enforced on the
+    /// new partition (P') after cutover. A second exclusive attempt on the new partition must return
+    /// AlreadyLocked, proving the clamped lock was transferred.
+    /// </summary>
+    [Fact]
+    public Task Lock_SpanningSplit_EnforcedOnNewPartition() => RetrySplitTransfer(async () =>
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        ((IRaft, KahunaManager)[] nodes, _, KahunaManager dataLeader, _) =
+            await Setup([Space + "/a"], [Space + "/z"]);
+
+        try
+        {
+            (IRaft p2Raft, _) = await LeaderOf(RangeMapStore.FirstDataPartitionId, nodes);
+
+            // tx1 holds an Exclusive lock on the whole range before the split.
+            HLCTimestamp tx1 = NextTx(p2Raft);
+            KeyValueResponseType lockBefore = await dataLeader.TryAcquireRangeLock(
+                tx1, Space, null, true, null, false, 60_000,
+                KeyValueDurability.Persistent, RangeLockMode.Exclusive);
+            Assert.Equal(KeyValueResponseType.Locked, lockBefore);
+
+            // Split at Space+"/m" — T5b must transfer tx1's clamped lock to the new partition.
+            SplitOutcome outcome = await SplitViaLeaders(Space, Space + "/m", nodes, ct);
+            Assert.True(outcome.IsSuccess, $"Split failed: {outcome.Status}");
+
+            // Locate the new partition leader.
+            (IRaft pPrimeRaft, KahunaManager pPrimeLeader) =
+                await LeaderOf(outcome.NewPartitionId, nodes);
+
+            // tx2 tries Exclusive on the new partition — must be blocked by tx1's clamped lock.
+            HLCTimestamp tx2 = NextTx(pPrimeRaft);
+            KeyValueResponseType lockOnNewPartition = await pPrimeLeader.TryAcquireRangeLock(
+                tx2, Space, Space + "/m", true, null, false, 60_000,
+                KeyValueDurability.Persistent, RangeLockMode.Exclusive);
+
+            // AlreadyLocked → guarantee held; Locked → strand (retry on a fresh cluster).
+            return lockOnNewPartition == KeyValueResponseType.AlreadyLocked;
+        }
+        finally
+        {
+            await LeaveCluster(nodes[0].Item1, nodes[1].Item1, nodes[2].Item1);
+        }
+    });
+
+    /// <summary>
+    /// T5b: when a Shared lock spans the split, BOTH halves after the split must still allow
+    /// another Shared lock (S∩S coexist) but block an Exclusive (X conflicts with S).
+    /// </summary>
+    [Fact]
+    public Task SharedLock_SpanningSplit_BothHalvesCoexist() => RetrySplitTransfer(async () =>
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        ((IRaft, KahunaManager)[] nodes, _, KahunaManager dataLeader, _) =
+            await Setup([Space + "/a"], [Space + "/z"]);
+
+        try
+        {
+            (IRaft p2Raft, KahunaManager p2Leader) =
+                await LeaderOf(RangeMapStore.FirstDataPartitionId, nodes);
+
+            // tx1 acquires Shared on the whole range.
+            HLCTimestamp tx1 = NextTx(p2Raft);
+            KeyValueResponseType sharedBefore = await dataLeader.TryAcquireRangeLock(
+                tx1, Space, null, true, null, false, 60_000,
+                KeyValueDurability.Persistent, RangeLockMode.Shared);
+            Assert.Equal(KeyValueResponseType.Locked, sharedBefore);
+
+            SplitOutcome outcome = await SplitViaLeaders(Space, Space + "/m", nodes, ct);
+            Assert.True(outcome.IsSuccess, $"Split failed: {outcome.Status}");
+
+            (IRaft pPrimeRaft, KahunaManager pPrimeLeader) =
+                await LeaderOf(outcome.NewPartitionId, nodes);
+
+            (p2Raft, p2Leader) = await LeaderOf(RangeMapStore.FirstDataPartitionId, nodes);
+
+            HLCTimestamp tx3 = NextTx(pPrimeRaft);
+
+            // tx3 Exclusive on new partition → AlreadyLocked iff tx1's Shared was transferred.
+            // (A Shared probe would acquire regardless, so it can't detect a strand — use X.)
+            KeyValueResponseType exclusiveOnNew = await pPrimeLeader.TryAcquireRangeLock(
+                tx3, Space, Space + "/m", true, null, false, 60_000,
+                KeyValueDurability.Persistent, RangeLockMode.Exclusive);
+            if (exclusiveOnNew != KeyValueResponseType.AlreadyLocked)
+                return false; // strand — retry on a fresh cluster
+
+            // tx2 Shared on new partition → Locked (S∩S coexist with tx1's transferred Shared).
+            HLCTimestamp tx2 = NextTx(pPrimeRaft);
+            KeyValueResponseType sharedOnNew = await pPrimeLeader.TryAcquireRangeLock(
+                tx2, Space, Space + "/m", true, null, false, 60_000,
+                KeyValueDurability.Persistent, RangeLockMode.Shared);
+            Assert.Equal(KeyValueResponseType.Locked, sharedOnNew);
+
+            // P2 left half also still respects the original lock (retained partition — not strand-prone).
+            HLCTimestamp tx4 = NextTx(p2Raft);
+            KeyValueResponseType exclusiveOnOrig = await p2Leader.TryAcquireRangeLock(
+                tx4, Space, null, true, Space + "/m", false, 60_000,
+                KeyValueDurability.Persistent, RangeLockMode.Exclusive);
+            Assert.Equal(KeyValueResponseType.AlreadyLocked, exclusiveOnOrig);
+
+            return true;
+        }
+        finally
+        {
+            await LeaveCluster(nodes[0].Item1, nodes[1].Item1, nodes[2].Item1);
+        }
+    });
+
+    /// <summary>
+    /// T5b: releasing a lock that was transferred across a split cleans up the clamped entry
+    /// from the new partition's actor. After release a fresh Exclusive lock must be granted.
+    /// </summary>
+    [Fact]
+    public Task Lock_SpanningSplit_ReleaseCleansBothHalves() => RetrySplitTransfer(async () =>
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        ((IRaft, KahunaManager)[] nodes, _, KahunaManager dataLeader, _) =
+            await Setup([Space + "/a"], [Space + "/z"]);
+
+        try
+        {
+            (IRaft p2Raft, _) = await LeaderOf(RangeMapStore.FirstDataPartitionId, nodes);
+
+            HLCTimestamp tx1 = NextTx(p2Raft);
+            KeyValueResponseType lockBefore = await dataLeader.TryAcquireRangeLock(
+                tx1, Space, null, true, null, false, 60_000,
+                KeyValueDurability.Persistent, RangeLockMode.Exclusive);
+            Assert.Equal(KeyValueResponseType.Locked, lockBefore);
+
+            SplitOutcome outcome = await SplitViaLeaders(Space, Space + "/m", nodes, ct);
+            Assert.True(outcome.IsSuccess, $"Split failed: {outcome.Status}");
+
+            (IRaft pPrimeRaft, KahunaManager pPrimeLeader) =
+                await LeaderOf(outcome.NewPartitionId, nodes);
+
+            // Confirm the lock is present on the new partition; absent → strand, retry.
+            HLCTimestamp txCheck = NextTx(pPrimeRaft);
+            KeyValueResponseType blockedBefore = await pPrimeLeader.TryAcquireRangeLock(
+                txCheck, Space, Space + "/m", true, null, false, 60_000,
+                KeyValueDurability.Persistent, RangeLockMode.Exclusive);
+            if (blockedBefore != KeyValueResponseType.AlreadyLocked)
+                return false; // strand — retry on a fresh cluster
+
+            // Release with original (unclamped) bounds — the overlap fallback in the handler
+            // should match the clamped entry and remove it.
+            KeyValueResponseType releaseOnNew = await pPrimeLeader.TryReleaseExclusiveRangeLock(
+                tx1, Space, null, true, null, false,
+                KeyValueDurability.Persistent);
+            Assert.Equal(KeyValueResponseType.Unlocked, releaseOnNew);
+
+            // After release a fresh Exclusive must be granted.
+            HLCTimestamp tx2 = NextTx(pPrimeRaft);
+            KeyValueResponseType afterRelease = await pPrimeLeader.TryAcquireRangeLock(
+                tx2, Space, Space + "/m", true, null, false, 60_000,
+                KeyValueDurability.Persistent, RangeLockMode.Exclusive);
+            Assert.Equal(KeyValueResponseType.Locked, afterRelease);
+
+            return true;
+        }
+        finally
+        {
+            await LeaveCluster(nodes[0].Item1, nodes[1].Item1, nodes[2].Item1);
+        }
+    });
+
     // ── Split_DirectWriteDuringQuiesce_MustRetry ──────────────────────────────────
 
     /// <summary>

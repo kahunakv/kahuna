@@ -1529,6 +1529,81 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         return remoteResponse.Success;
     }
 
+    public async Task<List<KeyValueRangeLock>> GetRangeLocks(string node, string keySpace, CancellationToken cancellationToken)
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcGetRangeLocksRequest request = new()
+        {
+            KeySpace = keySpace,
+        };
+
+        GrpcServerBatcherResponse batchResponse;
+
+        if (cancellationToken == CancellationToken.None)
+            batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+        else
+            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        GrpcGetRangeLocksResponse remoteResponse = batchResponse.GetRangeLocks!;
+
+        List<KeyValueRangeLock> locks = new(remoteResponse.Locks.Count);
+        foreach (GrpcRangeLockEntry entry in remoteResponse.Locks)
+        {
+            locks.Add(new KeyValueRangeLock
+            {
+                TransactionId  = new HLCTimestamp(entry.TransactionIdNode, entry.TransactionIdPhysical, entry.TransactionIdCounter),
+                StartKey       = entry.HasStartKey ? entry.StartKey : null,
+                StartInclusive = entry.StartInclusive,
+                EndKey         = entry.HasEndKey ? entry.EndKey : null,
+                EndInclusive   = entry.EndInclusive,
+                Mode           = (RangeLockMode)entry.Mode,
+                Expires        = new HLCTimestamp(entry.ExpiresNode, entry.ExpiresPhysical, entry.ExpiresCounter),
+            });
+        }
+        return locks;
+    }
+
+    public async Task ImportRangeLocks(string node, string keySpace, List<KeyValueRangeLock> locks, CancellationToken cancellationToken)
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcImportRangeLocksRequest request = new()
+        {
+            KeySpace = keySpace,
+        };
+
+        foreach (KeyValueRangeLock rl in locks)
+        {
+            GrpcRangeLockEntry entry = new()
+            {
+                TransactionIdNode     = rl.TransactionId.N,
+                TransactionIdPhysical = rl.TransactionId.L,
+                TransactionIdCounter  = rl.TransactionId.C,
+                StartInclusive        = rl.StartInclusive,
+                EndInclusive          = rl.EndInclusive,
+                Mode                  = (GrpcRangeLockMode)rl.Mode,
+                ExpiresNode           = rl.Expires.N,
+                ExpiresPhysical       = rl.Expires.L,
+                ExpiresCounter        = rl.Expires.C,
+            };
+
+            if (rl.StartKey is not null) entry.StartKey = rl.StartKey;
+            if (rl.EndKey is not null) entry.EndKey = rl.EndKey;
+
+            request.Locks.Add(entry);
+        }
+
+        GrpcServerBatcherResponse batchResponse;
+
+        if (cancellationToken == CancellationToken.None)
+            batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+        else
+            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        _ = batchResponse.ImportRangeLocks;
+    }
+
     private static GrpcServerBatcher GetSharedBatcher(string url)
     {
         Lazy<GrpcServerBatcher> lazyBatchers = batchers.GetOrAdd(url, GetSharedBatchers);

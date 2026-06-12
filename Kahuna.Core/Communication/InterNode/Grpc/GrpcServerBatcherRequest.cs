@@ -75,6 +75,10 @@ internal sealed class GrpcServerBatcherRequest
 
     public GrpcEnsureKeyRangeSeededRequest? EnsureKeyRangeSeeded { get; }
 
+    public GrpcGetRangeLocksRequest? GetRangeLocks { get; }
+
+    public GrpcImportRangeLocksRequest? ImportRangeLocks { get; }
+
     public GrpcServerBatcherRequest(GrpcTryLockRequest tryLock)
     {
         TryLock = tryLock;
@@ -253,5 +257,15 @@ internal sealed class GrpcServerBatcherRequest
     public GrpcServerBatcherRequest(GrpcEnsureKeyRangeSeededRequest ensureKeyRangeSeeded)
     {
         EnsureKeyRangeSeeded = ensureKeyRangeSeeded;
+    }
+
+    public GrpcServerBatcherRequest(GrpcGetRangeLocksRequest getRangeLocks)
+    {
+        GetRangeLocks = getRangeLocks;
+    }
+
+    public GrpcServerBatcherRequest(GrpcImportRangeLocksRequest importRangeLocks)
+    {
+        ImportRangeLocks = importRangeLocks;
     }
 }

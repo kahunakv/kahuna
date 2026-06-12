@@ -85,4 +85,10 @@ public interface IInterNodeCommunication
     public Task<KeyValueResponseType> RollbackTransaction(string node, string uniqueId, HLCTimestamp timestamp, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken);
 
     public Task<bool> EnsureKeyRangeSeeded(string node, string keySpace, CancellationToken cancellationToken);
+
+    /// <summary>Reads live range locks for <paramref name="keySpace"/> from the actor pool on <paramref name="node"/> (T5).</summary>
+    public Task<List<KeyValueRangeLock>> GetRangeLocks(string node, string keySpace, CancellationToken cancellationToken);
+
+    /// <summary>Injects clamped lock entries into the actor pool for <paramref name="keySpace"/> on <paramref name="node"/> (T5).</summary>
+    public Task ImportRangeLocks(string node, string keySpace, List<KeyValueRangeLock> locks, CancellationToken cancellationToken);
 }

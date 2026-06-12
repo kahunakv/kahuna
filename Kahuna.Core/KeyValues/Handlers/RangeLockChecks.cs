@@ -56,4 +56,29 @@ internal static class RangeLockChecks
         }
         return true;
     }
+
+    /// <summary>
+    /// Returns true when lock A's range overlaps lock B's range.
+    /// Two ranges overlap iff A.start &lt; B.end AND B.start &lt; A.end (ordinal, honoring inclusivity).
+    /// An absent bound (null) represents unbounded — always "before" the other end.
+    /// </summary>
+    internal static bool RangesOverlap(
+        string? aStart, bool aStartInclusive, string? aEnd, bool aEndInclusive,
+        string? bStart, bool bStartInclusive, string? bEnd, bool bEndInclusive)
+    {
+        return StartBeforeEnd(aStart, aStartInclusive, bEnd, bEndInclusive)
+            && StartBeforeEnd(bStart, bStartInclusive, aEnd, aEndInclusive);
+    }
+
+    /// <summary>Returns true when <paramref name="start"/> is strictly before <paramref name="end"/>.</summary>
+    internal static bool StartBeforeEnd(string? start, bool startInclusive, string? end, bool endInclusive)
+    {
+        if (start is null || end is null)
+            return true; // unbounded → always overlaps
+
+        int cmp = string.Compare(start, end, StringComparison.Ordinal);
+        if (cmp < 0) return true;
+        if (cmp > 0) return false;
+        return startInclusive && endInclusive;
+    }
 }

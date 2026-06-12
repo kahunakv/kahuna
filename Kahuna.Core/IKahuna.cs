@@ -133,6 +133,12 @@ public interface IKahuna
     public Task<KeyValueResponseType> TryAcquireRangeLock(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability, RangeLockMode mode);
 
     public Task<KeyValueResponseType> TryAcquireExclusiveRangeLock(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability);
+
+    /// <summary>Returns live range locks for <paramref name="keySpace"/> from the local actor (T5 export).</summary>
+    public Task<List<KeyValueRangeLock>> GetRangeLocks(string keySpace);
+
+    /// <summary>Injects clamped lock entries into the local actor for <paramref name="keySpace"/> (T5 import).</summary>
+    public Task ImportRangeLocks(string keySpace, List<KeyValueRangeLock> locks);
     
     public Task<(KeyValueResponseType, string)> TryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueDurability durability);
     

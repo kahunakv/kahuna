@@ -823,6 +823,8 @@ message GrpcBatchServerKeyValueRequest {
     GrpcTryAcquireExclusiveRangeLockRequest TryAcquireExclusiveRangeLock = 33;
     GrpcTryReleaseExclusiveRangeLockRequest TryReleaseExclusiveRangeLock = 34;
     GrpcEnsureKeyRangeSeededRequest EnsureKeyRangeSeeded = 35;
+    GrpcGetRangeLocksRequest GetRangeLocks = 36;
+    GrpcImportRangeLocksRequest ImportRangeLocks = 37;
   }
 }
 
@@ -863,6 +865,8 @@ message GrpcBatchServerKeyValueResponse
     GrpcTryAcquireExclusiveRangeLockResponse TryAcquireExclusiveRangeLock = 32;
     GrpcTryReleaseExclusiveRangeLockResponse TryReleaseExclusiveRangeLock = 33;
     GrpcEnsureKeyRangeSeededResponse EnsureKeyRangeSeeded = 34;
+    GrpcGetRangeLocksResponse GetRangeLocks = 35;
+    GrpcImportRangeLocksResponse ImportRangeLocks = 36;
   }
 }
 
@@ -879,6 +883,37 @@ message GrpcEnsureKeyRangeSeededRequest {
 }
 
 message GrpcEnsureKeyRangeSeededResponse {
+  bool Success = 1;
+}
+
+message GrpcRangeLockEntry {
+  int32  TransactionIdNode      = 1;
+  int64  TransactionIdPhysical  = 2;
+  uint32 TransactionIdCounter   = 3;
+  optional string StartKey      = 4;
+  bool   StartInclusive         = 5;
+  optional string EndKey        = 6;
+  bool   EndInclusive           = 7;
+  GrpcRangeLockMode Mode        = 8;
+  int32  ExpiresNode            = 9;
+  int64  ExpiresPhysical        = 10;
+  uint32 ExpiresCounter         = 11;
+}
+
+message GrpcGetRangeLocksRequest {
+  string KeySpace = 1;
+}
+
+message GrpcGetRangeLocksResponse {
+  repeated GrpcRangeLockEntry Locks = 1;
+}
+
+message GrpcImportRangeLocksRequest {
+  string KeySpace = 1;
+  repeated GrpcRangeLockEntry Locks = 2;
+}
+
+message GrpcImportRangeLocksResponse {
   bool Success = 1;
 }
 
@@ -934,6 +969,8 @@ enum GrpcServerBatchType {
   SERVER_TRY_ACQUIRE_EXCLUSIVE_RANGE_LOCK = 31;
   SERVER_TRY_RELEASE_EXCLUSIVE_RANGE_LOCK = 32;
   SERVER_TRY_ENSURE_KEY_RANGE_SEEDED = 33;
+  SERVER_TRY_GET_RANGE_LOCKS = 34;
+  SERVER_TRY_IMPORT_RANGE_LOCKS = 35;
 }
 
 enum GrpcRangeLockMode {

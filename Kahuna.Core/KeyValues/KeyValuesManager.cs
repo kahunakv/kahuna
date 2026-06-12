@@ -2064,6 +2064,126 @@ internal sealed class KeyValuesManager : IDisposable
     }
 
     /// <summary>
+    /// Returns a snapshot of all live range-lock entries stored in the local actor for
+    /// <paramref name="keySpace"/>. Used by <c>KvStateMachineTransfer</c> to read lock
+    /// state before serializing it into a range-snapshot stream (T5).
+    /// <para>
+    /// <b>Persistent-only assumption.</b> Range locks for key-range spaces are always acquired
+    /// through the persistent router (the split/merge path only applies to persistent spaces —
+    /// ephemeral data is not transferable). Ephemeral range locks, if any exist, are held in
+    /// the ephemeral router's actor pool and are not returned here. T5b/T5c callers must not
+    /// rely on this method for ephemeral key spaces.
+    /// </para>
+    /// </summary>
+    internal async Task<List<KeyValueRangeLock>> GetRangeLocksAsync(string keySpace)
+    {
+        KeyValueRequest request = KeyValueRequestPool.Rent(
+            KeyValueRequestType.GetRangeLocks,
+            HLCTimestamp.Zero,
+            HLCTimestamp.Zero,
+            keySpace,
+            null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero,
+            KeyValueDurability.Persistent, 0, 0, null);
+
+        try
+        {
+            KeyValueResponse? response = await persistentKeyValuesRouter.Ask(request);
+            return response?.RangeLockList ?? [];
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
+    }
+
+    /// <summary>
+    /// Injects <paramref name="locks"/> directly into the local actor's <c>LocksByRange</c>
+    /// for <paramref name="keySpace"/> — no conflict checks, no acquire logic. Entries that
+    /// duplicate an already-held lock (same tx + overlapping bounds) are silently skipped.
+    /// Used by <c>KvStateMachineTransfer</c> to restore clamped locks into a destination
+    /// partition after a split or merge (T5).
+    /// <para>
+    /// <b>Persistent-only assumption.</b> Routes to the persistent actor pool for the same
+    /// reason as <see cref="GetRangeLocksAsync"/> — T5 applies only to persistent key-range
+    /// spaces. Ephemeral range locks are not injected and do not need to be transferred.
+    /// </para>
+    /// </summary>
+    internal async Task ImportRangeLocksAsync(string keySpace, List<KeyValueRangeLock> locks)
+    {
+        if (locks.Count == 0)
+            return;
+
+        KeyValueRequest request = KeyValueRequestPool.Rent(
+            KeyValueRequestType.ImportRangeLocks,
+            HLCTimestamp.Zero,
+            HLCTimestamp.Zero,
+            keySpace,
+            null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero,
+            KeyValueDurability.Persistent, 0, 0, null);
+
+        request.RangeLockImportList = locks;
+
+        try
+        {
+            await persistentKeyValuesRouter.Ask(request);
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
+    }
+
+    /// <summary>
+    /// Returns the live range locks held in the actor pool for <paramref name="keySpace"/>
+    /// on the leader of <paramref name="partitionId"/>. Forwards via IPC when this node is
+    /// not the leader.
+    /// </summary>
+    internal async Task<List<KeyValueRangeLock>> GetRangeLocksFromPartitionLeaderAsync(
+        string keySpace,
+        int partitionId,
+        CancellationToken cancellationToken)
+    {
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
+            return await GetRangeLocksAsync(keySpace).ConfigureAwait(false);
+
+        string leader = await raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        if (leader == raft.GetLocalEndpoint())
+            return await GetRangeLocksAsync(keySpace).ConfigureAwait(false);
+
+        return await interNodeCommunication.GetRangeLocks(leader, keySpace, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Injects <paramref name="locks"/> into the actor pool for <paramref name="keySpace"/>
+    /// on the leader of <paramref name="partitionId"/>. Forwards via IPC when this node is
+    /// not the leader.
+    /// </summary>
+    internal async Task ImportRangeLocksToPartitionLeaderAsync(
+        string keySpace,
+        int partitionId,
+        List<KeyValueRangeLock> locks,
+        CancellationToken cancellationToken)
+    {
+        if (locks.Count == 0)
+            return;
+
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
+        {
+            await ImportRangeLocksAsync(keySpace, locks).ConfigureAwait(false);
+            return;
+        }
+
+        string leader = await raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        if (leader == raft.GetLocalEndpoint())
+        {
+            await ImportRangeLocksAsync(keySpace, locks).ConfigureAwait(false);
+            return;
+        }
+
+        await interNodeCommunication.ImportRangeLocks(leader, keySpace, locks, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Passes a TryAcquireExclusiveLock request to the key/value actor for the given keys.
     /// </summary>
     /// <param name="transactionId"></param>

@@ -47,7 +47,7 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
                             continue;
                         if (other.Expires != HLCTimestamp.Zero && other.Expires - currentTime <= TimeSpan.Zero)
                             continue;
-                        if (RangesOverlap(message.StartKey, message.StartInclusive, message.EndKey, message.EndInclusive,
+                        if (RangeLockChecks.RangesOverlap(message.StartKey, message.StartInclusive, message.EndKey, message.EndInclusive,
                                 other.StartKey, other.StartInclusive, other.EndKey, other.EndInclusive))
                             return KeyValueStaticResponses.AlreadyLockedResponse;
                     }
@@ -77,7 +77,7 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
                 if (message.RangeLockMode == RangeLockMode.Shared && existing.Mode == RangeLockMode.Shared)
                     continue; // S∩S always compatible
 
-                if (RangesOverlap(message.StartKey, message.StartInclusive, message.EndKey, message.EndInclusive,
+                if (RangeLockChecks.RangesOverlap(message.StartKey, message.StartInclusive, message.EndKey, message.EndInclusive,
                         existing.StartKey, existing.StartInclusive, existing.EndKey, existing.EndInclusive))
                     return KeyValueStaticResponses.AlreadyLockedResponse;
             }
@@ -165,26 +165,4 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
         return KeyValueStaticResponses.LockedResponse;
     }
 
-    private static bool RangesOverlap(
-        string? aStart, bool aStartInclusive, string? aEnd, bool aEndInclusive,
-        string? bStart, bool bStartInclusive, string? bEnd, bool bEndInclusive)
-    {
-        // A.start < B.end  AND  B.start < A.end
-        if (!StartBeforeEnd(aStart, aStartInclusive, bEnd, bEndInclusive))
-            return false;
-        if (!StartBeforeEnd(bStart, bStartInclusive, aEnd, aEndInclusive))
-            return false;
-        return true;
-    }
-
-    private static bool StartBeforeEnd(string? start, bool startInclusive, string? end, bool endInclusive)
-    {
-        if (start is null || end is null)
-            return true; // unbounded → always overlaps
-
-        int cmp = string.Compare(start, end, StringComparison.Ordinal);
-        if (cmp < 0) return true;
-        if (cmp > 0) return false;
-        return startInclusive && endInclusive;
-    }
 }

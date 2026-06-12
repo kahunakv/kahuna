@@ -29,5 +29,7 @@ public enum KeyValueRequestType
     CompleteProposal,
     ReleaseProposal,
     Collect,
-    TryCheckWriteIntent
+    TryCheckWriteIntent,
+    GetRangeLocks,
+    ImportRangeLocks,
 }

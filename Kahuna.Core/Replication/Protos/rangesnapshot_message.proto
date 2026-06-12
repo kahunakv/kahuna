@@ -2,6 +2,34 @@ syntax = "proto3";
 
 package Kahuna.Server.Replication.Protos;
 
+// Mode carried on a transferred range lock (mirrors RangeLockMode; numeric values must match).
+enum RangeSnapshotLockMode {
+  RANGE_LOCK_EXCLUSIVE = 0;
+  RANGE_LOCK_SHARED    = 1;
+}
+
+// One range-lock entry in a range-transfer snapshot. Carries every field needed to reconstruct
+// a KeyValueRangeLock on the destination partition verbatim (no acquire re-run, no TTL recompute).
+// Null start/end keys are encoded as optional fields absent from the wire (proto3 optional).
+message RangeSnapshotLockEntry {
+  int32  txIdNode        = 1;
+  int64  txIdPhysical    = 2;
+  uint32 txIdCounter     = 3;
+  optional string startKey       = 4;
+  bool   startInclusive  = 5;
+  optional string endKey         = 6;
+  bool   endInclusive    = 7;
+  RangeSnapshotLockMode mode     = 8;
+  int32  expiresNode     = 9;
+  int64  expiresPhysical = 10;
+  uint32 expiresCounter  = 11;
+}
+
+// A page of range-lock entries in a lock-transfer snapshot.
+message RangeSnapshotLockPage {
+  repeated RangeSnapshotLockEntry entries = 1;
+}
+
 // One key/value entry in a range-transfer snapshot. Carries every field needed for a
 // byte-identical round-trip (mirrors ReadOnlyKeyValueEntry, incl. State which KeyValueMessage lacks).
 message RangeSnapshotEntry {

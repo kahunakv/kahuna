@@ -195,6 +195,20 @@ internal sealed class KeyValueServerBatcher
                     }
                     break;
 
+                    case GrpcServerBatchType.ServerTryGetRangeLocks:
+                    {
+                        GrpcGetRangeLocksRequest? req = request.GetRangeLocks;
+                        tasks.Add(GetRangeLocksDelayed(semaphore, request.RequestId, req, responseStream, context));
+                    }
+                    break;
+
+                    case GrpcServerBatchType.ServerTryImportRangeLocks:
+                    {
+                        GrpcImportRangeLocksRequest? req = request.ImportRangeLocks;
+                        tasks.Add(ImportRangeLocksDelayed(semaphore, request.RequestId, req, responseStream, context));
+                    }
+                    break;
+
                     case GrpcServerBatchType.ServerTryReleaseManyExclusiveLocks:
                     {
                         GrpcTryReleaseManyExclusiveLocksRequest? tryReleaseManyExclusiveLocksRequest = request.TryReleaseManyExclusiveLocks;
@@ -690,6 +704,54 @@ internal sealed class KeyValueServerBatcher
                 Type = GrpcServerBatchType.ServerTryEnsureKeyRangeSeeded,
                 RequestId = requestId,
                 EnsureKeyRangeSeeded = resp
+            });
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+
+    private async Task GetRangeLocksDelayed(
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcGetRangeLocksRequest request,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context)
+    {
+        await semaphore.WaitAsync(context.CancellationToken);
+        try
+        {
+            GrpcGetRangeLocksResponse resp = await service.GetRangeLocksInternal(request, context);
+            await responseStream.WriteAsync(new GrpcBatchServerKeyValueResponse
+            {
+                Type = GrpcServerBatchType.ServerTryGetRangeLocks,
+                RequestId = requestId,
+                GetRangeLocks = resp
+            });
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+
+    private async Task ImportRangeLocksDelayed(
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcImportRangeLocksRequest request,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context)
+    {
+        await semaphore.WaitAsync(context.CancellationToken);
+        try
+        {
+            GrpcImportRangeLocksResponse resp = await service.ImportRangeLocksInternal(request, context);
+            await responseStream.WriteAsync(new GrpcBatchServerKeyValueResponse
+            {
+                Type = GrpcServerBatchType.ServerTryImportRangeLocks,
+                RequestId = requestId,
+                ImportRangeLocks = resp
             });
         }
         finally

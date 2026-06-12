@@ -6,6 +6,7 @@ using Kommander.Time;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication.Protos;
+using Kahuna.Server.KeyValues.Handlers;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues.Ranges;
@@ -184,6 +185,268 @@ internal sealed class KvStateMachineTransfer : IRaftStateMachineTransfer
             throw new KahunaServerException("ImportRange: StoreKeyValues failed to persist the snapshot.");
 
         return Task.CompletedTask;
+    }
+
+    // ── Range-lock serialization (T5) ────────────────────────────────────────────
+
+    /// <summary>
+    /// Serializes the range-lock entries for <paramref name="keySpace"/> that overlap
+    /// <c>[<paramref name="destStartKey"/>, <paramref name="destEndKey"/>)</c> into a
+    /// <see cref="RangeSnapshotLockPage"/> proto stream. Expired entries (relative to
+    /// <paramref name="now"/>) are excluded. The returned stream is positioned at 0.
+    ///
+    /// <para>
+    /// This method reads the lock list from the local actor via
+    /// <see cref="KeyValuesManager.GetRangeLocksAsync"/>, so it must be called while the
+    /// caller holds the quiesce lock (split/merge), ensuring a consistent snapshot.
+    /// </para>
+    /// </summary>
+    public async Task<Stream> ExportLocksAsync(
+        string keySpace,
+        string? destStartKey,
+        string? destEndKey,
+        HLCTimestamp now,
+        CancellationToken ct)
+    {
+        List<KeyValueRangeLock> allLocks = await manager.GetRangeLocksAsync(keySpace).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
+
+        RangeSnapshotLockPage page = new();
+
+        foreach (KeyValueRangeLock lk in allLocks)
+        {
+            // Skip expired.
+            if (lk.Expires != HLCTimestamp.Zero && lk.Expires - now <= TimeSpan.Zero)
+                continue;
+
+            // Skip non-overlapping.
+            if (!RangeLockChecks.RangesOverlap(
+                    lk.StartKey, lk.StartInclusive, lk.EndKey, lk.EndInclusive,
+                    destStartKey, true, destEndKey, false))
+                continue;
+
+            RangeSnapshotLockEntry entry = new()
+            {
+                TxIdNode     = lk.TransactionId.N,
+                TxIdPhysical = lk.TransactionId.L,
+                TxIdCounter  = (uint)lk.TransactionId.C,
+                StartInclusive = lk.StartInclusive,
+                EndInclusive   = lk.EndInclusive,
+                Mode           = (RangeSnapshotLockMode)lk.Mode,
+                ExpiresNode     = lk.Expires.N,
+                ExpiresPhysical = lk.Expires.L,
+                ExpiresCounter  = (uint)lk.Expires.C,
+            };
+
+            if (lk.StartKey is not null) entry.StartKey = lk.StartKey;
+            if (lk.EndKey   is not null) entry.EndKey   = lk.EndKey;
+
+            page.Entries.Add(entry);
+        }
+
+        MemoryStream stream = new();
+        page.WriteDelimitedTo(stream);
+        stream.Position = 0;
+        return stream;
+    }
+
+    /// <summary>
+    /// Deserializes a lock-snapshot stream produced by <see cref="ExportLocksAsync"/>,
+    /// clamps each entry's bounds to <c>[<paramref name="destStartKey"/>,
+    /// <paramref name="destEndKey"/>)</c>, skips expired entries (relative to
+    /// <paramref name="now"/>), and returns the clamped list ready for injection.
+    ///
+    /// <para>
+    /// Deduplication of same-tx overlapping entries within the returned list is performed
+    /// here; deduplication against already-stored entries is done by
+    /// <see cref="ImportRangeLocksHandler"/>.
+    /// </para>
+    /// </summary>
+    public static List<KeyValueRangeLock> ImportLocks(
+        Stream stream,
+        string? destStartKey,
+        string? destEndKey,
+        HLCTimestamp now)
+    {
+        RangeSnapshotLockPage? page = RangeSnapshotLockPage.Parser.ParseDelimitedFrom(stream);
+        if (page is null)
+            return [];
+
+        List<KeyValueRangeLock> result = [];
+
+        foreach (RangeSnapshotLockEntry entry in page.Entries)
+        {
+            HLCTimestamp expires = new(entry.ExpiresNode, entry.ExpiresPhysical, entry.ExpiresCounter);
+
+            // Skip expired.
+            if (expires != HLCTimestamp.Zero && expires - now <= TimeSpan.Zero)
+                continue;
+
+            string? rawStart = entry.HasStartKey ? entry.StartKey : null;
+            string? rawEnd   = entry.HasEndKey   ? entry.EndKey   : null;
+
+            // Clamp start: start' = max(entry.StartKey, destStartKey) — ordinal.
+            (string? clampedStart, bool clampedStartIncl) = ClampStart(rawStart, entry.StartInclusive, destStartKey);
+            // Clamp end: end' = min(entry.EndKey, destEndKey) — ordinal.
+            (string? clampedEnd, bool clampedEndIncl)     = ClampEnd(rawEnd, entry.EndInclusive, destEndKey);
+
+            // Skip entries that became empty after clamping (should not happen for valid overlapping entries).
+            if (!RangeLockChecks.StartBeforeEnd(clampedStart, clampedStartIncl, clampedEnd, clampedEndIncl))
+                continue;
+
+            HLCTimestamp txId = new(entry.TxIdNode, entry.TxIdPhysical, entry.TxIdCounter);
+
+            // Deduplicate within this batch: skip if same tx already has an overlapping entry.
+            bool duplicate = false;
+            foreach (KeyValueRangeLock existing in result)
+            {
+                if (existing.TransactionId != txId) continue;
+                if (RangeLockChecks.RangesOverlap(
+                        existing.StartKey, existing.StartInclusive, existing.EndKey, existing.EndInclusive,
+                        clampedStart, clampedStartIncl, clampedEnd, clampedEndIncl))
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+
+            if (!duplicate)
+                result.Add(new KeyValueRangeLock
+                {
+                    TransactionId  = txId,
+                    Expires        = expires,
+                    StartKey       = clampedStart,
+                    StartInclusive = clampedStartIncl,
+                    EndKey         = clampedEnd,
+                    EndInclusive   = clampedEndIncl,
+                    Mode           = (RangeLockMode)entry.Mode,
+                });
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Filters <paramref name="locks"/> to entries that overlap
+    /// <c>[<paramref name="destStartKey"/>, <paramref name="destEndKey"/>)</c>, skips expired
+    /// entries and the caller's own <paramref name="excludeTxId"/> (the splitter's quiesce lock,
+    /// which is released independently and must not be carried to the destination), clamps bounds,
+    /// and deduplicates — exactly what <see cref="ImportLocks"/> does but without proto
+    /// serialization. Used by the splitter to transfer locks between in-memory actors.
+    /// </summary>
+    public static List<KeyValueRangeLock> FilterAndClamp(
+        IReadOnlyList<KeyValueRangeLock> locks,
+        string? destStartKey,
+        string? destEndKey,
+        HLCTimestamp now,
+        HLCTimestamp excludeTxId = default)
+    {
+        List<KeyValueRangeLock> result = [];
+
+        foreach (KeyValueRangeLock lk in locks)
+        {
+            if (excludeTxId != HLCTimestamp.Zero && lk.TransactionId == excludeTxId)
+                continue;
+
+            if (lk.Expires != HLCTimestamp.Zero && lk.Expires - now <= TimeSpan.Zero)
+                continue;
+
+            if (!RangeLockChecks.RangesOverlap(
+                    lk.StartKey, lk.StartInclusive, lk.EndKey, lk.EndInclusive,
+                    destStartKey, true, destEndKey, false))
+                continue;
+
+            (string? cs, bool csI) = ClampStart(lk.StartKey, lk.StartInclusive, destStartKey);
+            (string? ce, bool ceI) = ClampEnd(lk.EndKey, lk.EndInclusive, destEndKey);
+
+            if (!RangeLockChecks.StartBeforeEnd(cs, csI, ce, ceI))
+                continue;
+
+            bool duplicate = false;
+            foreach (KeyValueRangeLock existing in result)
+            {
+                if (existing.TransactionId != lk.TransactionId) continue;
+                if (RangeLockChecks.RangesOverlap(
+                        existing.StartKey, existing.StartInclusive, existing.EndKey, existing.EndInclusive,
+                        cs, csI, ce, ceI))
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+
+            if (!duplicate)
+                result.Add(new KeyValueRangeLock
+                {
+                    TransactionId  = lk.TransactionId,
+                    Expires        = lk.Expires,
+                    StartKey       = cs,
+                    StartInclusive = csI,
+                    EndKey         = ce,
+                    EndInclusive   = ceI,
+                    Mode           = lk.Mode,
+                });
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// True when every lock in <paramref name="expected"/> has a matching entry (same transaction,
+    /// overlapping bounds) in <paramref name="present"/>. The splitter uses this to confirm a lock
+    /// transfer actually landed on the <em>current</em> destination-partition leader before relying
+    /// on it — a freshly-created partition can change leadership between import and use, stranding
+    /// the in-memory (non-replicated) lock on a node that is no longer the leader (T5b option A).
+    /// </summary>
+    public static bool AllLocksPresent(
+        IReadOnlyList<KeyValueRangeLock> expected,
+        IReadOnlyList<KeyValueRangeLock> present)
+    {
+        foreach (KeyValueRangeLock e in expected)
+        {
+            bool found = false;
+            foreach (KeyValueRangeLock p in present)
+            {
+                if (p.TransactionId != e.TransactionId)
+                    continue;
+                if (RangeLockChecks.RangesOverlap(
+                        p.StartKey, p.StartInclusive, p.EndKey, p.EndInclusive,
+                        e.StartKey, e.StartInclusive, e.EndKey, e.EndInclusive))
+                {
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found)
+                return false;
+        }
+
+        return true;
+    }
+
+    private static (string? key, bool inclusive) ClampStart(string? raw, bool rawIncl, string? destStart)
+    {
+        if (destStart is null) return (raw, rawIncl);    // dest is unbounded left → keep raw
+        if (raw is null)       return (destStart, true); // entry is unbounded left → use dest start
+
+        int cmp = string.Compare(raw, destStart, StringComparison.Ordinal);
+        if (cmp > 0)  return (raw, rawIncl);   // entry.start is after dest.start → keep
+        if (cmp < 0)  return (destStart, true); // entry.start is before dest.start → clamp to dest
+        // equal: inclusivity: take the more restrictive (false overrides true)
+        return (destStart, rawIncl && true);
+    }
+
+    private static (string? key, bool inclusive) ClampEnd(string? raw, bool rawIncl, string? destEnd)
+    {
+        if (destEnd is null) return (raw, rawIncl);    // dest is unbounded right → keep raw
+        if (raw is null)     return (destEnd, false);  // entry is unbounded right → use dest end (exclusive)
+
+        int cmp = string.Compare(raw, destEnd, StringComparison.Ordinal);
+        if (cmp < 0)  return (raw, rawIncl);   // entry.end is before dest.end → keep
+        if (cmp > 0)  return (destEnd, false); // entry.end is after dest.end → clamp to dest (exclusive)
+        // equal: take the more restrictive (false overrides true)
+        return (destEnd, rawIncl && false);
     }
 
     // ── IRaftStateMachineTransfer (Kommander-driven path) ────────────────────────

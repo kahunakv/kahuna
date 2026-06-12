@@ -1189,6 +1189,21 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <summary>The key-range data-movement primitive (Task 5); register with <c>IRaft.RegisterStateMachineTransfer</c>.</summary>
     internal KvStateMachineTransfer KvStateMachineTransfer => keyValues.KvStateMachineTransfer;
 
+    /// <summary>Returns live range locks held on <paramref name="keySpace"/> in the local actor (T5 export helper).</summary>
+    internal Task<List<KeyValueRangeLock>> GetRangeLocksAsync(string keySpace) =>
+        keyValues.GetRangeLocksAsync(keySpace);
+
+    /// <summary>Injects clamped lock entries into the local actor for <paramref name="keySpace"/> (T5 import helper).</summary>
+    internal Task ImportRangeLocksAsync(string keySpace, List<KeyValueRangeLock> locks) =>
+        keyValues.ImportRangeLocksAsync(keySpace, locks);
+
+    // IKahuna surface for inter-node routing (T5).
+    public Task<List<KeyValueRangeLock>> GetRangeLocks(string keySpace) =>
+        keyValues.GetRangeLocksAsync(keySpace);
+
+    public Task ImportRangeLocks(string keySpace, List<KeyValueRangeLock> locks) =>
+        keyValues.ImportRangeLocksAsync(keySpace, locks);
+
     /// <summary>Resolves a key to its owning <c>(partitionId, generation)</c> (Task 3 key-order router).</summary>
     internal (int PartitionId, long Generation) LocateRange(string key) => keyValues.LocateRange(key);
 

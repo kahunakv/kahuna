@@ -32,5 +32,11 @@ public enum KeyValueResponseType
     /// touches (design §8). Returned instead of a generic <see cref="Errored"/> so callers can
     /// migrate deliberately rather than treating it as a transient failure.
     /// </summary>
-    PrefixLockUnsupportedOnRangedSpace = 105
+    PrefixLockUnsupportedOnRangedSpace = 105,
+
+    /// <summary>
+    /// Returned by <c>GetRangeLocks</c> actor messages; the payload is in
+    /// <see cref="KeyValueResponse.RangeLockList"/>. Not surfaced to external callers.
+    /// </summary>
+    RangeLocks = 106,
 }
