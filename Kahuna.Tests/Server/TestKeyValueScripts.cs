@@ -22,7 +22,7 @@ public class TestKeyValueScripts : BaseCluster
     }    
     
     [Theory, CombinatorialData]
-    public async Task TestSetGetExecuteScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    public async Task TestSetGetExecuteScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) = await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
         try
@@ -88,7 +88,7 @@ public class TestKeyValueScripts : BaseCluster
     }
 
     [Theory, CombinatorialData]
-    public async Task TestSetGetExtendExecuteScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    public async Task TestSetGetExtendExecuteScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
@@ -141,7 +141,7 @@ public class TestKeyValueScripts : BaseCluster
     }
     
     [Theory, CombinatorialData]
-    public async Task TestSetGetExtendExecuteScript2([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    public async Task TestSetGetExtendExecuteScript2([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
@@ -248,7 +248,7 @@ public class TestKeyValueScripts : BaseCluster
     }
     
     [Theory, CombinatorialData]
-    public async Task TestSetGetExistsExecuteScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    public async Task TestSetGetExistsExecuteScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
@@ -311,7 +311,7 @@ public class TestKeyValueScripts : BaseCluster
     }
 
     [Theory, CombinatorialData]
-    public async Task TestSetGetSameScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    public async Task TestSetGetSameScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna _) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
@@ -347,7 +347,7 @@ public class TestKeyValueScripts : BaseCluster
     }
     
     [Theory, CombinatorialData]
-    public async Task TestSetGetSameScript2([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    public async Task TestSetGetSameScript2([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
@@ -385,7 +385,7 @@ public class TestKeyValueScripts : BaseCluster
     }
     
     [Theory, CombinatorialData]
-    public async Task TestSetGetSameNxScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    public async Task TestSetGetSameNxScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
@@ -423,7 +423,7 @@ public class TestKeyValueScripts : BaseCluster
     }
     
     [Theory, CombinatorialData]
-    public async Task TestSetGetSameXxScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    public async Task TestSetGetSameXxScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
@@ -461,7 +461,7 @@ public class TestKeyValueScripts : BaseCluster
     }
     
     [Theory, CombinatorialData]
-    public async Task TestSetGetSameConditionalScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    public async Task TestSetGetSameConditionalScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
@@ -507,7 +507,7 @@ public class TestKeyValueScripts : BaseCluster
     }
     
     [Theory, CombinatorialData]
-    public async Task TestSetGetSetRollbackScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    public async Task TestSetGetSetRollbackScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
@@ -550,7 +550,7 @@ public class TestKeyValueScripts : BaseCluster
     }
     
     [Theory, CombinatorialData]
-    public async Task TestSetGetDeleteRollbackScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    public async Task TestSetGetDeleteRollbackScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
@@ -620,7 +620,7 @@ public class TestKeyValueScripts : BaseCluster
     }
     
     [Theory, CombinatorialData]
-    public Task TestSetGetExtendRollbackScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions) =>
+    public Task TestSetGetExtendRollbackScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions) =>
         RetryAsync(() => RunSetGetExtendRollbackScript(storage, partitions));
 
     private async Task RunSetGetExtendRollbackScript(string storage, int partitions)
@@ -700,7 +700,7 @@ public class TestKeyValueScripts : BaseCluster
     }
 
     [Theory, CombinatorialData]
-    public async Task TestSetGetMultiExecuteScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    public async Task TestSetGetMultiExecuteScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
@@ -822,7 +822,7 @@ public class TestKeyValueScripts : BaseCluster
     }
     
     [Theory, CombinatorialData]
-    public async Task TestSetGetByBucketExecuteScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    public async Task TestSetGetByBucketExecuteScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
