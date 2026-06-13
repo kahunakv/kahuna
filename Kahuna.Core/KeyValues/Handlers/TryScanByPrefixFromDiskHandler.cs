@@ -31,22 +31,87 @@ internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
     public async Task<KeyValueResponse> Execute(KeyValueRequest message)
     {
         Dictionary<string, ReadOnlyKeyValueEntry> items = new();
-                
+
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
-        
-        List<(string, ReadOnlyKeyValueEntry)> itemsFromDisk = await context.Raft.ReadScheduler.EnqueueTask(message.PartitionId, () => context.PersistenceBackend.GetKeyValueByPrefix(message.Key));
-        
+        HLCTimestamp readTimestamp = message.ReadTimestamp;
+
+        List<(string, ReadOnlyKeyValueEntry)> itemsFromDisk = await context.Raft.ReadScheduler.EnqueueTask(
+            message.PartitionId,
+            () =>
+            {
+                List<(string, ReadOnlyKeyValueEntry)> scanned = context.PersistenceBackend.GetKeyValueByPrefix(message.Key);
+
+                if (readTimestamp.IsNull())
+                    return scanned;
+
+                // Snapshot scan: the prefix scan returns each key's latest committed revision. When that
+                // revision is newer than the snapshot, walk the persisted revision history backwards to the
+                // most recent revision at-or-before the snapshot, mirroring the in-memory scan path. A key
+                // with no retained revision at-or-before the snapshot is dropped (it did not exist, or was
+                // written, after the snapshot).
+                List<(string, ReadOnlyKeyValueEntry)> projected = new(scanned.Count);
+
+                foreach ((string key, ReadOnlyKeyValueEntry entry) in scanned)
+                {
+                    if (entry.LastModified.CompareTo(readTimestamp) <= 0)
+                    {
+                        projected.Add((key, entry));
+                        continue;
+                    }
+
+                    if (TryResolveRevisionAtOrBefore(key, entry.Revision, readTimestamp, out ReadOnlyKeyValueEntry snapshot))
+                        projected.Add((key, snapshot));
+                }
+
+                return projected;
+            });
+
         foreach ((string key, ReadOnlyKeyValueEntry readOnlyKeyValueEntry) in itemsFromDisk)
         {
             if (items.ContainsKey(key))
                 continue;
-            
+
             if (readOnlyKeyValueEntry.State == KeyValueState.Deleted || readOnlyKeyValueEntry.Expires != HLCTimestamp.Zero && readOnlyKeyValueEntry.Expires - currentTime < TimeSpan.Zero)
                 continue;
-                        
+
             items.Add(key, readOnlyKeyValueEntry);
-        }                             
-                
+        }
+
         return new(KeyValueResponseType.Get, items.Select(kv => (kv.Key, kv.Value)).ToList());
+    }
+
+    /// <summary>
+    /// Walks the persisted revision history of <paramref name="key"/> from <paramref name="latestRevision"/>
+    /// downwards, returning the most recent revision whose LastModified is at-or-before
+    /// <paramref name="readTimestamp"/>. Returns false when no such revision is retained.
+    /// </summary>
+    private bool TryResolveRevisionAtOrBefore(string key, long latestRevision, HLCTimestamp readTimestamp, out ReadOnlyKeyValueEntry snapshot)
+    {
+        snapshot = default!;
+
+        for (long revision = latestRevision - 1; revision >= 0; revision--)
+        {
+            KeyValueEntry? historical = context.PersistenceBackend.GetKeyValueRevision(key, revision);
+            if (historical is null)
+                return false;
+
+            if (historical.LastModified.CompareTo(readTimestamp) > 0)
+                continue;
+
+            if (historical.State == KeyValueState.Deleted)
+                return false;
+
+            snapshot = new(
+                historical.Value,
+                historical.Revision,
+                historical.Expires,
+                historical.LastUsed,
+                historical.LastModified,
+                historical.State);
+
+            return true;
+        }
+
+        return false;
     }
 }

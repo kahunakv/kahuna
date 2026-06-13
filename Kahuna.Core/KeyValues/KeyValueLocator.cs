@@ -1973,7 +1973,7 @@ internal sealed class KeyValueLocator
 
         if (durability == KeyValueDurability.Persistent)
         {
-            KeyValueGetByBucketResult result = await manager.ScanByPrefixFromDisk(prefixKeyName);
+            KeyValueGetByBucketResult result = await manager.ScanByPrefixFromDisk(prefixKeyName, readTimestamp);
 
             if (items.Type == KeyValueResponseType.Get)
             {

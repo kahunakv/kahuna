@@ -2663,13 +2663,15 @@ internal sealed class KeyValuesManager : IDisposable
             -1,
             KeyValueFlags.None,
             0,
-            readTimestamp,
+            HLCTimestamp.Zero,
             durability,
             0,
             0,
             null
         );
-        
+
+        request.ReadTimestamp = readTimestamp;
+
         List<(string, ReadOnlyKeyValueEntry)> items = [];
         
         if (durability == KeyValueDurability.Ephemeral)
@@ -2720,11 +2722,11 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="prefixKeyName"></param>    
     /// <returns></returns>
     /// <exception cref="KahunaServerException"></exception>
-    public async Task<KeyValueGetByBucketResult> ScanByPrefixFromDisk(string prefixKeyName)
-    {                
+    public async Task<KeyValueGetByBucketResult> ScanByPrefixFromDisk(string prefixKeyName, HLCTimestamp readTimestamp)
+    {
         KeyValueRequest request = new(
             KeyValueRequestType.ScanByPrefixFromDisk,
-            HLCTimestamp.Zero, 
+            HLCTimestamp.Zero,
             HLCTimestamp.Zero,
             prefixKeyName,
             null,
@@ -2738,6 +2740,8 @@ internal sealed class KeyValuesManager : IDisposable
             0,
             null
         );
+
+        request.ReadTimestamp = readTimestamp;
 
         KeyValueResponse? response = await persistentKeyValuesRouter.Ask(request);
 
