@@ -28,7 +28,7 @@
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TDOUBLEQUALS
 %token TBEGIN TROLLBACK TCOMMIT TLET TSET TGET TESET TEGET TDELETE TEDELETE TEXTEND TEEXTEND TEXISTS TEEXISTS
 %token TIF TELSE TTHEN TEND TNX TXX TEX TCMP TCMPREV TNOREV TTHROW TFOUND TFOR TDO TIN
-%token TRETURN TSLEEP TDIGIT TFLOAT TSTRING TIDENTIFIER TESCIDENTIFIER TPLACEHOLDER TTRUE TFALSE TNULL TAT TSCAN TESCAN TPREFIX TBUCKET TBY
+%token TRETURN TSLEEP TDIGIT TFLOAT TSTRING TIDENTIFIER TESCIDENTIFIER TPLACEHOLDER TTRUE TFALSE TNULL TAT TSCAN TESCAN TPREFIX TBUCKET TBY TAS TOF
 
 %%
 
@@ -100,24 +100,32 @@ get_stmt : TGET key_name { $$.n = new(NodeType.Get, $2.n, null, null, null, null
          | TLET identifier TEQUALS TGET key_name { $$.n = new(NodeType.Get, $5.n, $2.n, null, null, null, null, null, $1.l); }
          | TGET key_name TAT int { $$.n = new(NodeType.Get, $2.n, null, $4.n, null, null, null, null, $1.l); }
          | TLET identifier TEQUALS TGET key_name TAT int { $$.n = new(NodeType.Get, $5.n, $2.n, $7.n, null, null, null, null, $1.l); }
+         | TGET key_name TAS TOF expression { $$.n = new(NodeType.Get, $2.n, null, null, $5.n, null, null, null, $1.l); }
+         | TLET identifier TEQUALS TGET key_name TAS TOF expression { $$.n = new(NodeType.Get, $5.n, $2.n, null, $8.n, null, null, null, $1.l); }
          ;
-         
+
 eget_stmt : TEGET key_name { $$.n = new(NodeType.Eget, $2.n, null, null, null, null, null, null, $1.l); }
           | TLET identifier TEQUALS TEGET key_name { $$.n = new(NodeType.Eget, $5.n, $2.n, null, null, null, null, null, $1.l); }
           | TEGET key_name TAT int { $$.n = new(NodeType.Eget, $2.n, null, $4.n, null, null, null, null, $1.l); }
           | TLET identifier TEQUALS TEGET key_name TAT int { $$.n = new(NodeType.Eget, $5.n, $2.n, $7.n, null, null, null, null, $1.l); }
+          | TEGET key_name TAS TOF expression { $$.n = new(NodeType.Eget, $2.n, null, null, $5.n, null, null, null, $1.l); }
+          | TLET identifier TEQUALS TEGET key_name TAS TOF expression { $$.n = new(NodeType.Eget, $5.n, $2.n, null, $8.n, null, null, null, $1.l); }
           ;
-                   
+
 exists_stmt : TEXISTS key_name { $$.n = new(NodeType.Exists, $2.n, null, null, null, null, null, null, $1.l); }
        | TLET identifier TEQUALS TEXISTS key_name { $$.n = new(NodeType.Exists, $5.n, $2.n, null, null, null, null, null, $1.l); }
        | TEXISTS key_name TAT int { $$.n = new(NodeType.Exists, $2.n, null, $4.n, null, null, null, null, $1.l); }
        | TLET identifier TEQUALS TEXISTS key_name TAT int { $$.n = new(NodeType.Exists, $5.n, $2.n, $7.n, null, null, null, null, $1.l); }
+       | TEXISTS key_name TAS TOF expression { $$.n = new(NodeType.Exists, $2.n, null, null, $5.n, null, null, null, $1.l); }
+       | TLET identifier TEQUALS TEXISTS key_name TAS TOF expression { $$.n = new(NodeType.Exists, $5.n, $2.n, null, $8.n, null, null, null, $1.l); }
        ;
-       
+
 eexists_stmt : TEEXISTS key_name { $$.n = new(NodeType.Eexists, $2.n, null, null, null, null, null, null, $1.l); }
         | TLET identifier TEQUALS TEEXISTS key_name { $$.n = new(NodeType.Eexists, $5.n, $2.n, null, null, null, null, null, $1.l); }
         | TEEXISTS key_name TAT int { $$.n = new(NodeType.Eexists, $2.n, null, $4.n, null, null, null, null, $1.l); }
         | TLET identifier TEQUALS TEEXISTS key_name TAT int { $$.n = new(NodeType.Eexists, $5.n, $2.n, $7.n, null, null, null, null, $1.l); }
+        | TEEXISTS key_name TAS TOF expression { $$.n = new(NodeType.Eexists, $2.n, null, null, $5.n, null, null, null, $1.l); }
+        | TLET identifier TEQUALS TEEXISTS key_name TAS TOF expression { $$.n = new(NodeType.Eexists, $5.n, $2.n, null, $8.n, null, null, null, $1.l); }
         ;
           
 delete_stmt : TDELETE key_name { $$.n = new(NodeType.Delete, $2.n, null, null, null, null, null, null, $1.l); }
@@ -133,20 +141,28 @@ eextend_stmt : TEEXTEND key_name int { $$.n = new(NodeType.Eextend, $2.n, $3.n, 
             ;
             
 get_by_bucket_stmt : TGET TBY TBUCKET key_name { $$.n = new(NodeType.GetByBucket, $4.n, null, null, null, null, null, null, $1.l); }
-                   | TLET identifier TEQUALS TGET TBY TBUCKET key_name { $$.n = new(NodeType.GetByBucket, $7.n, $2.n, null, null, null, null, null, $1.l); }    
+                   | TLET identifier TEQUALS TGET TBY TBUCKET key_name { $$.n = new(NodeType.GetByBucket, $7.n, $2.n, null, null, null, null, null, $1.l); }
+                   | TGET TBY TBUCKET key_name TAS TOF expression { $$.n = new(NodeType.GetByBucket, $4.n, null, null, $7.n, null, null, null, $1.l); }
+                   | TLET identifier TEQUALS TGET TBY TBUCKET key_name TAS TOF expression { $$.n = new(NodeType.GetByBucket, $7.n, $2.n, null, $10.n, null, null, null, $1.l); }
                    ;
-                   
-eget_by_bucket_stmt : TEGET TBY TBUCKET key_name { $$.n = new(NodeType.EGetByBucket, $4.n, null, null, null, null, null, null, $1.l); }    
+
+eget_by_bucket_stmt : TEGET TBY TBUCKET key_name { $$.n = new(NodeType.EGetByBucket, $4.n, null, null, null, null, null, null, $1.l); }
                    | TLET identifier TEQUALS TEGET TBY TBUCKET key_name { $$.n = new(NodeType.EGetByBucket, $7.n, $2.n, null, null, null, null, null, $1.l); }
+                   | TEGET TBY TBUCKET key_name TAS TOF expression { $$.n = new(NodeType.EGetByBucket, $4.n, null, null, $7.n, null, null, null, $1.l); }
+                   | TLET identifier TEQUALS TEGET TBY TBUCKET key_name TAS TOF expression { $$.n = new(NodeType.EGetByBucket, $7.n, $2.n, null, $10.n, null, null, null, $1.l); }
                    ;
-                   
+
 scan_by_prefix_stmt : TSCAN TBY TPREFIX key_name { $$.n = new(NodeType.ScanByPrefix, $4.n, null, null, null, null, null, null, $1.l); }
-                   | TLET identifier TEQUALS TSCAN TBY TPREFIX key_name { $$.n = new(NodeType.ScanByPrefix, $7.n, $2.n, null, null, null, null, null, $1.l); }    
+                   | TLET identifier TEQUALS TSCAN TBY TPREFIX key_name { $$.n = new(NodeType.ScanByPrefix, $7.n, $2.n, null, null, null, null, null, $1.l); }
+                   | TSCAN TBY TPREFIX key_name TAS TOF expression { $$.n = new(NodeType.ScanByPrefix, $4.n, null, null, $7.n, null, null, null, $1.l); }
+                   | TLET identifier TEQUALS TSCAN TBY TPREFIX key_name TAS TOF expression { $$.n = new(NodeType.ScanByPrefix, $7.n, $2.n, null, $10.n, null, null, null, $1.l); }
                    ;
-                   
-escan_by_prefix_stmt : TESCAN TBY TPREFIX key_name { $$.n = new(NodeType.EscanByPrefix, $4.n, null, null, null, null, null, null, $1.l); }    
+
+escan_by_prefix_stmt : TESCAN TBY TPREFIX key_name { $$.n = new(NodeType.EscanByPrefix, $4.n, null, null, null, null, null, null, $1.l); }
                    | TLET identifier TEQUALS TESCAN TBY TPREFIX key_name { $$.n = new(NodeType.EscanByPrefix, $7.n, $2.n, null, null, null, null, null, $1.l); }
-                   ;                                 
+                   | TESCAN TBY TPREFIX key_name TAS TOF expression { $$.n = new(NodeType.EscanByPrefix, $4.n, null, null, $7.n, null, null, null, $1.l); }
+                   | TLET identifier TEQUALS TESCAN TBY TPREFIX key_name TAS TOF expression { $$.n = new(NodeType.EscanByPrefix, $7.n, $2.n, null, $10.n, null, null, null, $1.l); }
+                   ;
             
 key_name : identifier { $$.n = $1.n; $$.l = $1.l; }
          | placeholder  { $$.n = $1.n; $$.l = $1.l; }

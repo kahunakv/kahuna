@@ -127,24 +127,27 @@ internal sealed class TryGetHandler : BaseHandler
             }
         }
 
-        // TransactionId is provided so we keep a MVCC entry for it
-        if (message.TransactionId != HLCTimestamp.Zero)
+        // TransactionId is provided so we keep a MVCC entry for it.
+        // Exception: when readTimestamp is also set, this is an AS OF snapshot read — skip MVCC
+        // tracking and fall through to the snapshot visibility path below. The write-intent check
+        // above already handled our own lock correctly (same txId → not treated as foreign).
+        if (message.TransactionId != HLCTimestamp.Zero && message.ReadTimestamp.IsNull())
         {
             if (entry is null)
             {
                 entry = new() { Bucket = GetBucket(message.Key), State = KeyValueState.Undefined, Revision = -1 };
                 context.InsertStoreEntry(message.Key, entry);
             }
-            
+
             entry.MvccEntries ??= new();
 
             if (!entry.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? mvccEntry))
             {
                 mvccEntry = new()
                 {
-                    Value = entry.Value, 
-                    Revision = entry.Revision, 
-                    Expires = entry.Expires, 
+                    Value = entry.Value,
+                    Revision = entry.Revision,
+                    Expires = entry.Expires,
                     LastUsed = entry.LastUsed,
                     LastModified = entry.LastModified,
                     State = entry.State
@@ -152,31 +155,28 @@ internal sealed class TryGetHandler : BaseHandler
 
                 entry.MvccEntries.Add(message.TransactionId, mvccEntry);
             }
-            
+
             if (entry.Revision > mvccEntry.Revision) // early conflict detection
                 return KeyValueStaticResponses.AbortedResponse;
-            
+
             if (mvccEntry.State is KeyValueState.Undefined or KeyValueState.Deleted || (mvccEntry.Expires != HLCTimestamp.Zero && mvccEntry.Expires - currentTime < TimeSpan.Zero))
                 return KeyValueStaticResponses.DoesNotExistContextResponse;
 
             readOnlyKeyValueEntry = new(
-                mvccEntry.Value, 
-                mvccEntry.Revision, 
-                mvccEntry.Expires, 
-                mvccEntry.LastUsed, 
-                mvccEntry.LastModified, 
+                mvccEntry.Value,
+                mvccEntry.Revision,
+                mvccEntry.Expires,
+                mvccEntry.LastUsed,
+                mvccEntry.LastModified,
                 mvccEntry.State
             );
 
             return new(KeyValueResponseType.Get, readOnlyKeyValueEntry);
         }
-        
-        // Non-transactional snapshot visibility check (mirrors TryGetByRangeHandler.Get lines 328-349).
-        // When the current revision was committed after the snapshot, serve the most recent archived
-        // revision whose LastModified ≤ readTimestamp instead of returning the latest.
-        // txId != Zero + readTimestamp != Zero: leave the MVCC branch above unchanged — serving a
-        // stale revision there would silently weaken the early-conflict/abort guarantee (see
-        // TryGetByRangeHandler comment at lines 285-294). RO snapshot reads use txId = Zero.
+
+        // Snapshot visibility: serve the revision at-or-before readTimestamp.
+        // Applies both for non-transactional reads (txId == Zero) and for AS OF reads within
+        // a transaction (txId != Zero && readTimestamp != Zero — MVCC skipped above).
         if (!message.ReadTimestamp.IsNull() && entry is not null && entry.LastModified > message.ReadTimestamp)
         {
             if (!entry.TryGetRevisionAtOrBefore(message.ReadTimestamp, out long snapRevision, out KeyValueRevisionEntry snapshot))

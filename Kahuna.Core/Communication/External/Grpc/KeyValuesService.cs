@@ -468,9 +468,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? keyValueContext) = await keyValues.LocateAndTryExistsValue(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            request.Key, 
+            request.Key,
             request.Revision,
-            (KeyValueDurability)request.Durability, 
+            new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
+            (KeyValueDurability)request.Durability,
             context.CancellationToken
         );
         
@@ -1405,9 +1406,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             };
             
         KeyValueGetByBucketResult result = await keyValues.LocateAndGetByBucket(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
-            request.PrefixKey, 
-            (KeyValueDurability)request.Durability, 
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
+            request.PrefixKey,
+            new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
+            (KeyValueDurability)request.Durability,
             context.CancellationToken
         );
 
@@ -1545,7 +1547,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
             
-        KeyValueGetByBucketResult result = await keyValues.ScanByPrefix(request.PrefixKey, (KeyValueDurability) request.Durability);
+        HLCTimestamp readTimestamp = new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter);
+
+        KeyValueGetByBucketResult result = await keyValues.ScanByPrefix(request.PrefixKey, readTimestamp, (KeyValueDurability) request.Durability);
 
         GrpcScanByPrefixResponse response = new()
         {
@@ -1582,7 +1586,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
             
-        KeyValueGetByBucketResult result = await keyValues.ScanAllByPrefix(request.PrefixKey, (KeyValueDurability) request.Durability, context.CancellationToken);
+        KeyValueGetByBucketResult result = await keyValues.ScanAllByPrefix(request.PrefixKey, HLCTimestamp.Zero, (KeyValueDurability) request.Durability, context.CancellationToken);
 
         GrpcScanAllByPrefixResponse response = new()
         {

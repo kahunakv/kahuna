@@ -329,11 +329,12 @@ public sealed class KahunaManager : IKahuna, IDisposable
         HLCTimestamp transactionId,
         string key,
         long revision,
+        HLCTimestamp readTimestamp,
         KeyValueDurability durability,
         CancellationToken cancellationToken
     )
     {
-        return keyValues.LocateAndTryExistsValue(transactionId, key, revision, durability, cancellationToken);
+        return keyValues.LocateAndTryExistsValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
     }
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryExistsManyValues(
@@ -652,13 +653,14 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public Task<KeyValueGetByBucketResult> LocateAndGetByBucket(
-        HLCTimestamp transactionId, 
-        string prefixedKey, 
-        KeyValueDurability durability, 
+        HLCTimestamp transactionId,
+        string prefixedKey,
+        HLCTimestamp readTimestamp,
+        KeyValueDurability durability,
         CancellationToken cancellationToken
     )
     {
-        return keyValues.LocateAndGetByBucket(transactionId, prefixedKey, durability, cancellationToken);
+        return keyValues.LocateAndGetByBucket(transactionId, prefixedKey, readTimestamp, durability, cancellationToken);
     }
 
     public Task<KeyValueGetByRangeResult> LocateAndGetByRange(
@@ -858,10 +860,11 @@ public sealed class KahunaManager : IKahuna, IDisposable
         HLCTimestamp transactionId,
         string key,
         long revision,
+        HLCTimestamp readTimestamp,
         KeyValueDurability durability
     )
     {
-        return keyValues.TryExistsValue(transactionId, key, revision, durability);
+        return keyValues.TryExistsValue(transactionId, key, revision, readTimestamp, durability);
     }
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryExistsManyValues(
@@ -1026,9 +1029,9 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="prefixKeyName"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public Task<KeyValueGetByBucketResult> ScanByPrefix(string prefixKeyName, KeyValueDurability durability)
+    public Task<KeyValueGetByBucketResult> ScanByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability)
     {
-        return keyValues.ScanByPrefix(prefixKeyName, durability);
+        return keyValues.ScanByPrefix(prefixKeyName, readTimestamp, durability);
     }
     
     /// <summary>
@@ -1038,9 +1041,9 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="prefixKeyName"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public Task<KeyValueGetByBucketResult> GetByBucket(HLCTimestamp transactionId, string prefixKeyName, KeyValueDurability durability)
+    public Task<KeyValueGetByBucketResult> GetByBucket(HLCTimestamp transactionId, string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability)
     {
-        return keyValues.GetByBucket(transactionId, prefixKeyName, durability);
+        return keyValues.GetByBucket(transactionId, prefixKeyName, readTimestamp, durability);
     }
     
     /// <summary>
@@ -1049,9 +1052,9 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="prefixKeyName"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public Task<KeyValueGetByBucketResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability, CancellationToken cancellationToken)
+    public Task<KeyValueGetByBucketResult> ScanAllByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        return keyValues.ScanAllByPrefix(prefixKeyName, durability, cancellationToken);
+        return keyValues.ScanAllByPrefix(prefixKeyName, readTimestamp, durability, cancellationToken);
     }
 
     /// <summary>

@@ -452,6 +452,7 @@ internal sealed class KeyValueTransactionCoordinator
         bool asyncRelease = false;
         int timeout = configuration.DefaultTransactionTimeout;
         KeyValueTransactionLocking locking = KeyValueTransactionLocking.Pessimistic;
+        HLCTimestamp readTimestamp = HLCTimestamp.Zero;
 
         if (optionsAst?.nodeType is NodeType.BeginOptionList or NodeType.BeginOption)
         {
@@ -498,6 +499,13 @@ internal sealed class KeyValueTransactionCoordinator
                 if (!int.TryParse(optionValue, out timeout))
                     throw new KahunaScriptException("Invalid timeout option: " + timeout, optionsAst.yyline);
             }
+
+            if (options.TryGetValue("snapshot", out optionValue))
+            {
+                if (!long.TryParse(optionValue, out long snapshotMs) || snapshotMs == 0)
+                    throw new KahunaScriptException("snapshot must be a non-zero Unix epoch millisecond value", optionsAst.yyline);
+                readTimestamp = new HLCTimestamp(0, snapshotMs, uint.MaxValue);
+            }
         }
 
         using CancellationTokenSource cts = new();
@@ -511,6 +519,7 @@ internal sealed class KeyValueTransactionCoordinator
         {
             TransactionId = transactionId,
             Locking = locking,
+            ReadTimestamp = readTimestamp,
             Action = autoCommit ? KeyValueTransactionAction.Commit : KeyValueTransactionAction.Abort,
             AsyncRelease = asyncRelease,
             Result = new() { Type = KeyValueResponseType.Aborted },
@@ -1353,14 +1362,20 @@ internal sealed class KeyValueTransactionCoordinator
                 }
 
                 case NodeType.Set:
+                    if (!context.ReadTimestamp.IsNull())
+                        throw new KahunaAbortedException("writes are not allowed in a snapshot (AS OF) transaction");
                     context.Result = await SetCommand.Execute(manager, context, ast, KeyValueDurability.Persistent, cancellationToken);
                     break;
 
                 case NodeType.Delete:
+                    if (!context.ReadTimestamp.IsNull())
+                        throw new KahunaAbortedException("writes are not allowed in a snapshot (AS OF) transaction");
                     context.Result = await DeleteCommand.Execute(manager, context, ast, KeyValueDurability.Persistent, cancellationToken);
                     break;
 
                 case NodeType.Extend:
+                    if (!context.ReadTimestamp.IsNull())
+                        throw new KahunaAbortedException("writes are not allowed in a snapshot (AS OF) transaction");
                     context.Result = await ExtendCommand.Execute(manager, context, ast, KeyValueDurability.Persistent, cancellationToken);
                     break;
 
@@ -1377,6 +1392,8 @@ internal sealed class KeyValueTransactionCoordinator
                 }
 
                 case NodeType.Eset:
+                    if (!context.ReadTimestamp.IsNull())
+                        throw new KahunaAbortedException("writes are not allowed in a snapshot (AS OF) transaction");
                     context.Result = await SetCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
 
@@ -1393,10 +1410,14 @@ internal sealed class KeyValueTransactionCoordinator
                 }
 
                 case NodeType.Edelete:
+                    if (!context.ReadTimestamp.IsNull())
+                        throw new KahunaAbortedException("writes are not allowed in a snapshot (AS OF) transaction");
                     context.Result = await DeleteCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
 
                 case NodeType.Eextend:
+                    if (!context.ReadTimestamp.IsNull())
+                        throw new KahunaAbortedException("writes are not allowed in a snapshot (AS OF) transaction");
                     context.Result = await ExtendCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
 

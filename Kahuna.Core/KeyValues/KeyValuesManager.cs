@@ -605,14 +605,15 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryExistsValue(
-        HLCTimestamp transactionId, 
+        HLCTimestamp transactionId,
         string key,
-        long revision, 
-        KeyValueDurability durability, 
+        long revision,
+        HLCTimestamp readTimestamp,
+        KeyValueDurability durability,
         CancellationToken cancellationToken
     )
     {
-        return locator.LocateAndTryExistsValue(transactionId, key, revision, durability, cancellationToken);
+        return locator.LocateAndTryExistsValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
     }
 
     public async Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryExistsManyValues(
@@ -921,16 +922,16 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public Task<KeyValueGetByBucketResult> LocateAndGetByBucket(HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    public Task<KeyValueGetByBucketResult> LocateAndGetByBucket(HLCTimestamp transactionId, string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        return locator.LocateAndGetByBucket(transactionId, prefixedKey, durability, cancellationToken);
+        return locator.LocateAndGetByBucket(transactionId, prefixedKey, readTimestamp, durability, cancellationToken);
     }
 
     internal Task<KeyValueGetByBucketResult> LocateAndGetByBucketWithHooks(
         HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability,
         Func<int, Task>? beforeQuery, Func<int, Task>? afterDescriptor,
         CancellationToken cancellationToken) =>
-        locator.LocateAndGetByBucket(transactionId, prefixedKey, durability, beforeQuery, afterDescriptor, cancellationToken);
+        locator.LocateAndGetByBucket(transactionId, prefixedKey, HLCTimestamp.Zero, durability, beforeQuery, afterDescriptor, cancellationToken);
 
     public Task<KeyValueGetByRangeResult> LocateAndGetByRange(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
     {
@@ -1496,22 +1497,23 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="durability"></param>
     /// <returns></returns>
     public async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryExistsValue(
-        HLCTimestamp transactionId, 
+        HLCTimestamp transactionId,
         string key,
         long revision,
+        HLCTimestamp readTimestamp,
         KeyValueDurability durability
     )
     {
         KeyValueRequest request = KeyValueRequestPool.Rent(
-            KeyValueRequestType.TryExists, 
-            transactionId, 
+            KeyValueRequestType.TryExists,
+            transactionId,
             HLCTimestamp.Zero,
-            key, 
-            null, 
+            key,
+            null,
             null,
             revision,
             KeyValueFlags.None,
-            0, 
+            0,
             HLCTimestamp.Zero,
             durability,
             0,
@@ -1519,12 +1521,17 @@ internal sealed class KeyValuesManager : IDisposable
             null
         );
 
+        request.ReadTimestamp = readTimestamp;
+
         try
         {
-            for (int i = 0; i < MaxRetries; i++)
+            int backoffMs = 1;
+            long deadline = Environment.TickCount64 + 16_500;
+
+            while (true)
             {
                 KeyValueResponse? response;
-                
+
                 if (durability == KeyValueDurability.Ephemeral)
                     response = await ephemeralKeyValuesRouter.Ask(request);
                 else
@@ -1533,16 +1540,15 @@ internal sealed class KeyValuesManager : IDisposable
                 if (response is null)
                     return (KeyValueResponseType.Errored, null);
 
-                if (response.Type == KeyValueResponseType.WaitingForReplication)
-                {
-                    await Task.Delay(1);
-                    continue;
-                }
+                if (response.Type != KeyValueResponseType.WaitingForReplication)
+                    return (response.Type, response.Entry);
 
-                return (response.Type, response.Entry);
+                if (Environment.TickCount64 >= deadline)
+                    return (KeyValueResponseType.MustRetry, null);
+
+                await Task.Delay(backoffMs);
+                backoffMs = Math.Min(backoffMs * 2, 1000);
             }
-            
-            return (KeyValueResponseType.MustRetry, null);
         }
         finally
         {
@@ -1604,6 +1610,7 @@ internal sealed class KeyValuesManager : IDisposable
                 transactionId,
                 item.key,
                 item.revision,
+                HLCTimestamp.Zero,
                 item.durability
             );
 
@@ -2631,9 +2638,9 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="prefixKeyName"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public Task<KeyValueGetByBucketResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability, CancellationToken cancellationToken)
+    public Task<KeyValueGetByBucketResult> ScanAllByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        return locator.ScanAllByPrefix(prefixKeyName, durability, cancellationToken);
+        return locator.ScanAllByPrefix(prefixKeyName, readTimestamp, durability, cancellationToken);
     }
 
     /// <summary>
@@ -2644,11 +2651,11 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="durability"></param>
     /// <returns></returns>
     /// <exception cref="KahunaServerException"></exception>
-    public async Task<KeyValueGetByBucketResult> ScanByPrefix(string prefixKeyName, KeyValueDurability durability)
-    {                
+    public async Task<KeyValueGetByBucketResult> ScanByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability)
+    {
         KeyValueRequest request = new(
             KeyValueRequestType.ScanByPrefix,
-            HLCTimestamp.Zero, 
+            HLCTimestamp.Zero,
             HLCTimestamp.Zero,
             prefixKeyName,
             null,
@@ -2656,7 +2663,7 @@ internal sealed class KeyValuesManager : IDisposable
             -1,
             KeyValueFlags.None,
             0,
-            HLCTimestamp.Zero,
+            readTimestamp,
             durability,
             0,
             0,
@@ -2750,7 +2757,7 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="prefixKeyName"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KeyValueGetByBucketResult> GetByBucket(HLCTimestamp transactionId, string prefixKeyName, KeyValueDurability durability)
+    public async Task<KeyValueGetByBucketResult> GetByBucket(HLCTimestamp transactionId, string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability)
     {
         KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.GetByBucket,
@@ -2769,9 +2776,14 @@ internal sealed class KeyValuesManager : IDisposable
             null
         );
 
+        request.ReadTimestamp = readTimestamp;
+
         try
         {
-            for (int i = 0; i < MaxRetries; i++)
+            int backoffMs = 1;
+            long deadline = Environment.TickCount64 + 16_500;
+
+            while (true)
             {
                 KeyValueResponse? response;
 
@@ -2783,19 +2795,19 @@ internal sealed class KeyValuesManager : IDisposable
                 if (response is null)
                     return new(KeyValueResponseType.Errored, []);
 
-                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                if (response.Type != KeyValueResponseType.WaitingForReplication)
                 {
-                    await Task.Delay(1);
-                    continue;
+                    if (response is { Type: KeyValueResponseType.Get, Items: not null })
+                        return new(response.Type, response.Items);
+                    return new(response.Type, []);
                 }
 
-                if (response is { Type: KeyValueResponseType.Get, Items: not null })
-                    return new(response.Type, response.Items);
+                if (Environment.TickCount64 >= deadline)
+                    return new(KeyValueResponseType.MustRetry, []);
 
-                return new(response.Type, []);
+                await Task.Delay(backoffMs);
+                backoffMs = Math.Min(backoffMs * 2, 1000);
             }
-
-            return new(KeyValueResponseType.MustRetry, []);
         }
         finally
         {

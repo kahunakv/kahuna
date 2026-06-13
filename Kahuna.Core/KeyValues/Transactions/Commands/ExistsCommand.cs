@@ -34,14 +34,17 @@ internal sealed class ExistsCommand : BaseCommand
         }
         
         long compareRevision = -1;
-        
+
         if (ast.extendedOne is not null)
             compareRevision = int.Parse(ast.extendedOne.yytext!);
-        
+
+        HLCTimestamp readTimestamp = ResolveReadTimestamp(context, ast);
+
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? readOnlyContext) = await manager.LocateAndTryExistsValue(
             context.TransactionId,
             keyName,
             compareRevision,
+            readTimestamp,
             durability,
             cancellationToken
         );
@@ -54,12 +57,12 @@ internal sealed class ExistsCommand : BaseCommand
 
         if (readOnlyContext is null)
         {
-            if (type == KeyValueResponseType.DoesNotExist)
+            if (type == KeyValueResponseType.DoesNotExist && readTimestamp.IsNull())
                 RecordReadKey(context, keyName, durability, false, -1);
 
             if (ast.rightAst is not null)
                 context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new(KeyValueExpressionType.NullType));
-            
+
             return new()
             {
                 ServedFrom = "",
@@ -75,7 +78,8 @@ internal sealed class ExistsCommand : BaseCommand
             };
         }
 
-        RecordReadKey(context, keyName, durability, type == KeyValueResponseType.Exists, readOnlyContext.Revision);
+        if (readTimestamp.IsNull())
+            RecordReadKey(context, keyName, durability, type == KeyValueResponseType.Exists, readOnlyContext.Revision);
         
         if (ast.rightAst is not null)
             context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new(

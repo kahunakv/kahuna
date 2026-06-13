@@ -33,37 +33,56 @@ internal sealed class TryScanByPrefixHandler : BaseHandler
     {
         List<(string, ReadOnlyKeyValueEntry)> items = [];
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
-        
+
         foreach ((string key, KeyValueEntry? _) in context.Store.GetByBucket(message.Key))
         {
-            KeyValueResponse response = await Get(currentTime, key, message.Durability);     
-            
+            KeyValueResponse response = await Get(currentTime, key, message.Durability, message.ReadTimestamp);
+
             if (response.Type != KeyValueResponseType.Get)
                 continue;
 
             if (response is { Type: KeyValueResponseType.Get, Entry: not null })
                 items.Add((key, response.Entry));
-        }        
-                
-        return new(KeyValueResponseType.Get, items);
-    }        
+        }
 
-    private async Task<KeyValueResponse> Get(HLCTimestamp currentTime, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? keyValueEntry = null)
+        return new(KeyValueResponseType.Get, items);
+    }
+
+    private async Task<KeyValueResponse> Get(HLCTimestamp currentTime, string key, KeyValueDurability durability, HLCTimestamp readTimestamp = default, ReadOnlyKeyValueEntry? keyValueEntry = null)
     {
         KeyValueEntry? entry = await GetKeyValueEntry(key, durability, keyValueEntry);
+
+        // Non-transactional snapshot visibility: serve the revision at-or-before readTimestamp.
+        if (!readTimestamp.IsNull() && entry is not null && entry.LastModified > readTimestamp)
+        {
+            if (!entry.TryGetRevisionAtOrBefore(readTimestamp, out long snapRevision, out KeyValueRevisionEntry snapshot))
+                return KeyValueStaticResponses.DoesNotExistContextResponse;
+
+            if (snapshot.State is KeyValueState.Deleted or KeyValueState.Undefined ||
+                (snapshot.Expires != HLCTimestamp.Zero && snapshot.Expires - currentTime < TimeSpan.Zero))
+                return KeyValueStaticResponses.DoesNotExistContextResponse;
+
+            return new(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
+                snapshot.Value,
+                snapRevision,
+                snapshot.Expires,
+                currentTime,
+                snapshot.LastModified,
+                snapshot.State));
+        }
 
         if (entry is null || entry.State == KeyValueState.Deleted || entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
             return KeyValueStaticResponses.DoesNotExistContextResponse;
 
         ReadOnlyKeyValueEntry readOnlyKeyValueEntry = new(
-            entry.Value, 
-            entry.Revision, 
-            entry.Expires, 
-            entry.LastUsed, 
-            entry.LastModified, 
+            entry.Value,
+            entry.Revision,
+            entry.Expires,
+            entry.LastUsed,
+            entry.LastModified,
             entry.State
         );
 
         return new(KeyValueResponseType.Get, readOnlyKeyValueEntry);
-    }       
+    }
 }

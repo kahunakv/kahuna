@@ -274,9 +274,10 @@ public static class KeyValuesHandlers
 
             (KeyValueResponseType type, ReadOnlyKeyValueEntry? keyValueContext) = await keyValues.LocateAndTryExistsValue(
                 request.TransactionId,
-                request.Key, 
+                request.Key,
                 request.Revision,
-                request.Durability, 
+                HLCTimestamp.Zero,
+                request.Durability,
                 cancellationToken
             );
         

@@ -104,7 +104,7 @@ public class TestLocateAndScanRange : BaseCluster
             TestContext.Current.CancellationToken));
 
         KeyValueGetByBucketResult bucket = await node.Kahuna.LocateAndGetByBucket(
-            HLCTimestamp.Zero, prefix, KeyValueDurability.Ephemeral,
+            HLCTimestamp.Zero, prefix, HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
             TestContext.Current.CancellationToken);
 
         Assert.Equal(bucket.Items.Count, scanned.Count);

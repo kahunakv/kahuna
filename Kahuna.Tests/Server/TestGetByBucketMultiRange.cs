@@ -196,7 +196,7 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
 
             // Query from k3 — exercises inter-node fan-out via the multi-range path.
             KeyValueGetByBucketResult result = await k3.LocateAndGetByBucket(
-                HLCTimestamp.Zero, space, KeyValueDurability.Persistent, ct);
+                HLCTimestamp.Zero, space, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
 
             Assert.Equal(KeyValueResponseType.Get, result.Type);
             Assert.Equal(total, result.Items.Count);
@@ -252,7 +252,7 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
             }
 
             KeyValueGetByBucketResult result = await k2.LocateAndGetByBucket(
-                HLCTimestamp.Zero, space, KeyValueDurability.Persistent, ct);
+                HLCTimestamp.Zero, space, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
 
             Assert.Equal(KeyValueResponseType.Get, result.Type);
             Assert.Equal(total, result.Items.Count);
@@ -524,7 +524,7 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
 
             // Hash space — IsPrefixOpSafe always true; single-leader path; no scatter.
             KeyValueGetByBucketResult result = await k3.LocateAndGetByBucket(
-                HLCTimestamp.Zero, prefix, KeyValueDurability.Persistent, ct);
+                HLCTimestamp.Zero, prefix, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
 
             Assert.Equal(KeyValueResponseType.Get, result.Type);
             Assert.Equal(total, result.Items.Count);

@@ -36,9 +36,12 @@ internal sealed class GetByBucketCommand : BaseCommand
             context.LocksAcquired.Add((keyName, durability));
         }*/
                        
+        HLCTimestamp readTimestamp = ResolveReadTimestamp(context, ast);
+
         KeyValueGetByBucketResult response = await manager.LocateAndGetByBucket(
             context.TransactionId,
-            keyName,            
+            keyName,
+            readTimestamp,
             durability,
             cancellationToken
         );
@@ -75,7 +78,8 @@ internal sealed class GetByBucketCommand : BaseCommand
         
         foreach ((string key, ReadOnlyKeyValueEntry valueContext) item in response.Items)
         {
-            RecordReadKey(context, item.key, durability, true, item.valueContext.Revision);
+            if (readTimestamp.IsNull())
+                RecordReadKey(context, item.key, durability, true, item.valueContext.Revision);
 
             values.Add(new()
             {
@@ -83,7 +87,7 @@ internal sealed class GetByBucketCommand : BaseCommand
                 Value = item.valueContext.Value,
                 Revision = item.valueContext.Revision,
                 Expires = item.valueContext.Expires
-            });                        
+            });
         }
         
         return new()

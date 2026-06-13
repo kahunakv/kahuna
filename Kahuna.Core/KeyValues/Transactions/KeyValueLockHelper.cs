@@ -73,73 +73,83 @@ internal sealed class KeyValueLockHelper : BaseCommand
                 case NodeType.Set:
                     if (ast.leftAst is null)
                         throw new KahunaScriptException("Invalid SET expression", ast.yyline);
-                    
-                    persistentLocks.Add(GetKeyName(context, ast.leftAst));
+
+                    if (context.ReadTimestamp.IsNull())
+                        persistentLocks.Add(GetKeyName(context, ast.leftAst));
                     break;
-                    
+
                 case NodeType.Eset:
                     if (ast.leftAst is null)
                         throw new KahunaScriptException("Invalid SET expression", ast.yyline);
-                    
-                    ephemeralLocks.Add(GetKeyName(context, ast.leftAst));
+
+                    if (context.ReadTimestamp.IsNull())
+                        ephemeralLocks.Add(GetKeyName(context, ast.leftAst));
                     break;
                 
                 case NodeType.Get:
                     if (ast.leftAst is null)
                         throw new KahunaScriptException("Invalid SET expression", ast.yyline);
-                    
-                    if (ast.extendedOne is null) // make sure if isn't querying a revision
+
+                    // Skip OCC lock for snapshot reads (extendedTwo set, or transaction-level snapshot)
+                    // and revision queries (extendedOne set).
+                    if (ast.extendedOne is null && ast.extendedTwo is null && context.ReadTimestamp.IsNull())
                         persistentLocks.Add(GetKeyName(context, ast.leftAst));
                     break;
-                    
+
                 case NodeType.Eget:
                     if (ast.leftAst is null)
                         throw new KahunaScriptException("Invalid GET expression", ast.yyline);
-                    
-                    if (ast.extendedOne is null) // make sure if isn't querying a revision
+
+                    if (ast.extendedOne is null && ast.extendedTwo is null && context.ReadTimestamp.IsNull())
                         ephemeralLocks.Add(GetKeyName(context, ast.leftAst));
                     break;
                 
                 case NodeType.Extend:
                     if (ast.leftAst is null)
                         throw new KahunaScriptException("Invalid EXTEND expression", ast.yyline);
-                    
-                    persistentLocks.Add(GetKeyName(context, ast.leftAst));
+
+                    if (context.ReadTimestamp.IsNull())
+                        persistentLocks.Add(GetKeyName(context, ast.leftAst));
                     break;
-                    
+
                 case NodeType.Eextend:
                     if (ast.leftAst is null)
                         throw new KahunaScriptException("Invalid EXTEND expression", ast.yyline);
-                    
-                    ephemeralLocks.Add(GetKeyName(context, ast.leftAst));
+
+                    if (context.ReadTimestamp.IsNull())
+                        ephemeralLocks.Add(GetKeyName(context, ast.leftAst));
                     break;
-                
+
                 case NodeType.Delete:
                     if (ast.leftAst is null)
                         throw new KahunaScriptException("Invalid DELETE expression", ast.yyline);
-                    
-                    persistentLocks.Add(GetKeyName(context, ast.leftAst));
+
+                    if (context.ReadTimestamp.IsNull())
+                        persistentLocks.Add(GetKeyName(context, ast.leftAst));
                     break;
-                
+
                 case NodeType.Edelete:
                     if (ast.leftAst is null)
                         throw new KahunaScriptException("Invalid DELETE expression", ast.yyline);
-                    
-                    ephemeralLocks.Add(GetKeyName(context, ast.leftAst));
+
+                    if (context.ReadTimestamp.IsNull())
+                        ephemeralLocks.Add(GetKeyName(context, ast.leftAst));
                     break;                               
                 
                 case NodeType.GetByBucket:
                     if (ast.leftAst is null)
                         throw new KahunaScriptException("Invalid get by bucket expression", ast.yyline);
-                    
-                    persistentPrefixLocksToAcquire.Add(GetKeyName(context, ast.leftAst));
+
+                    if (ast.extendedTwo is null)
+                        persistentPrefixLocksToAcquire.Add(GetKeyName(context, ast.leftAst));
                     break;
-                
+
                 case NodeType.EGetByBucket:
                     if (ast.leftAst is null)
                         throw new KahunaScriptException("Invalid get by bucket expression", ast.yyline);
-                    
-                    ephemeralPrefixLocksToAcquire.Add(GetKeyName(context, ast.leftAst));
+
+                    if (ast.extendedTwo is null)
+                        ephemeralPrefixLocksToAcquire.Add(GetKeyName(context, ast.leftAst));
                     break;
                 
                 case NodeType.IntegerType:

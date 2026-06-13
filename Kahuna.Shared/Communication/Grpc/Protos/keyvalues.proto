@@ -198,6 +198,9 @@ message GrpcTryExistsKeyValueRequest {
   string Key = 4;
   int64 Revision = 5;
   GrpcKeyValueDurability Durability = 6;
+  int32 ReadTimestampNode = 7;
+  int64 ReadTimestampPhysical = 8;
+  uint32 ReadTimestampCounter = 9;
 }
 
 message GrpcTryExistsKeyValueResponse {
@@ -603,6 +606,9 @@ message GrpcTryRollbackManyMutationsResponseItem {
 message GrpcScanByPrefixRequest {
   string PrefixKey = 1;
   GrpcKeyValueDurability Durability = 2;
+  int32 ReadTimestampNode = 3;
+  int64 ReadTimestampPhysical = 4;
+  uint32 ReadTimestampCounter = 5;
 }
 
 message GrpcScanByPrefixResponse {
@@ -617,6 +623,9 @@ message GrpcGetByBucketRequest {
   uint32 TransactionIdCounter = 3;
   string PrefixKey = 4;
   GrpcKeyValueDurability Durability = 5;
+  int32 ReadTimestampNode = 6;
+  int64 ReadTimestampPhysical = 7;
+  uint32 ReadTimestampCounter = 8;
 }
 
 message GrpcGetByBucketResponse {

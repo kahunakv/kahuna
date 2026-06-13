@@ -84,15 +84,22 @@ internal sealed class TryExistsHandler : BaseHandler
             entry.ReplicationIntent = null;
         }
         
-        // A live write intent from another transaction is not a blocking condition for reads.
-        // Exists checks read the committed state regardless of pending writes (read-committed semantics).
+        // Mirror TryGetHandler safe-time logic: when a snapshot readTimestamp is in play, a live
+        // foreign write intent whose pending commit could land at-or-before T must be awaited.
         if (entry?.WriteIntent != null)
         {
             if (entry.WriteIntent.TransactionId != message.TransactionId)
             {
                 if (entry.WriteIntent.Expires - currentTime <= TimeSpan.Zero)
                     entry.WriteIntent = null;
-                // live write intent from another tx: fall through to committed state
+                else if (!message.ReadTimestamp.IsNull())
+                {
+                    HLCTimestamp commitTs = entry.WriteIntent.CommitTimestamp;
+                    if (commitTs.IsNull() || commitTs.CompareTo(message.ReadTimestamp) <= 0)
+                        return KeyValueStaticResponses.WaitingForReplicationResponse;
+                    // commitTs > readTimestamp: write won't land in our snapshot; fall through
+                }
+                // live write intent from another tx without snapshot: fall through to committed state
             }
         }
         
@@ -112,23 +119,26 @@ internal sealed class TryExistsHandler : BaseHandler
             }
         }
 
-        if (message.TransactionId != HLCTimestamp.Zero)
+        // TransactionId is provided so we keep a MVCC entry for it.
+        // Exception: when readTimestamp is also set, this is an AS OF snapshot read — skip MVCC
+        // tracking and fall through to the snapshot visibility path below.
+        if (message.TransactionId != HLCTimestamp.Zero && message.ReadTimestamp.IsNull())
         {
             if (entry is null)
             {
                 entry = new() { Bucket = GetBucket(message.Key), State = KeyValueState.Undefined, Revision = -1 };
                 context.InsertStoreEntry(message.Key, entry);
             }
-            
+
             entry.MvccEntries ??= new();
 
             if (!entry.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? mvccEntry))
             {
                 mvccEntry = new()
                 {
-                    Value = entry.Value, 
-                    Revision = entry.Revision, 
-                    Expires = entry.Expires, 
+                    Value = entry.Value,
+                    Revision = entry.Revision,
+                    Expires = entry.Expires,
                     LastUsed = entry.LastUsed,
                     LastModified = entry.LastModified,
                     State = entry.State
@@ -136,36 +146,55 @@ internal sealed class TryExistsHandler : BaseHandler
 
                 entry.MvccEntries.Add(message.TransactionId, mvccEntry);
             }
-            
+
             if (mvccEntry.State is KeyValueState.Undefined or KeyValueState.Deleted || (mvccEntry.Expires != HLCTimestamp.Zero && mvccEntry.Expires - currentTime < TimeSpan.Zero))
                 return KeyValueStaticResponses.DoesNotExistContextResponse;
 
             if (entry.Revision > mvccEntry.Revision) // early conflict detection
                 return KeyValueStaticResponses.AbortedResponse;
-            
+
             readOnlyKeyValueEntry = new(
-                null, 
-                mvccEntry.Revision, 
-                mvccEntry.Expires, 
-                mvccEntry.LastUsed, 
-                mvccEntry.LastModified, 
+                null,
+                mvccEntry.Revision,
+                mvccEntry.Expires,
+                mvccEntry.LastUsed,
+                mvccEntry.LastModified,
                 mvccEntry.State
             );
 
             return new(KeyValueResponseType.Exists, readOnlyKeyValueEntry);
         }
-        
+
+        // Snapshot visibility (non-transactional or AS OF within transaction).
+        if (!message.ReadTimestamp.IsNull() && entry is not null && entry.LastModified > message.ReadTimestamp)
+        {
+            if (!entry.TryGetRevisionAtOrBefore(message.ReadTimestamp, out long snapRevision, out KeyValueRevisionEntry snapshot))
+                return KeyValueStaticResponses.DoesNotExistContextResponse;
+
+            if (snapshot.State is KeyValueState.Deleted or KeyValueState.Undefined ||
+                (snapshot.Expires != HLCTimestamp.Zero && snapshot.Expires - currentTime < TimeSpan.Zero))
+                return KeyValueStaticResponses.DoesNotExistContextResponse;
+
+            return new(KeyValueResponseType.Exists, new ReadOnlyKeyValueEntry(
+                null,
+                snapRevision,
+                snapshot.Expires,
+                currentTime,
+                snapshot.LastModified,
+                snapshot.State));
+        }
+
         if (entry is null || entry.State is KeyValueState.Undefined or KeyValueState.Deleted || (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero))
             return KeyValueStaticResponses.DoesNotExistContextResponse;
 
         entry.LastUsed = currentTime;
 
         readOnlyKeyValueEntry = new(
-            null, 
-            entry.Revision, 
-            entry.Expires, 
-            entry.LastUsed, 
-            entry.LastModified, 
+            null,
+            entry.Revision,
+            entry.Expires,
+            entry.LastUsed,
+            entry.LastModified,
             entry.State
         );
 

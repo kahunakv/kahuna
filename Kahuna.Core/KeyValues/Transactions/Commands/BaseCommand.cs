@@ -1,6 +1,8 @@
 
+using Kommander.Time;
 using Kahuna.Server.ScriptParser;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues.Transactions.Commands;
@@ -23,6 +25,23 @@ internal abstract class BaseCommand
             NodeType.Placeholder => context.GetParameter(ast),
             _ => throw new KahunaScriptException($"Invalid key name type {ast.nodeType}", ast.yyline)
         };
+    }
+
+    /// <summary>
+    /// Resolves the effective snapshot timestamp for a read statement.
+    /// Per-statement AS OF (ast.extendedTwo) overrides the transaction-level context.ReadTimestamp.
+    /// AS OF 0 is rejected. When neither is present, returns Zero (latest).
+    /// </summary>
+    internal static HLCTimestamp ResolveReadTimestamp(KeyValueTransactionContext context, NodeAst ast)
+    {
+        if (ast.extendedTwo is null)
+            return context.ReadTimestamp;
+
+        long ms = KeyValueTransactionExpression.Eval(context, ast.extendedTwo).ToLong();
+        if (ms == 0)
+            throw new KahunaScriptException("AS OF 0 is not a valid snapshot timestamp", ast.extendedTwo.yyline);
+
+        return new HLCTimestamp(0, ms, uint.MaxValue);
     }
 
     internal static void RecordReadKey(

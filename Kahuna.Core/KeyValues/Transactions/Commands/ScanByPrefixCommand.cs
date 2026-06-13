@@ -3,6 +3,7 @@ using System.Text;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.ScriptParser;
 using Kahuna.Shared.KeyValue;
+using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Transactions.Commands;
 
@@ -37,8 +38,11 @@ internal sealed class ScanByPrefixCommand : BaseCommand
             context.LocksAcquired.Add((keyName, durability));
         }*/
                        
-        KeyValueGetByBucketResult response = await manager.ScanAllByPrefix(            
+        HLCTimestamp readTimestamp = ResolveReadTimestamp(context, ast);
+
+        KeyValueGetByBucketResult response = await manager.ScanAllByPrefix(
             keyName,
+            readTimestamp,
             durability,
             cancellationToken
         );

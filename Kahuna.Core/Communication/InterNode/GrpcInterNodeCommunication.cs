@@ -522,18 +522,22 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         HLCTimestamp transactionId,
         string key,
         long revision,
+        HLCTimestamp readTimestamp,
         KeyValueDurability durability,
         CancellationToken cancellationToken
     )
     {
         GrpcTryExistsKeyValueRequest request = new()
         {
-            TransactionIdNode = transactionId.N,
+            TransactionIdNode     = transactionId.N,
             TransactionIdPhysical = transactionId.L,
-            TransactionIdCounter = transactionId.C,
-            Key = key,
-            Revision = revision,
-            Durability = (GrpcKeyValueDurability) durability,
+            TransactionIdCounter  = transactionId.C,
+            Key                   = key,
+            Revision              = revision,
+            Durability            = (GrpcKeyValueDurability)durability,
+            ReadTimestampNode     = readTimestamp.N,
+            ReadTimestampPhysical = readTimestamp.L,
+            ReadTimestampCounter  = readTimestamp.C,
         };               
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);
@@ -1228,17 +1232,20 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<KeyValueGetByBucketResult> GetByBucket(string node, HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<KeyValueGetByBucketResult> GetByBucket(string node, HLCTimestamp transactionId, string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
-        
+
         GrpcGetByBucketRequest request = new()
         {
-            TransactionIdNode = transactionId.N,
+            TransactionIdNode     = transactionId.N,
             TransactionIdPhysical = transactionId.L,
-            TransactionIdCounter = transactionId.C,
-            PrefixKey = prefixedKey,
-            Durability = (GrpcKeyValueDurability)durability,
+            TransactionIdCounter  = transactionId.C,
+            PrefixKey             = prefixedKey,
+            Durability            = (GrpcKeyValueDurability)durability,
+            ReadTimestampNode     = readTimestamp.N,
+            ReadTimestampPhysical = readTimestamp.L,
+            ReadTimestampCounter  = readTimestamp.C,
         };
         
         GrpcServerBatcherResponse batchResponse;
@@ -1316,14 +1323,17 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             remoteResponse.HasMore);
     }
 
-    public async Task<KeyValueGetByBucketResult> ScanByPrefix(string node, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<KeyValueGetByBucketResult> ScanByPrefix(string node, string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
-        
+
         GrpcScanByPrefixRequest request = new()
-        {            
+        {
             PrefixKey = prefixedKey,
             Durability = (GrpcKeyValueDurability)durability,
+            ReadTimestampNode = readTimestamp.N,
+            ReadTimestampPhysical = readTimestamp.L,
+            ReadTimestampCounter = readTimestamp.C,
         };
         
         GrpcServerBatcherResponse batchResponse;

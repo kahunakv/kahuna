@@ -41,6 +41,8 @@ TThrow          (T|t)(H|h)(R|r)(O|o)(W|w)
 TFound          (F|f)(O|o)(U|u)(N|n)(D|d)
 TNull           (N|n)(U|u)(L|l)(L|l)
 TAtWord         (A|a)(T|t)
+TAs             (A|a)(S|s)
+TOf             (O|o)(F|f)
 TNotWord        (N|n)(O|o)(T|t)
 TScan           (S|s)(C|c)(A|a)(N|n)
 TEScan          (E|e)(S|s)(C|c)(A|a)(N|n)
@@ -231,6 +233,10 @@ TAnd            &&
 {TAt} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TAT; }
 
 {TAtWord} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TAT; }
+
+{TAs} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TAS; }
+
+{TOf} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TOF; }
 
 {TScan} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TSCAN; }
 

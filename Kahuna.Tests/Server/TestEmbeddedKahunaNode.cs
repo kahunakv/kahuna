@@ -138,6 +138,7 @@ public sealed class TestEmbeddedKahunaNode
         KeyValueGetByBucketResult bucket = await node.Kahuna.LocateAndGetByBucket(
             HLCTimestamp.Zero,
             "tenant/table",
+            HLCTimestamp.Zero,
             KeyValueDurability.Persistent,
             TestContext.Current.CancellationToken
         );

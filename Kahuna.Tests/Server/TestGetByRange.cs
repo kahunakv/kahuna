@@ -143,7 +143,7 @@ public sealed class TestGetByRange
 
         // Collect all keys via GetByBucket
         KeyValueGetByBucketResult bucket = await node.Kahuna.LocateAndGetByBucket(
-            HLCTimestamp.Zero, prefix, durability,
+            HLCTimestamp.Zero, prefix, HLCTimestamp.Zero, durability,
             TestContext.Current.CancellationToken);
 
         List<string> bucketKeys = bucket.Items.Select(i => i.Item1).ToList();

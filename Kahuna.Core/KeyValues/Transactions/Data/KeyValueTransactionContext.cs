@@ -48,6 +48,14 @@ internal sealed class KeyValueTransactionContext
     public KeyValueTransactionLocking Locking { get; init; }
 
     /// <summary>
+    /// Gets the transaction-wide snapshot timestamp for reads.
+    /// When non-Zero, every read in this transaction is served as of this instant
+    /// (epoch-ms in <c>L</c>, <c>C = uint.MaxValue</c> to include all events within that ms).
+    /// Zero means "latest" — the default for non-snapshot transactions.
+    /// </summary>
+    public HLCTimestamp ReadTimestamp { get; init; }
+
+    /// <summary>
     /// Gets or sets the last result of the current key-value execution
     /// </summary>
     /// <remarks>

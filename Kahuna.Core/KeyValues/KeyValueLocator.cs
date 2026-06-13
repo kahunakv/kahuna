@@ -424,28 +424,29 @@ internal sealed class KeyValueLocator
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryExistsValue(
-        HLCTimestamp transactionId, 
-        string key, 
+        HLCTimestamp transactionId,
+        string key,
         long revision,
+        HLCTimestamp readTimestamp,
         KeyValueDurability durability,
         CancellationToken cancellationToken
     )
     {
         if (string.IsNullOrEmpty(key))
             return (KeyValueResponseType.InvalidInput, null);
-        
+
         int partitionId = RouteKey(key);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
-            return await manager.TryExistsValue(transactionId, key, revision, durability);
-            
+            return await manager.TryExistsValue(transactionId, key, revision, readTimestamp, durability);
+
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
             return (KeyValueResponseType.MustRetry, null);
-        
+
         logger.LogDebug("EXISTS-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
-        
-        return await interNodeCommunication.TryExistsValue(leader, transactionId, key, revision, durability, cancellationToken);
+
+        return await interNodeCommunication.TryExistsValue(leader, transactionId, key, revision, readTimestamp, durability, cancellationToken);
     }
 
     public async Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryExistsManyValues(
@@ -1525,9 +1526,9 @@ internal sealed class KeyValueLocator
     /// </para>
     /// </summary>
     public Task<KeyValueGetByBucketResult> LocateAndGetByBucket(
-        HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability,
+        HLCTimestamp transactionId, string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability,
         CancellationToken cancellationToken) =>
-        LocateAndGetByBucket(transactionId, prefixedKey, durability, null, null, cancellationToken);
+        LocateAndGetByBucket(transactionId, prefixedKey, readTimestamp, durability, null, null, cancellationToken);
 
     /// <summary>
     /// Internal overload with test hooks.
@@ -1538,7 +1539,7 @@ internal sealed class KeyValueLocator
     /// lets tests inject a mid-fan-out split for <c>Bucket_SplitMidScan_NoDupNoMissing</c>.
     /// </summary>
     internal async Task<KeyValueGetByBucketResult> LocateAndGetByBucket(
-        HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability,
+        HLCTimestamp transactionId, string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability,
         Func<int, Task>? beforeQuery,
         Func<int, Task>? afterDescriptor,
         CancellationToken cancellationToken)
@@ -1552,7 +1553,7 @@ internal sealed class KeyValueLocator
             int singlePartitionId = RoutePrefixKey(prefixedKey);
 
             if (!raft.Joined || await raft.AmILeader(singlePartitionId, cancellationToken))
-                return await manager.GetByBucket(transactionId, prefixedKey, durability);
+                return await manager.GetByBucket(transactionId, prefixedKey, readTimestamp, durability);
 
             string singleLeader = await raft.WaitForLeader(singlePartitionId, cancellationToken);
             if (singleLeader == raft.GetLocalEndpoint())
@@ -1560,7 +1561,7 @@ internal sealed class KeyValueLocator
 
             logger.LogDebug("GETPREFIX-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", prefixedKey, singlePartitionId, singleLeader);
 
-            return await interNodeCommunication.GetByBucket(singleLeader, transactionId, prefixedKey, durability, cancellationToken);
+            return await interNodeCommunication.GetByBucket(singleLeader, transactionId, prefixedKey, readTimestamp, durability, cancellationToken);
         }
 
         // Multi-range path (F5 parallel): key-range space is split; fan out to all descriptors
@@ -1583,7 +1584,7 @@ internal sealed class KeyValueLocator
         Task[] fanOutTasks = Enumerable.Range(0, descriptors.Count)
             .Select(idx => FetchDescriptorSlotAsync(
                 idx, descriptors[idx], transactionId, prefixedKey,
-                durability, bucketPageSize, sem, slots,
+                readTimestamp, durability, bucketPageSize, sem, slots,
                 beforeQuery, afterDescriptor, cancellationToken))
             .ToArray();
 
@@ -1606,7 +1607,7 @@ internal sealed class KeyValueLocator
     private async Task FetchDescriptorSlotAsync(
         int idx, RangeDescriptor descriptor,
         HLCTimestamp transactionId, string prefixedKey,
-        KeyValueDurability durability,
+        HLCTimestamp readTimestamp, KeyValueDurability durability,
         int bucketPageSize, SemaphoreSlim sem,
         (KeyValueResponseType, List<(string, ReadOnlyKeyValueEntry)>)[] slots,
         Func<int, Task>? beforeQuery, Func<int, Task>? afterDescriptor,
@@ -1630,7 +1631,7 @@ internal sealed class KeyValueLocator
                 KeyValueGetByRangeResult page = await QueryDescriptorRange(
                     descriptor.PartitionId, transactionId, prefixedKey,
                     cursorKey, cursorInc, clEnd, clEndInc,
-                    bucketPageSize, HLCTimestamp.Zero, durability, cancellationToken);
+                    bucketPageSize, readTimestamp, durability, cancellationToken);
 
                 if (page.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
                 {
@@ -1949,11 +1950,11 @@ internal sealed class KeyValueLocator
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<KeyValueGetByBucketResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<KeyValueGetByBucketResult> ScanAllByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         ConcurrentDictionary<string, ReadOnlyKeyValueEntry> unionItems = [];
-        
-        KeyValueGetByBucketResult items = await manager.ScanByPrefix(prefixKeyName, durability);
+
+        KeyValueGetByBucketResult items = await manager.ScanByPrefix(prefixKeyName, readTimestamp, durability);
 
         if (items.Type == KeyValueResponseType.Get)
         {
@@ -1962,13 +1963,13 @@ internal sealed class KeyValueLocator
         }
 
         IList<RaftNode> nodes = raft.GetNodes();
-        
+
         List<Task> tasks = new(nodes.Count);
 
         foreach (RaftNode node in nodes)
-            tasks.Add(NodeScanByPrefix(unionItems, node, prefixKeyName, durability, cancellationToken));
-        
-        await Task.WhenAll(tasks);               
+            tasks.Add(NodeScanByPrefix(unionItems, node, prefixKeyName, readTimestamp, durability, cancellationToken));
+
+        await Task.WhenAll(tasks);
 
         if (durability == KeyValueDurability.Persistent)
         {
@@ -1983,24 +1984,26 @@ internal sealed class KeyValueLocator
 
         return new(KeyValueResponseType.Get, unionItems.Select(kv => (kv.Key, kv.Value)).ToList());
     }
-    
+
     /// <summary>
-    /// 
+    ///
     /// </summary>
     /// <param name="unionItems"></param>
     /// <param name="node"></param>
     /// <param name="prefixKeyName"></param>
+    /// <param name="readTimestamp"></param>
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     private async Task NodeScanByPrefix(
-        ConcurrentDictionary<string, ReadOnlyKeyValueEntry> unionItems, 
-        RaftNode node, 
-        string prefixKeyName, 
-        KeyValueDurability durability, 
+        ConcurrentDictionary<string, ReadOnlyKeyValueEntry> unionItems,
+        RaftNode node,
+        string prefixKeyName,
+        HLCTimestamp readTimestamp,
+        KeyValueDurability durability,
         CancellationToken cancellationToken
     )
     {
-        KeyValueGetByBucketResult response = await interNodeCommunication.ScanByPrefix(node.Endpoint, prefixKeyName, durability, cancellationToken);
+        KeyValueGetByBucketResult response = await interNodeCommunication.ScanByPrefix(node.Endpoint, prefixKeyName, readTimestamp, durability, cancellationToken);
         
         if (response.Type == KeyValueResponseType.Get)
         {
