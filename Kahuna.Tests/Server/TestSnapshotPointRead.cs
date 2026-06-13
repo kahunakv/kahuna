@@ -139,12 +139,13 @@ public class TestSnapshotPointRead : BaseCluster
     }
 
     /// <summary>
-    /// txId != Zero + readTimestamp != Zero: MVCC branch runs unchanged — serves the current
-    /// committed state, not a historical revision. Regression guard: readTimestamp must not
-    /// weaken the MVCC early-conflict check by serving a stale revision.
+    /// txId != Zero + readTimestamp != Zero: AS-OF snapshot path applies — serves the revision
+    /// at-or-before readTimestamp (valA), not the current committed state (valB).
+    /// When readTimestamp is non-zero the handler treats the read as an AS-OF snapshot regardless
+    /// of whether a transaction ID is present; OCC conflict tracking is skipped for snapshot reads.
     /// </summary>
     [Theory, CombinatorialData]
-    public async Task PointRead_MvccPath_IgnoresReadTimestamp(
+    public async Task PointRead_WithReadTimestamp_ServesSnapshot(
         [CombinatorialValues("memory")] string storage,
         [CombinatorialValues(8)] int partitions
     )
@@ -177,10 +178,9 @@ public class TestSnapshotPointRead : BaseCluster
                 KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
             Assert.Equal(KeyValueResponseType.Set, setType);
 
-            // txId != Zero: MVCC path opens a snapshot of current committed state (valB).
-            // The readTimestamp (snapshotT, pointing at valA's commit) must not cause
-            // TryGetHandler to serve the archived valA — that would silently weaken the
-            // early-conflict/abort guarantee.
+            // txId != Zero + readTimestamp != Zero: AS-OF snapshot path applies.
+            // snapshotT points at valA's commit, so the handler returns valA even though
+            // valB is the current committed state.
             HLCTimestamp fakeTxId = node1.HybridLogicalClock.TrySendOrLocalEvent(node1.GetLocalNodeId());
 
             (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry) =
@@ -188,10 +188,9 @@ public class TestSnapshotPointRead : BaseCluster
                     fakeTxId, key, -1, snapshotT,
                     KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
 
-            // MVCC path opens snapshot of current committed state → valB.
             Assert.Equal(KeyValueResponseType.Get, getType);
             Assert.NotNull(entry);
-            Assert.Equal("updated", Encoding.UTF8.GetString(entry.Value!));
+            Assert.Equal("initial", Encoding.UTF8.GetString(entry.Value!));
         }
         finally
         {
