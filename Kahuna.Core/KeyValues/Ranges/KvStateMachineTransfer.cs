@@ -425,6 +425,59 @@ internal sealed class KvStateMachineTransfer : IRaftStateMachineTransfer
         return true;
     }
 
+    private const int LockConfirmMaxAttempts = 10;
+    private const int LockConfirmRetryDelayMs = 100;
+    private const int LockConfirmStableReads = 2;
+
+    /// <summary>
+    /// Confirms <paramref name="expected"/> locks are present on the current leader of
+    /// <paramref name="partitionId"/>, re-importing if a leadership change stranded them on a former
+    /// leader after the pre-cutover import. Requires <see cref="LockConfirmStableReads"/> consecutive
+    /// present-reads (separated by a delay) before returning, so a leadership change mid-confirm is
+    /// caught and re-imported. Best-effort with bounded retries (T5 option A). Locks are in-memory
+    /// and non-replicated, so a leadership change after the final stable confirm can still strand a
+    /// lock — the robust fix is option B (replicate through the partition's Raft log). See T5d.
+    /// </summary>
+    internal static async Task EnsureLocksOnDestinationLeaderAsync(
+        KeyValuesManager manager,
+        string keySpace,
+        int partitionId,
+        List<KeyValueRangeLock> expected,
+        ILogger<IKahuna> logger,
+        string callerTag,
+        CancellationToken ct)
+    {
+        if (expected.Count == 0)
+            return;
+
+        int consecutivePresent = 0;
+
+        for (int attempt = 0; attempt < LockConfirmMaxAttempts; attempt++)
+        {
+            List<KeyValueRangeLock> present = await manager.GetRangeLocksFromPartitionLeaderAsync(
+                keySpace, partitionId, ct).ConfigureAwait(false);
+
+            if (AllLocksPresent(expected, present))
+            {
+                if (++consecutivePresent >= LockConfirmStableReads)
+                    return;
+            }
+            else
+            {
+                consecutivePresent = 0;
+                await manager.ImportRangeLocksToPartitionLeaderAsync(keySpace, partitionId, expected, ct)
+                    .ConfigureAwait(false);
+            }
+
+            await Task.Delay(LockConfirmRetryDelayMs, ct).ConfigureAwait(false);
+        }
+
+        logger.LogWarning(
+            "{Caller}: range locks for {Space} not confirmed stable on P{Partition} leader after {Attempts} attempts; "
+            + "a leadership change may have stranded an in-memory (non-replicated) lock — see T5 option B",
+            callerTag, keySpace, partitionId, LockConfirmMaxAttempts);
+    }
+
     private static (string? key, bool inclusive) ClampStart(string? raw, bool rawIncl, string? destStart)
     {
         if (destStart is null) return (raw, rawIncl);    // dest is unbounded left → keep raw

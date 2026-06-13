@@ -315,7 +315,8 @@ internal sealed class RangeSplitter
             // a lock, because locks are in-memory, leader-local, non-replicated. See T5d in
             // specs/spec-shared-range-locks-tasks.md.
             if (clampedLocks.Count > 0)
-                await EnsureLocksOnDestinationLeaderAsync(keySpace, newPartitionId, clampedLocks, ct);
+                await KvStateMachineTransfer.EnsureLocksOnDestinationLeaderAsync(
+                    manager, keySpace, newPartitionId, clampedLocks, logger, "RangeSplitter", ct);
 
             logger.LogInformation(
                 "RangeSplitter: split {Space} at {Key} → [{Start},{Key}) @P{SourcePartition} + [{Key},{End}) @P{NewPartition} gen={Gen}",
@@ -345,50 +346,6 @@ internal sealed class RangeSplitter
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────────
-
-    private const int LockConfirmMaxAttempts = 10;
-    private const int LockConfirmRetryDelayMs = 100;
-    private const int LockConfirmStableReads = 2;
-
-    /// <summary>
-    /// Confirms <paramref name="expected"/> locks are present on the current leader of
-    /// <paramref name="partitionId"/>, re-importing if a leadership change stranded them on a former
-    /// leader. Requires <see cref="LockConfirmStableReads"/> consecutive present-reads (separated by
-    /// a delay) before returning, so a leadership change mid-confirm is caught and re-imported.
-    /// Best-effort with bounded retries (T5b option A). Locks are in-memory and non-replicated, so a
-    /// leadership change after the final stable confirm can still strand a lock — the robust fix is
-    /// option B (replicate through the partition's Raft log). See T5d in the spec.
-    /// </summary>
-    private async Task EnsureLocksOnDestinationLeaderAsync(
-        string keySpace, int partitionId, List<KeyValueRangeLock> expected, CancellationToken ct)
-    {
-        int consecutivePresent = 0;
-
-        for (int attempt = 0; attempt < LockConfirmMaxAttempts; attempt++)
-        {
-            List<KeyValueRangeLock> present = await manager.GetRangeLocksFromPartitionLeaderAsync(
-                keySpace, partitionId, ct).ConfigureAwait(false);
-
-            if (KvStateMachineTransfer.AllLocksPresent(expected, present))
-            {
-                if (++consecutivePresent >= LockConfirmStableReads)
-                    return;
-            }
-            else
-            {
-                consecutivePresent = 0;
-                await manager.ImportRangeLocksToPartitionLeaderAsync(keySpace, partitionId, expected, ct)
-                    .ConfigureAwait(false);
-            }
-
-            await Task.Delay(LockConfirmRetryDelayMs, ct).ConfigureAwait(false);
-        }
-
-        logger.LogWarning(
-            "RangeSplitter: range locks for {Space} not confirmed stable on P{Partition} leader after {Attempts} attempts; "
-            + "a leadership change may have stranded an in-memory (non-replicated) lock — see T5 option B",
-            keySpace, partitionId, LockConfirmMaxAttempts);
-    }
 
     /// <summary>Probes whether the half-open interval [start,end) within keySpace has at least one key.</summary>
     private async Task<bool> HalfHasKeysAsync(

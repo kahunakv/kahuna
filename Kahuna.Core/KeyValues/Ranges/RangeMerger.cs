@@ -123,6 +123,35 @@ internal sealed class RangeMerger
             return MergeOutcome.TransferFailed;
         }
 
+        // -- 2b. Transfer range locks: clamp right's live locks, inject into left leader --
+        // Locks are actor-local (not Raft-replicated). Read from the right partition leader and
+        // inject into the left (survivor) leader before cutover so writes to [B,C) routed to
+        // the survivor after the merge are still blocked by any live range locks.
+        // The pre-cutover import is followed by a post-cutover confirm-and-reimport loop
+        // (EnsureLocksOnDestinationLeaderAsync) to handle a left-leadership change during the window.
+        List<KeyValueRangeLock> clampedLocks = [];
+
+        try
+        {
+            HLCTimestamp lockNow = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+            List<KeyValueRangeLock> rightLocks = await manager.GetRangeLocksFromPartitionLeaderAsync(
+                keySpace, right.PartitionId, ct);
+
+            clampedLocks = KvStateMachineTransfer.FilterAndClamp(
+                rightLocks, right.StartKey, right.EndKey, lockNow);
+
+            if (clampedLocks.Count > 0)
+                await manager.ImportRangeLocksToPartitionLeaderAsync(keySpace, left.PartitionId, clampedLocks, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "RangeMerger: lock transfer from P{Right} to P{Left} failed (best-effort; merge continues)",
+                right.PartitionId, left.PartitionId);
+            clampedLocks = [];
+        }
+
         // -- 3. Atomic cutover ----------------------------------------------------
         // Replace {left, right} with [A,C)@P1 gen+1.
         long newGeneration = Math.Max(left.Generation, right.Generation) + 1;
@@ -180,6 +209,14 @@ internal sealed class RangeMerger
             logger.LogError("RangeMerger: MutateAsync cutover failed (not leader or validation rejected)");
             return MergeOutcome.CutoverFailed;
         }
+
+        // -- 3b. Post-cutover confirm-and-reimport (option A hardening) ----------------------
+        // After cutover the left partition is the authoritative route for [B,C). A left-leadership
+        // change during the pre-cutover window can strand the imported locks on a former leader.
+        // Re-read the current left leader's LocksByRange and re-import any missing entries.
+        if (clampedLocks.Count > 0)
+            await KvStateMachineTransfer.EnsureLocksOnDestinationLeaderAsync(
+                manager, keySpace, left.PartitionId, clampedLocks, logger, "RangeMerger", ct);
 
         logger.LogInformation(
             "RangeMerger: merged {Space} -> [{A},{C})@P{P} gen={Gen} (retired P{Retired})",
