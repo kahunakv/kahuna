@@ -86,16 +86,27 @@ internal sealed class TryGetHandler : BaseHandler
             entry.ReplicationIntent = null;
         }
         
-        // A live write intent from another transaction is not a blocking condition for reads.
-        // Reads use read-committed semantics: entry.Value / MVCC snapshot is the committed state
-        // regardless of any pending write. Only clear expired intents as housekeeping.
-        // (Write operations and TryExists for ValidateReadSet still block on write intents.)
+        // A live write intent from another transaction is not a blocking condition for reads
+        // UNLESS the read carries a snapshot timestamp and the intent's pending commit ts could
+        // land at-or-before that snapshot (safe-time wait).
+        // Clear expired intents as housekeeping; otherwise apply the safe-time decision:
+        //   CommitTimestamp == Zero  → undetermined — must wait (MustRetry).
+        //   CommitTimestamp ≤ T     → might commit in our snapshot window — must wait.
+        //   CommitTimestamp > T     → provably outside our snapshot — fall through to committed state.
+        // (Write ops and TryExists for ValidateReadSet still block on write intents unconditionally.)
         if (entry?.WriteIntent != null)
         {
             if (entry.WriteIntent.TransactionId != message.TransactionId)
             {
                 if (entry.WriteIntent.Expires - currentTime <= TimeSpan.Zero)
                     entry.WriteIntent = null;
+                else if (!message.ReadTimestamp.IsNull())
+                {
+                    HLCTimestamp commitTs = entry.WriteIntent.CommitTimestamp;
+                    if (commitTs.IsNull() || commitTs.CompareTo(message.ReadTimestamp) <= 0)
+                        return KeyValueStaticResponses.WaitingForReplicationResponse;
+                    // commitTs > readTimestamp: write won't land in our snapshot; fall through
+                }
                 // live write intent from another tx: fall through to committed state
             }
         }

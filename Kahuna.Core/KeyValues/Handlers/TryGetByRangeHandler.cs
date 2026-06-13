@@ -257,14 +257,26 @@ internal sealed class TryGetByRangeHandler : BaseHandler
             entry.ReplicationIntent = null;
         }
 
-        // A live write intent from another transaction is not a blocking condition for reads.
-        // Range scans read the committed state (entry.Value / MVCC snapshot) regardless of pending writes.
+        // A live write intent from another transaction is not a blocking condition for reads
+        // UNLESS the scan carries a snapshot timestamp and the pending commit ts could land
+        // at-or-before that snapshot (safe-time wait).
+        // Clear expired intents as housekeeping; otherwise apply the safe-time decision:
+        //   CommitTimestamp == Zero  → undetermined — must wait (WaitingForReplication to retry the page).
+        //   CommitTimestamp ≤ T     → might commit in our snapshot window — must wait.
+        //   CommitTimestamp > T     → provably outside our snapshot — fall through to committed state.
         if (entry?.WriteIntent != null)
         {
             if (entry.WriteIntent.TransactionId != transactionId)
             {
                 if (entry.WriteIntent.Expires - currentTime <= TimeSpan.Zero)
                     entry.WriteIntent = null;
+                else if (!readTimestamp.IsNull())
+                {
+                    HLCTimestamp commitTs = entry.WriteIntent.CommitTimestamp;
+                    if (commitTs.IsNull() || commitTs.CompareTo(readTimestamp) <= 0)
+                        return KeyValueStaticResponses.WaitingForReplicationResponse;
+                    // commitTs > readTimestamp: write won't land in our snapshot; fall through
+                }
                 // live write intent from another tx: fall through to committed state
             }
         }

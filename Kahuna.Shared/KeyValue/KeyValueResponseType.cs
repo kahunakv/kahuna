@@ -19,6 +19,25 @@ public enum KeyValueResponseType
     WaitingForReplication = 11,
     Errored = 99,
     InvalidInput = 100,
+    /// <summary>
+    /// Overloaded for two distinct cases — callers should handle both:
+    /// <list type="bullet">
+    ///   <item><description>
+    ///     <b>Stale route</b>: the target partition moved or split since the request was routed;
+    ///     re-resolve the key-space descriptor and retry on the new partition.
+    ///   </description></item>
+    ///   <item><description>
+    ///     <b>Safe-time not reached</b>: a snapshot read at T is blocked by a live write intent whose
+    ///     <c>CommitTimestamp</c> is undetermined (Zero) or ≤ T, but the retrying node is not the
+    ///     partition leader (so the exponential back-off loop in <c>KeyValuesManager.TryGetValue</c>
+    ///     cannot run there). The coordinator should retry the same read with the same T — no
+    ///     re-routing is required.
+    ///   </description></item>
+    /// </list>
+    /// If the distinction matters for a caller, inspect the accompanying context (e.g. whether a
+    /// generation fence changed) or prefer checking for <see cref="WaitingForReplication"/> first
+    /// (the transparent back-off path that never surfaces here when the leader handles the retry).
+    /// </summary>
     MustRetry = 101,
     Aborted = 102,
     DoesNotExist = 103,

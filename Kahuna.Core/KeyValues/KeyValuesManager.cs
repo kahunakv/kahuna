@@ -1448,7 +1448,19 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            for (int i = 0; i < MaxRetries; i++)
+            // Exponential back-off loop, matching the LocateAndScanRange page-retry contract.
+            // WaitingForReplication covers two cases:
+            //   • Short replication lag (ReplicationIntent): typically resolves in < 10 ms.
+            //   • Safe-time wait (pending write intent whose commit ts ≤ readTimestamp): can
+            //     last up to the intent TTL (DefaultTxCompleteTimeout ≈ 15 s). The exponential
+            //     back-off naturally amortises both: a replication lag resolves in the first 1-2
+            //     iterations; a safe-time wait resolves once the in-flight write commits or the
+            //     intent expires and the actor clears it.
+            // The deadline is DefaultTxCompleteTimeout + 1 500 ms buffer.
+            int backoffMs = 1;
+            long deadline = Environment.TickCount64 + 16_500;
+
+            while (true)
             {
                 KeyValueResponse? response;
 
@@ -1460,16 +1472,15 @@ internal sealed class KeyValuesManager : IDisposable
                 if (response is null)
                     return (KeyValueResponseType.Errored, null);
 
-                if (response.Type == KeyValueResponseType.WaitingForReplication)
-                {
-                    await Task.Delay(1);
-                    continue;
-                }
+                if (response.Type != KeyValueResponseType.WaitingForReplication)
+                    return (response.Type, response.Entry);
 
-                return (response.Type, response.Entry);
+                if (Environment.TickCount64 >= deadline)
+                    return (KeyValueResponseType.MustRetry, null);
+
+                await Task.Delay(backoffMs);
+                backoffMs = Math.Min(backoffMs * 2, 1000);
             }
-            
-            return (KeyValueResponseType.MustRetry, null);
         }
         finally
         {

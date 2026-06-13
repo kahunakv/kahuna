@@ -126,7 +126,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         // The write intent lease will by extended by DefaultTxCompleteTimeout
         // it will give the transaction enough time to commit or rollback
         // CommitTimestamp records the ts the committed revision will carry (mvccEntry.LastModified,
-        // stamped at MVCC write time in TrySetHandler). This lets K3b readers determine whether the
+        // stamped at MVCC write time in TrySetHandler). This lets snapshot readers determine whether the
         // in-flight write will commit at-or-before their readTimestamp without blocking the actor.
         // CommitId is a different coordinator-supplied fence value and is NOT used here.
         if (entry.WriteIntent is null)
