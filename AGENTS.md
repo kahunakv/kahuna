@@ -27,6 +27,34 @@ patch the dependency's source yourself, and do **not** bury a workaround/shim/re
 Kahuna to route around it. A clear "this needs a change in `<repo>`: …" plus stopping is the
 correct outcome — surfacing it is far more valuable than a hidden workaround.
 
+## ⛔ No spec/task references in code
+
+**Specs and task documents must never be mentioned in the code** — not in comments, method names,
+class names, variable names, log messages, or test names. Documents like
+`specs/spec-shared-range-locks.md`, `…-tasks.md`, or task identifiers such as "T5b", "K1", "Task 4",
+"option A/B" are planning artifacts; they are renamed, split, and deleted as work evolves, so any
+reference to them rots immediately and leaks process noise into the source.
+
+Describe **what the code does and why**, not which document or task asked for it. Replace
+`// T5b: clamp the lock` with `// Clamp the lock to the destination range`; replace `// see K3 option B`
+with the actual invariant or trade-off being made. If a design decision needs justification, state the
+decision itself in the comment — never defer to an external doc the reader can't see.
+
+## Document layout: specs, archived specs, and docs
+
+Keep planning and reference material in three well-defined places:
+
+- **`specs/`** — every spec and its companion `…-tasks.md` lives here while the work is **in
+  progress** (design not yet fully implemented).
+- **`specs/archived/`** — once a spec is **fully implemented** (the feature code exists and its
+  acceptance is met), move the spec and its task file here. Keep them as a historical record; do
+  not delete them.
+- **`docs/`** — **user-facing / maintainer documentation** (developer guides, how-tos, reference
+  material for the shipped system). These are not specs and are not archived; they evolve with the
+  code. Do not put specs in `docs/`, and do not put guides in `specs/`.
+
+When you finish implementing a spec, archive it. When you write a new spec, put it in `specs/`.
+
 ## Test Execution Rules
 
 **Never run multiple `dotnet test` commands in parallel or in the background.**

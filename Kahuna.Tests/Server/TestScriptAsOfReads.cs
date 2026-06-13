@@ -172,10 +172,11 @@ public class TestScriptAsOfReads : BaseCluster
             Assert.Equal(KeyValueResponseType.Set, setType);
 
             // A snapshot transaction at T must see k1v1 (not k1v2) for key1.
+            // Use COMMIT (not RETURN) so context.Action flips to Commit — BEGIN requires explicit COMMIT.
             string script = $"""
                 BEGIN (snapshot = {snapshotMs})
-                  LET a = GET "{key1}"
-                  RETURN a
+                  GET "{key1}"
+                  COMMIT
                 END
                 """;
 
@@ -187,8 +188,8 @@ public class TestScriptAsOfReads : BaseCluster
             // A snapshot transaction at T must see k2v1 for key2.
             script = $"""
                 BEGIN (snapshot = {snapshotMs})
-                  LET b = GET "{key2}"
-                  RETURN b
+                  GET "{key2}"
+                  COMMIT
                 END
                 """;
             resp = await kahuna1.TryExecuteTransactionScript(
@@ -228,20 +229,14 @@ public class TestScriptAsOfReads : BaseCluster
                 TestContext.Current.CancellationToken);
             Assert.Equal(KeyValueResponseType.Set, setType);
 
-            // EXISTS at T (before write) → DoesNotExist.
-            string script = $"""
-                LET existed = EXISTS "{key}" AS OF {earlyMs}
-                RETURN existed
-                """;
+            // Bare EXISTS AS OF (no LET/RETURN) → DoesNotExist.
+            string script = $"""EXISTS "{key}" AS OF {earlyMs}""";
             KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(
                 Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.DoesNotExist, resp.Type);
 
-            // EXISTS now → Exists.
-            script = $"""
-                LET e = EXISTS "{key}"
-                RETURN e
-                """;
+            // Bare EXISTS now → Exists.
+            script = $"EXISTS \"{key}\"";
             resp = await kahuna1.TryExecuteTransactionScript(
                 Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Exists, resp.Type);
@@ -288,7 +283,8 @@ public class TestScriptAsOfReads : BaseCluster
             Assert.NotNull(entry2);
             long snapshotMs = entry2.LastModified.L;
 
-            // Write key3 after T.
+            // Write key3 after T — delay ensures a different HLC millisecond so it falls outside snapshot.
+            await Task.Delay(10, TestContext.Current.CancellationToken);
             (KeyValueResponseType setType, _, _) = await kahuna1.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, key3, Encoding.UTF8.GetBytes("v"), null, -1,
                 KeyValueFlags.Set, 0, KeyValueDurability.Persistent,
@@ -296,10 +292,8 @@ public class TestScriptAsOfReads : BaseCluster
             Assert.Equal(KeyValueResponseType.Set, setType);
 
             // GET BY BUCKET at T → should return key1 and key2 only (key3 not yet present).
-            string script = $"""
-                LET items = GET BY BUCKET "{prefix}" AS OF {snapshotMs}
-                RETURN items
-                """;
+            // Use a bare statement so the result carries (key, value) pairs with Key populated.
+            string script = $"""GET BY BUCKET "{prefix}" AS OF {snapshotMs}""";
 
             KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(
                 Encoding.UTF8.GetBytes(script), null, null);
@@ -366,10 +360,11 @@ public class TestScriptAsOfReads : BaseCluster
             Assert.Equal(KeyValueResponseType.Set, setType);
 
             // Inside a snapshot=T1 transaction, an explicit AS OF T2 should return v2 (not v1).
+            // COMMIT is required — BEGIN requires explicit COMMIT for context.Action to flip.
             string script = $"""
                 BEGIN (snapshot = {t1Ms})
-                  LET x = GET "{key}" AS OF {t2Ms}
-                  RETURN x
+                  GET "{key}" AS OF {t2Ms}
+                  COMMIT
                 END
                 """;
 
