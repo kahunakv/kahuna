@@ -29,7 +29,7 @@ public enum KeyValueResponseType
     /// split: a prefix lock is a single-partition bucket lock, but a split space spans several
     /// partitions. This is a deliberate deprecation — use the per-range exclusive <i>range</i> lock
     /// (<c>TryAcquireExclusiveRangeLock</c>) instead, which locks exactly the descriptors a scan
-    /// touches (design §8). Returned instead of a generic <see cref="Errored"/> so callers can
+    /// touches. Returned instead of a generic <see cref="Errored"/> so callers can
     /// migrate deliberately rather than treating it as a transient failure.
     /// </summary>
     PrefixLockUnsupportedOnRangedSpace = 105,

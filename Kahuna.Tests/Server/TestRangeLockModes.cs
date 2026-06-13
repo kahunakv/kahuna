@@ -8,7 +8,7 @@ using Microsoft.Extensions.Logging;
 namespace Kahuna.Tests.Server;
 
 /// <summary>
-/// Acceptance tests for T1 — RangeLockMode enum + S/X compatibility matrix.
+/// Acceptance tests for the RangeLockMode enum + S/X compatibility matrix.
 ///
 /// These tests use a 1-partition in-memory cluster (hash-space, no range-map setup needed)
 /// and drive the handler via <see cref="KahunaManager.TryAcquireRangeLock"/>.
@@ -140,7 +140,7 @@ public sealed class TestRangeLockModes : BaseCluster
 
     /// <summary>
     /// X∩X: second exclusive from a different tx over the same range → AlreadyLocked.
-    /// Unchanged behavior from before T1.
+    /// Unchanged behavior from before range-lock modes existed.
     /// </summary>
     [Fact]
     public async Task ExclusiveExclusiveOverlapping_Conflicts()

@@ -303,7 +303,7 @@ public sealed class TestGetByRange
         AssertOrdinalOrder(allKeys);
     }
 
-    // ── Task 5: snapshot-consistent paging ──────────────────────────────────
+    // ── Snapshot-consistent paging ──────────────────────────────────
 
     /// <summary>
     /// Key regression: after page 1 is returned, a concurrent commit inserts a new key and
@@ -536,7 +536,7 @@ public sealed class TestGetByRange
         Assert.Contains(txKey, keys);
     }
 
-    // ── Bug 2: HasMore not premature when tombstones fill the window ──────────
+    // ── HasMore not premature when tombstones fill the window ──────────
 
     /// <summary>
     /// Delete more than limit entries at the start of the range; the scan must still
@@ -619,7 +619,7 @@ public sealed class TestGetByRange
         Assert.False(result.HasMore);
     }
 
-    // ── Bug 3: EndKey enforced on the persistent/disk path ────────────────────
+    // ── EndKey enforced on the persistent/disk path ────────────────────
 
     [Theory]
     [InlineData(true)]   // inclusive end

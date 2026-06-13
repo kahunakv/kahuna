@@ -168,6 +168,9 @@ message GrpcTryGetKeyValueRequest {
   string Key = 4;
   int64 Revision = 5;
   GrpcKeyValueDurability Durability = 6;
+  int32 ReadTimestampNode = 7;
+  int64 ReadTimestampPhysical = 8;
+  uint32 ReadTimestampCounter = 9;
 }
 
 message GrpcTryGetKeyValueResponse {

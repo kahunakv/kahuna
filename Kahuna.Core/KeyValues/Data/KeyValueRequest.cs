@@ -74,7 +74,7 @@ public sealed class KeyValueRequest : IConsistentHashable
     public HLCTimestamp ReadTimestamp { get; internal set; }
 
     /// <summary>
-    /// Key-range routing generation the request was resolved on (Task 4 fence). 0 = hash space / not
+    /// Key-range routing generation the request was resolved on (descriptor fence). 0 = hash space / not
     /// range-routed. Set by the locator for KeyRange write ops; threaded into the proposal so the
     /// replication chokepoint can reject a stale-generation write with <c>MustRetry</c>.
     /// </summary>

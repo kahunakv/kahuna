@@ -175,7 +175,7 @@ public sealed class TestAutoMerge : BaseCluster
                 while (Environment.TickCount64 < deadline)
                 {
                     (KeyValueResponseType rt, _) =
-                        await km.TryGetValue(HLCTimestamp.Zero, k, 0, KeyValueDurability.Persistent);
+                        await km.TryGetValue(HLCTimestamp.Zero, k, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent);
                     if (rt == KeyValueResponseType.Get) break;
                     await Task.Delay(25, ct);
                 }

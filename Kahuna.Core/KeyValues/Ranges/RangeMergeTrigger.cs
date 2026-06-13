@@ -29,7 +29,7 @@ namespace Kahuna.Server.KeyValues.Ranges;
 ///
 /// <para>
 /// <b>Size dimension.</b> "Size" is measured in key count, not bytes or request load.
-/// Byte-size and load-based merging are deferred to Task 12.
+/// Byte-size and load-based merging are deferred.
 /// </para>
 /// </summary>
 internal sealed class RangeMergeTrigger

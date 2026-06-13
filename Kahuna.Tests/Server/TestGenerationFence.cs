@@ -8,7 +8,7 @@ using Microsoft.Extensions.Logging;
 namespace Kahuna.Tests.Server;
 
 /// <summary>
-/// Tests for the key-range generation fence (Task 4). The fence uses Kahuna's replicated descriptor
+/// Tests for the key-range generation fence. The fence uses Kahuna's replicated descriptor
 /// map (not Kommander's partition generation): a persistent key-range write carries the
 /// <see cref="RangeDescriptor.Generation"/> it routed on, and the proposal actor on the leader rejects
 /// it with <c>MustRetry</c> if the current descriptor generation no longer matches — the range

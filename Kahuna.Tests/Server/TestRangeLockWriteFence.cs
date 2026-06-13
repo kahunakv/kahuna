@@ -9,7 +9,7 @@ using Microsoft.Extensions.Logging;
 namespace Kahuna.Tests.Server;
 
 /// <summary>
-/// Acceptance tests for T2 — write-path phantom enforcement for Delete and Prepare.
+/// Acceptance tests for write-path phantom enforcement for Delete and Prepare.
 /// Set is already gated (regression guard). All tests use a 1-partition in-memory
 /// cluster and drive handlers directly on the leader via <see cref="KahunaManager"/>.
 ///
@@ -91,7 +91,7 @@ public sealed class TestRangeLockWriteFence : BaseCluster
     }
 
     /// <summary>
-    /// New behavior (T2): tx A holds X [10,50); tx B deletes an existing key inside → MustRetry.
+    /// Tx A holds X [10,50); tx B deletes an existing key inside → MustRetry.
     /// </summary>
     [Fact]
     public async Task Delete_PhantomIntoExclusiveRange_Conflicts()
@@ -126,7 +126,7 @@ public sealed class TestRangeLockWriteFence : BaseCluster
     }
 
     /// <summary>
-    /// New behavior (T2): tx A holds X [10,50); tx B prepares a mutation on a key inside → MustRetry.
+    /// Tx A holds X [10,50); tx B prepares a mutation on a key inside → MustRetry.
     /// </summary>
     [Fact]
     public async Task Prepare_IntoExclusiveRange_Conflicts()

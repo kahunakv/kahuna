@@ -6,16 +6,16 @@ using Kahuna.Shared.KeyValue;
 namespace Kahuna.Server.KeyValues.Ranges;
 
 /// <summary>
-/// Executes the key-range split transaction (design §5):
+/// Executes the key-range split transaction:
 /// <c>R = [S,E)@P</c> → <c>[S,K)@P</c> + <c>[K,E)@P'</c>.
 ///
 /// <para>
-/// <b>Step sequence (design §5 steps 2–5):</b>
+/// <b>Step sequence:</b>
 /// <list type="number">
 ///   <item>Validate <c>S &lt; K &lt; E</c> ordinal and both halves non-empty (no thrash).</item>
 ///   <item><c>P' = CreatePartitionAsync(newId, Unrouted)</c> — fresh empty Raft group.</item>
 ///   <item>Initial bulk transfer: export <c>[K,E)</c> at <c>snapshotTs</c> (MVCC), import to P'.</item>
-///   <item>Quiesce window (§5.5): acquire an exclusive range lock on <c>[K,E)</c> to block
+///   <item>Quiesce window: acquire an exclusive range lock on <c>[K,E)</c> to block
 ///       concurrent 2PC commits on P; do a final catch-up export at the quiesce timestamp;
 ///       import the catch-up to P'.</item>
 ///   <item>Atomic cutover: <see cref="RangeMapStore.MutateAsync"/> replaces <c>R</c> with
@@ -41,13 +41,13 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// from the catch-up snapshot, and after cutover routes to P' — where it never arrives. That
 /// write is silently lost. Fully closing the window requires replicating the quiesce state to the
 /// data-partition proposal actor so the check can be enforced on every replica. <b>Deferred to
-/// Phase G</b> (partition-scoped storage).
+/// a future partition-scoped storage design.</b>
 /// </para>
 ///
 /// <para>
 /// <b>Caller constraint.</b> <see cref="SplitAsync"/> must be called on the node that is the
 /// <b>system-partition (partition 0) leader</b>, because <see cref="IRaft.CreatePartitionAsync"/>
-/// enforces this. The auto-split trigger (Task 7) will run on the system-partition leader.
+/// enforces this. The auto-split trigger will run on the system-partition leader.
 /// The rest of the work (export, import, meta-cutover) routes to the appropriate leaders via
 /// the normal request path.
 /// </para>
@@ -309,11 +309,10 @@ internal sealed class RangeSplitter
             // bounded — direct writes to [K,E) stay blocked by the quiesce (released in the finally
             // below) for the duration of this loop.
             //
-            // NOTE (future, option B): the robust fix is to replicate range-lock acquire/release
+            // NOTE (future hardening): the robust fix is to replicate range-lock acquire/release
             // through P''s Raft log so locks reconstruct on whichever node becomes leader. This loop
             // only narrows the window — a leadership change after the final confirm can still strand
-            // a lock, because locks are in-memory, leader-local, non-replicated. See T5d in
-            // specs/spec-shared-range-locks-tasks.md.
+            // a lock, because locks are in-memory, leader-local, non-replicated.
             if (clampedLocks.Count > 0)
                 await KvStateMachineTransfer.EnsureLocksOnDestinationLeaderAsync(
                     manager, keySpace, newPartitionId, clampedLocks, logger, "RangeSplitter", ct);
@@ -379,7 +378,7 @@ internal sealed class RangeSplitter
     }
 
     /// <summary>Returns <c>max(PartitionId in current map) + 1</c>, lower-bounded by
-    /// <see cref="RangeMapStore.FirstDataPartitionId"/>. Used by Task 7 auto-splitter to
+    /// <see cref="RangeMapStore.FirstDataPartitionId"/>. Used by the auto-splitter to
     /// compute the ID to pass to <see cref="IRaft.CreatePartitionAsync"/> on the system-partition
     /// leader before calling <see cref="SplitAsync"/>.</summary>
     internal static int ComputeNextPartitionId(RangeMap map)

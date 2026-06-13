@@ -5,7 +5,7 @@ namespace Kahuna.Server.KeyValues.Handlers;
 
 // Release prefers an exact-bounds match (txId + StartKey + EndKey + inclusivity) and falls back
 // to overlap-only if no exact match exists. The fallback lets original bounds match a clamped
-// entry inserted by a split/merge transfer (T5). Exact-first preserves precision for a tx that
+// entry inserted by a split/merge transfer. Exact-first preserves precision for a tx that
 // holds multiple non-overlapping locks on one partition (the common case). A residual ambiguity
 // remains for the exotic "same tx + multiple clamped overlapping locks on one partition" scenario,
 // which requires a split of an already-split partition while the lock is still live; document-only.
@@ -39,7 +39,7 @@ internal sealed class TryReleaseExclusiveRangeLockHandler : BaseHandler
             }
         }
 
-        // Pass 2: overlap fallback — matches a clamped entry from a split/merge transfer (T5).
+        // Pass 2: overlap fallback — matches a clamped entry from a split/merge transfer.
         if (found is null)
         {
             foreach (KeyValueRangeLock rl in locks)

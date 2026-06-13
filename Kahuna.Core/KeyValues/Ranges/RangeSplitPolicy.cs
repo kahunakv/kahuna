@@ -12,7 +12,7 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// </para>
 ///
 /// <para>
-/// <b>Monotonic-append detection (§8 — "gen_id() / hot tail" pattern):</b> if the most-recently
+/// <b>Monotonic-append detection ("gen_id() / hot tail" pattern):</b> if the most-recently
 /// written quarter of the sample are clustered in the last quarter of the ordinal key space
 /// (i.e. 75 %+ of the recently-written keys sit above the 75th-percentile key), the range is
 /// monotonically-appended at its tail. In that case, splitting at the median would put all future

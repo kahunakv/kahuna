@@ -84,7 +84,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
         this.keyValues = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);
         this.sequencer = new(keyValues, logger);
 
-        // Register the key-range data-movement hook (Task 5) once, here, so every host (embedded,
+        // Register the key-range data-movement hook once, here, so every host (embedded,
         // server, tests) gets it uniformly without reaching across the internal API boundary.
         raft.RegisterStateMachineTransfer(keyValues.KvStateMachineTransfer);
     }
@@ -296,14 +296,15 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
-        HLCTimestamp transactionId, 
-        string key, 
-        long revision, 
-        KeyValueDurability durability, 
+        HLCTimestamp transactionId,
+        string key,
+        long revision,
+        HLCTimestamp readTimestamp,
+        KeyValueDurability durability,
         CancellationToken cancellationToken
     )
     {
-        return keyValues.LocateAndTryGetValue(transactionId, key, revision, durability, cancellationToken);
+        return keyValues.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
     }
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(
@@ -683,10 +684,11 @@ public sealed class KahunaManager : IKahuna, IDisposable
         string? endKey,
         bool endInclusive,
         int pageSize,
+        HLCTimestamp readTimestamp,
         KeyValueDurability durability,
         CancellationToken ct)
     {
-        return keyValues.LocateAndScanRange(txId, prefix, startKey, startInclusive, endKey, endInclusive, pageSize, durability, ct);
+        return keyValues.LocateAndScanRange(txId, prefix, startKey, startInclusive, endKey, endInclusive, pageSize, readTimestamp, durability, ct);
     }
 
     /// <summary>
@@ -827,12 +829,13 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <returns></returns>
     public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(
         HLCTimestamp transactionId,
-        string key, 
-        long revision, 
+        string key,
+        long revision,
+        HLCTimestamp readTimestamp,
         KeyValueDurability durability
     )
     {
-        return keyValues.TryGetValue(transactionId, key, revision, durability);
+        return keyValues.TryGetValue(transactionId, key, revision, readTimestamp, durability);
     }
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryGetManyValues(
@@ -1176,7 +1179,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <summary>The replicated range-descriptor map.</summary>
     internal RangeMapStore RangeMapStore => keyValues.RangeMapStore;
 
-    /// <summary>The per-node key-space routing registry (Task 3).</summary>
+    /// <summary>The per-node key-space routing registry.</summary>
     internal KeySpaceRegistry KeySpaceRegistry => keyValues.KeySpaceRegistry;
 
     /// <inheritdoc/>
@@ -1186,31 +1189,31 @@ public sealed class KahunaManager : IKahuna, IDisposable
     public Task<bool> RegisterKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default) =>
         keyValues.RegisterKeyRangeAsync(keySpace, cancellationToken);
 
-    /// <summary>The key-range data-movement primitive (Task 5); register with <c>IRaft.RegisterStateMachineTransfer</c>.</summary>
+    /// <summary>The key-range data-movement primitive; register with <c>IRaft.RegisterStateMachineTransfer</c>.</summary>
     internal KvStateMachineTransfer KvStateMachineTransfer => keyValues.KvStateMachineTransfer;
 
-    /// <summary>Returns live range locks held on <paramref name="keySpace"/> in the local actor (T5 export helper).</summary>
+    /// <summary>Returns live range locks held on <paramref name="keySpace"/> in the local actor (export helper).</summary>
     internal Task<List<KeyValueRangeLock>> GetRangeLocksAsync(string keySpace) =>
         keyValues.GetRangeLocksAsync(keySpace);
 
-    /// <summary>Injects clamped lock entries into the local actor for <paramref name="keySpace"/> (T5 import helper).</summary>
+    /// <summary>Injects clamped lock entries into the local actor for <paramref name="keySpace"/> (import helper).</summary>
     internal Task ImportRangeLocksAsync(string keySpace, List<KeyValueRangeLock> locks) =>
         keyValues.ImportRangeLocksAsync(keySpace, locks);
 
-    // IKahuna surface for inter-node routing (T5).
+    // IKahuna surface for inter-node routing.
     public Task<List<KeyValueRangeLock>> GetRangeLocks(string keySpace) =>
         keyValues.GetRangeLocksAsync(keySpace);
 
     public Task ImportRangeLocks(string keySpace, List<KeyValueRangeLock> locks) =>
         keyValues.ImportRangeLocksAsync(keySpace, locks);
 
-    /// <summary>Resolves a key to its owning <c>(partitionId, generation)</c> (Task 3 key-order router).</summary>
+    /// <summary>Resolves a key to its owning <c>(partitionId, generation)</c> (key-order router).</summary>
     internal (int PartitionId, long Generation) LocateRange(string key) => keyValues.LocateRange(key);
 
-    /// <summary>The split-transaction executor (Task 6).</summary>
+    /// <summary>The split-transaction executor.</summary>
     internal RangeSplitter RangeSplitter => keyValues.RangeSplitter;
 
-    /// <summary>The merge-transaction executor (Task 8).</summary>
+    /// <summary>The merge-transaction executor.</summary>
     internal RangeMerger RangeMerger => keyValues.RangeMerger;
 
     /// <summary>
@@ -1251,7 +1254,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
 
     /// <summary>
     /// Issues a persistent key-range write on the <b>local</b> node carrying an explicit routed
-    /// generation (Task 4 fence). Must be called on the descriptor partition's leader. Lets tests
+    /// generation (descriptor fence). Must be called on the descriptor partition's leader. Lets tests
     /// inject a stale generation; production routes through the locator which captures the live one.
     /// </summary>
     internal Task<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValueRanged(

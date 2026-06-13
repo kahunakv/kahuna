@@ -110,7 +110,7 @@ internal sealed class KeyValuesManager : IDisposable
         scriptParserEvicter = actorSystem.Spawn<ScriptParserEvicterActor, ScriptParserEvicterRequest>("script-parser-evicter", logger);
 
         // Construct the range-descriptor map before the proposal router — the proposal actors carry it
-        // for the Task 4 generation fence.
+        // for the generation fence.
         rangeMapStore = new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
 
         // Sync the per-node key-space registry with any descriptors loaded from the durable snapshot.
@@ -178,13 +178,13 @@ internal sealed class KeyValuesManager : IDisposable
     internal RangeMapStore RangeMapStore => rangeMapStore;
 
     /// <summary>
-    /// The key-range data-movement primitive (Task 5). Registered with Kommander via
-    /// <c>RegisterStateMachineTransfer</c>; Task 6 calls its native export/import directly.
+    /// The key-range data-movement primitive. Registered with Kommander via
+    /// <c>RegisterStateMachineTransfer</c>; the split transaction calls its native export/import directly.
     /// </summary>
     internal KvStateMachineTransfer KvStateMachineTransfer => kvStateMachineTransfer;
 
     /// <summary>
-    /// The per-node key-space routing registry. Task 9 registers row/index spaces as
+    /// The per-node key-space routing registry. Row/index spaces are registered as
     /// key-range here; <c>{db}/meta</c> and system spaces stay hash-routed (the default).
     /// </summary>
     internal KeySpaceRegistry KeySpaceRegistry => keySpaceRegistry;
@@ -321,10 +321,10 @@ internal sealed class KeyValuesManager : IDisposable
     /// </summary>
     internal (int PartitionId, long Generation) LocateRange(string key) => locator.LocateRange(key);
 
-    /// <summary>The split-transaction executor (Task 6). Splits a key range at a given split key.</summary>
+    /// <summary>The split-transaction executor. Splits a key range at a given split key.</summary>
     internal RangeSplitter RangeSplitter => rangeSplitter!;
 
-    /// <summary>The merge-transaction executor (Task 8). Merges adjacent under-min ranges.</summary>
+    /// <summary>The merge-transaction executor. Merges adjacent under-min ranges.</summary>
     internal RangeMerger RangeMerger => rangeMerger!;
 
     /// <summary>
@@ -584,14 +584,15 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
-        HLCTimestamp transactionId, 
+        HLCTimestamp transactionId,
         string key,
-        long revision, 
-        KeyValueDurability durability, 
+        long revision,
+        HLCTimestamp readTimestamp,
+        KeyValueDurability durability,
         CancellationToken cancellationToken
     )
     {
-        return locator.LocateAndTryGetValue(transactionId, key, revision, durability, cancellationToken);
+        return locator.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
     }
     
     /// <summary>
@@ -951,12 +952,14 @@ internal sealed class KeyValuesManager : IDisposable
         string? endKey,
         bool endInclusive,
         int pageSize,
+        HLCTimestamp readTimestamp,
         KeyValueDurability durability,
         [EnumeratorCancellation] CancellationToken ct)
     {
         string? cursorKey       = startKey;
         bool    cursorInclusive = startInclusive;
-        HLCTimestamp snapshotTs = HLCTimestamp.Zero;
+        // Seed from caller's T when supplied; Zero means "capture on first successful page".
+        HLCTimestamp snapshotTs = readTimestamp;
         int backoffMs           = 1;
 
         while (true)
@@ -997,6 +1000,8 @@ internal sealed class KeyValuesManager : IDisposable
             if (!KeyValueRangeCursor.TryDecode(page.NextCursor, out string lastKey, out _, out _, out HLCTimestamp cursorTs))
                 yield break;
 
+            // If the caller supplied a readTimestamp it's already non-Null, so this
+            // no-ops and preserves the caller's T across all pages.
             if (snapshotTs.IsNull())
                 snapshotTs = cursorTs;
 
@@ -1415,28 +1420,31 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="durability"></param>
     /// <returns></returns>
     public async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(
-        HLCTimestamp transactionId, 
+        HLCTimestamp transactionId,
         string key,
         long revision,
+        HLCTimestamp readTimestamp,
         KeyValueDurability durability
     )
     {
         KeyValueRequest request = KeyValueRequestPool.Rent(
-            KeyValueRequestType.TryGet, 
-            transactionId, 
+            KeyValueRequestType.TryGet,
+            transactionId,
             HLCTimestamp.Zero,
-            key, 
-            null, 
+            key,
+            null,
             null,
             revision,
             KeyValueFlags.None,
-            0, 
+            0,
             HLCTimestamp.Zero,
             durability,
             0,
             0,
             null
         );
+
+        request.ReadTimestamp = readTimestamp;
 
         try
         {
@@ -1554,6 +1562,7 @@ internal sealed class KeyValuesManager : IDisposable
                 transactionId,
                 item.key,
                 item.revision,
+                HLCTimestamp.Zero,
                 item.durability
             );
 
@@ -2066,12 +2075,12 @@ internal sealed class KeyValuesManager : IDisposable
     /// <summary>
     /// Returns a snapshot of all live range-lock entries stored in the local actor for
     /// <paramref name="keySpace"/>. Used by <c>KvStateMachineTransfer</c> to read lock
-    /// state before serializing it into a range-snapshot stream (T5).
+    /// state before serializing it into a range-snapshot stream.
     /// <para>
     /// <b>Persistent-only assumption.</b> Range locks for key-range spaces are always acquired
     /// through the persistent router (the split/merge path only applies to persistent spaces —
     /// ephemeral data is not transferable). Ephemeral range locks, if any exist, are held in
-    /// the ephemeral router's actor pool and are not returned here. T5b/T5c callers must not
+    /// the ephemeral router's actor pool and are not returned here. Split/merge callers must not
     /// rely on this method for ephemeral key spaces.
     /// </para>
     /// </summary>
@@ -2101,10 +2110,10 @@ internal sealed class KeyValuesManager : IDisposable
     /// for <paramref name="keySpace"/> — no conflict checks, no acquire logic. Entries that
     /// duplicate an already-held lock (same tx + overlapping bounds) are silently skipped.
     /// Used by <c>KvStateMachineTransfer</c> to restore clamped locks into a destination
-    /// partition after a split or merge (T5).
+    /// partition after a split or merge.
     /// <para>
     /// <b>Persistent-only assumption.</b> Routes to the persistent actor pool for the same
-    /// reason as <see cref="GetRangeLocksAsync"/> — T5 applies only to persistent key-range
+    /// reason as <see cref="GetRangeLocksAsync"/> — applies only to persistent key-range
     /// spaces. Ephemeral range locks are not injected and do not need to be transferred.
     /// </para>
     /// </summary>

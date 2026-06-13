@@ -389,9 +389,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? keyValueContext) = await keyValues.LocateAndTryGetValue(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            request.Key, 
+            request.Key,
             request.Revision,
-            (KeyValueDurability)request.Durability, 
+            new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
+            (KeyValueDurability)request.Durability,
             context.CancellationToken
         );
         

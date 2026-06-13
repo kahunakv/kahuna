@@ -3,13 +3,13 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// <summary>
 /// In-memory <c>key → range</c> lookup over a set of <see cref="RangeDescriptor"/>s, grouped by
 /// key space and kept sorted by <see cref="RangeDescriptor.StartKey"/> (ordinal). This is the
-/// read side of the range-descriptor map; Task 2 makes it the replicated source of
-/// truth on the meta partition. Task 1 is pure in-memory with no Raft.
+/// read side of the range-descriptor map; the replicated source of
+/// truth on the meta partition. The map itself is pure in-memory with no Raft.
 ///
 /// <para>
 /// All comparisons are ordinal. A null <c>StartKey</c> sorts as −infinity (lowest); a null
 /// <c>EndKey</c> means +infinity. The map is immutable once constructed — mutation arrives in
-/// Task 2 via replicated meta entries.
+/// via replicated meta entries.
 /// </para>
 /// </summary>
 internal sealed class RangeMap

@@ -4,7 +4,7 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// <summary>
 /// Returns a snapshot of all live range-lock entries for the key space named by
 /// <see cref="KeyValueRequest.Key"/>. Used by <c>KvStateMachineTransfer</c> to read lock
-/// state before serializing it into a range-snapshot stream (T5).
+/// state before serializing it into a range-snapshot stream.
 /// </summary>
 internal sealed class GetRangeLocksHandler : BaseHandler
 {

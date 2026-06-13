@@ -318,7 +318,7 @@ public class TestLocks : BaseCluster
         }
     }
 
-    // ── Per-range lock tests (Task 11) ───────────────────────────────────────────
+    // ── Per-range lock tests ───────────────────────────────────────────
 
     private const string RlSpace = "t:rl";
     private const string RlSplit = RlSpace + "/m";
@@ -576,7 +576,7 @@ public class TestLocks : BaseCluster
     }
 
     /// <summary>
-    /// T3 — mode forwarded through the full locator stack (non-leader → leader).
+    /// Mode forwarded through the full locator stack (non-leader → leader).
     ///
     /// A Shared lock acquired via a non-leader node must be forwarded to the partition leader and
     /// land with Mode == Shared, so a second overlapping Shared acquire from a different tx also

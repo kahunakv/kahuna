@@ -13,8 +13,7 @@ namespace Kahuna.Server.KeyValues.Ranges;
 
 /// <summary>
 /// The key-range data-movement primitive: export a key range's KV state at a
-/// fixed MVCC snapshot to a stream, and import such a stream into a target store atomically. Task 6
-/// (the split transaction) uses this to move <c>[K, E)</c> from a partition to a freshly-created one.
+/// fixed MVCC snapshot to a stream, and import such a stream into a target store atomically. The split transaction uses this to move <c>[K, E)</c> from a partition to a freshly-created one.
 ///
 /// <para>
 /// <b>Why a Kahuna-native API alongside <see cref="IRaftStateMachineTransfer"/>.</b> Kommander's
@@ -22,7 +21,7 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// <see cref="ExportRange(RaftSplitPlan,long,System.Threading.CancellationToken)"/> cannot express
 /// <c>[K, E)</c>. Kahuna therefore drives key-range transfers through
 /// <see cref="ExportRangeAsync"/> / <see cref="ImportRangeAsync"/> with explicit bounds (it does not
-/// call <c>SplitPartitionAsync</c> for data; design §7). The instance is still registered with
+/// call <c>SplitPartitionAsync</c> for data). The instance is still registered with
 /// Kommander so any coordinator-driven <i>import</i> works; the plan-based <i>export</i> throws
 /// (it is never invoked by Kahuna's key-range path).
 /// </para>
@@ -35,13 +34,13 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// </para>
 ///
 /// <para>
-/// <b>Import safety (idempotent-copy model, design §5.4 — <i>not</i> raw all-or-nothing).</b> Entries
+/// <b>Import safety (idempotent-copy model — <i>not</i> raw all-or-nothing).</b> Entries
 /// are buffered and applied only after the whole stream is read + checksum-verified, so a crash while
 /// <i>reading</i> is a clean no-op. The apply itself is <b>not</b> cross-shard atomic:
 /// <see cref="IPersistenceBackend.StoreKeyValues"/> groups by shard and commits one transaction per
 /// shard, so a crash <i>mid-store</i> can leave a partial apply. That is safe by construction — the
 /// target is a fresh empty partition, the copy is idempotent (re-import overwrites the same keys), and
-/// the split's atomic point is the cutover meta-transaction (Task 6), which runs <b>only after a
+/// the split's atomic point is the cutover meta-transaction, which runs <b>only after a
 /// fully-successful import</b>. A partial/failed import is retried or the fresh partition discarded; it
 /// is never cut over.
 /// </para>
@@ -138,7 +137,7 @@ internal sealed class KvStateMachineTransfer : IRaftStateMachineTransfer
     /// buffers all entries, then applies them via <see cref="IPersistenceBackend.StoreKeyValues"/>. A
     /// crash/cancel before the apply leaves the target untouched; the apply commits per shard (not
     /// cross-shard atomic), so a crash mid-store may leave a partial apply — safe because the copy is
-    /// idempotent and Task 6 cuts over only after a fully-successful import (see type remarks, §5.4).
+    /// idempotent and cutover happens only after a fully-successful import (see type remarks).
     /// </summary>
     public Task ImportRangeAsync(Stream snapshot, CancellationToken ct)
     {
@@ -177,8 +176,8 @@ internal sealed class KvStateMachineTransfer : IRaftStateMachineTransfer
 
         // Apply only after the whole stream is buffered + verified, so a crash while reading is a
         // no-op. StoreKeyValues commits per shard (not cross-shard atomic), so a crash mid-store can
-        // leave a partial apply — safe by construction: the copy is idempotent and Task 6 cuts over
-        // only after a fully-successful import (§5.4).
+        // leave a partial apply — safe by construction: the copy is idempotent and cutover happens
+        // only after a fully-successful import.
         ct.ThrowIfCancellationRequested();
 
         if (items.Count > 0 && !persistenceBackend.StoreKeyValues(items))
@@ -187,7 +186,7 @@ internal sealed class KvStateMachineTransfer : IRaftStateMachineTransfer
         return Task.CompletedTask;
     }
 
-    // ── Range-lock serialization (T5) ────────────────────────────────────────────
+    // ── Range-lock serialization ────────────────────────────────────────────
 
     /// <summary>
     /// Serializes the range-lock entries for <paramref name="keySpace"/> that overlap
@@ -396,7 +395,7 @@ internal sealed class KvStateMachineTransfer : IRaftStateMachineTransfer
     /// overlapping bounds) in <paramref name="present"/>. The splitter uses this to confirm a lock
     /// transfer actually landed on the <em>current</em> destination-partition leader before relying
     /// on it — a freshly-created partition can change leadership between import and use, stranding
-    /// the in-memory (non-replicated) lock on a node that is no longer the leader (T5b option A).
+    /// the in-memory (non-replicated) lock on a node that is no longer the leader.
     /// </summary>
     public static bool AllLocksPresent(
         IReadOnlyList<KeyValueRangeLock> expected,
@@ -434,9 +433,9 @@ internal sealed class KvStateMachineTransfer : IRaftStateMachineTransfer
     /// <paramref name="partitionId"/>, re-importing if a leadership change stranded them on a former
     /// leader after the pre-cutover import. Requires <see cref="LockConfirmStableReads"/> consecutive
     /// present-reads (separated by a delay) before returning, so a leadership change mid-confirm is
-    /// caught and re-imported. Best-effort with bounded retries (T5 option A). Locks are in-memory
+    /// caught and re-imported. Best-effort with bounded retries. Locks are in-memory
     /// and non-replicated, so a leadership change after the final stable confirm can still strand a
-    /// lock — the robust fix is option B (replicate through the partition's Raft log). See T5d.
+    /// lock — the robust fix is to replicate through the partition's Raft log.
     /// </summary>
     internal static async Task EnsureLocksOnDestinationLeaderAsync(
         KeyValuesManager manager,
@@ -474,7 +473,7 @@ internal sealed class KvStateMachineTransfer : IRaftStateMachineTransfer
 
         logger.LogWarning(
             "{Caller}: range locks for {Space} not confirmed stable on P{Partition} leader after {Attempts} attempts; "
-            + "a leadership change may have stranded an in-memory (non-replicated) lock — see T5 option B",
+            + "a leadership change may have stranded an in-memory (non-replicated) lock",
             callerTag, keySpace, partitionId, LockConfirmMaxAttempts);
     }
 
@@ -511,7 +510,7 @@ internal sealed class KvStateMachineTransfer : IRaftStateMachineTransfer
     public Task<Stream> ExportRange(RaftSplitPlan plan, long upToIndex, CancellationToken ct) =>
         throw new NotSupportedException(
             "Kahuna key-range transfers are driven via ExportRangeAsync with explicit key bounds; " +
-            "RaftSplitPlan carries no key range (design §7).");
+            "RaftSplitPlan carries no key range.");
 
     /// <summary>Coordinator-driven import — applies the stream exactly like the native path.</summary>
     public Task ImportRange(int targetPartitionId, Stream snapshot, CancellationToken ct) =>

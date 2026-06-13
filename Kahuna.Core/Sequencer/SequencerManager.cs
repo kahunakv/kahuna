@@ -40,6 +40,7 @@ internal sealed class SequencerManager
             HLCTimestamp.Zero,
             GetStorageKey(normalizedName),
             -1,
+            HLCTimestamp.Zero,
             ToKeyValueDurability(durability),
             cancellationToken
         ).ConfigureAwait(false);
@@ -141,6 +142,7 @@ internal sealed class SequencerManager
                     HLCTimestamp.Zero,
                     GetStorageKey(normalizedName),
                     -1,
+                    HLCTimestamp.Zero,
                     ToKeyValueDurability(durability),
                     cancellationToken
                 ).ConfigureAwait(false);

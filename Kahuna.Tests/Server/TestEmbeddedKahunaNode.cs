@@ -123,6 +123,7 @@ public sealed class TestEmbeddedKahunaNode
             HLCTimestamp.Zero,
             "tenant/table/key-a",
             -1,
+            HLCTimestamp.Zero,
             KeyValueDurability.Persistent,
             TestContext.Current.CancellationToken
         );
@@ -199,6 +200,7 @@ public sealed class TestEmbeddedKahunaNode
             HLCTimestamp.Zero,
             txKey,
             -1,
+            HLCTimestamp.Zero,
             KeyValueDurability.Persistent,
             TestContext.Current.CancellationToken
         );
@@ -556,6 +558,7 @@ public sealed class TestEmbeddedKahunaNode
                 HLCTimestamp.Zero,
                 "tenant/rocksdb/key-a",
                 -1,
+                HLCTimestamp.Zero,
                 KeyValueDurability.Persistent,
                 TestContext.Current.CancellationToken
             );

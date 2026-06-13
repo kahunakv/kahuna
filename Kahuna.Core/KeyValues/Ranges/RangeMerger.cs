@@ -7,7 +7,7 @@ using Kahuna.Shared.KeyValue;
 namespace Kahuna.Server.KeyValues.Ranges;
 
 /// <summary>
-/// Executes the key-range merge transaction (design §6):
+/// Executes the key-range merge transaction:
 /// <c>[A,B)@P1 + [B,C)@P2</c> → <c>[A,C)@P1</c>, retiring P2.
 ///
 /// <para>
@@ -27,14 +27,14 @@ namespace Kahuna.Server.KeyValues.Ranges;
 ///
 /// <para>
 /// <b>No quiesce lock.</b> The split uses a range lock to quiesce 2PC commits during the
-/// catch-up window (design §5.5). The merge does not, because
+/// catch-up window. The merge does not, because
 /// <c>LocateAndTryAcquireExclusiveRangeLock</c> rejects prefix ops over split keyspaces (the
-/// partial-result safety guard added during Task 10). With today's node-global persistence
+/// partial-result safety guard). With today's node-global persistence
 /// backend, a write to <c>[B,C)</c> that commits after the snapshot and before the cutover is
 /// still visible on P1 (P1 and P2 share the same store; the export/import is a no-op as noted
 /// above). The correctness gap only materialises under future partition-scoped storage.
 /// Accepting the current gap is reasonable for under-min ranges (very few keys, low load); full
-/// per-descriptor lock support is deferred to Task 11.
+/// per-descriptor lock support is deferred.
 /// </para>
 ///
 /// <para>
@@ -210,7 +210,7 @@ internal sealed class RangeMerger
             return MergeOutcome.CutoverFailed;
         }
 
-        // -- 3b. Post-cutover confirm-and-reimport (option A hardening) ----------------------
+        // -- 3b. Post-cutover confirm-and-reimport (best-effort hardening) ----------------------
         // After cutover the left partition is the authoritative route for [B,C). A left-leadership
         // change during the pre-cutover window can strand the imported locks on a former leader.
         // Re-read the current left leader's LocksByRange and re-import any missing entries.

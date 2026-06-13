@@ -45,6 +45,7 @@ internal sealed class GetCommand : BaseCommand
             context.TransactionId,
             keyName,
             compareRevision,
+            HLCTimestamp.Zero,
             durability,
             cancellationToken
         );

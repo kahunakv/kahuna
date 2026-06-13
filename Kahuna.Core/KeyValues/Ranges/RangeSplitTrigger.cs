@@ -29,7 +29,7 @@ namespace Kahuna.Server.KeyValues.Ranges;
 ///
 /// <para>
 /// <b>Size dimension.</b> "Size" is measured in sampled key count, not bytes or request load.
-/// Byte-size and load-based splitting are explicitly deferred to Task 12.
+/// Byte-size and load-based splitting are explicitly deferred.
 /// </para>
 ///
 /// <para>

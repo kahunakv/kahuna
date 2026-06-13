@@ -57,7 +57,7 @@ internal sealed class KeyValueProposalActor : IActor<KeyValueProposalRequest>
 
         int partitionId;
 
-        // Generation fence (Task 4, design §4). For key-range spaces the partition + generation come
+        // Generation fence. For key-range spaces the partition + generation come
         // from the replicated descriptor map; if the range moved or split since the request routed
         // (no covering descriptor, or a bumped generation), reject with MustRetry so the client
         // re-resolves LocateRange and retries — never a double-apply into the stale partition. Hash

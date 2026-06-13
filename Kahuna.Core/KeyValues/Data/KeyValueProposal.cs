@@ -74,7 +74,7 @@ internal sealed class KeyValueProposal
 
     /// <summary>
     /// The <see cref="Kahuna.Server.KeyValues.Ranges.RangeDescriptor.Generation"/> the client routed
-    /// on for a key-range space (Task 4 fence). 0 = hash space / not range-routed (no fence). The
+    /// on for a key-range space (descriptor fence). 0 = hash space / not range-routed (no fence). The
     /// proposal actor rejects the write with <c>MustRetry</c> if the current descriptor generation no
     /// longer matches this — the range moved/split since routing.
     /// </summary>

@@ -465,18 +465,22 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         HLCTimestamp transactionId,
         string key,
         long revision,
+        HLCTimestamp readTimestamp,
         KeyValueDurability durability,
         CancellationToken cancellationToken
     )
     {
         GrpcTryGetKeyValueRequest request = new()
         {
-            TransactionIdNode = transactionId.N,
+            TransactionIdNode     = transactionId.N,
             TransactionIdPhysical = transactionId.L,
-            TransactionIdCounter = transactionId.C,
-            Key = key,
-            Revision = revision,
-            Durability = (GrpcKeyValueDurability) durability,
+            TransactionIdCounter  = transactionId.C,
+            Key                   = key,
+            Revision              = revision,
+            Durability            = (GrpcKeyValueDurability)durability,
+            ReadTimestampNode     = readTimestamp.N,
+            ReadTimestampPhysical = readTimestamp.L,
+            ReadTimestampCounter  = readTimestamp.C,
         };
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);               

@@ -12,7 +12,7 @@ using Microsoft.Extensions.Logging;
 namespace Kahuna.Tests.Server;
 
 /// <summary>
-/// Integration tests for LocateAndScanRange (Task 7) — the IAsyncEnumerable surface over
+/// Integration tests for LocateAndScanRange — the IAsyncEnumerable surface over
 /// cursor-paged GetByRange calls. Tests cover single-node, multi-node, snapshot isolation,
 /// cancellation, and the retry-resumes-from-cursor guarantee.
 /// </summary>
@@ -76,7 +76,7 @@ public class TestLocateAndScanRange : BaseCluster
         List<(string, ReadOnlyKeyValueEntry)> items = await Drain(node.Kahuna.LocateAndScanRange(
             HLCTimestamp.Zero, prefix,
             null, true, null, false,
-            pageSize: 7, durability,
+            pageSize: 7, HLCTimestamp.Zero, durability,
             TestContext.Current.CancellationToken));
 
         Assert.Equal(total, items.Count);
@@ -100,7 +100,7 @@ public class TestLocateAndScanRange : BaseCluster
         List<(string, ReadOnlyKeyValueEntry)> scanned = await Drain(node.Kahuna.LocateAndScanRange(
             HLCTimestamp.Zero, prefix,
             null, true, null, false,
-            pageSize: 3, KeyValueDurability.Ephemeral,
+            pageSize: 3, HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
             TestContext.Current.CancellationToken));
 
         KeyValueGetByBucketResult bucket = await node.Kahuna.LocateAndGetByBucket(
@@ -133,7 +133,7 @@ public class TestLocateAndScanRange : BaseCluster
         await foreach ((string key, ReadOnlyKeyValueEntry _) in node.Kahuna.LocateAndScanRange(
             HLCTimestamp.Zero, prefix,
             null, true, null, false,
-            pageSize: 3, durability,
+            pageSize: 3, HLCTimestamp.Zero, durability,
             TestContext.Current.CancellationToken))
         {
             seen.Add(key);
@@ -179,7 +179,7 @@ public class TestLocateAndScanRange : BaseCluster
         List<(string, ReadOnlyKeyValueEntry)> items = await Drain(node.Kahuna.LocateAndScanRange(
             HLCTimestamp.Zero, "scan/nobody",
             null, true, null, false,
-            pageSize: 10, KeyValueDurability.Ephemeral,
+            pageSize: 10, HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
             TestContext.Current.CancellationToken));
 
         Assert.Empty(items);
@@ -204,7 +204,7 @@ public class TestLocateAndScanRange : BaseCluster
             await foreach ((string _, ReadOnlyKeyValueEntry _) in node.Kahuna.LocateAndScanRange(
                 HLCTimestamp.Zero, "scan/cancel",
                 null, true, null, false,
-                pageSize: 5, KeyValueDurability.Ephemeral,
+                pageSize: 5, HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
                 cts.Token))
             {
                 count++;
@@ -232,7 +232,7 @@ public class TestLocateAndScanRange : BaseCluster
         List<(string, ReadOnlyKeyValueEntry)> items = await Drain(node.Kahuna.LocateAndScanRange(
             HLCTimestamp.Zero, "scan/partial",
             "scan/partial/0005", true, null, false,
-            pageSize: 3, KeyValueDurability.Ephemeral,
+            pageSize: 3, HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
             TestContext.Current.CancellationToken));
 
         Assert.Equal(5, items.Count);
@@ -263,7 +263,7 @@ public class TestLocateAndScanRange : BaseCluster
             List<(string, ReadOnlyKeyValueEntry)> items = await Drain(k3.LocateAndScanRange(
                 HLCTimestamp.Zero, prefix,
                 null, true, null, false,
-                pageSize: 6, durability,
+                pageSize: 6, HLCTimestamp.Zero, durability,
                 TestContext.Current.CancellationToken));
 
             Assert.Equal(total, items.Count);
@@ -299,7 +299,7 @@ public class TestLocateAndScanRange : BaseCluster
             await foreach ((string key, ReadOnlyKeyValueEntry _) in k2.LocateAndScanRange(
                 HLCTimestamp.Zero, prefix,
                 null, true, null, false,
-                pageSize: 4, durability,
+                pageSize: 4, HLCTimestamp.Zero, durability,
                 TestContext.Current.CancellationToken))
             {
                 seen.Add(key);
@@ -345,7 +345,7 @@ public class TestLocateAndScanRange : BaseCluster
             (await Drain(node.Kahuna.LocateAndScanRange(
                 HLCTimestamp.Zero, "scan/cursor",
                 null, true, null, false,
-                pageSize: ps, KeyValueDurability.Ephemeral,
+                pageSize: ps, HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
                 TestContext.Current.CancellationToken)))
             .Select(i => i.Item1).ToList();
 
@@ -358,7 +358,7 @@ public class TestLocateAndScanRange : BaseCluster
         Assert.Equal(30,       byOne.Count);
     }
 
-    // ── Task 10: multi-range stitch ───────────────────────────────────────────
+    // ── Multi-range stitch ───────────────────────────────────────────
 
     private const string SplitSpace = "tbl:r";
 
@@ -399,7 +399,7 @@ public class TestLocateAndScanRange : BaseCluster
     }
 
     /// <summary>
-    /// Task 10 — Scan_SpanningMultipleRanges_ReturnsFullOrderedResult
+    /// Scan_SpanningMultipleRanges_ReturnsFullOrderedResult
     ///
     /// Seeds keys into a key-range space, splits it at the midpoint, then verifies that
     /// LocateAndScanRange returns every key in order with no gaps, stitching across both partitions.
@@ -463,7 +463,7 @@ public class TestLocateAndScanRange : BaseCluster
                     await WaitUntilScanAsync(async () =>
                     {
                         (KeyValueResponseType rt, _) =
-                            await kahuna.TryGetValue(HLCTimestamp.Zero, key, 0, KeyValueDurability.Persistent);
+                            await kahuna.TryGetValue(HLCTimestamp.Zero, key, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent);
                         return rt == KeyValueResponseType.Get;
                     });
             }
@@ -500,7 +500,7 @@ public class TestLocateAndScanRange : BaseCluster
                 k2.LocateAndScanRange(
                     HLCTimestamp.Zero, SplitSpace,
                     null, true, null, false,
-                    pageSize: 7, KeyValueDurability.Persistent, ct));
+                    pageSize: 7, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct));
 
             Assert.Equal(total, items.Count);
 
@@ -521,7 +521,7 @@ public class TestLocateAndScanRange : BaseCluster
     }
 
     /// <summary>
-    /// Task 10 — Scan_SplitMidIteration_NoDuplicateOrMissingRows
+    /// Scan_SplitMidIteration_NoDuplicateOrMissingRows
     ///
     /// Captures the complete key set before a split, then re-scans after the split, and verifies
     /// the post-split scan returns exactly the same keys (no duplicates, no missing rows).
@@ -581,7 +581,7 @@ public class TestLocateAndScanRange : BaseCluster
                     await WaitUntilScanAsync(async () =>
                     {
                         (KeyValueResponseType rt, _) =
-                            await kahuna.TryGetValue(HLCTimestamp.Zero, key, 0, KeyValueDurability.Persistent);
+                            await kahuna.TryGetValue(HLCTimestamp.Zero, key, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent);
                         return rt == KeyValueResponseType.Get;
                     });
             }
@@ -589,7 +589,7 @@ public class TestLocateAndScanRange : BaseCluster
             // Baseline scan (unsplit — single partition).
             List<string> baseline = (await Drain(k1.LocateAndScanRange(
                 HLCTimestamp.Zero, space, null, true, null, false,
-                pageSize: 10, KeyValueDurability.Persistent, ct)))
+                pageSize: 10, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct)))
                 .Select(x => x.Item1).ToList();
             Assert.Equal(total, baseline.Count);
 
@@ -621,7 +621,7 @@ public class TestLocateAndScanRange : BaseCluster
             // Post-split scan must match the baseline exactly.
             List<string> afterSplit = (await Drain(k3.LocateAndScanRange(
                 HLCTimestamp.Zero, space, null, true, null, false,
-                pageSize: 5, KeyValueDurability.Persistent, ct)))
+                pageSize: 5, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct)))
                 .Select(x => x.Item1).ToList();
 
             Assert.Equal(baseline.Count, afterSplit.Count);
@@ -634,7 +634,7 @@ public class TestLocateAndScanRange : BaseCluster
     }
 
     /// <summary>
-    /// Task 10 — Scan_SplitMidIteration_ResumesViaCursor
+    /// Scan_SplitMidIteration_ResumesViaCursor
     ///
     /// Fetches page 1 of a paged scan, then splits the space, then resumes from the returned
     /// cursor. Verifies that the full result set (page 1 + resumed pages) equals the pre-split
@@ -699,7 +699,7 @@ public class TestLocateAndScanRange : BaseCluster
                     await WaitUntilScanAsync(async () =>
                     {
                         (KeyValueResponseType rt, _) =
-                            await kahuna.TryGetValue(HLCTimestamp.Zero, key, 0, KeyValueDurability.Persistent);
+                            await kahuna.TryGetValue(HLCTimestamp.Zero, key, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent);
                         return rt == KeyValueResponseType.Get;
                     });
             }
@@ -707,7 +707,7 @@ public class TestLocateAndScanRange : BaseCluster
             // ── baseline (unsplit, from k1) ────────────────────────────────────
             List<string> baseline = (await Drain(k1.LocateAndScanRange(
                 HLCTimestamp.Zero, space, null, true, null, false,
-                pageSize: 100, KeyValueDurability.Persistent, ct)))
+                pageSize: 100, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct)))
                 .Select(x => x.Item1).ToList();
             Assert.Equal(total, baseline.Count);
 

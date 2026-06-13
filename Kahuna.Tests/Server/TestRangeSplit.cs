@@ -11,7 +11,7 @@ using Microsoft.Extensions.Logging;
 namespace Kahuna.Tests.Server;
 
 /// <summary>
-/// Acceptance tests for Task 6 — the key-range split transaction.
+/// Acceptance tests for the key-range split transaction.
 /// Each test uses a 4-partition 3-node cluster (meta P1 + data P2/P3/P4).
 /// </summary>
 public sealed class TestRangeSplit : BaseCluster
@@ -154,7 +154,7 @@ public sealed class TestRangeSplit : BaseCluster
                 await WaitUntil(async () =>
                 {
                     (KeyValueResponseType rt, _) = await kahuna.TryGetValue(
-                        HLCTimestamp.Zero, k, 0, KeyValueDurability.Persistent);
+                        HLCTimestamp.Zero, k, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent);
                     return rt == KeyValueResponseType.Get;
                 });
             }
@@ -225,7 +225,7 @@ public sealed class TestRangeSplit : BaseCluster
             foreach (string key in keysAbove)
             {
                 (KeyValueResponseType rt, ReadOnlyKeyValueEntry? entry) = await newPartLeader.TryGetValue(
-                    HLCTimestamp.Zero, key, 0, KeyValueDurability.Persistent);
+                    HLCTimestamp.Zero, key, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent);
                 Assert.Equal(KeyValueResponseType.Get, rt);
                 Assert.Equal("v", System.Text.Encoding.UTF8.GetString(entry!.Value!));
             }
@@ -406,7 +406,7 @@ public sealed class TestRangeSplit : BaseCluster
                     await WaitUntil(async () =>
                     {
                         (KeyValueResponseType rt, _) = await kahuna.TryGetValue(
-                            HLCTimestamp.Zero, k, 0, KeyValueDurability.Persistent);
+                            HLCTimestamp.Zero, k, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent);
                         return rt == KeyValueResponseType.Get;
                     });
                 }
@@ -426,7 +426,7 @@ public sealed class TestRangeSplit : BaseCluster
             foreach (string key in keysAbove)
             {
                 (KeyValueResponseType rt, _) = await newLeader.TryGetValue(
-                    HLCTimestamp.Zero, key, 0, KeyValueDurability.Persistent);
+                    HLCTimestamp.Zero, key, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent);
                 Assert.Equal(KeyValueResponseType.Get, rt);
             }
 
@@ -436,7 +436,7 @@ public sealed class TestRangeSplit : BaseCluster
                 foreach ((IRaft _, KahunaManager kahuna) in nodes)
                 {
                     (KeyValueResponseType rt, ReadOnlyKeyValueEntry? entry) = await kahuna.TryGetValue(
-                        HLCTimestamp.Zero, key, 0, KeyValueDurability.Persistent);
+                        HLCTimestamp.Zero, key, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent);
                     Assert.Equal(KeyValueResponseType.Get, rt);
                     Assert.Equal("bystander", System.Text.Encoding.UTF8.GetString(entry!.Value!));
                 }
@@ -454,7 +454,7 @@ public sealed class TestRangeSplit : BaseCluster
     // ── Split_2pcStraddlingK_AtCutover_RetriesNeverDoubleApplies ─────────────────
 
     /// <summary>
-    /// Verifies the 2PC generation fence (Task 4, §4 — Prepare path):
+    /// Verifies the 2PC generation fence (prepare path):
     /// A Prepare carrying a stale routed generation is rejected with MustRetry; the write intent
     /// is preserved so the coordinator can retry with the current generation; the retry commits
     /// exactly once. No double-apply.
@@ -525,7 +525,7 @@ public sealed class TestRangeSplit : BaseCluster
 
             // Assert written exactly once: the value is present, matches, and has a single revision.
             (KeyValueResponseType get, ReadOnlyKeyValueEntry? entry) = await p2Leader.TryGetValue(
-                HLCTimestamp.Zero, key, -1, KeyValueDurability.Persistent);
+                HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent);
             Assert.Equal(KeyValueResponseType.Get, get);
             Assert.Equal(val, Encoding.UTF8.GetString(entry!.Value!));
         }
@@ -541,7 +541,7 @@ public sealed class TestRangeSplit : BaseCluster
         raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
     /// <summary>
-    /// T4 acceptance test — verifies that a Shared range lock acquired on the original
+    /// Verifies that a Shared range lock acquired on the original
     /// partition (P2) before a split is NOT wiped out by the split, and that the S/X
     /// compatibility matrix still holds on P2 after the split completes.
     ///
@@ -602,16 +602,16 @@ public sealed class TestRangeSplit : BaseCluster
         }
     }
 
-    // ── T5b lock-transfer tests ───────────────────────────────────────────────────
+    // ── Lock-transfer tests ───────────────────────────────────────────────────
 
     /// <summary>
     /// Runs a split lock-transfer scenario with bounded retries (each attempt on a fresh cluster) to
-    /// tolerate the documented best-effort gap of T5b option A: a freshly-created partition can
+    /// tolerate the documented best-effort gap: a freshly-created partition can
     /// re-elect and strand the in-memory, non-replicated lock on a former leader. <paramref
     /// name="attempt"/> returns true when the transfer-dependent guarantee held; false signals a
     /// strand and triggers a retry. Hard bugs surface as exceptions inside the attempt (no masking).
-    /// The robust fix that removes the retry is option B — replicate locks through the partition's
-    /// Raft log (see T5d in specs/spec-shared-range-locks-tasks.md).
+    /// The robust fix that removes the retry is to replicate locks through the partition's
+    /// Raft log.
     /// </summary>
     private static async Task RetrySplitTransfer(Func<Task<bool>> attempt, int maxAttempts = 5)
     {
@@ -622,17 +622,17 @@ public sealed class TestRangeSplit : BaseCluster
         }
 
         Assert.Fail($"split lock-transfer guarantee not observed after {maxAttempts} attempts " +
-                    "(best-effort under leadership churn — see T5b option A / T5d)");
+                    "(best-effort under leadership churn)");
     }
 
     /// <summary>
-    /// T5b: an Exclusive range lock acquired on [−∞,+∞) before the split must be enforced on the
+    /// An Exclusive range lock acquired on [−∞,+∞) before the split must be enforced on the
     /// new partition (P') after cutover. A second exclusive attempt on the new partition must return
     /// AlreadyLocked, proving the clamped lock was transferred.
     /// </summary>
-    [Fact(Skip = "Best-effort under T5b option A: a freshly-created/re-electing destination partition " +
-                 "can strand the in-memory, non-replicated lock. Re-enable when T5d (option B — replicate " +
-                 "range locks through the partition Raft log) lands and makes the guarantee deterministic.")]
+    [Fact(Skip = "Best-effort: a freshly-created/re-electing destination partition " +
+                 "can strand the in-memory, non-replicated lock. Re-enable when range locks are replicated " +
+                 "through the partition Raft log, which makes the guarantee deterministic.")]
     public Task Lock_SpanningSplit_EnforcedOnNewPartition() => RetrySplitTransfer(async () =>
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
@@ -651,7 +651,7 @@ public sealed class TestRangeSplit : BaseCluster
                 KeyValueDurability.Persistent, RangeLockMode.Exclusive);
             Assert.Equal(KeyValueResponseType.Locked, lockBefore);
 
-            // Split at Space+"/m" — T5b must transfer tx1's clamped lock to the new partition.
+            // Split at Space+"/m" — must transfer tx1's clamped lock to the new partition.
             SplitOutcome outcome = await SplitViaLeaders(Space, Space + "/m", nodes, ct);
             Assert.True(outcome.IsSuccess, $"Split failed: {outcome.Status}");
 
@@ -675,12 +675,12 @@ public sealed class TestRangeSplit : BaseCluster
     });
 
     /// <summary>
-    /// T5b: when a Shared lock spans the split, BOTH halves after the split must still allow
+    /// When a Shared lock spans the split, BOTH halves after the split must still allow
     /// another Shared lock (S∩S coexist) but block an Exclusive (X conflicts with S).
     /// </summary>
-    [Fact(Skip = "Best-effort under T5b option A: a freshly-created/re-electing destination partition " +
-                 "can strand the in-memory, non-replicated lock. Re-enable when T5d (option B — replicate " +
-                 "range locks through the partition Raft log) lands and makes the guarantee deterministic.")]
+    [Fact(Skip = "Best-effort: a freshly-created/re-electing destination partition " +
+                 "can strand the in-memory, non-replicated lock. Re-enable when range locks are replicated " +
+                 "through the partition Raft log, which makes the guarantee deterministic.")]
     public Task SharedLock_SpanningSplit_BothHalvesCoexist() => RetrySplitTransfer(async () =>
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
@@ -742,12 +742,12 @@ public sealed class TestRangeSplit : BaseCluster
     });
 
     /// <summary>
-    /// T5b: releasing a lock that was transferred across a split cleans up the clamped entry
+    /// Releasing a lock that was transferred across a split cleans up the clamped entry
     /// from the new partition's actor. After release a fresh Exclusive lock must be granted.
     /// </summary>
-    [Fact(Skip = "Best-effort under T5b option A: a freshly-created/re-electing destination partition " +
-                 "can strand the in-memory, non-replicated lock. Re-enable when T5d (option B — replicate " +
-                 "range locks through the partition Raft log) lands and makes the guarantee deterministic.")]
+    [Fact(Skip = "Best-effort: a freshly-created/re-electing destination partition " +
+                 "can strand the in-memory, non-replicated lock. Re-enable when range locks are replicated " +
+                 "through the partition Raft log, which makes the guarantee deterministic.")]
     public Task Lock_SpanningSplit_ReleaseCleansBothHalves() => RetrySplitTransfer(async () =>
     {
         CancellationToken ct = TestContext.Current.CancellationToken;

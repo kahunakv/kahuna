@@ -5,7 +5,7 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// Injects a list of <see cref="KeyValueRangeLock"/> entries directly into
 /// <c>LocksByRange[keySpace]</c> without running conflict checks or acquire logic.
 /// Used by <c>KvStateMachineTransfer</c> to restore clamped locks into a destination
-/// partition after a split or merge (T5).
+/// partition after a split or merge.
 ///
 /// <para>
 /// Deduplication: an entry is skipped when an existing entry for the same transaction

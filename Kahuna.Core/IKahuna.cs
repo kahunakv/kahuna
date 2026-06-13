@@ -41,7 +41,7 @@ public interface IKahuna
 
     public Task<KeyValueResponseType> LocateAndTryCheckWriteIntent(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken);
 
-    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken);
+    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken);
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(HLCTimestamp transactionId, List<(string key, long revision, KeyValueDurability durability)> keys, CancellationToken cancellationToken);
 
@@ -58,8 +58,9 @@ public interface IKahuna
     /// <summary>
     /// Streams all key-value entries whose keys start with <paramref name="prefix"/> as an
     /// <see cref="IAsyncEnumerable{T}"/>, fetching results in cursor-paged batches of
-    /// <paramref name="pageSize"/> items. The snapshot timestamp is captured on the first page
-    /// and held fixed across all subsequent pages for a consistent read.
+    /// <paramref name="pageSize"/> items. When <paramref name="readTimestamp"/> is non-Zero the whole
+    /// scan is pinned to that snapshot; when Zero the snapshot is captured on the first page. Either
+    /// way it is held fixed across all subsequent pages for a consistent read.
     /// </summary>
     public IAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> LocateAndScanRange(
         HLCTimestamp txId,
@@ -69,6 +70,7 @@ public interface IKahuna
         string? endKey,
         bool endInclusive,
         int pageSize,
+        HLCTimestamp readTimestamp,
         KeyValueDurability durability,
         CancellationToken ct);
 
@@ -80,7 +82,7 @@ public interface IKahuna
 
     public Task<List<KahunaDeleteKeyValueResponseItem>> DeleteManyNodeKeyValue(List<KahunaDeleteKeyValueRequestItem> items);
 
-    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability);
+    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability);
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryGetManyValues(HLCTimestamp transactionId, List<(string key, long revision, KeyValueDurability durability)> keys);
     
@@ -134,10 +136,10 @@ public interface IKahuna
 
     public Task<KeyValueResponseType> TryAcquireExclusiveRangeLock(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability);
 
-    /// <summary>Returns live range locks for <paramref name="keySpace"/> from the local actor (T5 export).</summary>
+    /// <summary>Returns live range locks for <paramref name="keySpace"/> from the local actor (export).</summary>
     public Task<List<KeyValueRangeLock>> GetRangeLocks(string keySpace);
 
-    /// <summary>Injects clamped lock entries into the local actor for <paramref name="keySpace"/> (T5 import).</summary>
+    /// <summary>Injects clamped lock entries into the local actor for <paramref name="keySpace"/> (import).</summary>
     public Task ImportRangeLocks(string keySpace, List<KeyValueRangeLock> locks);
     
     public Task<(KeyValueResponseType, string)> TryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueDurability durability);

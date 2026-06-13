@@ -46,12 +46,12 @@ public class TestKeyValues : BaseCluster
             Assert.Equal(KeyValueResponseType.Set, response);
             Assert.Equal(0, revision);
         
-            (response, ReadOnlyKeyValueEntry? readOnlyKeyValueContext) = await kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, keyName, -1, durability, TestContext.Current.CancellationToken);
+            (response, ReadOnlyKeyValueEntry? readOnlyKeyValueContext) = await kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, keyName, -1, HLCTimestamp.Zero, durability, TestContext.Current.CancellationToken);
             Assert.Equal(KeyValueResponseType.Get, response);
             Assert.NotNull(readOnlyKeyValueContext);
             Assert.Equal(0, readOnlyKeyValueContext.Revision);
         
-            (response, readOnlyKeyValueContext) = await kahuna3.LocateAndTryGetValue(HLCTimestamp.Zero, keyName, -1, durability, TestContext.Current.CancellationToken);
+            (response, readOnlyKeyValueContext) = await kahuna3.LocateAndTryGetValue(HLCTimestamp.Zero, keyName, -1, HLCTimestamp.Zero, durability, TestContext.Current.CancellationToken);
             Assert.Equal(KeyValueResponseType.Get, response);
             Assert.NotNull(readOnlyKeyValueContext);
             Assert.Equal(0, readOnlyKeyValueContext.Revision);

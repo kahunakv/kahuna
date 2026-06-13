@@ -131,7 +131,7 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
                 await WaitForAsync(async () =>
                 {
                     (KeyValueResponseType rt, _) =
-                        await kahuna.TryGetValue(HLCTimestamp.Zero, k, 0, KeyValueDurability.Persistent);
+                        await kahuna.TryGetValue(HLCTimestamp.Zero, k, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent);
                     return rt == KeyValueResponseType.Get;
                 });
         }
@@ -345,7 +345,7 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
                     await WaitForAsync(async () =>
                     {
                         (KeyValueResponseType rt, _) =
-                            await kahuna.TryGetValue(HLCTimestamp.Zero, k, 0, KeyValueDurability.Persistent);
+                            await kahuna.TryGetValue(HLCTimestamp.Zero, k, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent);
                         return rt == KeyValueResponseType.Get;
                     });
 
@@ -420,7 +420,7 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
     ///
     /// <para>
     /// Setup: bucket split into 2 descriptors (D0, D1). After D0's pages are collected, a second
-    /// split subdivides D1 into D1a+D1b. Because Task 6 orphan-retains <c>[K,E)</c> on the source
+    /// split subdivides D1 into D1a+D1b. Because the split transaction orphan-retains <c>[K,E)</c> on the source
     /// partition, querying the now-stale D1 descriptor still returns the full D1 range. The final
     /// result must equal the pre-split baseline exactly (no duplicates, no missing keys).
     /// </para>

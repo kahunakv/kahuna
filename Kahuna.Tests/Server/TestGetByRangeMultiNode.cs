@@ -9,7 +9,7 @@ using Microsoft.Extensions.Logging;
 namespace Kahuna.Tests.Server;
 
 /// <summary>
-/// Multi-node integration tests for GetByRange (Task 6).
+/// Multi-node integration tests for GetByRange.
 /// Verifies that paged range scans forwarded to a remote leader work correctly:
 /// no full-table buffering on either node, snapshot consistency held across pages.
 /// </summary>

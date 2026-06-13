@@ -7,7 +7,7 @@ using Microsoft.Extensions.Logging;
 namespace Kahuna.Tests.Server;
 
 /// <summary>
-/// Tests for Task 9 — the routing mass-switch.
+/// Tests for the routing mass-switch.
 /// Verifies that key-range spaces route through the descriptor map at both the locator and the
 /// proposal actor, that schema-log spaces stay hash-routed, and that the registry guard prevents
 /// accidental KeyRange registration of schema-log key spaces.
@@ -55,7 +55,7 @@ public sealed class TestKeySpaceRouting : BaseCluster
 
     /// <summary>
     /// Attempting to register a schema-log key space as KeyRange must throw. Schema-log spaces
-    /// (those whose key space ends in "/meta") must stay hash-routed per the §8 invariant.
+    /// (those whose key space ends in "/meta") must stay hash-routed per the meta-routing invariant.
     /// This test needs no cluster — the guard is in <see cref="KeySpaceRegistry"/>.
     /// </summary>
     [Fact]
@@ -169,7 +169,7 @@ public sealed class TestKeySpaceRouting : BaseCluster
             // Read back from the P2 leader to confirm the write landed on the descriptor's partition.
             (IRaft _, KahunaManager dataLeader) = await LeaderOf(RangeMapStore.FirstDataPartitionId, nodes);
             (KeyValueResponseType rt, _) = await dataLeader.TryGetValue(
-                HLCTimestamp.Zero, Key, 0, KeyValueDurability.Persistent);
+                HLCTimestamp.Zero, Key, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent);
             Assert.Equal(KeyValueResponseType.Get, rt);
         }
         finally

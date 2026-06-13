@@ -12,7 +12,7 @@ using Microsoft.Extensions.Logging;
 namespace Kahuna.Tests.Server;
 
 /// <summary>
-/// Acceptance tests for Task 8 — the key-range merge transaction.
+/// Acceptance tests for the key-range merge transaction.
 /// Each test uses a 4-partition 3-node cluster (meta P1 + data P2 + data P3).
 /// </summary>
 public sealed class TestRangeMerge : BaseCluster
@@ -164,7 +164,7 @@ public sealed class TestRangeMerge : BaseCluster
                 while (Environment.TickCount64 < deadline)
                 {
                     (KeyValueResponseType rt, _) =
-                        await km.TryGetValue(HLCTimestamp.Zero, k, 0, KeyValueDurability.Persistent);
+                        await km.TryGetValue(HLCTimestamp.Zero, k, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent);
                     if (rt == KeyValueResponseType.Get) break;
                     await Task.Delay(25, ct);
                 }
@@ -194,19 +194,19 @@ public sealed class TestRangeMerge : BaseCluster
         return outcome;
     }
 
-    // ── T5c lock-transfer tests ───────────────────────────────────────────────
+    // ── Lock-transfer tests ───────────────────────────────────────────────
 
     private static HLCTimestamp NextTx(IRaft raft) =>
         raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
     /// <summary>
     /// Runs a merge lock-transfer scenario with bounded retries (each attempt on a fresh cluster)
-    /// to tolerate the documented best-effort gap of T5c option A: a left-leadership change during
+    /// to tolerate the documented best-effort gap: a left-leadership change during
     /// the merge window can temporarily strand the in-memory, non-replicated lock on a former
     /// leader. <paramref name="attempt"/> returns true when the transfer-dependent guarantee held;
     /// false signals a strand and triggers a retry. Hard bugs surface as exceptions (no masking).
     /// The post-cutover <c>EnsureLocksOnDestinationLeaderAsync</c> confirm loop narrows the window;
-    /// the robust fix is option B — replicate locks through the partition's Raft log (T5d).
+    /// the robust fix is to replicate locks through the partition's Raft log.
     /// </summary>
     private static async Task RetryMergeTransfer(Func<Task<bool>> attempt, int maxAttempts = 5)
     {
@@ -217,17 +217,17 @@ public sealed class TestRangeMerge : BaseCluster
         }
 
         Assert.Fail($"merge lock-transfer guarantee not observed after {maxAttempts} attempts " +
-                    "(best-effort under leadership churn — see T5c option A / T5d)");
+                    "(best-effort under leadership churn)");
     }
 
     /// <summary>
-    /// T5c: a range lock acquired on the soon-to-be-retired right partition (P3) must be
+    /// A range lock acquired on the soon-to-be-retired right partition (P3) must be
     /// enforced on the surviving left partition (P2) after the merge. A foreign Exclusive
     /// attempt on the merged range → AlreadyLocked.
     /// </summary>
-    [Fact(Skip = "Best-effort under T5c option A: a left-partition leadership change during the merge " +
-                 "window can strand the in-memory, non-replicated lock. Re-enable when T5d (option B — " +
-                 "replicate range locks through the partition Raft log) lands and makes the guarantee " +
+    [Fact(Skip = "Best-effort: a left-partition leadership change during the merge " +
+                 "window can strand the in-memory, non-replicated lock. Re-enable when range locks are " +
+                 "replicated through the partition Raft log, which makes the guarantee " +
                  "deterministic.")]
     public Task Lock_OnMergedPartition_Enforced() => RetryMergeTransfer(async () =>
     {
@@ -251,7 +251,7 @@ public sealed class TestRangeMerge : BaseCluster
                 KeyValueDurability.Persistent, RangeLockMode.Exclusive);
             Assert.Equal(KeyValueResponseType.Locked, lockBefore);
 
-            // Merge right → left (T5c must transfer tx1's lock to the survivor).
+            // Merge right → left (must transfer tx1's lock to the survivor).
             MergeOutcome outcome = await MergeViaLeaders(Space, left, right, nodes, ct);
             Assert.True(outcome.IsSuccess, $"Merge failed: {outcome.Status}");
 
@@ -274,12 +274,12 @@ public sealed class TestRangeMerge : BaseCluster
     });
 
     /// <summary>
-    /// T5c: after a merge, releasing the transferred lock via the survivor left partition cleans
+    /// After a merge, releasing the transferred lock via the survivor left partition cleans
     /// up the clamped entry. A subsequent Exclusive on the same range → Locked.
     /// </summary>
-    [Fact(Skip = "Best-effort under T5c option A: a left-partition leadership change during the merge " +
-                 "window can strand the in-memory, non-replicated lock. Re-enable when T5d (option B — " +
-                 "replicate range locks through the partition Raft log) lands and makes the guarantee " +
+    [Fact(Skip = "Best-effort: a left-partition leadership change during the merge " +
+                 "window can strand the in-memory, non-replicated lock. Re-enable when range locks are " +
+                 "replicated through the partition Raft log, which makes the guarantee " +
                  "deterministic.")]
     public Task Lock_OnMergedPartition_ReleaseCleansSurvivor() => RetryMergeTransfer(async () =>
     {

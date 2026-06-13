@@ -125,17 +125,23 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         // this is to ensure that the assigned transaction will win the race.
         // The write intent lease will by extended by DefaultTxCompleteTimeout
         // it will give the transaction enough time to commit or rollback
+        // CommitTimestamp records the ts the committed revision will carry (mvccEntry.LastModified,
+        // stamped at MVCC write time in TrySetHandler). This lets K3b readers determine whether the
+        // in-flight write will commit at-or-before their readTimestamp without blocking the actor.
+        // CommitId is a different coordinator-supplied fence value and is NOT used here.
         if (entry.WriteIntent is null)
         {
             entry.WriteIntent = new()
             {
-                TransactionId = message.TransactionId,
-                Expires = message.TransactionId + DefaultTxCompleteTimeout
+                TransactionId   = message.TransactionId,
+                Expires         = message.TransactionId + DefaultTxCompleteTimeout,
+                CommitTimestamp = mvccEntry.LastModified
             };
         }
         else
         {
-            entry.WriteIntent.Expires = message.TransactionId + DefaultTxCompleteTimeout;
+            entry.WriteIntent.Expires         = message.TransactionId + DefaultTxCompleteTimeout;
+            entry.WriteIntent.CommitTimestamp = mvccEntry.LastModified;
         }
 
         if (message.Durability != KeyValueDurability.Persistent)
@@ -145,7 +151,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         if (RangeLockChecks.KeyCoveredByForeignRangeLock(context, message.Key, entry.Bucket, message.TransactionId, message.CommitId))
             return new(KeyValueResponseType.MustRetry, 0);
 
-        // Key-range generation fence for 2PC (Task 4 §4 — Prepare path). A non-zero RoutedGeneration
+        // Key-range generation fence for 2PC (prepare path). A non-zero RoutedGeneration
         // was set by the locator at route time; if the descriptor was bumped since then (split or
         // cutover) the proposal would land on the stale partition. Reject with MustRetry so the
         // coordinator re-resolves and retries the transaction on the correct partition.

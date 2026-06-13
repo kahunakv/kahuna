@@ -160,17 +160,41 @@ internal sealed class TryGetHandler : BaseHandler
             return new(KeyValueResponseType.Get, readOnlyKeyValueEntry);
         }
         
+        // Non-transactional snapshot visibility check (mirrors TryGetByRangeHandler.Get lines 328-349).
+        // When the current revision was committed after the snapshot, serve the most recent archived
+        // revision whose LastModified ≤ readTimestamp instead of returning the latest.
+        // txId != Zero + readTimestamp != Zero: leave the MVCC branch above unchanged — serving a
+        // stale revision there would silently weaken the early-conflict/abort guarantee (see
+        // TryGetByRangeHandler comment at lines 285-294). RO snapshot reads use txId = Zero.
+        if (!message.ReadTimestamp.IsNull() && entry is not null && entry.LastModified > message.ReadTimestamp)
+        {
+            if (!entry.TryGetRevisionAtOrBefore(message.ReadTimestamp, out long snapRevision, out KeyValueRevisionEntry snapshot))
+                return KeyValueStaticResponses.DoesNotExistContextResponse;
+
+            if (snapshot.State is KeyValueState.Deleted or KeyValueState.Undefined ||
+                (snapshot.Expires != HLCTimestamp.Zero && snapshot.Expires - currentTime < TimeSpan.Zero))
+                return KeyValueStaticResponses.DoesNotExistContextResponse;
+
+            return new(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
+                snapshot.Value,
+                snapRevision,
+                snapshot.Expires,
+                currentTime,
+                snapshot.LastModified,
+                snapshot.State));
+        }
+
         if (entry is null || entry.State is KeyValueState.Undefined or KeyValueState.Deleted || (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero))
             return KeyValueStaticResponses.DoesNotExistContextResponse;
 
         entry.LastUsed = currentTime;
 
         readOnlyKeyValueEntry = new(
-            entry.Value, 
-            entry.Revision, 
-            entry.Expires, 
-            entry.LastUsed, 
-            entry.LastModified, 
+            entry.Value,
+            entry.Revision,
+            entry.Expires,
+            entry.LastUsed,
+            entry.LastModified,
             entry.State
         );
 

@@ -10,7 +10,7 @@ using Microsoft.Extensions.Logging;
 namespace Kahuna.Tests.Server;
 
 /// <summary>
-/// Acceptance tests for Task 7 — size-based automatic split trigger.
+/// Acceptance tests for the size-based automatic split trigger.
 /// Each cluster test uses a 4-partition 3-node cluster (meta P1 + data P2).
 /// </summary>
 public sealed class TestAutoSplit : BaseCluster
@@ -114,7 +114,7 @@ public sealed class TestAutoSplit : BaseCluster
                 while (Environment.TickCount64 < deadline)
                 {
                     (KeyValueResponseType rt, _) =
-                        await km.TryGetValue(HLCTimestamp.Zero, k, 0, KeyValueDurability.Persistent);
+                        await km.TryGetValue(HLCTimestamp.Zero, k, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent);
                     if (rt == KeyValueResponseType.Get) break;
                     await Task.Delay(25, ct);
                 }

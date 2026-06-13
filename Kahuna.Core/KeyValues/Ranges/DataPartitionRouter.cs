@@ -5,7 +5,7 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// <summary>
 /// Kahuna-owned hash assignment for hash-routed key spaces — the replacement for
 /// <c>IRaft.GetPartitionKey</c> under the decision that <b>Kahuna owns key→partition assignment</b>
-/// (Kommander only hosts groups; its partitions are <c>Unrouted</c>, design §7.4).
+/// (Kommander only hosts groups; its partitions are <c>Unrouted</c>).
 ///
 /// <para>
 /// The hash pool is <b>all user partitions <c>[1, InitialPartitions]</c></b>. Partition 0 is the

@@ -32,7 +32,7 @@ public interface IInterNodeCommunication
 
     public Task<(KeyValueResponseType, long, HLCTimestamp)> TryExtendKeyValue(string node, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken);
 
-    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(string node, HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken);
+    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(string node, HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken);
 
     public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryExistsValue(string node, HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken);
 
@@ -86,9 +86,9 @@ public interface IInterNodeCommunication
 
     public Task<bool> EnsureKeyRangeSeeded(string node, string keySpace, CancellationToken cancellationToken);
 
-    /// <summary>Reads live range locks for <paramref name="keySpace"/> from the actor pool on <paramref name="node"/> (T5).</summary>
+    /// <summary>Reads live range locks for <paramref name="keySpace"/> from the actor pool on <paramref name="node"/>.</summary>
     public Task<List<KeyValueRangeLock>> GetRangeLocks(string node, string keySpace, CancellationToken cancellationToken);
 
-    /// <summary>Injects clamped lock entries into the actor pool for <paramref name="keySpace"/> on <paramref name="node"/> (T5).</summary>
+    /// <summary>Injects clamped lock entries into the actor pool for <paramref name="keySpace"/> on <paramref name="node"/>.</summary>
     public Task ImportRangeLocks(string node, string keySpace, List<KeyValueRangeLock> locks, CancellationToken cancellationToken);
 }

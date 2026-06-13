@@ -3,7 +3,7 @@ using Kahuna.Server.KeyValues.Ranges;
 namespace Kahuna.Tests.Server;
 
 /// <summary>
-/// Unit tests for the in-memory range-descriptor map (Task 1). Pure data structure — no Raft,
+/// Unit tests for the in-memory range-descriptor map. Pure data structure — no Raft,
 /// no cluster. Covers the no-gap/no-overlap invariant (G1), half-open boundary semantics, null
 /// (±inf) bounds, and ordinal ordering.
 /// </summary>

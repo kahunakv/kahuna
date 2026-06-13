@@ -52,7 +52,7 @@ internal sealed class ReleaseProposalHandler : BaseHandler
         context.Proposals.Remove(message.ProposalId);
 
         // A fence-rejected proposal (key-range generation moved) resolves as MustRetry so the client
-        // re-resolves LocateRange and retries on the correct partition (Task 4); otherwise Errored.
+        // re-resolves LocateRange and retries on the correct partition; otherwise Errored.
         KeyValueResponse response = (message.Flags & KeyValueFlags.FenceRetry) != 0
             ? new KeyValueResponse(KeyValueResponseType.MustRetry, 0)
             : KeyValueStaticResponses.ErroredResponse;

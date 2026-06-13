@@ -69,7 +69,7 @@ internal abstract class BaseHandler
         int currentProposalId = Interlocked.Increment(ref proposalId);
 
         // Carry the key-range routing generation from the request into the proposal so the proposal
-        // actor's generation fence (Task 4) can reject a stale-routed write. 0 for hash spaces.
+        // actor's generation fence can reject a stale-routed write. 0 for hash spaces.
         proposal.RoutedGeneration = message.RoutedGeneration;
 
         entry.ReplicationIntent = new()

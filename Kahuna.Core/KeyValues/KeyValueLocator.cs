@@ -57,9 +57,9 @@ internal sealed class KeyValueLocator
     /// <summary>
     /// The key-order router: resolves <paramref name="key"/> to <c>(partitionId,
     /// generation)</c> through the range-descriptor map for key-range spaces, or falls back to the
-    /// hash router (<c>GetPartitionKey</c>) for hash spaces. Added in Task 3 — <b>no caller is
-    /// switched to it yet</b> (that is Task 9, which also points <c>KeyValueProposalActor</c> at the
-    /// same <see cref="RangeRouting.Locate"/> so the two routing sites cannot drift).
+    /// hash router (<c>GetPartitionKey</c>) for hash spaces. Both this router and
+    /// <c>KeyValueProposalActor</c> resolve through the same <see cref="RangeRouting.Locate"/> so the
+    /// two routing sites cannot drift.
     /// </summary>
     public (int PartitionId, long Generation) LocateRange(string key) =>
         RangeRouting.Locate(keySpaceRegistry, manager.RangeMapStore.Current, dataPartitionRouter, key);
@@ -386,29 +386,30 @@ internal sealed class KeyValueLocator
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
-        HLCTimestamp transactionId, 
-        string key, 
+        HLCTimestamp transactionId,
+        string key,
         long revision,
+        HLCTimestamp readTimestamp,
         KeyValueDurability durability,
         CancellationToken cancellationToken
     )
     {
         if (string.IsNullOrEmpty(key))
             return (KeyValueResponseType.InvalidInput, null);
-        
+
         int partitionId = RouteKey(key);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
-            return await manager.TryGetValue(transactionId, key, revision, durability);
-            
+            return await manager.TryGetValue(transactionId, key, revision, readTimestamp, durability);
+
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
             return (KeyValueResponseType.MustRetry, null);
 
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
-        
-        (KeyValueResponseType, ReadOnlyKeyValueEntry?) response = await interNodeCommunication.TryGetValue(leader, transactionId, key, revision, durability, cancellationToken);
-        
+
+        (KeyValueResponseType, ReadOnlyKeyValueEntry?) response = await interNodeCommunication.TryGetValue(leader, transactionId, key, revision, readTimestamp, durability, cancellationToken);
+
         logger.LogDebug("GET-KEYVALUE Redirected {KeyValueName} to leader partition {Partition} at {Leader} Time={Elapsed}ms", key, partitionId, leader, stopwatch.GetElapsedMilliseconds());
 
         return response;
@@ -662,7 +663,7 @@ internal sealed class KeyValueLocator
         {
             // Deprecated by design: a prefix lock is a single-partition bucket lock and cannot cover
             // a key space that has been key-range split across partitions. Callers must use the
-            // per-range exclusive range lock instead (TryAcquireExclusiveRangeLock, design §8).
+            // per-range exclusive range lock instead (TryAcquireExclusiveRangeLock).
             logger.LogWarning("ACQUIRE-PREFIX-LOCK: prefix {Prefix} is on a key-range-split space — prefix locks are unsupported there; use a range lock", prefixKey);
             return KeyValueResponseType.PrefixLockUnsupportedOnRangedSpace;
         }
@@ -1515,7 +1516,7 @@ internal sealed class KeyValueLocator
     /// does not merge the descriptor ranges before dispatching. True locator-level grouping (resolve
     /// leaders → merge adjacent same-leader ranges → one <c>GetByRange</c> per leader) would further
     /// reduce RPC message count on the in-memory and gRPC transports alike; that optimisation is
-    /// deferred to a future task.
+    /// deferred for now.
     /// </para>
     ///
     /// <para>
@@ -1667,7 +1668,7 @@ internal sealed class KeyValueLocator
     /// Locates the leader for the given prefix and executes a bounded, cursor-paged range scan.
     /// For unsplit spaces routes to the single partition leader directly. For split key-range spaces
     /// fans out across all intersecting descriptors in StartKey order, clips each sub-range, and
-    /// merges results maintaining key order (Task 10 multi-range stitch).
+    /// merges results maintaining key order (multi-range stitch).
     /// </summary>
     public async Task<KeyValueGetByRangeResult> LocateAndGetByRange(
         HLCTimestamp transactionId,
@@ -1703,7 +1704,7 @@ internal sealed class KeyValueLocator
 
         // Multi-range path: key-range space has been split; fan out across intersecting descriptors.
         // RangeMap is snapshotted once for this page. A split landing mid-fan-out means the loop
-        // may query a now-stale source partition, but that is safe: Task 6 orphan-retains [K,E) on
+        // may query a now-stale source partition, but that is safe: the split transaction orphan-retains [K,E) on
         // the source, so the fixed readTimestamp (MVCC) still resolves correctly from there. The
         // next page re-resolves RangeMapStore.Current fresh and routes to the new partition.
         string keySpace = KeySpaceRegistry.ExtractKeySpace(prefix + "/");

@@ -76,6 +76,7 @@ public class TestDeleteManyKeyValues : BaseCluster
                     HLCTimestamp.Zero,
                     key,
                     -1,
+                    HLCTimestamp.Zero,
                     KeyValueDurability.Persistent,
                     TestContext.Current.CancellationToken
                 );
@@ -188,6 +189,7 @@ END
                 HLCTimestamp.Zero,
                 key,
                 -1,
+                HLCTimestamp.Zero,
                 KeyValueDurability.Persistent,
                 TestContext.Current.CancellationToken
             );
@@ -250,6 +252,7 @@ END
                 HLCTimestamp.Zero,
                 key,
                 -1,
+                HLCTimestamp.Zero,
                 KeyValueDurability.Persistent,
                 TestContext.Current.CancellationToken
             );
@@ -302,9 +305,9 @@ END
             Assert.Equal(KeyValueResponseType.Aborted, resp.Type);
 
             Assert.Equal(KeyValueResponseType.Get, (await kahuna3.LocateAndTryGetValue(
-                HLCTimestamp.Zero, keyA, -1, KeyValueDurability.Persistent, TestContext.Current.CancellationToken)).Item1);
+                HLCTimestamp.Zero, keyA, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, TestContext.Current.CancellationToken)).Item1);
             Assert.Equal(KeyValueResponseType.Get, (await kahuna3.LocateAndTryGetValue(
-                HLCTimestamp.Zero, keyB, -1, KeyValueDurability.Persistent, TestContext.Current.CancellationToken)).Item1);
+                HLCTimestamp.Zero, keyB, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, TestContext.Current.CancellationToken)).Item1);
         }
         finally
         {

@@ -8,8 +8,8 @@ using Microsoft.Extensions.Logging;
 namespace Kahuna.Tests.Server;
 
 /// <summary>
-/// T5a acceptance tests — lock-snapshot serialization round-trip and release-by-overlap.
-/// These tests exercise the T5a plumbing (proto, export, import, clamping, dedup, release fix)
+/// Acceptance tests — lock-snapshot serialization round-trip and release-by-overlap.
+/// These tests exercise the lock-transfer plumbing (proto, export, import, clamping, dedup, release fix)
 /// <b>without</b> wiring split or merge, so they cannot regress the topology paths.
 /// </summary>
 public sealed class TestRangeLockTransfer : BaseCluster
@@ -46,7 +46,7 @@ public sealed class TestRangeLockTransfer : BaseCluster
         }
     }
 
-    // ── T5a test 1 ───────────────────────────────────────────────────────────────
+    // ── Test 1 ───────────────────────────────────────────────────────────────
 
     /// <summary>
     /// Verifies that a set of live range-lock entries (Shared + Exclusive, various bounds)
@@ -142,7 +142,7 @@ public sealed class TestRangeLockTransfer : BaseCluster
         }
     }
 
-    // ── T5a test 2 ───────────────────────────────────────────────────────────────
+    // ── Test 2 ───────────────────────────────────────────────────────────────
 
     /// <summary>
     /// Verifies the release-by-overlap change: a clamped-bounds lock entry (as the destination
@@ -169,7 +169,7 @@ public sealed class TestRangeLockTransfer : BaseCluster
 
             HLCTimestamp tx1 = NextTx(leaderRaft);
 
-            // Inject a clamped entry directly (simulates what T5b would do for P').
+            // Inject a clamped entry directly (simulates what the split transfer would do for P').
             string destSpace = Space + "-clamp";
             List<KeyValueRangeLock> clamped =
             [
@@ -207,7 +207,7 @@ public sealed class TestRangeLockTransfer : BaseCluster
         }
     }
 
-    // ── T5a test 3 ───────────────────────────────────────────────────────────────
+    // ── Test 3 ───────────────────────────────────────────────────────────────
 
     /// <summary>
     /// Regression guard for the exact-first / overlap-fallback logic in the release handler.

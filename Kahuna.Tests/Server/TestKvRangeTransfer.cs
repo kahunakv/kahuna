@@ -9,7 +9,7 @@ using Microsoft.Extensions.Logging;
 namespace Kahuna.Tests.Server;
 
 /// <summary>
-/// Tests for the KV state-machine transfer primitive (Task 5): export a key range at a fixed MVCC
+/// Tests for the KV state-machine transfer primitive: export a key range at a fixed MVCC
 /// snapshot and import it atomically into a fresh store. Uses in-process single-node
 /// EmbeddedKahunaNodes (memory storage), <b>one at a time</b> — the export stream is captured as a
 /// byte buffer and the source disposed before the target starts, because two embedded nodes share
@@ -153,7 +153,7 @@ public sealed class TestKvRangeTransfer
         // applies nothing until the whole stream is buffered+verified, so this must leave the target
         // empty. (Note: the StoreKeyValues apply itself commits per shard and is NOT cross-shard
         // atomic; a crash mid-store is handled by idempotent re-import + cutover-after-success in
-        // Task 6, not by this primitive — see KvStateMachineTransfer remarks, §5.4.)
+        // the split transaction, not by this primitive — see KvStateMachineTransfer remarks.)
         await using ThrowingStream crashing = new(exported, failAfter: exported.Length / 2);
 
         await Assert.ThrowsAnyAsync<Exception>(

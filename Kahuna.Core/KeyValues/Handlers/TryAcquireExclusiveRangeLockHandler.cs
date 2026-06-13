@@ -89,7 +89,7 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
     private KeyValueResponse LockExistingKeysByRange(HLCTimestamp currentTime, KeyValueRequest message)
     {
         // Exclusive acquires place per-key write intents so existing keys are immediately locked.
-        // Shared acquires skip intents — write-path conflict is enforced by TrySetHandler / T2.
+        // Shared acquires skip intents — write-path conflict is enforced by TrySetHandler.
         if (message.RangeLockMode == RangeLockMode.Exclusive)
         {
             KeyValueResponse intents = PlaceWriteIntents(currentTime, message);

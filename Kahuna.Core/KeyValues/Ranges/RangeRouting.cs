@@ -10,7 +10,7 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// into</b> once on the leader.</item>
 /// </list>
 /// If those two disagree for a ranged key, a split replicates into the stale partition. They are
-/// inventoried here in Task 3; the actual caller switch is Task 9 (both then call this method).
+/// inventoried here; the caller switch is wired separately (both then call this method).
 /// </summary>
 internal static class RangeRouting
 {
@@ -20,7 +20,7 @@ internal static class RangeRouting
     /// <item><b>KeyRange</b> space → the descriptor from <paramref name="rangeMap"/> whose half-open
     /// ordinal interval contains the key; returns <c>(descriptor.PartitionId, descriptor.Generation)</c>.
     /// The generation is the routing fence threaded into <c>ReplicateLogs(expectedGeneration:)</c>
-    /// by Task 4.</item>
+    /// by the generation fence.</item>
     /// <item><b>Hash</b> space (default; system + <c>{db}/meta</c>) → <c>(DataPartitionRouter.Locate(key), 0)</c>.
     /// Kahuna owns hash assignment (Kommander partitions are <c>Unrouted</c>), mapping the key onto the
     /// user partitions <c>[1, InitialPartitions]</c> (P1 included — hash data may share it with the meta
@@ -81,7 +81,7 @@ internal static class RangeRouting
     }
 
     /// <summary>
-    /// The generation fence (Task 4, design §4) for a <b>key-range</b> key, evaluated on the leader
+    /// The generation fence for a <b>key-range</b> key, evaluated on the leader
     /// just before replicating a write. Resolves the current descriptor and compares it to the
     /// generation the request routed on. Returns <c>false</c> (⇒ caller surfaces <c>MustRetry</c>)
     /// when the range moved or split since routing — no covering descriptor, or a generation bump.

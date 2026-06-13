@@ -12,10 +12,9 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// same <c>finally</c> block that releases the range lock at cutover.
 /// </para>
 ///
-/// <para><b>Pre-G limitation.</b> The check is performed pre-route in the locator, so it only
+/// <para><b>Current limitation.</b> The check is performed pre-route in the locator, so it only
 /// intercepts direct writes that arrive on the node currently running the split. A write arriving
-/// on a different node bypasses the check. This is an acknowledged limitation: until Phase G
-/// (partition-scoped storage) lands, the check is a best-effort guard rather than a hard guarantee.
+/// on a different node bypasses the check. This is an acknowledged limitation: until partition-scoped storage lands, the check is a best-effort guard rather than a hard guarantee.
 /// Fully closing the window requires replicating the quiesce state to the data-partition leader so
 /// the check can be applied inside the proposal actor.</para>
 /// </summary>

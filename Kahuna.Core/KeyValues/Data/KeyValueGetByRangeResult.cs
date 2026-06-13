@@ -7,7 +7,7 @@ namespace Kahuna.Server.KeyValues;
 /// Represents the result of a paginated range scan over key-value entries.
 /// </summary>
 /// <remarks>
-/// Placement note: Task 3 originally suggested <c>Kahuna.Shared/KeyValue/</c>, but this type
+/// Placement note: this type
 /// lives here alongside <see cref="KeyValueGetByBucketResult"/> because it is server-internal.
 /// The gRPC boundary uses proto-generated <c>GrpcGetByRangeResponse</c> / <c>GrpcGetByRangePageResponse</c>
 /// for cross-node transport; <see cref="KeyValueGetByRangeResult"/> is never serialised directly

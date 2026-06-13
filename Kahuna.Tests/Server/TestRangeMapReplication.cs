@@ -13,7 +13,7 @@ using Nixie;
 namespace Kahuna.Tests.Server;
 
 /// <summary>
-/// Replication tests for the range-descriptor map (Task 2). The map is the replicated source of
+/// Replication tests for the range-descriptor map. The map is the replicated source of
 /// truth, hosted on the system/meta partition (<see cref="RangeMapStore.MetaPartitionId"/> = 0) —
 /// shared with the Kommander partition-map coordinator by log type (0.11.0+). These tests run a
 /// real 3-node cluster and exercise the three commit paths: WAL replay on restart

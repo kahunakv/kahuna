@@ -504,6 +504,7 @@ public sealed class TestKeyValueCollection
             HLCTimestamp.Zero,
             key,
             -1,
+            HLCTimestamp.Zero,
             KeyValueDurability.Persistent,
             TestContext.Current.CancellationToken);
 
@@ -559,6 +560,7 @@ public sealed class TestKeyValueCollection
                     HLCTimestamp.Zero,
                     $"{prefix}/{i:D3}",
                     -1,
+                    HLCTimestamp.Zero,
                     KeyValueDurability.Ephemeral,
                     TestContext.Current.CancellationToken);
 

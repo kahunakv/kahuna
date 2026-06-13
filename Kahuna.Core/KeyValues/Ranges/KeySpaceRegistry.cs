@@ -5,7 +5,7 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// <summary>
 /// The per-node registry of which key spaces route by key-range vs hash (per-key-space opt-in). 
 /// Default is <see cref="RoutingMode.Hash"/>; a key space becomes
-/// <see cref="RoutingMode.KeyRange"/> only by explicit registration (Task 9 opts in
+/// <see cref="RoutingMode.KeyRange"/> only by explicit registration (opt-in registers
 /// <c>{tableId}:r</c> / <c>{tableId}:i:{indexId}</c>; <c>{db}/meta</c> is never registered).
 ///
 /// <para>

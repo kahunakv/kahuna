@@ -5,10 +5,10 @@ using Microsoft.Extensions.Logging;
 namespace Kahuna.Tests.Server;
 
 /// <summary>
-/// Tests for the key-order router <c>LocateRange</c> + the per-key-space registry (Task 3). The
+/// Tests for the key-order router <c>LocateRange</c> + the per-key-space registry. The
 /// router resolves a key to <c>(partitionId, generation)</c> through the range-descriptor map for
 /// key-range spaces and falls back to the hash router (<c>GetPartitionKey</c>) for hash spaces — the
-/// two coexist. No caller is switched yet (that is Task 9); these tests exercise the function and the
+/// two coexist. No caller is switched yet; these tests exercise the function and the
 /// single-source-of-truth that keeps the locator and the proposal actor from drifting.
 /// </summary>
 public sealed class TestLocateRange : BaseCluster
@@ -200,7 +200,7 @@ public sealed class TestLocateRange : BaseCluster
             // The locator's request-routing path.
             (int PartitionId, long Generation) viaLocator = leader.LocateRange(rangedKey);
 
-            // The proposal actor's replicate-into path will call the SAME shared resolver (Task 9).
+            // The proposal actor's replicate-into path will call the SAME shared resolver.
             // Resolving through it must yield the identical partition+generation — no drift.
             (int PartitionId, long Generation) viaProposalPath = RangeRouting.Locate(
                 leader.KeySpaceRegistry, leader.RangeMapStore.Current,

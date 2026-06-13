@@ -152,7 +152,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
                 string.CompareOrdinal(keyToProcess, message.StartKey) == 0)
                 continue;
 
-            // EndKey enforcement for disk path (Bug 3): ComputeBounds passes memEnd to the
+            // EndKey enforcement for disk path: ComputeBounds passes memEnd to the
             // BTree but GetKeyValueByRange has no endKey parameter; enforce it here for both.
             if (message.EndKey is not null)
             {
