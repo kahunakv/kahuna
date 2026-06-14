@@ -555,7 +555,7 @@ public class TestScriptAsOfReads : BaseCluster
         CancellationToken ct = TestContext.Current.CancellationToken;
 
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
-            await AssembleThreNodeCluster("memory", 4, raftLogger, kahunaLogger);
+            await AssembleThreNodeCluster("memory", 3, raftLogger, kahunaLogger);
 
         try
         {

@@ -48,7 +48,7 @@ public sealed class TestSnapshotSafeTime : BaseCluster
         CancellationToken ct = TestContext.Current.CancellationToken;
 
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
-            await AssembleThreNodeCluster("memory", 4, raftLogger, kahunaLogger);
+            await AssembleThreNodeCluster("memory", 3, raftLogger, kahunaLogger);
 
         try
         {
@@ -122,7 +122,7 @@ public sealed class TestSnapshotSafeTime : BaseCluster
         CancellationToken ct = TestContext.Current.CancellationToken;
 
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
-            await AssembleThreNodeCluster("memory", 4, raftLogger, kahunaLogger);
+            await AssembleThreNodeCluster("memory", 3, raftLogger, kahunaLogger);
 
         try
         {
@@ -188,7 +188,7 @@ public sealed class TestSnapshotSafeTime : BaseCluster
         CancellationToken ct = TestContext.Current.CancellationToken;
 
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
-            await AssembleThreNodeCluster("memory", 4, raftLogger, kahunaLogger);
+            await AssembleThreNodeCluster("memory", 3, raftLogger, kahunaLogger);
 
         try
         {
@@ -252,7 +252,7 @@ public sealed class TestSnapshotSafeTime : BaseCluster
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        const int poolSize = 4; // matches AssembleThreNodeCluster("memory", 4, ...)
+        const int poolSize = 4; // matches AssembleThreNodeCluster("memory", 3, ...)
 
         // Find two keys guaranteed to land on different partitions.
         string key1 = "sst:d:" + Guid.NewGuid().ToString("N")[..8];

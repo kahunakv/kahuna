@@ -62,7 +62,7 @@ public sealed class TestGenerationFence : BaseCluster
     private async Task<((IRaft, KahunaManager)[] Nodes, KahunaManager DataLeader)> Setup()
     {
         (IRaft r1, IRaft r2, IRaft r3, IKahuna k1, IKahuna k2, IKahuna k3) =
-            await AssembleThreNodeCluster("memory", 4, raftLogger, kahunaLogger);
+            await AssembleThreNodeCluster("memory", 3, raftLogger, kahunaLogger);
 
         (IRaft, KahunaManager)[] nodes =
             [(r1, (KahunaManager)k1), (r2, (KahunaManager)k2), (r3, (KahunaManager)k3)];

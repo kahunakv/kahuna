@@ -408,7 +408,7 @@ public class TestLocateAndScanRange : BaseCluster
     public async Task Scan_SpanningMultipleRanges_ReturnsFullOrderedResult()
     {
         (IRaft r1, IRaft r2, IRaft r3, IKahuna k1, IKahuna k2, IKahuna k3) =
-            await AssembleThreNodeCluster("memory", 4, raftLogger, kahunaLogger);
+            await AssembleThreNodeCluster("memory", 3, raftLogger, kahunaLogger);
 
         (IRaft Raft, KahunaManager Kahuna)[] nodes =
             [(r1, (KahunaManager)k1), (r2, (KahunaManager)k2), (r3, (KahunaManager)k3)];
@@ -530,7 +530,7 @@ public class TestLocateAndScanRange : BaseCluster
     public async Task Scan_SplitMidIteration_NoDuplicateOrMissingRows()
     {
         (IRaft r1, IRaft r2, IRaft r3, IKahuna k1, IKahuna k2, IKahuna k3) =
-            await AssembleThreNodeCluster("memory", 4, raftLogger, kahunaLogger);
+            await AssembleThreNodeCluster("memory", 3, raftLogger, kahunaLogger);
 
         (IRaft Raft, KahunaManager Kahuna)[] nodes =
             [(r1, (KahunaManager)k1), (r2, (KahunaManager)k2), (r3, (KahunaManager)k3)];
@@ -645,7 +645,7 @@ public class TestLocateAndScanRange : BaseCluster
     public async Task Scan_SplitMidIteration_ResumesViaCursor()
     {
         (IRaft r1, IRaft r2, IRaft r3, IKahuna k1, IKahuna k2, IKahuna k3) =
-            await AssembleThreNodeCluster("memory", 4, raftLogger, kahunaLogger);
+            await AssembleThreNodeCluster("memory", 3, raftLogger, kahunaLogger);
 
         (IRaft Raft, KahunaManager Kahuna)[] nodes =
             [(r1, (KahunaManager)k1), (r2, (KahunaManager)k2), (r3, (KahunaManager)k3)];
