@@ -38,6 +38,10 @@ public sealed class TestRangeMapReplication
 
     private sealed record Node(RaftManager Raft, KahunaManager Kahuna);
 
+    // Distinct per-node seeds prevent all three nodes from drawing the same election-timeout
+    // sequence and splitting votes indefinitely (Raft election livelock).
+    private const int ElectionTimeoutSeedBase = 91000;
+
     /// <summary>Builds a single node bound to the shared in-memory transports and the given WAL revision.</summary>
     private (RaftManager, KahunaManager) BuildNode(
         int nodeId, int port, string[] peers, string walStorage, string raftRevision,
@@ -61,6 +65,7 @@ public sealed class TestRangeMapReplication
             InitialPartitions = 2, // meta map on P0 (system); partitions 1, 2 = data
             StartElectionTimeout = 50,
             EndElectionTimeout = 150,
+            ElectionTimeoutSeed = ElectionTimeoutSeedBase + nodeId, // distinct per node, prevents election livelock
             CompactEveryOperations = 1000,
             CompactNumberEntries = 50
         };

@@ -284,24 +284,47 @@ internal sealed class TryGetByRangeHandler : BaseHandler
             }
         }
 
-        // AS-OF snapshot scans (snapshotRead = true) skip the MVCC/RYOW block and fall through
-        // to the non-transactional snapshot-visibility path below, which serves the revision
-        // at-or-before readTimestamp via TryGetRevisionAtOrBefore — matching TryGetHandler's
-        // point-read behaviour for the same (transactionId != Zero, readTimestamp != Zero) case.
-        if (transactionId != HLCTimestamp.Zero && !snapshotRead)
+        if (transactionId != HLCTimestamp.Zero)
         {
-            // Read-only scan: never insert a placeholder (would mutate the BTree mid-enumeration
-            // and pollute the read-through cache). A key absent from both memory and disk simply
-            // does not exist at this snapshot. RYOW still holds: keys the transaction itself wrote
-            // already live in the store with an MvccEntry and are returned via the branch below.
-            if (entry is null)
-                return KeyValueStaticResponses.DoesNotExistContextResponse;
-
-            entry.MvccEntries ??= new();
-
-            if (!entry.MvccEntries.TryGetValue(transactionId, out KeyValueMvccEntry? mvccEntry))
+            // Check for an existing MVCC entry first. This covers RYOW (own uncommitted writes)
+            // and prior read-snapshots for OCC conflict detection. Runs for both AS-OF and
+            // non-AS-OF scans: an own write must be visible regardless of the snapshot timestamp.
+            if (entry is not null)
             {
-                mvccEntry = new()
+                entry.MvccEntries ??= new();
+
+                if (entry.MvccEntries.TryGetValue(transactionId, out KeyValueMvccEntry? mvccEntry))
+                {
+                    if (entry.Revision > mvccEntry.Revision)
+                        return KeyValueStaticResponses.AbortedResponse;
+
+                    if (mvccEntry.State is KeyValueState.Undefined or KeyValueState.Deleted ||
+                        mvccEntry.Expires != HLCTimestamp.Zero && mvccEntry.Expires - currentTime < TimeSpan.Zero)
+                        return KeyValueStaticResponses.DoesNotExistContextResponse;
+
+                    readOnlyKeyValueEntry = new(
+                        mvccEntry.Value,
+                        mvccEntry.Revision,
+                        mvccEntry.Expires,
+                        mvccEntry.LastUsed,
+                        mvccEntry.LastModified,
+                        entry.State);
+
+                    return new(KeyValueResponseType.Get, readOnlyKeyValueEntry);
+                }
+            }
+
+            // No prior read or write for this key by the transaction.
+            // For AS-OF snapshot scans fall through to TryGetRevisionAtOrBefore below — that path
+            // serves the revision at-or-before readTimestamp, matching TryGetHandler's behaviour.
+            // For ordinary read-write scans, snapshot the current state for OCC conflict tracking.
+            if (!snapshotRead)
+            {
+                if (entry is null)
+                    return KeyValueStaticResponses.DoesNotExistContextResponse;
+
+                // entry.MvccEntries is already initialised (??= new() in the block above).
+                KeyValueMvccEntry newMvcc = new()
                 {
                     Value = entry.Value,
                     Revision = entry.Revision,
@@ -311,26 +334,26 @@ internal sealed class TryGetByRangeHandler : BaseHandler
                     State = entry.State
                 };
 
-                entry.MvccEntries.Add(transactionId, mvccEntry);
+                entry.MvccEntries!.Add(transactionId, newMvcc);
+
+                if (entry.Revision > newMvcc.Revision)
+                    return KeyValueStaticResponses.AbortedResponse;
+
+                if (newMvcc.State is KeyValueState.Undefined or KeyValueState.Deleted ||
+                    newMvcc.Expires != HLCTimestamp.Zero && newMvcc.Expires - currentTime < TimeSpan.Zero)
+                    return KeyValueStaticResponses.DoesNotExistContextResponse;
+
+                readOnlyKeyValueEntry = new(
+                    newMvcc.Value,
+                    newMvcc.Revision,
+                    newMvcc.Expires,
+                    newMvcc.LastUsed,
+                    newMvcc.LastModified,
+                    entry.State);
+
+                return new(KeyValueResponseType.Get, readOnlyKeyValueEntry);
             }
-            // If the MVCC entry already exists, the transaction wrote it: RYOW — always visible.
-
-            if (entry.Revision > mvccEntry.Revision)
-                return KeyValueStaticResponses.AbortedResponse;
-
-            if (mvccEntry.State is KeyValueState.Undefined or KeyValueState.Deleted ||
-                mvccEntry.Expires != HLCTimestamp.Zero && mvccEntry.Expires - currentTime < TimeSpan.Zero)
-                return KeyValueStaticResponses.DoesNotExistContextResponse;
-
-            readOnlyKeyValueEntry = new(
-                mvccEntry.Value,
-                mvccEntry.Revision,
-                mvccEntry.Expires,
-                mvccEntry.LastUsed,
-                mvccEntry.LastModified,
-                entry.State);
-
-            return new(KeyValueResponseType.Get, readOnlyKeyValueEntry);
+            // else (snapshotRead, no own write): fall through to snapshot-visibility path below.
         }
 
         // Non-transactional snapshot visibility check.
