@@ -20,7 +20,7 @@ public static class KeyValueScanByPrefixCommand
         List<KahunaKeyValue> kv = await connection.ScanAllByPrefix(
             prefix,
             KeyValueDurability.Persistent,
-            CancellationToken.None
+            cancellationToken: CancellationToken.None
         );
 
         if (format == "json")

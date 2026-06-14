@@ -524,10 +524,10 @@ public class RestCommunication : IKahunaCommunication
     }
 
     public Task<(List<KahunaGetManyKeyValuesResponseItem>, int)> TryGetManyKeyValues(string url, HLCTimestamp transactionId, IEnumerable<KahunaGetManyKeyValuesRequestItem> requestItems, CancellationToken cancellationToken)
-        => throw new NotImplementedException();
+        => throw new NotSupportedException("GetManyKeyValues is not available over the REST transport; use the gRPC transport.");
 
     public Task<(List<KahunaGetManyKeyValuesResponseItem>, int)> TryExistsManyKeyValues(string url, HLCTimestamp transactionId, IEnumerable<KahunaGetManyKeyValuesRequestItem> requestItems, CancellationToken cancellationToken)
-        => throw new NotImplementedException();
+        => throw new NotSupportedException("ExistsManyKeyValues is not available over the REST transport; use the gRPC transport.");
 
     /// <summary>
     /// Attempts to compare the specified value with an existing key's value and set a new value if they match.
@@ -786,6 +786,7 @@ public class RestCommunication : IKahunaCommunication
         HLCTimestamp transactionId,
         string key,
         long revision,
+        HLCTimestamp readTimestamp,
         KeyValueDurability durability,
         CancellationToken cancellationToken
     )
@@ -1045,62 +1046,40 @@ public class RestCommunication : IKahunaCommunication
     }
 
     public Task<bool> TryAcquireExclusiveKeyValueLock(string url, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
-    {
-        throw new NotImplementedException();
-    }
+        => throw new NotSupportedException("TryAcquireExclusiveKeyValueLock is not available over the REST transport; use the gRPC transport.");
 
     public Task<bool> TryAcquireExclusivePrefixKeyValueLock(string url, HLCTimestamp transactionId, string prefixKey, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
-    {
-        throw new NotImplementedException();
-    }
+        => throw new NotSupportedException("TryAcquireExclusivePrefixKeyValueLock is not available over the REST transport; use the gRPC transport.");
 
     public Task TryReleaseExclusivePrefixKeyValueLock(string url, HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
-    {
-        throw new NotImplementedException();
-    }
+        => throw new NotSupportedException("TryReleaseExclusivePrefixKeyValueLock is not available over the REST transport; use the gRPC transport.");
 
     public Task<bool> TryAcquireRangeKeyValueLock(string url, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability, RangeLockMode mode, CancellationToken cancellationToken)
-    {
-        throw new NotImplementedException();
-    }
+        => throw new NotSupportedException("TryAcquireRangeKeyValueLock is not available over the REST transport; use the gRPC transport.");
 
     public Task TryReleaseExclusiveRangeKeyValueLock(string url, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability, CancellationToken cancellationToken)
-    {
-        throw new NotImplementedException();
-    }
+        => throw new NotSupportedException("TryReleaseExclusiveRangeKeyValueLock is not available over the REST transport; use the gRPC transport.");
 
     public Task<KeyValueGetByRangePageResult> GetByRange(string url, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
-    {
-        throw new NotImplementedException();
-    }
+        => throw new NotSupportedException("GetByRange is not available over the REST transport; use the gRPC transport.");
 
     public IAsyncEnumerable<KeyValueGetByBucketItem> ScanByRange(string url, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int pageSize, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
-        => throw new NotImplementedException();
+        => throw new NotSupportedException("ScanByRange is not available over the REST transport; use the gRPC transport.");
 
-    public Task<List<KeyValueGetByBucketItem>> GetByBucket(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
-    {
-        throw new NotImplementedException();
-    }
+    public Task<List<KeyValueGetByBucketItem>> GetByBucket(string url, string prefixKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+        => throw new NotSupportedException("GetByBucket is not available over the REST transport; use the gRPC transport.");
 
-    public Task<List<KeyValueGetByBucketItem>> ScanAllByPrefix(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
-    {
-        throw new NotImplementedException();
-    }
+    public Task<List<KeyValueGetByBucketItem>> ScanAllByPrefix(string url, string prefixKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+        => throw new NotSupportedException("ScanAllByPrefix is not available over the REST transport; use the gRPC transport.");
 
     public Task<(string, HLCTimestamp transactionId)> StartTransactionSession(string url, string uniqueId, KahunaTransactionOptions txOptions, CancellationToken cancellationToken)
-    {
-        throw new NotImplementedException();
-    }
+        => throw new NotSupportedException("StartTransactionSession is not available over the REST transport; use the gRPC transport.");
 
     public Task<bool> CommitTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, List<KeyValueTransactionReadKey> readKeys, CancellationToken cancellationToken)
-    {
-        throw new NotImplementedException();
-    }
+        => throw new NotSupportedException("CommitTransactionSession is not available over the REST transport; use the gRPC transport.");
 
     public Task<bool> RollbackTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken)
-    {
-        throw new NotImplementedException();
-    }
+        => throw new NotSupportedException("RollbackTransactionSession is not available over the REST transport; use the gRPC transport.");
 
     public async Task<(SequenceResponseType, ReadOnlySequenceEntry?, int)> GetSequence(string url, string name, SequenceDurability durability, CancellationToken cancellationToken)
     {

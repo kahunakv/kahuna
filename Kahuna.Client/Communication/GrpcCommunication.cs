@@ -853,6 +853,7 @@ public class GrpcCommunication : IKahunaCommunication
         HLCTimestamp transactionId,
         string key,
         long revision,
+        HLCTimestamp readTimestamp,
         KeyValueDurability durability,
         CancellationToken cancellationToken
     )
@@ -864,7 +865,10 @@ public class GrpcCommunication : IKahunaCommunication
             TransactionIdCounter = transactionId.C,
             Key = key,
             Revision = revision,
-            Durability = (GrpcKeyValueDurability)durability
+            Durability = (GrpcKeyValueDurability)durability,
+            ReadTimestampNode = readTimestamp.N,
+            ReadTimestampPhysical = readTimestamp.L,
+            ReadTimestampCounter = readTimestamp.C
         };
 
         int retries = 0;
@@ -1475,12 +1479,15 @@ public class GrpcCommunication : IKahunaCommunication
     /// <exception cref="KahunaException">
     /// Thrown if the operation fails or encounters an error while attempting to retrieve keys by prefix.
     /// </exception>
-    public async Task<List<KeyValueGetByBucketItem>> GetByBucket(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<List<KeyValueGetByBucketItem>> GetByBucket(string url, string prefixKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcGetByBucketRequest request = new()
         {
             PrefixKey = prefixKey,
-            Durability = (GrpcKeyValueDurability)durability
+            Durability = (GrpcKeyValueDurability)durability,
+            ReadTimestampNode = readTimestamp.N,
+            ReadTimestampPhysical = readTimestamp.L,
+            ReadTimestampCounter = readTimestamp.C
         };
 
         int retries = 0;
@@ -1539,11 +1546,14 @@ public class GrpcCommunication : IKahunaCommunication
     /// A tuple containing a boolean indicating success or failure, and a list of keys that match the specified prefix.
     /// </returns>
     /// <exception cref="KahunaException">Thrown if the scan operation encounters an error or fails to complete successfully.</exception>
-    public async Task<List<KeyValueGetByBucketItem>> ScanAllByPrefix(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<List<KeyValueGetByBucketItem>> ScanAllByPrefix(string url, string prefixKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         GrpcScanAllByPrefixRequest request = new()
         {
             PrefixKey = prefixKey,
+            ReadTimestampNode = readTimestamp.N,
+            ReadTimestampPhysical = readTimestamp.L,
+            ReadTimestampCounter = readTimestamp.C,
             Durability = (GrpcKeyValueDurability)durability
         };
 

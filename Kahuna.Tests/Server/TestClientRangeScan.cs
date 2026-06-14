@@ -167,8 +167,8 @@ public sealed class TestClientRangeScan
 
         List<KahunaKeyValue> snap = await client.GetByRange(
             prefix, limit: 100,
-            cancellationToken: TestContext.Current.CancellationToken,
-            snapshotMs: snapshotMs);
+            snapshotMs: snapshotMs,
+            cancellationToken: TestContext.Current.CancellationToken);
 
         List<string?> snapKeys = snap.Select(kv => kv.Key).ToList();
         Assert.Contains($"{prefix}/0000", snapKeys);

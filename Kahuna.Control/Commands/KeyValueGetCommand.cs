@@ -20,9 +20,9 @@ public static class KeyValueGetCommand
     {                
         KahunaKeyValue result = await connection.GetKeyValue(
             optsGet,
-            KeyValueDurability.Persistent, 
-            CancellationToken.None
-        );       
+            KeyValueDurability.Persistent,
+            cancellationToken: CancellationToken.None
+        );
 
         if (format == "json")
             Console.WriteLine("{0}", result.ToJson());

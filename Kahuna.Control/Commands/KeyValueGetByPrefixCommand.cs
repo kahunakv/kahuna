@@ -22,8 +22,8 @@ public static class KeyValueGetByBucketCommand
     {                
         List<KahunaKeyValue> kv = await connection.GetByBucket(
             optsGet,
-            KeyValueDurability.Persistent, 
-            CancellationToken.None
+            KeyValueDurability.Persistent,
+            cancellationToken: CancellationToken.None
         );       
 
         if (format == "json")

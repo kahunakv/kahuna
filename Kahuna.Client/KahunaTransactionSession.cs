@@ -615,9 +615,10 @@ public class KahunaTransactionSession : IAsyncDisposable
         (bool success, long revision, int timeElapsedMs) = await Client.Communication.TryExistsKeyValue(
             Url,
             TransactionId,
-            key, 
-            -1, 
-            durability, 
+            key,
+            -1,
+            HLCTimestamp.Zero,
+            durability,
             cancellationToken
         ).ConfigureAwait(false);
         
@@ -851,6 +852,7 @@ public class KahunaTransactionSession : IAsyncDisposable
         List<KeyValueGetByBucketItem> kv = await Client.Communication.GetByBucket(
             Url,
             prefixKey,
+            HLCTimestamp.Zero,
             durability,
             cancellationToken
         ).ConfigureAwait(false);

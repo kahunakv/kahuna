@@ -39,7 +39,7 @@ public sealed class TestClientPointRead
         KahunaKeyValue setV1 = await client.SetKeyValue(key, "version-one", 0, KeyValueFlags.Set, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
         Assert.True(setV1.Success);
 
-        KahunaKeyValue readV1 = await client.GetKeyValue(key, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+        KahunaKeyValue readV1 = await client.GetKeyValue(key, KeyValueDurability.Persistent, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(readV1.Success);
         Assert.NotEqual(0L, readV1.LastModified);
 
@@ -48,11 +48,11 @@ public sealed class TestClientPointRead
         KahunaKeyValue setV2 = await client.SetKeyValue(key, "version-two", 0, KeyValueFlags.Set, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
         Assert.True(setV2.Success);
 
-        KahunaKeyValue snap = await client.GetKeyValue(key, KeyValueDurability.Persistent, TestContext.Current.CancellationToken, snapshotMs: snapshotMs);
+        KahunaKeyValue snap = await client.GetKeyValue(key, KeyValueDurability.Persistent, snapshotMs, TestContext.Current.CancellationToken);
         Assert.True(snap.Success);
         Assert.Equal("version-one", snap.ValueAsString());
 
-        KahunaKeyValue latest = await client.GetKeyValue(key, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+        KahunaKeyValue latest = await client.GetKeyValue(key, KeyValueDurability.Persistent, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(latest.Success);
         Assert.Equal("version-two", latest.ValueAsString());
     }
@@ -80,11 +80,11 @@ public sealed class TestClientPointRead
 
         await client.SetKeyValue(key, "value-a", 0, KeyValueFlags.Set, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
 
-        KahunaKeyValue result = await client.GetKeyValue(key, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+        KahunaKeyValue result = await client.GetKeyValue(key, KeyValueDurability.Persistent, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
         Assert.NotEqual(0L, result.LastModified);
 
-        KahunaKeyValue replay = await client.GetKeyValue(key, KeyValueDurability.Persistent, TestContext.Current.CancellationToken, snapshotMs: result.LastModified);
+        KahunaKeyValue replay = await client.GetKeyValue(key, KeyValueDurability.Persistent, result.LastModified, TestContext.Current.CancellationToken);
         Assert.True(replay.Success);
         Assert.Equal("value-a", replay.ValueAsString());
     }
@@ -114,7 +114,7 @@ public sealed class TestClientPointRead
         string key = "client/before/" + Guid.NewGuid().ToString("N")[..8];
         await client.SetKeyValue(key, "appeared-later", 0, KeyValueFlags.Set, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
 
-        KahunaKeyValue snap = await client.GetKeyValue(key, KeyValueDurability.Persistent, TestContext.Current.CancellationToken, snapshotMs: beforeMs);
+        KahunaKeyValue snap = await client.GetKeyValue(key, KeyValueDurability.Persistent, beforeMs, TestContext.Current.CancellationToken);
         Assert.False(snap.Success);
     }
 }

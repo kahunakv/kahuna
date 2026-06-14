@@ -723,7 +723,7 @@ public class KahunaClient
     /// <param name="durability">The specified durability level of the key-value pair, default is persistent.</param>
     /// <param name="cancellationToken">A token to propagate notifications that the operation should be canceled.</param>
     /// <returns>A task that represents the asynchronous operation, which returns a <see cref="KahunaKeyValue"/> containing the key-value information.</returns>
-    public async Task<KahunaKeyValue> GetKeyValue(string key, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default, long snapshotMs = 0)
+    public async Task<KahunaKeyValue> GetKeyValue(string key, KeyValueDurability durability = KeyValueDurability.Persistent, long snapshotMs = 0, CancellationToken cancellationToken = default)
     {
         HLCTimestamp readTimestamp = snapshotMs == 0 ? HLCTimestamp.Zero : new HLCTimestamp(0, snapshotMs, uint.MaxValue);
 
@@ -747,17 +747,24 @@ public class KahunaClient
     /// <param name="durability">The durability level to check the key against. Defaults to <see cref="KeyValueDurability.Persistent"/>.</param>
     /// <param name="cancellationToken">A token to signal request cancellation.</param>
     /// <returns>A <see cref="KahunaKeyValue"/> object containing the key's metadata, including success status and revision number.</returns>
-    public async Task<KahunaKeyValue> ExistsKeyValue(string key, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
+    public async Task<KahunaKeyValue> ExistsKeyValue(
+        string key,
+        KeyValueDurability durability = KeyValueDurability.Persistent,
+        long snapshotMs = 0,
+        CancellationToken cancellationToken = default)
     {
+        HLCTimestamp readTimestamp = snapshotMs == 0 ? HLCTimestamp.Zero : new HLCTimestamp(0, snapshotMs, uint.MaxValue);
+
         (bool success, long revision, int timeElapsedMs) = await communication.TryExistsKeyValue(
             GetRoundRobinUrl(),
             HLCTimestamp.Zero,
-            key, 
-            -1, 
-            durability, 
+            key,
+            -1,
+            readTimestamp,
+            durability,
             cancellationToken
         ).ConfigureAwait(false);
-        
+
         return new(this, key, success, revision, durability, timeElapsedMs);
     }
 
@@ -866,14 +873,21 @@ public class KahunaClient
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<List<KahunaKeyValue>> GetByBucket(string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken = default)
+    public async Task<List<KahunaKeyValue>> GetByBucket(
+        string prefixKey,
+        KeyValueDurability durability,
+        long snapshotMs = 0,
+        CancellationToken cancellationToken = default)
     {
-        List<KeyValueGetByBucketItem> kv = await communication.GetByBucket(GetRoundRobinUrl(), prefixKey, durability, cancellationToken).ConfigureAwait(false);
-        
+        HLCTimestamp readTimestamp = snapshotMs == 0 ? HLCTimestamp.Zero : new HLCTimestamp(0, snapshotMs, uint.MaxValue);
+
+        List<KeyValueGetByBucketItem> kv = await communication.GetByBucket(
+            GetRoundRobinUrl(), prefixKey, readTimestamp, durability, cancellationToken).ConfigureAwait(false);
+
         List<KahunaKeyValue> result = new(kv.Count);
-        
+
         foreach (KeyValueGetByBucketItem item in kv)
-            result.Add(new(this, item.Key ?? "", true, item.Value, item.Revision, durability, 0));
+            result.Add(new(this, item.Key ?? "", true, item.Value, item.Revision, durability, 0, item.LastModified.L));
 
         return result;
     }
@@ -884,15 +898,23 @@ public class KahunaClient
     /// <param name="prefixKey">The prefix to match against stored keys.</param>
     /// <param name="durability">Specifies the durability level for the operation.</param>
     /// <param name="cancellationToken">Token to observe while waiting for the task to complete.</param>
+    /// <param name="snapshotMs">Unix-epoch-ms snapshot timestamp; zero means latest.</param>
     /// <returns>A tuple containing a success flag and a list of matching keys.</returns>
-    public async Task<List<KahunaKeyValue>> ScanAllByPrefix(string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken = default)
+    public async Task<List<KahunaKeyValue>> ScanAllByPrefix(
+        string prefixKey,
+        KeyValueDurability durability,
+        long snapshotMs = 0,
+        CancellationToken cancellationToken = default)
     {
-        List<KeyValueGetByBucketItem> kv = await communication.ScanAllByPrefix(GetRoundRobinUrl(), prefixKey, durability, cancellationToken).ConfigureAwait(false);
-        
+        HLCTimestamp readTimestamp = snapshotMs == 0 ? HLCTimestamp.Zero : new HLCTimestamp(0, snapshotMs, uint.MaxValue);
+
+        List<KeyValueGetByBucketItem> kv = await communication.ScanAllByPrefix(
+            GetRoundRobinUrl(), prefixKey, readTimestamp, durability, cancellationToken).ConfigureAwait(false);
+
         List<KahunaKeyValue> result = new(kv.Count);
-        
+
         foreach (KeyValueGetByBucketItem item in kv)
-            result.Add(new(this, item.Key ?? "", true, item.Value, item.Revision, durability, 0));
+            result.Add(new(this, item.Key ?? "", true, item.Value, item.Revision, durability, 0, item.LastModified.L));
 
         return result;
     }
@@ -967,8 +989,8 @@ public class KahunaClient
         string? endKey = null, bool endInclusive = false,
         int limit = 100,
         KeyValueDurability durability = KeyValueDurability.Persistent,
-        CancellationToken cancellationToken = default,
-        long snapshotMs = 0)
+        long snapshotMs = 0,
+        CancellationToken cancellationToken = default)
     {
         HLCTimestamp readTimestamp = snapshotMs == 0 ? HLCTimestamp.Zero : new HLCTimestamp(0, snapshotMs, uint.MaxValue);
 
@@ -996,8 +1018,8 @@ public class KahunaClient
         string? endKey = null, bool endInclusive = false,
         int pageSize = 100,
         KeyValueDurability durability = KeyValueDurability.Persistent,
-        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default,
-        long snapshotMs = 0)
+        long snapshotMs = 0,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         HLCTimestamp readTimestamp = snapshotMs == 0 ? HLCTimestamp.Zero : new HLCTimestamp(0, snapshotMs, uint.MaxValue);
 

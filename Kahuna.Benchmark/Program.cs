@@ -262,7 +262,7 @@ async Task GetKeyConcurrently(KahunaClient keyValues)
 
         string key = GetRandomLockNameFromList(tokens);
 
-        KahunaKeyValue result = await keyValues.GetKeyValue(key, KeyValueDurability.Persistent, src.Token);
+        KahunaKeyValue result = await keyValues.GetKeyValue(key, KeyValueDurability.Persistent, cancellationToken: src.Token);
 
         //if (revision > 1)
         //   Console.WriteLine("Got repeated revision " + revision);

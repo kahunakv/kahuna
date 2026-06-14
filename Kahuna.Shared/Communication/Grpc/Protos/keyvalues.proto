@@ -668,6 +668,9 @@ message GrpcGetByRangeResponse {
 message GrpcScanAllByPrefixRequest {
   string PrefixKey = 1;
   GrpcKeyValueDurability Durability = 2;
+  int32 ReadTimestampNode = 3;
+  int64 ReadTimestampPhysical = 4;
+  uint32 ReadTimestampCounter = 5;
 }
 
 message GrpcScanAllByPrefixResponse {

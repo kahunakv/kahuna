@@ -137,7 +137,16 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
     public Task<(List<KahunaDeleteKeyValueResponseItem>, int)> TryDeleteManyKeyValues(string url, IEnumerable<KahunaDeleteKeyValueRequestItem> requestItems, CancellationToken cancellationToken) => throw new NotImplementedException();
     public Task<(bool, long, int)> TryCompareValueAndSetKeyValue(string url, HLCTimestamp transactionId, string key, byte[]? value, byte[]? compareValue, int expiryTime, KeyValueDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
     public Task<(bool, long, int)> TryCompareRevisionAndSetKeyValue(string url, HLCTimestamp transactionId, string key, byte[]? value, long compareRevision, int expiryTime, KeyValueDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
-    public Task<(bool, long, int)> TryExistsKeyValue(string url, HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
+    public async Task<(bool, long, int)> TryExistsKeyValue(
+        string url, HLCTimestamp transactionId, string key, long revision,
+        HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) =
+            await kahuna.LocateAndTryExistsValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
+        return type == KeyValueResponseType.Exists
+            ? (true, entry?.Revision ?? 0, 0)
+            : (false, 0, 0);
+    }
     public Task<(bool, long, int)> TryDeleteKeyValue(string url, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
     public Task<(bool, long, int)> TryExtendKeyValue(string url, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
     public Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransactionScript(string url, byte[] script, string? hash, List<KeyValueParameter>? parameters, CancellationToken cancellationToken) => throw new NotImplementedException();
@@ -156,8 +165,28 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
         return result == KeyValueResponseType.Locked;
     }
     public Task TryReleaseExclusiveRangeKeyValueLock(string url, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
-    public Task<List<KeyValueGetByBucketItem>> GetByBucket(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
-    public Task<List<KeyValueGetByBucketItem>> ScanAllByPrefix(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
+    public async Task<List<KeyValueGetByBucketItem>> GetByBucket(
+        string url, string prefixKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        KeyValueGetByBucketResult result = await kahuna.LocateAndGetByBucket(
+            HLCTimestamp.Zero, prefixKey, readTimestamp, durability, cancellationToken);
+        return result.Items.Select(t => new KeyValueGetByBucketItem
+        {
+            Key = t.Item1, Value = t.Item2.Value, Revision = t.Item2.Revision, LastModified = t.Item2.LastModified
+        }).ToList();
+    }
+
+    public async Task<List<KeyValueGetByBucketItem>> ScanAllByPrefix(
+        string url, string prefixKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        // In-process tests run against a single embedded node; use ScanByPrefix (local partition scan)
+        // which honours readTimestamp and has the same result set when all keys live on one node.
+        KeyValueGetByBucketResult result = await kahuna.ScanByPrefix(prefixKey, readTimestamp, durability);
+        return result.Items.Select(t => new KeyValueGetByBucketItem
+        {
+            Key = t.Item1, Value = t.Item2.Value, Revision = t.Item2.Revision, LastModified = t.Item2.LastModified
+        }).ToList();
+    }
     public async Task<(string, HLCTimestamp transactionId)> StartTransactionSession(
         string url, string uniqueId, KahunaTransactionOptions txOptions, CancellationToken cancellationToken)
     {

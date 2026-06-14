@@ -58,7 +58,7 @@ public class TestTransactionLockingAnomalies
         int committedCount = attempts.Count(attempt => attempt.Committed);
         int abortedCount = attempts.Count(attempt => attempt.ErrorCode is KeyValueResponseType.Aborted or KeyValueResponseType.MustRetry);
 
-        KahunaKeyValue finalValue = await client.GetKeyValue(key, durability, cancellationToken);
+        KahunaKeyValue finalValue = await client.GetKeyValue(key, durability, cancellationToken: cancellationToken);
 
         Assert.True(finalValue.Success);
         Assert.Equal(committedCount, finalValue.ValueAsLong());
@@ -141,8 +141,8 @@ public class TestTransactionLockingAnomalies
         StaleReadAttempt staleWriter = await staleWriterTask;
         SimpleCommitAttempt freshWriter = await freshWriterTask;
 
-        KahunaKeyValue finalA = await client.GetKeyValue(keyA, durability, cancellationToken);
-        KahunaKeyValue finalB = await client.GetKeyValue(keyB, durability, cancellationToken);
+        KahunaKeyValue finalA = await client.GetKeyValue(keyA, durability, cancellationToken: cancellationToken);
+        KahunaKeyValue finalB = await client.GetKeyValue(keyB, durability, cancellationToken: cancellationToken);
 
         Assert.True(finalA.Success);
         Assert.True(finalB.Success);
@@ -230,8 +230,8 @@ public class TestTransactionLockingAnomalies
         int committedCount = attempts.Count(attempt => attempt.Committed);
         int abortedCount = attempts.Count(attempt => attempt.ErrorCode is KeyValueResponseType.Aborted or KeyValueResponseType.MustRetry);
 
-        KahunaKeyValue finalAlice = await client.GetKeyValue(aliceKey, durability, cancellationToken);
-        KahunaKeyValue finalBob = await client.GetKeyValue(bobKey, durability, cancellationToken);
+        KahunaKeyValue finalAlice = await client.GetKeyValue(aliceKey, durability, cancellationToken: cancellationToken);
+        KahunaKeyValue finalBob = await client.GetKeyValue(bobKey, durability, cancellationToken: cancellationToken);
 
         Assert.True(finalAlice.Success);
         Assert.True(finalBob.Success);
@@ -311,8 +311,8 @@ public class TestTransactionLockingAnomalies
         int committedCount = attempts.Count(attempt => attempt.Committed);
         int abortedCount = attempts.Count(attempt => attempt.ErrorCode is KeyValueResponseType.Aborted or KeyValueResponseType.MustRetry);
 
-        KahunaKeyValue finalAlice = await client.GetKeyValue(aliceKey, durability, cancellationToken);
-        KahunaKeyValue finalBob = await client.GetKeyValue(bobKey, durability, cancellationToken);
+        KahunaKeyValue finalAlice = await client.GetKeyValue(aliceKey, durability, cancellationToken: cancellationToken);
+        KahunaKeyValue finalBob = await client.GetKeyValue(bobKey, durability, cancellationToken: cancellationToken);
 
         Assert.True(finalAlice.Success);
         Assert.True(finalBob.Success);
@@ -392,7 +392,7 @@ public class TestTransactionLockingAnomalies
             cancellationToken
         );
 
-        List<KahunaKeyValue> bucketItems = await bucketSession.GetByBucket(prefix, durability, cancellationToken);
+        List<KahunaKeyValue> bucketItems = await bucketSession.GetByBucket(prefix, durability, cancellationToken: cancellationToken);
         string[] bucketKeys = bucketItems
             .Select(item => item.Key)
             .OrderBy(key => key, StringComparer.Ordinal)
@@ -430,10 +430,10 @@ public class TestTransactionLockingAnomalies
         CommitAttempt bucketCommit = await CommitTransactionAttempt(bucketSession, cancellationToken);
         SimpleCommitAttempt updater = await updaterTask;
 
-        KahunaKeyValue finalA = await client.GetKeyValue(keyA, durability, cancellationToken);
-        KahunaKeyValue finalB = await client.GetKeyValue(keyB, durability, cancellationToken);
-        KahunaKeyValue finalSummary = await client.GetKeyValue(summaryKey, durability, cancellationToken);
-        KahunaKeyValue finalInflight = await client.GetKeyValue(keyInflight, durability, cancellationToken);
+        KahunaKeyValue finalA = await client.GetKeyValue(keyA, durability, cancellationToken: cancellationToken);
+        KahunaKeyValue finalB = await client.GetKeyValue(keyB, durability, cancellationToken: cancellationToken);
+        KahunaKeyValue finalSummary = await client.GetKeyValue(summaryKey, durability, cancellationToken: cancellationToken);
+        KahunaKeyValue finalInflight = await client.GetKeyValue(keyInflight, durability, cancellationToken: cancellationToken);
 
         Assert.True(finalA.Success);
         Assert.True(finalB.Success);
@@ -504,7 +504,7 @@ public class TestTransactionLockingAnomalies
             cancellationToken
         );
 
-        List<KahunaKeyValue> visibleUsers = await staleSession.GetByBucket(prefix, durability, cancellationToken);
+        List<KahunaKeyValue> visibleUsers = await staleSession.GetByBucket(prefix, durability, cancellationToken: cancellationToken);
         Assert.Single(visibleUsers);
         Assert.Equal(existingKey, visibleUsers[0].Key);
 
@@ -535,7 +535,7 @@ public class TestTransactionLockingAnomalies
         CommitAttempt staleCommit = await CommitTransactionAttempt(staleSession, cancellationToken);
         SimpleCommitAttempt concurrentInsert = await concurrentInsertTask;
 
-        List<KahunaKeyValue> finalUsers = await client.GetByBucket(prefix, durability, cancellationToken);
+        List<KahunaKeyValue> finalUsers = await client.GetByBucket(prefix, durability, cancellationToken: cancellationToken);
         string[] finalKeys = finalUsers
             .Select(item => item.Key)
             .OrderBy(key => key, StringComparer.Ordinal)
@@ -617,8 +617,8 @@ public class TestTransactionLockingAnomalies
         NonRepeatableReadAttempt reader = await readerTask;
         SimpleCommitAttempt writer = await writerTask;
 
-        KahunaKeyValue finalAccount = await client.GetKeyValue(accountKey, durability, cancellationToken);
-        KahunaKeyValue finalObserved = await client.GetKeyValue(observedKey, durability, cancellationToken);
+        KahunaKeyValue finalAccount = await client.GetKeyValue(accountKey, durability, cancellationToken: cancellationToken);
+        KahunaKeyValue finalObserved = await client.GetKeyValue(observedKey, durability, cancellationToken: cancellationToken);
 
         Assert.True(finalAccount.Success);
 
@@ -689,14 +689,14 @@ public class TestTransactionLockingAnomalies
         );
         Assert.True(uncommittedWrite.Success);
 
-        KahunaKeyValue outsideRead = await client.GetKeyValue(keyX, durability, cancellationToken);
+        KahunaKeyValue outsideRead = await client.GetKeyValue(keyX, durability, cancellationToken: cancellationToken);
         Assert.True(outsideRead.Success);
 
         await using KahunaTransactionSession readerSession = await client.StartTransactionSession(
             new() { Locking = KeyValueTransactionLocking.Optimistic, Timeout = 5000 },
             cancellationToken
         );
-        KahunaKeyValue transactionalRead = await readerSession.GetKeyValue(keyX, durability, cancellationToken);
+        KahunaKeyValue transactionalRead = await readerSession.GetKeyValue(keyX, durability, cancellationToken: cancellationToken);
         Assert.True(transactionalRead.Success);
 
         KahunaKeyValueTransactionResult scriptRead = await client.ExecuteKeyValueTransactionScript(
@@ -705,8 +705,8 @@ public class TestTransactionLockingAnomalies
         );
         Assert.Equal(KeyValueResponseType.Get, scriptRead.Type);
 
-        List<KahunaKeyValue> bucketItems = await client.GetByBucket(prefix, durability, cancellationToken);
-        List<KahunaKeyValue> prefixItems = await client.ScanAllByPrefix(prefix, durability, cancellationToken);
+        List<KahunaKeyValue> bucketItems = await client.GetByBucket(prefix, durability, cancellationToken: cancellationToken);
+        List<KahunaKeyValue> prefixItems = await client.ScanAllByPrefix(prefix, durability, cancellationToken: cancellationToken);
 
         KahunaKeyValue bucketX = Assert.Single(bucketItems, item => item.Key == keyX);
         KahunaKeyValue prefixX = Assert.Single(prefixItems, item => item.Key == keyX);
@@ -720,7 +720,7 @@ public class TestTransactionLockingAnomalies
         bool rolledBack = await writerSession.Rollback(cancellationToken);
         Assert.True(rolledBack);
 
-        KahunaKeyValue finalX = await client.GetKeyValue(keyX, durability, cancellationToken);
+        KahunaKeyValue finalX = await client.GetKeyValue(keyX, durability, cancellationToken: cancellationToken);
         Assert.True(finalX.Success);
         Assert.Equal("committed", finalX.ValueAsString());
     }
@@ -804,9 +804,9 @@ public class TestTransactionLockingAnomalies
             cancellationToken
         );
 
-        KahunaKeyValue initialA = await tx1.GetKeyValue(keyA, durability, cancellationToken);
-        KahunaKeyValue initialB = await tx1.GetKeyValue(keyB, durability, cancellationToken);
-        KahunaKeyValue initialC = await tx1.GetKeyValue(keyC, durability, cancellationToken);
+        KahunaKeyValue initialA = await tx1.GetKeyValue(keyA, durability, cancellationToken: cancellationToken);
+        KahunaKeyValue initialB = await tx1.GetKeyValue(keyB, durability, cancellationToken: cancellationToken);
+        KahunaKeyValue initialC = await tx1.GetKeyValue(keyC, durability, cancellationToken: cancellationToken);
 
         Assert.True(initialA.Success);
         Assert.True(initialB.Success);
@@ -843,9 +843,9 @@ public class TestTransactionLockingAnomalies
         Assert.False(tx1Commit.Committed);
         Assert.True(tx1Commit.ErrorCode is KeyValueResponseType.Aborted or KeyValueResponseType.MustRetry);
 
-        KahunaKeyValue finalA = await client.GetKeyValue(keyA, durability, cancellationToken);
-        KahunaKeyValue finalB = await client.GetKeyValue(keyB, durability, cancellationToken);
-        KahunaKeyValue finalC = await client.GetKeyValue(keyC, durability, cancellationToken);
+        KahunaKeyValue finalA = await client.GetKeyValue(keyA, durability, cancellationToken: cancellationToken);
+        KahunaKeyValue finalB = await client.GetKeyValue(keyB, durability, cancellationToken: cancellationToken);
+        KahunaKeyValue finalC = await client.GetKeyValue(keyC, durability, cancellationToken: cancellationToken);
 
         Assert.True(finalA.Success);
         Assert.True(finalB.Success);
@@ -905,9 +905,9 @@ public class TestTransactionLockingAnomalies
         Assert.True(insertedWrite.Success);
         Assert.True(deletedWrite.Success);
 
-        KahunaKeyValue updatedInTx = await session.GetKeyValue(updatedKey, durability, cancellationToken);
-        KahunaKeyValue insertedInTx = await session.GetKeyValue(insertedKey, durability, cancellationToken);
-        KahunaKeyValue deletedInTx = await session.GetKeyValue(deletedKey, durability, cancellationToken);
+        KahunaKeyValue updatedInTx = await session.GetKeyValue(updatedKey, durability, cancellationToken: cancellationToken);
+        KahunaKeyValue insertedInTx = await session.GetKeyValue(insertedKey, durability, cancellationToken: cancellationToken);
+        KahunaKeyValue deletedInTx = await session.GetKeyValue(deletedKey, durability, cancellationToken: cancellationToken);
 
         Assert.True(updatedInTx.Success);
         Assert.True(insertedInTx.Success);
@@ -930,9 +930,9 @@ public class TestTransactionLockingAnomalies
             cancellationToken: cancellationToken
         );
 
-        KahunaKeyValue updatedOutsideBeforeCommit = await client.GetKeyValue(updatedKey, durability, cancellationToken);
-        KahunaKeyValue insertedOutsideBeforeCommit = await client.GetKeyValue(insertedKey, durability, cancellationToken);
-        KahunaKeyValue deletedOutsideBeforeCommit = await client.GetKeyValue(deletedKey, durability, cancellationToken);
+        KahunaKeyValue updatedOutsideBeforeCommit = await client.GetKeyValue(updatedKey, durability, cancellationToken: cancellationToken);
+        KahunaKeyValue insertedOutsideBeforeCommit = await client.GetKeyValue(insertedKey, durability, cancellationToken: cancellationToken);
+        KahunaKeyValue deletedOutsideBeforeCommit = await client.GetKeyValue(deletedKey, durability, cancellationToken: cancellationToken);
 
         Assert.Equal(KeyValueResponseType.Get, scriptRead.Type);
         Assert.Equal("before", scriptRead.FirstValueAsString);
@@ -952,9 +952,9 @@ public class TestTransactionLockingAnomalies
         CommitAttempt commit = await CommitTransactionAttempt(session, cancellationToken);
         Assert.True(commit.Committed);
 
-        KahunaKeyValue updatedAfterCommit = await client.GetKeyValue(updatedKey, durability, cancellationToken);
-        KahunaKeyValue insertedAfterCommit = await client.GetKeyValue(insertedKey, durability, cancellationToken);
-        KahunaKeyValue deletedAfterCommit = await client.GetKeyValue(deletedKey, durability, cancellationToken);
+        KahunaKeyValue updatedAfterCommit = await client.GetKeyValue(updatedKey, durability, cancellationToken: cancellationToken);
+        KahunaKeyValue insertedAfterCommit = await client.GetKeyValue(insertedKey, durability, cancellationToken: cancellationToken);
+        KahunaKeyValue deletedAfterCommit = await client.GetKeyValue(deletedKey, durability, cancellationToken: cancellationToken);
 
         Assert.True(updatedAfterCommit.Success);
         Assert.True(insertedAfterCommit.Success);
@@ -992,7 +992,7 @@ public class TestTransactionLockingAnomalies
         );
 
         // Acquiring the prefix lock via GetByBucket must happen before the concurrent write attempt.
-        List<KahunaKeyValue> bucketItems = await bucketSession.GetByBucket(prefix, durability, cancellationToken);
+        List<KahunaKeyValue> bucketItems = await bucketSession.GetByBucket(prefix, durability, cancellationToken: cancellationToken);
         Assert.Equal(2, bucketItems.Count);
 
         // Concurrent tx tries to insert a brand-new key under the locked prefix.
@@ -1047,8 +1047,8 @@ public class TestTransactionLockingAnomalies
             cancellationToken
         );
 
-        List<KahunaKeyValue> firstScan = await session.GetByBucket(prefix, durability, cancellationToken);
-        List<KahunaKeyValue> secondScan = await session.GetByBucket(prefix, durability, cancellationToken);
+        List<KahunaKeyValue> firstScan = await session.GetByBucket(prefix, durability, cancellationToken: cancellationToken);
+        List<KahunaKeyValue> secondScan = await session.GetByBucket(prefix, durability, cancellationToken: cancellationToken);
 
         Assert.Single(firstScan);
         Assert.Single(secondScan);
@@ -1084,7 +1084,7 @@ public class TestTransactionLockingAnomalies
             cancellationToken
         );
 
-        List<KahunaKeyValue> bucketItems = await session.GetByBucket(prefix, durability, cancellationToken);
+        List<KahunaKeyValue> bucketItems = await session.GetByBucket(prefix, durability, cancellationToken: cancellationToken);
         Assert.Single(bucketItems);
 
         bool rolled = await session.Rollback(cancellationToken);
@@ -1097,7 +1097,7 @@ public class TestTransactionLockingAnomalies
         Assert.True(newEntry.Success);
 
         // The original key must be unchanged (rollback did not write anything).
-        KahunaKeyValue finalA = await client.GetKeyValue(keyA, durability, cancellationToken);
+        KahunaKeyValue finalA = await client.GetKeyValue(keyA, durability, cancellationToken: cancellationToken);
         Assert.True(finalA.Success);
         Assert.Equal("original", finalA.ValueAsString());
     }
@@ -1241,7 +1241,7 @@ public class TestTransactionLockingAnomalies
         );
         Assert.True(newEntry.Success);
 
-        KahunaKeyValue finalA = await client.GetKeyValue(keyA, durability, cancellationToken);
+        KahunaKeyValue finalA = await client.GetKeyValue(keyA, durability, cancellationToken: cancellationToken);
         Assert.True(finalA.Success);
         Assert.Equal("original", finalA.ValueAsString());
     }
@@ -1354,14 +1354,14 @@ public class TestTransactionLockingAnomalies
                 cancellationToken
             );
 
-            KahunaKeyValue first = await session.GetKeyValue(accountKey, durability, cancellationToken);
+            KahunaKeyValue first = await session.GetKeyValue(accountKey, durability, cancellationToken: cancellationToken);
             Assert.True(first.Success);
             firstRead = first.ValueAsLong();
 
             schedule.MarkFirstReadComplete();
             await schedule.WaitForSecondReadRelease(cancellationToken);
 
-            KahunaKeyValue second = await session.GetKeyValue(accountKey, durability, cancellationToken);
+            KahunaKeyValue second = await session.GetKeyValue(accountKey, durability, cancellationToken: cancellationToken);
             Assert.True(second.Success);
             secondRead = second.ValueAsLong();
 
@@ -1558,7 +1558,7 @@ public class TestTransactionLockingAnomalies
                 cancellationToken
             );
 
-            KahunaKeyValue currentValue = await session.GetKeyValue(key, durability, cancellationToken);
+            KahunaKeyValue currentValue = await session.GetKeyValue(key, durability, cancellationToken: cancellationToken);
             Assert.True(currentValue.Success);
             readValue = currentValue.ValueAsLong();
 
@@ -1616,7 +1616,7 @@ public class TestTransactionLockingAnomalies
         bool committed = await session.Commit(timeout.Token);
         Assert.True(committed);
 
-        KahunaKeyValue finalValue = await client.GetKeyValue(lockedKey, durability, timeout.Token);
+        KahunaKeyValue finalValue = await client.GetKeyValue(lockedKey, durability, cancellationToken: timeout.Token);
         Assert.True(finalValue.Success);
         Assert.Equal("released", finalValue.ValueAsString());
     }
@@ -1683,7 +1683,7 @@ public class TestTransactionLockingAnomalies
                 cancellationToken
             );
 
-            KahunaKeyValue currentValue = await session.GetKeyValue(key, durability, cancellationToken);
+            KahunaKeyValue currentValue = await session.GetKeyValue(key, durability, cancellationToken: cancellationToken);
 
             Assert.True(currentValue.Success);
 
@@ -1735,7 +1735,7 @@ public class TestTransactionLockingAnomalies
                 cancellationToken
             );
 
-            KahunaKeyValue currentA = await session.GetKeyValue(keyA, durability, cancellationToken);
+            KahunaKeyValue currentA = await session.GetKeyValue(keyA, durability, cancellationToken: cancellationToken);
             Assert.True(currentA.Success);
 
             readValue = currentA.ValueAsLong();
@@ -1789,8 +1789,8 @@ public class TestTransactionLockingAnomalies
                 cancellationToken
             );
 
-            KahunaKeyValue alice = await session.GetKeyValue(aliceKey, durability, cancellationToken);
-            KahunaKeyValue bob = await session.GetKeyValue(bobKey, durability, cancellationToken);
+            KahunaKeyValue alice = await session.GetKeyValue(aliceKey, durability, cancellationToken: cancellationToken);
+            KahunaKeyValue bob = await session.GetKeyValue(bobKey, durability, cancellationToken: cancellationToken);
 
             Assert.True(alice.Success);
             Assert.True(bob.Success);

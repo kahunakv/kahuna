@@ -62,8 +62,8 @@ public class TestAdvancedKeyValueOperations
         {
             KahunaKeyValue getResult = await client.GetKeyValue(
                 $"{keyPrefix}{i}",
-                durability,
-                TestContext.Current.CancellationToken
+    durability,
+    cancellationToken: TestContext.Current.CancellationToken
             );
             
             Assert.True(getResult.Success);
@@ -114,8 +114,8 @@ public class TestAdvancedKeyValueOperations
         // Scan by prefix
         List<KahunaKeyValue> scanResults = await client.ScanAllByPrefix(
             keyPrefix,
-            durability,
-            TestContext.Current.CancellationToken
+    durability,
+    cancellationToken: TestContext.Current.CancellationToken
         );
         
         // Verify we got only the keys with our prefix
@@ -174,8 +174,8 @@ public class TestAdvancedKeyValueOperations
         // Get by bucket
         List<KahunaKeyValue> bucketResults = await client.GetByBucket(
             bucketPrefix,
-            durability,
-            TestContext.Current.CancellationToken
+    durability,
+    cancellationToken: TestContext.Current.CancellationToken
         );
         
         // Verify we got only the keys from our bucket
@@ -239,8 +239,8 @@ public class TestAdvancedKeyValueOperations
         // Get the current value
         KahunaKeyValue currentValue = await client.GetKeyValue(
             keyName,
-            durability,
-            TestContext.Current.CancellationToken
+    durability,
+    cancellationToken: TestContext.Current.CancellationToken
         );
         
         Assert.True(currentValue.Success);
@@ -341,8 +341,8 @@ END
         // Verify the value was updated
         KahunaKeyValue getResult = await client.GetKeyValue(
             keyName,
-            durability,
-            TestContext.Current.CancellationToken
+    durability,
+    cancellationToken: TestContext.Current.CancellationToken
         );
         
         Assert.True(getResult.Success);
@@ -386,8 +386,8 @@ END
         // Verify the value was not updated
         KahunaKeyValue getResult = await client.GetKeyValue(
             keyName,
-            durability,
-            TestContext.Current.CancellationToken
+    durability,
+    cancellationToken: TestContext.Current.CancellationToken
         );
         
         Assert.True(getResult.Success);

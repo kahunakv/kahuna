@@ -53,7 +53,7 @@ public class TestDeleteManyKeyValues
             KahunaKeyValue getResult = await client.GetKeyValue(
                 key,
                 KeyValueDurability.Persistent,
-                TestContext.Current.CancellationToken
+                cancellationToken: TestContext.Current.CancellationToken
             );
 
             Assert.False(getResult.Success);
@@ -102,7 +102,7 @@ public class TestDeleteManyKeyValues
             KahunaKeyValue getResult = await client.GetKeyValue(
                 key,
                 KeyValueDurability.Ephemeral,
-                TestContext.Current.CancellationToken
+                cancellationToken: TestContext.Current.CancellationToken
             );
 
             Assert.False(getResult.Success);
@@ -142,8 +142,8 @@ public class TestDeleteManyKeyValues
         Assert.Equal(2, deleteResults.Count);
         Assert.All(deleteResults, result => Assert.True(result.Success));
 
-        Assert.False((await client.GetKeyValue(persistentKey, KeyValueDurability.Persistent, TestContext.Current.CancellationToken)).Success);
-        Assert.False((await client.GetKeyValue(ephemeralKey, KeyValueDurability.Ephemeral, TestContext.Current.CancellationToken)).Success);
+        Assert.False((await client.GetKeyValue(persistentKey, KeyValueDurability.Persistent, cancellationToken: TestContext.Current.CancellationToken)).Success);
+        Assert.False((await client.GetKeyValue(ephemeralKey, KeyValueDurability.Ephemeral, cancellationToken: TestContext.Current.CancellationToken)).Success);
     }
 
     [Theory, CombinatorialData]
@@ -173,7 +173,7 @@ public class TestDeleteManyKeyValues
         Assert.Contains(deleteResults, result => result.Key == existingKey && result.Success);
         Assert.Contains(deleteResults, result => result.Key == missingKey && !result.Success);
 
-        Assert.False((await client.GetKeyValue(existingKey, KeyValueDurability.Persistent, TestContext.Current.CancellationToken)).Success);
+        Assert.False((await client.GetKeyValue(existingKey, KeyValueDurability.Persistent, cancellationToken: TestContext.Current.CancellationToken)).Success);
     }
 
     [Theory, CombinatorialData]
