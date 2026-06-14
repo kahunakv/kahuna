@@ -523,6 +523,12 @@ public class RestCommunication : IKahunaCommunication
         return (response.Items ?? [], response.TimeElapsedMs);
     }
 
+    public Task<(List<KahunaGetManyKeyValuesResponseItem>, int)> TryGetManyKeyValues(string url, HLCTimestamp transactionId, IEnumerable<KahunaGetManyKeyValuesRequestItem> requestItems, CancellationToken cancellationToken)
+        => throw new NotImplementedException();
+
+    public Task<(List<KahunaGetManyKeyValuesResponseItem>, int)> TryExistsManyKeyValues(string url, HLCTimestamp transactionId, IEnumerable<KahunaGetManyKeyValuesRequestItem> requestItems, CancellationToken cancellationToken)
+        => throw new NotImplementedException();
+
     /// <summary>
     /// Attempts to compare the specified value with an existing key's value and set a new value if they match.
     /// </summary>
@@ -699,11 +705,12 @@ public class RestCommunication : IKahunaCommunication
     /// <exception cref="KahunaException">
     /// Thrown when the key-value retrieval process encounters an unrecoverable error.
     /// </exception>
-    public async Task<(bool, byte[]?, long, int)> TryGetKeyValue(
+    public async Task<(bool, byte[]?, long, HLCTimestamp, int)> TryGetKeyValue(
         string url,
         HLCTimestamp transactionId,
         string key,
         long revision,
+        HLCTimestamp readTimestamp,
         KeyValueDurability durability,
         CancellationToken cancellationToken
     )
@@ -743,10 +750,10 @@ public class RestCommunication : IKahunaCommunication
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
             if (response.Type == KeyValueResponseType.Get)
-                return (true, response.Value, response.Revision, 0);
-            
+                return (true, response.Value, response.Revision, HLCTimestamp.Zero, 0);
+
             if (response.Type == KeyValueResponseType.DoesNotExist)
-                return (false, null, response.Revision, 0);
+                return (false, null, response.Revision, HLCTimestamp.Zero, 0);
             
             if (++retries >= 5)
                 throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
@@ -1052,7 +1059,7 @@ public class RestCommunication : IKahunaCommunication
         throw new NotImplementedException();
     }
 
-    public Task<bool> TryAcquireExclusiveRangeKeyValueLock(string url, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+    public Task<bool> TryAcquireRangeKeyValueLock(string url, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability, RangeLockMode mode, CancellationToken cancellationToken)
     {
         throw new NotImplementedException();
     }
@@ -1066,6 +1073,9 @@ public class RestCommunication : IKahunaCommunication
     {
         throw new NotImplementedException();
     }
+
+    public IAsyncEnumerable<KeyValueGetByBucketItem> ScanByRange(string url, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int pageSize, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+        => throw new NotImplementedException();
 
     public Task<List<KeyValueGetByBucketItem>> GetByBucket(string url, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {

@@ -723,18 +723,21 @@ public class KahunaClient
     /// <param name="durability">The specified durability level of the key-value pair, default is persistent.</param>
     /// <param name="cancellationToken">A token to propagate notifications that the operation should be canceled.</param>
     /// <returns>A task that represents the asynchronous operation, which returns a <see cref="KahunaKeyValue"/> containing the key-value information.</returns>
-    public async Task<KahunaKeyValue> GetKeyValue(string key, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
+    public async Task<KahunaKeyValue> GetKeyValue(string key, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default, long snapshotMs = 0)
     {
-        (bool success, byte[]? value, long revision, int timeElapsedMs) = await communication.TryGetKeyValue(
-            GetRoundRobinUrl(), 
+        HLCTimestamp readTimestamp = snapshotMs == 0 ? HLCTimestamp.Zero : new HLCTimestamp(0, snapshotMs, uint.MaxValue);
+
+        (bool success, byte[]? value, long revision, HLCTimestamp lastModified, int timeElapsedMs) = await communication.TryGetKeyValue(
+            GetRoundRobinUrl(),
             HLCTimestamp.Zero,
-            key, 
-            -1, 
-            durability, 
+            key,
+            -1,
+            readTimestamp,
+            durability,
             cancellationToken
         ).ConfigureAwait(false);
-        
-        return new(this, key, success, value, revision, durability, timeElapsedMs);
+
+        return new(this, key, success, value, revision, durability, timeElapsedMs, lastModified.L);
     }
 
     /// <summary>
@@ -769,16 +772,17 @@ public class KahunaClient
     /// <returns>A task that represents the asynchronous operation. The result contains the retrieved key-value pair.</returns>
     public async Task<KahunaKeyValue> GetKeyValueRevision(string key, long revision, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        (bool success, byte[]? value, long returnRevision, int timeElapsedMs) = await communication.TryGetKeyValue(
-            GetRoundRobinUrl(), 
+        (bool success, byte[]? value, long returnRevision, HLCTimestamp lastModified, int timeElapsedMs) = await communication.TryGetKeyValue(
+            GetRoundRobinUrl(),
             HLCTimestamp.Zero,
-            key, 
-            revision, 
-            durability, 
+            key,
+            revision,
+            HLCTimestamp.Zero,
+            durability,
             cancellationToken
         ).ConfigureAwait(false);
-        
-        return new(this, key, success, value, returnRevision, durability, timeElapsedMs);
+
+        return new(this, key, success, value, returnRevision, durability, timeElapsedMs, lastModified.L);
     }
 
     /// <summary>
@@ -894,9 +898,130 @@ public class KahunaClient
     }
 
     /// <summary>
+    /// Retrieves multiple key-value entries in a single round-trip.
+    /// Each item in <paramref name="requestItems"/> specifies a key, optional revision, and durability.
+    /// Items not found are returned with <see cref="KahunaKeyValue.Success"/> set to false.
+    /// </summary>
+    public async Task<List<KahunaKeyValue>> GetManyKeyValues(
+        IEnumerable<KahunaGetManyKeyValuesRequestItem> requestItems,
+        CancellationToken cancellationToken = default)
+    {
+        (List<KahunaGetManyKeyValuesResponseItem> items, int timeElapsedMs) = await communication.TryGetManyKeyValues(
+            GetRoundRobinUrl(), HLCTimestamp.Zero, requestItems, cancellationToken
+        ).ConfigureAwait(false);
+
+        List<KahunaKeyValue> result = new(items.Count);
+        foreach (KahunaGetManyKeyValuesResponseItem item in items)
+        {
+            result.Add(new(
+                this,
+                item.Key ?? "",
+                item.Type == KeyValueResponseType.Get,
+                item.Value,
+                item.Revision,
+                item.Durability,
+                timeElapsedMs,
+                item.LastModified.L
+            ));
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Checks existence of multiple keys in a single round-trip.
+    /// Returns one <see cref="KahunaKeyValue"/> per input key;
+    /// <see cref="KahunaKeyValue.Success"/> is true when the key exists, false otherwise.
+    /// </summary>
+    public async Task<List<KahunaKeyValue>> ExistsManyKeyValues(
+        IEnumerable<KahunaGetManyKeyValuesRequestItem> requestItems,
+        CancellationToken cancellationToken = default)
+    {
+        (List<KahunaGetManyKeyValuesResponseItem> items, int timeElapsedMs) = await communication.TryExistsManyKeyValues(
+            GetRoundRobinUrl(), HLCTimestamp.Zero, requestItems, cancellationToken
+        ).ConfigureAwait(false);
+
+        List<KahunaKeyValue> result = new(items.Count);
+        foreach (KahunaGetManyKeyValuesResponseItem item in items)
+        {
+            result.Add(new(
+                this,
+                item.Key ?? "",
+                item.Type == KeyValueResponseType.Exists,
+                item.Value,
+                item.Revision,
+                item.Durability,
+                timeElapsedMs,
+                item.LastModified.L
+            ));
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Returns up to <paramref name="limit"/> key-value entries within a range of a prefix scan,
+    /// optionally as of a historical snapshot. Bounds are inclusive or exclusive as specified.
+    /// </summary>
+    public async Task<List<KahunaKeyValue>> GetByRange(
+        string prefix,
+        string? startKey = null, bool startInclusive = true,
+        string? endKey = null, bool endInclusive = false,
+        int limit = 100,
+        KeyValueDurability durability = KeyValueDurability.Persistent,
+        CancellationToken cancellationToken = default,
+        long snapshotMs = 0)
+    {
+        HLCTimestamp readTimestamp = snapshotMs == 0 ? HLCTimestamp.Zero : new HLCTimestamp(0, snapshotMs, uint.MaxValue);
+
+        KeyValueGetByRangePageResult result = await communication.GetByRange(
+            GetRoundRobinUrl(), HLCTimestamp.Zero, prefix,
+            startKey, startInclusive, endKey, endInclusive,
+            limit, readTimestamp, durability, cancellationToken
+        ).ConfigureAwait(false);
+
+        List<KahunaKeyValue> list = new(result.Items.Count);
+        foreach (KeyValueGetByBucketItem item in result.Items)
+            list.Add(new(this, item.Key ?? "", true, item.Value, item.Revision, durability, 0, item.LastModified.L));
+
+        return list;
+    }
+
+    /// <summary>
+    /// Streams all key-value entries within a range of a prefix scan as an async sequence,
+    /// fetching results in server-side pages of <paramref name="pageSize"/> items each.
+    /// When <paramref name="snapshotMs"/> is non-zero the scan is pinned to that Unix-epoch-ms snapshot.
+    /// </summary>
+    public async IAsyncEnumerable<KahunaKeyValue> ScanByRange(
+        string prefix,
+        string? startKey = null, bool startInclusive = true,
+        string? endKey = null, bool endInclusive = false,
+        int pageSize = 100,
+        KeyValueDurability durability = KeyValueDurability.Persistent,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default,
+        long snapshotMs = 0)
+    {
+        HLCTimestamp readTimestamp = snapshotMs == 0 ? HLCTimestamp.Zero : new HLCTimestamp(0, snapshotMs, uint.MaxValue);
+
+        await foreach (KeyValueGetByBucketItem item in communication.ScanByRange(
+            GetRoundRobinUrl(), HLCTimestamp.Zero, prefix,
+            startKey, startInclusive, endKey, endInclusive,
+            pageSize, readTimestamp, durability, cancellationToken).ConfigureAwait(false))
+        {
+            yield return new(this, item.Key ?? "", true, item.Value, item.Revision, durability, 0, item.LastModified.L);
+        }
+    }
+
+    /// <summary>
+    /// Registers a key space for range-based sharding.
+    /// After registration, keys in the space are routed via range descriptors seeded on the cluster.
+    /// Returns true when the key space was newly seeded; false when it was already registered.
+    /// </summary>
+    public Task<bool> RegisterKeyRange(string keySpace, CancellationToken cancellationToken = default) =>
+        communication.RegisterKeyRange(GetRoundRobinUrl(), keySpace, cancellationToken);
+
+    /// <summary>
     /// Executes a script on the key-value store
     /// Scripts are executed as all or nothing transactions
-    /// if one command fails the entire transaction is aborted 
+    /// if one command fails the entire transaction is aborted
     /// </summary>
     /// <param name="script"></param>
     /// <param name="hash"></param>
@@ -905,8 +1030,8 @@ public class KahunaClient
     /// <returns></returns>
     public async Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransactionScript(
         string script,
-        string? hash = null, 
-        List<KeyValueParameter>? parameters = null, 
+        string? hash = null,
+        List<KeyValueParameter>? parameters = null,
         CancellationToken cancellationToken = default
     )
     {

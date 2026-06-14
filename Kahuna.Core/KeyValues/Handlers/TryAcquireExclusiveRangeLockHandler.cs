@@ -61,7 +61,10 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
                         return intents;
                     existing.Mode = RangeLockMode.Exclusive;
                 }
-                // X → S downgrade or same-mode re-entry: no-op.
+                // X → S downgrade or same-mode re-entry: refresh the expiry from *now* so the
+                // caller can extend the lock beyond its original TTL (heartbeat / lease-renewal).
+                if (message.ExpiresMs > 0)
+                    existing.Expires = currentTime + message.ExpiresMs;
                 return KeyValueStaticResponses.LockedResponse;
             }
 

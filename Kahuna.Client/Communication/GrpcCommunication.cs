@@ -407,6 +407,107 @@ public class GrpcCommunication : IKahunaCommunication
         return (GetDeleteManyKeyValueResponseItems(response.Items), response.TimeElapsedMs);
     }
 
+    public async Task<(List<KahunaGetManyKeyValuesResponseItem>, int)> TryGetManyKeyValues(
+        string url,
+        HLCTimestamp transactionId,
+        IEnumerable<KahunaGetManyKeyValuesRequestItem> requestItems,
+        CancellationToken cancellationToken
+    )
+    {
+        GrpcTryGetManyValuesRequest request = new()
+        {
+            TransactionIdNode = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C
+        };
+        request.Items.AddRange(GetManyKeyValuesRequestItems(requestItems));
+
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
+        KeyValuer.KeyValuerClient client = new(channel);
+
+        GrpcTryGetManyValuesResponse response = await client.TryGetManyValuesAsync(
+            request, cancellationToken: cancellationToken
+        ).ConfigureAwait(false);
+
+        return (GetGetManyKeyValuesResponseItems(response.Items), 0);
+    }
+
+    public async Task<(List<KahunaGetManyKeyValuesResponseItem>, int)> TryExistsManyKeyValues(
+        string url,
+        HLCTimestamp transactionId,
+        IEnumerable<KahunaGetManyKeyValuesRequestItem> requestItems,
+        CancellationToken cancellationToken
+    )
+    {
+        GrpcTryExistsManyValuesRequest request = new()
+        {
+            TransactionIdNode = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C
+        };
+        request.Items.AddRange(GetManyKeyValuesRequestItems(requestItems));
+
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
+        KeyValuer.KeyValuerClient client = new(channel);
+
+        GrpcTryExistsManyValuesResponse response = await client.TryExistsManyValuesAsync(
+            request, cancellationToken: cancellationToken
+        ).ConfigureAwait(false);
+
+        return (GetExistsManyKeyValuesResponseItems(response.Items), 0);
+    }
+
+    private static IEnumerable<GrpcTryManyValuesRequestItem> GetManyKeyValuesRequestItems(
+        IEnumerable<KahunaGetManyKeyValuesRequestItem> requestItems)
+    {
+        foreach (KahunaGetManyKeyValuesRequestItem item in requestItems)
+        {
+            yield return new()
+            {
+                Key = item.Key ?? "",
+                Revision = item.Revision,
+                Durability = (GrpcKeyValueDurability)item.Durability
+            };
+        }
+    }
+
+    private static List<KahunaGetManyKeyValuesResponseItem> GetGetManyKeyValuesResponseItems(
+        RepeatedField<GrpcTryGetManyValuesResponseItem> items)
+    {
+        List<KahunaGetManyKeyValuesResponseItem> result = new(items.Count);
+        foreach (GrpcTryGetManyValuesResponseItem item in items)
+        {
+            result.Add(new()
+            {
+                Key = item.Key,
+                Type = (KeyValueResponseType)item.Type,
+                Value = item.HasValue ? item.Value.ToByteArray() : null,
+                Revision = item.Revision,
+                LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
+                Durability = (KeyValueDurability)item.Durability
+            });
+        }
+        return result;
+    }
+
+    private static List<KahunaGetManyKeyValuesResponseItem> GetExistsManyKeyValuesResponseItems(
+        RepeatedField<GrpcTryExistsManyValuesResponseItem> items)
+    {
+        List<KahunaGetManyKeyValuesResponseItem> result = new(items.Count);
+        foreach (GrpcTryExistsManyValuesResponseItem item in items)
+        {
+            result.Add(new()
+            {
+                Key = item.Key,
+                Type = (KeyValueResponseType)item.Type,
+                Revision = item.Revision,
+                LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
+                Durability = (KeyValueDurability)item.Durability
+            });
+        }
+        return result;
+    }
+
     private static IEnumerable<GrpcTrySetManyKeyValueRequestItem> GetSetManyKeyValueRequestItems(IEnumerable<KahunaSetKeyValueRequestItem> requestItems)
     {                
         foreach (KahunaSetKeyValueRequestItem item in requestItems)
@@ -648,11 +749,12 @@ public class GrpcCommunication : IKahunaCommunication
     /// - The fourth item represents the time taken for the operation in milliseconds.
     /// </returns>
     /// <exception cref="KahunaException">Thrown if the operation fails after retries.</exception>
-    public async Task<(bool, byte[]?, long, int)> TryGetKeyValue(
+    public async Task<(bool, byte[]?, long, HLCTimestamp, int)> TryGetKeyValue(
         string url,
         HLCTimestamp transactionId,
         string key,
         long revision,
+        HLCTimestamp readTimestamp,
         KeyValueDurability durability,
         CancellationToken cancellationToken
     )
@@ -664,6 +766,9 @@ public class GrpcCommunication : IKahunaCommunication
             TransactionIdCounter = transactionId.C,
             Key = key,
             Revision = revision,
+            ReadTimestampNode = readTimestamp.N,
+            ReadTimestampPhysical = readTimestamp.L,
+            ReadTimestampCounter = readTimestamp.C,
             Durability = (GrpcKeyValueDurability)durability
         };
 
@@ -703,12 +808,13 @@ public class GrpcCommunication : IKahunaCommunication
                                 value = segment.Array;
                             else
                                 value = response.Value.ToByteArray();
-                    
-                            return (true, value, response.Revision, response.TimeElapsedMs);
+
+                            HLCTimestamp lastModified = new(response.LastModifiedNode, response.LastModifiedPhysical, response.LastModifiedCounter);
+                            return (true, value, response.Revision, lastModified, response.TimeElapsedMs);
                         }
 
                         case GrpcKeyValueResponseType.TypeDoesNotExist:
-                            return (false, null, 0, response.TimeElapsedMs);
+                            return (false, null, 0, HLCTimestamp.Zero, response.TimeElapsedMs);
                     }
             
                     if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
@@ -1124,7 +1230,7 @@ public class GrpcCommunication : IKahunaCommunication
         await client.TryReleaseExclusivePrefixLockAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<bool> TryAcquireExclusiveRangeKeyValueLock(
+    public async Task<bool> TryAcquireRangeKeyValueLock(
         string url,
         HLCTimestamp transactionId,
         string prefix,
@@ -1132,6 +1238,7 @@ public class GrpcCommunication : IKahunaCommunication
         string? endKey, bool endInclusive,
         int expiresMs,
         KeyValueDurability durability,
+        RangeLockMode mode,
         CancellationToken cancellationToken
     )
     {
@@ -1144,7 +1251,8 @@ public class GrpcCommunication : IKahunaCommunication
             StartInclusive = startInclusive,
             EndInclusive = endInclusive,
             ExpiresMs = expiresMs,
-            Durability = (GrpcKeyValueDurability)durability
+            Durability = (GrpcKeyValueDurability)durability,
+            Mode = (GrpcRangeLockMode)mode
         };
 
         if (startKey is not null) request.StartKey = startKey;
@@ -1272,6 +1380,57 @@ public class GrpcCommunication : IKahunaCommunication
         }
 
         throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
+    }
+
+    public async IAsyncEnumerable<KeyValueGetByBucketItem> ScanByRange(
+        string url,
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey, bool endInclusive,
+        int pageSize,
+        HLCTimestamp readTimestamp,
+        KeyValueDurability durability,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken
+    )
+    {
+        GrpcGetByRangeRequest request = new()
+        {
+            TransactionIdNode = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
+            Prefix = prefix,
+            StartInclusive = startInclusive,
+            EndInclusive = endInclusive,
+            Limit = pageSize,
+            ReadTimestampNode = readTimestamp.N,
+            ReadTimestampPhysical = readTimestamp.L,
+            ReadTimestampCounter = readTimestamp.C,
+            Durability = (GrpcKeyValueDurability)durability
+        };
+
+        if (startKey is not null) request.StartKey = startKey;
+        if (endKey is not null)   request.EndKey   = endKey;
+
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
+        KeyValuer.KeyValuerClient client = new(channel);
+
+        using Grpc.Core.AsyncServerStreamingCall<GrpcGetByRangePageResponse> stream =
+            client.GetByRangeStream(request, cancellationToken: cancellationToken);
+
+        await foreach (GrpcGetByRangePageResponse page in stream.ResponseStream.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+        {
+            foreach (GrpcKeyValueByPrefixItemResponse item in page.Items)
+            {
+                yield return new KeyValueGetByBucketItem
+                {
+                    Key = item.Key,
+                    Value = item.Value.IsEmpty ? null : item.Value.ToByteArray(),
+                    Revision = item.Revision,
+                    LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter)
+                };
+            }
+        }
     }
 
     private static List<KahunaKeyValueTransactionResultValue> GetTransactionValues(RepeatedField<GrpcTryExecuteTransactionResponseValue> responseValues)

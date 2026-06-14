@@ -52,6 +52,13 @@ public class KahunaKeyValue
     public KeyValueDurability Durability => durability;
 
     /// <summary>
+    /// Unix epoch milliseconds at which this revision was committed.
+    /// Use as a snapshot anchor: pass this value to <c>GetKeyValue(key, snapshotMs: LastModified)</c>
+    /// to re-read the key at the same point in time. Zero when not available.
+    /// </summary>
+    public long LastModified { get; }
+
+    /// <summary>
     /// Represents a key-value operation result, encapsulating details such as success status, revision number,
     /// durability type, and time elapsed during the operation.
     /// </summary>
@@ -70,7 +77,7 @@ public class KahunaKeyValue
     /// such as the operation's success status, key, value, revision number, durability level,
     /// and the time taken to complete the operation.
     /// </summary>
-    public KahunaKeyValue(KahunaClient client, string key, bool success, byte[]? value, long revision, KeyValueDurability durability, int timeElapsedMs)
+    public KahunaKeyValue(KahunaClient client, string key, bool success, byte[]? value, long revision, KeyValueDurability durability, int timeElapsedMs, long lastModified = 0)
     {
         this.client = client;
         this.Key = key;
@@ -79,6 +86,7 @@ public class KahunaKeyValue
         Revision = revision;
         this.durability = durability;
         TimeElapsedMs = timeElapsedMs;
+        LastModified = lastModified;
     }
 
     /// <summary>

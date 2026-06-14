@@ -79,7 +79,7 @@ public class KahunaTransactionSession : IAsyncDisposable
     /// <summary>
     /// A set of acquired range locks within the transaction session.
     /// </summary>
-    private List<(string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability)>? acquiredRangeLocks;
+    private List<(string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability, RangeLockMode mode)>? acquiredRangeLocks;
     
     /// <summary>
     /// A set of modified keys within the transaction session.
@@ -187,25 +187,26 @@ public class KahunaTransactionSession : IAsyncDisposable
         acquiredPrefixLocks = null;
     }
 
-    private async Task AcquireExclusiveRangeLock(
+    private async Task AcquireRangeLock(
         string prefix,
         string? startKey, bool startInclusive,
         string? endKey, bool endInclusive,
         KeyValueDurability durability,
+        RangeLockMode mode,
         CancellationToken cancellationToken
     )
     {
         acquiredRangeLocks ??= [];
 
-        bool successLock = await Client.Communication.TryAcquireExclusiveRangeKeyValueLock(
+        bool successLock = await Client.Communication.TryAcquireRangeKeyValueLock(
             Url, TransactionId, prefix, startKey, startInclusive, endKey, endInclusive,
-            TransactionTimeout, durability, cancellationToken
+            TransactionTimeout, durability, mode, cancellationToken
         ).ConfigureAwait(false);
 
         if (!successLock)
-            throw new KahunaException($"Failed to acquire exclusive range lock for '{prefix}'.", KeyValueResponseType.Aborted);
+            throw new KahunaException($"Failed to acquire range lock for '{prefix}'.", KeyValueResponseType.Aborted);
 
-        acquiredRangeLocks.Add((prefix, startKey, startInclusive, endKey, endInclusive, durability));
+        acquiredRangeLocks.Add((prefix, startKey, startInclusive, endKey, endInclusive, durability, mode));
     }
 
     private async Task ReleaseAllRangeLocks(CancellationToken cancellationToken)
@@ -213,7 +214,7 @@ public class KahunaTransactionSession : IAsyncDisposable
         if (acquiredRangeLocks is null)
             return;
 
-        foreach ((string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability) in acquiredRangeLocks)
+        foreach ((string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability, RangeLockMode _) in acquiredRangeLocks)
         {
             try
             {
@@ -581,18 +582,19 @@ public class KahunaTransactionSession : IAsyncDisposable
         if (Locking == KeyValueTransactionLocking.Pessimistic)
             await AcquireExclusiveKeyValueLock(key, durability, cancellationToken);
         
-        (bool success, byte[]? value, long revision, int timeElapsedMs) = await Client.Communication.TryGetKeyValue(
-            Url, 
+        (bool success, byte[]? value, long revision, HLCTimestamp lastModified, int timeElapsedMs) = await Client.Communication.TryGetKeyValue(
+            Url,
             TransactionId,
-            key, 
-            -1, 
-            durability, 
+            key,
+            -1,
+            HLCTimestamp.Zero,
+            durability,
             cancellationToken
         ).ConfigureAwait(false);
-        
+
         RecordReadKey(key, durability, success, success ? revision : -1);
-        
-        return new(Client, key, success, value, revision, durability, timeElapsedMs);
+
+        return new(Client, key, success, value, revision, durability, timeElapsedMs, lastModified.L);
     }
     
     /// <summary>
@@ -876,6 +878,7 @@ public class KahunaTransactionSession : IAsyncDisposable
         int limit = 0,
         HLCTimestamp readTimestamp = default,
         KeyValueDurability durability = KeyValueDurability.Persistent,
+        RangeLockMode lockMode = RangeLockMode.Exclusive,
         CancellationToken cancellationToken = default
     )
     {
@@ -883,7 +886,7 @@ public class KahunaTransactionSession : IAsyncDisposable
             throw new KahunaException("Cannot perform actions on a completed transaction.", KeyValueResponseType.Errored);
 
         if (Locking == KeyValueTransactionLocking.Pessimistic)
-            await AcquireExclusiveRangeLock(prefix, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken).ConfigureAwait(false);
+            await AcquireRangeLock(prefix, startKey, startInclusive, endKey, endInclusive, durability, lockMode, cancellationToken).ConfigureAwait(false);
 
         return await Client.Communication.GetByRange(
             Url, TransactionId, prefix, startKey, startInclusive, endKey, endInclusive,
