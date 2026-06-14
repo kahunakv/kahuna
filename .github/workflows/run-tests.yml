@@ -24,6 +24,7 @@ jobs:
           dotnet-version: |
             8.0.x
             9.0.x
+            10.0.x
       - name: Run Kahuna Server
         run: (cd scripts && chmod +x ./run-server.sh && ./run-server.sh)
       - name: Run Client Tests

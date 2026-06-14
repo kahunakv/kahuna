@@ -20,13 +20,13 @@ internal sealed class EmbeddedRaftCommunication : ICommunication
 
     private static readonly Task<AppendLogsResponse> AppendLogsResponse = Task.FromResult(new AppendLogsResponse());
 
-    private static readonly Task<AppendLogsBatchResponse> AppendLogsBatchResponse = Task.FromResult(new AppendLogsBatchResponse());
-
     private static readonly Task<CompleteAppendLogsResponse> CompleteAppendLogsResponse = Task.FromResult(new CompleteAppendLogsResponse());
 
-    private static readonly Task<CompleteAppendLogsBatchResponse> CompleteAppendLogsBatchResponse = Task.FromResult(new CompleteAppendLogsBatchResponse());
-
     private static readonly Task<BatchRequestsResponse> BatchRequestsResponse = Task.FromResult(new BatchRequestsResponse());
+
+    private static readonly Task<JoinResponse> JoinResponse = Task.FromResult(new JoinResponse(false));
+
+    private static readonly Task<LeaveResponse> LeaveResponse = Task.FromResult(new LeaveResponse(false));
 
     public Task<HandshakeResponse> Handshake(RaftManager manager, RaftNode node, HandshakeRequest request)
     {
@@ -50,25 +50,19 @@ internal sealed class EmbeddedRaftCommunication : ICommunication
         return AppendLogsResponse;
     }
 
-    public Task<AppendLogsBatchResponse> AppendLogsBatch(RaftManager manager, RaftNode node, AppendLogsBatchRequest request)
-    {
-        if (request.AppendLogs is not null)
-        {
-            foreach (AppendLogsRequest appendLogsRequest in request.AppendLogs)
-                CompleteAppendLogs(manager, node, appendLogsRequest);
-        }
-
-        return AppendLogsBatchResponse;
-    }
-
     public Task<CompleteAppendLogsResponse> CompleteAppendLogs(RaftManager manager, RaftNode node, CompleteAppendLogsRequest request)
     {
         return CompleteAppendLogsResponse;
     }
 
-    public Task<CompleteAppendLogsBatchResponse> CompleteAppendLogsBatch(RaftManager manager, RaftNode node, CompleteAppendLogsBatchRequest request)
+    public Task<JoinResponse> SendJoin(RaftManager manager, RaftNode node, JoinRequest request)
     {
-        return CompleteAppendLogsBatchResponse;
+        return JoinResponse;
+    }
+
+    public Task<LeaveResponse> SendLeave(RaftManager manager, RaftNode node, LeaveRequest request, CancellationToken cancellationToken = default)
+    {
+        return LeaveResponse;
     }
 
     public Task<BatchRequestsResponse> BatchRequests(RaftManager manager, RaftNode node, BatchRequestsRequest request)
