@@ -174,7 +174,8 @@ public sealed class TestLockHolderTimestamp : BaseCluster
 
     /// <summary>
     /// Remote partition path: holder survives the inter-node routing round-trip via MemoryInterNodeCommunication.
-    /// Uses a multi-node cluster so LocateAndTryAcquireRangeLock routes through the locator.
+    /// The second acquire is sent through a confirmed non-leader node so the request is guaranteed
+    /// to be forwarded to the partition leader rather than served locally, exercising the inter-node path.
     /// </summary>
     [Fact]
     public async Task RangeLock_RemoteRouting_HolderSurvivesRoundTrip()
@@ -183,19 +184,38 @@ public sealed class TestLockHolderTimestamp : BaseCluster
             await AssembleThreNodeCluster("memory", 3, raftLogger, kahunaLogger);
         try
         {
+            CancellationToken ct = TestContext.Current.CancellationToken;
+            const string prefix = Prefix + "4";
+
+            (IRaft, IKahuna)[] allNodes = [(r1, k1), (r2, k2), (r3, k3)];
+
             HLCTimestamp tx1 = r1.HybridLogicalClock.TrySendOrLocalEvent(r1.GetLocalNodeId());
             HLCTimestamp tx2 = r1.HybridLogicalClock.TrySendOrLocalEvent(r1.GetLocalNodeId());
 
-            // tx1 acquires Exclusive via k1
+            // tx1 acquires Exclusive via k1 (any node — the locator forwards to the leader).
             (KeyValueResponseType t1, _) = await k1.LocateAndTryAcquireExclusiveRangeLock(
-                tx1, Prefix + "4", StartKey, true, EndKey, false, ExpiresMs,
-                KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+                tx1, prefix, StartKey, true, EndKey, false, ExpiresMs,
+                KeyValueDurability.Persistent, ct);
             Assert.Equal(KeyValueResponseType.Locked, t1);
 
-            // tx2 tries same range via k2 (may route to the leader on a different node)
-            (KeyValueResponseType t2, HLCTimestamp holder) = await k2.LocateAndTryAcquireExclusiveRangeLock(
-                tx2, Prefix + "4", StartKey, true, EndKey, false, ExpiresMs,
-                KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+            // Determine which partition the prefix hashes to (prefix + "/" mirrors RoutePrefixKey).
+            int partitionId = ((KahunaManager)k1).GetDataPartitionForKey(prefix + "/");
+
+            // Find a confirmed non-leader node so the second request must cross inter-node.
+            IKahuna? nonLeader = null;
+            foreach ((IRaft raft, IKahuna kahuna) in allNodes)
+            {
+                if (!await raft.AmILeader(partitionId, ct))
+                {
+                    nonLeader = kahuna;
+                    break;
+                }
+            }
+            Assert.NotNull(nonLeader);
+
+            (KeyValueResponseType t2, HLCTimestamp holder) = await nonLeader.LocateAndTryAcquireExclusiveRangeLock(
+                tx2, prefix, StartKey, true, EndKey, false, ExpiresMs,
+                KeyValueDurability.Persistent, ct);
             Assert.Equal(KeyValueResponseType.AlreadyLocked, t2);
             Assert.Equal(tx1, holder);
         }
