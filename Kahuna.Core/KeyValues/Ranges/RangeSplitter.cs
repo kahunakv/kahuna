@@ -193,7 +193,7 @@ internal sealed class RangeSplitter
 
         // Route to the DATA partition leader (not the local actor) so the lock is recorded where
         // the 2PC handlers for [K,E) run.
-        KeyValueResponseType lockResult = await manager.LocateAndTryAcquireExclusiveRangeLock(
+        (KeyValueResponseType lockResult, _) = await manager.LocateAndTryAcquireExclusiveRangeLock(
             splitTxId,
             keySpace,
             splitKey, true,

@@ -49,7 +49,7 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
                             continue;
                         if (RangeLockChecks.RangesOverlap(message.StartKey, message.StartInclusive, message.EndKey, message.EndInclusive,
                                 other.StartKey, other.StartInclusive, other.EndKey, other.EndInclusive))
-                            return KeyValueStaticResponses.AlreadyLockedResponse;
+                            return KeyValueResponse.Denied(KeyValueResponseType.AlreadyLocked, other.TransactionId);
                     }
 
                     // Partial-failure inherited from original code: if TryLock fails midway,
@@ -82,7 +82,7 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
 
                 if (RangeLockChecks.RangesOverlap(message.StartKey, message.StartInclusive, message.EndKey, message.EndInclusive,
                         existing.StartKey, existing.StartInclusive, existing.EndKey, existing.EndInclusive))
-                    return KeyValueStaticResponses.AlreadyLockedResponse;
+                    return KeyValueResponse.Denied(KeyValueResponseType.AlreadyLocked, existing.TransactionId);
             }
         }
 

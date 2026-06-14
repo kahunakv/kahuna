@@ -399,7 +399,7 @@ public class TestLocks : BaseCluster
             HLCTimestamp tx1 = nodes[0].Item1.HybridLogicalClock.TrySendOrLocalEvent(nodes[0].Item1.GetLocalNodeId());
 
             // Acquire exclusive range lock on the LEFT half [−∞, t:rl/m) for TX1.
-            KeyValueResponseType lockResult = await node.LocateAndTryAcquireExclusiveRangeLock(
+            (KeyValueResponseType lockResult, _) = await node.LocateAndTryAcquireExclusiveRangeLock(
                 tx1, RlSpace, null, true, RlSplit, false, 30_000, KeyValueDurability.Persistent, ct);
             Assert.Equal(KeyValueResponseType.Locked, lockResult);
 
@@ -434,12 +434,12 @@ public class TestLocks : BaseCluster
             HLCTimestamp tx1 = nodes[0].Item1.HybridLogicalClock.TrySendOrLocalEvent(nodes[0].Item1.GetLocalNodeId());
             HLCTimestamp tx2 = nodes[0].Item1.HybridLogicalClock.TrySendOrLocalEvent(nodes[0].Item1.GetLocalNodeId());
 
-            KeyValueResponseType first = await node.LocateAndTryAcquireExclusiveRangeLock(
+            (KeyValueResponseType first, _) = await node.LocateAndTryAcquireExclusiveRangeLock(
                 tx1, RlSpace, null, true, RlSplit, false, 30_000, KeyValueDurability.Persistent, ct);
             Assert.Equal(KeyValueResponseType.Locked, first);
 
             // TX2 tries the same range — must be blocked.
-            KeyValueResponseType second = await node.LocateAndTryAcquireExclusiveRangeLock(
+            (KeyValueResponseType second, _) = await node.LocateAndTryAcquireExclusiveRangeLock(
                 tx2, RlSpace, null, true, RlSplit, false, 30_000, KeyValueDurability.Persistent, ct);
             Assert.Equal(KeyValueResponseType.AlreadyLocked, second);
         }
@@ -466,7 +466,7 @@ public class TestLocks : BaseCluster
             HLCTimestamp tx1 = nodes[0].Item1.HybridLogicalClock.TrySendOrLocalEvent(nodes[0].Item1.GetLocalNodeId());
 
             // Full-range lock spans both descriptors.
-            KeyValueResponseType locked = await node.LocateAndTryAcquireExclusiveRangeLock(
+            (KeyValueResponseType locked, _) = await node.LocateAndTryAcquireExclusiveRangeLock(
                 tx1, RlSpace, null, true, null, false, 30_000, KeyValueDurability.Persistent, ct);
             Assert.Equal(KeyValueResponseType.Locked, locked);
 
@@ -545,7 +545,7 @@ public class TestLocks : BaseCluster
 
             // Inject a split into the window between FindIntersecting and AcquireRangeLockOnPartition.
             // The hook commits a split so the post-acquire fence sees a changed descriptor set.
-            KeyValueResponseType fenced = await node.AcquireExclusiveRangeLockWithHook(
+            (KeyValueResponseType fenced, _) = await node.AcquireExclusiveRangeLockWithHook(
                 tx1, RlSpace, null, true, null, false, 30_000, KeyValueDurability.Persistent,
                 afterSnapshot: async () =>
                 {
@@ -564,7 +564,7 @@ public class TestLocks : BaseCluster
 
             // Prove no sub-lock was left held: a follow-up acquire on the same transaction
             // with the now-split map must succeed (AlreadyLocked would mean a leaked sub-lock).
-            KeyValueResponseType retry = await node.LocateAndTryAcquireExclusiveRangeLock(
+            (KeyValueResponseType retry, _) = await node.LocateAndTryAcquireExclusiveRangeLock(
                 tx1, RlSpace, null, true, null, false, 30_000, KeyValueDurability.Persistent, ct);
             Assert.Equal(KeyValueResponseType.Locked, retry);
         }
@@ -603,19 +603,19 @@ public class TestLocks : BaseCluster
             HLCTimestamp tx3 = nonLeaderRaft.HybridLogicalClock.TrySendOrLocalEvent(nonLeaderRaft.GetLocalNodeId());
 
             // tx1 acquires Shared on the LEFT half [−∞, RlSplit) via the non-leader.
-            KeyValueResponseType r1 = await nonLeaderKahuna.LocateAndTryAcquireRangeLock(
+            (KeyValueResponseType r1, _) = await nonLeaderKahuna.LocateAndTryAcquireRangeLock(
                 tx1, RlSpace, null, true, RlSplit, false, 30_000, KeyValueDurability.Persistent,
                 RangeLockMode.Shared, ct);
             Assert.Equal(KeyValueResponseType.Locked, r1);
 
             // tx2 acquires Shared on the same range from the same non-leader — S∩S must coexist.
-            KeyValueResponseType r2 = await nonLeaderKahuna.LocateAndTryAcquireRangeLock(
+            (KeyValueResponseType r2, _) = await nonLeaderKahuna.LocateAndTryAcquireRangeLock(
                 tx2, RlSpace, null, true, RlSplit, false, 30_000, KeyValueDurability.Persistent,
                 RangeLockMode.Shared, ct);
             Assert.Equal(KeyValueResponseType.Locked, r2);
 
             // tx3 tries Exclusive on the same range — must be blocked (both S locks are live).
-            KeyValueResponseType r3 = await nonLeaderKahuna.LocateAndTryAcquireRangeLock(
+            (KeyValueResponseType r3, _) = await nonLeaderKahuna.LocateAndTryAcquireRangeLock(
                 tx3, RlSpace, null, true, RlSplit, false, 30_000, KeyValueDurability.Persistent,
                 RangeLockMode.Exclusive, ct);
             Assert.Equal(KeyValueResponseType.AlreadyLocked, r3);
@@ -652,7 +652,7 @@ public class TestLocks : BaseCluster
             Assert.Equal(KeyValueResponseType.PrefixLockUnsupportedOnRangedSpace, release);
 
             // The range lock IS supported on the same space (the designed replacement).
-            KeyValueResponseType rangeLock = await node.LocateAndTryAcquireExclusiveRangeLock(
+            (KeyValueResponseType rangeLock, _) = await node.LocateAndTryAcquireExclusiveRangeLock(
                 tx, RlSpace, null, true, null, false, 30_000, KeyValueDurability.Persistent, ct);
             Assert.Equal(KeyValueResponseType.Locked, rangeLock);
         }

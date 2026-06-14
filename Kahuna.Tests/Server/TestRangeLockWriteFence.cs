@@ -75,9 +75,10 @@ public sealed class TestRangeLockWriteFence : BaseCluster
             HLCTimestamp txA = NextTx(leaderRaft);
             HLCTimestamp txB = NextTx(leaderRaft);
 
-            Assert.Equal(KeyValueResponseType.Locked, await leader.TryAcquireRangeLock(
+            (KeyValueResponseType _lockType, _) = await leader.TryAcquireRangeLock(
                 txA, Prefix, StartKey, true, EndKey, false, ExpiresMs,
-                KeyValueDurability.Persistent, RangeLockMode.Exclusive));
+                KeyValueDurability.Persistent, RangeLockMode.Exclusive);
+            Assert.Equal(KeyValueResponseType.Locked, _lockType);
 
             (KeyValueResponseType setResult, _, _) = await leader.TrySetKeyValue(
                 txB, InsideKey, SomeValue, null, -1, KeyValueFlags.Set, 0,
@@ -111,9 +112,10 @@ public sealed class TestRangeLockWriteFence : BaseCluster
             HLCTimestamp txA = NextTx(leaderRaft);
             HLCTimestamp txB = NextTx(leaderRaft);
 
-            Assert.Equal(KeyValueResponseType.Locked, await leader.TryAcquireRangeLock(
+            (KeyValueResponseType _lockType, _) = await leader.TryAcquireRangeLock(
                 txA, Prefix, StartKey, true, EndKey, false, ExpiresMs,
-                KeyValueDurability.Persistent, RangeLockMode.Exclusive));
+                KeyValueDurability.Persistent, RangeLockMode.Exclusive);
+            Assert.Equal(KeyValueResponseType.Locked, _lockType);
 
             (KeyValueResponseType deleteResult, _, _) = await leader.TryDeleteKeyValue(
                 txB, InsideKey, KeyValueDurability.Persistent);
@@ -146,9 +148,10 @@ public sealed class TestRangeLockWriteFence : BaseCluster
 
             // tx A acquires exclusive range lock covering that key.
             HLCTimestamp txA = NextTx(leaderRaft);
-            Assert.Equal(KeyValueResponseType.Locked, await leader.TryAcquireRangeLock(
+            (KeyValueResponseType _lockType, _) = await leader.TryAcquireRangeLock(
                 txA, Prefix, StartKey, true, EndKey, false, ExpiresMs,
-                KeyValueDurability.Persistent, RangeLockMode.Exclusive));
+                KeyValueDurability.Persistent, RangeLockMode.Exclusive);
+            Assert.Equal(KeyValueResponseType.Locked, _lockType);
 
             // tx B tries to prepare — tx A's range lock blocks it.
             HLCTimestamp commitId = NextTx(leaderRaft);
@@ -184,9 +187,10 @@ public sealed class TestRangeLockWriteFence : BaseCluster
             HLCTimestamp txA = NextTx(leaderRaft);
             HLCTimestamp txB = NextTx(leaderRaft);
 
-            Assert.Equal(KeyValueResponseType.Locked, await leader.TryAcquireRangeLock(
+            (KeyValueResponseType _lockType, _) = await leader.TryAcquireRangeLock(
                 txA, Prefix, StartKey, true, EndKey, false, ExpiresMs,
-                KeyValueDurability.Persistent, RangeLockMode.Shared));
+                KeyValueDurability.Persistent, RangeLockMode.Shared);
+            Assert.Equal(KeyValueResponseType.Locked, _lockType);
 
             // Set inside shared range → MustRetry
             (KeyValueResponseType setResult, _, _) = await leader.TrySetKeyValue(
@@ -226,9 +230,10 @@ public sealed class TestRangeLockWriteFence : BaseCluster
             HLCTimestamp txA = NextTx(leaderRaft);
             HLCTimestamp txB = NextTx(leaderRaft);
 
-            Assert.Equal(KeyValueResponseType.Locked, await leader.TryAcquireRangeLock(
+            (KeyValueResponseType _lockType, _) = await leader.TryAcquireRangeLock(
                 txA, Prefix, StartKey, true, EndKey, false, ExpiresMs,
-                KeyValueDurability.Persistent, RangeLockMode.Exclusive));
+                KeyValueDurability.Persistent, RangeLockMode.Exclusive);
+            Assert.Equal(KeyValueResponseType.Locked, _lockType);
 
             (KeyValueResponseType setResult, _, _) = await leader.TrySetKeyValue(
                 txB, OutsideKey, SomeValue, null, -1, KeyValueFlags.Set, 0,
@@ -259,9 +264,10 @@ public sealed class TestRangeLockWriteFence : BaseCluster
 
             HLCTimestamp txA = NextTx(leaderRaft);
 
-            Assert.Equal(KeyValueResponseType.Locked, await leader.TryAcquireRangeLock(
+            (KeyValueResponseType _lockType, _) = await leader.TryAcquireRangeLock(
                 txA, Prefix, StartKey, true, EndKey, false, ExpiresMs,
-                KeyValueDurability.Persistent, RangeLockMode.Exclusive));
+                KeyValueDurability.Persistent, RangeLockMode.Exclusive);
+            Assert.Equal(KeyValueResponseType.Locked, _lockType);
 
             // txA writes inside its own exclusive range → must succeed
             (KeyValueResponseType setResult, _, _) = await leader.TrySetKeyValue(

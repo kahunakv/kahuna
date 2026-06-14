@@ -247,7 +247,7 @@ public abstract class BaseCluster
             TestContext.Current.CancellationToken);
         assemblyCts.CancelAfter(TimeSpan.FromSeconds(90));
 
-        for (int i = 1; i <= partitions; i++)
+        for (int i = 0; i <= partitions; i++)
         {
             while (true)
             {

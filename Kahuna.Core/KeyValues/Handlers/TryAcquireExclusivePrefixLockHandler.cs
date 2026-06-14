@@ -38,8 +38,8 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
                 return KeyValueStaticResponses.LockedResponse;
 
             // Locked by another transaction but check if the lease is still active
-            if (writeIntent.Expires != HLCTimestamp.Zero && writeIntent.Expires - currentTime > TimeSpan.Zero)            
-                return KeyValueStaticResponses.AlreadyLockedResponse;            
+            if (writeIntent.Expires != HLCTimestamp.Zero && writeIntent.Expires - currentTime > TimeSpan.Zero)
+                return KeyValueResponse.Denied(KeyValueResponseType.AlreadyLocked, writeIntent.TransactionId);
             
             // The lock is expired, remove it
             context.LocksByPrefix.Remove(message.Key);

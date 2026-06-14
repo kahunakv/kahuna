@@ -632,17 +632,20 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
         
-        (KeyValueResponseType type, _, _) = await keyValues.LocateAndTryAcquireExclusiveLock(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
-            request.Key, 
-            request.ExpiresMs, 
-            (KeyValueDurability)request.Durability, 
+        (KeyValueResponseType type, _, _, HLCTimestamp holder) = await keyValues.LocateAndTryAcquireExclusiveLock(
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
+            request.Key,
+            request.ExpiresMs,
+            (KeyValueDurability)request.Durability,
             context.CancellationToken
         );
 
         return new()
         {
-            Type = (GrpcKeyValueResponseType)type
+            Type = (GrpcKeyValueResponseType)type,
+            HolderTransactionIdNode     = holder.N,
+            HolderTransactionIdPhysical = holder.L,
+            HolderTransactionIdCounter  = holder.C
         };
     }
     
@@ -707,9 +710,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns></returns>
     internal async Task<GrpcTryAcquireManyExclusiveLocksResponse> TryAcquireManyExclusiveLocksInternal(GrpcTryAcquireManyExclusiveLocksRequest request, ServerCallContext context)
     {
-        List<(KeyValueResponseType, string, KeyValueDurability)> responses = await keyValues.LocateAndTryAcquireManyExclusiveLocks(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
-            GetRequestLocksItems(request.Items), 
+        List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> responses = await keyValues.LocateAndTryAcquireManyExclusiveLocks(
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
+            GetRequestLocksItems(request.Items),
             context.CancellationToken
         );
 
@@ -745,15 +748,18 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <param name="responses">A list of tuples containing the key-value response type, key, and durability information.</param>
     /// <returns>An enumerable collection of gRPC response items corresponding to the provided key-value responses.</returns>
     private static IEnumerable<GrpcTryAcquireManyExclusiveLocksResponseItem> GetResponseLocksItems(
-        List<(KeyValueResponseType, string, KeyValueDurability)> responses
+        List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> responses
     )
     {
-        foreach ((KeyValueResponseType response, string key, KeyValueDurability durability) in responses)
+        foreach ((KeyValueResponseType response, string key, KeyValueDurability durability, HLCTimestamp holder) in responses)
             yield return new()
             {
                 Type = (GrpcKeyValueResponseType)response,
                 Key = key,
-                Durability = (GrpcKeyValueDurability)durability
+                Durability = (GrpcKeyValueDurability)durability,
+                HolderTransactionIdNode     = holder.N,
+                HolderTransactionIdPhysical = holder.L,
+                HolderTransactionIdCounter  = holder.C
             };
     }
 
@@ -852,7 +858,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         string? startKey = request.HasStartKey ? request.StartKey : null;
         string? endKey   = request.HasEndKey   ? request.EndKey   : null;
 
-        KeyValueResponseType type = await keyValues.LocateAndTryAcquireRangeLock(
+        (KeyValueResponseType type, HLCTimestamp holder) = await keyValues.LocateAndTryAcquireRangeLock(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Prefix,
             startKey, request.StartInclusive,
@@ -863,7 +869,13 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             context.CancellationToken
         );
 
-        return new() { Type = (GrpcKeyValueResponseType)type };
+        return new()
+        {
+            Type = (GrpcKeyValueResponseType)type,
+            HolderTransactionIdNode     = holder.N,
+            HolderTransactionIdPhysical = holder.L,
+            HolderTransactionIdCounter  = holder.C
+        };
     }
 
     public override async Task<GrpcTryReleaseExclusiveRangeLockResponse> TryReleaseExclusiveRangeLock(

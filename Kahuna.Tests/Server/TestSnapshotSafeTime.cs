@@ -214,7 +214,7 @@ public sealed class TestSnapshotSafeTime : BaseCluster
                 new() { UniqueId = Guid.NewGuid().ToString(), Locking = KeyValueTransactionLocking.Pessimistic }, ct);
             Assert.Equal(KeyValueResponseType.Set, startType);
 
-            (KeyValueResponseType lockResult, _, _) = await kahuna2.LocateAndTryAcquireExclusiveLock(
+            (KeyValueResponseType lockResult, _, _, _) = await kahuna2.LocateAndTryAcquireExclusiveLock(
                 lockTxId, key, 200, KeyValueDurability.Persistent, ct);
             Assert.Equal(KeyValueResponseType.Locked, lockResult);
 

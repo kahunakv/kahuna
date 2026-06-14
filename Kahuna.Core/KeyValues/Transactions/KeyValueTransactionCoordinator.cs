@@ -683,7 +683,7 @@ internal sealed class KeyValueTransactionCoordinator
             {
                 if (ephemeralLocksToAcquire.Count > 0)
                 {
-                    (KeyValueResponseType acquireResponse, string keyName, KeyValueDurability durability) = await manager.LocateAndTryAcquireExclusiveLock(
+                    (KeyValueResponseType acquireResponse, string keyName, KeyValueDurability durability, _) = await manager.LocateAndTryAcquireExclusiveLock(
                         context.TransactionId,
                         ephemeralLocksToAcquire.First(),
                         timeout + ExtraLockingDelay,
@@ -700,7 +700,7 @@ internal sealed class KeyValueTransactionCoordinator
 
                 if (persistentLocksToAcquire.Count > 0)
                 {
-                    (KeyValueResponseType acquireResponse, string keyName, KeyValueDurability durability) =
+                    (KeyValueResponseType acquireResponse, string keyName, KeyValueDurability durability, _) =
                         await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, persistentLocksToAcquire.First(), timeout + 10, KeyValueDurability.Persistent, ctsToken);
 
                     if (acquireResponse != KeyValueResponseType.Locked)
@@ -719,15 +719,15 @@ internal sealed class KeyValueTransactionCoordinator
             foreach (string key in persistentLocksToAcquire)
                 keysToLock.Add((key, timeout + ExtraLockingDelay, KeyValueDurability.Persistent));
 
-            List<(KeyValueResponseType, string, KeyValueDurability)> lockResponses = await manager.LocateAndTryAcquireManyExclusiveLocks(context.TransactionId, keysToLock, ctsToken);
+            List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> lockResponses = await manager.LocateAndTryAcquireManyExclusiveLocks(context.TransactionId, keysToLock, ctsToken);
 
-            foreach ((KeyValueResponseType response, string keyName, KeyValueDurability durability) in lockResponses)
+            foreach ((KeyValueResponseType response, string keyName, KeyValueDurability durability, _) in lockResponses)
             {
                 if (response == KeyValueResponseType.Locked)
                     context.LocksAcquired.Add((keyName, durability));
             }
 
-            foreach ((KeyValueResponseType response, string keyName, KeyValueDurability durability) in lockResponses)
+            foreach ((KeyValueResponseType response, string keyName, KeyValueDurability durability, _) in lockResponses)
             {
                 if (response != KeyValueResponseType.Locked)
                     throw new KahunaAbortedException("Failed to acquire lock: " + keyName + " " + durability);

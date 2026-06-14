@@ -62,7 +62,7 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
 
             // Check if the lease is still active
             if (entry.WriteIntent.Expires != HLCTimestamp.Zero && entry.WriteIntent.Expires - currentTime > TimeSpan.Zero)
-                return KeyValueStaticResponses.AlreadyLockedResponse;
+                return KeyValueResponse.Denied(KeyValueResponseType.AlreadyLocked, entry.WriteIntent.TransactionId);
         }
 
         entry.WriteIntent = new()

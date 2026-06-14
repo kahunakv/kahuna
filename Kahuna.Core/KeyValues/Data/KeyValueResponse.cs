@@ -67,7 +67,25 @@ public sealed class KeyValueResponse
     /// Used by GetRangeLocks to return the live range-lock entries for a key space.
     /// </summary>
     public List<KeyValueRangeLock>? RangeLockList { get; private set; }
-    
+
+    /// <summary>
+    /// Transaction id of the conflicting lock holder at denial time.
+    /// Advisory only — may be stale by the time the caller acts.
+    /// <see cref="HLCTimestamp.Zero"/> means no holder info (non-denial outcomes, or denials
+    /// where no single holder applies such as <c>WaitingForReplication</c> / infrastructural
+    /// <c>Errored</c>). Never gate correctness on this field; the actual lock is the sole
+    /// safety mechanism.
+    /// </summary>
+    public HLCTimestamp HolderTransactionId { get; private set; }
+
+    /// <summary>
+    /// Factory for a denial response that carries the conflicting holder's transaction id.
+    /// Use instead of <see cref="KeyValueStaticResponses.AlreadyLockedResponse"/> at sites
+    /// where the holder is known.
+    /// </summary>
+    public static KeyValueResponse Denied(KeyValueResponseType type, HLCTimestamp holder) =>
+        new(type) { HolderTransactionId = holder };
+
     /// <summary>
     /// Construtor
     /// </summary>

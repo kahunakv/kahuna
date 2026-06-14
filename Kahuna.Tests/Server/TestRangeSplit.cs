@@ -58,17 +58,29 @@ public sealed class TestRangeSplit : BaseCluster
     private static async Task<SplitOutcome> SplitViaLeaders(
         string space, string splitKey, (IRaft, KahunaManager)[] nodes, CancellationToken ct)
     {
-        (IRaft leaderRaft, KahunaManager leader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+        // Retry up to 5 times: a transient leader change between LeaderOf and MutateAsync
+        // inside SplitAsync returns CutoverFailed, which is safe to retry.
+        for (int attempt = 0; attempt < 5; attempt++)
+        {
+            (IRaft leaderRaft, KahunaManager leader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
 
-        int newPartitionId = RangeSplitter.ComputeNextPartitionId(leader.RangeMapStore.Current);
+            int newPartitionId = RangeSplitter.ComputeNextPartitionId(leader.RangeMapStore.Current);
 
-        RaftPartitionLifecycleResult createResult =
-            await leaderRaft.CreatePartitionAsync(newPartitionId, RaftRoutingMode.Unrouted, null, ct);
+            RaftPartitionLifecycleResult createResult =
+                await leaderRaft.CreatePartitionAsync(newPartitionId, RaftRoutingMode.Unrouted, null, ct);
 
-        if (!createResult.Success)
-            return SplitOutcome.PartitionCreationFailed;
+            if (!createResult.Success)
+                return SplitOutcome.PartitionCreationFailed;
 
-        return await leader.RangeSplitter.SplitAsync(space, splitKey, newPartitionId, ct);
+            SplitOutcome outcome = await leader.RangeSplitter.SplitAsync(space, splitKey, newPartitionId, ct);
+
+            if (outcome.Status != SplitStatus.CutoverFailed)
+                return outcome;
+
+            await Task.Delay(100, ct);
+        }
+
+        return SplitOutcome.CutoverFailed;
     }
 
     private static async Task WaitUntil(Func<bool> predicate, int timeoutMs = 8000)
@@ -569,7 +581,7 @@ public sealed class TestRangeSplit : BaseCluster
             HLCTimestamp tx1 = NextTx(p2Raft);
 
             // Step 1: tx1 acquires Shared over the whole range on P2.
-            KeyValueResponseType sharedBefore = await dataLeader.TryAcquireRangeLock(
+            (KeyValueResponseType sharedBefore, _) = await dataLeader.TryAcquireRangeLock(
                 tx1, Space, null, true, null, false, 60_000,
                 KeyValueDurability.Persistent, RangeLockMode.Shared);
             Assert.Equal(KeyValueResponseType.Locked, sharedBefore);
@@ -585,13 +597,13 @@ public sealed class TestRangeSplit : BaseCluster
             HLCTimestamp tx3 = NextTx(p2Raft);
 
             // Step 3: tx2 Shared on P2 → Locked (S∩S; proves tx1's lock Mode=Shared survived the split).
-            KeyValueResponseType sharedAfter = await p2Leader.TryAcquireRangeLock(
+            (KeyValueResponseType sharedAfter, _) = await p2Leader.TryAcquireRangeLock(
                 tx2, Space, null, true, null, false, 60_000,
                 KeyValueDurability.Persistent, RangeLockMode.Shared);
             Assert.Equal(KeyValueResponseType.Locked, sharedAfter);
 
             // Step 4: tx3 Exclusive on P2 → AlreadyLocked (X conflicts with the two live Shared locks).
-            KeyValueResponseType exclusiveAfter = await p2Leader.TryAcquireRangeLock(
+            (KeyValueResponseType exclusiveAfter, _) = await p2Leader.TryAcquireRangeLock(
                 tx3, Space, null, true, null, false, 60_000,
                 KeyValueDurability.Persistent, RangeLockMode.Exclusive);
             Assert.Equal(KeyValueResponseType.AlreadyLocked, exclusiveAfter);
@@ -646,7 +658,7 @@ public sealed class TestRangeSplit : BaseCluster
 
             // tx1 holds an Exclusive lock on the whole range before the split.
             HLCTimestamp tx1 = NextTx(p2Raft);
-            KeyValueResponseType lockBefore = await dataLeader.TryAcquireRangeLock(
+            (KeyValueResponseType lockBefore, _) = await dataLeader.TryAcquireRangeLock(
                 tx1, Space, null, true, null, false, 60_000,
                 KeyValueDurability.Persistent, RangeLockMode.Exclusive);
             Assert.Equal(KeyValueResponseType.Locked, lockBefore);
@@ -661,7 +673,7 @@ public sealed class TestRangeSplit : BaseCluster
 
             // tx2 tries Exclusive on the new partition — must be blocked by tx1's clamped lock.
             HLCTimestamp tx2 = NextTx(pPrimeRaft);
-            KeyValueResponseType lockOnNewPartition = await pPrimeLeader.TryAcquireRangeLock(
+            (KeyValueResponseType lockOnNewPartition, _) = await pPrimeLeader.TryAcquireRangeLock(
                 tx2, Space, Space + "/m", true, null, false, 60_000,
                 KeyValueDurability.Persistent, RangeLockMode.Exclusive);
 
@@ -695,7 +707,7 @@ public sealed class TestRangeSplit : BaseCluster
 
             // tx1 acquires Shared on the whole range.
             HLCTimestamp tx1 = NextTx(p2Raft);
-            KeyValueResponseType sharedBefore = await dataLeader.TryAcquireRangeLock(
+            (KeyValueResponseType sharedBefore, _) = await dataLeader.TryAcquireRangeLock(
                 tx1, Space, null, true, null, false, 60_000,
                 KeyValueDurability.Persistent, RangeLockMode.Shared);
             Assert.Equal(KeyValueResponseType.Locked, sharedBefore);
@@ -712,7 +724,7 @@ public sealed class TestRangeSplit : BaseCluster
 
             // tx3 Exclusive on new partition → AlreadyLocked iff tx1's Shared was transferred.
             // (A Shared probe would acquire regardless, so it can't detect a strand — use X.)
-            KeyValueResponseType exclusiveOnNew = await pPrimeLeader.TryAcquireRangeLock(
+            (KeyValueResponseType exclusiveOnNew, _) = await pPrimeLeader.TryAcquireRangeLock(
                 tx3, Space, Space + "/m", true, null, false, 60_000,
                 KeyValueDurability.Persistent, RangeLockMode.Exclusive);
             if (exclusiveOnNew != KeyValueResponseType.AlreadyLocked)
@@ -720,7 +732,7 @@ public sealed class TestRangeSplit : BaseCluster
 
             // tx2 Shared on new partition → Locked (S∩S coexist with tx1's transferred Shared).
             HLCTimestamp tx2 = NextTx(pPrimeRaft);
-            KeyValueResponseType sharedOnNew = await pPrimeLeader.TryAcquireRangeLock(
+            (KeyValueResponseType sharedOnNew, _) = await pPrimeLeader.TryAcquireRangeLock(
                 tx2, Space, Space + "/m", true, null, false, 60_000,
                 KeyValueDurability.Persistent, RangeLockMode.Shared);
             Assert.Equal(KeyValueResponseType.Locked, sharedOnNew);
@@ -729,7 +741,7 @@ public sealed class TestRangeSplit : BaseCluster
             // partition is *also* subject to the non-replicated-lock failover gap (a P2 re-election
             // strands tx1's in-memory lock the same way), so treat a miss as a strand → retry.
             HLCTimestamp tx4 = NextTx(p2Raft);
-            KeyValueResponseType exclusiveOnOrig = await p2Leader.TryAcquireRangeLock(
+            (KeyValueResponseType exclusiveOnOrig, _) = await p2Leader.TryAcquireRangeLock(
                 tx4, Space, null, true, Space + "/m", false, 60_000,
                 KeyValueDurability.Persistent, RangeLockMode.Exclusive);
 
@@ -760,7 +772,7 @@ public sealed class TestRangeSplit : BaseCluster
             (IRaft p2Raft, _) = await LeaderOf(RangeMapStore.FirstDataPartitionId, nodes);
 
             HLCTimestamp tx1 = NextTx(p2Raft);
-            KeyValueResponseType lockBefore = await dataLeader.TryAcquireRangeLock(
+            (KeyValueResponseType lockBefore, _) = await dataLeader.TryAcquireRangeLock(
                 tx1, Space, null, true, null, false, 60_000,
                 KeyValueDurability.Persistent, RangeLockMode.Exclusive);
             Assert.Equal(KeyValueResponseType.Locked, lockBefore);
@@ -773,7 +785,7 @@ public sealed class TestRangeSplit : BaseCluster
 
             // Confirm the lock is present on the new partition; absent → strand, retry.
             HLCTimestamp txCheck = NextTx(pPrimeRaft);
-            KeyValueResponseType blockedBefore = await pPrimeLeader.TryAcquireRangeLock(
+            (KeyValueResponseType blockedBefore, _) = await pPrimeLeader.TryAcquireRangeLock(
                 txCheck, Space, Space + "/m", true, null, false, 60_000,
                 KeyValueDurability.Persistent, RangeLockMode.Exclusive);
             if (blockedBefore != KeyValueResponseType.AlreadyLocked)
@@ -788,7 +800,7 @@ public sealed class TestRangeSplit : BaseCluster
 
             // After release a fresh Exclusive must be granted.
             HLCTimestamp tx2 = NextTx(pPrimeRaft);
-            KeyValueResponseType afterRelease = await pPrimeLeader.TryAcquireRangeLock(
+            (KeyValueResponseType afterRelease, _) = await pPrimeLeader.TryAcquireRangeLock(
                 tx2, Space, Space + "/m", true, null, false, 60_000,
                 KeyValueDurability.Persistent, RangeLockMode.Exclusive);
             Assert.Equal(KeyValueResponseType.Locked, afterRelease);

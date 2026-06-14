@@ -326,8 +326,11 @@ message GrpcTryAcquireExclusiveLockRequest {
 }
 
 message GrpcTryAcquireExclusiveLockResponse {
-  optional string ServedFrom = 1;
-  GrpcKeyValueResponseType Type = 2;
+  optional string ServedFrom              = 1;
+  GrpcKeyValueResponseType Type           = 2;
+  int32  HolderTransactionIdNode          = 3;
+  int64  HolderTransactionIdPhysical      = 4;
+  uint32 HolderTransactionIdCounter       = 5;
 }
 
 message GrpcTryCheckWriteIntentRequest {
@@ -353,8 +356,11 @@ message GrpcTryAcquireExclusivePrefixLockRequest {
 }
 
 message GrpcTryAcquireExclusivePrefixLockResponse {
-  optional string ServedFrom = 1;
-  GrpcKeyValueResponseType Type = 2;
+  optional string ServedFrom              = 1;
+  GrpcKeyValueResponseType Type           = 2;
+  int32  HolderTransactionIdNode          = 3;
+  int64  HolderTransactionIdPhysical      = 4;
+  uint32 HolderTransactionIdCounter       = 5;
 }
 
 message GrpcTryAcquireManyExclusiveLocksRequest {
@@ -376,9 +382,12 @@ message GrpcTryAcquireManyExclusiveLocksRequestItem {
 }
 
 message GrpcTryAcquireManyExclusiveLocksResponseItem {
-  GrpcKeyValueResponseType Type = 1;
-  string Key = 2;
-  GrpcKeyValueDurability Durability = 3;
+  GrpcKeyValueResponseType Type           = 1;
+  string Key                              = 2;
+  GrpcKeyValueDurability Durability       = 3;
+  int32  HolderTransactionIdNode          = 4;
+  int64  HolderTransactionIdPhysical      = 5;
+  uint32 HolderTransactionIdCounter       = 6;
 }
 
 message GrpcTryReleaseManyExclusiveLocksRequest {
@@ -445,8 +454,11 @@ message GrpcTryAcquireExclusiveRangeLockRequest {
 }
 
 message GrpcTryAcquireExclusiveRangeLockResponse {
-  optional string ServedFrom = 1;
-  GrpcKeyValueResponseType Type = 2;
+  optional string ServedFrom              = 1;
+  GrpcKeyValueResponseType Type           = 2;
+  int32  HolderTransactionIdNode          = 3;
+  int64  HolderTransactionIdPhysical      = 4;
+  uint32 HolderTransactionIdCounter       = 5;
 }
 
 message GrpcTryReleaseExclusiveRangeLockRequest {

@@ -77,16 +77,19 @@ public sealed class TestRangeLockTransfer : BaseCluster
             HLCTimestamp txExp = NextTx(leaderRaft);
 
             // Shared lock [−∞, Space+"/m")
-            Assert.Equal(KeyValueResponseType.Locked, await leader.TryAcquireRangeLock(
-                txS, Space, null, true, Space + "/m", false, 60_000, KeyValueDurability.Persistent, RangeLockMode.Shared));
+            (KeyValueResponseType _lockS, _) = await leader.TryAcquireRangeLock(
+                txS, Space, null, true, Space + "/m", false, 60_000, KeyValueDurability.Persistent, RangeLockMode.Shared);
+            Assert.Equal(KeyValueResponseType.Locked, _lockS);
 
             // Exclusive lock [Space+"/m", Space+"/z")
-            Assert.Equal(KeyValueResponseType.Locked, await leader.TryAcquireRangeLock(
-                txX, Space, Space + "/m", true, Space + "/z", false, 60_000, KeyValueDurability.Persistent, RangeLockMode.Exclusive));
+            (KeyValueResponseType _lockX, _) = await leader.TryAcquireRangeLock(
+                txX, Space, Space + "/m", true, Space + "/z", false, 60_000, KeyValueDurability.Persistent, RangeLockMode.Exclusive);
+            Assert.Equal(KeyValueResponseType.Locked, _lockX);
 
             // An already-expired lock: expiresMs = 1 then wait just enough
-            Assert.Equal(KeyValueResponseType.Locked, await leader.TryAcquireRangeLock(
-                txExp, Space, Space + "/e", true, Space + "/f", false, 1, KeyValueDurability.Persistent, RangeLockMode.Shared));
+            (KeyValueResponseType _lockExp, _) = await leader.TryAcquireRangeLock(
+                txExp, Space, Space + "/e", true, Space + "/f", false, 1, KeyValueDurability.Persistent, RangeLockMode.Shared);
+            Assert.Equal(KeyValueResponseType.Locked, _lockExp);
 
             // Advance HLC so expiresTs of the 1 ms lock is definitely in the past.
             await Task.Delay(20, ct);
@@ -238,13 +241,15 @@ public sealed class TestRangeLockTransfer : BaseCluster
 
             // Same tx acquires two non-overlapping Shared locks — acquire handler allows this
             // because the conflict loop skips same-tx entries.
-            Assert.Equal(KeyValueResponseType.Locked, await leader.TryAcquireRangeLock(
+            (KeyValueResponseType _lockA, _) = await leader.TryAcquireRangeLock(
                 tx1, space, space + "/a", true, space + "/m", false,
-                60_000, KeyValueDurability.Persistent, RangeLockMode.Shared));
+                60_000, KeyValueDurability.Persistent, RangeLockMode.Shared);
+            Assert.Equal(KeyValueResponseType.Locked, _lockA);
 
-            Assert.Equal(KeyValueResponseType.Locked, await leader.TryAcquireRangeLock(
+            (KeyValueResponseType _lockM, _) = await leader.TryAcquireRangeLock(
                 tx1, space, space + "/m", true, space + "/z", false,
-                60_000, KeyValueDurability.Persistent, RangeLockMode.Shared));
+                60_000, KeyValueDurability.Persistent, RangeLockMode.Shared);
+            Assert.Equal(KeyValueResponseType.Locked, _lockM);
 
             List<KeyValueRangeLock> before = await leader.GetRangeLocksAsync(space);
             Assert.Equal(2, before.Count);

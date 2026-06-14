@@ -403,11 +403,11 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, string, KeyValueDurability)> LocateAndTryAcquireExclusiveLock(
-        HLCTimestamp transactionId, 
-        string key, 
-        int expiresMs, 
-        KeyValueDurability durability, 
+    public Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)> LocateAndTryAcquireExclusiveLock(
+        HLCTimestamp transactionId,
+        string key,
+        int expiresMs,
+        KeyValueDurability durability,
         CancellationToken cancellationToken
     )
     {
@@ -441,9 +441,9 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="keys"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public Task<List<(KeyValueResponseType, string, KeyValueDurability)>> LocateAndTryAcquireManyExclusiveLocks(
+    public Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)>> LocateAndTryAcquireManyExclusiveLocks(
         HLCTimestamp transactionId,
-        List<(string key, int expiresMs, KeyValueDurability durability)> keys, 
+        List<(string key, int expiresMs, KeyValueDurability durability)> keys,
         CancellationToken cancellationToken
     )
     {
@@ -486,7 +486,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
         return keyValues.LocateAndTryReleaseExclusivePrefixLock(transactionId, prefixKey, durability, cancellationToken);
     }
 
-    public Task<KeyValueResponseType> LocateAndTryAcquireRangeLock(
+    public Task<(KeyValueResponseType, HLCTimestamp HolderTransactionId)> LocateAndTryAcquireRangeLock(
         HLCTimestamp transactionId,
         string prefix,
         string? startKey, bool startInclusive,
@@ -497,7 +497,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
         CancellationToken cancellationToken
     ) => keyValues.LocateAndTryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, cancellationToken);
 
-    public Task<KeyValueResponseType> LocateAndTryAcquireExclusiveRangeLock(
+    public Task<(KeyValueResponseType, HLCTimestamp HolderTransactionId)> LocateAndTryAcquireExclusiveRangeLock(
         HLCTimestamp transactionId,
         string prefix,
         string? startKey, bool startInclusive,
@@ -892,10 +892,10 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="expiresMs"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, string, KeyValueDurability)> TryAcquireExclusiveLock(
-        HLCTimestamp transactionId, 
-        string key, 
-        int expiresMs, 
+    public Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)> TryAcquireExclusiveLock(
+        HLCTimestamp transactionId,
+        string key,
+        int expiresMs,
         KeyValueDurability durability
     )
     {
@@ -943,10 +943,10 @@ public sealed class KahunaManager : IKahuna, IDisposable
         return keyValues.TryReleaseExclusivePrefixLock(transactionId, prefixKey, durability);
     }
 
-    public Task<KeyValueResponseType> TryAcquireExclusiveRangeLock(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability)
+    public Task<(KeyValueResponseType, HLCTimestamp HolderTransactionId)> TryAcquireExclusiveRangeLock(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability)
         => keyValues.TryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, RangeLockMode.Exclusive);
 
-    public Task<KeyValueResponseType> TryAcquireRangeLock(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability, RangeLockMode mode)
+    public Task<(KeyValueResponseType, HLCTimestamp HolderTransactionId)> TryAcquireRangeLock(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability, RangeLockMode mode)
     {
         return keyValues.TryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode);
     }
@@ -1296,7 +1296,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <c>FindIntersecting</c> snapshot but before any sub-lock RPC. Lets tests inject a split
     /// into that window to drive the generation fence deterministically.
     /// </summary>
-    internal Task<KeyValueResponseType> AcquireExclusiveRangeLockWithHook(
+    internal Task<(KeyValueResponseType, HLCTimestamp)> AcquireExclusiveRangeLockWithHook(
         HLCTimestamp transactionId,
         string prefix,
         string? startKey, bool startInclusive,

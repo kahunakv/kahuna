@@ -162,7 +162,7 @@ public sealed class TestEmbeddedKahunaNode
         Assert.Equal(KeyValueResponseType.Set, response);
 
         string txKey = "tenant/table/key-tx";
-        (response, _, _) = await node.Kahuna.LocateAndTryAcquireExclusiveLock(
+        (response, _, _, _) = await node.Kahuna.LocateAndTryAcquireExclusiveLock(
             transactionId,
             txKey,
             5000,

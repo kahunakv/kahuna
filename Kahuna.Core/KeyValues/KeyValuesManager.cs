@@ -684,11 +684,11 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, string, KeyValueDurability)> LocateAndTryAcquireExclusiveLock(
-        HLCTimestamp transactionId, 
-        string key, 
-        int expiresMs, 
-        KeyValueDurability durability, 
+    public Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)> LocateAndTryAcquireExclusiveLock(
+        HLCTimestamp transactionId,
+        string key,
+        int expiresMs,
+        KeyValueDurability durability,
         CancellationToken cancelationToken
     )
     {
@@ -722,9 +722,9 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="keys"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public Task<List<(KeyValueResponseType, string, KeyValueDurability)>> LocateAndTryAcquireManyExclusiveLocks(
-        HLCTimestamp transactionId, 
-        List<(string key, int expiresMs, KeyValueDurability durability)> keys, 
+    public Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)>> LocateAndTryAcquireManyExclusiveLocks(
+        HLCTimestamp transactionId,
+        List<(string key, int expiresMs, KeyValueDurability durability)> keys,
         CancellationToken cancelationToken
     )
     {
@@ -764,7 +764,7 @@ internal sealed class KeyValuesManager : IDisposable
         return locator.LocateAndTryReleaseExclusivePrefixLock(transactionId, prefixKey, durability, cancellationToken);
     }
 
-    public Task<KeyValueResponseType> LocateAndTryAcquireRangeLock(
+    public Task<(KeyValueResponseType, HLCTimestamp HolderTransactionId)> LocateAndTryAcquireRangeLock(
         HLCTimestamp transactionId,
         string prefix,
         string? startKey, bool startInclusive,
@@ -775,7 +775,7 @@ internal sealed class KeyValuesManager : IDisposable
         CancellationToken cancellationToken
     ) => locator.LocateAndTryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, cancellationToken);
 
-    public Task<KeyValueResponseType> LocateAndTryAcquireExclusiveRangeLock(
+    public Task<(KeyValueResponseType, HLCTimestamp HolderTransactionId)> LocateAndTryAcquireExclusiveRangeLock(
         HLCTimestamp transactionId,
         string prefix,
         string? startKey, bool startInclusive,
@@ -785,7 +785,7 @@ internal sealed class KeyValuesManager : IDisposable
         CancellationToken cancellationToken
     ) => locator.LocateAndTryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, RangeLockMode.Exclusive, cancellationToken);
 
-    internal Task<KeyValueResponseType> LocateAndTryAcquireExclusiveRangeLockWithHook(
+    internal Task<(KeyValueResponseType, HLCTimestamp)> LocateAndTryAcquireExclusiveRangeLockWithHook(
         HLCTimestamp transactionId,
         string prefix,
         string? startKey, bool startInclusive,
@@ -1668,7 +1668,7 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="expiresMs"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, string, KeyValueDurability)> TryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability)
+    public async Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)> TryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability)
     {
         KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TryAcquireExclusiveLock, 
@@ -1699,7 +1699,7 @@ internal sealed class KeyValuesManager : IDisposable
                     response = await persistentKeyValuesRouter.Ask(request);
 
                 if (response is null)
-                    return (KeyValueResponseType.Errored, key, durability);
+                    return (KeyValueResponseType.Errored, key, durability, HLCTimestamp.Zero);
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
@@ -1707,17 +1707,17 @@ internal sealed class KeyValuesManager : IDisposable
                     continue;
                 }
 
-                return (response.Type, key, durability);
+                return (response.Type, key, durability, response.HolderTransactionId);
             }
-            
-            return (KeyValueResponseType.MustRetry, key, durability);
+
+            return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero);
         }
         finally
         {
             KeyValueRequestPool.Return(request);
         }
     }
-    
+
     /// <summary>
     /// Passes a TryAcquireExclusivePrefixLock request to the key/value actor to lock a range of keys by the specified prefix
     /// </summary>
@@ -1787,13 +1787,13 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="transactionId"></param>
     /// <param name="keys"></param>
     /// <returns></returns>
-    public async Task<List<(KeyValueResponseType, string, KeyValueDurability)>> TryAcquireManyExclusiveLocks(
-        HLCTimestamp transactionId, 
+    public async Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)>> TryAcquireManyExclusiveLocks(
+        HLCTimestamp transactionId,
         List<(string key, int expiresMs, KeyValueDurability durability)> keys
     )
     {
-        List<(KeyValueResponseType, string, KeyValueDurability)> responses = new(keys.Count);
-        
+        List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> responses = new(keys.Count);
+
         foreach ((string key, int expiresMs, KeyValueDurability durability) key in keys)
         {
             KeyValueRequest request = KeyValueRequestPool.Rent(
@@ -1824,11 +1824,11 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response is null || response.Type == KeyValueResponseType.WaitingForReplication)
                 {
-                    responses.Add((KeyValueResponseType.Errored, key.key, key.durability));
+                    responses.Add((KeyValueResponseType.Errored, key.key, key.durability, HLCTimestamp.Zero));
                     continue;
                 }
 
-                responses.Add((response.Type, key.key, key.durability));
+                responses.Add((response.Type, key.key, key.durability, response.HolderTransactionId));
 
                 if (response.Type != KeyValueResponseType.Locked)
                     break;
@@ -1956,7 +1956,7 @@ internal sealed class KeyValuesManager : IDisposable
         }
     }
     
-    public Task<KeyValueResponseType> TryAcquireExclusiveRangeLock(
+    public Task<(KeyValueResponseType, HLCTimestamp HolderTransactionId)> TryAcquireExclusiveRangeLock(
         HLCTimestamp transactionId,
         string prefix,
         string? startKey, bool startInclusive,
@@ -1965,7 +1965,7 @@ internal sealed class KeyValuesManager : IDisposable
         KeyValueDurability durability
     ) => TryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, RangeLockMode.Exclusive);
 
-    public async Task<KeyValueResponseType> TryAcquireRangeLock(
+    public async Task<(KeyValueResponseType, HLCTimestamp HolderTransactionId)> TryAcquireRangeLock(
         HLCTimestamp transactionId,
         string prefix,
         string? startKey, bool startInclusive,
@@ -2010,7 +2010,7 @@ internal sealed class KeyValuesManager : IDisposable
                     response = await persistentKeyValuesRouter.Ask(request);
 
                 if (response is null)
-                    return KeyValueResponseType.Errored;
+                    return (KeyValueResponseType.Errored, HLCTimestamp.Zero);
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
@@ -2018,10 +2018,10 @@ internal sealed class KeyValuesManager : IDisposable
                     continue;
                 }
 
-                return response.Type;
+                return (response.Type, response.HolderTransactionId);
             }
 
-            return KeyValueResponseType.MustRetry;
+            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
         }
         finally
         {

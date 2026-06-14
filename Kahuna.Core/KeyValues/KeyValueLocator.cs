@@ -621,22 +621,22 @@ internal sealed class KeyValueLocator
     /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, string, KeyValueDurability)> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancelationToken)
+    public async Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancelationToken)
     {
         if (string.IsNullOrEmpty(key))
-            return (KeyValueResponseType.InvalidInput, key, durability);
-        
+            return (KeyValueResponseType.InvalidInput, key, durability, HLCTimestamp.Zero);
+
         int partitionId = RouteKey(key);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
             return await manager.TryAcquireExclusiveLock(transactionId, key, expiresMs, durability);
-            
+
         string leader = await raft.WaitForLeader(partitionId, cancelationToken);
         if (leader == raft.GetLocalEndpoint())
-            return (KeyValueResponseType.MustRetry, key, durability);
-        
+            return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero);
+
         logger.LogDebug("ACQUIRE-LOCK-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
-        
+
         return await interNodeCommunication.TryAcquireExclusiveLock(leader, transactionId, key, expiresMs, durability, cancelationToken);
     }
 
@@ -690,68 +690,68 @@ internal sealed class KeyValueLocator
     /// <param name="keys"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<List<(KeyValueResponseType, string, KeyValueDurability)>> LocateAndTryAcquireManyExclusiveLocks(
-        HLCTimestamp transactionId, 
-        List<(string key, int expiresMs, KeyValueDurability durability)> keys, 
+    public async Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)>> LocateAndTryAcquireManyExclusiveLocks(
+        HLCTimestamp transactionId,
+        List<(string key, int expiresMs, KeyValueDurability durability)> keys,
         CancellationToken cancelationToken
     )
     {
         string localNode = raft.GetLocalEndpoint();
-        
+
         Dictionary<string, List<(string key, int expiresMs, KeyValueDurability durability)>> acquisitionPlan = [];
 
         foreach ((string key, int expiresMs, KeyValueDurability durability) key in keys)
         {
             if (string.IsNullOrEmpty(key.key))
-                return [(KeyValueResponseType.InvalidInput, key.key, key.durability)];
+                return [(KeyValueResponseType.InvalidInput, key.key, key.durability, HLCTimestamp.Zero)];
 
             int partitionId = RouteKey(key.key);
             string leader = await raft.WaitForLeader(partitionId, cancelationToken);
-            
+
             if (acquisitionPlan.TryGetValue(leader, out List<(string key, int expiresMs, KeyValueDurability durability)>? list))
                 list.Add(key);
             else
                 acquisitionPlan[leader] = [key];
         }
-        
+
         Lock lockSync = new();
         List<Task> tasks = new(acquisitionPlan.Count);
-        List<(KeyValueResponseType, string, KeyValueDurability)> responses = new(keys.Count);
-        
+        List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> responses = new(keys.Count);
+
         // Requests to nodes are sent in parallel
         foreach ((string leader, List<(string key, int expiresMs, KeyValueDurability durability)> xkeys) in acquisitionPlan)
             tasks.Add(TryAcquireNodeExclusiveLocks(transactionId, leader, localNode, xkeys, lockSync, responses, cancelationToken));
-        
+
         await Task.WhenAll(tasks);
 
         return responses;
     }
 
     private async Task TryAcquireNodeExclusiveLocks(
-        HLCTimestamp transactionId, 
-        string leader, 
-        string localNode, 
+        HLCTimestamp transactionId,
+        string leader,
+        string localNode,
         List<(string key, int expiresMs, KeyValueDurability durability)> xkeys,
         Lock lockSync,
-        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses,
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder)> responses,
         CancellationToken cancellationToken
     )
     {
         logger.LogDebug("ACQUIRE-LOCK-KEYVALUE Redirect {Number} lock acquisitions to node {Leader}", xkeys.Count, leader);
-        
+
         if (leader == localNode)
         {
-            List<(KeyValueResponseType type, string key, KeyValueDurability durability)> acquireResponses = await manager.TryAcquireManyExclusiveLocks(transactionId, xkeys);
+            List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder)> acquireResponses = await manager.TryAcquireManyExclusiveLocks(transactionId, xkeys);
 
             lock (lockSync)
             {
-                foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) item in acquireResponses)
-                    responses.Add((item.type, item.key, item.durability));
+                foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder) item in acquireResponses)
+                    responses.Add((item.type, item.key, item.durability, item.holder));
             }
 
             return;
         }
-            
+
         await interNodeCommunication.TryAcquireNodeExclusiveLocks(leader, transactionId, xkeys, lockSync, responses, cancellationToken);
     }
 
@@ -844,7 +844,7 @@ internal sealed class KeyValueLocator
     /// frequently-consistent case. Fully closing the cross-node skew window would require the lock
     /// to carry and verify a descriptor generation end-to-end against the writer's view.</para>
     /// </summary>
-    public Task<KeyValueResponseType> LocateAndTryAcquireRangeLock(
+    public Task<(KeyValueResponseType, HLCTimestamp HolderTransactionId)> LocateAndTryAcquireRangeLock(
         HLCTimestamp transactionId,
         string prefix,
         string? startKey, bool startInclusive,
@@ -855,7 +855,7 @@ internal sealed class KeyValueLocator
         CancellationToken cancellationToken
     ) => LocateAndTryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, null, cancellationToken);
 
-    public Task<KeyValueResponseType> LocateAndTryAcquireExclusiveRangeLock(
+    public Task<(KeyValueResponseType, HLCTimestamp HolderTransactionId)> LocateAndTryAcquireExclusiveRangeLock(
         HLCTimestamp transactionId,
         string prefix,
         string? startKey, bool startInclusive,
@@ -865,7 +865,7 @@ internal sealed class KeyValueLocator
         CancellationToken cancellationToken
     ) => LocateAndTryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, RangeLockMode.Exclusive, null, cancellationToken);
 
-    internal Task<KeyValueResponseType> LocateAndTryAcquireExclusiveRangeLock(
+    internal Task<(KeyValueResponseType, HLCTimestamp)> LocateAndTryAcquireExclusiveRangeLock(
         HLCTimestamp transactionId,
         string prefix,
         string? startKey, bool startInclusive,
@@ -876,7 +876,7 @@ internal sealed class KeyValueLocator
         CancellationToken cancellationToken
     ) => LocateAndTryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, RangeLockMode.Exclusive, afterSnapshot, cancellationToken);
 
-    internal async Task<KeyValueResponseType> LocateAndTryAcquireRangeLock(
+    internal async Task<(KeyValueResponseType, HLCTimestamp)> LocateAndTryAcquireRangeLock(
         HLCTimestamp transactionId,
         string prefix,
         string? startKey, bool startInclusive,
@@ -889,7 +889,7 @@ internal sealed class KeyValueLocator
     )
     {
         if (string.IsNullOrEmpty(prefix))
-            return KeyValueResponseType.InvalidInput;
+            return (KeyValueResponseType.InvalidInput, HLCTimestamp.Zero);
 
         IReadOnlyList<RangeDescriptor> descriptors =
             manager.RangeMapStore.Current.FindIntersecting(prefix, startKey, endKey);
@@ -908,12 +908,12 @@ internal sealed class KeyValueLocator
 
         if (descriptors.Count == 1)
         {
-            KeyValueResponseType result = await AcquireRangeLockOnPartition(
+            (KeyValueResponseType result, HLCTimestamp holder) = await AcquireRangeLockOnPartition(
                 transactionId, descriptors[0].PartitionId, prefix,
                 startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, cancellationToken);
 
             if (result != KeyValueResponseType.Locked)
-                return result;
+                return (result, holder);
 
             // Generation fence: a split that committed after FindIntersecting but before the
             // sub-lock RPC would leave P' un-locked. Re-check the map; if the descriptor set
@@ -927,10 +927,10 @@ internal sealed class KeyValueLocator
                     logger.LogWarning("ACQUIRE-RANGE-LOCK {Prefix} P{Pid}: fence rollback release returned {Status} — sub-lock leaks until TTL",
                         prefix, descriptors[0].PartitionId, rel);
 
-                return KeyValueResponseType.MustRetry;
+                return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
             }
 
-            return KeyValueResponseType.Locked;
+            return (KeyValueResponseType.Locked, HLCTimestamp.Zero);
         }
 
         // Multi-descriptor: per-range sub-locks with roll-back on partial failure.
@@ -941,7 +941,7 @@ internal sealed class KeyValueLocator
             (string? cs, bool csI, string? ce, bool ceI) = ClipRange(
                 startKey, startInclusive, endKey, endInclusive, desc);
 
-            KeyValueResponseType result = await AcquireRangeLockOnPartition(
+            (KeyValueResponseType result, HLCTimestamp holder) = await AcquireRangeLockOnPartition(
                 transactionId, desc.PartitionId, prefix, cs, csI, ce, ceI, expiresMs, durability, mode, cancellationToken);
 
             if (result == KeyValueResponseType.Locked)
@@ -960,7 +960,7 @@ internal sealed class KeyValueLocator
                         prefix, pid, rel);
             }
 
-            return result;
+            return (result, holder);
         }
 
         // Generation fence: re-check after all sub-locks are held. If the map changed
@@ -979,10 +979,10 @@ internal sealed class KeyValueLocator
                         prefix, pid, rel);
             }
 
-            return KeyValueResponseType.MustRetry;
+            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
         }
 
-        return KeyValueResponseType.Locked;
+        return (KeyValueResponseType.Locked, HLCTimestamp.Zero);
     }
 
     /// <summary>
@@ -1063,7 +1063,7 @@ internal sealed class KeyValueLocator
         return firstFailure;
     }
 
-    private async Task<KeyValueResponseType> AcquireRangeLockOnPartition(
+    private async Task<(KeyValueResponseType, HLCTimestamp)> AcquireRangeLockOnPartition(
         HLCTimestamp transactionId,
         int partitionId,
         string prefix,
@@ -1079,7 +1079,7 @@ internal sealed class KeyValueLocator
 
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
-            return KeyValueResponseType.MustRetry;
+            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
 
         logger.LogDebug("ACQUIRE-RANGE-LOCK-KEYVALUE Redirect {Prefix} P{Partition} → {Leader}", prefix, partitionId, leader);
 

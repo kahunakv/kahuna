@@ -159,7 +159,7 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
         int expiresMs, KeyValueDurability durability, RangeLockMode mode,
         CancellationToken cancellationToken)
     {
-        KeyValueResponseType result = await kahuna.LocateAndTryAcquireRangeLock(
+        (KeyValueResponseType result, _) = await kahuna.LocateAndTryAcquireRangeLock(
             transactionId, prefix, startKey, startInclusive, endKey, endInclusive,
             expiresMs, durability, mode, cancellationToken);
         return result == KeyValueResponseType.Locked;

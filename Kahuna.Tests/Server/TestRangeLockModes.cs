@@ -72,12 +72,12 @@ public sealed class TestRangeLockModes : BaseCluster
             HLCTimestamp tx1 = NextTx(leaderRaft);
             HLCTimestamp tx2 = NextTx(leaderRaft);
 
-            KeyValueResponseType r = await leader.TryAcquireRangeLock(
+            (KeyValueResponseType r, _) = await leader.TryAcquireRangeLock(
                 tx1, Prefix, StartKey, true, EndKey, false, ExpiresMs,
                 KeyValueDurability.Persistent, RangeLockMode.Shared);
             Assert.Equal(KeyValueResponseType.Locked, r);
 
-            KeyValueResponseType r2Result = await leader.TryAcquireRangeLock(
+            (KeyValueResponseType r2Result, _) = await leader.TryAcquireRangeLock(
                 tx2, Prefix, StartKey, true, EndKey, false, ExpiresMs,
                 KeyValueDurability.Persistent, RangeLockMode.Shared);
             Assert.Equal(KeyValueResponseType.Locked, r2Result);
@@ -107,12 +107,12 @@ public sealed class TestRangeLockModes : BaseCluster
             HLCTimestamp txS = NextTx(leaderRaft);
             HLCTimestamp txX = NextTx(leaderRaft);
 
-            KeyValueResponseType sharedResult = await leader.TryAcquireRangeLock(
+            (KeyValueResponseType sharedResult, _) = await leader.TryAcquireRangeLock(
                 txS, Prefix, StartKey, true, EndKey, false, ExpiresMs,
                 KeyValueDurability.Persistent, RangeLockMode.Shared);
             Assert.Equal(KeyValueResponseType.Locked, sharedResult);
 
-            KeyValueResponseType exclusiveResult = await leader.TryAcquireRangeLock(
+            (KeyValueResponseType exclusiveResult, _) = await leader.TryAcquireRangeLock(
                 txX, Prefix, StartKey, true, EndKey, false, ExpiresMs,
                 KeyValueDurability.Persistent, RangeLockMode.Exclusive);
             Assert.Equal(KeyValueResponseType.AlreadyLocked, exclusiveResult);
@@ -122,12 +122,12 @@ public sealed class TestRangeLockModes : BaseCluster
             HLCTimestamp txX2 = NextTx(leaderRaft);
             HLCTimestamp txS2 = NextTx(leaderRaft);
 
-            KeyValueResponseType exclusiveFirst = await leader.TryAcquireRangeLock(
+            (KeyValueResponseType exclusiveFirst, _) = await leader.TryAcquireRangeLock(
                 txX2, prefix2, StartKey, true, EndKey, false, ExpiresMs,
                 KeyValueDurability.Persistent, RangeLockMode.Exclusive);
             Assert.Equal(KeyValueResponseType.Locked, exclusiveFirst);
 
-            KeyValueResponseType sharedSecond = await leader.TryAcquireRangeLock(
+            (KeyValueResponseType sharedSecond, _) = await leader.TryAcquireRangeLock(
                 txS2, prefix2, StartKey, true, EndKey, false, ExpiresMs,
                 KeyValueDurability.Persistent, RangeLockMode.Shared);
             Assert.Equal(KeyValueResponseType.AlreadyLocked, sharedSecond);
@@ -156,12 +156,12 @@ public sealed class TestRangeLockModes : BaseCluster
             HLCTimestamp tx1 = NextTx(leaderRaft);
             HLCTimestamp tx2 = NextTx(leaderRaft);
 
-            KeyValueResponseType first = await leader.TryAcquireRangeLock(
+            (KeyValueResponseType first, _) = await leader.TryAcquireRangeLock(
                 tx1, Prefix, StartKey, true, EndKey, false, ExpiresMs,
                 KeyValueDurability.Persistent, RangeLockMode.Exclusive);
             Assert.Equal(KeyValueResponseType.Locked, first);
 
-            KeyValueResponseType second = await leader.TryAcquireRangeLock(
+            (KeyValueResponseType second, _) = await leader.TryAcquireRangeLock(
                 tx2, Prefix, StartKey, true, EndKey, false, ExpiresMs,
                 KeyValueDurability.Persistent, RangeLockMode.Exclusive);
             Assert.Equal(KeyValueResponseType.AlreadyLocked, second);
@@ -190,13 +190,13 @@ public sealed class TestRangeLockModes : BaseCluster
             HLCTimestamp tx2 = NextTx(leaderRaft);
 
             // tx1 takes Exclusive [10, 50)
-            KeyValueResponseType left = await leader.TryAcquireRangeLock(
+            (KeyValueResponseType left, _) = await leader.TryAcquireRangeLock(
                 tx1, Prefix, StartKey, true, EndKey, false, ExpiresMs,
                 KeyValueDurability.Persistent, RangeLockMode.Exclusive);
             Assert.Equal(KeyValueResponseType.Locked, left);
 
             // tx2 takes Shared [50, 99] — disjoint → must succeed
-            KeyValueResponseType right = await leader.TryAcquireRangeLock(
+            (KeyValueResponseType right, _) = await leader.TryAcquireRangeLock(
                 tx2, Prefix, EndKey, true, OuterKey, true, ExpiresMs,
                 KeyValueDurability.Persistent, RangeLockMode.Shared);
             Assert.Equal(KeyValueResponseType.Locked, right);
@@ -225,18 +225,21 @@ public sealed class TestRangeLockModes : BaseCluster
             HLCTimestamp tx1 = NextTx(leaderRaft);
             HLCTimestamp tx2 = NextTx(leaderRaft);
 
-            Assert.Equal(KeyValueResponseType.Locked, await leader.TryAcquireRangeLock(
+            (KeyValueResponseType _lockTx1, _) = await leader.TryAcquireRangeLock(
                 tx1, Prefix, StartKey, true, EndKey, false, ExpiresMs,
-                KeyValueDurability.Persistent, RangeLockMode.Shared));
+                KeyValueDurability.Persistent, RangeLockMode.Shared);
+            Assert.Equal(KeyValueResponseType.Locked, _lockTx1);
 
-            Assert.Equal(KeyValueResponseType.Locked, await leader.TryAcquireRangeLock(
+            (KeyValueResponseType _lockTx2, _) = await leader.TryAcquireRangeLock(
                 tx2, Prefix, StartKey, true, EndKey, false, ExpiresMs,
-                KeyValueDurability.Persistent, RangeLockMode.Shared));
+                KeyValueDurability.Persistent, RangeLockMode.Shared);
+            Assert.Equal(KeyValueResponseType.Locked, _lockTx2);
 
             // tx1 tries to upgrade to X — tx2's Shared is still live → must be rejected
-            Assert.Equal(KeyValueResponseType.AlreadyLocked, await leader.TryAcquireRangeLock(
+            (KeyValueResponseType _upgradeResult, _) = await leader.TryAcquireRangeLock(
                 tx1, Prefix, StartKey, true, EndKey, false, ExpiresMs,
-                KeyValueDurability.Persistent, RangeLockMode.Exclusive));
+                KeyValueDurability.Persistent, RangeLockMode.Exclusive);
+            Assert.Equal(KeyValueResponseType.AlreadyLocked, _upgradeResult);
         }
         finally
         {
@@ -263,26 +266,26 @@ public sealed class TestRangeLockModes : BaseCluster
             HLCTimestamp tx1 = NextTx(leaderRaft);
 
             // Acquire Shared
-            KeyValueResponseType first = await leader.TryAcquireRangeLock(
+            (KeyValueResponseType first, _) = await leader.TryAcquireRangeLock(
                 tx1, Prefix, StartKey, true, EndKey, false, ExpiresMs,
                 KeyValueDurability.Persistent, RangeLockMode.Shared);
             Assert.Equal(KeyValueResponseType.Locked, first);
 
             // Re-acquire same bounds same tx → idempotent
-            KeyValueResponseType reentry = await leader.TryAcquireRangeLock(
+            (KeyValueResponseType reentry, _) = await leader.TryAcquireRangeLock(
                 tx1, Prefix, StartKey, true, EndKey, false, ExpiresMs,
                 KeyValueDurability.Persistent, RangeLockMode.Shared);
             Assert.Equal(KeyValueResponseType.Locked, reentry);
 
             // S→X upgrade same tx, same bounds → Locked
-            KeyValueResponseType upgrade = await leader.TryAcquireRangeLock(
+            (KeyValueResponseType upgrade, _) = await leader.TryAcquireRangeLock(
                 tx1, Prefix, StartKey, true, EndKey, false, ExpiresMs,
                 KeyValueDurability.Persistent, RangeLockMode.Exclusive);
             Assert.Equal(KeyValueResponseType.Locked, upgrade);
 
             // After upgrade, a different tx requesting Shared on the same range must be blocked
             HLCTimestamp tx2 = NextTx(leaderRaft);
-            KeyValueResponseType blocked = await leader.TryAcquireRangeLock(
+            (KeyValueResponseType blocked, _) = await leader.TryAcquireRangeLock(
                 tx2, Prefix, StartKey, true, EndKey, false, ExpiresMs,
                 KeyValueDurability.Persistent, RangeLockMode.Shared);
             Assert.Equal(KeyValueResponseType.AlreadyLocked, blocked);

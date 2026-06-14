@@ -246,7 +246,7 @@ public sealed class TestRangeMerge : BaseCluster
                 await LeaderOf(right.PartitionId, nodes);
 
             HLCTimestamp tx1 = NextTx(rightRaft);
-            KeyValueResponseType lockBefore = await rightLeader.TryAcquireRangeLock(
+            (KeyValueResponseType lockBefore, _) = await rightLeader.TryAcquireRangeLock(
                 tx1, Space, right.StartKey, true, right.EndKey, false, 60_000,
                 KeyValueDurability.Persistent, RangeLockMode.Exclusive);
             Assert.Equal(KeyValueResponseType.Locked, lockBefore);
@@ -261,7 +261,7 @@ public sealed class TestRangeMerge : BaseCluster
 
             // tx2 tries Exclusive on the merged range — must be blocked by tx1's clamped lock.
             HLCTimestamp tx2 = NextTx(leftRaft);
-            KeyValueResponseType blockedAfter = await leftLeader.TryAcquireRangeLock(
+            (KeyValueResponseType blockedAfter, _) = await leftLeader.TryAcquireRangeLock(
                 tx2, Space, right.StartKey, true, right.EndKey, false, 60_000,
                 KeyValueDurability.Persistent, RangeLockMode.Exclusive);
 
@@ -297,7 +297,7 @@ public sealed class TestRangeMerge : BaseCluster
                 await LeaderOf(right.PartitionId, nodes);
 
             HLCTimestamp tx1 = NextTx(rightRaft);
-            KeyValueResponseType lockBefore = await rightLeader.TryAcquireRangeLock(
+            (KeyValueResponseType lockBefore, _) = await rightLeader.TryAcquireRangeLock(
                 tx1, Space, right.StartKey, true, right.EndKey, false, 60_000,
                 KeyValueDurability.Persistent, RangeLockMode.Exclusive);
             Assert.Equal(KeyValueResponseType.Locked, lockBefore);
@@ -310,7 +310,7 @@ public sealed class TestRangeMerge : BaseCluster
 
             // Confirm the lock is present on the survivor (return false to retry if stranded).
             HLCTimestamp txCheck = NextTx(leftRaft);
-            KeyValueResponseType blockedBefore = await leftLeader.TryAcquireRangeLock(
+            (KeyValueResponseType blockedBefore, _) = await leftLeader.TryAcquireRangeLock(
                 txCheck, Space, right.StartKey, true, right.EndKey, false, 60_000,
                 KeyValueDurability.Persistent, RangeLockMode.Exclusive);
 
@@ -325,7 +325,7 @@ public sealed class TestRangeMerge : BaseCluster
 
             // After release a fresh Exclusive must be granted.
             HLCTimestamp tx2 = NextTx(leftRaft);
-            KeyValueResponseType afterRelease = await leftLeader.TryAcquireRangeLock(
+            (KeyValueResponseType afterRelease, _) = await leftLeader.TryAcquireRangeLock(
                 tx2, Space, right.StartKey, true, right.EndKey, false, 60_000,
                 KeyValueDurability.Persistent, RangeLockMode.Exclusive);
             Assert.Equal(KeyValueResponseType.Locked, afterRelease);

@@ -702,7 +702,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     /// <param name="durability">The desired durability level of the lock, either ephemeral or persistent.</param>
     /// <param name="cancellationToken">A token to observe cancellation requests for the operation.</param>
     /// <returns>A tuple containing the type of the response, the key, and the lock's durability level.</returns>
-    public async Task<(KeyValueResponseType, string, KeyValueDurability)> TryAcquireExclusiveLock(
+    public async Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)> TryAcquireExclusiveLock(
         string node,
         HLCTimestamp transactionId,
         string key,
@@ -710,9 +710,9 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         KeyValueDurability durability,
         CancellationToken cancellationToken
     )
-    {        
-        GrpcServerBatcher batcher = GetSharedBatcher(node);               
-        
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
         GrpcTryAcquireExclusiveLockRequest request = new()
         {
             TransactionIdNode = transactionId.N,
@@ -722,13 +722,14 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             ExpiresMs = expiresMs,
             Durability = (GrpcKeyValueDurability)durability,
         };
-        
+
         GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTryAcquireExclusiveLockResponse remoteResponse = response.TryAcquireExclusiveLock!;
-        
+
         remoteResponse.ServedFrom = $"https://{node}";
-        
-        return ((KeyValueResponseType)remoteResponse.Type, key, durability);
+
+        HLCTimestamp holder = new(remoteResponse.HolderTransactionIdNode, remoteResponse.HolderTransactionIdPhysical, remoteResponse.HolderTransactionIdCounter);
+        return ((KeyValueResponseType)remoteResponse.Type, key, durability, holder);
     }
 
     /// <summary>
@@ -786,28 +787,31 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         HLCTimestamp transactionId,
         List<(string key, int expiresMs, KeyValueDurability durability)> xkeys,
         Lock lockSync,
-        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses,
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder)> responses,
         CancellationToken cancellationToken
     )
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
-            
+
         GrpcTryAcquireManyExclusiveLocksRequest request = new()
         {
             TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C
         };
-            
+
         request.Items.Add(GetAcquireLockRequestItems(xkeys));
-        
+
         GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTryAcquireManyExclusiveLocksResponse remoteResponse = response.TryAcquireManyExclusiveLocks!;
 
         lock (lockSync)
         {
             foreach (GrpcTryAcquireManyExclusiveLocksResponseItem item in remoteResponse.Items)
-                responses.Add(((KeyValueResponseType)item.Type, item.Key, (KeyValueDurability)item.Durability));
+            {
+                HLCTimestamp holder = new(item.HolderTransactionIdNode, item.HolderTransactionIdPhysical, item.HolderTransactionIdCounter);
+                responses.Add(((KeyValueResponseType)item.Type, item.Key, (KeyValueDurability)item.Durability, holder));
+            }
         }
     }
     
@@ -886,7 +890,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         return (KeyValueResponseType)remoteResponse.Type;
     }
 
-    public async Task<KeyValueResponseType> TryAcquireRangeLock(
+    public async Task<(KeyValueResponseType, HLCTimestamp HolderTransactionId)> TryAcquireRangeLock(
         string node,
         HLCTimestamp transactionId,
         string prefix,
@@ -919,10 +923,11 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTryAcquireExclusiveRangeLockResponse remoteResponse = response.TryAcquireExclusiveRangeLock!;
         remoteResponse.ServedFrom = $"https://{node}";
-        return (KeyValueResponseType)remoteResponse.Type;
+        HLCTimestamp holder = new(remoteResponse.HolderTransactionIdNode, remoteResponse.HolderTransactionIdPhysical, remoteResponse.HolderTransactionIdCounter);
+        return ((KeyValueResponseType)remoteResponse.Type, holder);
     }
 
-    public Task<KeyValueResponseType> TryAcquireExclusiveRangeLock(
+    public Task<(KeyValueResponseType, HLCTimestamp HolderTransactionId)> TryAcquireExclusiveRangeLock(
         string node,
         HLCTimestamp transactionId,
         string prefix,
