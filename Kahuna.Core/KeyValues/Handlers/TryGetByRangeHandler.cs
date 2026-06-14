@@ -45,7 +45,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         // produce a premature HasMore=false whenever tombstones/expired entries fill the window.
         foreach ((string key, KeyValueEntry? _) in context.Store.GetByRange(memStart, memStartIncl, memEnd, memEndIncl, int.MaxValue))
         {
-            KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability, snapshotTs);
+            KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability, snapshotTs, snapshotRead: !message.ReadTimestamp.IsNull());
 
             if (response.Type == KeyValueResponseType.DoesNotExist)
                 continue;
@@ -161,7 +161,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
                     break;
             }
 
-            KeyValueResponse response = await Get(currentTime, message.TransactionId, keyToProcess, message.Durability, snapshotTs, diskEntry);
+            KeyValueResponse response = await Get(currentTime, message.TransactionId, keyToProcess, message.Durability, snapshotTs, diskEntry, snapshotRead: !message.ReadTimestamp.IsNull());
 
             if (response.Type == KeyValueResponseType.DoesNotExist)
                 continue;
@@ -227,13 +227,15 @@ internal sealed class TryGetByRangeHandler : BaseHandler
     }
 
     /// <summary>
-    /// Resolves a single key with full MVCC/RYOW semantics, gated by a fixed snapshot timestamp.
+    /// Resolves a single key for a range scan.
     ///
-    /// <paramref name="currentTime"/> is always the current HLC tick (used for expiry and intent
-    /// timeout checks). <paramref name="readTimestamp"/> is the fixed scan snapshot:
-    ///   • Zero  → "latest" — no snapshot filtering (legacy/non-paged behaviour).
-    ///   • non-Zero → entries whose <see cref="KeyValueEntry.LastModified"/> is after the snapshot
-    ///     are treated as invisible, *except* when the scanning transaction itself wrote them (RYOW).
+    /// <paramref name="currentTime"/> is the current HLC tick (expiry / intent checks).
+    /// <paramref name="readTimestamp"/> is always the effective snapshot timestamp — callers
+    /// normalise it to <c>currentTime</c> when no explicit AS-OF snapshot was requested, so it is
+    /// never <c>Zero</c> inside this method.
+    /// <paramref name="snapshotRead"/> is <c>true</c> when the caller supplied an explicit AS-OF
+    /// timestamp (<c>message.ReadTimestamp != Zero</c>); when <c>false</c> an ordinary RYOW/MVCC
+    /// scan is in progress and the transactional block runs normally.
     /// </summary>
     private async Task<KeyValueResponse> Get(
         HLCTimestamp currentTime,
@@ -241,7 +243,8 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         string key,
         KeyValueDurability durability,
         HLCTimestamp readTimestamp,
-        ReadOnlyKeyValueEntry? keyValueEntry = null)
+        ReadOnlyKeyValueEntry? keyValueEntry = null,
+        bool snapshotRead = false)
     {
         // populateCache: false — this is a read-only scan. Inserting disk entries into the
         // store here would mutate the BTree while GetByRangePersistent is lazily enumerating it.
@@ -281,7 +284,11 @@ internal sealed class TryGetByRangeHandler : BaseHandler
             }
         }
 
-        if (transactionId != HLCTimestamp.Zero)
+        // AS-OF snapshot scans (snapshotRead = true) skip the MVCC/RYOW block and fall through
+        // to the non-transactional snapshot-visibility path below, which serves the revision
+        // at-or-before readTimestamp via TryGetRevisionAtOrBefore — matching TryGetHandler's
+        // point-read behaviour for the same (transactionId != Zero, readTimestamp != Zero) case.
+        if (transactionId != HLCTimestamp.Zero && !snapshotRead)
         {
             // Read-only scan: never insert a placeholder (would mutate the BTree mid-enumeration
             // and pollute the read-through cache). A key absent from both memory and disk simply
@@ -294,17 +301,6 @@ internal sealed class TryGetByRangeHandler : BaseHandler
 
             if (!entry.MvccEntries.TryGetValue(transactionId, out KeyValueMvccEntry? mvccEntry))
             {
-                // Snapshot check (MVCC path, no prior write by this tx).
-                // entry.LastModified > readTimestamp means the *current* revision was committed
-                // after this transaction's snapshot. Unlike the non-transactional path (which now
-                // serves the historical revision via TryGetRevisionAtOrBefore), this path keeps the
-                // conservative drop on purpose: the early-conflict check below (entry.Revision >
-                // mvccEntry.Revision ⇒ Aborted) treats a key that advanced past the snapshot as a
-                // read-write conflict for the enclosing transaction. Serving an old revision here
-                // would silently weaken that isolation guarantee, so the key stays invisible.
-                if (!readTimestamp.IsNull() && entry.LastModified > readTimestamp)
-                    return KeyValueStaticResponses.DoesNotExistContextResponse;
-
                 mvccEntry = new()
                 {
                     Value = entry.Value,
