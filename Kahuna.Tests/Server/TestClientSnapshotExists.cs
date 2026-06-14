@@ -35,7 +35,7 @@ public sealed class TestClientSnapshotExists
         KahunaClient client = new("http://localhost", communication: new InProcessKahunaCommunication(node.Kahuna));
 
         long snapshotBefore = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        await Task.Delay(2);
+        await Task.Delay(2, TestContext.Current.CancellationToken);
 
         string key = "snap/exists/before/" + Guid.NewGuid().ToString("N")[..8];
         await client.SetKeyValue(key, "val", 0, KeyValueFlags.Set, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
@@ -88,7 +88,7 @@ public sealed class TestClientSnapshotExists
         KahunaKeyValue early = await client.GetKeyValue($"{prefix}/early", KeyValueDurability.Persistent, cancellationToken: TestContext.Current.CancellationToken);
         long snapshot = early.LastModified;
 
-        await Task.Delay(2);
+        await Task.Delay(2, TestContext.Current.CancellationToken);
         await client.SetKeyValue($"{prefix}/late", "v2", 0, KeyValueFlags.Set, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
 
         List<KahunaKeyValue> results = await client.GetByBucket(
@@ -139,7 +139,7 @@ public sealed class TestClientSnapshotExists
         KahunaKeyValue early = await client.GetKeyValue($"{prefix}/early", KeyValueDurability.Persistent, cancellationToken: TestContext.Current.CancellationToken);
         long snapshot = early.LastModified;
 
-        await Task.Delay(2);
+        await Task.Delay(2, TestContext.Current.CancellationToken);
         await client.SetKeyValue($"{prefix}/late", "v2", 0, KeyValueFlags.Set, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
 
         List<KahunaKeyValue> results = await client.ScanAllByPrefix(

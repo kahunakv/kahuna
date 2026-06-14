@@ -191,6 +191,18 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
         MaxDrainQuantumControl = opts.RaftMaxDrainQuantumControl,
         MaxDrainQuantumReplication = opts.RaftMaxDrainQuantumReplication,
         MaxDrainQuantumClient = opts.RaftMaxDrainQuantumClient,
-        MaxDrainQuantumMaintenance = opts.RaftMaxDrainQuantumMaintenance
+        MaxDrainQuantumMaintenance = opts.RaftMaxDrainQuantumMaintenance,
+        GrpcScheme = opts.RaftGrpcScheme,
+        BackfillThreshold = opts.RaftBackfillThreshold,
+        MaxBackfillEntriesPerRound = opts.RaftMaxBackfillEntriesPerRound,
+        LearnerPromotionLag = opts.RaftLearnerPromotionLag,
+        LearnerPromotionStableWindow = TimeSpan.FromMilliseconds(opts.RaftLearnerPromotionStableWindow),
+        GossipInterval = TimeSpan.FromMilliseconds(opts.RaftGossipInterval),
+        GossipFanout = opts.RaftGossipFanout,
+        PingTimeout = TimeSpan.FromMilliseconds(opts.RaftPingTimeout),
+        IndirectPingFanout = opts.RaftIndirectPingFanout,
+        SuspicionTimeout = TimeSpan.FromMilliseconds(opts.RaftSuspicionTimeout),
+        DeadMemberEvictionGrace = TimeSpan.FromMilliseconds(opts.RaftDeadMemberEvictionGrace),
+        PingInterval = opts.RaftPingInterval == 0 ? TimeSpan.Zero : TimeSpan.FromMilliseconds(opts.RaftPingInterval)
     };
 }

@@ -41,7 +41,19 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.MaxDrainQuantumReplication)] = nameof(KahunaCommandLineOptions.RaftMaxDrainQuantumReplication),
         [nameof(RaftConfiguration.MaxDrainQuantumClient)] = nameof(KahunaCommandLineOptions.RaftMaxDrainQuantumClient),
         [nameof(RaftConfiguration.MaxDrainQuantumMaintenance)] = nameof(KahunaCommandLineOptions.RaftMaxDrainQuantumMaintenance),
-        [nameof(RaftConfiguration.TransportSecurity)] = nameof(KahunaCommandLineOptions.RaftTransportSecurity)
+        [nameof(RaftConfiguration.TransportSecurity)] = nameof(KahunaCommandLineOptions.RaftTransportSecurity),
+        [nameof(RaftConfiguration.GrpcScheme)] = nameof(KahunaCommandLineOptions.RaftGrpcScheme),
+        [nameof(RaftConfiguration.BackfillThreshold)] = nameof(KahunaCommandLineOptions.RaftBackfillThreshold),
+        [nameof(RaftConfiguration.MaxBackfillEntriesPerRound)] = nameof(KahunaCommandLineOptions.RaftMaxBackfillEntriesPerRound),
+        [nameof(RaftConfiguration.LearnerPromotionLag)] = nameof(KahunaCommandLineOptions.RaftLearnerPromotionLag),
+        [nameof(RaftConfiguration.LearnerPromotionStableWindow)] = nameof(KahunaCommandLineOptions.RaftLearnerPromotionStableWindow),
+        [nameof(RaftConfiguration.GossipInterval)] = nameof(KahunaCommandLineOptions.RaftGossipInterval),
+        [nameof(RaftConfiguration.GossipFanout)] = nameof(KahunaCommandLineOptions.RaftGossipFanout),
+        [nameof(RaftConfiguration.PingTimeout)] = nameof(KahunaCommandLineOptions.RaftPingTimeout),
+        [nameof(RaftConfiguration.IndirectPingFanout)] = nameof(KahunaCommandLineOptions.RaftIndirectPingFanout),
+        [nameof(RaftConfiguration.SuspicionTimeout)] = nameof(KahunaCommandLineOptions.RaftSuspicionTimeout),
+        [nameof(RaftConfiguration.DeadMemberEvictionGrace)] = nameof(KahunaCommandLineOptions.RaftDeadMemberEvictionGrace),
+        [nameof(RaftConfiguration.PingInterval)] = nameof(KahunaCommandLineOptions.RaftPingInterval)
     };
 
     [Fact]

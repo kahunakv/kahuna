@@ -51,7 +51,7 @@ public sealed class TestClientRangeScan
             limit: 100,
             cancellationToken: TestContext.Current.CancellationToken);
 
-        List<string?> keys = page.Select(kv => kv.Key).ToList();
+        List<string> keys = page.Select(kv => kv.Key).ToList();
         Assert.Contains($"{prefix}/0002", keys);
         Assert.Contains($"{prefix}/0003", keys);
         Assert.Contains($"{prefix}/0004", keys);
@@ -154,8 +154,8 @@ public sealed class TestClientRangeScan
 
         string prefix = "range/asof/" + Guid.NewGuid().ToString("N")[..6];
 
-        await client.SetKeyValue($"{prefix}/0000", "early", 0, KeyValueFlags.Set, KeyValueDurability.Persistent);
-        await client.SetKeyValue($"{prefix}/0001", "early", 0, KeyValueFlags.Set, KeyValueDurability.Persistent);
+        await client.SetKeyValue($"{prefix}/0000", "early", 0, KeyValueFlags.Set, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+        await client.SetKeyValue($"{prefix}/0001", "early", 0, KeyValueFlags.Set, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
 
         List<KahunaKeyValue> before = await client.GetByRange(
             prefix, limit: 100, cancellationToken: TestContext.Current.CancellationToken);
@@ -170,7 +170,7 @@ public sealed class TestClientRangeScan
             snapshotMs: snapshotMs,
             cancellationToken: TestContext.Current.CancellationToken);
 
-        List<string?> snapKeys = snap.Select(kv => kv.Key).ToList();
+        List<string> snapKeys = snap.Select(kv => kv.Key).ToList();
         Assert.Contains($"{prefix}/0000", snapKeys);
         Assert.Contains($"{prefix}/0001", snapKeys);
         Assert.DoesNotContain($"{prefix}/0002", snapKeys);

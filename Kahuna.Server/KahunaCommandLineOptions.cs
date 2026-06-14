@@ -169,6 +169,42 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-max-drain-quantum-maintenance", Required = false, HelpText = "Max maintenance operations drained per executor wake cycle", Default = 1)]
     public int RaftMaxDrainQuantumMaintenance { get; set; } = 1;
 
+    [Option("raft-grpc-scheme", Required = false, HelpText = "URL scheme prepended to peer endpoints when opening gRPC channels", Default = "https://")]
+    public string RaftGrpcScheme { get; set; } = "https://";
+
+    [Option("raft-backfill-threshold", Required = false, HelpText = "Committed entries a follower may trail the leader before active backfill kicks in", Default = 10)]
+    public int RaftBackfillThreshold { get; set; } = 10;
+
+    [Option("raft-max-backfill-entries-per-round", Required = false, HelpText = "Maximum committed entries shipped to a stale follower per heartbeat interval", Default = 128)]
+    public int RaftMaxBackfillEntriesPerRound { get; set; } = 128;
+
+    [Option("raft-learner-promotion-lag", Required = false, HelpText = "Maximum entries a learner may trail the leader and still be eligible for promotion", Default = 10)]
+    public int RaftLearnerPromotionLag { get; set; } = 10;
+
+    [Option("raft-learner-promotion-stable-window", Required = false, HelpText = "Milliseconds a learner must stay within promotion-lag before being promoted to Voter", Default = 3000)]
+    public int RaftLearnerPromotionStableWindow { get; set; } = 3000;
+
+    [Option("raft-gossip-interval", Required = false, HelpText = "Interval between gossip anti-entropy rounds in milliseconds", Default = 5000)]
+    public int RaftGossipInterval { get; set; } = 5000;
+
+    [Option("raft-gossip-fanout", Required = false, HelpText = "Number of random peers contacted per gossip round (0 disables gossip)", Default = 2)]
+    public int RaftGossipFanout { get; set; } = 2;
+
+    [Option("raft-ping-timeout", Required = false, HelpText = "SWIM failure-detector ping timeout in milliseconds", Default = 500)]
+    public int RaftPingTimeout { get; set; } = 500;
+
+    [Option("raft-indirect-ping-fanout", Required = false, HelpText = "Number of intermediary nodes used for indirect SWIM probing", Default = 2)]
+    public int RaftIndirectPingFanout { get; set; } = 2;
+
+    [Option("raft-suspicion-timeout", Required = false, HelpText = "How long a node may remain Suspect before being declared Dead in milliseconds", Default = 5000)]
+    public int RaftSuspicionTimeout { get; set; } = 5000;
+
+    [Option("raft-dead-member-eviction-grace", Required = false, HelpText = "Grace period before a Dead node is committed as removed from the roster in milliseconds", Default = 30000)]
+    public int RaftDeadMemberEvictionGrace { get; set; } = 30000;
+
+    [Option("raft-ping-interval", Required = false, HelpText = "Interval between SWIM ping rounds in milliseconds (0 disables the failure detector)", Default = 0)]
+    public int RaftPingInterval { get; set; }
+
     [Option("raft-transport-security", Required = false, HelpText = "Transport security and node authentication settings (JSON; prefer --raft-allow-insecure-certificate-validation for simple dev overrides)", Default = "")]
     public string RaftTransportSecurity { get; set; } = "";
 
