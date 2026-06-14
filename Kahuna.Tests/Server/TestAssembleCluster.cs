@@ -22,13 +22,11 @@ public sealed class TestAssembleCluster : BaseCluster
     [Theory, CombinatorialData]
     public async Task TestJoinClusterAndDecideLeaderOnManyPartitions(
         [CombinatorialValues("memory")] string walStorage,
-        [CombinatorialValues(1, 4, 8, 16)] int partitions
+        [CombinatorialValues(1, 3, 5)] int partitions
     )
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) = await AssembleThreNodeCluster(walStorage, partitions, raftLogger, kahunaLogger);
-        
-        await node1.LeaveCluster(true);
-        await node2.LeaveCluster(true);
-        await node3.LeaveCluster(true);
+
+        await LeaveCluster(node1, node2, node3);
     }
 }

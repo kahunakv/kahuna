@@ -243,16 +243,22 @@ public abstract class BaseCluster
         
         await Task.WhenAll(raft1.JoinCluster(), raft2.JoinCluster(), raft3.JoinCluster());
 
+        using CancellationTokenSource assemblyCts = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        assemblyCts.CancelAfter(TimeSpan.FromSeconds(90));
+
         for (int i = 1; i <= partitions; i++)
         {
             while (true)
             {
-                if (await raft1.AmILeader(i, cancellationToken: TestContext.Current.CancellationToken) ||
-                    await raft2.AmILeader(i, cancellationToken: TestContext.Current.CancellationToken) ||
-                    await raft3.AmILeader(i, cancellationToken: TestContext.Current.CancellationToken))
+                assemblyCts.Token.ThrowIfCancellationRequested();
+
+                if (await raft1.AmILeader(i, cancellationToken: assemblyCts.Token) ||
+                    await raft2.AmILeader(i, cancellationToken: assemblyCts.Token) ||
+                    await raft3.AmILeader(i, cancellationToken: assemblyCts.Token))
                     break;
 
-                await Task.Delay(50, cancellationToken: TestContext.Current.CancellationToken);
+                await Task.Delay(50, cancellationToken: assemblyCts.Token);
             }
         }
     }
