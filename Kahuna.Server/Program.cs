@@ -35,41 +35,55 @@ if (opts is null)
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
-// Try to assemble a Kahuna cluster from static discovery
-builder.Services.AddSingleton<IRaft>(services =>
+if (string.IsNullOrEmpty(opts.RaftNodeName))
+    opts.RaftNodeName = Environment.MachineName;
+
+// With no peers configured the node runs standalone: an in-process embedded engine backed by
+// phantom witness nodes for a clean single-node quorum (no real-peer election churn), exposed
+// over the same gRPC/REST surface as a clustered node.
+bool standalone = opts.InitialCluster is null || !opts.InitialCluster.Any();
+
+if (standalone)
 {
-    if (string.IsNullOrEmpty(opts.RaftNodeName))
-        opts.RaftNodeName = Environment.MachineName;
+    builder.Services.AddSingleton<EmbeddedKahunaNode>(services =>
+        new EmbeddedKahunaNode(CreateEmbeddedOptions(opts), services.GetRequiredService<ILoggerFactory>()));
 
-    ILogger<IRaft> logger = services.GetRequiredService<ILogger<IRaft>>();
-    
-    RaftConfiguration configuration = CreateRaftConfiguration(opts);
-
-    bool walSyncWrites = opts.GetWalSyncWrites();
-
-    IWAL walAdapter = opts.WalStorage switch
+    builder.Services.AddSingleton<IRaft>(services => services.GetRequiredService<EmbeddedKahunaNode>().Raft);
+    builder.Services.AddSingleton<IKahuna>(services => services.GetRequiredService<EmbeddedKahunaNode>().Kahuna);
+}
+else
+{
+    // Assemble a Kahuna cluster from static discovery
+    builder.Services.AddSingleton<IRaft>(services =>
     {
-        "rocksdb" => new RocksDbWAL(path: opts.WalPath, revision: opts.WalRevision, logger, syncWrites: walSyncWrites),
-        "sqlite" => new SqliteWAL(path: opts.WalPath, revision: opts.WalRevision, logger, syncWrites: walSyncWrites),
-        _ => throw new KahunaServerException("Invalid WAL storage")
-    };
+        ILogger<IRaft> logger = services.GetRequiredService<ILogger<IRaft>>();
 
-    //IWAL walAdapter = new InMemoryWAL(logger);
-    
-    return new RaftManager(
-        configuration,
-        new StaticDiscovery(opts.InitialCluster is not null ? [.. opts.InitialCluster.Select(k => new RaftNode(k))] : []),
-        walAdapter,
-        new GrpcCommunication(),
-        new HybridLogicalClock(),
-        logger
-    );
-});
+        RaftConfiguration configuration = CreateRaftConfiguration(opts);
 
-builder.Services.AddSingleton<ActorSystem>(services => new(services, services.GetRequiredService<ILogger<IRaft>>()));
-builder.Services.AddSingleton<IKahuna, KahunaManager>();
-builder.Services.AddSingleton<IInterNodeCommunication, GrpcInterNodeCommunication>();
-builder.Services.AddHostedService<ReplicationService>();
+        bool walSyncWrites = opts.GetWalSyncWrites();
+
+        IWAL walAdapter = opts.WalStorage switch
+        {
+            "rocksdb" => new RocksDbWAL(path: opts.WalPath, revision: opts.WalRevision, logger, syncWrites: walSyncWrites),
+            "sqlite" => new SqliteWAL(path: opts.WalPath, revision: opts.WalRevision, logger, syncWrites: walSyncWrites),
+            _ => throw new KahunaServerException("Invalid WAL storage")
+        };
+
+        return new RaftManager(
+            configuration,
+            new StaticDiscovery([.. opts.InitialCluster!.Select(k => new RaftNode(k))]),
+            walAdapter,
+            new GrpcCommunication(),
+            new HybridLogicalClock(),
+            logger
+        );
+    });
+
+    builder.Services.AddSingleton<ActorSystem>(services => new(services, services.GetRequiredService<ILogger<IRaft>>()));
+    builder.Services.AddSingleton<IKahuna, KahunaManager>();
+    builder.Services.AddSingleton<IInterNodeCommunication, GrpcInterNodeCommunication>();
+    builder.Services.AddHostedService<ReplicationService>();
+}
 
 builder.Services.AddGrpc();
 builder.Services.AddGrpcReflection();
@@ -147,7 +161,48 @@ app.MapGrpcRaftRoutes();
 app.MapGrpcKahunaRoutes();
 app.MapGrpcReflectionService();
 
-app.Run();
+if (standalone)
+{
+    // Bind Kestrel first, then boot the embedded engine (join + leader election), then block
+    // until shutdown and dispose the node so its actor system drains cleanly.
+    await app.StartAsync();
+    await app.Services.GetRequiredService<EmbeddedKahunaNode>().StartAsync();
+    await app.WaitForShutdownAsync();
+    await app.Services.GetRequiredService<EmbeddedKahunaNode>().DisposeAsync();
+}
+else
+{
+    app.Run();
+}
+
+static EmbeddedKahunaOptions CreateEmbeddedOptions(KahunaCommandLineOptions opts) => new()
+{
+    NodeName = opts.RaftNodeName,
+    NodeId = opts.RaftNodeId,
+    Host = opts.RaftHost,
+    Port = opts.RaftPort,
+    InitialPartitions = opts.InitialClusterPartitions,
+    Storage = opts.Storage,
+    StoragePath = opts.StoragePath,
+    StorageRevision = opts.StorageRevision,
+    WalStorage = opts.WalStorage,
+    WalPath = opts.WalPath,
+    WalRevision = opts.WalRevision,
+    WalSyncWrites = opts.GetWalSyncWrites(),
+    LocksWorkers = opts.LocksWorkers,
+    KeyValueWorkers = opts.KeyValueWorkers,
+    BackgroundWriterWorkers = opts.BackgroundWritersWorkers,
+    DefaultTransactionTimeout = opts.DefaultTransactionTimeout,
+    ScriptCacheExpiration = TimeSpan.FromSeconds(opts.ScriptCacheExpiration),
+    CacheEntryTtl = TimeSpan.FromSeconds(opts.CacheEntryTtl),
+    CacheEntriesToRemove = opts.CacheEntriesToRemove,
+    DirtyObjectsWriterDelay = opts.DirtyObjectsWriterDelay,
+    PersistentRevisionRetentionCount = opts.PersistentRevisionRetentionCount,
+    PersistentRevisionRetentionAge = TimeSpan.FromSeconds(opts.PersistentRevisionRetentionAge),
+    PersistentRevisionCleanupInterval = TimeSpan.FromSeconds(opts.PersistentRevisionCleanupInterval),
+    PersistentRevisionCleanupBatchSize = opts.PersistentRevisionCleanupBatchSize,
+    PersistentRevisionCleanupOnWrite = opts.GetPersistentRevisionCleanupOnWrite()
+};
 
 static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
 {
