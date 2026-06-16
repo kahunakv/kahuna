@@ -31,8 +31,6 @@ internal sealed class KeyValueLockHelper : BaseCommand
     {
         while (true)
         {
-            //Console.WriteLine("AST={0}", ast.nodeType);
-            
             switch (ast.nodeType)
             {
                 case NodeType.StmtList:

@@ -67,6 +67,9 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// </remarks>
     private static readonly WriteOptions DefaultWriteOptions = new WriteOptions().SetSync(true);
 
+    private static readonly Comparison<(long Revision, long LastModifiedPhysical, byte[] RawKeyBytes)> RevisionDescComparer =
+        static (a, b) => b.Revision.CompareTo(a.Revision);
+
     /// <summary>
     /// Shared block cache for the table reader. Sized once and reused across both column families so
     /// hot index/filter/data blocks stay resident instead of being re-read from disk on every point
@@ -679,25 +682,26 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 if (deleted >= batchSize || keysVisited >= keyBudget)
                 {
                     // Pause here; resume from the current (unprocessed) entry next pass.
-                    sweepCursor = iterator.Key().ToArray();
+                    sweepCursor = iterator.GetKeySpan().ToArray();
                     batchLimitReached = true;
                     paused = true;
                     break;
                 }
 
-                byte[] rawKeyBytes = iterator.Key().ToArray();
-                string rawKey = Encoding.UTF8.GetString(rawKeyBytes);
+                // Only ~CURRENT rows map to a logical key to prune. Test the suffix on the native
+                // span and decode just the logical key for those — revision rows skip the decode.
+                ReadOnlySpan<byte> rawKeySpan = iterator.GetKeySpan();
 
-                if (rawKey.EndsWith(CurrentMarker, StringComparison.Ordinal))
+                if (rawKeySpan.EndsWith(CurrentMarkerUtf8))
                 {
-                    string logicalKey = rawKey[..^CurrentMarker.Length];
+                    string logicalKey = Encoding.UTF8.GetString(rawKeySpan[..^CurrentMarkerUtf8.Length]);
                     PruneRevisionsForKey(logicalKey, retentionCount, retentionAge, batchSize, ref deleted, out bool keyLimitReached);
                     keysVisited++;
 
                     if (keyLimitReached)
                     {
                         // Key only partially pruned — resume at this same key next pass.
-                        sweepCursor = rawKeyBytes;
+                        sweepCursor = rawKeySpan.ToArray(); // ToArray only on pause path
                         batchLimitReached = true;
                         paused = true;
                         break;
@@ -759,21 +763,24 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
             while (iterator.Valid())
             {
-                string entryKey = Encoding.UTF8.GetString(iterator.Key());
+                // Filter on the native key span — no per-row string decode. Only rows we keep are
+                // materialised (their key bytes are retained below for the later batch.Delete).
+                ReadOnlySpan<byte> entryKey = iterator.GetKeySpan();
 
-                if (!entryKey.StartsWith(revisionPrefix, StringComparison.Ordinal))
+                if (!entryKey.StartsWith(prefixBytes))
                     break;
 
                 // Skip the ~CURRENT sentinel — never a candidate for deletion.
-                if (entryKey.EndsWith(CurrentMarker, StringComparison.Ordinal))
+                if (entryKey.EndsWith(CurrentMarkerUtf8))
                 {
                     iterator.Next();
                     continue;
                 }
 
-                // The suffix after "<key>~" must be a numeric revision.
-                string suffix = entryKey[revisionPrefix.Length..];
-                if (!long.TryParse(suffix, out long revisionNum))
+                // The suffix after "<key>~" must be a numeric revision; reject any trailing junk
+                // so "<key>~123abc" is ignored exactly as long.TryParse would.
+                ReadOnlySpan<byte> suffix = entryKey[prefixBytes.Length..];
+                if (!Utf8Parser.TryParse(suffix, out long revisionNum, out int consumed) || consumed != suffix.Length)
                 {
                     iterator.Next();
                     continue;
@@ -782,11 +789,12 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 long lastModifiedPhysical = 0;
                 if (needAge)
                 {
-                    RocksDbKeyValueMessage msg = UnserializeKeyValueMessage(iterator.Value());
+                    RocksDbKeyValueMessage msg = UnserializeKeyValueMessage(iterator.GetValueSpan());
                     lastModifiedPhysical = msg.LastModifiedPhysical;
                 }
 
-                revisions.Add((revisionNum, lastModifiedPhysical, iterator.Key().ToArray()));
+                // Copy the key out of native memory: it must outlive the iterator for batch.Delete.
+                revisions.Add((revisionNum, lastModifiedPhysical, entryKey.ToArray()));
                 iterator.Next();
             }
         }
@@ -795,7 +803,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             return;
 
         // Sort descending so index 0 is the newest revision.
-        revisions.Sort((a, b) => b.Revision.CompareTo(a.Revision));
+        revisions.Sort(RevisionDescComparer);
 
         using WriteBatch batch = new();
         int deletedInBatch = 0;

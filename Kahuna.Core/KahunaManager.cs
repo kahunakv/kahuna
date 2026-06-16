@@ -70,7 +70,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
     {
         this.actorSystem = actorSystem;
 
-        persistenceBackend = GetPersistence(configuration);
+        persistenceBackend = GetPersistence(configuration, logger);
 
         backgroundWriter = actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
             "background-writer",
@@ -116,12 +116,12 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="configuration"></param>
     /// <returns></returns>
     /// <exception cref="KahunaServerException"></exception>
-    private static IPersistenceBackend GetPersistence(KahunaConfiguration configuration)
+    private static IPersistenceBackend GetPersistence(KahunaConfiguration configuration, ILogger<IKahuna> logger)
     {
         return configuration.Storage switch
         {
             "rocksdb" => new RocksDbPersistenceBackend(configuration.StoragePath, configuration.StorageRevision),
-            "sqlite" => new SqlitePersistenceBackend(configuration.StoragePath, configuration.StorageRevision),
+            "sqlite" => new SqlitePersistenceBackend(configuration.StoragePath, configuration.StorageRevision, logger),
             "memory" => new MemoryPersistenceBackend(),
             _ => throw new KahunaServerException("Invalid storage type: " + configuration.Storage)
         };

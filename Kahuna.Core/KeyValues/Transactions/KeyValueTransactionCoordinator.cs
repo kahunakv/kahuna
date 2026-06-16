@@ -1324,8 +1324,6 @@ internal sealed class KeyValueTransactionCoordinator
         
         while (true)
         {
-            //Console.WriteLine("AST={0} {1}", ast.nodeType, ast.yyline);
-
             if (context.Status == KeyValueExecutionStatus.Stop)
                 break;
 

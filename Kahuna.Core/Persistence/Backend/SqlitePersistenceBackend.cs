@@ -3,6 +3,7 @@ using Kahuna.Server.Locks;
 using Kommander;
 using Kahuna.Server.KeyValues;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging;
 using System.Collections.Generic;
 using Kahuna.Server.Locks.Data;
 
@@ -51,6 +52,8 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
 
     private readonly string dbRevision;
 
+    private readonly ILogger logger;
+
     /// <summary>
     /// Shard at which the next backend-wide revision sweep should resume.
     /// </summary>
@@ -69,10 +72,11 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
     /// </summary>
     /// <param name="path"></param>
     /// <param name="dbRevision"></param>
-    public SqlitePersistenceBackend(string path = ".", string dbRevision = "v1")
+    public SqlitePersistenceBackend(string path = ".", string dbRevision = "v1", ILogger? logger = null)
     {
         this.path = path;
         this.dbRevision = dbRevision;
+        this.logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
     }
 
     /// <summary>
@@ -328,12 +332,7 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         }
         catch (Exception ex)
         {
-            Console.WriteLine(
-                "StoreLock: {0} {1} {2}", 
-                ex.GetType().Name, 
-                ex.Message, 
-                ex.StackTrace
-            );
+            logger.LogError(ex, "StoreLock failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
         }
 
         return false;
@@ -448,12 +447,7 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         }
         catch (Exception ex)
         {
-            Console.WriteLine(
-                "StoreKeyValue: {0} {1} {2}", 
-                ex.GetType().Name, 
-                ex.Message, 
-                ex.StackTrace
-            );
+            logger.LogError(ex, "StoreKeyValue failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
         }
 
         return false;
@@ -519,7 +513,7 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         }
         catch (Exception ex)
         {
-            Console.WriteLine("GetLock: {0} {1} {2}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            logger.LogError(ex, "GetLock failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
         }
         
         return null;
@@ -585,7 +579,7 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         }
         catch (Exception ex)
         {
-            Console.WriteLine("GetKeyValue: {0} {1} {2}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            logger.LogError(ex, "GetKeyValue failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
         }
         
         return null;
@@ -654,7 +648,7 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         }
         catch (Exception ex)
         {
-            Console.WriteLine("GetKeyValueRevision: {0} {1} {2}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            logger.LogError(ex, "GetKeyValueRevision failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
         }
         
         return null;

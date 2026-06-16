@@ -1,6 +1,7 @@
 
 using Kommander.Time;
 using Kommander.Communication.Grpc;
+using Microsoft.Extensions.Logging;
 
 using Google.Protobuf;
 using Grpc.Net.Client;
@@ -26,13 +27,16 @@ namespace Kahuna.Server.Communication.Internode;
 /// </summary>
 public class GrpcInterNodeCommunication : IInterNodeCommunication
 {
-    private static readonly ConcurrentDictionary<string, Lazy<GrpcServerBatcher>> batchers = new();
-    
+    private readonly ConcurrentDictionary<string, Lazy<GrpcServerBatcher>> batchers = new();
+
     private readonly KahunaConfiguration configuration;
-    
-    public GrpcInterNodeCommunication(KahunaConfiguration configuration)
+
+    private readonly ILogger<GrpcInterNodeCommunication> logger;
+
+    public GrpcInterNodeCommunication(KahunaConfiguration configuration, ILogger<GrpcInterNodeCommunication> logger)
     {
         this.configuration = configuration;
+        this.logger = logger;
     }
 
     /// <summary>
@@ -1623,14 +1627,14 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         _ = batchResponse.ImportRangeLocks;
     }
 
-    private static GrpcServerBatcher GetSharedBatcher(string url)
+    private GrpcServerBatcher GetSharedBatcher(string url)
     {
-        Lazy<GrpcServerBatcher> lazyBatchers = batchers.GetOrAdd(url, GetSharedBatchers);
-        return lazyBatchers.Value;
+        Lazy<GrpcServerBatcher> lazyBatcher = batchers.GetOrAdd(url, static (u, self) => self.GetSharedBatchers(u), this);
+        return lazyBatcher.Value;
     }
 
-    private static Lazy<GrpcServerBatcher> GetSharedBatchers(string url)
+    private Lazy<GrpcServerBatcher> GetSharedBatchers(string url)
     {
-        return new(() => new(url));
+        return new(() => new(url, logger));
     }
 }

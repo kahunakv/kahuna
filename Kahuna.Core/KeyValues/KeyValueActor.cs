@@ -336,8 +336,6 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                     message.Durability
                 );
 
-            // Console.WriteLine("{0}", operations);
-
             if (message.Type != KeyValueRequestType.Collect)
             {
                 if (--operations == 0)

@@ -4,6 +4,7 @@ using Nixie.Routers;
 
 using Kommander;
 using Kommander.Data;
+using Polly.Contrib.WaitAndRetry;
 
 using Kahuna.Shared.Locks;
 using Kahuna.Server.Configuration;
@@ -304,7 +305,7 @@ internal sealed class LockManager
             null
         );
 
-        for (int i = 0; i < MaxRetries; i++)
+        foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
         {
             LockResponse? response;
 
@@ -316,18 +317,15 @@ internal sealed class LockManager
             if (response is null)
                 return (LockResponseType.Errored, 0);
 
-            if (response.Type == LockResponseType.WaitingForReplication)
-            {
-                await Task.Delay(i + 1);
-                continue;
-            }
+            if (response.Type != LockResponseType.WaitingForReplication)
+                return (response.Type, response.FencingToken);
 
-            return (response.Type, response.FencingToken);
+            await Task.Delay(delay);
         }
-        
+
         return (LockResponseType.MustRetry, 0);
     }
-    
+
     /// <summary>
     /// Passes a TryExtendLock request to the locker actor for the given lock name.
     /// </summary>
@@ -349,7 +347,7 @@ internal sealed class LockManager
             null
         );
 
-        for (int i = 0; i < MaxRetries; i++)
+        foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
         {
             LockResponse? response;
 
@@ -361,15 +359,12 @@ internal sealed class LockManager
             if (response is null)
                 return (LockResponseType.Errored, 0);
 
-            if (response.Type == LockResponseType.WaitingForReplication)
-            {
-                await Task.Delay(i + 1);
-                continue;
-            }
+            if (response.Type != LockResponseType.WaitingForReplication)
+                return (response.Type, response.FencingToken);
 
-            return (response.Type, response.FencingToken);
+            await Task.Delay(delay);
         }
-        
+
         return (LockResponseType.MustRetry, 0);
     }
 
@@ -393,7 +388,7 @@ internal sealed class LockManager
             null
         );
 
-        for (int i = 0; i < MaxRetries; i++)
+        foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
         {
             LockResponse? response;
 
@@ -405,15 +400,12 @@ internal sealed class LockManager
             if (response is null)
                 return LockResponseType.Errored;
 
-            if (response.Type == LockResponseType.WaitingForReplication)
-            {
-                await Task.Delay(i + 1);
-                continue;
-            }
+            if (response.Type != LockResponseType.WaitingForReplication)
+                return response.Type;
 
-            return response.Type;
+            await Task.Delay(delay);
         }
-        
+
         return LockResponseType.MustRetry;
     }
     

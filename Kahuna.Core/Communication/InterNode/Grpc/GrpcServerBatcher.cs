@@ -4,6 +4,7 @@ using System.Collections.Concurrent;
 using Grpc.Core;
 using Grpc.Net.Client;
 using Kommander.Communication.Grpc;
+using Microsoft.Extensions.Logging;
 
 namespace Kahuna.Server.Communication.Internode.Grpc;
 
@@ -15,20 +16,23 @@ namespace Kahuna.Server.Communication.Internode.Grpc;
 internal sealed class GrpcServerBatcher
 {
     private static readonly ConcurrentDictionary<string, Lazy<List<GrpcServerSharedStreaming>>> streamings = new();
-    
+
     private static readonly ConcurrentDictionary<int, GrpcServerBatcherItem> requestRefs = new();
-    
+
     private static int requestId;
 
     private readonly string url;
-    
+
+    private readonly ILogger logger;
+
     private readonly ConcurrentQueue<GrpcServerBatcherItem> inbox = new();
-    
+
     private int processing = 1;
 
-    public GrpcServerBatcher(string url)
+    public GrpcServerBatcher(string url, ILogger logger)
     {
         this.url = url;
+        this.logger = logger;
     }
     
     public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryLockRequest message)
@@ -410,15 +414,12 @@ internal sealed class GrpcServerBatcher
         }
         catch (Exception ex)
         {
-            Console.WriteLine("Exception: " + ex.Message);
-            //manager.Logger.LogError("[{Actor}] {Exception}: {Message}\n{StackTrace}", manager.LocalEndpoint, ex.GetType().Name, ex.Message, ex.StackTrace);
+            logger.LogError(ex, "GrpcServerBatcher DeliverMessages failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
         }
     }
 
     private async Task Receive(List<GrpcServerBatcherItem> requests)
     {
-        //Console.WriteLine("Request count: " + requests.Count);
-        
         await RunBatch(requests);
         
         if (requests.Count < 10)
@@ -429,7 +430,7 @@ internal sealed class GrpcServerBatcher
     {
         try
         {
-            GrpcServerSharedStreaming sharedStreaming = GetSharedStreaming(url);
+            GrpcServerSharedStreaming sharedStreaming = GetSharedStreaming();
 
             foreach (GrpcServerBatcherItem request in requests)
             {
@@ -455,7 +456,7 @@ internal sealed class GrpcServerBatcher
             foreach (GrpcServerBatcherItem request in requests)
                 request.Promise.SetException(ex);
 
-            Console.WriteLine("{0}", ex.Message);
+            logger.LogError(ex, "GrpcServerBatcher RunBatch failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
         }
         finally
         {
@@ -701,7 +702,7 @@ internal sealed class GrpcServerBatcher
         }
     }
     
-    private static async Task ReadLockMessages(AsyncDuplexStreamingCall<GrpcBatchServerLockRequest, GrpcBatchServerLockResponse> streaming)
+    private static async Task ReadLockMessages(AsyncDuplexStreamingCall<GrpcBatchServerLockRequest, GrpcBatchServerLockResponse> streaming, ILogger logger)
     {
         try
         {
@@ -709,7 +710,7 @@ internal sealed class GrpcServerBatcher
             {
                 if (!requestRefs.TryGetValue(response.RequestId, out GrpcServerBatcherItem item))
                 {
-                    Console.WriteLine("Request not found " + response.RequestId);
+                    logger.LogWarning("GrpcServerBatcher lock response: request not found {RequestId}", response.RequestId);
                     continue;
                 }
 
@@ -742,11 +743,11 @@ internal sealed class GrpcServerBatcher
         }
         catch (Exception ex)
         {
-            Console.WriteLine("Exception: " + ex.Message);
+            logger.LogError(ex, "GrpcServerBatcher ReadLockMessages failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
         }
     }
 
-    private static async Task ReadKeyValueMessages(AsyncDuplexStreamingCall<GrpcBatchServerKeyValueRequest, GrpcBatchServerKeyValueResponse> streaming)
+    private static async Task ReadKeyValueMessages(AsyncDuplexStreamingCall<GrpcBatchServerKeyValueRequest, GrpcBatchServerKeyValueResponse> streaming, ILogger logger)
     {
         try
         {
@@ -754,7 +755,7 @@ internal sealed class GrpcServerBatcher
             {
                 if (!requestRefs.TryGetValue(response.RequestId, out GrpcServerBatcherItem item))
                 {
-                    Console.WriteLine("Request not found " + response.RequestId);
+                    logger.LogWarning("GrpcServerBatcher key-value response: request not found {RequestId}", response.RequestId);
                     continue;
                 }
 
@@ -907,28 +908,31 @@ internal sealed class GrpcServerBatcher
         }
         catch (Exception ex)
         {
-            Console.WriteLine("Exception: " + ex.Message);
+            logger.LogError(ex, "GrpcServerBatcher ReadKeyValueMessages failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
         }
     }
 
-    private static GrpcServerSharedStreaming GetSharedStreaming(string url)
+    // streamings is process-global (static) keyed by URL; the background read loops and their
+    // captured logger belong to whichever GrpcServerBatcher instance first touches a URL.
+    // In production there is one GrpcInterNodeCommunication singleton so this is a non-issue.
+    private GrpcServerSharedStreaming GetSharedStreaming()
     {
-        Lazy<List<GrpcServerSharedStreaming>> lazyStreamings = streamings.GetOrAdd(url, GetSharedStreamings);
+        Lazy<List<GrpcServerSharedStreaming>> lazyStreamings = streamings.GetOrAdd(url, static (u, self) => self.GetSharedStreamings(), this);
 
         List<GrpcServerSharedStreaming> nodeStreamings = lazyStreamings.Value;
-        
+
         return nodeStreamings[Random.Shared.Next(0, nodeStreamings.Count)];
     }
-    
-    private static Lazy<List<GrpcServerSharedStreaming>> GetSharedStreamings(string url)
+
+    private Lazy<List<GrpcServerSharedStreaming>> GetSharedStreamings()
     {
-        return new(() => CreateSharedStreamings(url));
+        return new(() => CreateSharedStreamings());
     }
 
-    private static List<GrpcServerSharedStreaming> CreateSharedStreamings(string url)
+    private List<GrpcServerSharedStreaming> CreateSharedStreamings()
     {
         List<GrpcChannel> nodeChannels = SharedChannels.GetAllChannels(url);
-        
+
         List<GrpcServerSharedStreaming> nodeStreamings = new(nodeChannels.Count);
 
         foreach (GrpcChannel channel in nodeChannels)
@@ -938,10 +942,10 @@ internal sealed class GrpcServerBatcher
 
             AsyncDuplexStreamingCall<GrpcBatchServerLockRequest, GrpcBatchServerLockResponse>? locksStreaming = lockClient.BatchServerLockRequests();
             AsyncDuplexStreamingCall<GrpcBatchServerKeyValueRequest, GrpcBatchServerKeyValueResponse>? keyValueStreaming = keyValueClient.BatchServerKeyValueRequests();
-            
-            _ = ReadLockMessages(locksStreaming);
-            _ = ReadKeyValueMessages(keyValueStreaming);
-            
+
+            _ = ReadLockMessages(locksStreaming, logger);
+            _ = ReadKeyValueMessages(keyValueStreaming, logger);
+
             nodeStreamings.Add(new(locksStreaming, keyValueStreaming));
         }
 
