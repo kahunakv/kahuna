@@ -11,11 +11,26 @@ namespace Kahuna.Server.Persistence.Backend;
 /// Provides an in-memory implementation of the <see cref="IPersistenceBackend"/> interface
 /// to store locks and key-value pairs without the use of persistent storage.
 /// </summary>
+/// <remarks>
+/// This backend is used for tests and in-memory deployments. keyValues is backed by a
+/// SortedList so GetKeyValueByPrefix and GetKeyValueByRange can binary-search to the
+/// start position and iterate O(log N + k) instead of sorting the whole dictionary on
+/// every call.
+/// </remarks>
 internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
 {
     private readonly ConcurrentDictionary<string, LockEntry> locks = new();
 
-    private readonly ConcurrentDictionary<string, KeyValueEntry> keyValues = new();
+    // SortedList gives array-backed ordered keys — binary-search for range start, then
+    // iterate forward. Not thread-safe; guarded by kvLock.
+    // Trade-offs vs. the old ConcurrentDictionary:
+    //   Inserts of new keys: O(N) array shift (was O(1)). Low write volume in tests makes
+    //     this acceptable; switch to BTree<string,...> if sustained writes become a concern.
+    //   Point reads (GetKeyValue): now take kvLock (were lock-free). In practice reads are
+    //     serialized through ReadScheduler.EnqueueTask anyway, so contention is bounded; in
+    //     a true in-memory production deployment this would be a read-scalability narrowing.
+    private readonly SortedList<string, KeyValueEntry> keyValues = new(StringComparer.Ordinal);
+    private readonly object kvLock = new();
 
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<long, KeyValueEntry>> keyValueRevisions = new();
 
@@ -63,34 +78,35 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
     /// <returns>Returns <c>true</c> if the key-value pairs were successfully stored or updated.</returns>
     public bool StoreKeyValues(List<PersistenceRequestItem> items)
     {
-        foreach (PersistenceRequestItem item in items)
+        lock (kvLock)
         {
-            KeyValueEntry entry = new()
+            foreach (PersistenceRequestItem item in items)
             {
-                Value = item.Value,
-                Revision = item.Revision,
-                Expires = new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter),
-                LastUsed = new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter),
-                LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
-                State = (KeyValueState)item.State
-            };
+                if (keyValues.TryGetValue(item.Key, out KeyValueEntry? existing))
+                {
+                    existing.Value = item.Value;
+                    existing.Expires = new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter);
+                    existing.Revision = item.Revision;
+                    existing.LastUsed = new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter);
+                    existing.LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter);
+                    existing.State = (KeyValueState)item.State;
+                }
+                else
+                {
+                    keyValues.Add(item.Key, new()
+                    {
+                        Value = item.Value,
+                        Revision = item.Revision,
+                        Expires = new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter),
+                        LastUsed = new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter),
+                        LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
+                        State = (KeyValueState)item.State
+                    });
+                }
 
-            if (keyValues.TryGetValue(item.Key, out KeyValueEntry? keyValueContext))
-            {
-                keyValueContext.Value = item.Value;
-                keyValueContext.Expires = entry.Expires;
-                keyValueContext.Revision = item.Revision;
-                keyValueContext.LastUsed = entry.LastUsed;
-                keyValueContext.LastModified = entry.LastModified;
-                keyValueContext.State = entry.State;
+                ConcurrentDictionary<long, KeyValueEntry> revisions = keyValueRevisions.GetOrAdd(item.Key, _ => new());
+                revisions[item.Revision] = keyValues[item.Key];
             }
-            else
-            {
-                keyValues.TryAdd(item.Key, entry);
-            }
-
-            ConcurrentDictionary<long, KeyValueEntry> revisions = keyValueRevisions.GetOrAdd(item.Key, _ => new());
-            revisions[item.Revision] = entry;
         }
 
         return true;
@@ -103,7 +119,11 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
 
     public KeyValueEntry? GetKeyValue(string keyName)
     {
-        return keyValues.GetValueOrDefault(keyName);
+        lock (kvLock)
+        {
+            keyValues.TryGetValue(keyName, out KeyValueEntry? entry);
+            return entry;
+        }
     }
 
     public KeyValueEntry? GetKeyValueRevision(string keyName, long revision)
@@ -124,11 +144,19 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
     public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName)
     {
         List<(string, ReadOnlyKeyValueEntry)> items = [];
-        
-        foreach ((string key, KeyValueEntry value) in keyValues)
+
+        lock (kvLock)
         {
-            if (key.StartsWith(prefixKeyName))
+            IList<string> keys = keyValues.Keys;
+            int start = LowerBound(keys, prefixKeyName);
+
+            for (int i = start; i < keys.Count; i++)
             {
+                string key = keys[i];
+                if (!key.StartsWith(prefixKeyName, StringComparison.Ordinal))
+                    break;
+
+                KeyValueEntry value = keyValues.Values[i];
                 items.Add((key, new(
                     value.Value,
                     value.Revision,
@@ -151,27 +179,53 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
     {
         List<(string, ReadOnlyKeyValueEntry)> items = [];
 
-        IEnumerable<KeyValuePair<string, KeyValueEntry>> candidates = keyValues
-            .Where(kv => kv.Key.StartsWith(prefix, StringComparison.Ordinal));
-
-        if (startKey is not null)
-            candidates = candidates.Where(kv => string.CompareOrdinal(kv.Key, startKey) >= 0);
-
-        foreach ((string key, KeyValueEntry value) in candidates.OrderBy(kv => kv.Key, StringComparer.Ordinal).Take(limit))
+        lock (kvLock)
         {
-            items.Add((key, new(
-                value.Value,
-                value.Revision,
-                value.Expires,
-                value.LastUsed,
-                value.LastModified,
-                value.State
-            )));
+            IList<string> keys = keyValues.Keys;
+            // Seek to the greater of prefix and startKey so a startKey that sorts before
+            // the prefix block doesn't land outside it and return an empty result.
+            string seekTarget = startKey is not null && string.CompareOrdinal(startKey, prefix) > 0
+                ? startKey : prefix;
+            int start = LowerBound(keys, seekTarget);
+
+            for (int i = start; i < keys.Count && items.Count < limit; i++)
+            {
+                string key = keys[i];
+                if (!key.StartsWith(prefix, StringComparison.Ordinal))
+                    break;
+
+                KeyValueEntry value = keyValues.Values[i];
+                items.Add((key, new(
+                    value.Value,
+                    value.Revision,
+                    value.Expires,
+                    value.LastUsed,
+                    value.LastModified,
+                    value.State
+                )));
+            }
         }
 
         return items;
     }
 
+    /// <summary>
+    /// Returns the index of the first key >= <paramref name="target"/> in the sorted key list,
+    /// or keys.Count if all keys are smaller.
+    /// </summary>
+    private static int LowerBound(IList<string> keys, string target)
+    {
+        int lo = 0, hi = keys.Count;
+        while (lo < hi)
+        {
+            int mid = (lo + hi) >>> 1;
+            if (string.CompareOrdinal(keys[mid], target) < 0)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        return lo;
+    }
 
     public bool PruneKeyValueRevisions(
         IReadOnlyCollection<string>? keys,
@@ -187,7 +241,5 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
     public void Dispose()
     {
         GC.SuppressFinalize(this);
-        
-        //throw new NotImplementedException();
     }
 }
