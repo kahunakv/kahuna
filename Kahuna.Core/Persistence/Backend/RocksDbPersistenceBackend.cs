@@ -422,40 +422,42 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName)
     {
         List<(string, ReadOnlyKeyValueEntry)> result = [];
-        
-        Span<byte> buffer = stackalloc byte[Encoding.UTF8.GetByteCount(prefixKeyName)];
-        Encoding.UTF8.GetBytes(prefixKeyName.AsSpan(), buffer);
-        
+
+        Span<byte> prefixBytes = stackalloc byte[Encoding.UTF8.GetByteCount(prefixKeyName)];
+        Encoding.UTF8.GetBytes(prefixKeyName, prefixBytes);
+
         using Iterator? iterator = db.NewIterator(cf: columnFamilyKeys);
-        iterator.Seek(buffer);
+        iterator.Seek(prefixBytes);
 
         while (iterator.Valid())
         {
-            string key = Encoding.UTF8.GetString(iterator.Key());
-            
-            if (!key.StartsWith(prefixKeyName, StringComparison.Ordinal)) 
-                break; // Stop when we leave the prefix range
-            
-            if (!key.EndsWith(CurrentMarker, StringComparison.Ordinal))
+            // GetKeySpan returns a span directly over native memory — no byte[] copy.
+            // Valid only until the next iterator move; consumed entirely before Next().
+            ReadOnlySpan<byte> rawKey = iterator.GetKeySpan();
+
+            if (!rawKey.StartsWith(prefixBytes))
+                break;
+
+            if (!rawKey.EndsWith(CurrentMarkerUtf8))
             {
                 iterator.Next();
                 continue;
             }
-            
-            string keyWithoutMarker = key[..^CurrentMarker.Length];
-            
-            RocksDbKeyValueMessage message = UnserializeKeyValueMessage(iterator.Value());
-            
+
+            // Decode only keys that pass both filters.
+            string keyWithoutMarker = Encoding.UTF8.GetString(rawKey[..^CurrentMarkerUtf8.Length]);
+
+            RocksDbKeyValueMessage message = UnserializeKeyValueMessage(iterator.GetValueSpan());
+
             byte[]? messageValue;
-            
             if (MemoryMarshal.TryGetArray(message.Value.Memory, out ArraySegment<byte> segment))
                 messageValue = segment.Array;
             else
                 messageValue = message.Value.ToByteArray();
 
             result.Add((keyWithoutMarker, new(
-                messageValue, 
-                message.Revision, 
+                messageValue,
+                message.Revision,
                 new(message.ExpiresNode, message.ExpiresPhysical, message.ExpiresCounter),
                 new(message.LastUsedNode, message.LastUsedPhysical, message.LastUsedCounter),
                 new(message.LastModifiedNode, message.LastModifiedPhysical, message.LastModifiedCounter),
@@ -476,29 +478,35 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     {
         List<(string, ReadOnlyKeyValueEntry)> result = [];
 
-        string seekKey = startKey ?? prefix;
-        Span<byte> buffer = stackalloc byte[Encoding.UTF8.GetByteCount(seekKey)];
-        Encoding.UTF8.GetBytes(seekKey.AsSpan(), buffer);
+        Span<byte> prefixBytes = stackalloc byte[Encoding.UTF8.GetByteCount(prefix)];
+        Encoding.UTF8.GetBytes(prefix, prefixBytes);
+
+        string seekStr = startKey ?? prefix;
+        Span<byte> seekBytes = stackalloc byte[Encoding.UTF8.GetByteCount(seekStr)];
+        Encoding.UTF8.GetBytes(seekStr, seekBytes);
 
         using Iterator iterator = db.NewIterator(cf: columnFamilyKeys);
-        iterator.Seek(buffer);
+        iterator.Seek(seekBytes);
 
         while (iterator.Valid() && result.Count < limit)
         {
-            string key = Encoding.UTF8.GetString(iterator.Key());
+            // GetKeySpan returns a span directly over native memory — no byte[] copy.
+            // Valid only until the next iterator move; consumed entirely before Next().
+            ReadOnlySpan<byte> rawKey = iterator.GetKeySpan();
 
-            if (!key.StartsWith(prefix, StringComparison.Ordinal))
+            if (!rawKey.StartsWith(prefixBytes))
                 break;
 
-            if (!key.EndsWith(CurrentMarker, StringComparison.Ordinal))
+            if (!rawKey.EndsWith(CurrentMarkerUtf8))
             {
                 iterator.Next();
                 continue;
             }
 
-            string keyWithoutMarker = key[..^CurrentMarker.Length];
+            // Decode only keys that pass both filters.
+            string keyWithoutMarker = Encoding.UTF8.GetString(rawKey[..^CurrentMarkerUtf8.Length]);
 
-            RocksDbKeyValueMessage message = UnserializeKeyValueMessage(iterator.Value());
+            RocksDbKeyValueMessage message = UnserializeKeyValueMessage(iterator.GetValueSpan());
 
             byte[]? messageValue;
             if (MemoryMarshal.TryGetArray(message.Value.Memory, out ArraySegment<byte> segment))
