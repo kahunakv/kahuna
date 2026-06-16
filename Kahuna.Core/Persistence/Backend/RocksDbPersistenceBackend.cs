@@ -52,8 +52,23 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// Configured with synchronization enabled to ensure durability by flushing changes to disk
     /// before returning control to the calling code.
     /// </summary>
+    /// <remarks>
+    /// This is a deliberate second fsync: writes already pass through the durable Raft WAL before
+    /// reaching this backend. Sync is retained because the checkpoint mechanism can truncate the WAL
+    /// once a partition is checkpointed, after which this store becomes the source of truth for that
+    /// data — dropping sync here would risk losing checkpointed state on a crash. Relaxing it would
+    /// require ordering guarantees between checkpoint/WAL-truncation and this store's flush, which is
+    /// out of scope for the table-tuning change.
+    /// </remarks>
     private static readonly WriteOptions DefaultWriteOptions = new WriteOptions().SetSync(true);
-    
+
+    /// <summary>
+    /// Shared block cache for the table reader. Sized once and reused across both column families so
+    /// hot index/filter/data blocks stay resident instead of being re-read from disk on every point
+    /// lookup. Held in a static field to keep it alive for the lifetime of the process.
+    /// </summary>
+    private static readonly Cache BlockCache = Cache.CreateLru(256 * 1024 * 1024);
+
     private readonly RocksDb db;
 
     private readonly ColumnFamilyHandle columnFamilyKeys;
@@ -91,12 +106,32 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         DbOptions dbOptions = new DbOptions()
             .SetCreateIfMissing(true)
             .SetCreateMissingColumnFamilies(true)
-            .SetWalRecoveryMode(Recovery.AbsoluteConsistency);
-        
+            .SetWalRecoveryMode(Recovery.AbsoluteConsistency)
+            // Use available cores for background flush/compaction so writes don't stall behind a
+            // single-threaded compactor under sustained load.
+            .IncreaseParallelism(Math.Max(2, Environment.ProcessorCount))
+            .SetMaxBackgroundFlushes(2)
+            .SetMaxBackgroundCompactions(Math.Max(2, Environment.ProcessorCount / 2))
+            // Larger memtable absorbs more writes before flushing, reducing write amplification.
+            .SetWriteBufferSize(64 * 1024 * 1024)
+            .SetMaxWriteBufferNumber(3)
+            .SetMinWriteBufferNumberToMerge(1);
+
+        // Bloom filters + a shared block cache make point lookups (GetKeyValue/GetLock, the read hot
+        // path) avoid touching SSTs on a miss and keep hot blocks resident across reads.
+        BlockBasedTableOptions tableOptions = new BlockBasedTableOptions()
+            .SetBlockCache(BlockCache)
+            .SetFilterPolicy(BloomFilterPolicy.Create(10, false))
+            .SetCacheIndexAndFilterBlocks(true)
+            .SetWholeKeyFiltering(true);
+
+        ColumnFamilyOptions kvOptions = new ColumnFamilyOptions().SetBlockBasedTableFactory(tableOptions);
+        ColumnFamilyOptions locksOptions = new ColumnFamilyOptions().SetBlockBasedTableFactory(tableOptions);
+
         ColumnFamilies columnFamilies = new()
         {
-            { "kv", new() },
-            { "locks", new() }
+            { "kv", kvOptions },
+            { "locks", locksOptions }
         };
 
         db = RocksDb.Open(dbOptions, fullPath, columnFamilies);
