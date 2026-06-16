@@ -6,9 +6,11 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
+// GrpcBatcher is in Kahuna.Client.Communication (internal, visible via InternalsVisibleTo)
 
 namespace Kahuna.Tests.Client;
 
+[Collection("GrpcBatcherTests")]
 public class TestCancellationAndTimeouts
 {
     private const string url = "https://localhost:8082";
@@ -276,6 +278,38 @@ public class TestCancellationAndTimeouts
         
         // Clean up
         await session.Rollback(TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>
+    /// Verifies that cancelling a batched request before it is dispatched leaves requestRefs/requestStreamRefs empty.
+    /// This is a unit-level test (no Docker) — it uses a bogus URL; the pre-cancelled token causes the
+    /// IsCompleted early-bail in RunBatch so no connection is attempted.
+    /// </summary>
+    [Fact]
+    public async Task TestCancelledToken_DoesNotLeakRequestRefs()
+    {
+        using CancellationTokenSource cts = new();
+        cts.Cancel(); // pre-cancel
+
+        GrpcBatcher batcher = new("https://localhost:1"); // unreachable — should not be contacted
+
+        GrpcTrySetKeyValueRequest request = new()
+        {
+            Key = "test-key",
+            Value = Google.Protobuf.ByteString.CopyFromUtf8("v"),
+            ExpiresMs = 10000,
+            Durability = GrpcKeyValueDurability.Persistent
+        };
+
+        int countBefore = GrpcBatcher.PendingRequestCount;
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => batcher.Enqueue(request, cts.Token));
+
+        // Give DeliverMessages a moment to run the IsCompleted early-bail.
+        await Task.Delay(50, TestContext.Current.CancellationToken);
+
+        Assert.Equal(countBefore, GrpcBatcher.PendingRequestCount);
     }
 
     private KahunaClient GetClientByType(KahunaCommunicationType communicationType, KahunaClientType clientType)

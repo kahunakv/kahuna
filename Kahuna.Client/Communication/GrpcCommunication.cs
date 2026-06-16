@@ -73,10 +73,7 @@ public class GrpcCommunication : IKahunaCommunication
         {
             GrpcBatcherResponse batchResponse;
                               
-            if (cancellationToken == CancellationToken.None)
-               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-            else
-               batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
             
             response = batchResponse.TryLock;
 
@@ -136,10 +133,7 @@ public class GrpcCommunication : IKahunaCommunication
             
             GrpcBatcherResponse batchResponse;
                               
-            if (cancellationToken == CancellationToken.None)
-               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-            else
-               batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
             
             response = batchResponse.Unlock;
 
@@ -195,10 +189,7 @@ public class GrpcCommunication : IKahunaCommunication
             
             GrpcBatcherResponse batchResponse;
                               
-            if (cancellationToken == CancellationToken.None)
-               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-            else
-               batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
             
             response = batchResponse.ExtendLock;
 
@@ -249,10 +240,7 @@ public class GrpcCommunication : IKahunaCommunication
             
             GrpcBatcherResponse batchResponse;
                               
-            if (cancellationToken == CancellationToken.None)
-               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-            else
-               batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
             
             response = batchResponse.GetLock;
 
@@ -323,10 +311,7 @@ public class GrpcCommunication : IKahunaCommunication
 
             GrpcBatcherResponse batchResponse;
                               
-            if (cancellationToken == CancellationToken.None)
-               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-            else
-               batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
             
             response = batchResponse.TrySetKeyValue;
 
@@ -364,10 +349,7 @@ public class GrpcCommunication : IKahunaCommunication
 
         GrpcBatcherResponse batchResponse;
                               
-        if (cancellationToken == CancellationToken.None)
-           batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-        else
-           batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+        batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
             
         GrpcTrySetManyKeyValueResponse? response = batchResponse.TrySetManyKeyValues;
 
@@ -394,10 +376,7 @@ public class GrpcCommunication : IKahunaCommunication
 
         GrpcBatcherResponse batchResponse;
 
-        if (cancellationToken == CancellationToken.None)
-            batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-        else
-            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+        batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
 
         GrpcTryDeleteManyKeyValueResponse? response = batchResponse.TryDeleteManyKeyValues;
 
@@ -629,10 +608,7 @@ public class GrpcCommunication : IKahunaCommunication
             
             GrpcBatcherResponse batchResponse;
                               
-            if (cancellationToken == CancellationToken.None)
-               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-            else
-               batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
             
             response = batchResponse.TrySetKeyValue;
 
@@ -705,10 +681,7 @@ public class GrpcCommunication : IKahunaCommunication
             
             GrpcBatcherResponse batchResponse;
                               
-            if (cancellationToken == CancellationToken.None)
-               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-            else
-               batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
             
             response = batchResponse.TrySetKeyValue;
 
@@ -788,10 +761,7 @@ public class GrpcCommunication : IKahunaCommunication
                 
                     GrpcBatcherResponse batchResponse;
                         
-                    if (cancellationToken == CancellationToken.None)
-                       batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-                    else
-                       batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+                    batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
             
                     response = batchResponse.TryGetKeyValue;
 
@@ -883,10 +853,7 @@ public class GrpcCommunication : IKahunaCommunication
         
             GrpcBatcherResponse batchResponse;
                 
-            if (cancellationToken == CancellationToken.None)
-               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-            else
-                batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
             
             response = batchResponse.TryExistsKeyValue;
 
@@ -948,10 +915,7 @@ public class GrpcCommunication : IKahunaCommunication
             
             GrpcBatcherResponse batchResponse;
                 
-            if (cancellationToken == CancellationToken.None)
-               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-            else
-                batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
             
             response = batchResponse.TryDeleteKeyValue;
 
@@ -1016,10 +980,7 @@ public class GrpcCommunication : IKahunaCommunication
         
             GrpcBatcherResponse batchResponse;
                 
-            if (cancellationToken == CancellationToken.None)
-               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-            else
-                batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
             
             response = batchResponse.TryExtendKeyValue;
 
@@ -1083,10 +1044,7 @@ public class GrpcCommunication : IKahunaCommunication
             
             GrpcBatcherResponse batchResponse;
                 
-            if (cancellationToken == CancellationToken.None)
-               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-            else
-                batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
             
             response = batchResponse.TryExecuteTransactionScript;
 
@@ -1154,10 +1112,7 @@ public class GrpcCommunication : IKahunaCommunication
         
             GrpcBatcherResponse batchResponse;
                 
-            if (cancellationToken == CancellationToken.None)
-               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-            else
-                batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
             
             response = batchResponse.TryAcquireExclusiveLock;
 
@@ -1502,10 +1457,7 @@ public class GrpcCommunication : IKahunaCommunication
         
             GrpcBatcherResponse batchResponse;
                 
-            if (cancellationToken == CancellationToken.None)
-               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-            else
-                batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
             
             response = batchResponse.GetByBucket;
 
@@ -1569,10 +1521,7 @@ public class GrpcCommunication : IKahunaCommunication
             
             GrpcBatcherResponse batchResponse;
                 
-            if (cancellationToken == CancellationToken.None)
-               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-            else
-                batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
             
             response = batchResponse.ScanByPrefix;
 
@@ -1638,10 +1587,7 @@ public class GrpcCommunication : IKahunaCommunication
             
             GrpcBatcherResponse batchResponse;
                 
-            if (cancellationToken == CancellationToken.None)
-               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-            else
-                batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
             
             response = batchResponse.StartTransaction;
 
@@ -1716,10 +1662,7 @@ public class GrpcCommunication : IKahunaCommunication
             
             GrpcBatcherResponse batchResponse;
                 
-            if (cancellationToken == CancellationToken.None)
-               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-            else
-                batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
             
             response = batchResponse.CommitTransaction;
 
@@ -1790,10 +1733,7 @@ public class GrpcCommunication : IKahunaCommunication
             
             GrpcBatcherResponse batchResponse;
                 
-            if (cancellationToken == CancellationToken.None)
-               batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-            else
-                batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+            batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
             
             response = batchResponse.RollbackTransaction;
 

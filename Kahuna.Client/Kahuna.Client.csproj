@@ -23,6 +23,12 @@
     </PropertyGroup>
 
     <ItemGroup>
+        <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+            <_Parameter1>Kahuna.Tests</_Parameter1>
+        </AssemblyAttribute>
+    </ItemGroup>
+
+    <ItemGroup>
       <PackageReference Include="Blake3" Version="2.2.1" />
       <PackageReference Include="Polly" Version="8.7.0" />
       <PackageReference Include="Polly.Contrib.WaitAndRetry" Version="1.1.1" />

@@ -33,19 +33,27 @@ internal readonly struct GrpcBatcherItem
     /// <summary>
     /// Returns the task completion source of the reply
     /// </summary>
-    public TaskCompletionSource<GrpcBatcherResponse> Promise { get; }    
+    public TaskCompletionSource<GrpcBatcherResponse> Promise { get; }
+
+    /// <summary>
+    /// Token supplied by the caller; used to cancel the semaphore wait on the stream-write path.
+    /// </summary>
+    public CancellationToken CancellationToken { get; }
 
     /// <summary>
     /// Constructor
     /// </summary>
+    /// <param name="type"></param>
     /// <param name="requestId"></param>
     /// <param name="request"></param>
     /// <param name="promise"></param>
-    public GrpcBatcherItem(GrpcBatcherItemType type, int requestId, GrpcBatcherRequest request, TaskCompletionSource<GrpcBatcherResponse> promise)
+    /// <param name="cancellationToken"></param>
+    public GrpcBatcherItem(GrpcBatcherItemType type, int requestId, GrpcBatcherRequest request, TaskCompletionSource<GrpcBatcherResponse> promise, CancellationToken cancellationToken = default)
     {
         Type = type;
         RequestId = requestId;
         Request = request;
         Promise = promise;
+        CancellationToken = cancellationToken;
     }
 }

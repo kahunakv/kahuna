@@ -87,13 +87,13 @@ internal sealed class GrpcBatcher
     /// </summary>
     /// <param name="message">The lock request message to be enqueued.</param>
     /// <returns>A task that represents the asynchronous operation, containing the batcher response for the lock request.</returns>
-    public Task<GrpcBatcherResponse> Enqueue(GrpcTryLockRequest message)
+    public Task<GrpcBatcherResponse> Enqueue(GrpcTryLockRequest message, CancellationToken cancellationToken = default)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.Locks, Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.Locks, Interlocked.Increment(ref requestId), new(message), promise, cancellationToken);
 
-        return TryProcessQueue(grpcBatcherItem, promise);
+        return TryProcessQueue(grpcBatcherItem, promise, cancellationToken);
     }
 
     /// <summary>
@@ -101,13 +101,13 @@ internal sealed class GrpcBatcher
     /// </summary>
     /// <param name="message">The unlock request message to be added to the queue.</param>
     /// <returns>A task representing the asynchronous operation, containing the batcher response for the unlock request.</returns>
-    public Task<GrpcBatcherResponse> Enqueue(GrpcUnlockRequest message)
+    public Task<GrpcBatcherResponse> Enqueue(GrpcUnlockRequest message, CancellationToken cancellationToken = default)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.Locks, Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.Locks, Interlocked.Increment(ref requestId), new(message), promise, cancellationToken);
 
-        return TryProcessQueue(grpcBatcherItem, promise);
+        return TryProcessQueue(grpcBatcherItem, promise, cancellationToken);
     }
 
     /// <summary>
@@ -115,13 +115,13 @@ internal sealed class GrpcBatcher
     /// </summary>
     /// <param name="message">The lock extension request to be enqueued.</param>
     /// <returns>A task that represents the asynchronous operation, containing the batcher response for the lock extension request.</returns>
-    public Task<GrpcBatcherResponse> Enqueue(GrpcExtendLockRequest message)
+    public Task<GrpcBatcherResponse> Enqueue(GrpcExtendLockRequest message, CancellationToken cancellationToken = default)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.Locks, Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.Locks, Interlocked.Increment(ref requestId), new(message), promise, cancellationToken);
 
-        return TryProcessQueue(grpcBatcherItem, promise);
+        return TryProcessQueue(grpcBatcherItem, promise, cancellationToken);
     }
 
     /// <summary>
@@ -129,13 +129,13 @@ internal sealed class GrpcBatcher
     /// </summary>
     /// <param name="message">The lock request message to be enqueued.</param>
     /// <returns>A task that represents the asynchronous operation, containing the batcher response for the lock request.</returns>
-    public Task<GrpcBatcherResponse> Enqueue(GrpcGetLockRequest message)
+    public Task<GrpcBatcherResponse> Enqueue(GrpcGetLockRequest message, CancellationToken cancellationToken = default)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.Locks, Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.Locks, Interlocked.Increment(ref requestId), new(message), promise, cancellationToken);
 
-        return TryProcessQueue(grpcBatcherItem, promise);
+        return TryProcessQueue(grpcBatcherItem, promise, cancellationToken);
     }
     
     /// <summary>
@@ -143,13 +143,13 @@ internal sealed class GrpcBatcher
     /// </summary>
     /// <param name="message">The key-value set request to be enqueued.</param>
     /// <returns>A task representing the asynchronous operation, containing the response for the processed request.</returns>
-    public Task<GrpcBatcherResponse> Enqueue(GrpcTrySetKeyValueRequest message)
+    public Task<GrpcBatcherResponse> Enqueue(GrpcTrySetKeyValueRequest message, CancellationToken cancellationToken = default)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise, cancellationToken);
 
-        return TryProcessQueue(grpcBatcherItem, promise);
+        return TryProcessQueue(grpcBatcherItem, promise, cancellationToken);
     }
 
     /// <summary>
@@ -157,22 +157,22 @@ internal sealed class GrpcBatcher
     /// </summary>
     /// <param name="message">The key-value set request to be enqueued.</param>
     /// <returns>A task representing the asynchronous operation, containing the response for the processed request.</returns>
-    public Task<GrpcBatcherResponse> Enqueue(GrpcTrySetManyKeyValueRequest message)
+    public Task<GrpcBatcherResponse> Enqueue(GrpcTrySetManyKeyValueRequest message, CancellationToken cancellationToken = default)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise, cancellationToken);
 
-        return TryProcessQueue(grpcBatcherItem, promise);
+        return TryProcessQueue(grpcBatcherItem, promise, cancellationToken);
     }
 
-    public Task<GrpcBatcherResponse> Enqueue(GrpcTryDeleteManyKeyValueRequest message)
+    public Task<GrpcBatcherResponse> Enqueue(GrpcTryDeleteManyKeyValueRequest message, CancellationToken cancellationToken = default)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise, cancellationToken);
 
-        return TryProcessQueue(grpcBatcherItem, promise);
+        return TryProcessQueue(grpcBatcherItem, promise, cancellationToken);
     }
 
     /// <summary>
@@ -180,108 +180,132 @@ internal sealed class GrpcBatcher
     /// </summary>
     /// <param name="message">The key-value request message to be enqueued.</param>
     /// <returns>A task representing the asynchronous operation, containing the batcher response for the key-value request.</returns>
-    public Task<GrpcBatcherResponse> Enqueue(GrpcTryGetKeyValueRequest message)
+    public Task<GrpcBatcherResponse> Enqueue(GrpcTryGetKeyValueRequest message, CancellationToken cancellationToken = default)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise, cancellationToken);
 
-        return TryProcessQueue(grpcBatcherItem, promise);
+        return TryProcessQueue(grpcBatcherItem, promise, cancellationToken);
     }
     
-    public Task<GrpcBatcherResponse> Enqueue(GrpcTryDeleteKeyValueRequest message)
+    public Task<GrpcBatcherResponse> Enqueue(GrpcTryDeleteKeyValueRequest message, CancellationToken cancellationToken = default)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise, cancellationToken);
 
-        return TryProcessQueue(grpcBatcherItem, promise);
+        return TryProcessQueue(grpcBatcherItem, promise, cancellationToken);
     }
     
-    public Task<GrpcBatcherResponse> Enqueue(GrpcTryExtendKeyValueRequest message)
+    public Task<GrpcBatcherResponse> Enqueue(GrpcTryExtendKeyValueRequest message, CancellationToken cancellationToken = default)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise, cancellationToken);
 
-        return TryProcessQueue(grpcBatcherItem, promise);
+        return TryProcessQueue(grpcBatcherItem, promise, cancellationToken);
     }
     
-    public Task<GrpcBatcherResponse> Enqueue(GrpcTryExistsKeyValueRequest message)
+    public Task<GrpcBatcherResponse> Enqueue(GrpcTryExistsKeyValueRequest message, CancellationToken cancellationToken = default)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise, cancellationToken);
 
-        return TryProcessQueue(grpcBatcherItem, promise);
+        return TryProcessQueue(grpcBatcherItem, promise, cancellationToken);
     }
     
-    public Task<GrpcBatcherResponse> Enqueue(GrpcTryExecuteTransactionScriptRequest message)
+    public Task<GrpcBatcherResponse> Enqueue(GrpcTryExecuteTransactionScriptRequest message, CancellationToken cancellationToken = default)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise, cancellationToken);
 
-        return TryProcessQueue(grpcBatcherItem, promise);
+        return TryProcessQueue(grpcBatcherItem, promise, cancellationToken);
     }
     
-    public Task<GrpcBatcherResponse> Enqueue(GrpcTryAcquireExclusiveLockRequest message)
+    public Task<GrpcBatcherResponse> Enqueue(GrpcTryAcquireExclusiveLockRequest message, CancellationToken cancellationToken = default)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise, cancellationToken);
 
-        return TryProcessQueue(grpcBatcherItem, promise);
+        return TryProcessQueue(grpcBatcherItem, promise, cancellationToken);
     }
     
-    public Task<GrpcBatcherResponse> Enqueue(GrpcGetByBucketRequest message)
+    public Task<GrpcBatcherResponse> Enqueue(GrpcGetByBucketRequest message, CancellationToken cancellationToken = default)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise, cancellationToken);
 
-        return TryProcessQueue(grpcBatcherItem, promise);
+        return TryProcessQueue(grpcBatcherItem, promise, cancellationToken);
     }
     
-    public Task<GrpcBatcherResponse> Enqueue(GrpcScanAllByPrefixRequest message)
+    public Task<GrpcBatcherResponse> Enqueue(GrpcScanAllByPrefixRequest message, CancellationToken cancellationToken = default)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise, cancellationToken);
 
-        return TryProcessQueue(grpcBatcherItem, promise);
+        return TryProcessQueue(grpcBatcherItem, promise, cancellationToken);
     }
 
-    public Task<GrpcBatcherResponse> Enqueue(GrpcStartTransactionRequest message)
+    public Task<GrpcBatcherResponse> Enqueue(GrpcStartTransactionRequest message, CancellationToken cancellationToken = default)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise, cancellationToken);
 
-        return TryProcessQueue(grpcBatcherItem, promise);
-    }
-    
-    public Task<GrpcBatcherResponse> Enqueue(GrpcCommitTransactionRequest message)
-    {
-        TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
-
-        return TryProcessQueue(grpcBatcherItem, promise);
+        return TryProcessQueue(grpcBatcherItem, promise, cancellationToken);
     }
     
-    public Task<GrpcBatcherResponse> Enqueue(GrpcRollbackTransactionRequest message)
+    public Task<GrpcBatcherResponse> Enqueue(GrpcCommitTransactionRequest message, CancellationToken cancellationToken = default)
     {
         TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise, cancellationToken);
 
-        return TryProcessQueue(grpcBatcherItem, promise);
+        return TryProcessQueue(grpcBatcherItem, promise, cancellationToken);
+    }
+    
+    public Task<GrpcBatcherResponse> Enqueue(GrpcRollbackTransactionRequest message, CancellationToken cancellationToken = default)
+    {
+        TaskCompletionSource<GrpcBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcBatcherItem grpcBatcherItem = new(GrpcBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise, cancellationToken);
+
+        return TryProcessQueue(grpcBatcherItem, promise, cancellationToken);
     }
 
-    private Task<GrpcBatcherResponse> TryProcessQueue(GrpcBatcherItem grpcBatcherItem, TaskCompletionSource<GrpcBatcherResponse> promise)
+    private Task<GrpcBatcherResponse> TryProcessQueue(GrpcBatcherItem grpcBatcherItem, TaskCompletionSource<GrpcBatcherResponse> promise, CancellationToken cancellationToken)
     {
         inbox.Enqueue(grpcBatcherItem);
+
+        if (cancellationToken.CanBeCanceled)
+        {
+            // Register a local-cleanup callback so that cancelling the caller's token removes the
+            // item from the tracking dicts and cancels the promise.  This is best-effort local
+            // abandon: the server still executes the operation (no cancel frame is sent over the
+            // duplex stream), but the requestRefs/requestStreamRefs leak under cancellation churn
+            // is eliminated.  The registration is disposed when the promise completes (normally,
+            // faulted, or cancelled) to release the token's reference to the callback.
+            CancellationTokenRegistration reg = cancellationToken.Register(static state =>
+            {
+                (GrpcBatcherItem item, CancellationToken ct) = ((GrpcBatcherItem, CancellationToken))state!;
+                requestRefs.TryRemove(item.RequestId, out _);
+                requestStreamRefs.TryRemove(item.RequestId, out _);
+                item.Promise.TrySetCanceled(ct);
+            }, (grpcBatcherItem, cancellationToken));
+
+            promise.Task.ContinueWith(
+                static (_, state) => ((CancellationTokenRegistration)state!).Dispose(),
+                reg,
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
 
         if (1 == Interlocked.Exchange(ref processing, 0))
             _ = DeliverMessages();
@@ -332,6 +356,12 @@ internal sealed class GrpcBatcher
     }
 
     /// <summary>
+    /// Number of in-flight requests currently tracked in <see cref="requestRefs"/>.
+    /// Exposed internal for test assertions; not for production use.
+    /// </summary>
+    internal static int PendingRequestCount => requestRefs.Count;
+
+    /// <summary>
     /// Processes a batch of requests, delegating them to specific handling mechanisms based on their type.
     /// </summary>
     /// <param name="requests">The list of batcher items to be processed.</param>
@@ -340,6 +370,17 @@ internal sealed class GrpcBatcher
     {
         try
         {
+            // Skip the entire network path when every item was cancelled before dispatch
+            // (e.g. a synchronously pre-cancelled token fires the callback in TryProcessQueue
+            // before DeliverMessages picks the item up).
+            bool anyPending = false;
+            foreach (GrpcBatcherItem r in requests)
+            {
+                if (!r.Promise.Task.IsCompleted) { anyPending = true; break; }
+            }
+            if (!anyPending)
+                return;
+
             for (int attempt = 0; attempt < 2; attempt++)
             {
                 try
@@ -348,6 +389,11 @@ internal sealed class GrpcBatcher
 
                     foreach (GrpcBatcherItem request in requests)
                     {
+                        // Skip items whose promise was completed between inbox drain and now
+                        // (cancelled mid-flight or synchronously pre-cancelled).
+                        if (request.Promise.Task.IsCompleted)
+                            continue;
+
                         requestRefs.TryAdd(request.RequestId, request);
                         requestStreamRefs[request.RequestId] = sharedStreaming.Id;
 
@@ -437,7 +483,7 @@ internal sealed class GrpcBatcher
 
         try
         {
-            await sharedStreaming.Semaphore.WaitAsync();
+            await sharedStreaming.Semaphore.WaitAsync(request.CancellationToken);
             lockTaken = true;
 
             await sharedStreaming.LockStreaming.RequestStream.WriteAsync(batchRequest);
@@ -550,7 +596,7 @@ internal sealed class GrpcBatcher
 
         try
         {
-            await sharedStreaming.Semaphore.WaitAsync();
+            await sharedStreaming.Semaphore.WaitAsync(request.CancellationToken);
             lockTaken = true;
 
             await sharedStreaming.KeyValueStreaming.RequestStream.WriteAsync(batchRequest);
@@ -581,78 +627,76 @@ internal sealed class GrpcBatcher
         {
             await foreach (GrpcBatchClientKeyValueResponse response in streaming.ResponseStream.ReadAllAsync())
             {
-                if (!requestRefs.TryGetValue(response.RequestId, out GrpcBatcherItem item))
-                {
-                    Console.WriteLine("Request not found " + response.RequestId);
+                // TryRemove wins the race against the cancellation callback's TryRemove; whoever
+                // removes the item first gets to complete the promise via TrySetResult/TrySetCanceled.
+                if (!requestRefs.TryRemove(response.RequestId, out GrpcBatcherItem item))
                     continue;
-                }
-            
+
+                requestStreamRefs.TryRemove(response.RequestId, out _);
+
                 switch (response.Type)
                 {
                     case GrpcClientBatchType.TrySetKeyValue:
-                        item.Promise.SetResult(new(response.TrySetKeyValue));
+                        item.Promise.TrySetResult(new(response.TrySetKeyValue));
                         break;
-                
+
                     case GrpcClientBatchType.TrySetManyKeyValue:
-                        item.Promise.SetResult(new(response.TrySetManyKeyValue));
+                        item.Promise.TrySetResult(new(response.TrySetManyKeyValue));
                         break;
 
                     case GrpcClientBatchType.TryDeleteManyKeyValue:
-                        item.Promise.SetResult(new(response.TryDeleteManyKeyValue));
+                        item.Promise.TrySetResult(new(response.TryDeleteManyKeyValue));
                         break;
-                        
+
                     case GrpcClientBatchType.TryGetKeyValue:
-                        item.Promise.SetResult(new(response.TryGetKeyValue));
+                        item.Promise.TrySetResult(new(response.TryGetKeyValue));
                         break;
-                        
+
                     case GrpcClientBatchType.TryDeleteKeyValue:
-                        item.Promise.SetResult(new(response.TryDeleteKeyValue));
+                        item.Promise.TrySetResult(new(response.TryDeleteKeyValue));
                         break;
-                        
+
                     case GrpcClientBatchType.TryExtendKeyValue:
-                        item.Promise.SetResult(new(response.TryExtendKeyValue));
+                        item.Promise.TrySetResult(new(response.TryExtendKeyValue));
                         break;
-                        
+
                     case GrpcClientBatchType.TryExistsKeyValue:
-                        item.Promise.SetResult(new(response.TryExistsKeyValue));
+                        item.Promise.TrySetResult(new(response.TryExistsKeyValue));
                         break;
-                
+
                     case GrpcClientBatchType.TryAcquireExclusiveLock:
-                        item.Promise.SetResult(new(response.TryAcquireExclusiveLock));
+                        item.Promise.TrySetResult(new(response.TryAcquireExclusiveLock));
                         break;
-                
+
                     case GrpcClientBatchType.TryExecuteTransactionScript:
-                        item.Promise.SetResult(new(response.TryExecuteTransactionScript));
+                        item.Promise.TrySetResult(new(response.TryExecuteTransactionScript));
                         break;
-                
+
                     case GrpcClientBatchType.TryGetByBucket:
-                        item.Promise.SetResult(new(response.GetByBucket));
+                        item.Promise.TrySetResult(new(response.GetByBucket));
                         break;
-                
+
                     case GrpcClientBatchType.TryScanByPrefix:
-                        item.Promise.SetResult(new(response.ScanByPrefix));
+                        item.Promise.TrySetResult(new(response.ScanByPrefix));
                         break;
-                
+
                     case GrpcClientBatchType.TryStartTransaction:
-                        item.Promise.SetResult(new(response.StartTransaction));
+                        item.Promise.TrySetResult(new(response.StartTransaction));
                         break;
-                
+
                     case GrpcClientBatchType.TryCommitTransaction:
-                        item.Promise.SetResult(new(response.CommitTransaction));
+                        item.Promise.TrySetResult(new(response.CommitTransaction));
                         break;
-                
+
                     case GrpcClientBatchType.TryRollbackTransaction:
-                        item.Promise.SetResult(new(response.RollbackTransaction));
+                        item.Promise.TrySetResult(new(response.RollbackTransaction));
                         break;
-                        
+
                     case GrpcClientBatchType.TypeNone:
                     default:
-                        item.Promise.SetException(new KahunaException("Unknown response type: " + response.Type, KeyValueResponseType.Errored));
+                        item.Promise.TrySetException(new KahunaException("Unknown response type: " + response.Type, KeyValueResponseType.Errored));
                         break;
                 }
-
-                requestRefs.TryRemove(response.RequestId, out _);
-                requestStreamRefs.TryRemove(response.RequestId, out _);
             }
 
             RpcException ex = new(new(StatusCode.Unavailable, "gRPC key-value stream closed."));
@@ -677,38 +721,34 @@ internal sealed class GrpcBatcher
         {
             await foreach (GrpcBatchClientLockResponse response in streaming.ResponseStream.ReadAllAsync())
             {
-                if (!requestRefs.TryGetValue(response.RequestId, out GrpcBatcherItem item))
-                {
-                    Console.WriteLine("Request not found " + response.RequestId);
+                if (!requestRefs.TryRemove(response.RequestId, out GrpcBatcherItem item))
                     continue;
-                }
+
+                requestStreamRefs.TryRemove(response.RequestId, out _);
 
                 switch (response.Type)
                 {
                     case GrpcLockClientBatchType.TypeTryLock:
-                        item.Promise.SetResult(new(response.TryLock));
+                        item.Promise.TrySetResult(new(response.TryLock));
                         break;
 
                     case GrpcLockClientBatchType.TypeUnlock:
-                        item.Promise.SetResult(new(response.Unlock));
+                        item.Promise.TrySetResult(new(response.Unlock));
                         break;
 
                     case GrpcLockClientBatchType.TypeExtendLock:
-                        item.Promise.SetResult(new(response.ExtendLock));
+                        item.Promise.TrySetResult(new(response.ExtendLock));
                         break;
 
                     case GrpcLockClientBatchType.TypeGetLock:
-                        item.Promise.SetResult(new(response.GetLock));
+                        item.Promise.TrySetResult(new(response.GetLock));
                         break;
 
                     case GrpcLockClientBatchType.TypeNone:
                     default:
-                        item.Promise.SetException(new KahunaException("Unknown response type: " + response.Type, LockResponseType.Errored));
+                        item.Promise.TrySetException(new KahunaException("Unknown response type: " + response.Type, LockResponseType.Errored));
                         break;
                 }
-
-                requestRefs.TryRemove(response.RequestId, out _);
-                requestStreamRefs.TryRemove(response.RequestId, out _);
             }
 
             RpcException ex = new(new(StatusCode.Unavailable, "gRPC lock stream closed."));
