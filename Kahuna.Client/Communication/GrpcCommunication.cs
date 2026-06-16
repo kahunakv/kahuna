@@ -401,6 +401,11 @@ public class GrpcCommunication : IKahunaCommunication
         CancellationToken cancellationToken
     )
     {
+        // Intentionally unary: GetMany is already a bulk-key RPC; the streaming batcher's value
+        // is coalescing individual single-key calls, not bulk requests that carry N keys internally.
+        // GrpcBatchClientKeyValueResponse does not yet include GetMany/ExistsMany payload fields,
+        // so routing through the batcher would require proto + server-handler changes. The shared
+        // channel pool provides HTTP/2 multiplexing without that overhead.
         GrpcTryGetManyValuesRequest request = new()
         {
             TransactionIdNode = transactionId.N,
@@ -426,6 +431,7 @@ public class GrpcCommunication : IKahunaCommunication
         CancellationToken cancellationToken
     )
     {
+        // Intentionally unary — same rationale as TryGetManyKeyValues above.
         GrpcTryExistsManyValuesRequest request = new()
         {
             TransactionIdNode = transactionId.N,
@@ -1143,6 +1149,8 @@ public class GrpcCommunication : IKahunaCommunication
 
     public async Task<bool> TryAcquireExclusivePrefixKeyValueLock(string url, HLCTimestamp transactionId, string prefixKey, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
     {
+        // Intentionally unary: prefix lock acquisition is a low-frequency control-plane op that
+        // drives its own retry loop; routing through the streaming batcher adds no throughput benefit.
         GrpcTryAcquireExclusivePrefixLockRequest request = new()
         {
             TransactionIdNode = transactionId.N,
@@ -1182,6 +1190,7 @@ public class GrpcCommunication : IKahunaCommunication
 
     public async Task TryReleaseExclusivePrefixKeyValueLock(string url, HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
     {
+        // Intentionally unary: low-frequency control-plane release; no coalescing value.
         GrpcTryReleaseExclusivePrefixLockRequest request = new()
         {
             TransactionIdNode = transactionId.N,
@@ -1209,6 +1218,8 @@ public class GrpcCommunication : IKahunaCommunication
         CancellationToken cancellationToken
     )
     {
+        // Intentionally unary: range lock acquisition is a low-frequency control-plane op with its
+        // own retry loop; batching adds no throughput benefit here.
         GrpcTryAcquireExclusiveRangeLockRequest request = new()
         {
             TransactionIdNode = transactionId.N,
@@ -1262,6 +1273,7 @@ public class GrpcCommunication : IKahunaCommunication
         CancellationToken cancellationToken
     )
     {
+        // Intentionally unary: low-frequency control-plane release; no coalescing value.
         GrpcTryReleaseExclusiveRangeLockRequest request = new()
         {
             TransactionIdNode = transactionId.N,
@@ -1294,6 +1306,8 @@ public class GrpcCommunication : IKahunaCommunication
         CancellationToken cancellationToken
     )
     {
+        // Intentionally unary: range scan returns a paginated result set; it carries its own
+        // retry logic and is not a candidate for per-key coalescing in the streaming batcher.
         GrpcGetByRangeRequest request = new()
         {
             TransactionIdNode = transactionId.N,
@@ -1349,6 +1363,8 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
     }
 
+    // Intentionally unary (server-streaming): range scan is a streaming server-push call, not a
+    // per-key operation; the batcher's per-item coalescing model does not apply here.
     public async IAsyncEnumerable<KeyValueGetByBucketItem> ScanByRange(
         string url,
         HLCTimestamp transactionId,
@@ -1762,6 +1778,9 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to rollback key/value transaction: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
 
+    // Intentionally unary: sequence operations are low-frequency control-plane calls routed to a
+    // dedicated sequencer service via CreateSequenceChannel; they are not candidates for per-key
+    // coalescing in the streaming key-value batcher.
     public async Task<(SequenceResponseType, ReadOnlySequenceEntry?, int)> GetSequence(string url, string name, SequenceDurability durability, CancellationToken cancellationToken)
     {
         using GrpcChannel channel = CreateSequenceChannel(url);
@@ -1968,6 +1987,8 @@ public class GrpcCommunication : IKahunaCommunication
         return new(() => new(url, timeout, options, logger));
     }
 
+    // Intentionally unary: key-range registration is a one-shot control-plane operation performed
+    // at startup or on topology changes; it is not a hot-path call suitable for batcher coalescing.
     public async Task<bool> RegisterKeyRange(string url, string keySpace, CancellationToken cancellationToken)
     {
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
