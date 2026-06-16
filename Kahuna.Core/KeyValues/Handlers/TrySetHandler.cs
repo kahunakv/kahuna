@@ -266,7 +266,7 @@ internal sealed class TrySetHandler : BaseHandler
         if (entry.Revisions is not null)
             RemoveExpiredRevisions(entry, proposal.Revision);
 
-        bool revisionsCreated = entry.Revisions is null;
+        bool revisionsCreated = entry.Revisions is null || entry.Revisions.Count == 0;
         entry.Revisions ??= new();
         entry.Revisions[entry.Revision] = new KeyValueRevisionEntry(entry.Value, entry.LastModified, entry.Expires, entry.State);
         context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreated, entry.Value));

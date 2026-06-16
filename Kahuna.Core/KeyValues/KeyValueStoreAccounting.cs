@@ -31,9 +31,16 @@ internal static class KeyValueStoreAccounting
 
     /// <summary>
     /// Bytes to reclaim when a single revision entry is removed from entry.Revisions.
+    /// Pass dictionaryNowEmpty=true when the dictionary is empty after this removal,
+    /// so the one-time DictionaryOverheadBytes charged on first add is also reclaimed.
     /// </summary>
-    internal static long EstimateRevisionRemovedBytes(byte[]? archivedValue)
-        => sizeof(long) + RevisionEntryOverheadBytes + (archivedValue?.Length ?? 0);
+    internal static long EstimateRevisionRemovedBytes(bool dictionaryNowEmpty, byte[]? archivedValue)
+    {
+        long bytes = sizeof(long) + RevisionEntryOverheadBytes + (archivedValue?.Length ?? 0);
+        if (dictionaryNowEmpty)
+            bytes += DictionaryOverheadBytes;
+        return bytes;
+    }
 
     /// <summary>
     /// Bytes charged when a new MVCC entry is added to entry.MvccEntries.
@@ -49,9 +56,16 @@ internal static class KeyValueStoreAccounting
 
     /// <summary>
     /// Bytes to reclaim when a single MVCC entry is removed from entry.MvccEntries.
+    /// Pass dictionaryNowEmpty=true when the dictionary is empty after this removal,
+    /// so the one-time DictionaryOverheadBytes charged on first add is also reclaimed.
     /// </summary>
-    internal static long MvccEntryRemovedBytes(byte[]? snapshotValue)
-        => MvccEntryOverheadBytes + (snapshotValue?.Length ?? 0);
+    internal static long MvccEntryRemovedBytes(bool dictionaryNowEmpty, byte[]? snapshotValue)
+    {
+        long bytes = MvccEntryOverheadBytes + (snapshotValue?.Length ?? 0);
+        if (dictionaryNowEmpty)
+            bytes += DictionaryOverheadBytes;
+        return bytes;
+    }
 
     public static long EstimateEntryBytes(string key, KeyValueEntry entry)
     {

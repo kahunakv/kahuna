@@ -203,7 +203,7 @@ internal sealed class TryCollectHandler : BaseHandler
         foreach (long revision in staleRevisions)
         {
             if (entry.Revisions.Remove(revision, out KeyValueRevisionEntry removed))
-                bytesFreed += KeyValueStoreAccounting.EstimateRevisionRemovedBytes(removed.Value);
+                bytesFreed += KeyValueStoreAccounting.EstimateRevisionRemovedBytes(entry.Revisions.Count == 0, removed.Value);
         }
 
         return (staleRevisions.Count, bytesFreed);
@@ -231,8 +231,12 @@ internal sealed class TryCollectHandler : BaseHandler
         foreach (HLCTimestamp transactionId in staleTransactions)
         {
             if (entry.MvccEntries.Remove(transactionId, out KeyValueMvccEntry? removedMvcc))
-                bytesFreed += KeyValueStoreAccounting.MvccEntryRemovedBytes(removedMvcc.Value);
+                bytesFreed += KeyValueStoreAccounting.MvccEntryRemovedBytes(false, removedMvcc.Value);
         }
+
+        // Reclaim the dictionary overhead if the last entry was just removed.
+        if (staleTransactions.Count > 0 && entry.MvccEntries.Count == 0)
+            bytesFreed += KeyValueStoreAccounting.DictionaryOverheadBytes;
 
         return (staleTransactions.Count, bytesFreed);
     }

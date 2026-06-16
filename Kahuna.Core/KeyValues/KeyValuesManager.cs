@@ -57,8 +57,15 @@ internal sealed class KeyValuesManager : IDisposable
     private readonly IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> persistentKeyValuesRouter;
 
     private readonly List<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> ephemeralInstances = [];
-    
+
     private readonly List<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> persistentInstances = [];
+
+    /// <summary>
+    /// Exposes the per-actor instance lists for in-process test inspection of
+    /// accounting state (CachedBytes). Not part of the production API surface.
+    /// </summary>
+    internal IReadOnlyList<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> EphemeralInstances => ephemeralInstances;
+    internal IReadOnlyList<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> PersistentInstances => persistentInstances;
 
     private readonly KeyValueRestorer restorer;
 

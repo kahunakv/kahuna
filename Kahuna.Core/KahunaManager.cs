@@ -1185,6 +1185,12 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <summary>The per-node key-space routing registry.</summary>
     internal KeySpaceRegistry KeySpaceRegistry => keyValues.KeySpaceRegistry;
 
+    /// <summary>
+    /// Exposes the KeyValuesManager for in-process test inspection of accounting state.
+    /// Not part of the production API surface.
+    /// </summary>
+    internal KeyValuesManager KeyValues => keyValues;
+
     /// <inheritdoc/>
     public void RegisterKeyRange(string keySpace) => keyValues.KeySpaceRegistry.RegisterKeyRange(keySpace);
 

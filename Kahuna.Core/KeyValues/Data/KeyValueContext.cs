@@ -100,6 +100,8 @@ internal sealed class KeyValueContext
         // Initialize CachedBytes the first time an entry enters the store. For new entries
         // (no Revisions, no MvccEntries) EstimateEntryBytes is O(1); subsequent mutations
         // maintain CachedBytes incrementally via AdjustEstimatedEntryBytes / AdjustEntryValueBytes.
+        // Guard relies on insert-before-adjust ordering: callers must not call AdjustEstimatedEntryBytes
+        // on this entry before InsertStoreEntry, or CachedBytes would be non-zero and skip init.
         if (entry.CachedBytes == 0)
             entry.CachedBytes = KeyValueStoreAccounting.EstimateEntryBytes(key, entry) - (key.Length * sizeof(char));
 

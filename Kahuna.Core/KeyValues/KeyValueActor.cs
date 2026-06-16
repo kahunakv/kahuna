@@ -229,6 +229,8 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// </summary>
     private readonly Stopwatch stopwatch = Stopwatch.StartNew();
 
+    private KeyValueContext? kvContext;
+
     /// <summary>
     /// Constructor
     /// </summary>
@@ -254,7 +256,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         this.actorContext = actorContext;
         this.logger = logger;
         
-        KeyValueContext context = new(
+        kvContext = new(
             actorContext,
             keyValuesStore,
             locksByPrefix,
@@ -269,6 +271,8 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
             configuration,
             logger
         );
+
+        KeyValueContext context = kvContext;
 
         trySetHandler = new(context);
         tryExtendHandler = new(context);
@@ -295,6 +299,12 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         completeProposalHandler = new(context);
         releaseProposalHandler = new(context);
     }
+
+    /// <summary>
+    /// Returns the actor's KeyValueContext. Used only by in-process tests to inspect
+    /// per-entry accounting state (CachedBytes) without going through the public API.
+    /// </summary>
+    internal KeyValueContext GetContext() => kvContext!;
 
     /// <summary>
     /// Main entry point for the actor.

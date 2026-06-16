@@ -242,8 +242,8 @@ internal abstract class BaseHandler
             foreach (long revision in revisionsToRemove)
             {
                 entry.Revisions.TryGetValue(revision, out KeyValueRevisionEntry removed);
-                bytesFreed += KeyValueStoreAccounting.EstimateRevisionRemovedBytes(removed.Value);
                 entry.Revisions.Remove(revision);
+                bytesFreed += KeyValueStoreAccounting.EstimateRevisionRemovedBytes(entry.Revisions.Count == 0, removed.Value);
             }
 
             context.AdjustEstimatedEntryBytes(entry, -bytesFreed);

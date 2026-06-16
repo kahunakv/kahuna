@@ -1,4 +1,5 @@
 
+using System.Buffers.Text;
 using System.Runtime.InteropServices;
 using System.Text;
 using Kahuna.Server.Locks;
@@ -37,6 +38,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// of the latest state of a record.
     /// </summary>
     private const string CurrentMarker = "~CURRENT";
+
+    // UTF-8 encoding of CurrentMarker for allocation-free key construction. The Debug.Assert
+    // below catches any future edit to the const that forgets to update this literal.
+    private static ReadOnlySpan<byte> CurrentMarkerUtf8 => "~CURRENT"u8;
 
     /// <summary>
     /// Manages memory streams efficiently by utilizing the RecyclableMemoryStreamManager,
@@ -186,19 +191,24 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     {
         byte[] serialized = Serialize(kvm);
 
-        string currentMarker = string.Concat(item.Key, CurrentMarker);
-        
-        Span<byte> index1 = stackalloc byte[Encoding.UTF8.GetByteCount(currentMarker)];
-        Encoding.UTF8.GetBytes(currentMarker.AsSpan(), index1);
-        
+        int keyLen = Encoding.UTF8.GetByteCount(item.Key);
+
+        // ~CURRENT key: encode key + CurrentMarker suffix without an intermediate string.
+        System.Diagnostics.Debug.Assert(CurrentMarker.Length == CurrentMarkerUtf8.Length,
+            "CurrentMarker string and CurrentMarkerUtf8 span have drifted — update the u8 literal");
+        Span<byte> index1 = stackalloc byte[keyLen + CurrentMarkerUtf8.Length];
+        Encoding.UTF8.GetBytes(item.Key, index1);
+        CurrentMarkerUtf8.CopyTo(index1[keyLen..]);
         batch.Put(index1, serialized, cf: columnFamily);
-        
-        string keyRevision = string.Concat(item.Key, "~", item.Revision);
-        
-        Span<byte> index2 = stackalloc byte[Encoding.UTF8.GetByteCount(keyRevision)];
-        Encoding.UTF8.GetBytes(keyRevision.AsSpan(), index2);
-        
-        batch.Put(index2, serialized, cf: columnFamily);
+
+        // ~<revision> key: encode key + '~' + decimal revision digits without an intermediate string.
+        // 21 = '~'(1) + 20 digits (long.MinValue = -9223372036854775808 is 20 chars including '-').
+        Span<byte> index2 = stackalloc byte[keyLen + 21];
+        Encoding.UTF8.GetBytes(item.Key, index2);
+        index2[keyLen] = (byte)'~';
+        bool formatted = Utf8Formatter.TryFormat(item.Revision, index2[(keyLen + 1)..], out int revLen);
+        System.Diagnostics.Debug.Assert(formatted, "Utf8Formatter.TryFormat failed for revision key");
+        batch.Put(index2[..(keyLen + 1 + revLen)], serialized, cf: columnFamily);
     }
 
     /// <summary>
@@ -256,19 +266,24 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     {
         byte[] serialized = Serialize(kvm);
 
-        string currentMarker = string.Concat(item.Key, CurrentMarker);
-        
-        Span<byte> index1 = stackalloc byte[Encoding.UTF8.GetByteCount(currentMarker)];
-        Encoding.UTF8.GetBytes(currentMarker.AsSpan(), index1);
-        
+        int keyLen = Encoding.UTF8.GetByteCount(item.Key);
+
+        // ~CURRENT key: encode key + CurrentMarker suffix without an intermediate string.
+        System.Diagnostics.Debug.Assert(CurrentMarker.Length == CurrentMarkerUtf8.Length,
+            "CurrentMarker string and CurrentMarkerUtf8 span have drifted — update the u8 literal");
+        Span<byte> index1 = stackalloc byte[keyLen + CurrentMarkerUtf8.Length];
+        Encoding.UTF8.GetBytes(item.Key, index1);
+        CurrentMarkerUtf8.CopyTo(index1[keyLen..]);
         batch.Put(index1, serialized, cf: columnFamily);
-        
-        string keyRevision = string.Concat(item.Key, "~", item.Revision);
-        
-        Span<byte> index2 = stackalloc byte[Encoding.UTF8.GetByteCount(keyRevision)];
-        Encoding.UTF8.GetBytes(keyRevision.AsSpan(), index2);
-        
-        batch.Put(index2, serialized, cf: columnFamily);
+
+        // ~<revision> key: encode key + '~' + decimal revision digits without an intermediate string.
+        // 21 = '~'(1) + 20 digits (long.MinValue = -9223372036854775808 is 20 chars including '-').
+        Span<byte> index2 = stackalloc byte[keyLen + 21];
+        Encoding.UTF8.GetBytes(item.Key, index2);
+        index2[keyLen] = (byte)'~';
+        bool formatted = Utf8Formatter.TryFormat(item.Revision, index2[(keyLen + 1)..], out int revLen);
+        System.Diagnostics.Debug.Assert(formatted, "Utf8Formatter.TryFormat failed for revision key");
+        batch.Put(index2[..(keyLen + 1 + revLen)], serialized, cf: columnFamily);
     }
 
     /// <summary>
@@ -365,10 +380,13 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// </returns>
     public KeyValueEntry? GetKeyValueRevision(string keyName, long revision)
     {
-        string keyRevision = string.Concat(keyName, "~", revision);
-        
-        Span<byte> buffer = stackalloc byte[Encoding.UTF8.GetByteCount(keyRevision)];
-        Encoding.UTF8.GetBytes(keyRevision.AsSpan(), buffer);
+        int keyLen = Encoding.UTF8.GetByteCount(keyName);
+        Span<byte> buffer = stackalloc byte[keyLen + 21]; // '~'(1) + up to 20 decimal digits
+        Encoding.UTF8.GetBytes(keyName, buffer);
+        buffer[keyLen] = (byte)'~';
+        bool formatted = Utf8Formatter.TryFormat(revision, buffer[(keyLen + 1)..], out int revLen);
+        System.Diagnostics.Debug.Assert(formatted, "Utf8Formatter.TryFormat failed for revision lookup key");
+        buffer = buffer[..(keyLen + 1 + revLen)];
         
         byte[]? value = db.Get(buffer, cf: columnFamilyKeys);
         if (value is null)
