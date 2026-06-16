@@ -444,10 +444,11 @@ public class TestCancellationAndTimeouts
 
     private static IKahunaCommunication GetCommunicationByType(KahunaCommunicationType communicationType)
     {
+        KahunaOptions opts = new() { AllowInsecureCertificateValidation = true };
         return communicationType switch
         {
-            KahunaCommunicationType.Grpc => new GrpcCommunication(null, null),
-            KahunaCommunicationType.Rest => new RestCommunication(null),
+            KahunaCommunicationType.Grpc => new GrpcCommunication(opts, null),
+            KahunaCommunicationType.Rest => new RestCommunication(null, opts),
             _ => throw new ArgumentOutOfRangeException(nameof(communicationType))
         };
     }

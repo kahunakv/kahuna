@@ -70,9 +70,13 @@ public class GrpcCommunication : IKahunaCommunication
 
         // MustRetry means the server has a transient condition (replication catch-up, leader
         // election) and wants the client to retry.  Elections can run 100s of ms to seconds, so
-        // this loop is intentionally unbounded — termination is guaranteed by the CT3 default
-        // deadline or the caller's own CancellationToken.  The backoff grows from ~1ms toward
-        // ~10ms over the first 10 retries, then stays capped at the last value.
+        // this loop is intentionally unbounded.  Termination is driven by the caller's
+        // CancellationToken — pass one (or set KahunaOptions.DefaultOperationTimeout and use a
+        // linked token) to bound it.  The CT3 default deadline does NOT bound this loop: it is
+        // applied per Enqueue inside the batcher, so it only aborts a single unresponsive call,
+        // not the overall retry loop when the server keeps returning MustRetry quickly.  The
+        // backoff grows from ~1ms toward ~10ms over the first 10 retries, then stays capped at the
+        // last value, so a stuck server is not busy-polled.
         using IEnumerator<TimeSpan> mustRetryBackoff = Backoff
             .DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: 10)
             .GetEnumerator();
@@ -405,7 +409,7 @@ public class GrpcCommunication : IKahunaCommunication
         };
         request.Items.AddRange(GetManyKeyValuesRequestItems(requestItems));
 
-        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
         KeyValuer.KeyValuerClient client = new(channel);
 
         GrpcTryGetManyValuesResponse response = await client.TryGetManyValuesAsync(
@@ -430,7 +434,7 @@ public class GrpcCommunication : IKahunaCommunication
         };
         request.Items.AddRange(GetManyKeyValuesRequestItems(requestItems));
 
-        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
         KeyValuer.KeyValuerClient client = new(channel);
 
         GrpcTryExistsManyValuesResponse response = await client.TryExistsManyValuesAsync(
@@ -1149,7 +1153,7 @@ public class GrpcCommunication : IKahunaCommunication
             Durability = (GrpcKeyValueDurability)durability
         };
 
-        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
         KeyValuer.KeyValuerClient client = new(channel);
 
         for (int retries = 0; retries < 5; retries++)
@@ -1187,7 +1191,7 @@ public class GrpcCommunication : IKahunaCommunication
             Durability = (GrpcKeyValueDurability)durability
         };
 
-        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
         KeyValuer.KeyValuerClient client = new(channel);
 
         await client.TryReleaseExclusivePrefixLockAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -1221,7 +1225,7 @@ public class GrpcCommunication : IKahunaCommunication
         if (startKey is not null) request.StartKey = startKey;
         if (endKey is not null)   request.EndKey   = endKey;
 
-        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
         KeyValuer.KeyValuerClient client = new(channel);
 
         for (int retries = 0; retries < 5; retries++)
@@ -1272,7 +1276,7 @@ public class GrpcCommunication : IKahunaCommunication
         if (startKey is not null) request.StartKey = startKey;
         if (endKey is not null)   request.EndKey   = endKey;
 
-        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
         KeyValuer.KeyValuerClient client = new(channel);
 
         await client.TryReleaseExclusiveRangeLockAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -1308,7 +1312,7 @@ public class GrpcCommunication : IKahunaCommunication
         if (startKey is not null) request.StartKey = startKey;
         if (endKey is not null)   request.EndKey   = endKey;
 
-        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
         KeyValuer.KeyValuerClient client = new(channel);
 
         for (int retries = 0; retries < 5; retries++)
@@ -1375,7 +1379,7 @@ public class GrpcCommunication : IKahunaCommunication
         if (startKey is not null) request.StartKey = startKey;
         if (endKey is not null)   request.EndKey   = endKey;
 
-        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
         KeyValuer.KeyValuerClient client = new(channel);
 
         using Grpc.Core.AsyncServerStreamingCall<GrpcGetByRangePageResponse> stream =
@@ -1843,11 +1847,11 @@ public class GrpcCommunication : IKahunaCommunication
         return ((SequenceResponseType)response.Type, response.TimeElapsedMs);
     }
 
-    private static GrpcChannel CreateSequenceChannel(string url)
+    private GrpcChannel CreateSequenceChannel(string url)
     {
         SslClientAuthenticationOptions sslOptions = new()
         {
-            RemoteCertificateValidationCallback = delegate { return true; }
+            RemoteCertificateValidationCallback = GrpcBatcher.BuildCertValidationCallback(options)
         };
 
         SocketsHttpHandler handler = new()
@@ -1961,12 +1965,12 @@ public class GrpcCommunication : IKahunaCommunication
     private Lazy<GrpcBatcher> CreateSharedBatcher(string url)
     {
         TimeSpan timeout = options?.DefaultOperationTimeout ?? TimeSpan.FromSeconds(30);
-        return new(() => new(url, timeout));
+        return new(() => new(url, timeout, options, logger));
     }
 
     public async Task<bool> RegisterKeyRange(string url, string keySpace, CancellationToken cancellationToken)
     {
-        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url);
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
         KeyValuer.KeyValuerClient client = new(channel);
 
         GrpcRegisterKeyRangeResponse response = await client.RegisterKeyRangeAsync(new()

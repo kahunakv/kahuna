@@ -8,11 +8,14 @@
 
 using System.Collections.Concurrent;
 using System.Net.Security;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using Grpc.Core;
 using Grpc.Net.Client;
 using Grpc.Net.Client.Configuration;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
+using Microsoft.Extensions.Logging;
 
 namespace Kahuna.Client.Communication;
 
@@ -67,6 +70,16 @@ internal sealed class GrpcBatcher
     private readonly TimeSpan operationTimeout;
 
     /// <summary>
+    /// Transport security options used when creating gRPC channels for this batcher's URL.
+    /// </summary>
+    private readonly KahunaOptions? securityOptions;
+
+    private readonly ILogger? logger;
+
+    private readonly int coalescingThreshold;
+    private readonly int coalescingDelayMs;
+
+    /// <summary>
     /// Represents a thread-safe queue used to temporarily store instances of <see cref="GrpcBatcherItem"/>
     /// for batched processing within the gRPC communication layer. The queue ensures efficient message
     /// handling and processing by maintaining the order of incoming items and supporting concurrent operations.
@@ -88,10 +101,14 @@ internal sealed class GrpcBatcher
     /// Default deadline for batched ops with no caller-supplied token.
     /// <see cref="TimeSpan.Zero"/> disables the deadline (hang-forever on wedged streams).
     /// </param>
-    public GrpcBatcher(string url, TimeSpan operationTimeout = default)
+    public GrpcBatcher(string url, TimeSpan operationTimeout = default, KahunaOptions? securityOptions = null, ILogger? logger = null)
     {
         this.url = url;
         this.operationTimeout = operationTimeout;
+        this.securityOptions = securityOptions;
+        this.logger = logger;
+        this.coalescingThreshold = securityOptions?.BatchCoalescingThreshold ?? 10;
+        this.coalescingDelayMs = securityOptions?.BatchCoalescingDelayMs ?? 2;
     }
 
     /// <summary>
@@ -370,19 +387,16 @@ internal sealed class GrpcBatcher
         }
         catch (Exception ex)
         {
-            Console.WriteLine("Exception: " + ex.Message);
-            //manager.Logger.LogError("[{Actor}] {Exception}: {Message}\n{StackTrace}", manager.LocalEndpoint, ex.GetType().Name, ex.Message, ex.StackTrace);
+            logger?.LogError(ex, "GrpcBatcher ({Url}): unexpected exception in batch dispatch loop", url);
         }
     }
 
     private async Task Receive(List<GrpcBatcherItem> requests)
     {
-        //Console.WriteLine("Request count: " + requests.Count);
-        
         await RunBatch(requests);
-        
-        if (requests.Count < 10)
-            await Task.Delay(Random.Shared.Next(1, 3)); // Force large batches
+
+        if (coalescingThreshold > 1 && requests.Count < coalescingThreshold && coalescingDelayMs > 0)
+            await Task.Delay(Random.Shared.Next(1, coalescingDelayMs + 1));
     }
 
     /// <summary>
@@ -431,7 +445,7 @@ internal sealed class GrpcBatcher
             {
                 try
                 {
-                    GrpcSharedStreaming sharedStreaming = GetSharedStreaming(url);
+                    GrpcSharedStreaming sharedStreaming = GetSharedStreaming();
 
                     foreach (GrpcBatcherItem request in requests)
                     {
@@ -478,7 +492,7 @@ internal sealed class GrpcBatcher
                 }
                 catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.Cancelled)
                 {
-                    InvalidateSharedConnections(url);
+                    InvalidateSharedConnections(MakeCacheKey(url, securityOptions));
                     RemoveRequestRefs(requests);
 
                     if (attempt == 0 && requests.Count == 1)
@@ -682,7 +696,7 @@ internal sealed class GrpcBatcher
     /// </summary>
     /// <param name="streaming">The asynchronous duplex streaming call that delivers key-value request and response messages.</param>
     /// <returns>A task that represents the asynchronous operation of reading and processing the key-value messages.</returns>
-    private static async Task ReadKeyValueMessages(string url, long sharedStreamingId, AsyncDuplexStreamingCall<GrpcBatchClientKeyValueRequest, GrpcBatchClientKeyValueResponse> streaming)
+    private static async Task ReadKeyValueMessages(string cacheKey, long sharedStreamingId, AsyncDuplexStreamingCall<GrpcBatchClientKeyValueRequest, GrpcBatchClientKeyValueResponse> streaming)
     {
         try
         {
@@ -761,12 +775,12 @@ internal sealed class GrpcBatcher
             }
 
             RpcException ex = new(new(StatusCode.Unavailable, "gRPC key-value stream closed."));
-            InvalidateSharedConnections(url);
+            InvalidateSharedConnections(cacheKey);
             FailPendingRequests(sharedStreamingId, ex);
         }
         catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.Cancelled)
         {
-            InvalidateSharedConnections(url);
+            InvalidateSharedConnections(cacheKey);
             FailPendingRequests(sharedStreamingId, ex);
         }
     }
@@ -776,7 +790,7 @@ internal sealed class GrpcBatcher
     /// and resolves or rejects associated tasks based on the response type.
     /// </summary>
     /// <param name="streaming">The asynchronous duplex streaming call containing lock request and response messages.</param>
-    private static async Task ReadLockMessages(string url, long sharedStreamingId, AsyncDuplexStreamingCall<GrpcBatchClientLockRequest, GrpcBatchClientLockResponse> streaming)
+    private static async Task ReadLockMessages(string cacheKey, long sharedStreamingId, AsyncDuplexStreamingCall<GrpcBatchClientLockRequest, GrpcBatchClientLockResponse> streaming)
     {
         try
         {
@@ -813,12 +827,12 @@ internal sealed class GrpcBatcher
             }
 
             RpcException ex = new(new(StatusCode.Unavailable, "gRPC lock stream closed."));
-            InvalidateSharedConnections(url);
+            InvalidateSharedConnections(cacheKey);
             FailPendingRequests(sharedStreamingId, ex);
         }
         catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.Cancelled)
         {
-            InvalidateSharedConnections(url);
+            InvalidateSharedConnections(cacheKey);
             FailPendingRequests(sharedStreamingId, ex);
         }
     }
@@ -828,43 +842,74 @@ internal sealed class GrpcBatcher
     /// </summary>
     /// <param name="url">The URL for which the shared gRPC channel is requested.</param>
     /// <returns>A shared gRPC channel corresponding to the specified URL.</returns>
-    public static GrpcChannel GetSharedChannel(string url)
+    /// <summary>
+    /// Derives a dict cache key that encodes the server URL, TLS security policy, and channel pool
+    /// size so that callers with different configurations for the same URL never share channel pools.
+    /// </summary>
+    internal static string MakeCacheKey(string url, KahunaOptions? opts)
     {
-        Lazy<List<GrpcChannel>> lazyChannels = channels.GetOrAdd(url, GetSharedChannels);
+        if (opts is null) return url;
+
+        int poolSize = Math.Max(1, opts.GrpcChannelPoolSize);
+        bool isDefault = poolSize == 2
+            && !opts.AllowInsecureCertificateValidation
+            && opts.TrustedServerCertificateThumbprints.Count == 0;
+
+        if (isDefault) return url;
+
+        string poolSuffix = poolSize != 2 ? $"\0pool:{poolSize}" : "";
+
+        string tlsSuffix;
+        if (opts.AllowInsecureCertificateValidation)
+            tlsSuffix = "\0insecure";
+        else if (opts.TrustedServerCertificateThumbprints.Count > 0)
+        {
+            string pins = string.Join(",", opts.TrustedServerCertificateThumbprints
+                .Select(t => t.ToUpperInvariant())
+                .OrderBy(t => t, StringComparer.Ordinal));
+            tlsSuffix = $"\0pin:{pins}";
+        }
+        else
+            tlsSuffix = "";
+
+        return $"{url}{poolSuffix}{tlsSuffix}";
+    }
+
+    public static GrpcChannel GetSharedChannel(string url, KahunaOptions? opts = null)
+    {
+        string cacheKey = MakeCacheKey(url, opts);
+        Lazy<List<GrpcChannel>> lazyChannels = channels.GetOrAdd(
+            cacheKey,
+            static (_, arg) => new(() => CreateSharedChannels(arg.url, arg.opts)),
+            (url, opts));
 
         List<GrpcChannel> nodeChannels = lazyChannels.Value;
-        
+
         return nodeChannels[Random.Shared.Next(0, nodeChannels.Count)];
     }
 
-    private static GrpcSharedStreaming GetSharedStreaming(string url)
+    private GrpcSharedStreaming GetSharedStreaming()
     {
-        Lazy<List<GrpcSharedStreaming>> lazyStreamings = streamings.GetOrAdd(url, GetSharedStreamings);
+        string cacheKey = MakeCacheKey(url, securityOptions);
+        Lazy<List<GrpcSharedStreaming>> lazyStreamings = streamings.GetOrAdd(
+            cacheKey,
+            static (_, arg) => new(() => CreateSharedStreamings(arg.url, arg.cacheKey, arg.opts)),
+            (url, cacheKey, opts: securityOptions));
 
         List<GrpcSharedStreaming> nodeStreamings = lazyStreamings.Value;
-        
+
         return nodeStreamings[Random.Shared.Next(0, nodeStreamings.Count)];
     }
 
-    private static Lazy<List<GrpcChannel>> GetSharedChannels(string url)
+    private static void InvalidateSharedConnections(string cacheKey)
     {
-        return new(() => CreateSharedChannels(url));
-    }
-    
-    private static Lazy<List<GrpcSharedStreaming>> GetSharedStreamings(string url)
-    {
-        return new(() => CreateSharedStreamings(url));
-    }
-
-    private static void InvalidateSharedConnections(string url)
-    {
-        if (streamings.TryRemove(url, out Lazy<List<GrpcSharedStreaming>>? lazyStreamings) && lazyStreamings.IsValueCreated)
+        if (streamings.TryRemove(cacheKey, out Lazy<List<GrpcSharedStreaming>>? lazyStreamings) && lazyStreamings.IsValueCreated)
         {
             foreach (GrpcSharedStreaming streaming in lazyStreamings.Value)
                 streaming.Dispose();
         }
 
-        if (channels.TryRemove(url, out Lazy<List<GrpcChannel>>? lazyChannels) && lazyChannels.IsValueCreated)
+        if (channels.TryRemove(cacheKey, out Lazy<List<GrpcChannel>>? lazyChannels) && lazyChannels.IsValueCreated)
         {
             foreach (GrpcChannel channel in lazyChannels.Value)
                 channel.Dispose();
@@ -900,48 +945,75 @@ internal sealed class GrpcBatcher
             request.Promise.TrySetException(ex);
     }
 
-    private static List<GrpcSharedStreaming> CreateSharedStreamings(string url)
+    private static List<GrpcSharedStreaming> CreateSharedStreamings(string url, string cacheKey, KahunaOptions? opts)
     {
-        Lazy<List<GrpcChannel>> lazyChannels = channels.GetOrAdd(url, GetSharedChannels);
+        Lazy<List<GrpcChannel>> lazyChannels = channels.GetOrAdd(
+            cacheKey,
+            static (_, arg) => new(() => CreateSharedChannels(arg.url, arg.opts)),
+            (url, opts));
 
         List<GrpcChannel> nodeChannels = lazyChannels.Value;
-        
+
         List<GrpcSharedStreaming> nodeStreamings = new(nodeChannels.Count);
 
         foreach (GrpcChannel channel in nodeChannels)
         {
             Locker.LockerClient lockClient = new(channel);
-            KeyValuer.KeyValuerClient keyValueClient = new(channel);            
+            KeyValuer.KeyValuerClient keyValueClient = new(channel);
 
             AsyncDuplexStreamingCall<GrpcBatchClientLockRequest, GrpcBatchClientLockResponse>? lockStreaming = lockClient.BatchClientLockRequests();
             AsyncDuplexStreamingCall<GrpcBatchClientKeyValueRequest, GrpcBatchClientKeyValueResponse>? keyValueStreaming = keyValueClient.BatchClientKeyValueRequests();
-            
+
             long id = Interlocked.Increment(ref streamingId);
 
-            _ = ReadLockMessages(url, id, lockStreaming);
-            _ = ReadKeyValueMessages(url, id, keyValueStreaming);
-                       
+            _ = ReadLockMessages(cacheKey, id, lockStreaming);
+            _ = ReadKeyValueMessages(cacheKey, id, keyValueStreaming);
+
             nodeStreamings.Add(new(id, lockStreaming, keyValueStreaming));
         }
 
         return nodeStreamings;
     }
 
-    private static List<GrpcChannel> CreateSharedChannels(string url)
-    {                
-        List<GrpcChannel> urlChannels = new(2);
-        
-        for (int i = 0; i < 2; i++)       
-            urlChannels.Add(CreateChannelInternal(url));        
+    private static List<GrpcChannel> CreateSharedChannels(string url, KahunaOptions? opts)
+    {
+        int poolSize = Math.Max(1, opts?.GrpcChannelPoolSize ?? 2);
+        List<GrpcChannel> urlChannels = new(poolSize);
+
+        for (int i = 0; i < poolSize; i++)
+            urlChannels.Add(CreateChannelInternal(url, opts));
 
         return urlChannels;
     }
 
-    private static GrpcChannel CreateChannelInternal(string url)
+    /// <summary>
+    /// Returns a <see cref="RemoteCertificateValidationCallback"/> appropriate for the supplied
+    /// options: <see langword="null"/> for standard OS chain validation (the default),
+    /// always-true for insecure dev mode, or a SHA-256 thumbprint-pinning callback.
+    /// </summary>
+    internal static RemoteCertificateValidationCallback? BuildCertValidationCallback(KahunaOptions? opts)
+    {
+        if (opts is null || (!opts.AllowInsecureCertificateValidation && opts.TrustedServerCertificateThumbprints.Count == 0))
+            return null;
+
+        if (opts.AllowInsecureCertificateValidation)
+            return static (_, _, _, _) => true;
+
+        IReadOnlyList<string> thumbprints = opts.TrustedServerCertificateThumbprints;
+        return (_, certificate, _, _) =>
+        {
+            if (certificate is null) return false;
+            byte[] hash = SHA256.HashData(certificate.GetRawCertData());
+            string thumbprint = Convert.ToHexString(hash);
+            return thumbprints.Any(t => string.Equals(t, thumbprint, StringComparison.OrdinalIgnoreCase));
+        };
+    }
+
+    private static GrpcChannel CreateChannelInternal(string url, KahunaOptions? opts)
     {
         SslClientAuthenticationOptions sslOptions = new()
         {
-            RemoteCertificateValidationCallback = delegate { return true; }
+            RemoteCertificateValidationCallback = BuildCertValidationCallback(opts)
         };
 
         SocketsHttpHandler handler = new()

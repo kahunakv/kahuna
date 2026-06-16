@@ -2086,7 +2086,7 @@ public class TestTransactionLockingAnomalies
 
     private static IKahunaCommunication GetCommunication()
     {
-        return new GrpcCommunication(null, null);
+        return new GrpcCommunication(new() { AllowInsecureCertificateValidation = true }, null);
     }
 
     private sealed class TxSchedule

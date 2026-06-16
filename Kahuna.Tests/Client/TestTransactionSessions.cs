@@ -319,8 +319,8 @@ public class TestTransactionSessions
     {
         return communicationType switch
         {
-            KahunaCommunicationType.Grpc => new GrpcCommunication(null, null),
-            KahunaCommunicationType.Rest => new RestCommunication(null),
+            KahunaCommunicationType.Grpc => new GrpcCommunication(new() { AllowInsecureCertificateValidation = true }, null),
+            KahunaCommunicationType.Rest => new RestCommunication(null, new() { AllowInsecureCertificateValidation = true }),
             _ => throw new ArgumentOutOfRangeException(nameof(communicationType))
         };
     }

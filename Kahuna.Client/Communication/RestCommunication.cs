@@ -7,6 +7,7 @@
  */
 
 using System.Net;
+using System.Security.Cryptography;
 using System.Text.Json;
 using Flurl.Http;
 using Kommander.Diagnostics;
@@ -33,16 +34,50 @@ namespace Kahuna.Client.Communication;
 /// </summary>
 public class RestCommunication : IKahunaCommunication
 {
-    static RestCommunication()
-    {
-        FlurlHttp.Clients.WithDefaults(x => x.ConfigureInnerHandler(ih => ih.ServerCertificateCustomValidationCallback = (a, b, c, d) => true));
-    }
+    /// <summary>
+    /// Guards one-time Flurl global configuration so multiple instances don't race.
+    /// Flurl's WithDefaults is process-global; we set it at most once per process.
+    /// </summary>
+    private static int flurlConfigured;
 
     private readonly ILogger? logger;
-    
-    public RestCommunication(ILogger? logger)
+
+    public RestCommunication(ILogger? logger, KahunaOptions? options = null)
     {
         this.logger = logger;
+        ConfigureFlurl(options);
+    }
+
+    private static void ConfigureFlurl(KahunaOptions? options)
+    {
+        // Check first whether there is anything to apply; only then latch the guard.
+        // This prevents a null-options (no-op) first call from consuming the latch and
+        // silently blocking a later non-default config.
+        // Residual: two distinct non-default configs still first-wins — Flurl WithDefaults
+        // is inherently process-global.
+        if (options is null || (!options.AllowInsecureCertificateValidation && options.TrustedServerCertificateThumbprints.Count == 0))
+            return; // leave platform-default validation in place
+
+        if (Interlocked.CompareExchange(ref flurlConfigured, 1, 0) != 0)
+            return;
+
+        if (options.AllowInsecureCertificateValidation)
+        {
+            FlurlHttp.Clients.WithDefaults(x => x.ConfigureInnerHandler(
+                ih => ih.ServerCertificateCustomValidationCallback = (_, _, _, _) => true));
+            return;
+        }
+
+        // Thumbprint pinning
+        IReadOnlyList<string> thumbprints = options.TrustedServerCertificateThumbprints;
+        FlurlHttp.Clients.WithDefaults(x => x.ConfigureInnerHandler(ih =>
+            ih.ServerCertificateCustomValidationCallback = (_, certificate, _, _) =>
+            {
+                if (certificate is null) return false;
+                byte[] hash = SHA256.HashData(certificate.GetRawCertData());
+                string thumbprint = Convert.ToHexString(hash);
+                return thumbprints.Any(t => string.Equals(t, thumbprint, StringComparison.OrdinalIgnoreCase));
+            }));
     }
     
     private static AsyncRetryPolicy BuildRetryPolicy(ILogger? logger, int medianFirstRetryDelay = 1)
@@ -60,10 +95,7 @@ public class RestCommunication : IKahunaCommunication
     
     private static void OnRetry(Exception ex, TimeSpan timeSpan, ILogger? logger)
     {
-        if (logger is not null)
-            logger.LogWarning("Retry: {Exception} {Time}", ex.Message, timeSpan);
-        else
-            Console.WriteLine("Retry: {0} {1}", ex.Message, timeSpan);
+        logger?.LogWarning("Retry: {Exception} {Time}", ex.Message, timeSpan);
     }
     
     private static bool IsTransientError(FlurlHttpException exception)
@@ -136,9 +168,10 @@ public class RestCommunication : IKahunaCommunication
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
 
-        // MustRetry is unbounded — same policy as the gRPC transport.  Termination is guaranteed
-        // by the caller's token or the CT3 default deadline; the backoff grows from ~1ms to ~10ms
-        // over the first 10 steps then caps, so a stuck server is not busy-polled.
+        // MustRetry is unbounded — same policy as the gRPC transport.  Termination is driven by
+        // the caller's CancellationToken (the CT3 default deadline only bounds a single
+        // unresponsive call inside the batcher, not this retry loop).  The backoff grows from
+        // ~1ms to ~10ms over the first 10 steps then caps, so a stuck server is not busy-polled.
         using IEnumerator<TimeSpan> mustRetryBackoff = Backoff
             .DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: 10)
             .GetEnumerator();
