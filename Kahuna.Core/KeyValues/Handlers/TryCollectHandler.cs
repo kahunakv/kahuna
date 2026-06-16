@@ -116,7 +116,7 @@ internal sealed class TryCollectHandler : BaseHandler
 
                 projectedCount--;
                 if (context.Store.TryGetValue(key, out KeyValueEntry? entry))
-                    projectedBytes -= KeyValueStoreAccounting.EstimateEntryBytes(key, entry);
+                    projectedBytes -= (key.Length * sizeof(char)) + entry.CachedBytes;
             }
         }
 
@@ -176,36 +176,43 @@ internal sealed class TryCollectHandler : BaseHandler
             if (!context.Store.TryGetValue(key, out KeyValueEntry? entry))
                 continue;
 
-            long bytesBefore = KeyValueStoreAccounting.EstimateEntryBytes(key, entry);
-            trimmed += TrimRevisions(entry, revisionRetention);
-            trimmed += TrimMvccEntries(entry, currentTime);
-            long bytesAfter = KeyValueStoreAccounting.EstimateEntryBytes(key, entry);
-            context.AdjustEstimatedEntryBytes(bytesAfter - bytesBefore);
+            (int revCount, long revBytes) = TrimRevisions(entry, revisionRetention);
+            (int mvccCount, long mvccBytes) = TrimMvccEntries(entry, currentTime);
+
+            trimmed += revCount + mvccCount;
+
+            long bytesFreed = revBytes + mvccBytes;
+            if (bytesFreed != 0)
+                context.AdjustEstimatedEntryBytes(entry, -bytesFreed);
         }
 
         return trimmed;
     }
 
-    private static int TrimRevisions(KeyValueEntry entry, int revisionRetention)
+    private static (int count, long bytesFreed) TrimRevisions(KeyValueEntry entry, int revisionRetention)
     {
         if (entry.Revisions is null || entry.Revisions.Count <= revisionRetention)
-            return 0;
+            return (0, 0);
 
         List<long> staleRevisions = entry.Revisions.Keys
             .OrderByDescending(static revision => revision)
             .Skip(revisionRetention)
             .ToList();
 
+        long bytesFreed = 0;
         foreach (long revision in staleRevisions)
-            entry.Revisions.Remove(revision);
+        {
+            if (entry.Revisions.Remove(revision, out KeyValueRevisionEntry removed))
+                bytesFreed += KeyValueStoreAccounting.EstimateRevisionRemovedBytes(removed.Value);
+        }
 
-        return staleRevisions.Count;
+        return (staleRevisions.Count, bytesFreed);
     }
 
-    private static int TrimMvccEntries(KeyValueEntry entry, HLCTimestamp currentTime)
+    private static (int count, long bytesFreed) TrimMvccEntries(KeyValueEntry entry, HLCTimestamp currentTime)
     {
         if (entry.MvccEntries is null || entry.MvccEntries.Count == 0)
-            return 0;
+            return (0, 0);
 
         List<HLCTimestamp> staleTransactions = [];
 
@@ -220,10 +227,14 @@ internal sealed class TryCollectHandler : BaseHandler
             staleTransactions.Add(transactionId);
         }
 
+        long bytesFreed = 0;
         foreach (HLCTimestamp transactionId in staleTransactions)
-            entry.MvccEntries.Remove(transactionId);
+        {
+            if (entry.MvccEntries.Remove(transactionId, out KeyValueMvccEntry? removedMvcc))
+                bytesFreed += KeyValueStoreAccounting.MvccEntryRemovedBytes(removedMvcc.Value);
+        }
 
-        return staleTransactions.Count;
+        return (staleTransactions.Count, bytesFreed);
     }
 
     private long EstimateEvictionBytes(HashSet<string> keys)
@@ -233,7 +244,7 @@ internal sealed class TryCollectHandler : BaseHandler
         foreach (string key in keys)
         {
             if (context.Store.TryGetValue(key, out KeyValueEntry? entry))
-                bytes += KeyValueStoreAccounting.EstimateEntryBytes(key, entry);
+                bytes += (key.Length * sizeof(char)) + entry.CachedBytes;
         }
 
         return bytes;

@@ -88,10 +88,23 @@ internal sealed class KeyValueContext
     public void InsertStoreEntry(string key, KeyValueEntry entry)
     {
         if (Store.TryGetValue(key, out KeyValueEntry? existing))
-            approximateStoreBytes -= KeyValueStoreAccounting.EstimateEntryBytes(key, existing);
+        {
+#if DEBUG
+            System.Diagnostics.Debug.Assert(
+                existing.CachedBytes == KeyValueStoreAccounting.EstimateEntryBytes(key, existing) - (key.Length * sizeof(char)),
+                $"CachedBytes drift on replace: key={key}, cached={existing.CachedBytes}, computed={KeyValueStoreAccounting.EstimateEntryBytes(key, existing) - (key.Length * sizeof(char))}");
+#endif
+            approximateStoreBytes -= (key.Length * sizeof(char)) + existing.CachedBytes;
+        }
+
+        // Initialize CachedBytes the first time an entry enters the store. For new entries
+        // (no Revisions, no MvccEntries) EstimateEntryBytes is O(1); subsequent mutations
+        // maintain CachedBytes incrementally via AdjustEstimatedEntryBytes / AdjustEntryValueBytes.
+        if (entry.CachedBytes == 0)
+            entry.CachedBytes = KeyValueStoreAccounting.EstimateEntryBytes(key, entry) - (key.Length * sizeof(char));
 
         Store.Insert(key, entry);
-        approximateStoreBytes += KeyValueStoreAccounting.EstimateEntryBytes(key, entry);
+        approximateStoreBytes += (key.Length * sizeof(char)) + entry.CachedBytes;
     }
 
     public bool RemoveStoreEntry(string key)
@@ -100,18 +113,21 @@ internal sealed class KeyValueContext
             return false;
 
         Store.Remove(key);
-        approximateStoreBytes -= KeyValueStoreAccounting.EstimateEntryBytes(key, entry);
+        approximateStoreBytes -= (key.Length * sizeof(char)) + entry.CachedBytes;
         return true;
     }
 
-    public void AdjustEntryValueBytes(int previousValueLength, int newValueLength)
+    public void AdjustEntryValueBytes(KeyValueEntry entry, int previousValueLength, int newValueLength)
     {
-        approximateStoreBytes += newValueLength - previousValueLength;
+        int delta = newValueLength - previousValueLength;
+        approximateStoreBytes += delta;
+        entry.CachedBytes += delta;
     }
 
-    public void AdjustEstimatedEntryBytes(long delta)
+    public void AdjustEstimatedEntryBytes(KeyValueEntry entry, long delta)
     {
         approximateStoreBytes += delta;
+        entry.CachedBytes += delta;
     }
 
     public void ScheduleFollowUpCollect()

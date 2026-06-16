@@ -134,6 +134,7 @@ internal sealed class TryExistsHandler : BaseHandler
 
             if (!entry.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? mvccEntry))
             {
+                bool mvccDictJustCreated = entry.MvccEntries.Count == 0;
                 mvccEntry = new()
                 {
                     Value = entry.Value,
@@ -145,6 +146,7 @@ internal sealed class TryExistsHandler : BaseHandler
                 };
 
                 entry.MvccEntries.Add(message.TransactionId, mvccEntry);
+                context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.MvccEntryAddedBytes(mvccDictJustCreated, mvccEntry.Value));
             }
 
             if (mvccEntry.State is KeyValueState.Undefined or KeyValueState.Deleted || (mvccEntry.Expires != HLCTimestamp.Zero && mvccEntry.Expires - currentTime < TimeSpan.Zero))

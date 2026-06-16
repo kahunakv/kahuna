@@ -246,7 +246,7 @@ internal abstract class BaseHandler
                 entry.Revisions.Remove(revision);
             }
 
-            context.AdjustEstimatedEntryBytes(-bytesFreed);
+            context.AdjustEstimatedEntryBytes(entry, -bytesFreed);
             revisionsToRemove.Clear();
         }
     }

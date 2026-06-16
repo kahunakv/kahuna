@@ -29,8 +29,8 @@ internal sealed class TryReleaseExclusiveLockHandler : BaseHandler
         
         if (entry.MvccEntries is null)
             context.Logger.LogWarning("Trying to release exclusive lock for {Key} but MVCC entries are null", message.Key);
-        else
-            entry.MvccEntries.Remove(message.TransactionId);
+        else if (entry.MvccEntries.Remove(message.TransactionId, out KeyValueMvccEntry? removedMvcc))
+            context.AdjustEstimatedEntryBytes(entry, -KeyValueStoreAccounting.MvccEntryRemovedBytes(removedMvcc.Value));
         
         if (entry.ReplicationIntent is not null)
             return KeyValueStaticResponses.WaitingForReplicationResponse;

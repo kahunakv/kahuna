@@ -101,7 +101,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             // Idempotent archive (see the persistent path below): a revision can recur across a
             // delete→re-set cycle; Dictionary.Add would throw and corrupt the commit.
             entry.Revisions[entry.Revision] = new KeyValueRevisionEntry(entry.Value, entry.LastModified, entry.Expires, entry.State);
-            context.AdjustEstimatedEntryBytes(KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreatedEphemeral, entry.Value));
+            context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreatedEphemeral, entry.Value));
 
             previousValueLength = entry.Value?.Length ?? 0;
 
@@ -112,9 +112,10 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             entry.LastModified = proposal.LastModified;
             entry.State = proposal.State;
 
-            context.AdjustEntryValueBytes(previousValueLength, entry.Value?.Length ?? 0);
+            context.AdjustEntryValueBytes(entry, previousValueLength, entry.Value?.Length ?? 0);
 
-            entry.MvccEntries.Remove(message.TransactionId);
+            if (entry.MvccEntries.Remove(message.TransactionId, out KeyValueMvccEntry? removedMvccE))
+                context.AdjustEstimatedEntryBytes(entry, -KeyValueStoreAccounting.MvccEntryRemovedBytes(removedMvccE.Value));
             entry.WriteIntent = null;
 
             return new(KeyValueResponseType.Committed, 0);
@@ -130,15 +131,16 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             return KeyValueStaticResponses.ErroredResponse;
         }
 
-        entry.MvccEntries.Remove(message.TransactionId);
+        if (entry.MvccEntries.Remove(message.TransactionId, out KeyValueMvccEntry? removedMvccP))
+            context.AdjustEstimatedEntryBytes(entry, -KeyValueStoreAccounting.MvccEntryRemovedBytes(removedMvccP.Value));
         entry.WriteIntent = null;
 
         if (!success)
-            return KeyValueStaticResponses.ErroredResponse;        
+            return KeyValueStaticResponses.ErroredResponse;
 
         if (entry.Revisions is not null)
             RemoveExpiredRevisions(entry, proposal.Revision);
-               
+
         bool revisionsCreatedPersistent = entry.Revisions is null;
         entry.Revisions ??= new();
         // Idempotent archive: a revision number can recur across a delete→re-set cycle for the same
@@ -147,7 +149,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         // its unique-index entry stuck in the Deleted state (orphaned row → broken PK lookups and
         // duplicate inserts). Overwriting is safe: the same revision carries the same value.
         entry.Revisions[entry.Revision] = new KeyValueRevisionEntry(entry.Value, entry.LastModified, entry.Expires, entry.State);
-        context.AdjustEstimatedEntryBytes(KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreatedPersistent, entry.Value));
+        context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreatedPersistent, entry.Value));
 
         previousValueLength = entry.Value?.Length ?? 0;
 
@@ -158,7 +160,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         entry.LastModified = proposal.LastModified;
         entry.State = proposal.State;
 
-        context.AdjustEntryValueBytes(previousValueLength, entry.Value?.Length ?? 0);
+        context.AdjustEntryValueBytes(entry, previousValueLength, entry.Value?.Length ?? 0);
         
         context.BackgroundWriter.Send(new(
             BackgroundWriteType.QueueStoreKeyValue,

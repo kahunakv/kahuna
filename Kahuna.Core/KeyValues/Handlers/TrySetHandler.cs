@@ -134,19 +134,21 @@ internal sealed class TrySetHandler : BaseHandler
 
             if (!entry.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? mvccEntry))
             {
+                bool mvccDictJustCreated = entry.MvccEntries.Count == 0;
                 mvccEntry = new()
                 {
-                    Value = entry.Value, 
-                    Revision = entry.Revision, 
-                    Expires = entry.Expires, 
+                    Value = entry.Value,
+                    Revision = entry.Revision,
+                    Expires = entry.Expires,
                     LastUsed = entry.LastUsed,
                     LastModified = entry.LastModified,
                     State = entry.State
                 };
-                
+
                 entry.MvccEntries.Add(message.TransactionId, mvccEntry);
+                context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.MvccEntryAddedBytes(mvccDictJustCreated, mvccEntry.Value));
             }
-            
+
             if (entry.Revision > mvccEntry.Revision) // early conflict detection
                 return KeyValueStaticResponses.AbortedResponse;
 
@@ -267,10 +269,10 @@ internal sealed class TrySetHandler : BaseHandler
         bool revisionsCreated = entry.Revisions is null;
         entry.Revisions ??= new();
         entry.Revisions[entry.Revision] = new KeyValueRevisionEntry(entry.Value, entry.LastModified, entry.Expires, entry.State);
-        context.AdjustEstimatedEntryBytes(KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreated, entry.Value));
+        context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreated, entry.Value));
 
         int previousValueLength = entry.Value?.Length ?? 0;
-        
+
         entry.Value = proposal.Value;
         entry.Revision = proposal.Revision;
         entry.Expires = proposal.Expires;
@@ -278,7 +280,7 @@ internal sealed class TrySetHandler : BaseHandler
         entry.LastModified = proposal.LastModified;
         entry.State = proposal.State;
 
-        context.AdjustEntryValueBytes(previousValueLength, entry.Value?.Length ?? 0);
+        context.AdjustEntryValueBytes(entry, previousValueLength, entry.Value?.Length ?? 0);
 
         return new(KeyValueResponseType.Set, entry.Revision);
     }

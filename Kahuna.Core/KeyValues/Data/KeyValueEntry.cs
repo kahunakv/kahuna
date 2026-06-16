@@ -68,6 +68,14 @@ internal sealed class KeyValueEntry
     public KeyValueState State { get; set; } = KeyValueState.Set;
 
     /// <summary>
+    /// Running byte estimate for this entry (excluding the key-length contribution).
+    /// Initialized by <see cref="KeyValueContext.InsertStoreEntry"/> on first insertion and
+    /// maintained incrementally by AdjustEstimatedEntryBytes / AdjustEntryValueBytes so that
+    /// accounting lookups on the write path are O(1) instead of O(history).
+    /// </summary>
+    internal long CachedBytes;
+
+    /// <summary>
     /// Finds the most recent archived revision whose <see cref="KeyValueRevisionEntry.LastModified"/>
     /// is at or before <paramref name="snapshot"/>. Used to serve a snapshot-isolated read when the
     /// current revision (<see cref="LastModified"/>) is newer than the reader's snapshot.

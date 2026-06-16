@@ -86,17 +86,19 @@ internal sealed class TryDeleteHandler : BaseHandler
 
             if (!entry.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? mvccEntry))
             {
+                bool mvccDictJustCreated = entry.MvccEntries.Count == 0;
                 mvccEntry = new()
                 {
-                    Value = entry.Value, 
-                    Revision = entry.Revision, 
-                    Expires = entry.Expires,                     
+                    Value = entry.Value,
+                    Revision = entry.Revision,
+                    Expires = entry.Expires,
                     LastUsed = entry.LastUsed,
                     LastModified = entry.LastModified,
                     State = entry.State
                 };
-                
+
                 entry.MvccEntries.Add(message.TransactionId, mvccEntry);
+                context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.MvccEntryAddedBytes(mvccDictJustCreated, mvccEntry.Value));
             }
             
             if (entry.Revision > mvccEntry.Revision) // early conflict detection
@@ -137,7 +139,7 @@ internal sealed class TryDeleteHandler : BaseHandler
         entry.LastModified = proposal.LastModified;
         entry.State = proposal.State;
 
-        context.AdjustEntryValueBytes(previousValueLength, entry.Value?.Length ?? 0);
+        context.AdjustEntryValueBytes(entry, previousValueLength, entry.Value?.Length ?? 0);
         
         return new(KeyValueResponseType.Deleted, entry.Revision, entry.LastModified);
     }

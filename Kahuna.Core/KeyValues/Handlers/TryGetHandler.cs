@@ -143,6 +143,7 @@ internal sealed class TryGetHandler : BaseHandler
 
             if (!entry.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? mvccEntry))
             {
+                bool mvccDictJustCreated = entry.MvccEntries.Count == 0;
                 mvccEntry = new()
                 {
                     Value = entry.Value,
@@ -154,6 +155,7 @@ internal sealed class TryGetHandler : BaseHandler
                 };
 
                 entry.MvccEntries.Add(message.TransactionId, mvccEntry);
+                context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.MvccEntryAddedBytes(mvccDictJustCreated, mvccEntry.Value));
             }
 
             if (entry.Revision > mvccEntry.Revision) // early conflict detection

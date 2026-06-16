@@ -35,6 +35,24 @@ internal static class KeyValueStoreAccounting
     internal static long EstimateRevisionRemovedBytes(byte[]? archivedValue)
         => sizeof(long) + RevisionEntryOverheadBytes + (archivedValue?.Length ?? 0);
 
+    /// <summary>
+    /// Bytes charged when a new MVCC entry is added to entry.MvccEntries.
+    /// Pass dictionaryJustCreated=true when entry.MvccEntries was null/empty before this call.
+    /// </summary>
+    internal static long MvccEntryAddedBytes(bool dictionaryJustCreated, byte[]? snapshotValue)
+    {
+        long bytes = MvccEntryOverheadBytes + (snapshotValue?.Length ?? 0);
+        if (dictionaryJustCreated)
+            bytes += DictionaryOverheadBytes;
+        return bytes;
+    }
+
+    /// <summary>
+    /// Bytes to reclaim when a single MVCC entry is removed from entry.MvccEntries.
+    /// </summary>
+    internal static long MvccEntryRemovedBytes(byte[]? snapshotValue)
+        => MvccEntryOverheadBytes + (snapshotValue?.Length ?? 0);
+
     public static long EstimateEntryBytes(string key, KeyValueEntry entry)
     {
         long bytes = (key.Length * sizeof(char)) + (entry.Value?.Length ?? 0) + EntryOverheadBytes;
