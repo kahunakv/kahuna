@@ -19,6 +19,7 @@ using Kahuna.Shared.Locks;
 using Kahuna.Shared.Sequences;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
+using Polly.Contrib.WaitAndRetry;
 
 namespace Kahuna.Client.Communication;
 
@@ -28,7 +29,7 @@ namespace Kahuna.Client.Communication;
 /// </summary>
 public class GrpcCommunication : IKahunaCommunication
 {
-    private static readonly ConcurrentDictionary<string, Lazy<GrpcBatcher>> batchers = new();
+    private readonly ConcurrentDictionary<string, Lazy<GrpcBatcher>> batchers = new();
 
     private readonly KahunaOptions? options;
     
@@ -64,40 +65,43 @@ public class GrpcCommunication : IKahunaCommunication
             Durability = (GrpcLockDurability)durability
         };
         
-        int retries = 0;
-        GrpcTryLockResponse? response;
-        
         GrpcBatcher batcher = GetSharedBatcher(url);
-        
-        do
+        GrpcTryLockResponse? response = null;
+
+        // MustRetry means the server has a transient condition (replication catch-up, leader
+        // election) and wants the client to retry.  Elections can run 100s of ms to seconds, so
+        // this loop is intentionally unbounded — termination is guaranteed by the CT3 default
+        // deadline or the caller's own CancellationToken.  The backoff grows from ~1ms toward
+        // ~10ms over the first 10 retries, then stays capped at the last value.
+        using IEnumerator<TimeSpan> mustRetryBackoff = Backoff
+            .DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: 10)
+            .GetEnumerator();
+        TimeSpan mustRetryDelay = TimeSpan.FromMilliseconds(1);
+
+        while (true)
         {
-            GrpcBatcherResponse batchResponse;
-                              
-            batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
-            
+            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
+
             response = batchResponse.TryLock;
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
-            
-            if (response.Type == GrpcLockResponseType.LockResponseTypeMustRetry)
-            {
-                await Task.Delay(1, cancellationToken);
-                continue;
-            }
 
             if (response.Type == GrpcLockResponseType.LockResponseTypeLocked)
                 return (KahunaLockAcquireResult.Success, response.FencingToken, response.ServedFrom);
-            
+
             if (response.Type == GrpcLockResponseType.LockResponseTypeBusy)
                 return (KahunaLockAcquireResult.Conflicted, -1, null);
-            
-            if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);            
 
-        } while (response.Type == GrpcLockResponseType.LockResponseTypeMustRetry);
-            
-        throw new KahunaException("Failed to lock", (LockResponseType)response.Type);
+            if (response.Type != GrpcLockResponseType.LockResponseTypeMustRetry)
+                throw new KahunaException("Failed to lock", (LockResponseType)response.Type);
+
+            if (mustRetryBackoff.MoveNext())
+                mustRetryDelay = mustRetryBackoff.Current;
+            // else: keep the last (capped) delay for all subsequent retries
+
+            await Task.Delay(mustRetryDelay, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -1948,15 +1952,16 @@ public class GrpcCommunication : IKahunaCommunication
         }
     }
 
-    private static GrpcBatcher GetSharedBatcher(string url)
+    private GrpcBatcher GetSharedBatcher(string url)
     {
-        Lazy<GrpcBatcher> lazyBatchers = batchers.GetOrAdd(url, GetSharedBatchers);
+        Lazy<GrpcBatcher> lazyBatchers = batchers.GetOrAdd(url, CreateSharedBatcher);
         return lazyBatchers.Value;
     }
-    
-    private static Lazy<GrpcBatcher> GetSharedBatchers(string url)
+
+    private Lazy<GrpcBatcher> CreateSharedBatcher(string url)
     {
-        return new(() => new(url));
+        TimeSpan timeout = options?.DefaultOperationTimeout ?? TimeSpan.FromSeconds(30);
+        return new(() => new(url, timeout));
     }
 
     public async Task<bool> RegisterKeyRange(string url, string keySpace, CancellationToken cancellationToken)

@@ -136,16 +136,22 @@ public class RestCommunication : IKahunaCommunication
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
 
-        int retries = 0;
-        KahunaLockResponse? response;
-        
-        do
+        // MustRetry is unbounded — same policy as the gRPC transport.  Termination is guaranteed
+        // by the caller's token or the CT3 default deadline; the backoff grows from ~1ms to ~10ms
+        // over the first 10 steps then caps, so a stuck server is not busy-polled.
+        using IEnumerator<TimeSpan> mustRetryBackoff = Backoff
+            .DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: 10)
+            .GetEnumerator();
+        TimeSpan mustRetryDelay = TimeSpan.FromMilliseconds(1);
+        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
+
+        while (true)
         {
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
-            
-            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
-        
+
+            KahunaLockResponse? response;
+
             try
             {
                 response = await retryPolicy.ExecuteAsync(() =>
@@ -168,25 +174,18 @@ public class RestCommunication : IKahunaCommunication
 
             if (response.Type == LockResponseType.Locked)
                 return (KahunaLockAcquireResult.Success, response.FencingToken, response.ServedFrom);
-            
+
             if (response.Type == LockResponseType.Busy)
                 return (KahunaLockAcquireResult.Conflicted, response.FencingToken, response.ServedFrom);
 
-            if (response.Type == LockResponseType.MustRetry)
-            {
-                if (++retries >= 5)
-                    return (KahunaLockAcquireResult.Error, response.FencingToken, response.ServedFrom);
+            if (response.Type != LockResponseType.MustRetry)
+                throw new KahunaException("Failed to lock", response.Type);
 
-                await Task.Delay(1, cancellationToken).ConfigureAwait(false);
-                continue;
-            }
-            
-            if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
+            if (mustRetryBackoff.MoveNext())
+                mustRetryDelay = mustRetryBackoff.Current;
 
-        } while (response.Type == LockResponseType.MustRetry);
-            
-        throw new KahunaException("Failed to lock", response.Type);
+            await Task.Delay(mustRetryDelay, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary>

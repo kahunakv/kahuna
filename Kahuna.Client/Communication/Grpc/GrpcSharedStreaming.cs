@@ -27,7 +27,7 @@ internal sealed class GrpcSharedStreaming : IDisposable
     /// to shared resources in the context of gRPC-based streaming operations. Ensures that
     /// only one operation writes at a time within the scope of the shared streaming calls.
     /// </summary>
-    public SemaphoreSlim Semaphore { get; } = new(1, 1);
+    public SemaphoreSlim Semaphore { get; }
 
     /// <summary>
     /// Represents a duplex streaming call for handling lock requests and responses
@@ -46,23 +46,38 @@ internal sealed class GrpcSharedStreaming : IDisposable
     /// <summary>
     /// Constructor
     /// </summary>
+    /// <param name="id"></param>
     /// <param name="lockStreaming"></param>
     /// <param name="keyValueStreaming"></param>
     public GrpcSharedStreaming(
         long id,
         AsyncDuplexStreamingCall<GrpcBatchClientLockRequest, GrpcBatchClientLockResponse> lockStreaming,
-        AsyncDuplexStreamingCall<GrpcBatchClientKeyValueRequest, GrpcBatchClientKeyValueResponse> keyValueStreaming        
+        AsyncDuplexStreamingCall<GrpcBatchClientKeyValueRequest, GrpcBatchClientKeyValueResponse> keyValueStreaming
     )
     {
         Id = id;
+        Semaphore = new(1, 1);
         LockStreaming = lockStreaming;
-        KeyValueStreaming = keyValueStreaming;        
+        KeyValueStreaming = keyValueStreaming;
+    }
+
+    /// <summary>
+    /// Test-only constructor: injects a pre-configured semaphore without real gRPC connections.
+    /// LockStreaming and KeyValueStreaming are null — valid only when the semaphore blocks before
+    /// any stream access (e.g. to test cancellation-during-wait behaviour).
+    /// </summary>
+    internal GrpcSharedStreaming(long id, SemaphoreSlim semaphore)
+    {
+        Id = id;
+        Semaphore = semaphore;
+        LockStreaming = null!;
+        KeyValueStreaming = null!;
     }
 
     public void Dispose()
     {
-        LockStreaming.Dispose();
-        KeyValueStreaming.Dispose();
+        LockStreaming?.Dispose();
+        KeyValueStreaming?.Dispose();
         Semaphore.Dispose();
     }
 }

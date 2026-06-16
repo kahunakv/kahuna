@@ -61,6 +61,12 @@ internal sealed class GrpcBatcher
     private readonly string url;
 
     /// <summary>
+    /// Default deadline applied to batched operations whose caller supplied no
+    /// <see cref="CancellationToken"/>.  <see cref="TimeSpan.Zero"/> means no deadline.
+    /// </summary>
+    private readonly TimeSpan operationTimeout;
+
+    /// <summary>
     /// Represents a thread-safe queue used to temporarily store instances of <see cref="GrpcBatcherItem"/>
     /// for batched processing within the gRPC communication layer. The queue ensures efficient message
     /// handling and processing by maintaining the order of incoming items and supporting concurrent operations.
@@ -77,9 +83,15 @@ internal sealed class GrpcBatcher
     /// Efficiently batches and processes gRPC requests to a specified host using bidirectional streaming.
     /// Reduces connection and HTTP/2 stream overhead by multiplexing multiple operations over a single stream.
     /// </summary>
-    public GrpcBatcher(string url)
+    /// <param name="url">Server endpoint URL.</param>
+    /// <param name="operationTimeout">
+    /// Default deadline for batched ops with no caller-supplied token.
+    /// <see cref="TimeSpan.Zero"/> disables the deadline (hang-forever on wedged streams).
+    /// </param>
+    public GrpcBatcher(string url, TimeSpan operationTimeout = default)
     {
         this.url = url;
+        this.operationTimeout = operationTimeout;
     }
 
     /// <summary>
@@ -281,16 +293,29 @@ internal sealed class GrpcBatcher
 
     private Task<GrpcBatcherResponse> TryProcessQueue(GrpcBatcherItem grpcBatcherItem, TaskCompletionSource<GrpcBatcherResponse> promise, CancellationToken cancellationToken)
     {
+        // CT3: when the caller passes no token, apply the configured default deadline so that a
+        // wedged (non-faulting) stream doesn't hang the caller forever.  This reuses the CT1
+        // cleanup path — the deadline CTS fires the same callback that removes refs and cancels
+        // the promise.  The CTS is disposed when the promise completes (normal, faulted, or
+        // cancelled).  Server-side cancellation is not propagated (best-effort local abandon).
+        CancellationTokenSource? deadlineCts = null;
+        if (!cancellationToken.CanBeCanceled && operationTimeout > TimeSpan.Zero)
+        {
+            deadlineCts = new(operationTimeout);
+            cancellationToken = deadlineCts.Token;
+            // Rebuild the item so that CT2's Semaphore.WaitAsync(request.CancellationToken) also
+            // observes the deadline — GrpcBatcherItem is a readonly struct so we reassign.
+            grpcBatcherItem = new(grpcBatcherItem.Type, grpcBatcherItem.RequestId, grpcBatcherItem.Request, grpcBatcherItem.Promise, cancellationToken);
+        }
+
         inbox.Enqueue(grpcBatcherItem);
 
         if (cancellationToken.CanBeCanceled)
         {
-            // Register a local-cleanup callback so that cancelling the caller's token removes the
-            // item from the tracking dicts and cancels the promise.  This is best-effort local
-            // abandon: the server still executes the operation (no cancel frame is sent over the
-            // duplex stream), but the requestRefs/requestStreamRefs leak under cancellation churn
-            // is eliminated.  The registration is disposed when the promise completes (normally,
-            // faulted, or cancelled) to release the token's reference to the callback.
+            // Register a local-cleanup callback so that cancelling the caller's token (or the
+            // deadline firing) removes the item from the tracking dicts and cancels the promise.
+            // The registration AND the deadline CTS (if any) are disposed when the promise
+            // completes to release all resources promptly.
             CancellationTokenRegistration reg = cancellationToken.Register(static state =>
             {
                 (GrpcBatcherItem item, CancellationToken ct) = ((GrpcBatcherItem, CancellationToken))state!;
@@ -300,8 +325,13 @@ internal sealed class GrpcBatcher
             }, (grpcBatcherItem, cancellationToken));
 
             promise.Task.ContinueWith(
-                static (_, state) => ((CancellationTokenRegistration)state!).Dispose(),
-                reg,
+                static (_, state) =>
+                {
+                    (CancellationTokenRegistration reg, CancellationTokenSource? cts) = ((CancellationTokenRegistration, CancellationTokenSource?))state!;
+                    reg.Dispose();
+                    cts?.Dispose();
+                },
+                (reg, deadlineCts),
                 CancellationToken.None,
                 TaskContinuationOptions.ExecuteSynchronously,
                 TaskScheduler.Default);
@@ -362,11 +392,27 @@ internal sealed class GrpcBatcher
     internal static int PendingRequestCount => requestRefs.Count;
 
     /// <summary>
+    /// Replaces the streaming pool for <paramref name="url"/> with a single pre-built
+    /// <see cref="GrpcSharedStreaming"/>. Call <see cref="RemoveTestSharedStreaming"/> in test
+    /// teardown. For test use only — never call in production.
+    /// </summary>
+    internal static void InjectTestSharedStreaming(string url, GrpcSharedStreaming streaming)
+    {
+        streamings[url] = new Lazy<List<GrpcSharedStreaming>>(() => [streaming]);
+    }
+
+    /// <summary>Removes the injected test streaming for <paramref name="url"/>.</summary>
+    internal static void RemoveTestSharedStreaming(string url)
+    {
+        streamings.TryRemove(url, out _);
+    }
+
+    /// <summary>
     /// Processes a batch of requests, delegating them to specific handling mechanisms based on their type.
     /// </summary>
     /// <param name="requests">The list of batcher items to be processed.</param>
     /// <returns>A task that represents the asynchronous batch processing operation.</returns>
-    private async Task RunBatch(List<GrpcBatcherItem> requests)
+    internal async Task RunBatch(List<GrpcBatcherItem> requests)
     {
         try
         {
@@ -397,19 +443,34 @@ internal sealed class GrpcBatcher
                         requestRefs.TryAdd(request.RequestId, request);
                         requestStreamRefs[request.RequestId] = sharedStreaming.Id;
 
-                        switch (request.Type)
+                        try
                         {
-                            case GrpcBatcherItemType.Locks:
-                                await RunLocksBatch(sharedStreaming, request);
-                                break;
+                            switch (request.Type)
+                            {
+                                case GrpcBatcherItemType.Locks:
+                                    await RunLocksBatch(sharedStreaming, request);
+                                    break;
 
-                            case GrpcBatcherItemType.KeyValues:
-                                await RunKeyValueBatch(sharedStreaming, request);
-                                break;
+                                case GrpcBatcherItemType.KeyValues:
+                                    await RunKeyValueBatch(sharedStreaming, request);
+                                    break;
 
-                            case GrpcBatcherItemType.Sequences:
-                            default:
-                                throw new KahunaException("Unknown batch type", LockResponseType.Errored);
+                                case GrpcBatcherItemType.Sequences:
+                                default:
+                                    throw new KahunaException("Unknown batch type", LockResponseType.Errored);
+                            }
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            // This request's token fired during its own semaphore wait. CT1's
+                            // callback already cancelled its promise and removed its refs; the
+                            // TrySetCanceled/TryRemove calls below are no-ops in that case.
+                            // When RunBatch is called directly (e.g. in tests) without going
+                            // through TryProcessQueue the CT1 registration is absent, so we must
+                            // set the promise here to avoid leaving it permanently pending.
+                            requestRefs.TryRemove(request.RequestId, out _);
+                            requestStreamRefs.TryRemove(request.RequestId, out _);
+                            request.Promise.TrySetCanceled(request.CancellationToken);
                         }
                     }
 
