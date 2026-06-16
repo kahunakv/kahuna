@@ -243,43 +243,87 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
               state=@state;
               """;
             
+            // Group items by shard so each shard's connection is locked once and its rows are
+            // written under a single prepared command + transaction instead of re-parsing the
+            // INSERT for every row.
+            Dictionary<int, List<PersistenceRequestItem>> plan = new();
+
             foreach (PersistenceRequestItem item in items)
             {
-                (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabase(item.Key);
+                int shard = (int)HashUtils.InversePrefixedHash(item.Key, '/', MaxShards);
+
+                if (plan.TryGetValue(shard, out List<PersistenceRequestItem>? itemsPerShard))
+                    itemsPerShard.Add(item);
+                else
+                    plan.Add(shard, [item]);
+            }
+
+            foreach (KeyValuePair<int, List<PersistenceRequestItem>> kv in plan)
+            {
+                (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(kv.Key);
 
                 try
                 {
                     readerWriterLock.AcquireWriterLock(TimeSpan.FromSeconds(5));
 
-                    using SqliteCommand command = new(insert, connection);
+                    using SqliteTransaction transaction = connection.BeginTransaction();
 
-                    command.Parameters.AddWithValue("@resource", item.Key);
+                    try
+                    {
+                        using SqliteCommand command = new(insert, connection);
+                        command.Transaction = transaction;
 
-                    if (item.Value is null)
-                        command.Parameters.AddWithValue("@owner", DBNull.Value);
-                    else
-                        command.Parameters.AddWithValue("@owner", item.Value);
+                        // Parameters are created once and rebound per row; the statement is parsed
+                        // and planned a single time via Prepare().
+                        SqliteParameter pResource = command.Parameters.Add("@resource", SqliteType.Text);
+                        SqliteParameter pOwner = command.Parameters.Add("@owner", SqliteType.Blob);
+                        SqliteParameter pExpiresNode = command.Parameters.Add("@expiresNode", SqliteType.Integer);
+                        SqliteParameter pExpiresPhysical = command.Parameters.Add("@expiresPhysical", SqliteType.Integer);
+                        SqliteParameter pExpiresCounter = command.Parameters.Add("@expiresCounter", SqliteType.Integer);
+                        SqliteParameter pLastUsedNode = command.Parameters.Add("@lastUsedNode", SqliteType.Integer);
+                        SqliteParameter pLastUsedPhysical = command.Parameters.Add("@lastUsedPhysical", SqliteType.Integer);
+                        SqliteParameter pLastUsedCounter = command.Parameters.Add("@lastUsedCounter", SqliteType.Integer);
+                        SqliteParameter pLastModifiedNode = command.Parameters.Add("@lastModifiedNode", SqliteType.Integer);
+                        SqliteParameter pLastModifiedPhysical = command.Parameters.Add("@lastModifiedPhysical", SqliteType.Integer);
+                        SqliteParameter pLastModifiedCounter = command.Parameters.Add("@lastModifiedCounter", SqliteType.Integer);
+                        SqliteParameter pFencingToken = command.Parameters.Add("@fencingToken", SqliteType.Integer);
+                        SqliteParameter pState = command.Parameters.Add("@state", SqliteType.Integer);
 
-                    command.Parameters.AddWithValue("@expiresNode", item.ExpiresNode);
-                    command.Parameters.AddWithValue("@expiresPhysical", item.ExpiresPhysical);
-                    command.Parameters.AddWithValue("@expiresCounter", item.ExpiresCounter);
-                    command.Parameters.AddWithValue("@lastUsedNode", item.LastUsedNode);
-                    command.Parameters.AddWithValue("@lastUsedPhysical", item.LastUsedPhysical);
-                    command.Parameters.AddWithValue("@lastUsedCounter", item.LastUsedCounter);
-                    command.Parameters.AddWithValue("@lastModifiedNode", item.LastModifiedNode);
-                    command.Parameters.AddWithValue("@lastModifiedPhysical", item.LastModifiedPhysical);
-                    command.Parameters.AddWithValue("@lastModifiedCounter", item.LastModifiedCounter);
-                    command.Parameters.AddWithValue("@fencingToken", item.Revision);
-                    command.Parameters.AddWithValue("@state", item.State);
+                        command.Prepare();
 
-                    command.ExecuteNonQuery();
+                        foreach (PersistenceRequestItem item in kv.Value)
+                        {
+                            pResource.Value = item.Key;
+                            pOwner.Value = item.Value is null ? DBNull.Value : item.Value;
+                            pExpiresNode.Value = item.ExpiresNode;
+                            pExpiresPhysical.Value = item.ExpiresPhysical;
+                            pExpiresCounter.Value = item.ExpiresCounter;
+                            pLastUsedNode.Value = item.LastUsedNode;
+                            pLastUsedPhysical.Value = item.LastUsedPhysical;
+                            pLastUsedCounter.Value = item.LastUsedCounter;
+                            pLastModifiedNode.Value = item.LastModifiedNode;
+                            pLastModifiedPhysical.Value = item.LastModifiedPhysical;
+                            pLastModifiedCounter.Value = item.LastModifiedCounter;
+                            pFencingToken.Value = item.Revision;
+                            pState.Value = item.State;
+
+                            command.ExecuteNonQuery();
+                        }
+
+                        transaction.Commit();
+                    }
+                    catch
+                    {
+                        transaction.Rollback();
+                        throw;
+                    }
                 }
                 finally
                 {
                     readerWriterLock.ReleaseWriterLock();
                 }
             }
-            
+
             return true;
         }
         catch (Exception ex)
@@ -365,59 +409,27 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                                         
                     try
                     {
+                        // Both statements are parsed/planned once per shard via Prepare(); each row
+                        // only rebinds the reused parameter objects instead of re-parsing the SQL.
+                        using SqliteCommand revisionsCommand = new(insertKeyRevisions, connection);
+                        revisionsCommand.Transaction = transaction;
+                        ShardInsertParameters revisionsParams = ShardInsertParameters.Create(revisionsCommand);
+                        revisionsCommand.Prepare();
+
+                        using SqliteCommand keysCommand = new(insertKeys, connection);
+                        keysCommand.Transaction = transaction;
+                        ShardInsertParameters keysParams = ShardInsertParameters.Create(keysCommand);
+                        keysCommand.Prepare();
+
                         foreach (PersistenceRequestItem item in kv.Value)
                         {
-                            using SqliteCommand command = new(insertKeyRevisions, connection);
+                            revisionsParams.Bind(item);
+                            revisionsCommand.ExecuteNonQuery();
 
-                            command.Transaction = transaction;
-
-                            command.Parameters.AddWithValue("@key", item.Key);
-
-                            if (item.Value is null)
-                                command.Parameters.AddWithValue("@value", DBNull.Value);
-                            else
-                                command.Parameters.AddWithValue("@value", item.Value);
-
-                            command.Parameters.AddWithValue("@expiresNode", item.ExpiresNode);
-                            command.Parameters.AddWithValue("@expiresPhysical", item.ExpiresPhysical);
-                            command.Parameters.AddWithValue("@expiresCounter", item.ExpiresCounter);
-                            command.Parameters.AddWithValue("@lastUsedNode", item.LastUsedNode);
-                            command.Parameters.AddWithValue("@lastUsedPhysical", item.LastUsedPhysical);
-                            command.Parameters.AddWithValue("@lastUsedCounter", item.LastUsedCounter);
-                            command.Parameters.AddWithValue("@lastModifiedNode", item.LastModifiedNode);
-                            command.Parameters.AddWithValue("@lastModifiedPhysical", item.LastModifiedPhysical);
-                            command.Parameters.AddWithValue("@lastModifiedCounter", item.LastModifiedCounter);
-                            command.Parameters.AddWithValue("@revision", item.Revision);
-                            command.Parameters.AddWithValue("@state", item.State);
-
-                            command.ExecuteNonQuery();
-
-                            using SqliteCommand command2 = new(insertKeys, connection);
-
-                            command2.Transaction = transaction;
-
-                            command2.Parameters.AddWithValue("@key", item.Key);
-
-                            if (item.Value is null)
-                                command2.Parameters.AddWithValue("@value", DBNull.Value);
-                            else
-                                command2.Parameters.AddWithValue("@value", item.Value);
-
-                            command2.Parameters.AddWithValue("@expiresNode", item.ExpiresNode);
-                            command2.Parameters.AddWithValue("@expiresPhysical", item.ExpiresPhysical);
-                            command2.Parameters.AddWithValue("@expiresCounter", item.ExpiresCounter);
-                            command2.Parameters.AddWithValue("@lastUsedNode", item.LastUsedNode);
-                            command2.Parameters.AddWithValue("@lastUsedPhysical", item.LastUsedPhysical);
-                            command2.Parameters.AddWithValue("@lastUsedCounter", item.LastUsedCounter);
-                            command2.Parameters.AddWithValue("@lastModifiedNode", item.LastModifiedNode);
-                            command2.Parameters.AddWithValue("@lastModifiedPhysical", item.LastModifiedPhysical);
-                            command2.Parameters.AddWithValue("@lastModifiedCounter", item.LastModifiedCounter);
-                            command2.Parameters.AddWithValue("@revision", item.Revision);
-                            command2.Parameters.AddWithValue("@state", item.State);
-
-                            command2.ExecuteNonQuery();                            
+                            keysParams.Bind(item);
+                            keysCommand.ExecuteNonQuery();
                         }
-                        
+
                         transaction.Commit();
                     }
                     catch
@@ -1211,5 +1223,86 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         GC.SuppressFinalize(this);
 
         semaphore.Dispose();
+    }
+
+    /// <summary>
+    /// Holds the reusable <see cref="SqliteParameter"/> objects for the key/value insert statements
+    /// (<c>keys</c> and <c>keys_revisions</c>, which share an identical column set). Created once per
+    /// prepared command; <see cref="Bind"/> rebinds the values for each row so the statement is
+    /// parsed and planned a single time instead of per row.
+    /// </summary>
+    private readonly struct ShardInsertParameters
+    {
+        private readonly SqliteParameter key;
+        private readonly SqliteParameter value;
+        private readonly SqliteParameter expiresNode;
+        private readonly SqliteParameter expiresPhysical;
+        private readonly SqliteParameter expiresCounter;
+        private readonly SqliteParameter lastUsedNode;
+        private readonly SqliteParameter lastUsedPhysical;
+        private readonly SqliteParameter lastUsedCounter;
+        private readonly SqliteParameter lastModifiedNode;
+        private readonly SqliteParameter lastModifiedPhysical;
+        private readonly SqliteParameter lastModifiedCounter;
+        private readonly SqliteParameter revision;
+        private readonly SqliteParameter state;
+
+        private ShardInsertParameters(
+            SqliteParameter key, SqliteParameter value, SqliteParameter expiresNode,
+            SqliteParameter expiresPhysical, SqliteParameter expiresCounter, SqliteParameter lastUsedNode,
+            SqliteParameter lastUsedPhysical, SqliteParameter lastUsedCounter, SqliteParameter lastModifiedNode,
+            SqliteParameter lastModifiedPhysical, SqliteParameter lastModifiedCounter, SqliteParameter revision,
+            SqliteParameter state)
+        {
+            this.key = key;
+            this.value = value;
+            this.expiresNode = expiresNode;
+            this.expiresPhysical = expiresPhysical;
+            this.expiresCounter = expiresCounter;
+            this.lastUsedNode = lastUsedNode;
+            this.lastUsedPhysical = lastUsedPhysical;
+            this.lastUsedCounter = lastUsedCounter;
+            this.lastModifiedNode = lastModifiedNode;
+            this.lastModifiedPhysical = lastModifiedPhysical;
+            this.lastModifiedCounter = lastModifiedCounter;
+            this.revision = revision;
+            this.state = state;
+        }
+
+        public static ShardInsertParameters Create(SqliteCommand command)
+        {
+            return new(
+                command.Parameters.Add("@key", SqliteType.Text),
+                command.Parameters.Add("@value", SqliteType.Blob),
+                command.Parameters.Add("@expiresNode", SqliteType.Integer),
+                command.Parameters.Add("@expiresPhysical", SqliteType.Integer),
+                command.Parameters.Add("@expiresCounter", SqliteType.Integer),
+                command.Parameters.Add("@lastUsedNode", SqliteType.Integer),
+                command.Parameters.Add("@lastUsedPhysical", SqliteType.Integer),
+                command.Parameters.Add("@lastUsedCounter", SqliteType.Integer),
+                command.Parameters.Add("@lastModifiedNode", SqliteType.Integer),
+                command.Parameters.Add("@lastModifiedPhysical", SqliteType.Integer),
+                command.Parameters.Add("@lastModifiedCounter", SqliteType.Integer),
+                command.Parameters.Add("@revision", SqliteType.Integer),
+                command.Parameters.Add("@state", SqliteType.Integer)
+            );
+        }
+
+        public void Bind(PersistenceRequestItem item)
+        {
+            key.Value = item.Key;
+            value.Value = item.Value is null ? DBNull.Value : item.Value;
+            expiresNode.Value = item.ExpiresNode;
+            expiresPhysical.Value = item.ExpiresPhysical;
+            expiresCounter.Value = item.ExpiresCounter;
+            lastUsedNode.Value = item.LastUsedNode;
+            lastUsedPhysical.Value = item.LastUsedPhysical;
+            lastUsedCounter.Value = item.LastUsedCounter;
+            lastModifiedNode.Value = item.LastModifiedNode;
+            lastModifiedPhysical.Value = item.LastModifiedPhysical;
+            lastModifiedCounter.Value = item.LastModifiedCounter;
+            revision.Value = item.Revision;
+            state.Value = item.State;
+        }
     }
 }
