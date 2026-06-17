@@ -1,5 +1,6 @@
 
 using Grpc.Core;
+using Kahuna.Communication.External.Grpc.Logging;
 
 namespace Kahuna.Communication.External.Grpc.KeyValues;
 
@@ -324,7 +325,7 @@ internal sealed class KeyValueServerBatcher
         }
         catch (IOException ex)
         {
-            logger.LogTrace("IOException: {Message}", ex.Message);
+            logger.LogCommunicationIoException(ex);
         }
     }
 

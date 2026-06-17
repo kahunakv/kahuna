@@ -2,6 +2,7 @@
 using Nixie;
 
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues.Logging;
 
 namespace Kahuna.Server.KeyValues.Ranges;
 
@@ -50,7 +51,7 @@ internal sealed class RangeSplitCheckerActor : IActor<RangeSplitCheckerRequest>
         {
             int splits = await trigger.TriggerAsync();
             if (splits > 0)
-                logger.LogInformation("RangeSplitChecker: performed {Count} split(s).", splits);
+                logger.LogRangeSplitCheckerPerformed(splits);
         }
         catch (Exception ex)
         {

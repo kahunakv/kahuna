@@ -6,7 +6,6 @@ using Kommander;
 using Kommander.Data;
 using Kommander.Time;
 using Kommander.Support.Parallelization;
-using Polly.Contrib.WaitAndRetry;
 
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Ranges;
@@ -17,6 +16,7 @@ using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
 using Kahuna.Server.ScriptParser;
 using Kahuna.Server.Communication.Internode;
+using Kahuna.Server.KeyValues.Logging;
 using System.Runtime.CompilerServices;
 using Kahuna.Shared.KeyValue;
 
@@ -58,13 +58,9 @@ internal sealed class KeyValuesManager : IDisposable
     private readonly IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> persistentKeyValuesRouter;
 
     private readonly List<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> ephemeralInstances = [];
-
+    
     private readonly List<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> persistentInstances = [];
 
-    /// <summary>
-    /// Exposes the per-actor instance lists for in-process test inspection of
-    /// accounting state (CachedBytes). Not part of the production API surface.
-    /// </summary>
     internal IReadOnlyList<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> EphemeralInstances => ephemeralInstances;
     internal IReadOnlyList<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> PersistentInstances => persistentInstances;
 
@@ -406,7 +402,7 @@ internal sealed class KeyValuesManager : IDisposable
         KahunaConfiguration configuration
     )
     {
-        logger.LogDebug("Starting {Workers} ephemeral key/value workers", configuration.KeyValueWorkers);
+        logger.LogStartingEphemeralWorkers(configuration.KeyValueWorkers);
 
         for (int i = 0; i < configuration.KeyValueWorkers; i++)
             ephemeralInstances.Add(actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
@@ -435,7 +431,7 @@ internal sealed class KeyValuesManager : IDisposable
         KahunaConfiguration configuration
     )
     {
-        logger.LogDebug("Starting {Workers} persistent key/value workers", configuration.KeyValueWorkers);
+        logger.LogStartingPersistentWorkers(configuration.KeyValueWorkers);
 
         for (int i = 0; i < configuration.KeyValueWorkers; i++)
             persistentInstances.Add(actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
@@ -1118,7 +1114,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+            for (int i = 0; i < MaxRetries; i++)
             {
                 KeyValueResponse? response;
 
@@ -1129,11 +1125,14 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response is null)
                     return (KeyValueResponseType.Errored, -1, HLCTimestamp.Zero);
+                
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
 
-                if (response.Type != KeyValueResponseType.WaitingForReplication)
-                    return (response.Type, response.Revision, response.Ticket);
-
-                await Task.Delay(delay);
+                return (response.Type, response.Revision, response.Ticket);
             }
             
             return (KeyValueResponseType.MustRetry, -1, HLCTimestamp.Zero);
@@ -1151,12 +1150,11 @@ internal sealed class KeyValuesManager : IDisposable
     /// <returns>A task that represents the asynchronous operation. The task result contains a list of responses for each set request, indicating the outcome of the operation.</returns>
     public async Task<List<KahunaSetKeyValueResponseItem>> SetManyNodeKeyValue(List<KahunaSetKeyValueRequestItem> items)
     {
-        KahunaSetKeyValueResponseItem?[] slots = new KahunaSetKeyValueResponseItem?[items.Count];
+        Lock sync = new();
+        List<KahunaSetKeyValueResponseItem> responses = new(items.Count);
 
-        await items.Select((item, idx) => (item, idx)).ForEachAsync(5, async tuple =>
+        await items.ForEachAsync(5, async item =>
         {
-            (KahunaSetKeyValueRequestItem item, int idx) = tuple;
-
             KeyValueRequest request = KeyValueRequestPool.Rent(
                 KeyValueRequestType.TrySet,
                 item.TransactionId,
@@ -1179,7 +1177,7 @@ internal sealed class KeyValuesManager : IDisposable
             try
             {
                 KeyValueResponse? response;
-
+                
                 if (item.Durability == KeyValueDurability.Ephemeral)
                     response = await ephemeralKeyValuesRouter.Ask(request);
                 else
@@ -1187,18 +1185,19 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response is null || response.Type == KeyValueResponseType.WaitingForReplication)
                 {
-                    slots[idx] = new() { Type = KeyValueResponseType.Errored };
+                    responses.Add(new() { Type = KeyValueResponseType.Errored });
                     return;
                 }
 
-                slots[idx] = new()
-                {
-                    Key = item.Key ?? "",
-                    Type = response.Type,
-                    Revision = response.Revision,
-                    LastModified = response.Ticket,
-                    Durability = item.Durability
-                };
+                lock (sync)
+                    responses.Add(new()
+                    {
+                        Key = item.Key ?? "",
+                        Type = response.Type,
+                        Revision = response.Revision,
+                        LastModified = response.Ticket,
+                        Durability = item.Durability
+                    });
             }
             finally
             {
@@ -1206,20 +1205,16 @@ internal sealed class KeyValuesManager : IDisposable
             }
         });
 
-        List<KahunaSetKeyValueResponseItem> responses = new(items.Count);
-        foreach (KahunaSetKeyValueResponseItem? slot in slots)
-            responses.Add(slot ?? new() { Type = KeyValueResponseType.Errored });
         return responses;
     }
 
     public async Task<List<KahunaDeleteKeyValueResponseItem>> DeleteManyNodeKeyValue(List<KahunaDeleteKeyValueRequestItem> items)
     {
-        KahunaDeleteKeyValueResponseItem?[] slots = new KahunaDeleteKeyValueResponseItem?[items.Count];
+        Lock sync = new();
+        List<KahunaDeleteKeyValueResponseItem> responses = new(items.Count);
 
-        await items.Select((item, idx) => (item, idx)).ForEachAsync(5, async tuple =>
+        await items.ForEachAsync(5, async item =>
         {
-            (KahunaDeleteKeyValueRequestItem item, int idx) = tuple;
-
             KeyValueRequest request = KeyValueRequestPool.Rent(
                 KeyValueRequestType.TryDelete,
                 item.TransactionId,
@@ -1239,7 +1234,7 @@ internal sealed class KeyValuesManager : IDisposable
 
             try
             {
-                foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+                for (int i = 0; i < MaxRetries; i++)
                 {
                     KeyValueResponse? response;
 
@@ -1250,41 +1245,45 @@ internal sealed class KeyValuesManager : IDisposable
 
                     if (response is null)
                     {
-                        slots[idx] = new()
-                        {
-                            Key = item.Key ?? "",
-                            Type = KeyValueResponseType.Errored,
-                            Revision = -1,
-                            LastModified = HLCTimestamp.Zero,
-                            Durability = item.Durability
-                        };
+                        lock (sync)
+                            responses.Add(new()
+                            {
+                                Key = item.Key ?? "",
+                                Type = KeyValueResponseType.Errored,
+                                Revision = -1,
+                                LastModified = HLCTimestamp.Zero,
+                                Durability = item.Durability
+                            });
                         return;
                     }
 
-                    if (response.Type != KeyValueResponseType.WaitingForReplication)
+                    if (response.Type == KeyValueResponseType.WaitingForReplication)
                     {
-                        slots[idx] = new()
+                        await Task.Delay(1);
+                        continue;
+                    }
+
+                    lock (sync)
+                        responses.Add(new()
                         {
                             Key = item.Key ?? "",
                             Type = response.Type,
                             Revision = response.Revision,
                             LastModified = response.Ticket,
                             Durability = item.Durability
-                        };
-                        return;
-                    }
-
-                    await Task.Delay(delay);
+                        });
+                    return;
                 }
 
-                slots[idx] = new()
-                {
-                    Key = item.Key ?? "",
-                    Type = KeyValueResponseType.MustRetry,
-                    Revision = -1,
-                    LastModified = HLCTimestamp.Zero,
-                    Durability = item.Durability
-                };
+                lock (sync)
+                    responses.Add(new()
+                    {
+                        Key = item.Key ?? "",
+                        Type = KeyValueResponseType.MustRetry,
+                        Revision = -1,
+                        LastModified = HLCTimestamp.Zero,
+                        Durability = item.Durability
+                    });
             }
             finally
             {
@@ -1292,9 +1291,6 @@ internal sealed class KeyValuesManager : IDisposable
             }
         });
 
-        List<KahunaDeleteKeyValueResponseItem> responses = new(items.Count);
-        foreach (KahunaDeleteKeyValueResponseItem? slot in slots)
-            responses.Add(slot ?? new() { Type = KeyValueResponseType.Errored, Revision = -1, LastModified = HLCTimestamp.Zero });
         return responses;
     }
     
@@ -1331,7 +1327,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+            for (int i = 0; i < MaxRetries; i++)
             {
                 KeyValueResponse? response;
 
@@ -1342,11 +1338,14 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response is null)
                     return (KeyValueResponseType.Errored, -1, HLCTimestamp.Zero);
+                
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
 
-                if (response.Type != KeyValueResponseType.WaitingForReplication)
-                    return (response.Type, response.Revision, response.Ticket);
-
-                await Task.Delay(delay);
+                return (response.Type, response.Revision, response.Ticket);
             }
 
             return (KeyValueResponseType.MustRetry, -1, HLCTimestamp.Zero);
@@ -1389,10 +1388,10 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+            for (int i = 0; i < MaxRetries; i++)
             {
                 KeyValueResponse? response;
-
+                
                 if (durability == KeyValueDurability.Ephemeral)
                     response = await ephemeralKeyValuesRouter.Ask(request);
                 else
@@ -1400,13 +1399,16 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response is null)
                     return (KeyValueResponseType.Errored, -1, HLCTimestamp.Zero);
+                
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
 
-                if (response.Type != KeyValueResponseType.WaitingForReplication)
-                    return (response.Type, response.Revision, response.Ticket);
-
-                await Task.Delay(delay);
+                return (response.Type, response.Revision, response.Ticket);
             }
-
+            
             return (KeyValueResponseType.MustRetry, -1, HLCTimestamp.Zero);
         }
         finally
@@ -1691,10 +1693,10 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+            for (int i = 0; i < MaxRetries; i++)
             {
                 KeyValueResponse? response;
-
+                
                 if (durability == KeyValueDurability.Ephemeral)
                     response = await ephemeralKeyValuesRouter.Ask(request);
                 else
@@ -1703,10 +1705,13 @@ internal sealed class KeyValuesManager : IDisposable
                 if (response is null)
                     return (KeyValueResponseType.Errored, key, durability, HLCTimestamp.Zero);
 
-                if (response.Type != KeyValueResponseType.WaitingForReplication)
-                    return (response.Type, key, durability, response.HolderTransactionId);
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
 
-                await Task.Delay(delay);
+                return (response.Type, key, durability, response.HolderTransactionId);
             }
 
             return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero);
@@ -1751,7 +1756,7 @@ internal sealed class KeyValuesManager : IDisposable
         
         try
         {
-            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+            for (int i = 0; i < MaxRetries; i++)
             {
                 KeyValueResponse? response;
 
@@ -1763,10 +1768,13 @@ internal sealed class KeyValuesManager : IDisposable
                 if (response is null)
                     return KeyValueResponseType.Errored;
 
-                if (response.Type != KeyValueResponseType.WaitingForReplication)
-                    return response.Type;
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
 
-                await Task.Delay(delay);
+                return response.Type;
             }
 
             return KeyValueResponseType.MustRetry;
@@ -1866,7 +1874,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+            for (int i = 0; i < MaxRetries; i++)
             {
                 KeyValueResponse? response;
 
@@ -1878,12 +1886,15 @@ internal sealed class KeyValuesManager : IDisposable
                 if (response is null)
                     return (KeyValueResponseType.Errored, key);
 
-                if (response.Type != KeyValueResponseType.WaitingForReplication)
-                    return (response.Type, key);
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
 
-                await Task.Delay(delay);
+                return (response.Type, key);
             }
-
+            
             return (KeyValueResponseType.MustRetry, key);
         }
         finally
@@ -1920,7 +1931,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+            for (int i = 0; i < MaxRetries; i++)
             {
                 KeyValueResponse? response;
 
@@ -1932,12 +1943,15 @@ internal sealed class KeyValuesManager : IDisposable
                 if (response is null)
                     return KeyValueResponseType.Errored;
 
-                if (response.Type != KeyValueResponseType.WaitingForReplication)
-                    return response.Type;
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
 
-                await Task.Delay(delay);
+                return response.Type;
             }
-
+            
             return KeyValueResponseType.MustRetry;
         }
         finally
@@ -1990,7 +2004,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+            for (int i = 0; i < MaxRetries; i++)
             {
                 KeyValueResponse? response;
 
@@ -2002,10 +2016,13 @@ internal sealed class KeyValuesManager : IDisposable
                 if (response is null)
                     return (KeyValueResponseType.Errored, HLCTimestamp.Zero);
 
-                if (response.Type != KeyValueResponseType.WaitingForReplication)
-                    return (response.Type, response.HolderTransactionId);
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
 
-                await Task.Delay(delay);
+                return (response.Type, response.HolderTransactionId);
             }
 
             return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
@@ -2048,7 +2065,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+            for (int i = 0; i < MaxRetries; i++)
             {
                 KeyValueResponse? response;
 
@@ -2060,10 +2077,13 @@ internal sealed class KeyValuesManager : IDisposable
                 if (response is null)
                     return KeyValueResponseType.Errored;
 
-                if (response.Type != KeyValueResponseType.WaitingForReplication)
-                    return response.Type;
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
 
-                await Task.Delay(delay);
+                return response.Type;
             }
 
             return KeyValueResponseType.MustRetry;
@@ -2289,7 +2309,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+            for (int i = 0; i < MaxRetries; i++)
             {
                 KeyValueResponse? response;
 
@@ -2301,12 +2321,15 @@ internal sealed class KeyValuesManager : IDisposable
                 if (response is null)
                     return (KeyValueResponseType.Errored, HLCTimestamp.Zero, key, durability);
 
-                if (response.Type != KeyValueResponseType.WaitingForReplication)
-                    return (response.Type, response.Ticket, key, durability);
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
 
-                await Task.Delay(delay);
+                return (response.Type, response.Ticket, key, durability);
             }
-
+            
             return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero, key, durability);
         }
         finally
@@ -2413,7 +2436,7 @@ internal sealed class KeyValuesManager : IDisposable
         
         try
         {
-            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+            for (int i = 0; i < MaxRetries; i++)
             {
                 KeyValueResponse? response;
 
@@ -2425,12 +2448,15 @@ internal sealed class KeyValuesManager : IDisposable
                 if (response is null)
                     return (KeyValueResponseType.Errored, -1);
 
-                if (response.Type != KeyValueResponseType.WaitingForReplication)
-                    return (response.Type, response.Revision);
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    await Task.Delay(1);
+                    continue;
+                }
 
-                await Task.Delay(delay);
+                return (response.Type, response.Revision);
             }
-
+            
             return (KeyValueResponseType.Errored, -1);
         }
         finally
@@ -2826,7 +2852,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+            for (int i = 0; i < MaxRetries; i++)
             {
                 KeyValueResponse? response;
 
@@ -2838,14 +2864,16 @@ internal sealed class KeyValuesManager : IDisposable
                 if (response is null)
                     return new(KeyValueResponseType.Errored, [], null, false);
 
-                if (response.Type != KeyValueResponseType.WaitingForReplication)
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
-                    if (response.RangeResult is not null)
-                        return response.RangeResult;
-                    return new(response.Type, [], null, false);
+                    await Task.Delay(1);
+                    continue;
                 }
 
-                await Task.Delay(delay);
+                if (response.RangeResult is not null)
+                    return response.RangeResult;
+
+                return new(response.Type, [], null, false);
             }
 
             return new(KeyValueResponseType.MustRetry, [], null, false);

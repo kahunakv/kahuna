@@ -5,6 +5,7 @@ using Kommander.System;
 using Kommander.Time;
 
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues.Ranges;
@@ -106,12 +107,7 @@ internal sealed class RangeSplitTrigger
                 if (splitKey is null)
                     continue;
 
-                logger.LogInformation(
-                    "RangeSplitTrigger: splitting {Space} [{Start},{End}) at {Key}",
-                    descriptor.KeySpace,
-                    descriptor.StartKey ?? "−∞",
-                    descriptor.EndKey   ?? "+∞",
-                    splitKey);
+                logger.LogRangeSplitTriggerSplitting(descriptor.KeySpace, descriptor.StartKey ?? "−∞", descriptor.EndKey ?? "+∞", splitKey);
 
                 int newId = RangeSplitter.ComputeNextPartitionId(rangeMapStore.Current);
 
@@ -120,8 +116,7 @@ internal sealed class RangeSplitTrigger
 
                 if (!createResult.Success)
                 {
-                    logger.LogWarning(
-                        "RangeSplitTrigger: CreatePartitionAsync({Id}) failed for {Space}", newId, descriptor.KeySpace);
+                    logger.LogRangeSplitTriggerCreateFailed(newId, descriptor.KeySpace);
                     continue;
                 }
 
@@ -131,14 +126,11 @@ internal sealed class RangeSplitTrigger
                 if (outcome.IsSuccess)
                 {
                     splitsDone++;
-                    logger.LogInformation(
-                        "RangeSplitTrigger: split {Space} at {Key} → P{Id}", descriptor.KeySpace, splitKey, newId);
+                    logger.LogRangeSplitTriggerSplit(descriptor.KeySpace, splitKey, newId);
                 }
                 else
                 {
-                    logger.LogWarning(
-                        "RangeSplitTrigger: SplitAsync failed for {Space} at {Key}: {Status}",
-                        descriptor.KeySpace, splitKey, outcome.Status);
+                    logger.LogRangeSplitTriggerSplitFailed(descriptor.KeySpace, splitKey, outcome.Status.ToString());
                 }
             }
         }

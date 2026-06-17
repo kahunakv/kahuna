@@ -9,6 +9,7 @@
 using System.Collections.Concurrent;
 using System.Text;
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues.Logging;
 using Microsoft.IO;
 
 namespace Kahuna.Server.ScriptParser;
@@ -51,7 +52,7 @@ internal sealed partial class scriptParser
         {
             cached.ExpiresAt = Environment.TickCount64 + (long)configuration.ScriptCacheExpiration.TotalMilliseconds;
 
-            logger.LogDebug("Retrieved script from cache {Hash}", hash);
+            logger.LogScriptRetrievedFromCache(hash);
 
             return cached.Ast;
         }
@@ -85,7 +86,7 @@ internal sealed partial class scriptParser
 
         if (!string.IsNullOrEmpty(hash) && Cache.Count < configuration.ScriptCacheMaxEntries)
         {
-            logger.LogDebug("Added script to cache {Hash}", hash);
+            logger.LogScriptAddedToCache(hash);
 
             Cache.TryAdd(hash, new(hash, root, Environment.TickCount64 + (long)configuration.ScriptCacheExpiration.TotalMilliseconds));
         }

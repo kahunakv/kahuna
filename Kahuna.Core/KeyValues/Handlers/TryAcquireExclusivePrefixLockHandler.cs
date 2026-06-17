@@ -2,6 +2,7 @@
 using Kahuna.Server.Configuration;
 using Nixie;
 using Kommander;
+using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
@@ -109,7 +110,7 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
             Expires = transactionId + expiresMs,
         };        
         
-        context.Logger.LogDebug("Assigned {Key} write intent to TxId={TransactionId}", key, transactionId);
+        context.Logger.LogAssignedWriteIntent(key, transactionId);
         
         return KeyValueStaticResponses.LockedResponse;
     }     

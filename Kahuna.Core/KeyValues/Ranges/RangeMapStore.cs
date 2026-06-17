@@ -1,6 +1,7 @@
 using Kommander;
 using Kommander.Data;
 
+using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
 
@@ -259,8 +260,7 @@ internal sealed class RangeMapStore : IDisposable
             }
 
             current = loaded;
-            logger.LogInformation(
-                "Loaded range-map snapshot from {Path} ({Count} descriptors)", snapshotPath, loaded.Descriptors.Count);
+            logger.LogRangeMapSnapshotLoaded(snapshotPath, loaded.Descriptors.Count);
         }
         catch (Exception ex)
         {

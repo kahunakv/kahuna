@@ -369,7 +369,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
             locks.Remove(key);
         
         if (keysToEvict.Count > 0)
-            logger.LogDebug("Evicted {Count} key/value pairs", keysToEvict.Count);
+            logger.LogLocksActorEviction(keysToEvict.Count);
         
         keysToEvict.Clear();
     }

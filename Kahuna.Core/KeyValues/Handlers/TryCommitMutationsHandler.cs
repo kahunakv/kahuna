@@ -7,6 +7,7 @@ using Kommander.Data;
 using Kommander.Time;
 
 using Kahuna.Shared.KeyValue;
+using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Utils;
@@ -202,7 +203,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             return (false, -1, 0);
         }               
 
-        context.Logger.LogDebug("Successfully commmitted key/value {Key} Partition={Partition} ProposalIndex={ProposalIndex}", key, partitionId, commitLogId);
+        context.Logger.LogSuccessfullyCommittedKeyValue(key, partitionId, commitLogId);
 
         return (success, partitionId, commitLogId);
     }

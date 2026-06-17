@@ -1,6 +1,7 @@
 using Kommander;
 using Kommander.Time;
 
+using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues.Ranges;
@@ -317,13 +318,7 @@ internal sealed class RangeSplitter
                 await KvStateMachineTransfer.EnsureLocksOnDestinationLeaderAsync(
                     manager, keySpace, newPartitionId, clampedLocks, logger, "RangeSplitter", ct);
 
-            logger.LogInformation(
-                "RangeSplitter: split {Space} at {Key} → [{Start},{Key}) @P{SourcePartition} + [{Key},{End}) @P{NewPartition} gen={Gen}",
-                keySpace, splitKey,
-                descriptor.StartKey ?? "-inf", splitKey,
-                descriptor.PartitionId,
-                splitKey, descriptor.EndKey ?? "+inf",
-                newPartitionId, newGeneration);
+            logger.LogRangeSplitterSplit(keySpace, splitKey, descriptor.StartKey ?? "-inf", descriptor.EndKey ?? "+inf", descriptor.PartitionId, newPartitionId, newGeneration);
 
             return new SplitOutcome(SplitStatus.Succeeded, newPartitionId, newGeneration);
         }

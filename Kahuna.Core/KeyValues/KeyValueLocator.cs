@@ -7,6 +7,7 @@ using System.Collections.Concurrent;
 
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
@@ -164,13 +165,14 @@ internal sealed class KeyValueLocator
             cancellationToken
         );
 
-        logger.LogDebug("SET-KEYVALUE Redirected {Key} to leader partition {Partition} at {Leader} Time={Elapsed}ms", key, partitionId, leader, stopwatch.GetElapsedMilliseconds());
+        if (logger.IsEnabled(LogLevel.Debug))
+            logger.LogSetKeyValueRedirected(key, partitionId, leader, stopwatch.GetElapsedMilliseconds());
 
         return response;
     }
-    
+
     /// <summary>
-    /// 
+    ///
     /// </summary>
     /// <param name="setManyItems"></param>
     /// <param name="cancellationToken"></param>
@@ -235,7 +237,7 @@ internal sealed class KeyValueLocator
         CancellationToken cancellationToken
     )
     {
-        logger.LogDebug("SET-MANY-KEYVALUE Redirect {Number} set key/value pairs to node {Leader}", items.Count, leader);
+        logger.LogSetManyKeyValueRedirect(items.Count, leader);
         
         if (leader == localNode)
         {
@@ -302,7 +304,7 @@ internal sealed class KeyValueLocator
         CancellationToken cancellationToken
     )
     {
-        logger.LogDebug("DELETE-MANY-KEYVALUE Redirect {Number} delete key/value pairs to node {Leader}", items.Count, leader);
+        logger.LogDeleteManyKeyValueRedirect(items.Count, leader);
 
         if (leader == localNode)
         {
@@ -344,7 +346,7 @@ internal sealed class KeyValueLocator
         if (leader == raft.GetLocalEndpoint())
             return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);               
         
-        logger.LogDebug("DELETE-KEYVALUE Redirected {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
+        logger.LogDeleteKeyValueRedirected(key, partitionId, leader);
         
         return await interNodeCommunication.TryDeleteKeyValue(leader, transactionId, key, durability, cancellationToken);
     }
@@ -372,7 +374,7 @@ internal sealed class KeyValueLocator
         if (leader == raft.GetLocalEndpoint())
             return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);               
         
-        logger.LogDebug("EXTEND-KEYVALUE Redirected {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
+        logger.LogExtendKeyValueRedirected(key, partitionId, leader);
 
         return await interNodeCommunication.TryExtendKeyValue(leader, transactionId, key, expiresMs, durability, cancellationToken);
     }
@@ -410,7 +412,8 @@ internal sealed class KeyValueLocator
 
         (KeyValueResponseType, ReadOnlyKeyValueEntry?) response = await interNodeCommunication.TryGetValue(leader, transactionId, key, revision, readTimestamp, durability, cancellationToken);
 
-        logger.LogDebug("GET-KEYVALUE Redirected {KeyValueName} to leader partition {Partition} at {Leader} Time={Elapsed}ms", key, partitionId, leader, stopwatch.GetElapsedMilliseconds());
+        if (logger.IsEnabled(LogLevel.Debug))
+            logger.LogGetKeyValueRedirected(key, partitionId, leader, stopwatch.GetElapsedMilliseconds());
 
         return response;
     }
@@ -444,7 +447,7 @@ internal sealed class KeyValueLocator
         if (leader == raft.GetLocalEndpoint())
             return (KeyValueResponseType.MustRetry, null);
 
-        logger.LogDebug("EXISTS-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
+        logger.LogExistsKeyValueRedirect(key, partitionId, leader);
 
         return await interNodeCommunication.TryExistsValue(leader, transactionId, key, revision, readTimestamp, durability, cancellationToken);
     }
@@ -535,7 +538,7 @@ internal sealed class KeyValueLocator
         CancellationToken cancellationToken
     )
     {
-        logger.LogDebug("EXISTS-KEYVALUE Redirect {Number} batched exists probes to node {Leader}", xkeys.Count, leader);
+        logger.LogExistsManyKeyValueRedirect(xkeys.Count, leader);
 
         if (leader == localNode)
         {
@@ -564,7 +567,7 @@ internal sealed class KeyValueLocator
         CancellationToken cancellationToken
     )
     {
-        logger.LogDebug("GET-KEYVALUE Redirect {Number} batched gets to node {Leader}", xkeys.Count, leader);
+        logger.LogGetManyKeyValueRedirect(xkeys.Count, leader);
 
         if (leader == localNode)
         {
@@ -607,7 +610,7 @@ internal sealed class KeyValueLocator
         if (leader == raft.GetLocalEndpoint())
             return KeyValueResponseType.MustRetry;
 
-        logger.LogDebug("CHECK-WRITE-INTENT Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
+        logger.LogCheckWriteIntentRedirect(key, partitionId, leader);
 
         return await interNodeCommunication.TryCheckWriteIntentValue(leader, transactionId, key, durability, cancellationToken);
     }
@@ -635,7 +638,7 @@ internal sealed class KeyValueLocator
         if (leader == raft.GetLocalEndpoint())
             return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero);
 
-        logger.LogDebug("ACQUIRE-LOCK-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
+        logger.LogAcquireLockKeyValueRedirected(key, partitionId, leader);
 
         return await interNodeCommunication.TryAcquireExclusiveLock(leader, transactionId, key, expiresMs, durability, cancelationToken);
     }
@@ -678,7 +681,7 @@ internal sealed class KeyValueLocator
         if (leader == raft.GetLocalEndpoint())
             return KeyValueResponseType.MustRetry;
         
-        logger.LogDebug("ACQUIRE-PREFIX-LOCK-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", prefixKey, partitionId, leader);
+        logger.LogAcquirePrefixLockKeyValueRedirected(prefixKey, partitionId, leader);
         
         return await interNodeCommunication.TryAcquireExclusivePrefixLock(leader, transactionId, prefixKey, expiresMs, durability, cancellationToken);
     }
@@ -737,7 +740,7 @@ internal sealed class KeyValueLocator
         CancellationToken cancellationToken
     )
     {
-        logger.LogDebug("ACQUIRE-LOCK-KEYVALUE Redirect {Number} lock acquisitions to node {Leader}", xkeys.Count, leader);
+        logger.LogAcquireManyLocksKeyValueRedirect(xkeys.Count, leader);
 
         if (leader == localNode)
         {
@@ -777,7 +780,7 @@ internal sealed class KeyValueLocator
         if (leader == raft.GetLocalEndpoint())
             return (KeyValueResponseType.MustRetry, key);
         
-        logger.LogDebug("RELEASE-LOCK-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
+        logger.LogReleaseLockKeyValueRedirected(key, partitionId, leader);
         
         return await interNodeCommunication.TryReleaseExclusiveLock(leader, transactionId, key, durability, cancellationToken);
     }
@@ -819,7 +822,7 @@ internal sealed class KeyValueLocator
         if (leader == raft.GetLocalEndpoint())
             return KeyValueResponseType.MustRetry;
         
-        logger.LogDebug("RELEASE-PREFIX-LOCK-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", prefixKey, partitionId, leader);
+        logger.LogReleasePrefixLockKeyValueRedirected(prefixKey, partitionId, leader);
         
         return await interNodeCommunication.TryReleaseExclusivePrefixLock(leader, transactionId, prefixKey, durability, cancellationToken);
     }
@@ -967,7 +970,7 @@ internal sealed class KeyValueLocator
         // (split committed in the acquire window), roll everything back and MustRetry.
         if (!DescriptorSetStable(descriptors, manager.RangeMapStore.Current.FindIntersecting(prefix, startKey, endKey)))
         {
-            logger.LogDebug("ACQUIRE-RANGE-LOCK {Prefix}: descriptor set changed during acquisition — MustRetry", prefix);
+            logger.LogAcquireRangeLockDescriptorChanged(prefix);
 
             foreach ((int pid, string? rcs, bool rcsi, string? rce, bool rcei) in acquired)
             {
@@ -1081,7 +1084,7 @@ internal sealed class KeyValueLocator
         if (leader == raft.GetLocalEndpoint())
             return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
 
-        logger.LogDebug("ACQUIRE-RANGE-LOCK-KEYVALUE Redirect {Prefix} P{Partition} → {Leader}", prefix, partitionId, leader);
+        logger.LogAcquireRangeLockKeyValueRedirected(prefix, partitionId, leader);
 
         return await interNodeCommunication.TryAcquireRangeLock(leader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, cancellationToken);
     }
@@ -1102,7 +1105,7 @@ internal sealed class KeyValueLocator
         if (leader == raft.GetLocalEndpoint())
             return KeyValueResponseType.MustRetry;
 
-        logger.LogDebug("RELEASE-RANGE-LOCK-KEYVALUE Redirect {Prefix} P{Partition} → {Leader}", prefix, partitionId, leader);
+        logger.LogReleaseRangeLockKeyValueRedirected(prefix, partitionId, leader);
 
         return await interNodeCommunication.TryReleaseExclusiveRangeLock(leader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken);
     }
@@ -1161,7 +1164,7 @@ internal sealed class KeyValueLocator
         CancellationToken cancelationToken
     )
     {
-        logger.LogDebug("RELEASE-LOCK-KEYVALUE Redirect {Number} lock releases to node {Leader}", xkeys.Count, leader);
+        logger.LogReleaseManyLocksKeyValueRedirect(xkeys.Count, leader);
         
         if (leader == localNode)
         {
@@ -1215,7 +1218,7 @@ internal sealed class KeyValueLocator
         if (leader == raft.GetLocalEndpoint())
             return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero, key, durability);
 
-        logger.LogDebug("PREPARE-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
+        logger.LogPrepareKeyValueRedirected(key, partitionId, leader);
 
         return await interNodeCommunication.TryPrepareMutations(leader, transactionId, commitId, key, durability, routedGeneration, cancelationToken);
     }
@@ -1277,7 +1280,7 @@ internal sealed class KeyValueLocator
         CancellationToken cancellationToken
     )
     {
-        logger.LogDebug("PREPARE-KEYVALUE Redirect {Number} prepare mutations to node {Leader}", xkeys.Count, leader);
+        logger.LogPrepareManyKeyValueRedirect(xkeys.Count, leader);
         
         if (leader == localNode)
         {
@@ -1318,7 +1321,7 @@ internal sealed class KeyValueLocator
         if (leader == raft.GetLocalEndpoint())
             return (KeyValueResponseType.MustRetry, 0);
         
-        logger.LogDebug("COMMIT-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
+        logger.LogCommitKeyValueRedirected(key, partitionId, leader);
         
         return await interNodeCommunication.TryCommitMutations(leader, transactionId, key, ticketId, durability, cancelationToken);
     }
@@ -1377,7 +1380,7 @@ internal sealed class KeyValueLocator
         CancellationToken cancelationToken
     )
     {
-        logger.LogDebug("COMMIT-KEYVALUE Redirect {Number} Commit mutations to node {Leader}", xkeys.Count, leader);
+        logger.LogCommitManyKeyValueRedirect(xkeys.Count, leader);
         
         if (leader == localNode)
         {
@@ -1418,7 +1421,7 @@ internal sealed class KeyValueLocator
         if (leader == raft.GetLocalEndpoint())
             return (KeyValueResponseType.MustRetry, 0);
 
-        logger.LogDebug("ROLLBACK-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", key, partitionId, leader);
+        logger.LogRollbackKeyValueRedirected(key, partitionId, leader);
 
         return await interNodeCommunication.TryRollbackMutations(leader, transactionId, key, ticketId, durability, cancelationToken);
     }
@@ -1477,7 +1480,7 @@ internal sealed class KeyValueLocator
         CancellationToken cancelationToken
     )
     {
-        logger.LogDebug("ROLLBACK-KEYVALUE Redirect {Number} Commit mutations to node {Leader}", xkeys.Count, leader);
+        logger.LogRollbackManyKeyValueRedirect(xkeys.Count, leader);
         
         if (leader == localNode)
         {
@@ -1559,7 +1562,7 @@ internal sealed class KeyValueLocator
             if (singleLeader == raft.GetLocalEndpoint())
                 return new(KeyValueResponseType.MustRetry, []);
 
-            logger.LogDebug("GETPREFIX-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}", prefixedKey, singlePartitionId, singleLeader);
+            logger.LogGetPrefixKeyValueRedirected(prefixedKey, singlePartitionId, singleLeader);
 
             return await interNodeCommunication.GetByBucket(singleLeader, transactionId, prefixedKey, readTimestamp, durability, cancellationToken);
         }
@@ -1698,7 +1701,7 @@ internal sealed class KeyValueLocator
             if (singleLeader == raft.GetLocalEndpoint())
                 return new(KeyValueResponseType.MustRetry, [], null, false);
 
-            logger.LogDebug("GETRANGE-KEYVALUE Redirect {Prefix} to leader partition {Partition} at {Leader}", prefix, singlePartitionId, singleLeader);
+            logger.LogGetRangeKeyValueRedirected(prefix, singlePartitionId, singleLeader);
 
             return await interNodeCommunication.GetByRange(singleLeader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
         }
@@ -1867,7 +1870,7 @@ internal sealed class KeyValueLocator
         if (leader == raft.GetLocalEndpoint())
             return new(KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
         
-        logger.LogDebug("START-TRANSACTION Redirect {KeyValueName} to leader partition {Partition} at {Leader}", options.UniqueId, partitionId, leader);
+        logger.LogStartTransactionRedirected(options.UniqueId, partitionId, leader);
         
         return await interNodeCommunication.StartTransaction(leader, options, cancellationToken);
     }
@@ -1904,7 +1907,7 @@ internal sealed class KeyValueLocator
         if (leader == raft.GetLocalEndpoint())
             return KeyValueResponseType.MustRetry;
         
-        logger.LogDebug("COMMIT-TRANSACTION Redirect {KeyValueName} to leader partition {Partition} at {Leader}", uniqueId, partitionId, leader);
+        logger.LogCommitTransactionRedirected(uniqueId, partitionId, leader);
         
         return await interNodeCommunication.CommitTransaction(leader, uniqueId, timestamp, acquiredLocks, modifiedKeys, readKeys, cancellationToken);
     }
@@ -1938,7 +1941,7 @@ internal sealed class KeyValueLocator
         if (leader == raft.GetLocalEndpoint())
             return KeyValueResponseType.MustRetry;
         
-        logger.LogDebug("ROLLBACK-TRANSACTION Redirect {KeyValueName} to leader partition {Partition} at {Leader}", uniqueId, partitionId, leader);
+        logger.LogRollbackTransactionRedirected(uniqueId, partitionId, leader);
         
         return await interNodeCommunication.RollbackTransaction(leader, uniqueId, timestamp, acquiredLocks, modifiedKeys, cancellationToken);
     }

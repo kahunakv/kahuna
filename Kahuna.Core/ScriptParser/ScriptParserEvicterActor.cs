@@ -1,5 +1,6 @@
 
 using Nixie;
+using Kahuna.Server.KeyValues.Logging;
 
 namespace Kahuna.Server.ScriptParser;
 
@@ -32,7 +33,7 @@ public sealed class ScriptParserEvicterActor : IActor<ScriptParserEvicterRequest
             if (xv.Value.ExpiresAt < now)
             {
                 if (scriptParser.Cache.TryRemove(xv.Key, out _))
-                    logger.LogDebug("Removed {Key} from script cache", xv.Key);
+                    logger.LogScriptRemovedFromCache(xv.Key);
             }
         }
 

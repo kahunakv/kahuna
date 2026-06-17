@@ -2,6 +2,7 @@
 using Kommander;
 using Kommander.Time;
 
+using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues.Ranges;
@@ -97,13 +98,7 @@ internal sealed class RangeMerger
             return MergeOutcome.NotAdjacent;
         }
 
-        logger.LogInformation(
-            "RangeMerger: merging {Space} [{LS},{LE})@P{LP} + [{RS},{RE})@P{RP}",
-            keySpace,
-            left.StartKey ?? "-inf", left.EndKey,
-            left.PartitionId,
-            right.StartKey, right.EndKey ?? "+inf",
-            right.PartitionId);
+        logger.LogRangeMergerMerging(keySpace, left.StartKey ?? "-inf", left.EndKey, left.PartitionId, right.StartKey, right.EndKey ?? "+inf", right.PartitionId);
 
         // -- 2. Bulk export [B,C) at snapshotTs -> import to survivor -------------
         HLCTimestamp snapshotTs = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
@@ -218,12 +213,7 @@ internal sealed class RangeMerger
             await KvStateMachineTransfer.EnsureLocksOnDestinationLeaderAsync(
                 manager, keySpace, left.PartitionId, clampedLocks, logger, "RangeMerger", ct);
 
-        logger.LogInformation(
-            "RangeMerger: merged {Space} -> [{A},{C})@P{P} gen={Gen} (retired P{Retired})",
-            keySpace,
-            left.StartKey ?? "-inf", right.EndKey ?? "+inf",
-            left.PartitionId, newGeneration,
-            right.PartitionId);
+        logger.LogRangeMergerMerged(keySpace, left.StartKey ?? "-inf", right.EndKey ?? "+inf", left.PartitionId, newGeneration, right.PartitionId);
 
         return new MergeOutcome(MergeStatus.Succeeded, right.PartitionId, newGeneration);
     }

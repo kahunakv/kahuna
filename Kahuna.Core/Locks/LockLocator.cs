@@ -4,6 +4,7 @@ using Kommander;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Locks.Data;
+using Kahuna.Server.Locks.Logging;
 using Kahuna.Shared.Locks;
 
 namespace Kahuna.Server.Locks;
@@ -66,7 +67,7 @@ internal sealed class LockLocator
         if (leader == raft.GetLocalEndpoint())
             return (LockResponseType.MustRetry, 0);
 
-        logger.LogDebug("LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", resource, partitionId, leader);
+        logger.LogLockRedirect(resource, partitionId, leader);
 
         return await interNodeCommunication.TryLock(leader, resource, owner, expiresMs, durability, cancellationToken);
     }
@@ -94,7 +95,7 @@ internal sealed class LockLocator
         if (leader == raft.GetLocalEndpoint())
             return (LockResponseType.MustRetry, 0);
 
-        logger.LogDebug("EXTEND-LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", resource, partitionId, leader);
+        logger.LogExtendLockRedirect(resource, partitionId, leader);
 
         return await interNodeCommunication.TryExtendLock(leader, resource, owner, expiresMs, durability, cancellationToken);
     }
@@ -122,7 +123,7 @@ internal sealed class LockLocator
         if (leader == raft.GetLocalEndpoint())
             return LockResponseType.MustRetry;
 
-        logger.LogDebug("EXTEND-LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", resource, partitionId, leader);
+        logger.LogExtendLockRedirect(resource, partitionId, leader);
 
         return await interNodeCommunication.TryUnlock(leader, resource, owner, durability, cancellationToken);
     }
@@ -148,7 +149,7 @@ internal sealed class LockLocator
         if (leader == raft.GetLocalEndpoint())
             return (LockResponseType.MustRetry, null);
 
-        logger.LogDebug("GET-LOCK Redirect {LockName} to leader partition {Partition} at {Leader}", resource, partitionId, leader);
+        logger.LogGetLockRedirect(resource, partitionId, leader);
 
         return await interNodeCommunication.GetLock(leader, resource, durability, cancellationToken);
     }

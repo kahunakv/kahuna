@@ -7,6 +7,7 @@ using Kahuna.Server.Locks;
 using Kahuna.Shared.Locks;
 using System.Runtime.InteropServices;
 using Kahuna.Server.Locks.Data;
+using Kahuna.Communication.External.Grpc.Logging;
 
 namespace Kahuna.Communication.External.Grpc;
 
@@ -246,7 +247,7 @@ public sealed class LocksService : Locker.LockerBase
         }
         catch (IOException ex)
         {
-            logger.LogTrace("IOException: {Message}", ex.Message);
+            logger.LogCommunicationIoException(ex);
         }
     }
     
@@ -425,7 +426,7 @@ public sealed class LocksService : Locker.LockerBase
         }
         catch (IOException ex)
         {
-            logger.LogTrace("IOException: {Message}", ex.Message);
+            logger.LogCommunicationIoException(ex);
         }
     }
     

@@ -1,5 +1,6 @@
 
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
@@ -86,17 +87,15 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
 
         if (message.Durability != KeyValueDurability.Persistent)
         {
-            if (entry.MvccEntries.Remove(message.TransactionId, out KeyValueMvccEntry? removedMvccE))
-                context.AdjustEstimatedEntryBytes(entry, -KeyValueStoreAccounting.MvccEntryRemovedBytes(entry.MvccEntries.Count == 0, removedMvccE.Value));
+            entry.MvccEntries.Remove(message.TransactionId);                   
             entry.WriteIntent = null;
-
+            
             return new(KeyValueResponseType.RolledBack);
         }
 
         (bool success, long rollbackIndex) = await RollbackKeyValueMessage(message.Key, message.ProposalTicketId);
-
-        if (entry.MvccEntries.Remove(message.TransactionId, out KeyValueMvccEntry? removedMvccP))
-            context.AdjustEstimatedEntryBytes(entry, -KeyValueStoreAccounting.MvccEntryRemovedBytes(entry.MvccEntries.Count == 0, removedMvccP.Value));
+        
+        entry.MvccEntries.Remove(message.TransactionId);                   
         entry.WriteIntent = null;
 
         if (!success)
@@ -130,7 +129,7 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
             return (false, 0);
         }
         
-        context.Logger.LogDebug("Successfully rolled back key/value {Key} Partition={Partition} ProposalIndex={ProposalIndex}", key, partitionId, logIndex);
+        context.Logger.LogSuccessfullyRolledBackKeyValue(key, partitionId, logIndex);
 
         return (success, logIndex);
     }

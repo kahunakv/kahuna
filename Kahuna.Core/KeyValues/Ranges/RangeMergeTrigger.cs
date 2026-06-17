@@ -3,6 +3,7 @@ using Kommander;
 using Kommander.System;
 
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues.Logging;
 
 namespace Kahuna.Server.KeyValues.Ranges;
 
@@ -80,13 +81,11 @@ internal sealed class RangeMergeTrigger
                 if (retryResult.Success)
                 {
                     pendingRemovals.Remove(partId);
-                    logger.LogInformation("RangeMergeTrigger: retry-retired P{Id}", partId);
+                    logger.LogRangeMergeTriggerRetryRetired(partId);
                 }
                 else
                 {
-                    logger.LogWarning(
-                        "RangeMergeTrigger: retry RemovePartitionAsync({Id}) still failed: {Status}",
-                        partId, retryResult.Status);
+                    logger.LogRangeMergeTriggerRetryFailed(partId, retryResult.Status.ToString());
                 }
             }
         }
@@ -111,21 +110,13 @@ internal sealed class RangeMergeTrigger
             {
                 ct.ThrowIfCancellationRequested();
 
-                logger.LogInformation(
-                    "RangeMergeTrigger: merging {Space} [{LS},{LE})@P{LP} + [{RS},{RE})@P{RP}",
-                    keySpace,
-                    left.StartKey ?? "-inf", left.EndKey,
-                    left.PartitionId,
-                    right.StartKey, right.EndKey ?? "+inf",
-                    right.PartitionId);
+                logger.LogRangeMergeTriggerMerging(keySpace, left.StartKey ?? "-inf", left.EndKey, left.PartitionId, right.StartKey, right.EndKey ?? "+inf", right.PartitionId);
 
                 MergeOutcome outcome = await merger.MergeAsync(keySpace, left, right, ct);
 
                 if (!outcome.IsSuccess)
                 {
-                    logger.LogWarning(
-                        "RangeMergeTrigger: MergeAsync failed for {Space}: {Status}",
-                        keySpace, outcome.Status);
+                    logger.LogRangeMergeTriggerFailed(keySpace, outcome.Status.ToString());
                     continue;
                 }
 
@@ -137,14 +128,11 @@ internal sealed class RangeMergeTrigger
                 if (!removeResult.Success)
                 {
                     pendingRemovals.Add(outcome.RetiredPartitionId);
-                    logger.LogWarning(
-                        "RangeMergeTrigger: RemovePartitionAsync({Id}) failed for {Space}: {Status} — queued for retry",
-                        outcome.RetiredPartitionId, keySpace, removeResult.Status);
+                    logger.LogRangeMergeTriggerRemoveFailed(outcome.RetiredPartitionId, keySpace, removeResult.Status.ToString());
                 }
                 else
                 {
-                    logger.LogInformation(
-                        "RangeMergeTrigger: retired P{Id} for {Space}", outcome.RetiredPartitionId, keySpace);
+                    logger.LogRangeMergeTriggerRetired(outcome.RetiredPartitionId, keySpace);
                 }
 
                 mergesDone++;

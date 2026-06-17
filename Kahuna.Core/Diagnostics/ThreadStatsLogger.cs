@@ -1,5 +1,6 @@
 
 using Kommander;
+using Kahuna.Server.Diagnostics.Logging;
 
 namespace Kahuna.Server.Diagnostics;
 
@@ -61,9 +62,9 @@ public sealed class ThreadStatsLogger : IDisposable
         ThreadPool.GetMaxThreads(out _maxWorkerThreadLevel, out _maxIoThreadLevel);
         ThreadPool.GetAvailableThreads(out int workerAvailable, out int ioAvailable);
 
-        logger.LogInformation("Thread statistics at startup: minimum worker:{Workers} io:{IO}", _minWorkerThreadLevel, _minIoThreadLevel);
-        logger.LogInformation("Thread statistics at startup: maximum worker:{Workers} io:{IO}", _maxWorkerThreadLevel, _maxIoThreadLevel);
-        logger.LogInformation("Thread statistics at startup: available worker:{Workers} io:{IO}", workerAvailable, ioAvailable);
+        logger.LogThreadStatsMinimum(_minWorkerThreadLevel, _minIoThreadLevel);
+        logger.LogThreadStatsMaximum(_maxWorkerThreadLevel, _maxIoThreadLevel);
+        logger.LogThreadStatsAvailable(workerAvailable, ioAvailable);
 
         _minWorkerThreadLevelRecovery = (_minWorkerThreadLevel * 3) / 4;
         _minIoThreadLevelRecovery = (_minIoThreadLevel * 3) / 4;
@@ -88,7 +89,7 @@ public sealed class ThreadStatsLogger : IDisposable
         int activeWorkerThreads = _maxWorkerThreadLevel - availableWorkerThreads;
         int activeIoThreads = _maxIoThreadLevel - availableIoThreads;
 
-        _logger.LogTrace("Thread statistics: active worker:{Wokers} io:{Io}", activeWorkerThreads, activeIoThreads);
+        _logger.LogThreadStatsActive(activeWorkerThreads, activeIoThreads);
 
         if (activeWorkerThreads > _minWorkerThreadLevel && !_minWorkerThreadLevelWarned)
         {

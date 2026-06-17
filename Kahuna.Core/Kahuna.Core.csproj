@@ -22,7 +22,7 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <NoWarn>SYSLIB0051;CA1873</NoWarn>
+    <NoWarn>SYSLIB0051</NoWarn>
     <NuGetAudit>false</NuGetAudit>
   </PropertyGroup>
 

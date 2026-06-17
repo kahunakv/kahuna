@@ -5,6 +5,7 @@ using Kommander;
 using Kommander.Time;
 
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Server.KeyValues.Transactions.Commands;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.ScriptParser;
@@ -197,31 +198,31 @@ internal sealed class KeyValueTransactionCoordinator
         }
         catch (KahunaScriptException ex)
         {
-            logger.LogDebug("KahunaScriptException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            logger.LogKahunaScriptException(ex);
 
             return new() { Type = KeyValueResponseType.Errored, Reason = ex.Message + " at line " + ex.Line };
         }
         catch (KahunaAbortedException ex)
         {
-            logger.LogDebug("KahunaAbortedException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            logger.LogKahunaAbortedException(ex);
 
             return new() { Type = KeyValueResponseType.Aborted, Reason = ex.Message };
         }
         catch (TaskCanceledException ex)
         {
-            logger.LogDebug("TaskCanceledException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            logger.LogTaskCanceledException(ex);
 
             return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
         }
         catch (OperationCanceledException ex)
         {
-            logger.LogDebug("TaskCanceledException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            logger.LogTaskCanceledException(ex);
 
             return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
         }
         catch (Exception ex)
         {
-            logger.LogError("TryExecuteTx: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            logger.LogTryExecuteTxError(ex);
 
             return new() { Type = KeyValueResponseType.Errored, Reason = ex.Message };
         }
@@ -254,7 +255,7 @@ internal sealed class KeyValueTransactionCoordinator
 
         } while (!result);
 
-        logger.LogDebug("Started interactive transaction {TransactionId}", transactionId);
+        logger.LogStartedInteractiveTransaction(transactionId);
 
         await Task.CompletedTask;
 
@@ -315,7 +316,7 @@ internal sealed class KeyValueTransactionCoordinator
             if (context.Result.Type is KeyValueResponseType.Aborted or KeyValueResponseType.Errored)
                 return KeyValueResponseType.Aborted;
 
-            logger.LogDebug("Committed interactive transaction {TransactionId}", transactionId);
+            logger.LogCommittedInteractiveTransaction(transactionId);
 
             sessions.TryRemove(transactionId, out _);
 
@@ -323,14 +324,14 @@ internal sealed class KeyValueTransactionCoordinator
         }
         catch (KahunaAbortedException ex)
         {
-            logger.LogDebug("KahunaAbortedException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            logger.LogKahunaAbortedException(ex);
 
             //return new() { Type = KeyValueResponseType.Aborted, Reason = ex.Message };
             return KeyValueResponseType.Aborted;
         }
         catch (TaskCanceledException ex)
         {
-            logger.LogDebug("TaskCanceledException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            logger.LogTaskCanceledException(ex);
 
             //return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
 
@@ -338,7 +339,7 @@ internal sealed class KeyValueTransactionCoordinator
         }
         catch (OperationCanceledException ex)
         {
-            logger.LogDebug("OperationCanceledException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            logger.LogOperationCanceledException(ex);
 
             //return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
 
@@ -346,7 +347,7 @@ internal sealed class KeyValueTransactionCoordinator
         }
         catch (Exception ex)
         {
-            logger.LogDebug("OperationCanceledException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            logger.LogOperationCanceledException(ex);
 
             //return new() { Type = KeyValueResponseType.Errored, Reason = ex.GetType().Name + ": " + ex.Message };
 
@@ -401,7 +402,7 @@ internal sealed class KeyValueTransactionCoordinator
 
             context.Action = KeyValueTransactionAction.Abort;
 
-            logger.LogDebug("Rolled back interactive transaction {TransactionId}", transactionId);
+            logger.LogRolledBackInteractiveTransaction(transactionId);
 
             sessions.TryRemove(transactionId, out _);
 
@@ -573,31 +574,31 @@ internal sealed class KeyValueTransactionCoordinator
         }
         catch (KahunaScriptException ex)
         {
-            logger.LogDebug("KahunaScriptException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            logger.LogKahunaScriptException(ex);
 
             return new() { Type = KeyValueResponseType.Errored, Reason = ex.Message + " at line " + ex.Line };
         }
         catch (KahunaAbortedException ex)
         {
-            logger.LogDebug("KahunaAbortedException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            logger.LogKahunaAbortedException(ex);
 
             return new() { Type = KeyValueResponseType.Aborted, Reason = ex.Message };
         }
         catch (TaskCanceledException ex)
         {
-            logger.LogDebug("TaskCanceledException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            logger.LogTaskCanceledException(ex);
 
             return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
         }
         catch (OperationCanceledException ex)
         {
-            logger.LogDebug("OperationCanceledException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            logger.LogOperationCanceledException(ex);
 
             return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
         }
         catch (Exception ex)
         {
-            logger.LogDebug("OperationCanceledException: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            logger.LogOperationCanceledException(ex);
 
             return new() { Type = KeyValueResponseType.Errored, Reason = ex.GetType().Name + ": " + ex.Message };
         }
@@ -983,25 +984,13 @@ internal sealed class KeyValueTransactionCoordinator
         if (readKey.Exists != existsNow)
             return new(
                 $"Read dependency changed for {readKey.Key}",
-                () => logger.LogDebug(
-                    "Read dependency changed for {Key} {Durability}: expected exists {ExpectedExists}, actual exists {ActualExists}",
-                    readKey.Key,
-                    readKey.Durability,
-                    readKey.Exists,
-                    existsNow
-                )
+                () => logger.LogReadDependencyChanged(readKey.Key!, readKey.Durability, readKey.Exists, existsNow)
             );
 
         if (readKey.Exists && current!.Revision != readKey.Revision)
             return new(
                 $"Read dependency revision changed for {readKey.Key}",
-                () => logger.LogDebug(
-                    "Read dependency revision changed for {Key} {Durability}: expected revision {ExpectedRevision}, actual revision {ActualRevision}",
-                    readKey.Key,
-                    readKey.Durability,
-                    readKey.Revision,
-                    current.Revision
-                )
+                () => logger.LogReadDependencyRevisionChanged(readKey.Key!, readKey.Durability, readKey.Revision, current.Revision)
             );
 
         return null;
@@ -1073,11 +1062,7 @@ internal sealed class KeyValueTransactionCoordinator
                 Reason = $"Concurrent write intent detected on read key {key}"
             };
 
-            logger.LogDebug(
-                "Write-skew guard aborted optimistic transaction {TransactionId}: concurrent writer on {Key}",
-                context.TransactionId,
-                key
-            );
+            logger.LogWriteSkewGuardAborted(context.TransactionId, key);
 
             return false;
         }
@@ -1324,6 +1309,8 @@ internal sealed class KeyValueTransactionCoordinator
         
         while (true)
         {
+            //Console.WriteLine("AST={0} {1}", ast.nodeType, ast.yyline);
+
             if (context.Status == KeyValueExecutionStatus.Stop)
                 break;
 

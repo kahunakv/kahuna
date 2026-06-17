@@ -2,6 +2,7 @@
 using Nixie;
 
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues.Logging;
 
 namespace Kahuna.Server.KeyValues.Ranges;
 
@@ -51,7 +52,7 @@ internal sealed class RangeMergeCheckerActor : IActor<RangeMergeCheckerRequest>
         {
             int merges = await trigger.TriggerAsync();
             if (merges > 0)
-                logger.LogInformation("RangeMergeChecker: performed {Count} merge(s).", merges);
+                logger.LogRangeMergeCheckerPerformed(merges);
         }
         catch (Exception ex)
         {

@@ -4,6 +4,7 @@ using Google.Protobuf;
 using Kommander;
 using Kommander.Time;
 
+using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
@@ -240,7 +241,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             return (false, HLCTimestamp.Zero);
         }
         
-        context.Logger.LogDebug("Successfully proposed key/value {Key} Partition={Partition} ProposalIndex={ProposalIndex}", proposal.Key, partitionId, result.LogIndex);
+        context.Logger.LogSuccessfullyProposedKeyValue(proposal.Key, partitionId, result.LogIndex);
 
         return (result.Success, result.TicketId);
     }

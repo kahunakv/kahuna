@@ -4,6 +4,7 @@ using Kommander;
 using System.Diagnostics;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.Persistence.Backend;
+using Kahuna.Server.Persistence.Logging;
 using Polly.Contrib.WaitAndRetry;
 
 namespace Kahuna.Server.Persistence;
@@ -199,7 +200,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
             if (result.Success)
             {
-                logger.LogDebug("Successfully checkpointed partition #{PartitionId}", kv.Key);
+                logger.LogSuccessfullyCheckpointedPartition(kv.Key);
                 
                 partitionsToRemove.Add(kv.Key);
             }
@@ -291,7 +292,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 continue;
             }
 
-            logger.LogDebug("Successfully stored batch of {Count} locks in {Elapsed}ms", items.Count, stopwatch.ElapsedMilliseconds);
+            logger.LogSuccessfullyStoredLocks(items.Count, stopwatch.ElapsedMilliseconds);
             
             pendingCheckpoint = true;
             pendingLockItems = null;
@@ -383,7 +384,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 continue;
             }
 
-            logger.LogDebug("Successfully stored batch of {Count} key-values in {Elapsed}ms", items.Count, stopwatch.ElapsedMilliseconds);
+            logger.LogSuccessfullyStoredKeyValues(items.Count, stopwatch.ElapsedMilliseconds);
 
             if (ConfigurationValidator.IsPersistentRevisionRetentionEnabled(configuration)
                 && configuration.PersistentRevisionCleanupOnWrite)
@@ -445,8 +446,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             if (success)
             {
                 if (pruneResult.RevisionsDeleted > 0 || pruneResult.BatchLimitReached)
-                    logger.LogDebug(
-                        "Pruned persistent key/value revisions: mode=targeted keys={Keys} deleted={Deleted} backlog={Backlog} elapsedMs={Elapsed} backend={Backend} retentionCount={RetentionCount} retentionAge={RetentionAge}",
+                    logger.LogPrunedKeyValueRevisionsTargeted(
                         pruneResult.KeysVisited,
                         pruneResult.RevisionsDeleted,
                         pruneResult.BatchLimitReached,
@@ -537,8 +537,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             if (success)
             {
                 if (pruneResult.RevisionsDeleted > 0 || pruneResult.BatchLimitReached)
-                    logger.LogDebug(
-                        "Pruned persistent key/value revisions: mode=sweep keys={Keys} deleted={Deleted} backlog={Backlog} elapsedMs={Elapsed} backend={Backend} retentionCount={RetentionCount} retentionAge={RetentionAge}",
+                    logger.LogPrunedKeyValueRevisionsSweep(
                         pruneResult.KeysVisited,
                         pruneResult.RevisionsDeleted,
                         pruneResult.BatchLimitReached,
