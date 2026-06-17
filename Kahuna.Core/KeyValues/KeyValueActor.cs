@@ -143,6 +143,9 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// </summary>
     private readonly TryExistsHandler tryExistsHandler;
 
+    /// <summary>
+    /// Handles
+    /// </summary>
     private readonly TryCheckWriteIntentHandler tryCheckWriteIntentHandler;
 
     /// <summary>
@@ -229,7 +232,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// </summary>
     private readonly Stopwatch stopwatch = Stopwatch.StartNew();
 
-    private KeyValueContext? kvContext;
+    private readonly KeyValueContext? kvContext;
 
     /// <summary>
     /// Constructor

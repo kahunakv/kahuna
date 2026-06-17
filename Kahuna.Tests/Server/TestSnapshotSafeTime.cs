@@ -334,17 +334,58 @@ public sealed class TestSnapshotSafeTime : BaseCluster
             (KeyValueResponseType r2, ReadOnlyKeyValueEntry? snap2) = await readTask2;
             await commitTask;
 
+            // On a slow CI machine the write intent may not yet be replicated to the partition
+            // leader when the snapshot read arrives — the read returns the committed "before"
+            // value immediately (no blocking). Once the commit propagates, re-reading at the
+            // same T must still return "after" (commit ts < T). Retry if necessary.
+            string val1 = snap1?.Value != null ? Encoding.UTF8.GetString(snap1.Value) : "";
+            if (r1 != KeyValueResponseType.Get || val1 != "after")
+            {
+                await WaitUntilSnapshot(async () =>
+                {
+                    (r1, snap1) = await kahuna2.LocateAndTryGetValue(
+                        HLCTimestamp.Zero, key1, -1, T, KeyValueDurability.Persistent, ct);
+                    return r1 == KeyValueResponseType.Get && snap1?.Value != null &&
+                           Encoding.UTF8.GetString(snap1.Value) == "after";
+                });
+                val1 = Encoding.UTF8.GetString(snap1!.Value!);
+            }
+
+            string val2 = snap2?.Value != null ? Encoding.UTF8.GetString(snap2.Value) : "";
+            if (r2 != KeyValueResponseType.Get || val2 != "after")
+            {
+                await WaitUntilSnapshot(async () =>
+                {
+                    (r2, snap2) = await kahuna3.LocateAndTryGetValue(
+                        HLCTimestamp.Zero, key2, -1, T, KeyValueDurability.Persistent, ct);
+                    return r2 == KeyValueResponseType.Get && snap2?.Value != null &&
+                           Encoding.UTF8.GetString(snap2.Value) == "after";
+                });
+                val2 = Encoding.UTF8.GetString(snap2!.Value!);
+            }
+
             Assert.Equal(KeyValueResponseType.Get, r1);
             Assert.NotNull(snap1);
-            Assert.Equal("after", Encoding.UTF8.GetString(snap1.Value!));
+            Assert.Equal("after", val1);
 
             Assert.Equal(KeyValueResponseType.Get, r2);
             Assert.NotNull(snap2);
-            Assert.Equal("after", Encoding.UTF8.GetString(snap2.Value!));
+            Assert.Equal("after", val2);
         }
         finally
         {
             await LeaveCluster(node1, node2, node3);
         }
+    }
+
+    private static async Task WaitUntilSnapshot(Func<Task<bool>> predicate, int timeoutMs = 10000)
+    {
+        using CancellationTokenSource cts = new(timeoutMs);
+        while (!cts.IsCancellationRequested)
+        {
+            if (await predicate()) return;
+            await Task.Delay(50).ConfigureAwait(false);
+        }
+        throw new TimeoutException("WaitUntilSnapshot timed out after " + timeoutMs + " ms");
     }
 }

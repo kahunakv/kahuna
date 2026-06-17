@@ -43,7 +43,7 @@ internal sealed class KeyValueProposalActor : IActor<KeyValueProposalRequest>
         this.configuration = configuration;
         this.keySpaceRegistry = keySpaceRegistry;
         this.rangeMapStore = rangeMapStore;
-        this.dataPartitionRouter = new DataPartitionRouter(raft);
+        this.dataPartitionRouter = new(raft);
         this.logger = logger;
     }
 
