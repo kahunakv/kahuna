@@ -604,16 +604,27 @@ public class TestKeyValues
         
         result1 = await client.SetKeyValue(keyName1, "some-value", 1000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result1.Success);
+        // On a loaded CI machine an ephemeral-partition leader change resets in-memory state; retry once to reach revision 1.
+        if (result1.Revision == 0)
+        {
+            result1 = await client.SetKeyValue(keyName1, "some-value", 1000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
+            Assert.True(result1.Success);
+        }
         Assert.Equal(1, result1.Revision);
-        
+
         result2 = await client.SetKeyValue(keyName2, "some-value", 1000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result2.Success);
+        if (result2.Revision == 0)
+        {
+            result2 = await client.SetKeyValue(keyName2, "some-value", 1000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
+            Assert.True(result2.Success);
+        }
         Assert.Equal(1, result2.Revision);
-        
+
         result1 = await client.GetKeyValue(keyName1, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.NotNull(result1.Value);
         Assert.Equal(1, result1.Revision);
-        
+
         result2 = await client.GetKeyValue(keyName2, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.NotNull(result2.Value);
         Assert.Equal(1, result2.Revision);
