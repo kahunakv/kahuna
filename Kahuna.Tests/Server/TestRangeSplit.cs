@@ -594,6 +594,14 @@ public sealed class TestRangeSplit : BaseCluster
             SplitOutcome outcome = await SplitViaLeaders(Space, Space + "/m", nodes, ct);
             Assert.True(outcome.IsSuccess, $"Split failed: {outcome.Status}");
 
+            // Wait for the new range map to propagate before testing lock state.
+            await WaitUntil(() =>
+            {
+                RangeMap map = nodes[0].Item2.RangeMapStore.Current;
+                return map.Find(Space, Space + "/a") is not null &&
+                       map.Find(Space, Space + "/z") is not null;
+            });
+
             // Re-acquire P2 leader reference (split can trigger re-elections).
             (p2Raft, p2Leader) = await LeaderOf(RangeMapStore.FirstDataPartitionId, nodes);
 

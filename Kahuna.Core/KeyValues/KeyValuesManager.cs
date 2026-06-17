@@ -2215,6 +2215,31 @@ internal sealed class KeyValuesManager : IDisposable
     }
 
     /// <summary>
+    /// Releases an exclusive range lock on the leader of <paramref name="partitionId"/>, forwarding
+    /// via IPC if this node is not the leader. Used by <see cref="RangeSplitter"/> to release the
+    /// quiesce lock on the <em>original</em> partition after cutover, bypassing the locator which
+    /// would otherwise route to the newly-created partition.
+    /// </summary>
+    internal async Task<KeyValueResponseType> ReleaseExclusiveRangeLockOnPartitionLeaderAsync(
+        int partitionId,
+        HLCTimestamp transactionId,
+        string keySpace,
+        string? startKey, bool startInclusive,
+        string? endKey, bool endInclusive,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken)
+    {
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
+            return await TryReleaseExclusiveRangeLock(transactionId, keySpace, startKey, startInclusive, endKey, endInclusive, durability).ConfigureAwait(false);
+
+        string leader = await raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        if (leader == raft.GetLocalEndpoint())
+            return await TryReleaseExclusiveRangeLock(transactionId, keySpace, startKey, startInclusive, endKey, endInclusive, durability).ConfigureAwait(false);
+
+        return await interNodeCommunication.TryReleaseExclusiveRangeLock(leader, transactionId, keySpace, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Passes a TryAcquireExclusiveLock request to the key/value actor for the given keys.
     /// </summary>
     /// <param name="transactionId"></param>

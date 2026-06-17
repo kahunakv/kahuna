@@ -327,8 +327,13 @@ internal sealed class RangeSplitter
             // F3: release the direct-write quiesce before releasing the range lock.
             quiesceStore.Release(keySpace, splitKey, descriptor.EndKey);
 
-            // ── 9. Release quiesce lock (fence now protects P' via gen+1) ────────
-            await manager.LocateAndTryReleaseExclusiveRangeLock(
+            // ── 9. Release quiesce lock on the ORIGINAL partition by ID ──────────
+            // After cutover the locator routes [K,E) to P' — using LocateAndTryRelease
+            // would send the release to P' and leave the quiesce lock stranded on P.
+            // Target descriptor.PartitionId directly so the lock is released where it
+            // was acquired, regardless of what the descriptor map says now.
+            await manager.ReleaseExclusiveRangeLockOnPartitionLeaderAsync(
+                descriptor.PartitionId,
                 splitTxId,
                 keySpace,
                 splitKey, true,
