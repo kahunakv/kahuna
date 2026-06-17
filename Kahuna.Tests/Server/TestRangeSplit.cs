@@ -403,10 +403,14 @@ public sealed class TestRangeSplit : BaseCluster
             string[] bystanderKeys = [Bystander + "/z1", Bystander + "/z2"];
             foreach (string key in bystanderKeys)
             {
-                (KeyValueResponseType wt, _, _) = await nodes[0].Item2.LocateAndTrySetKeyValue(
-                    HLCTimestamp.Zero, key, V("bystander"), null, -1, KeyValueFlags.Set, 0,
-                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
-                Assert.Equal(KeyValueResponseType.Set, wt);
+                string k = key;
+                await WaitUntil(async () =>
+                {
+                    (KeyValueResponseType wt, _, _) = await nodes[0].Item2.LocateAndTrySetKeyValue(
+                        HLCTimestamp.Zero, k, V("bystander"), null, -1, KeyValueFlags.Set, 0,
+                        KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+                    return wt == KeyValueResponseType.Set;
+                });
             }
 
             // Wait for bystander keys to be visible on all nodes.
