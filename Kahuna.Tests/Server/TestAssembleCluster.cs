@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 
 namespace Kahuna.Tests.Server;
 
+[Collection("ClusterTests")]
 public sealed class TestAssembleCluster : BaseCluster
 {
     private readonly ILogger<IRaft> raftLogger;

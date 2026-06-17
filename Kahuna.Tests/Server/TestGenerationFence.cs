@@ -14,6 +14,7 @@ namespace Kahuna.Tests.Server;
 /// it with <c>MustRetry</c> if the current descriptor generation no longer matches — the range
 /// moved/split since routing. Hash spaces are unaffected.
 /// </summary>
+[Collection("ClusterTests")]
 public sealed class TestGenerationFence : BaseCluster
 {
     private const string Space = "t:r";
@@ -79,24 +80,12 @@ public sealed class TestGenerationFence : BaseCluster
 
         // Wait for the descriptor to replicate to every node's map.
         foreach ((IRaft _, KahunaManager kahuna) in nodes)
-            await WaitUntil(() => kahuna.RangeMapStore.Current.Find(Space, Space + "/k")?.Generation == SeedGeneration);
+            await WaitUntilAsync(() => kahuna.RangeMapStore.Current.Find(Space, Space + "/k")?.Generation == SeedGeneration);
 
         (IRaft _, KahunaManager dataLeader) = await LeaderOf(DataPartition, nodes);
         return (nodes, dataLeader);
     }
 
-    private static async Task WaitUntil(Func<bool> predicate, int timeoutMs = 5000)
-    {
-        CancellationToken ct = TestContext.Current.CancellationToken;
-        long deadline = Environment.TickCount64 + timeoutMs;
-        while (Environment.TickCount64 < deadline)
-        {
-            if (predicate())
-                return;
-            await Task.Delay(25, ct);
-        }
-        Assert.Fail("Timed out waiting for the range map to converge.");
-    }
 
     private static byte[] V(string s) => Encoding.UTF8.GetBytes(s);
 

@@ -7,6 +7,7 @@ using Microsoft.Extensions.Logging;
 
 namespace Kahuna.Tests.Server;
 
+[Collection("ClusterTests")]
 public class TestKeyValueScriptFuncCalls : BaseCluster
 {
     private readonly ILogger<IRaft> raftLogger;

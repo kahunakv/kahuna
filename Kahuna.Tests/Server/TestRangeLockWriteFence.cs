@@ -16,6 +16,7 @@ namespace Kahuna.Tests.Server;
 /// Convention: prefix "t:rwf"; range lock [t:rwf/10, t:rwf/50); inside key t:rwf/25;
 /// outside key t:rwf/99. Ordinal comparison ensures the string positions are correct.
 /// </summary>
+[Collection("ClusterTests")]
 public sealed class TestRangeLockWriteFence : BaseCluster
 {
     private const string Prefix   = "t:rwf";

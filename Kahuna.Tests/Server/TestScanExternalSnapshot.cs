@@ -11,6 +11,7 @@ namespace Kahuna.Tests.Server;
 /// <summary>
 /// Tests for LocateAndScanRange pinned to an external readTimestamp.
 /// </summary>
+[Collection("ClusterTests")]
 public class TestScanExternalSnapshot : BaseCluster
 {
     private readonly ILogger<IRaft> raftLogger;

@@ -11,6 +11,7 @@ using Microsoft.Extensions.Logging;
 
 namespace Kahuna.Tests.Server;
 
+[Collection("ClusterTests")]
 public class TestLocks : BaseCluster
 {
     private readonly ILogger<IRaft> raftLogger;
@@ -112,7 +113,13 @@ public class TestLocks : BaseCluster
             byte[] ownerB = Encoding.UTF8.GetBytes(GetRandomLockName());
 
             // Test acquiring lock from different nodes
-            (LockResponseType response, long fencingToken) = await kahuna1.LocateAndTryLock(lockName, ownerA, 10000, durability, TestContext.Current.CancellationToken);
+            LockResponseType response = LockResponseType.Errored;
+            long fencingToken = 0;
+            await WaitUntilAsync(async () =>
+            {
+                (response, fencingToken) = await kahuna1.LocateAndTryLock(lockName, ownerA, 10000, durability, TestContext.Current.CancellationToken);
+                return response != LockResponseType.Errored;
+            });
             Assert.Equal(LockResponseType.Locked, response);
             Assert.Equal(0, fencingToken);
 
@@ -131,7 +138,11 @@ public class TestLocks : BaseCluster
             Assert.Equal(LockResponseType.Unlocked, response);
 
             // Verify lock is released by trying to acquire from another node
-            (response, fencingToken) = await kahuna3.LocateAndTryLock(lockName, ownerB, 10000, durability, TestContext.Current.CancellationToken);
+            await WaitUntilAsync(async () =>
+            {
+                (response, fencingToken) = await kahuna3.LocateAndTryLock(lockName, ownerB, 10000, durability, TestContext.Current.CancellationToken);
+                return response != LockResponseType.Errored;
+            });
             Assert.Equal(LockResponseType.Locked, response);
             Assert.Equal(1, fencingToken);
 
@@ -220,7 +231,11 @@ public class TestLocks : BaseCluster
             Assert.Equal(LockResponseType.LockDoesNotExist, response);
 
             // Acquire lock with ownerA
-            (response, fencingToken) = await kahuna1.LocateAndTryLock(lockName, ownerA, 1000, durability, TestContext.Current.CancellationToken);
+            await WaitUntilAsync(async () =>
+            {
+                (response, fencingToken) = await kahuna1.LocateAndTryLock(lockName, ownerA, 1000, durability, TestContext.Current.CancellationToken);
+                return response != LockResponseType.Errored;
+            });
             Assert.Equal(LockResponseType.Locked, response);
             Assert.Equal(0, fencingToken);
 
@@ -336,17 +351,6 @@ public class TestLocks : BaseCluster
         }
     }
 
-    private static async Task RlWaitUntil(Func<bool> predicate, int timeoutMs = 8000)
-    {
-        CancellationToken ct = TestContext.Current.CancellationToken;
-        long deadline = Environment.TickCount64 + timeoutMs;
-        while (Environment.TickCount64 < deadline)
-        {
-            if (predicate()) return;
-            await Task.Delay(25, ct);
-        }
-        Assert.Fail("Timed out waiting for condition.");
-    }
 
     /// <summary>
     /// 4-partition cluster with <see cref="RlSpace"/> seeded with two adjacent descriptors:
@@ -378,7 +382,7 @@ public class TestLocks : BaseCluster
         Assert.True(seeded);
 
         foreach ((IRaft _, KahunaManager kahuna) in nodes)
-            await RlWaitUntil(() => kahuna.RangeMapStore.Current.FindAll(RlSpace).Count == 2);
+            await WaitUntilAsync(() => kahuna.RangeMapStore.Current.FindAll(RlSpace).Count == 2);
 
         return nodes;
     }
@@ -538,7 +542,7 @@ public class TestLocks : BaseCluster
             Assert.True(seeded);
 
             foreach ((IRaft _, KahunaManager kahuna) in nodes)
-                await RlWaitUntil(() => kahuna.RangeMapStore.Current.FindAll(RlSpace).Count == 1);
+                await WaitUntilAsync(() => kahuna.RangeMapStore.Current.FindAll(RlSpace).Count == 1);
 
             KahunaManager node = nodes[0].Item2;
             HLCTimestamp tx1 = nodes[0].Item1.HybridLogicalClock.TrySendOrLocalEvent(nodes[0].Item1.GetLocalNodeId());
@@ -556,7 +560,7 @@ public class TestLocks : BaseCluster
                     Assert.True(split);
 
                     // Wait for the new map to propagate to this node before the fence re-checks.
-                    await RlWaitUntil(() => node.RangeMapStore.Current.FindAll(RlSpace).Count == 2);
+                    await WaitUntilAsync(() => node.RangeMapStore.Current.FindAll(RlSpace).Count == 2);
                 },
                 cancellationToken: ct);
 

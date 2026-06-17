@@ -8,6 +8,7 @@ using System.Text;
 
 namespace Kahuna.Tests.Server;
 
+[Collection("ClusterTests")]
 public class TestDeleteManyKeyValues : BaseCluster
 {
     private readonly ILogger<IRaft> raftLogger;

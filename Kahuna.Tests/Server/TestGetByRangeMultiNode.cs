@@ -13,6 +13,7 @@ namespace Kahuna.Tests.Server;
 /// Verifies that paged range scans forwarded to a remote leader work correctly:
 /// no full-table buffering on either node, snapshot consistency held across pages.
 /// </summary>
+[Collection("ClusterTests")]
 public class TestGetByRangeMultiNode : BaseCluster
 {
     private readonly ILogger<IRaft>    raftLogger;

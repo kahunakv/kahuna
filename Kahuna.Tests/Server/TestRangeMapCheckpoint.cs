@@ -19,6 +19,7 @@ namespace Kahuna.Tests.Server;
 /// election needed, so they run in milliseconds. The leader-only checkpoint path is covered by the
 /// 3-node harness in <see cref="TestRangeMapReplication"/>.
 /// </summary>
+[Collection("ClusterTests")]
 public sealed class TestRangeMapCheckpoint : BaseCluster, IDisposable
 {
     private readonly ILogger<IRaft> raftLogger;

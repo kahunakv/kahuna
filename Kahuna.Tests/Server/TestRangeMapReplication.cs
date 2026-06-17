@@ -20,6 +20,7 @@ namespace Kahuna.Tests.Server;
 /// (<c>OnLogRestored</c>), follower replication + failover (<c>OnReplicationReceived</c>), and the
 /// single-writer serialization of <see cref="RangeMapStore.MutateAsync"/>.
 /// </summary>
+[Collection("ClusterTests")]
 public sealed class TestRangeMapReplication
 {
     private readonly ILogger<IRaft> raftLogger;
@@ -63,8 +64,8 @@ public sealed class TestRangeMapReplication
             Host = "localhost",
             Port = port,
             InitialPartitions = 2, // meta map on P0 (system); partitions 1, 2 = data
-            StartElectionTimeout = 50,
-            EndElectionTimeout = 150,
+            StartElectionTimeout = (int)(50 * TimingScale),
+            EndElectionTimeout = (int)(150 * TimingScale),
             ElectionTimeoutSeed = ElectionTimeoutSeedBase + nodeId, // distinct per node, prevents election livelock
             CompactEveryOperations = 1000,
             CompactNumberEntries = 50
@@ -161,11 +162,18 @@ public sealed class TestRangeMapReplication
         }
     }
 
+    private static readonly double TimingScale = GetTimingScale();
+    private static double GetTimingScale()
+    {
+        string? val = Environment.GetEnvironmentVariable("KAHUNA_TEST_TIMING_SCALE");
+        return val is not null && double.TryParse(val, out double s) && s >= 1.0 ? s : 1.0;
+    }
+
     /// <summary>Polls until <paramref name="predicate"/> holds over <paramref name="node"/>'s current map, or times out.</summary>
     private static async Task WaitUntil(Node node, Func<RangeMap, bool> predicate, int timeoutMs = 5000)
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
-        long deadline = Environment.TickCount64 + timeoutMs;
+        long deadline = Environment.TickCount64 + (long)(timeoutMs * TimingScale);
         while (Environment.TickCount64 < deadline)
         {
             if (predicate(node.Kahuna.RangeMapStore.Current))

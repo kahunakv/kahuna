@@ -10,6 +10,7 @@ namespace Kahuna.Tests.Server;
 /// <summary>
 /// Acceptance tests for HolderTransactionId surfacing on denied lock acquire responses.
 /// </summary>
+[Collection("ClusterTests")]
 public sealed class TestLockHolderTimestamp : BaseCluster
 {
     private const string Prefix    = "t:lht";

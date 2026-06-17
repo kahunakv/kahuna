@@ -14,6 +14,7 @@ namespace Kahuna.Tests.Server;
 /// Acceptance tests for the key-range split transaction.
 /// Each test uses a 4-partition 3-node cluster (meta P1 + data P2/P3/P4).
 /// </summary>
+[Collection("ClusterTests")]
 public sealed class TestRangeSplit : BaseCluster
 {
     private const string Space = "t:s";
@@ -83,29 +84,6 @@ public sealed class TestRangeSplit : BaseCluster
         return SplitOutcome.CutoverFailed;
     }
 
-    private static async Task WaitUntil(Func<bool> predicate, int timeoutMs = 8000)
-    {
-        CancellationToken ct = TestContext.Current.CancellationToken;
-        long deadline = Environment.TickCount64 + timeoutMs;
-        while (Environment.TickCount64 < deadline)
-        {
-            if (predicate()) return;
-            await Task.Delay(25, ct);
-        }
-        Assert.Fail("Timed out waiting for condition.");
-    }
-
-    private static async Task WaitUntil(Func<Task<bool>> predicate, int timeoutMs = 8000)
-    {
-        CancellationToken ct = TestContext.Current.CancellationToken;
-        long deadline = Environment.TickCount64 + timeoutMs;
-        while (Environment.TickCount64 < deadline)
-        {
-            if (await predicate()) return;
-            await Task.Delay(25, ct);
-        }
-        Assert.Fail("Timed out waiting for async condition.");
-    }
 
     private static byte[] V(string s) => Encoding.UTF8.GetBytes(s);
 
@@ -142,7 +120,7 @@ public sealed class TestRangeSplit : BaseCluster
 
         // Wait for the descriptor to reach every node.
         foreach ((IRaft _, KahunaManager kahuna) in nodes)
-            await WaitUntil(() => kahuna.RangeMapStore.Current.Find(Space, Space + "/x")?.Generation == 1);
+            await WaitUntilAsync(() => kahuna.RangeMapStore.Current.Find(Space, Space + "/x")?.Generation == 1);
 
         (IRaft _, KahunaManager dataLeader) = await LeaderOf(RangeMapStore.FirstDataPartitionId, nodes);
         (IRaft _, KahunaManager sysLeader) = await LeaderOf(SystemPartition, nodes);
@@ -163,7 +141,7 @@ public sealed class TestRangeSplit : BaseCluster
             foreach ((IRaft _, KahunaManager kahuna) in nodes)
             {
                 string k = key;
-                await WaitUntil(async () =>
+                await WaitUntilAsync(async () =>
                 {
                     (KeyValueResponseType rt, _) = await kahuna.TryGetValue(
                         HLCTimestamp.Zero, k, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent);
@@ -197,7 +175,7 @@ public sealed class TestRangeSplit : BaseCluster
             Assert.True(outcome.IsSuccess, $"Split failed: {outcome.Status}");
 
             // Wait for the new map to propagate.
-            await WaitUntil(() =>
+            await WaitUntilAsync(() =>
             {
                 RangeMap map = dataLeader.RangeMapStore.Current;
                 return map.Find(Space, Space + "/a") is not null &&
@@ -275,7 +253,7 @@ public sealed class TestRangeSplit : BaseCluster
             Assert.True(outcome.IsSuccess, $"Split failed: {outcome.Status}");
 
             // Wait until the updated map is visible on the data leader.
-            await WaitUntil(() =>
+            await WaitUntilAsync(() =>
                 dataLeader.RangeMapStore.Current.Find(Space, Space + "/p")?.Generation == outcome.NewGeneration);
 
             // A write carrying the PRE-split generation to a right-half key must be fenced.
@@ -356,7 +334,7 @@ public sealed class TestRangeSplit : BaseCluster
                 Space, Space + "/m", nodes, TestContext.Current.CancellationToken);
             Assert.True(first.IsSuccess);
 
-            await WaitUntil(() =>
+            await WaitUntilAsync(() =>
                 metaLeader.RangeMapStore.Current.Find(Space, Space + "/a")?.EndKey == Space + "/m");
 
             // Try splitting the left range [−∞, m) at "/a" — the only key in that half — which
@@ -404,7 +382,7 @@ public sealed class TestRangeSplit : BaseCluster
             foreach (string key in bystanderKeys)
             {
                 string k = key;
-                await WaitUntil(async () =>
+                await WaitUntilAsync(async () =>
                 {
                     (KeyValueResponseType wt, _, _) = await nodes[0].Item2.LocateAndTrySetKeyValue(
                         HLCTimestamp.Zero, k, V("bystander"), null, -1, KeyValueFlags.Set, 0,
@@ -419,7 +397,7 @@ public sealed class TestRangeSplit : BaseCluster
                 foreach ((IRaft _, KahunaManager kahuna) in nodes)
                 {
                     string k = key;
-                    await WaitUntil(async () =>
+                    await WaitUntilAsync(async () =>
                     {
                         (KeyValueResponseType rt, _) = await kahuna.TryGetValue(
                             HLCTimestamp.Zero, k, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent);
@@ -434,7 +412,7 @@ public sealed class TestRangeSplit : BaseCluster
             Assert.True(outcome.IsSuccess, $"Split failed: {outcome.Status}");
 
             // Wait for map to propagate.
-            await WaitUntil(() =>
+            await WaitUntilAsync(() =>
                 metaLeader.RangeMapStore.Current.Find(Space, Space + "/p") is not null);
 
             // keysAbove must be readable from the P' leader.
@@ -495,20 +473,28 @@ public sealed class TestRangeSplit : BaseCluster
             // between when the locator resolved gen=1 and when the Prepare is issued. Re-resolve the
             // current P0 (meta) leader at point-of-use — the leader cached by Setup may have re-elected
             // since (P0 now carries the meta-map writes), which would fail the mutation as non-leader.
-            (IRaft _, KahunaManager currentMetaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
-            Assert.True(await currentMetaLeader.RangeMapStore.MutateAsync(
-                _ => [new RangeDescriptor
-                {
-                    KeySpace = Space,
-                    StartKey = null,
-                    EndKey = null,
-                    PartitionId = RangeMapStore.FirstDataPartitionId,
-                    Generation = BumpedGen
-                }], ct));
+            // Retry: a re-election between LeaderOf and MutateAsync makes the call land on a non-leader.
+            bool mutated = false;
+            long mutateDeadline = Environment.TickCount64 + 15_000;
+            while (!mutated && Environment.TickCount64 < mutateDeadline)
+            {
+                (IRaft _, KahunaManager currentMetaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+                mutated = await currentMetaLeader.RangeMapStore.MutateAsync(
+                    _ => [new RangeDescriptor
+                    {
+                        KeySpace = Space,
+                        StartKey = null,
+                        EndKey = null,
+                        PartitionId = RangeMapStore.FirstDataPartitionId,
+                        Generation = BumpedGen
+                    }], ct);
+                if (!mutated) await Task.Delay(50, ct);
+            }
+            Assert.True(mutated);
 
             // Wait for the bumped descriptor to propagate everywhere before we touch the actors.
             foreach ((IRaft _, KahunaManager kahuna) in nodes)
-                await WaitUntil(() =>
+                await WaitUntilAsync(() =>
                     kahuna.RangeMapStore.Current.Find(Space, key)?.Generation == BumpedGen);
 
             // Find the current P2 leader — this node will own all three actor-local 2PC steps.
@@ -595,7 +581,7 @@ public sealed class TestRangeSplit : BaseCluster
             Assert.True(outcome.IsSuccess, $"Split failed: {outcome.Status}");
 
             // Wait for the new range map to propagate before testing lock state.
-            await WaitUntil(() =>
+            await WaitUntilAsync(() =>
             {
                 RangeMap map = nodes[0].Item2.RangeMapStore.Current;
                 return map.Find(Space, Space + "/a") is not null &&

@@ -16,6 +16,7 @@ namespace Kahuna.Tests.Server;
 /// cursor-paged GetByRange calls. Tests cover single-node, multi-node, snapshot isolation,
 /// cancellation, and the retry-resumes-from-cursor guarantee.
 /// </summary>
+[Collection("ClusterTests")]
 public class TestLocateAndScanRange : BaseCluster
 {
     private readonly ILogger<IRaft>   raftLogger;
@@ -374,29 +375,6 @@ public class TestLocateAndScanRange : BaseCluster
         }
     }
 
-    private static async Task WaitUntilScan(Func<bool> predicate, int timeoutMs = 10000)
-    {
-        CancellationToken ct = TestContext.Current.CancellationToken;
-        long deadline = Environment.TickCount64 + timeoutMs;
-        while (Environment.TickCount64 < deadline)
-        {
-            if (predicate()) return;
-            await Task.Delay(25, ct);
-        }
-        Assert.Fail("Timed out waiting for condition.");
-    }
-
-    private static async Task WaitUntilScanAsync(Func<Task<bool>> predicate, int timeoutMs = 10000)
-    {
-        CancellationToken ct = TestContext.Current.CancellationToken;
-        long deadline = Environment.TickCount64 + timeoutMs;
-        while (Environment.TickCount64 < deadline)
-        {
-            if (await predicate()) return;
-            await Task.Delay(25, ct);
-        }
-        Assert.Fail("Timed out waiting for async condition.");
-    }
 
     /// <summary>
     /// Scan_SpanningMultipleRanges_ReturnsFullOrderedResult
@@ -438,7 +416,7 @@ public class TestLocateAndScanRange : BaseCluster
 
             // Wait for descriptor to reach all nodes.
             foreach ((IRaft _, KahunaManager kahuna) in nodes)
-                await WaitUntilScan(
+                await WaitUntilAsync(
                     () => kahuna.RangeMapStore.Current.Find(SplitSpace, SplitSpace + "/x") is not null);
 
             // Seed 20 keys: /0000 … /0019.
@@ -460,7 +438,7 @@ public class TestLocateAndScanRange : BaseCluster
             {
                 string key = $"{SplitSpace}/{i:D4}";
                 foreach ((IRaft _, KahunaManager kahuna) in nodes)
-                    await WaitUntilScanAsync(async () =>
+                    await WaitUntilAsync(async () =>
                     {
                         (KeyValueResponseType rt, _) =
                             await kahuna.TryGetValue(HLCTimestamp.Zero, key, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent);
@@ -486,7 +464,7 @@ public class TestLocateAndScanRange : BaseCluster
 
             // Wait for the two-descriptor map to reach all nodes.
             foreach ((IRaft _, KahunaManager kahuna) in nodes)
-                await WaitUntilScan(() =>
+                await WaitUntilAsync(() =>
                 {
                     RangeMap m = kahuna.RangeMapStore.Current;
                     return m.Find(SplitSpace, SplitSpace + "/0005") is not null &&
@@ -559,7 +537,7 @@ public class TestLocateAndScanRange : BaseCluster
             Assert.True(committed);
 
             foreach ((IRaft _, KahunaManager kahuna) in nodes)
-                await WaitUntilScan(
+                await WaitUntilAsync(
                     () => kahuna.RangeMapStore.Current.Find(space, space + "/x") is not null);
 
             (IRaft _, KahunaManager dataLeader) =
@@ -578,7 +556,7 @@ public class TestLocateAndScanRange : BaseCluster
             {
                 string key = $"{space}/{i:D4}";
                 foreach ((IRaft _, KahunaManager kahuna) in nodes)
-                    await WaitUntilScanAsync(async () =>
+                    await WaitUntilAsync(async () =>
                     {
                         (KeyValueResponseType rt, _) =
                             await kahuna.TryGetValue(HLCTimestamp.Zero, key, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent);
@@ -609,7 +587,7 @@ public class TestLocateAndScanRange : BaseCluster
             Assert.True(outcome.IsSuccess, $"Split failed: {outcome.Status}");
 
             foreach ((IRaft _, KahunaManager kahuna) in nodes)
-                await WaitUntilScan(() =>
+                await WaitUntilAsync(() =>
                 {
                     RangeMap m = kahuna.RangeMapStore.Current;
                     return m.Find(space, space + "/0005") is not null &&
@@ -677,7 +655,7 @@ public class TestLocateAndScanRange : BaseCluster
             Assert.True(committed);
 
             foreach ((IRaft _, KahunaManager kahuna) in nodes)
-                await WaitUntilScan(
+                await WaitUntilAsync(
                     () => kahuna.RangeMapStore.Current.Find(space, space + "/x") is not null);
 
             (IRaft _, KahunaManager dataLeader) =
@@ -696,7 +674,7 @@ public class TestLocateAndScanRange : BaseCluster
             {
                 string key = $"{space}/{i:D4}";
                 foreach ((IRaft _, KahunaManager kahuna) in nodes)
-                    await WaitUntilScanAsync(async () =>
+                    await WaitUntilAsync(async () =>
                     {
                         (KeyValueResponseType rt, _) =
                             await kahuna.TryGetValue(HLCTimestamp.Zero, key, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent);
@@ -741,7 +719,7 @@ public class TestLocateAndScanRange : BaseCluster
 
             // Wait for the two-descriptor map on all nodes.
             foreach ((IRaft _, KahunaManager kahuna) in nodes)
-                await WaitUntilScan(() =>
+                await WaitUntilAsync(() =>
                 {
                     RangeMap m = kahuna.RangeMapStore.Current;
                     return m.Find(space, space + "/0005") is not null &&

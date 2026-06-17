@@ -33,8 +33,8 @@ public abstract class BaseCluster
             Host = "localhost",
             Port = 8001,
             InitialPartitions = partitions,
-            StartElectionTimeout = 50,
-            EndElectionTimeout = 150,
+            StartElectionTimeout = (int)(50 * TimingScale),
+            EndElectionTimeout = (int)(150 * TimingScale),
             // Deterministic election timers (Kommander 0.10.16): each node uses a DISTINCT seed so
             // their per-partition timeouts differ (a shared seed yields identical timers → split-vote
             // deadlock). Fixed seeds make elections reproducible — no run-to-run split-vote retries,
@@ -90,8 +90,8 @@ public abstract class BaseCluster
             Host = "localhost",
             Port = 8002,
             InitialPartitions = partitions,
-            StartElectionTimeout = 50,
-            EndElectionTimeout = 150,
+            StartElectionTimeout = (int)(50 * TimingScale),
+            EndElectionTimeout = (int)(150 * TimingScale),
             ElectionTimeoutSeed = ElectionTimeoutSeedBase + 2, // distinct per node (see GetNode1)
             CompactEveryOperations = 1000,
             CompactNumberEntries = 50
@@ -143,8 +143,8 @@ public abstract class BaseCluster
             Host = "localhost",
             Port = 8003,
             InitialPartitions = partitions,
-            StartElectionTimeout = 50,
-            EndElectionTimeout = 150,
+            StartElectionTimeout = (int)(50 * TimingScale),
+            EndElectionTimeout = (int)(150 * TimingScale),
             ElectionTimeoutSeed = ElectionTimeoutSeedBase + 3, // distinct per node (see GetNode1)
             CompactEveryOperations = 1000,
             CompactNumberEntries = 50
@@ -245,7 +245,7 @@ public abstract class BaseCluster
 
         using CancellationTokenSource assemblyCts = CancellationTokenSource.CreateLinkedTokenSource(
             TestContext.Current.CancellationToken);
-        assemblyCts.CancelAfter(TimeSpan.FromSeconds(90));
+        assemblyCts.CancelAfter(TimeSpan.FromSeconds(90 * TimingScale));
 
         for (int i = 0; i <= partitions; i++)
         {
@@ -273,9 +273,49 @@ public abstract class BaseCluster
         for (int attempt = 1; attempt < maxAttempts; attempt++)
         {
             try { await body(); return; }
-            catch { /* swallow — next attempt */ }
+            catch (OperationCanceledException) { throw; }  // test cancellation must propagate
+            catch (Xunit.Sdk.XunitException) { throw; }   // assertion failures are not transient
+            catch { /* swallow transient cluster errors — next attempt */ }
         }
-        await body(); // final attempt: let exceptions propagate
+        await body(); // final attempt: let all exceptions propagate
+    }
+
+    private static readonly double TimingScale = GetTimingScale();
+    private static double GetTimingScale()
+    {
+        string? val = Environment.GetEnvironmentVariable("KAHUNA_TEST_TIMING_SCALE");
+        return val is not null && double.TryParse(val, out double s) && s >= 1.0 ? s : 1.0;
+    }
+
+    /// <summary>
+    /// Polls <paramref name="predicate"/> every 50 ms until it returns true or the deadline
+    /// (scaled by <c>KAHUNA_TEST_TIMING_SCALE</c>) is reached; throws <see cref="TimeoutException"/> on expiry.
+    /// </summary>
+    protected static async Task WaitUntilAsync(Func<bool> predicate, int timeoutMs = 10_000)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        long deadline = Environment.TickCount64 + (long)(timeoutMs * TimingScale);
+        while (Environment.TickCount64 < deadline)
+        {
+            if (predicate()) return;
+            await Task.Delay(50, ct);
+        }
+        throw new TimeoutException($"Timed out after {timeoutMs * TimingScale} ms waiting for condition.");
+    }
+
+    /// <summary>
+    /// Async-predicate overload of <see cref="WaitUntilAsync(Func{bool}, int)"/>.
+    /// </summary>
+    protected static async Task WaitUntilAsync(Func<Task<bool>> predicate, int timeoutMs = 10_000)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        long deadline = Environment.TickCount64 + (long)(timeoutMs * TimingScale);
+        while (Environment.TickCount64 < deadline)
+        {
+            if (await predicate()) return;
+            await Task.Delay(50, ct);
+        }
+        throw new TimeoutException($"Timed out after {timeoutMs * TimingScale} ms waiting for condition.");
     }
 
     protected static async Task LeaveCluster(IRaft raft1, IRaft raft2, IRaft raft3)

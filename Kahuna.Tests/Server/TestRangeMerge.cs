@@ -15,6 +15,7 @@ namespace Kahuna.Tests.Server;
 /// Acceptance tests for the key-range merge transaction.
 /// Each test uses a 4-partition 3-node cluster (meta P1 + data P2 + data P3).
 /// </summary>
+[Collection("ClusterTests")]
 public sealed class TestRangeMerge : BaseCluster
 {
     private const string Space = "t:m";
@@ -48,17 +49,6 @@ public sealed class TestRangeMerge : BaseCluster
         }
     }
 
-    private static async Task WaitFor(Func<bool> predicate, int timeoutMs = 10_000)
-    {
-        CancellationToken ct = TestContext.Current.CancellationToken;
-        long deadline = Environment.TickCount64 + timeoutMs;
-        while (Environment.TickCount64 < deadline)
-        {
-            if (predicate()) return;
-            await Task.Delay(25, ct);
-        }
-        Assert.Fail("Timed out waiting for condition.");
-    }
 
     /// <summary>
     /// Forces <paramref name="target"/> to become leader of the system/meta partition (P0), then
@@ -123,7 +113,7 @@ public sealed class TestRangeMerge : BaseCluster
 
         // Wait for the descriptor map to propagate to all nodes.
         foreach ((IRaft _, KahunaManager kahuna) in nodes)
-            await WaitFor(() =>
+            await WaitUntilAsync(() =>
             {
                 IReadOnlyList<RangeDescriptor> all = kahuna.RangeMapStore.Current.FindAll(Space);
                 return all.Count == 2;
@@ -367,7 +357,7 @@ public sealed class TestRangeMerge : BaseCluster
 
             // Wait for the descriptor map to converge on all nodes.
             (IRaft _, KahunaManager metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
-            await WaitFor(() => metaLeader.RangeMapStore.Current.FindAll(Space).Count == 1);
+            await WaitUntilAsync(() => metaLeader.RangeMapStore.Current.FindAll(Space).Count == 1);
 
             foreach ((IRaft _, KahunaManager kahuna) in nodes)
             {
@@ -426,7 +416,7 @@ public sealed class TestRangeMerge : BaseCluster
             Assert.True(removeResult.Success);
 
             // The descriptor map must reflect the merge: one descriptor, covering the full range.
-            await WaitFor(() => dualLeader.RangeMapStore.Current.FindAll(Space).Count == 1);
+            await WaitUntilAsync(() => dualLeader.RangeMapStore.Current.FindAll(Space).Count == 1);
             Assert.Single(dualLeader.RangeMapStore.Current.FindAll(Space));
         }
         finally
@@ -464,7 +454,7 @@ public sealed class TestRangeMerge : BaseCluster
             MergeOutcome outcome = await MergeViaLeaders(Space, left, right, nodes, ct);
             Assert.True(outcome.IsSuccess);
 
-            await WaitFor(() => metaLeader.RangeMapStore.Current.FindAll(Space).Count == 1);
+            await WaitUntilAsync(() => metaLeader.RangeMapStore.Current.FindAll(Space).Count == 1);
 
             // Post-merge invariant: no gap, no overlap, full coverage.
             foreach ((IRaft _, KahunaManager kahuna) in nodes)
@@ -524,7 +514,7 @@ public sealed class TestRangeMerge : BaseCluster
             Assert.True(committed);
 
             foreach ((IRaft _, KahunaManager kahuna) in nodes)
-                await WaitFor(() => kahuna.RangeMapStore.Current.FindAll(spaceABC).Count == 3);
+                await WaitUntilAsync(() => kahuna.RangeMapStore.Current.FindAll(spaceABC).Count == 3);
 
             // All three ranges are empty (0 keys < any minMergeSize threshold).
             // FindMergeCandidatesAsync must return exactly ONE non-overlapping pair: (A,B).
@@ -584,7 +574,7 @@ public sealed class TestRangeMerge : BaseCluster
             int merges = await dualLeader.TriggerAutoMergeAsync(minSize, ct);
             Assert.Equal(1, merges);
 
-            await WaitFor(() => dualLeader.RangeMapStore.Current.FindAll(Space).Count == 1);
+            await WaitUntilAsync(() => dualLeader.RangeMapStore.Current.FindAll(Space).Count == 1);
 
             IReadOnlyList<RangeDescriptor> descriptors = dualLeader.RangeMapStore.Current.FindAll(Space);
             Assert.Single(descriptors);

@@ -12,6 +12,7 @@ namespace Kahuna.Tests.Server;
 /// proposal actor, that schema-log spaces stay hash-routed, and that the registry guard prevents
 /// accidental KeyRange registration of schema-log key spaces.
 /// </summary>
+[Collection("ClusterTests")]
 public sealed class TestKeySpaceRouting : BaseCluster
 {
     private readonly ILogger<IRaft> raftLogger;
@@ -39,17 +40,6 @@ public sealed class TestKeySpaceRouting : BaseCluster
         }
     }
 
-    private static async Task WaitUntil(Func<bool> predicate, int timeoutMs = 8000)
-    {
-        CancellationToken ct = TestContext.Current.CancellationToken;
-        long deadline = Environment.TickCount64 + timeoutMs;
-        while (Environment.TickCount64 < deadline)
-        {
-            if (predicate()) return;
-            await Task.Delay(25, ct);
-        }
-        Assert.Fail("Timed out waiting for condition.");
-    }
 
     // ── Registry_RejectsRangingSchemaLog ─────────────────────────────────────────
 
@@ -151,7 +141,7 @@ public sealed class TestKeySpaceRouting : BaseCluster
 
             // Wait for the descriptor to reach every node.
             foreach ((IRaft _, KahunaManager kahuna) in nodes)
-                await WaitUntil(() =>
+                await WaitUntilAsync(() =>
                     kahuna.RangeMapStore.Current.Find(Space, Key)?.Generation == SeedGen);
 
             // Verify LocateRange returns the descriptor's (partitionId, generation).

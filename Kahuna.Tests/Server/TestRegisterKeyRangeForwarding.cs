@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 
 namespace Kahuna.Tests.Server;
 
+[Collection("ClusterTests")]
 public class TestRegisterKeyRangeForwarding : BaseCluster
 {
     private readonly ILogger<IRaft> raftLogger;
@@ -41,9 +42,9 @@ public class TestRegisterKeyRangeForwarding : BaseCluster
             bool seeded = await followerKahuna.RegisterKeyRangeAsync(keySpace, TestContext.Current.CancellationToken);
 
             // The descriptor must appear on every node within a short window (replication).
-            await WaitForDescriptor(km1, keySpace);
-            await WaitForDescriptor(km2, keySpace);
-            await WaitForDescriptor(km3, keySpace);
+            await WaitUntilAsync(() => km1.RangeMapStore.Current.FindAll(keySpace).Count > 0);
+            await WaitUntilAsync(() => km2.RangeMapStore.Current.FindAll(keySpace).Count > 0);
+            await WaitUntilAsync(() => km3.RangeMapStore.Current.FindAll(keySpace).Count > 0);
 
             Assert.True(km1.RangeMapStore.Current.FindAll(keySpace).Count > 0, "node1 has descriptor");
             Assert.True(km2.RangeMapStore.Current.FindAll(keySpace).Count > 0, "node2 has descriptor");
@@ -77,10 +78,5 @@ public class TestRegisterKeyRangeForwarding : BaseCluster
         return n3;
     }
 
-    private static async Task WaitForDescriptor(KahunaManager km, string keySpace)
-    {
-        long deadline = Environment.TickCount64 + 10_000;
-        while (Environment.TickCount64 < deadline && km.RangeMapStore.Current.FindAll(keySpace).Count == 0)
-            await Task.Delay(25, TestContext.Current.CancellationToken);
-    }
+
 }

@@ -13,6 +13,7 @@ jobs:
       KAHUNA_SERVER_DEFAULT_LOG_LEVEL: Warning
       KAHUNA_SERVER_LOG_LEVEL: Error
       KAHUNA_TEST_LOG_LEVEL: Error
+      KAHUNA_TEST_TIMING_SCALE: "3"
     steps:
       - name: Check out repository code
         uses: actions/checkout@v5

@@ -21,6 +21,7 @@ namespace Kahuna.Tests.Server;
 /// exercising the trigger.
 /// </para>
 /// </summary>
+[Collection("ClusterTests")]
 public sealed class TestAutoMerge : BaseCluster
 {
     private readonly ILogger<IRaft>   raftLogger;
@@ -49,17 +50,6 @@ public sealed class TestAutoMerge : BaseCluster
         }
     }
 
-    private static async Task WaitFor(Func<bool> predicate, int timeoutMs = 10_000)
-    {
-        CancellationToken ct = TestContext.Current.CancellationToken;
-        long deadline = Environment.TickCount64 + timeoutMs;
-        while (Environment.TickCount64 < deadline)
-        {
-            if (predicate()) return;
-            await Task.Delay(25, ct);
-        }
-        Assert.Fail("Timed out waiting for condition.");
-    }
 
     /// <summary>
     /// Forces <paramref name="target"/> to become leader of the system/meta partition (P0), then
@@ -131,7 +121,7 @@ public sealed class TestAutoMerge : BaseCluster
         Assert.True(committed);
 
         foreach ((IRaft _, KahunaManager kahuna) in nodes)
-            await WaitFor(() => kahuna.RangeMapStore.Current.FindAll(space).Count == 2);
+            await WaitUntilAsync(() => kahuna.RangeMapStore.Current.FindAll(space).Count == 2);
 
         (IRaft _, KahunaManager leftLeader) =
             await LeaderOf(RangeMapStore.FirstDataPartitionId, nodes);
@@ -213,7 +203,7 @@ public sealed class TestAutoMerge : BaseCluster
             Assert.Equal(1, merges);
 
             // The map must collapse to a single full-range descriptor.
-            await WaitFor(() => dualLeader.RangeMapStore.Current.FindAll(space).Count == 1);
+            await WaitUntilAsync(() => dualLeader.RangeMapStore.Current.FindAll(space).Count == 1);
 
             IReadOnlyList<RangeDescriptor> descriptors = dualLeader.RangeMapStore.Current.FindAll(space);
             Assert.Single(descriptors);

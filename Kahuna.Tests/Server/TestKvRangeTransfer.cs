@@ -15,6 +15,7 @@ namespace Kahuna.Tests.Server;
 /// byte buffer and the source disposed before the target starts, because two embedded nodes share
 /// static witness state and cannot run concurrently.
 /// </summary>
+[Collection("ClusterTests")]
 public sealed class TestKvRangeTransfer
 {
     private readonly ILoggerFactory loggerFactory;

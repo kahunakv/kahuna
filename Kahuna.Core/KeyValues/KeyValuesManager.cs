@@ -2,6 +2,8 @@
 using Nixie;
 using Nixie.Routers;
 
+using Polly.Contrib.WaitAndRetry;
+
 using Kommander;
 using Kommander.Data;
 using Kommander.Time;
@@ -1114,7 +1116,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            for (int i = 0; i < MaxRetries; i++)
+            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
             {
                 KeyValueResponse? response;
 
@@ -1125,16 +1127,16 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response is null)
                     return (KeyValueResponseType.Errored, -1, HLCTimestamp.Zero);
-                
+
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
-                    await Task.Delay(1);
+                    await Task.Delay(delay);
                     continue;
                 }
 
                 return (response.Type, response.Revision, response.Ticket);
             }
-            
+
             return (KeyValueResponseType.MustRetry, -1, HLCTimestamp.Zero);
         }
         finally
@@ -1234,7 +1236,7 @@ internal sealed class KeyValuesManager : IDisposable
 
             try
             {
-                for (int i = 0; i < MaxRetries; i++)
+                foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
                 {
                     KeyValueResponse? response;
 
@@ -1259,7 +1261,7 @@ internal sealed class KeyValuesManager : IDisposable
 
                     if (response.Type == KeyValueResponseType.WaitingForReplication)
                     {
-                        await Task.Delay(1);
+                        await Task.Delay(delay);
                         continue;
                     }
 
@@ -1327,7 +1329,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            for (int i = 0; i < MaxRetries; i++)
+            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
             {
                 KeyValueResponse? response;
 
@@ -1338,10 +1340,10 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response is null)
                     return (KeyValueResponseType.Errored, -1, HLCTimestamp.Zero);
-                
+
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
-                    await Task.Delay(1);
+                    await Task.Delay(delay);
                     continue;
                 }
 
@@ -1388,10 +1390,10 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            for (int i = 0; i < MaxRetries; i++)
+            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
             {
                 KeyValueResponse? response;
-                
+
                 if (durability == KeyValueDurability.Ephemeral)
                     response = await ephemeralKeyValuesRouter.Ask(request);
                 else
@@ -1399,16 +1401,16 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response is null)
                     return (KeyValueResponseType.Errored, -1, HLCTimestamp.Zero);
-                
+
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
-                    await Task.Delay(1);
+                    await Task.Delay(delay);
                     continue;
                 }
 
                 return (response.Type, response.Revision, response.Ticket);
             }
-            
+
             return (KeyValueResponseType.MustRetry, -1, HLCTimestamp.Zero);
         }
         finally
@@ -1693,10 +1695,10 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            for (int i = 0; i < MaxRetries; i++)
+            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
             {
                 KeyValueResponse? response;
-                
+
                 if (durability == KeyValueDurability.Ephemeral)
                     response = await ephemeralKeyValuesRouter.Ask(request);
                 else
@@ -1707,7 +1709,7 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
-                    await Task.Delay(1);
+                    await Task.Delay(delay);
                     continue;
                 }
 
@@ -1756,7 +1758,7 @@ internal sealed class KeyValuesManager : IDisposable
         
         try
         {
-            for (int i = 0; i < MaxRetries; i++)
+            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
             {
                 KeyValueResponse? response;
 
@@ -1770,7 +1772,7 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
-                    await Task.Delay(1);
+                    await Task.Delay(delay);
                     continue;
                 }
 
@@ -1784,7 +1786,7 @@ internal sealed class KeyValuesManager : IDisposable
             KeyValueRequestPool.Return(request);
         }
     }
-    
+
     /// <summary>
     /// Passes a TryAcquireExclusiveLock request to the key/value actor for the given keys.
     /// </summary>
@@ -1874,7 +1876,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            for (int i = 0; i < MaxRetries; i++)
+            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
             {
                 KeyValueResponse? response;
 
@@ -1888,13 +1890,13 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
-                    await Task.Delay(1);
+                    await Task.Delay(delay);
                     continue;
                 }
 
                 return (response.Type, key);
             }
-            
+
             return (KeyValueResponseType.MustRetry, key);
         }
         finally
@@ -1902,7 +1904,7 @@ internal sealed class KeyValuesManager : IDisposable
             KeyValueRequestPool.Return(request);
         }
     }
-    
+
     /// <summary>
     /// Passes a TryReleaseExclusivePrefixLock request to the key/value actor to lock a range of keys by the specified prefix
     /// </summary>
@@ -1931,7 +1933,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            for (int i = 0; i < MaxRetries; i++)
+            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
             {
                 KeyValueResponse? response;
 
@@ -1945,13 +1947,13 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
-                    await Task.Delay(1);
+                    await Task.Delay(delay);
                     continue;
                 }
 
                 return response.Type;
             }
-            
+
             return KeyValueResponseType.MustRetry;
         }
         finally
@@ -1959,7 +1961,7 @@ internal sealed class KeyValuesManager : IDisposable
             KeyValueRequestPool.Return(request);
         }
     }
-    
+
     public Task<(KeyValueResponseType, HLCTimestamp HolderTransactionId)> TryAcquireExclusiveRangeLock(
         HLCTimestamp transactionId,
         string prefix,
@@ -2004,7 +2006,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            for (int i = 0; i < MaxRetries; i++)
+            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
             {
                 KeyValueResponse? response;
 
@@ -2018,7 +2020,7 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
-                    await Task.Delay(1);
+                    await Task.Delay(delay);
                     continue;
                 }
 
@@ -2065,7 +2067,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            for (int i = 0; i < MaxRetries; i++)
+            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
             {
                 KeyValueResponse? response;
 
@@ -2079,7 +2081,7 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
-                    await Task.Delay(1);
+                    await Task.Delay(delay);
                     continue;
                 }
 
@@ -2334,7 +2336,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            for (int i = 0; i < MaxRetries; i++)
+            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
             {
                 KeyValueResponse? response;
 
@@ -2348,13 +2350,13 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
-                    await Task.Delay(1);
+                    await Task.Delay(delay);
                     continue;
                 }
 
                 return (response.Type, response.Ticket, key, durability);
             }
-            
+
             return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero, key, durability);
         }
         finally
@@ -2362,7 +2364,7 @@ internal sealed class KeyValuesManager : IDisposable
             KeyValueRequestPool.Return(request);
         }
     }
-    
+
     /// <summary>
     /// Passes many TryPrepare requests to the key/value actor for the given keys.
     /// </summary>
@@ -2461,7 +2463,7 @@ internal sealed class KeyValuesManager : IDisposable
         
         try
         {
-            for (int i = 0; i < MaxRetries; i++)
+            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
             {
                 KeyValueResponse? response;
 
@@ -2475,13 +2477,13 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
-                    await Task.Delay(1);
+                    await Task.Delay(delay);
                     continue;
                 }
 
                 return (response.Type, response.Revision);
             }
-            
+
             return (KeyValueResponseType.Errored, -1);
         }
         finally
@@ -2489,7 +2491,7 @@ internal sealed class KeyValuesManager : IDisposable
             KeyValueRequestPool.Return(request);
         }
     }
-    
+
     /// <summary>
     /// Passes many TryCommit requests to the key/value actor for the given keyValue name.
     /// </summary>
@@ -2877,7 +2879,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            for (int i = 0; i < MaxRetries; i++)
+            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
             {
                 KeyValueResponse? response;
 
@@ -2891,7 +2893,7 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
-                    await Task.Delay(1);
+                    await Task.Delay(delay);
                     continue;
                 }
 

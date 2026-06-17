@@ -20,6 +20,7 @@ namespace Kahuna.Tests.Server;
 /// Tests requiring RPC-level instrumentation (Bucket_QueriesOnlySpannedPartitions,
 /// Bucket_SplitMidScan_RetriesOnlyAffectedRange) are deferred until a mock transport is available.
 /// </summary>
+[Collection("ClusterTests")]
 public sealed class TestGetByBucketMultiRange : BaseCluster
 {
     private readonly ILogger<IRaft>   raftLogger;
@@ -48,29 +49,6 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
         }
     }
 
-    private static async Task WaitFor(Func<bool> predicate, int timeoutMs = 10000)
-    {
-        CancellationToken ct = TestContext.Current.CancellationToken;
-        long deadline = Environment.TickCount64 + timeoutMs;
-        while (Environment.TickCount64 < deadline)
-        {
-            if (predicate()) return;
-            await Task.Delay(25, ct);
-        }
-        Assert.Fail("Timed out waiting for condition.");
-    }
-
-    private static async Task WaitForAsync(Func<Task<bool>> predicate, int timeoutMs = 10000)
-    {
-        CancellationToken ct = TestContext.Current.CancellationToken;
-        long deadline = Environment.TickCount64 + timeoutMs;
-        while (Environment.TickCount64 < deadline)
-        {
-            if (await predicate()) return;
-            await Task.Delay(25, ct);
-        }
-        Assert.Fail("Timed out waiting for async condition.");
-    }
 
     /// <summary>
     /// Assembles a 4-partition 3-node cluster, registers <paramref name="space"/> as KeyRange,
@@ -105,7 +83,7 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
         Assert.True(committed);
 
         foreach ((IRaft _, KahunaManager kahuna) in nodes)
-            await WaitFor(() => kahuna.RangeMapStore.Current.Find(space, space + "/x") is not null);
+            await WaitUntilAsync(() => kahuna.RangeMapStore.Current.Find(space, space + "/x") is not null);
 
         (IRaft _, KahunaManager dataLeader) =
             await LeaderOf(RangeMapStore.FirstDataPartitionId, nodes);
@@ -128,7 +106,7 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
         {
             string k = key;
             foreach ((IRaft _, KahunaManager kahuna) in nodes)
-                await WaitForAsync(async () =>
+                await WaitUntilAsync(async () =>
                 {
                     (KeyValueResponseType rt, _) =
                         await kahuna.TryGetValue(HLCTimestamp.Zero, k, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent);
@@ -185,7 +163,7 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
 
             // Wait for two-descriptor map on all nodes.
             foreach ((IRaft _, KahunaManager kahuna) in nodes)
-                await WaitFor(() =>
+                await WaitUntilAsync(() =>
                 {
                     RangeMap m = kahuna.RangeMapStore.Current;
                     return m.Find(space, space + "/0005") is not null &&
@@ -323,7 +301,7 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
                 }], ct));
 
             foreach ((IRaft _, KahunaManager kahuna) in nodes)
-                await WaitFor(() => kahuna.RangeMapStore.Current.Find(space, space + "/x") is not null);
+                await WaitUntilAsync(() => kahuna.RangeMapStore.Current.Find(space, space + "/x") is not null);
 
             (IRaft _, KahunaManager dataLeader) = await LeaderOf(RangeMapStore.FirstDataPartitionId, nodes);
 
@@ -342,7 +320,7 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
             // Wait for all writes to be visible on every node before probing HalfHasKeysAsync.
             foreach (string k in keys)
                 foreach ((IRaft _, KahunaManager kahuna) in nodes)
-                    await WaitForAsync(async () =>
+                    await WaitUntilAsync(async () =>
                     {
                         (KeyValueResponseType rt, _) =
                             await kahuna.TryGetValue(HLCTimestamp.Zero, k, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent);
@@ -355,7 +333,7 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
 
             // Wait for 2-descriptor map on all nodes.
             foreach ((IRaft _, KahunaManager kahuna) in nodes)
-                await WaitFor(() =>
+                await WaitUntilAsync(() =>
                 {
                     RangeMap m = kahuna.RangeMapStore.Current;
                     return m.Find(space, space + "/0005") is not null &&
@@ -456,7 +434,7 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
             Assert.True(first.IsSuccess, $"First split failed: {first.Status}");
 
             foreach ((IRaft _, KahunaManager kahuna) in nodes)
-                await WaitFor(() =>
+                await WaitUntilAsync(() =>
                 {
                     RangeMap m = kahuna.RangeMapStore.Current;
                     return m.Find(space, space + "/0005") is not null &&

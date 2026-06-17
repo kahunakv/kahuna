@@ -18,6 +18,7 @@ namespace Kahuna.Tests.Server;
 /// LocateAndScanRange) backs off until the intent resolves or expires —
 /// the wait is transparent to callers.
 /// </summary>
+[Collection("ClusterTests")]
 public sealed class TestSnapshotSafeTime : BaseCluster
 {
     private readonly ILogger<IRaft>   raftLogger;
@@ -341,7 +342,7 @@ public sealed class TestSnapshotSafeTime : BaseCluster
             string val1 = snap1?.Value != null ? Encoding.UTF8.GetString(snap1.Value) : "";
             if (r1 != KeyValueResponseType.Get || val1 != "after")
             {
-                await WaitUntilSnapshot(async () =>
+                await WaitUntilAsync(async () =>
                 {
                     (r1, snap1) = await kahuna2.LocateAndTryGetValue(
                         HLCTimestamp.Zero, key1, -1, T, KeyValueDurability.Persistent, ct);
@@ -354,7 +355,7 @@ public sealed class TestSnapshotSafeTime : BaseCluster
             string val2 = snap2?.Value != null ? Encoding.UTF8.GetString(snap2.Value) : "";
             if (r2 != KeyValueResponseType.Get || val2 != "after")
             {
-                await WaitUntilSnapshot(async () =>
+                await WaitUntilAsync(async () =>
                 {
                     (r2, snap2) = await kahuna3.LocateAndTryGetValue(
                         HLCTimestamp.Zero, key2, -1, T, KeyValueDurability.Persistent, ct);
@@ -378,14 +379,4 @@ public sealed class TestSnapshotSafeTime : BaseCluster
         }
     }
 
-    private static async Task WaitUntilSnapshot(Func<Task<bool>> predicate, int timeoutMs = 10000)
-    {
-        using CancellationTokenSource cts = new(timeoutMs);
-        while (!cts.IsCancellationRequested)
-        {
-            if (await predicate()) return;
-            await Task.Delay(50).ConfigureAwait(false);
-        }
-        throw new TimeoutException("WaitUntilSnapshot timed out after " + timeoutMs + " ms");
-    }
 }
