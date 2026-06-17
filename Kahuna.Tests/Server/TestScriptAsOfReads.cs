@@ -564,9 +564,16 @@ public class TestScriptAsOfReads : BaseCluster
             byte[] valB = "after"u8.ToArray();
 
             // Commit valA to establish a base committed revision.
-            (KeyValueResponseType setA, _, _) = await kahuna1.LocateAndTrySetKeyValue(
-                HLCTimestamp.Zero, key, valA, null, -1, KeyValueFlags.Set, 0,
-                KeyValueDurability.Persistent, ct);
+            // Retry on Errored: on a loaded CI machine Raft replication can transiently fail
+            // on the first attempt immediately after cluster assembly.
+            KeyValueResponseType setA = KeyValueResponseType.Errored;
+            await WaitUntilScriptSetup(async () =>
+            {
+                (setA, _, _) = await kahuna1.LocateAndTrySetKeyValue(
+                    HLCTimestamp.Zero, key, valA, null, -1, KeyValueFlags.Set, 0,
+                    KeyValueDurability.Persistent, ct);
+                return setA == KeyValueResponseType.Set;
+            });
             Assert.Equal(KeyValueResponseType.Set, setA);
 
             // Open a 2PC transaction and stage valB.
@@ -614,5 +621,16 @@ public class TestScriptAsOfReads : BaseCluster
         {
             await LeaveCluster(node1, node2, node3);
         }
+    }
+
+    private static async Task WaitUntilScriptSetup(Func<Task<bool>> predicate, int timeoutMs = 8000)
+    {
+        using CancellationTokenSource cts = new(timeoutMs);
+        while (!cts.IsCancellationRequested)
+        {
+            if (await predicate()) return;
+            await Task.Delay(50).ConfigureAwait(false);
+        }
+        throw new TimeoutException("WaitUntilScriptSetup timed out after " + timeoutMs + " ms");
     }
 }
