@@ -41,7 +41,11 @@ public abstract class BaseCluster
             // which is the main source of cluster-test flakiness/variance.
             ElectionTimeoutSeed = ElectionTimeoutSeedBase + 1,
             CompactEveryOperations = 1000,
-            CompactNumberEntries = 50
+            CompactNumberEntries = 50,
+            // Fast election timers (50–150 ms) sit below the default SWIM PingInterval (1 s), which
+            // quiescence requires to be < StartElectionTimeout. Keep the classic per-partition
+            // heartbeat model in tests so RaftConfiguration.Validate() does not reject the fast timers.
+            EnableQuiescence = false
         };
 
         RaftManager raft = new(
@@ -94,7 +98,11 @@ public abstract class BaseCluster
             EndElectionTimeout = (int)(150 * TimingScale),
             ElectionTimeoutSeed = ElectionTimeoutSeedBase + 2, // distinct per node (see GetNode1)
             CompactEveryOperations = 1000,
-            CompactNumberEntries = 50
+            CompactNumberEntries = 50,
+            // Fast election timers (50–150 ms) sit below the default SWIM PingInterval (1 s), which
+            // quiescence requires to be < StartElectionTimeout. Keep the classic per-partition
+            // heartbeat model in tests so RaftConfiguration.Validate() does not reject the fast timers.
+            EnableQuiescence = false
         };
 
         RaftManager raft = new(
@@ -147,7 +155,11 @@ public abstract class BaseCluster
             EndElectionTimeout = (int)(150 * TimingScale),
             ElectionTimeoutSeed = ElectionTimeoutSeedBase + 3, // distinct per node (see GetNode1)
             CompactEveryOperations = 1000,
-            CompactNumberEntries = 50
+            CompactNumberEntries = 50,
+            // Fast election timers (50–150 ms) sit below the default SWIM PingInterval (1 s), which
+            // quiescence requires to be < StartElectionTimeout. Keep the classic per-partition
+            // heartbeat model in tests so RaftConfiguration.Validate() does not reject the fast timers.
+            EnableQuiescence = false
         };
 
         RaftManager raft = new(

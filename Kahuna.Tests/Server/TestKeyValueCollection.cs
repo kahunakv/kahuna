@@ -590,7 +590,8 @@ public sealed class TestKeyValueCollection
                 NodeId = 1,
                 Host = "localhost",
                 Port = 0,
-                InitialPartitions = 1
+                InitialPartitions = 1,
+                EnableQuiescence = false // standalone test node: keep the pre-upgrade heartbeat model, no SWIM dependency
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),

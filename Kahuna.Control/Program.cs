@@ -122,7 +122,19 @@ static Task<KahunaClient> GetConnection(KahunaControlOptions opts)
     else
         connectionPool = connectionString.Split(",", StringSplitOptions.RemoveEmptyEntries).ToArray();
 
-    return Task.FromResult(new KahunaClient(connectionPool, null));
+    bool insecure = opts.Insecure || connectionPool.All(IsLocalhost);
+
+    KahunaOptions kahunaOptions = new() { AllowInsecureCertificateValidation = insecure };
+
+    return Task.FromResult(new KahunaClient(connectionPool, null, null, kahunaOptions));
+}
+
+static bool IsLocalhost(string url)
+{
+    if (!Uri.TryCreate(url, UriKind.Absolute, out Uri? uri))
+        return false;
+    string host = uri.Host;
+    return host is "localhost" or "127.0.0.1" or "::1" or "[::1]";
 }
 
 static bool IsSingleCommand(KahunaControlOptions kahunaControlOptions)

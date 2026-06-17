@@ -68,7 +68,10 @@ public sealed class TestRangeMapReplication
             EndElectionTimeout = (int)(150 * TimingScale),
             ElectionTimeoutSeed = ElectionTimeoutSeedBase + nodeId, // distinct per node, prevents election livelock
             CompactEveryOperations = 1000,
-            CompactNumberEntries = 50
+            CompactNumberEntries = 50,
+            // Fast election timers sit below the default SWIM PingInterval; keep the classic
+            // per-partition heartbeat model so RaftConfiguration.Validate() accepts them.
+            EnableQuiescence = false
         };
 
         RaftManager raft = new(

@@ -50,13 +50,14 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
         while (node is not null)
         {
-            int idx = node.FindIndex(key);
+            // One binary search per node: keys are unique, so a non-negative result is an exact hit.
+            int idx = Array.BinarySearch(node.Keys, 0, node.KeyCount, key, _comparer);
 
             if (node.IsLeaf)
-                return idx < node.KeyCount && _comparer.Compare(node.Keys[idx], key) == 0;
+                return idx >= 0;
 
-            int childIdx = node.FindChildIndex(key);
-            node = node.Children[childIdx];
+            // Found-in-interior ⇒ descend right of the key; otherwise ~idx is the child to descend.
+            node = node.Children[idx >= 0 ? idx + 1 : ~idx];
         }
 
         return false;
@@ -70,8 +71,29 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     /// <returns>True if the key exists in the B-Tree and its value is retrieved successfully; otherwise, false.</returns>
     public bool TryGetValue(TKey key, [MaybeNullWhen(false)] out TValue value)
     {
-        value = Get(key);
-        return value is not null;
+        Node<TKey, TValue>? node = Root;
+
+        while (node is not null)
+        {
+            int idx = Array.BinarySearch(node.Keys, 0, node.KeyCount, key, _comparer);
+
+            if (node.IsLeaf)
+            {
+                if (idx >= 0)
+                {
+                    // Report presence via the return value, not a null-check on the payload: a key
+                    // legitimately mapped to a null/default value is still present in the tree.
+                    value = node.Values[idx]!;
+                    return true;
+                }
+                break;
+            }
+
+            node = node.Children[idx >= 0 ? idx + 1 : ~idx];
+        }
+
+        value = default;
+        return false;
     }
 
     /// <summary>
@@ -358,13 +380,15 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
         {
             int idx = FindIndex(key);
             if (idx < KeyCount && _comparer.Compare(Keys[idx], key) == 0)
-                throw new ArgumentException("Duplicate key", nameof(key));
-
-            for (int i = KeyCount; i > idx; i--)
             {
-                Keys[i] = Keys[i - 1];
-                Values[i] = Values[i - 1];
+                // Key already present: update the value in place (no structural change, no count bump).
+                Values[idx] = value;
+                return (null!, default!);
             }
+
+            // Open a gap at idx by sliding the tail one slot right (Array.Copy handles the overlap).
+            Array.Copy(Keys, idx, Keys, idx + 1, KeyCount - idx);
+            Array.Copy(Values, idx, Values, idx + 1, KeyCount - idx);
 
             Keys[idx] = key;
             Values[idx] = value;
@@ -384,11 +408,8 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
 
         if (childSib is not null)
         {
-            for (int i = KeyCount; i > childIdx; i--)
-            {
-                Keys[i] = Keys[i - 1];
-                Children[i + 1] = Children[i];
-            }
+            Array.Copy(Keys, childIdx, Keys, childIdx + 1, KeyCount - childIdx);
+            Array.Copy(Children, childIdx + 1, Children, childIdx + 2, KeyCount - childIdx);
 
             Keys[childIdx] = childPromote;
             Children[childIdx + 1] = childSib;
@@ -406,14 +427,11 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
         int mid = KeyCount / 2;
         Node<TKey, TValue> sibling = new(_order, true, _comparer);
 
-        int j = 0;
-        for (int i = mid; i < KeyCount; i++, j++)
-        {
-            sibling.Keys[j] = Keys[i];
-            sibling.Values[j] = Values[i];
-        }
+        int count = KeyCount - mid;
+        Array.Copy(Keys, mid, sibling.Keys, 0, count);
+        Array.Copy(Values, mid, sibling.Values, 0, count);
 
-        sibling.KeyCount = KeyCount - mid;
+        sibling.KeyCount = count;
         KeyCount = mid;
         sibling.Next = Next;
         Next = sibling;
@@ -426,39 +444,31 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
         int mid = KeyCount / 2;
         Node<TKey, TValue> sibling = new(_order, false, _comparer);
 
-        int j = 0;
+        int count = KeyCount - mid - 1;
+        Array.Copy(Keys, mid + 1, sibling.Keys, 0, count);
+        Array.Copy(Children, mid + 1, sibling.Children, 0, count + 1);
 
-        for (int i = mid + 1; i < KeyCount; i++, j++)
-            sibling.Keys[j] = Keys[i];
-
-        for (int i = mid + 1, k = 0; i <= KeyCount; i++, k++)
-            sibling.Children[k] = Children[i];
-
-        sibling.KeyCount = KeyCount - mid - 1;
+        sibling.KeyCount = count;
         TKey promoteKey = Keys[mid];
         KeyCount = mid;
 
         return (sibling, promoteKey);
     }
 
+    // Lower bound: first index whose key is >= the search key (the insertion point). Keys are unique,
+    // so Array.BinarySearch returns either the exact hit or the bitwise-complement of that bound.
     internal int FindIndex(TKey key)
     {
-        int i = 0;
-
-        while (i < KeyCount && _comparer.Compare(Keys[i], key) < 0)
-            i++;
-
-        return i;
+        int idx = Array.BinarySearch(Keys, 0, KeyCount, key, _comparer);
+        return idx >= 0 ? idx : ~idx;
     }
 
+    // Upper bound: first index whose key is > the search key (the child to descend into). On an exact
+    // hit we step one past it, matching the original "<= 0 ⇒ keep scanning" linear semantics.
     internal int FindChildIndex(TKey key)
     {
-        int i = 0;
-
-        while (i < KeyCount && _comparer.Compare(Keys[i], key) <= 0)
-            i++;
-
-        return i;
+        int idx = Array.BinarySearch(Keys, 0, KeyCount, key, _comparer);
+        return idx >= 0 ? idx + 1 : ~idx;
     }
 
     internal bool RemoveRec(TKey key, BTree<TKey, TValue> tree)
@@ -470,12 +480,9 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
             if (idx >= KeyCount || _comparer.Compare(Keys[idx], key) != 0)
                 return false;
 
-            // shift left
-            for (int i = idx; i < KeyCount - 1; i++)
-            {
-                Keys[i] = Keys[i + 1];
-                Values[i] = Values[i + 1];
-            }
+            // shift left to close the gap
+            Array.Copy(Keys, idx + 1, Keys, idx, KeyCount - idx - 1);
+            Array.Copy(Values, idx + 1, Values, idx, KeyCount - idx - 1);
 
             KeyCount--;
             return true;
@@ -521,11 +528,8 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
         if (child.IsLeaf)
         {
             // pull last of left into front of child
-            for (int i = child.KeyCount; i > 0; i--)
-            {
-                child.Keys[i]   = child.Keys[i - 1];
-                child.Values[i] = child.Values[i - 1];
-            }
+            Array.Copy(child.Keys, 0, child.Keys, 1, child.KeyCount);
+            Array.Copy(child.Values, 0, child.Values, 1, child.KeyCount);
             child.Keys[0]   = left.Keys[left.KeyCount - 1];
             child.Values[0] = left.Values[left.KeyCount - 1];
             child.KeyCount++;
@@ -536,12 +540,8 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
         else
         {
             // pull separator down, last child key up
-            for (int i = child.KeyCount; i > 0; i--)
-            {
-                child.Keys[i]      = child.Keys[i - 1];
-                child.Children[i + 1] = child.Children[i];
-            }
-            child.Children[1] = child.Children[0];
+            Array.Copy(child.Keys, 0, child.Keys, 1, child.KeyCount);
+            Array.Copy(child.Children, 0, child.Children, 1, child.KeyCount + 1);
             child.Keys[0]     = Keys[idxChild - 1];
             child.Children[0] = left.Children[left.KeyCount];
             Keys[idxChild - 1] = left.Keys[left.KeyCount - 1];
@@ -562,11 +562,8 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
             child.Values[child.KeyCount] = right.Values[0];
             child.KeyCount++;
 
-            for (int i = 0; i < right.KeyCount - 1; i++)
-            {
-                right.Keys[i]   = right.Keys[i + 1];
-                right.Values[i] = right.Values[i + 1];
-            }
+            Array.Copy(right.Keys, 1, right.Keys, 0, right.KeyCount - 1);
+            Array.Copy(right.Values, 1, right.Values, 0, right.KeyCount - 1);
             right.KeyCount--;
             // update separator
             Keys[idxChild] = right.Keys[0];
@@ -579,11 +576,8 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
             child.KeyCount++;
             Keys[idxChild] = right.Keys[0];
 
-            for (int i = 0; i < right.KeyCount - 1; i++)
-                right.Keys[i] = right.Keys[i + 1];
-
-            for (int i = 0; i < right.KeyCount; i++)
-                right.Children[i] = right.Children[i + 1];
+            Array.Copy(right.Keys, 1, right.Keys, 0, right.KeyCount - 1);
+            Array.Copy(right.Children, 1, right.Children, 0, right.KeyCount);
 
             right.KeyCount--;
         }
@@ -597,11 +591,8 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
         if (child.IsLeaf)
         {
             // append child keys/values to left leaf
-            for (int i = 0; i < child.KeyCount; i++)
-            {
-                left.Keys[left.KeyCount + i]   = child.Keys[i];
-                left.Values[left.KeyCount + i] = child.Values[i];
-            }
+            Array.Copy(child.Keys, 0, left.Keys, left.KeyCount, child.KeyCount);
+            Array.Copy(child.Values, 0, left.Values, left.KeyCount, child.KeyCount);
             left.KeyCount += child.KeyCount;
             left.Next      = child.Next;
         }
@@ -610,21 +601,14 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
             // bring down separator, then child keys/children
             left.Keys[left.KeyCount] = Keys[idxChild - 1];
             left.KeyCount++;
-            for (int i = 0; i < child.KeyCount; i++)
-            {
-                left.Keys[left.KeyCount + i]      = child.Keys[i];
-                left.Children[left.KeyCount + i]  = child.Children[i];
-            }
-            left.Children[left.KeyCount + child.KeyCount] = child.Children[child.KeyCount];
+            Array.Copy(child.Keys, 0, left.Keys, left.KeyCount, child.KeyCount);
+            Array.Copy(child.Children, 0, left.Children, left.KeyCount, child.KeyCount + 1);
             left.KeyCount += child.KeyCount;
         }
 
-        // remove slot from parent
-        for (int i = idxChild - 1; i < KeyCount - 1; i++)
-        {
-            Keys[i]      = Keys[i + 1];
-            Children[i+1] = Children[i+2];
-        }
+        // remove slot from parent (drop separator Keys[idxChild-1] and Children[idxChild])
+        Array.Copy(Keys, idxChild, Keys, idxChild - 1, KeyCount - idxChild);
+        Array.Copy(Children, idxChild + 1, Children, idxChild, KeyCount - idxChild);
 
         KeyCount--;
     }
@@ -637,11 +621,8 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
         if (child.IsLeaf)
         {
             // append right into child
-            for (int i = 0; i < right.KeyCount; i++)
-            {
-                child.Keys[child.KeyCount + i]   = right.Keys[i];
-                child.Values[child.KeyCount + i] = right.Values[i];
-            }
+            Array.Copy(right.Keys, 0, child.Keys, child.KeyCount, right.KeyCount);
+            Array.Copy(right.Values, 0, child.Values, child.KeyCount, right.KeyCount);
             child.KeyCount += right.KeyCount;
             child.Next      = right.Next;
         }
@@ -650,21 +631,14 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
             // bring down separator, then right keys/children
             child.Keys[child.KeyCount] = Keys[idxChild];
             child.KeyCount++;
-            for (int i = 0; i < right.KeyCount; i++)
-            {
-                child.Keys[child.KeyCount + i]      = right.Keys[i];
-                child.Children[child.KeyCount + i]  = right.Children[i];
-            }
-            child.Children[child.KeyCount + right.KeyCount] = right.Children[right.KeyCount];
+            Array.Copy(right.Keys, 0, child.Keys, child.KeyCount, right.KeyCount);
+            Array.Copy(right.Children, 0, child.Children, child.KeyCount, right.KeyCount + 1);
             child.KeyCount += right.KeyCount;
         }
 
-        // remove slot from parent
-        for (int i = idxChild; i < KeyCount - 1; i++)
-        {
-            Keys[i]      = Keys[i + 1];
-            Children[i+1] = Children[i+2];
-        }
+        // remove slot from parent (drop separator Keys[idxChild] and Children[idxChild+1])
+        Array.Copy(Keys, idxChild + 1, Keys, idxChild, KeyCount - idxChild - 1);
+        Array.Copy(Children, idxChild + 2, Children, idxChild + 1, KeyCount - idxChild - 1);
 
         KeyCount--;
     }

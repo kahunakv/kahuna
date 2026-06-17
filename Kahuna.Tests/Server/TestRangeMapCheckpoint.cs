@@ -49,7 +49,7 @@ public sealed class TestRangeMapCheckpoint : BaseCluster, IDisposable
     /// Raft, so no cluster is needed to test snapshot persistence.
     /// </summary>
     private RaftManager UnjoinedRaft() => new(
-        new RaftConfiguration { NodeName = "t", NodeId = 1, Host = "localhost", Port = 8201, InitialPartitions = 2 },
+        new RaftConfiguration { NodeName = "t", NodeId = 1, Host = "localhost", Port = 8201, InitialPartitions = 2, EnableQuiescence = false },
         new StaticDiscovery([]),
         new InMemoryWAL(raftLogger),
         new InMemoryCommunication(),

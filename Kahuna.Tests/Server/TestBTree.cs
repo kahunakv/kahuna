@@ -38,6 +38,54 @@ public class TestBTree
     }
     
     [Fact]
+    public void TestBTreeInsertUpdatesValueOnDuplicateKey()
+    {
+        BTree<int, string> btree = new(4);
+
+        btree.Insert(1, "one");
+        btree.Insert(2, "two");
+        btree.Insert(1, "uno");   // duplicate key ⇒ upsert, not throw
+
+        Assert.Equal("uno", btree.Get(1));
+        Assert.True(btree.TryGetValue(1, out string? value));
+        Assert.Equal("uno", value);
+        Assert.Equal(2, btree.Count);   // count unchanged by the update
+    }
+
+    [Fact]
+    public void TestBTreeUpsertAcrossSplitsKeepsLatestValue()
+    {
+        BTree<int, int> btree = new(4);
+
+        for (int i = 0; i < 200; i++)
+            btree.Insert(i, i);
+
+        // Re-insert every key with a new value; tree is multi-level by now.
+        for (int i = 0; i < 200; i++)
+            btree.Insert(i, i + 1000);
+
+        Assert.Equal(200, btree.Count);
+        for (int i = 0; i < 200; i++)
+            Assert.Equal(i + 1000, btree.Get(i));
+    }
+
+    [Fact]
+    public void TestBTreeTryGetValueReportsPresentNullValue()
+    {
+        // A key mapped to a null value is still present: TryGetValue must report it via the return
+        // flag, not by null-checking the payload.
+        BTree<string, string?> btree = new(4);
+
+        btree.Insert("k", null);
+
+        Assert.True(btree.ContainsKey("k"));
+        Assert.True(btree.TryGetValue("k", out string? value));
+        Assert.Null(value);
+
+        Assert.False(btree.TryGetValue("missing", out value));
+    }
+
+    [Fact]
     public void TestBTreeBasicSplit()
     {
         BTree<int, string> btree = new(4);

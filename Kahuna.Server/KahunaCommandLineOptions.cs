@@ -172,6 +172,15 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-grpc-scheme", Required = false, HelpText = "URL scheme prepended to peer endpoints when opening gRPC channels", Default = "https://")]
     public string RaftGrpcScheme { get; set; } = "https://";
 
+    [Option("raft-grpc-channels-per-node", Required = false, HelpText = "Number of pooled gRPC channels opened to each peer node (clamped to [1, 64]). Each channel is a permanently-held connection and handler.", Default = 4)]
+    public int RaftGrpcChannelsPerNode { get; set; } = 4;
+
+    [Option("raft-grpc-enable-multiple-http2-connections", Required = false, HelpText = "Allow each pooled gRPC channel to open multiple HTTP/2 connections to spread concurrent streams", Default = false)]
+    public bool RaftGrpcEnableMultipleHttp2Connections { get; set; }
+
+    [Option("raft-grpc-enable-snapshot-compression", Required = false, HelpText = "Compress Raft snapshot transfers sent over gRPC", Default = false)]
+    public bool RaftGrpcEnableSnapshotCompression { get; set; }
+
     [Option("raft-backfill-threshold", Required = false, HelpText = "Committed entries a follower may trail the leader before active backfill kicks in", Default = 10)]
     public int RaftBackfillThreshold { get; set; } = 10;
 
@@ -202,8 +211,14 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-dead-member-eviction-grace", Required = false, HelpText = "Grace period before a Dead node is committed as removed from the roster in milliseconds", Default = 30000)]
     public int RaftDeadMemberEvictionGrace { get; set; } = 30000;
 
-    [Option("raft-ping-interval", Required = false, HelpText = "Interval between SWIM ping rounds in milliseconds (0 disables the failure detector)", Default = 0)]
-    public int RaftPingInterval { get; set; }
+    [Option("raft-ping-interval", Required = false, HelpText = "Interval between SWIM ping rounds in milliseconds (0 disables the failure detector). Must be > 0 and < raft-start-election-timeout when quiescence is enabled.", Default = 1000)]
+    public int RaftPingInterval { get; set; } = 1000;
+
+    [Option("raft-enable-quiescence", Required = false, HelpText = "Quiesce idle partitions: a leader stops per-partition heartbeats after a partition is idle, relying on the SWIM failure detector for node liveness. Cuts O(NxM) idle heartbeat traffic across many partitions. Requires SWIM (raft-ping-interval > 0 and < raft-start-election-timeout).", Default = true)]
+    public bool RaftEnableQuiescence { get; set; } = true;
+
+    [Option("raft-quiesce-after", Required = false, HelpText = "How long a partition must be idle (no proposals, no in-flight replication) before its leader quiesces it, in milliseconds", Default = 1500)]
+    public int RaftQuiesceAfter { get; set; } = 1500;
 
     [Option("raft-transport-security", Required = false, HelpText = "Transport security and node authentication settings (JSON; prefer --raft-allow-insecure-certificate-validation for simple dev overrides)", Default = "")]
     public string RaftTransportSecurity { get; set; } = "";

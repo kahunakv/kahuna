@@ -81,4 +81,7 @@ public sealed class KahunaControlOptions
 
     [Option("idempotency-key", Required = false, HelpText = "Defines an optional idempotency key for sequence allocation")]
     public string? IdempotencyKey { get; set; }
+
+    [Option("insecure", Required = false, HelpText = "Skip TLS certificate validation (useful for self-signed certs in dev/standalone mode)")]
+    public bool Insecure { get; set; }
 }

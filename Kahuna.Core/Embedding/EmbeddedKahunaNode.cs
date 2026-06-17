@@ -279,7 +279,13 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             WriteIOThreads = options.WriteIOThreads,
             CompactEveryOperations = options.CompactEveryOperations,
             CompactNumberEntries = options.CompactNumberEntries,
-            MaxEntriesPerCompaction = options.MaxEntriesPerCompaction
+            MaxEntriesPerCompaction = options.MaxEntriesPerCompaction,
+            // Embedded nodes keep the classic per-partition heartbeat model: they run a tiny,
+            // fixed partition count with in-process witnesses and fast election timers, so the
+            // O(N×M) heartbeat pressure that quiescence targets does not apply. Disabling it also
+            // avoids the SWIM dependency quiescence requires (PingInterval > 0 and
+            // < StartElectionTimeout), which the embedded fast timers would otherwise violate.
+            EnableQuiescence = false
         };
     }
 

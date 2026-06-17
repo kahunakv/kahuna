@@ -248,6 +248,9 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
         MaxDrainQuantumClient = opts.RaftMaxDrainQuantumClient,
         MaxDrainQuantumMaintenance = opts.RaftMaxDrainQuantumMaintenance,
         GrpcScheme = opts.RaftGrpcScheme,
+        GrpcChannelsPerNode = opts.RaftGrpcChannelsPerNode,
+        GrpcEnableMultipleHttp2Connections = opts.RaftGrpcEnableMultipleHttp2Connections,
+        GrpcEnableSnapshotCompression = opts.RaftGrpcEnableSnapshotCompression,
         BackfillThreshold = opts.RaftBackfillThreshold,
         MaxBackfillEntriesPerRound = opts.RaftMaxBackfillEntriesPerRound,
         LearnerPromotionLag = opts.RaftLearnerPromotionLag,
@@ -258,6 +261,12 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
         IndirectPingFanout = opts.RaftIndirectPingFanout,
         SuspicionTimeout = TimeSpan.FromMilliseconds(opts.RaftSuspicionTimeout),
         DeadMemberEvictionGrace = TimeSpan.FromMilliseconds(opts.RaftDeadMemberEvictionGrace),
-        PingInterval = opts.RaftPingInterval == 0 ? TimeSpan.Zero : TimeSpan.FromMilliseconds(opts.RaftPingInterval)
+        PingInterval = opts.RaftPingInterval == 0 ? TimeSpan.Zero : TimeSpan.FromMilliseconds(opts.RaftPingInterval),
+        // Quiesce idle partitions in cluster mode: with many partitions the per-partition
+        // keep-alive heartbeats dominate idle traffic, so a leader stops heartbeating a partition
+        // once it has been idle for QuiesceAfter and leans on SWIM node liveness instead. Requires
+        // PingInterval > 0 and < StartElectionTimeout, validated by RaftConfiguration at startup.
+        EnableQuiescence = opts.RaftEnableQuiescence,
+        QuiesceAfter = TimeSpan.FromMilliseconds(opts.RaftQuiesceAfter)
     };
 }

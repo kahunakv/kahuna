@@ -53,7 +53,12 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.IndirectPingFanout)] = nameof(KahunaCommandLineOptions.RaftIndirectPingFanout),
         [nameof(RaftConfiguration.SuspicionTimeout)] = nameof(KahunaCommandLineOptions.RaftSuspicionTimeout),
         [nameof(RaftConfiguration.DeadMemberEvictionGrace)] = nameof(KahunaCommandLineOptions.RaftDeadMemberEvictionGrace),
-        [nameof(RaftConfiguration.PingInterval)] = nameof(KahunaCommandLineOptions.RaftPingInterval)
+        [nameof(RaftConfiguration.PingInterval)] = nameof(KahunaCommandLineOptions.RaftPingInterval),
+        [nameof(RaftConfiguration.GrpcChannelsPerNode)] = nameof(KahunaCommandLineOptions.RaftGrpcChannelsPerNode),
+        [nameof(RaftConfiguration.GrpcEnableMultipleHttp2Connections)] = nameof(KahunaCommandLineOptions.RaftGrpcEnableMultipleHttp2Connections),
+        [nameof(RaftConfiguration.GrpcEnableSnapshotCompression)] = nameof(KahunaCommandLineOptions.RaftGrpcEnableSnapshotCompression),
+        [nameof(RaftConfiguration.EnableQuiescence)] = nameof(KahunaCommandLineOptions.RaftEnableQuiescence),
+        [nameof(RaftConfiguration.QuiesceAfter)] = nameof(KahunaCommandLineOptions.RaftQuiesceAfter)
     };
 
     [Fact]
