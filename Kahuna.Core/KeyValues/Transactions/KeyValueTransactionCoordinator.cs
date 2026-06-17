@@ -412,11 +412,10 @@ internal sealed class KeyValueTransactionCoordinator
         {
             if (context.Locking == KeyValueTransactionLocking.Pessimistic || context.State != KeyValueTransactionState.Committed && context.State != KeyValueTransactionState.RolledBack)
             {
-                // Final Step: Release locks
-                if (context.AsyncRelease)
-                    _ = ReleaseAcquiredLocks(context);
-                else
-                    await ReleaseAcquiredLocks(context);
+                // Always release synchronously: the RolledBack response must guarantee all locks
+                // are freed before the client receives it, or the next transaction on the same
+                // key will see AlreadyLocked.
+                await ReleaseAcquiredLocks(context);
             }
         }
     }
