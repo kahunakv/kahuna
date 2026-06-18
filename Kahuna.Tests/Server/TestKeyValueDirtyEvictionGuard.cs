@@ -344,10 +344,7 @@ public sealed class TestKeyValueDirtyEvictionGuard
             MaxEntriesPerActor = 50_000,
             MaxBytesPerActor = 256L * 1024 * 1024,
             CollectBatchMax = 1000,
-            RevisionRetention = 16,
-            LruSampleSize = 5,
-            LruSampleScanMax = 256,
-            MetadataTrimInterval = 0
+            RevisionRetention = 16
         });
         cfg.DirtyObjectsWriterDelay = dirtyObjectsWriterDelay;
         return cfg;

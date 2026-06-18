@@ -46,15 +46,6 @@ public sealed class KahunaConfiguration
 
     public int RevisionRetention { get; set; } = 16;
 
-    public int LruSampleSize { get; set; } = 5;
-
-    public int LruSampleScanMax { get; set; } = 256;
-
-    /// <summary>
-    /// Run metadata trimming every N collection cycles (1 = every cycle). 0 disables trimming.
-    /// </summary>
-    public int MetadataTrimInterval { get; set; } = 4;
-    
     public int DirtyObjectsWriterDelay { get; set; }
 
     /// <summary>

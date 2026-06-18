@@ -40,6 +40,8 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             return KeyValueStaticResponses.ErroredResponse;
         }
 
+        HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
+
         KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability);
 
         if (entry is null)
@@ -120,6 +122,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
 
             if (entry.MvccEntries.Remove(message.TransactionId, out KeyValueMvccEntry? removedMvccE))
                 context.AdjustEstimatedEntryBytes(entry, -KeyValueStoreAccounting.MvccEntryRemovedBytes(entry.MvccEntries.Count == 0, removedMvccE.Value));
+            TrimExpiredMvccEntries(entry, currentTime);
             entry.WriteIntent = null;
 
             return new(KeyValueResponseType.Committed, 0);
@@ -137,6 +140,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
 
         if (entry.MvccEntries.Remove(message.TransactionId, out KeyValueMvccEntry? removedMvccP))
             context.AdjustEstimatedEntryBytes(entry, -KeyValueStoreAccounting.MvccEntryRemovedBytes(entry.MvccEntries.Count == 0, removedMvccP.Value));
+        TrimExpiredMvccEntries(entry, currentTime);
         entry.WriteIntent = null;
 
         if (!success)

@@ -220,16 +220,16 @@ internal abstract class BaseHandler
     }
 
     /// <summary>
-    /// Removes expired revisions from the KeyValueEntry dictionary
+    /// Removes expired revisions from the KeyValueEntry dictionary, keeping at most
+    /// RevisionRetention entries. Called at archive time so the collector never needs a
+    /// separate metadata pass to enforce the bound.
     /// </summary>
-    /// <param name="entry"></param>
-    /// <param name="refRevision">Revisions older than the ref revision will be removed</param>
     protected void RemoveExpiredRevisions(KeyValueEntry entry, long refRevision)
     {
         if (entry.Revisions is null)
             return;
 
-        int toBeKept = context.Configuration.RevisionsToKeepCached;
+        int toBeKept = context.Configuration.RevisionRetention;
 
         foreach (KeyValuePair<long, KeyValueRevisionEntry> kv in entry.Revisions)
         {
@@ -251,5 +251,39 @@ internal abstract class BaseHandler
             context.AdjustEstimatedEntryBytes(entry, -bytesFreed);
             revisionsToRemove.Clear();
         }
+    }
+
+    /// <summary>
+    /// Removes MvccEntries from other transactions that have elapsed their Expires deadline.
+    /// Called at transaction resolve time (commit/rollback) so the collector never needs a
+    /// separate metadata pass for MVCC cleanup.
+    /// </summary>
+    protected void TrimExpiredMvccEntries(KeyValueEntry entry, HLCTimestamp currentTime)
+    {
+        if (entry.MvccEntries is null || entry.MvccEntries.Count == 0)
+            return;
+
+        List<HLCTimestamp>? stale = null;
+        foreach ((HLCTimestamp txId, KeyValueMvccEntry mvcc) in entry.MvccEntries)
+        {
+            if (mvcc.Expires == HLCTimestamp.Zero) continue;
+            if ((mvcc.Expires - currentTime) > TimeSpan.Zero) continue;
+            stale ??= [];
+            stale.Add(txId);
+        }
+
+        if (stale is null) return;
+
+        long bytesFreed = 0;
+        foreach (HLCTimestamp txId in stale)
+        {
+            if (entry.MvccEntries.Remove(txId, out KeyValueMvccEntry? removed))
+                bytesFreed += KeyValueStoreAccounting.MvccEntryRemovedBytes(false, removed.Value);
+        }
+
+        if (entry.MvccEntries.Count == 0)
+            bytesFreed += KeyValueStoreAccounting.DictionaryOverheadBytes;
+
+        context.AdjustEstimatedEntryBytes(entry, -bytesFreed);
     }
 }

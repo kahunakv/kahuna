@@ -12,13 +12,13 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Debug, Message = "KeyValueActor Took: {Actor} {Type} Key={Key} Response={Response} Revision={Revision} Time={Elapsed}ms")]
     public static partial void LogKeyValueActorTook(this ILogger<IKahuna> logger, string actor, KeyValueRequestType type, string key, KeyValueResponseType? response, long? revision, long elapsed);
 
-    [LoggerMessage(Level = LogLevel.Debug, Message = "Evicted {Count} key/value pairs (garbage={Garbage}, lru={Lru}, metadataTrimmed={MetadataTrimmed}, storeCount={StoreCount}, storeBytes={StoreBytes}, elapsedMs={ElapsedMs}, backlog={Backlog})")]
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Evicted {Count} key/value pairs (tombstone={Tombstone}, expired={Expired}, lru={Lru}, storeCount={StoreCount}, storeBytes={StoreBytes}, elapsedMs={ElapsedMs}, backlog={Backlog})")]
     public static partial void LogKeyValueEviction(
         this ILogger<IKahuna> logger,
         int count,
-        int garbage,
+        int tombstone,
+        int expired,
         int lru,
-        int metadataTrimmed,
         int storeCount,
         long storeBytes,
         long elapsedMs,

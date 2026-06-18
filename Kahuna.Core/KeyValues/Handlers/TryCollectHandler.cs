@@ -15,31 +15,41 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// Handles periodic collection and eviction of key-value pairs: garbage reclamation always runs;
 /// approximate LRU eviction runs when the actor exceeds entry or byte budgets.
 /// </summary>
+/// <summary>Per-cycle eviction statistics captured by TryCollectHandler.Execute.</summary>
+internal readonly record struct CollectCycleStats(
+    int TombstoneEvicted,
+    int ExpiryEvicted,
+    int LruEvicted,
+    int LruVisited,
+    int TotalEvicted,
+    long ElapsedMs
+);
+
 internal sealed class TryCollectHandler : BaseHandler
 {
     private readonly HashSet<string> keysToEvict = [];
-    private int collectCycleCount;
-    
+    private CollectCycleStats lastCycleStats;
+
     public TryCollectHandler(KeyValueContext context) : base(context)
     {
-        
+
     }
 
     public bool IsOverBudget() => context.IsOverStoreBudget();
 
+    /// <summary>Stats from the most recent Execute() call. Zero-initialised before the first call.</summary>
+    public CollectCycleStats LastCycleStats => lastCycleStats;
+
     public void Execute()
     {
         Stopwatch stopwatch = Stopwatch.StartNew();
-        int garbageEvicted = 0;
+        int tombstoneEvicted = 0;
+        int expiryEvicted = 0;
         int lruEvicted = 0;
-        int metadataTrimmed = 0;
         int evicted = 0;
         int batchMax = context.CollectBatchMax;
         KahunaConfiguration config = context.Configuration;
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
-        collectCycleCount++;
-        bool trimMetadata = ShouldTrimMetadata(config);
-        List<string>? metadataCandidates = trimMetadata ? [] : null;
 
         // Dirty-entry safety window.  The time-guard proxy for "not yet flushed" is:
         //   entry.IsDirty(safetyWindowMs, currentTime) = Revision > FlushedRevision
@@ -91,7 +101,7 @@ internal sealed class TryCollectHandler : BaseHandler
 
             keysToEvict.Add(tombstoneKey);
             evicted++;
-            garbageEvicted++;
+            tombstoneEvicted++;
         }
 
         if (deferredTombstones is not null)
@@ -142,23 +152,12 @@ internal sealed class TryCollectHandler : BaseHandler
 
             keysToEvict.Add(expiredKey);
             evicted++;
-            garbageEvicted++;
+            expiryEvicted++;
         }
 
         if (deferredExpiry is not null)
             foreach ((string key, HLCTimestamp expiry) in deferredExpiry)
                 context.ExpiryHeap.Enqueue(key, expiry);
-
-        // Metadata scan — runs only on the configured interval; removed in Phase C.
-        // Separate pass so the drain loops above stay O(reclaimed).
-        if (metadataCandidates is not null)
-        {
-            foreach (KeyValuePair<string, KeyValueEntry> pair in context.Store.GetItems())
-            {
-                if (MightNeedMetadataTrim(pair.Value, config))
-                    metadataCandidates.Add(pair.Key);
-            }
-        }
 
         // Intentional asymmetry: IsOverStoreBudget (the entry gate) includes heap/queue node
         // overhead so that stale-node accumulation triggers collection. IsProjectedOverBudget
@@ -171,11 +170,13 @@ internal sealed class TryCollectHandler : BaseHandler
         // eligible entries until under budget or batchMax reached. Dirty and intent-held entries
         // are skipped (advanced past), not evicted. Because the list is not modified until
         // RemoveStoreEntry runs after the loop, LruNext pointers remain stable during the walk.
+        int lruVisited = 0;
         KeyValueEntry? lruCandidate = context.LruHead;
         while (IsProjectedOverBudget(projectedCount, projectedBytes, config)
             && evicted < batchMax
             && lruCandidate is not null)
         {
+            lruVisited++;
             KeyValueEntry? next = lruCandidate.LruNext;
             string? candidateKey = lruCandidate.StoreKey;
 
@@ -195,21 +196,28 @@ internal sealed class TryCollectHandler : BaseHandler
             lruCandidate = next;
         }
 
+#if DEBUG
+        // The LRU walk must be O(evicted), not O(Store.Count). Visiting more than
+        // lruEvicted + batchMax nodes means the walk ran through the whole list without
+        // finding enough eligible entries — acceptable under heavy dirty/intent pressure, but
+        // visiting more than the whole store indicates a bug (cycle, phantom node).
+        System.Diagnostics.Debug.Assert(
+            lruVisited <= context.Store.Count,
+            $"LRU walk visited {lruVisited} entries but store has only {context.Store.Count}");
+#endif
+
         foreach (string key in keysToEvict)
             context.RemoveStoreEntry(key);
 
-        if (metadataCandidates is not null)
-            metadataTrimmed = TrimMetadataCandidates(metadataCandidates, currentTime, config.RevisionRetention);
-
         bool backlog = IsProjectedOverBudget(projectedCount, projectedBytes, config) && evicted >= batchMax;
 
-        if (keysToEvict.Count > 0 || metadataTrimmed > 0)
+        if (keysToEvict.Count > 0)
         {
             context.Logger.LogKeyValueEviction(
                 keysToEvict.Count,
-                garbageEvicted,
+                tombstoneEvicted,
+                expiryEvicted,
                 lruEvicted,
-                metadataTrimmed,
                 context.Store.Count,
                 context.ApproximateStoreBytes,
                 stopwatch.ElapsedMilliseconds,
@@ -217,103 +225,11 @@ internal sealed class TryCollectHandler : BaseHandler
             );
         }
 
+        lastCycleStats = new(tombstoneEvicted, expiryEvicted, lruEvicted, lruVisited, evicted, stopwatch.ElapsedMilliseconds);
         keysToEvict.Clear();
 
         if (backlog)
             context.ScheduleFollowUpCollect();
-    }
-
-    private bool ShouldTrimMetadata(KahunaConfiguration config)
-    {
-        if (config.MetadataTrimInterval <= 0)
-            return false;
-
-        return collectCycleCount % config.MetadataTrimInterval == 0;
-    }
-
-    private static bool MightNeedMetadataTrim(KeyValueEntry entry, KahunaConfiguration config)
-    {
-        if (entry.Revisions is not null && entry.Revisions.Count > config.RevisionRetention)
-            return true;
-
-        if (entry.MvccEntries is not null && entry.MvccEntries.Count > 0)
-            return true;
-
-        return false;
-    }
-
-    private int TrimMetadataCandidates(List<string> candidates, HLCTimestamp currentTime, int revisionRetention)
-    {
-        int trimmed = 0;
-
-        foreach (string key in candidates)
-        {
-            if (!context.Store.TryGetValue(key, out KeyValueEntry? entry))
-                continue;
-
-            (int revCount, long revBytes) = TrimRevisions(entry, revisionRetention);
-            (int mvccCount, long mvccBytes) = TrimMvccEntries(entry, currentTime);
-
-            trimmed += revCount + mvccCount;
-
-            long bytesFreed = revBytes + mvccBytes;
-            if (bytesFreed != 0)
-                context.AdjustEstimatedEntryBytes(entry, -bytesFreed);
-        }
-
-        return trimmed;
-    }
-
-    private static (int count, long bytesFreed) TrimRevisions(KeyValueEntry entry, int revisionRetention)
-    {
-        if (entry.Revisions is null || entry.Revisions.Count <= revisionRetention)
-            return (0, 0);
-
-        List<long> staleRevisions = entry.Revisions.Keys
-            .OrderByDescending(static revision => revision)
-            .Skip(revisionRetention)
-            .ToList();
-
-        long bytesFreed = 0;
-        foreach (long revision in staleRevisions)
-        {
-            if (entry.Revisions.Remove(revision, out KeyValueRevisionEntry removed))
-                bytesFreed += KeyValueStoreAccounting.EstimateRevisionRemovedBytes(entry.Revisions.Count == 0, removed.Value);
-        }
-
-        return (staleRevisions.Count, bytesFreed);
-    }
-
-    private static (int count, long bytesFreed) TrimMvccEntries(KeyValueEntry entry, HLCTimestamp currentTime)
-    {
-        if (entry.MvccEntries is null || entry.MvccEntries.Count == 0)
-            return (0, 0);
-
-        List<HLCTimestamp> staleTransactions = [];
-
-        foreach ((HLCTimestamp transactionId, KeyValueMvccEntry mvccEntry) in entry.MvccEntries)
-        {
-            if (mvccEntry.Expires == HLCTimestamp.Zero)
-                continue;
-
-            if ((mvccEntry.Expires - currentTime) > TimeSpan.Zero)
-                continue;
-
-            staleTransactions.Add(transactionId);
-        }
-
-        long bytesFreed = 0;
-        foreach (HLCTimestamp transactionId in staleTransactions)
-        {
-            if (entry.MvccEntries.Remove(transactionId, out KeyValueMvccEntry? removedMvcc))
-                bytesFreed += KeyValueStoreAccounting.MvccEntryRemovedBytes(false, removedMvcc.Value);
-        }
-
-        // Reclaim the dictionary overhead if the last entry was just removed.
-        if (staleTransactions.Count > 0 && entry.MvccEntries.Count == 0)
-            bytesFreed += KeyValueStoreAccounting.DictionaryOverheadBytes;
-
-        return (staleTransactions.Count, bytesFreed);
     }
 
     private long EstimateEvictionBytes(HashSet<string> keys)

@@ -299,9 +299,6 @@ public sealed class TestKeyValueReclamation
             MaxBytesPerActor = 512 * 1024,      // 512 KB
             CollectBatchMax = 1000,
             RevisionRetention = 16,
-            LruSampleSize = 5,
-            LruSampleScanMax = 256,
-            MetadataTrimInterval = 0
         });
         (_, KeyValueContext context, RaftManager raft) = CreateHandler(config);
         HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
@@ -342,9 +339,6 @@ public sealed class TestKeyValueReclamation
             MaxBytesPerActor = 512 * 1024,  // 512 KB — same tight budget as the bloat test
             CollectBatchMax = 100_000,
             RevisionRetention = 16,
-            LruSampleSize = 5,
-            LruSampleScanMax = 256,
-            MetadataTrimInterval = 0
         });
         (TryCollectHandler handler, KeyValueContext context, RaftManager raft) = CreateHandler(config);
         HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
@@ -426,9 +420,6 @@ public sealed class TestKeyValueReclamation
             MaxBytesPerActor = 256L * 1024 * 1024,
             CollectBatchMax = 1000,
             RevisionRetention = 16,
-            LruSampleSize = 5,
-            LruSampleScanMax = 256,
-            MetadataTrimInterval = 0
         });
         cfg.DirtyObjectsWriterDelay = dirtyObjectsWriterDelay;
         return cfg;

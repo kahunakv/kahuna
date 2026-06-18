@@ -61,15 +61,6 @@ public static class ConfigurationValidator
         if (configuration.RevisionRetention <= 0)
             configuration.RevisionRetention = configuration.RevisionsToKeepCached > 0 ? configuration.RevisionsToKeepCached : 16;
 
-        if (configuration.LruSampleSize <= 0)
-            configuration.LruSampleSize = 5;
-
-        if (configuration.LruSampleScanMax <= 0)
-            configuration.LruSampleScanMax = 256;
-
-        if (configuration.MetadataTrimInterval < 0)
-            configuration.MetadataTrimInterval = 4;
-
         ValidatePersistentRevisionRetention(configuration);
         
         return configuration;

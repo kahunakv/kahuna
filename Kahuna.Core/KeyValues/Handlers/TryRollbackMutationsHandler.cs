@@ -37,9 +37,11 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
         if (message.TransactionId == HLCTimestamp.Zero)
         {
             context.Logger.LogWarning("Cannot rollback mutations for missing transaction id");
-            
+
             return KeyValueStaticResponses.ErroredResponse;
         }
+
+        HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
 
         KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability);
 
@@ -89,6 +91,7 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
         {
             if (entry.MvccEntries.Remove(message.TransactionId, out KeyValueMvccEntry? removedMvccE))
                 context.AdjustEstimatedEntryBytes(entry, -KeyValueStoreAccounting.MvccEntryRemovedBytes(entry.MvccEntries.Count == 0, removedMvccE.Value));
+            TrimExpiredMvccEntries(entry, currentTime);
             entry.WriteIntent = null;
 
             return new(KeyValueResponseType.RolledBack);
@@ -98,6 +101,7 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
 
         if (entry.MvccEntries.Remove(message.TransactionId, out KeyValueMvccEntry? removedMvccP))
             context.AdjustEstimatedEntryBytes(entry, -KeyValueStoreAccounting.MvccEntryRemovedBytes(entry.MvccEntries.Count == 0, removedMvccP.Value));
+        TrimExpiredMvccEntries(entry, currentTime);
         entry.WriteIntent = null;
 
         if (!success)

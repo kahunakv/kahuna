@@ -61,12 +61,6 @@ public sealed class EmbeddedKahunaOptions
 
     public int RevisionRetention { get; set; } = 16;
 
-    public int LruSampleSize { get; set; } = 5;
-
-    public int LruSampleScanMax { get; set; } = 256;
-
-    public int MetadataTrimInterval { get; set; } = 4;
-
     public int DirtyObjectsWriterDelay { get; set; } = 1000;
 
     public int ReadIOThreads { get; set; } = 8;

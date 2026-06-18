@@ -27,11 +27,15 @@ internal sealed class TryReleaseExclusiveLockHandler : BaseHandler
         if (entry is null)
             return KeyValueStaticResponses.DoesNotExistResponse;
         
+        HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
+
         if (entry.MvccEntries is null)
             context.Logger.LogWarning("Trying to release exclusive lock for {Key} but MVCC entries are null", message.Key);
         else if (entry.MvccEntries.Remove(message.TransactionId, out KeyValueMvccEntry? removedMvcc))
             context.AdjustEstimatedEntryBytes(entry, -KeyValueStoreAccounting.MvccEntryRemovedBytes(entry.MvccEntries.Count == 0, removedMvcc.Value));
-        
+
+        TrimExpiredMvccEntries(entry, currentTime);
+
         if (entry.ReplicationIntent is not null)
             return KeyValueStaticResponses.WaitingForReplicationResponse;
         

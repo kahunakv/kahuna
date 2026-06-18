@@ -179,97 +179,6 @@ public sealed class TestKeyValueCollection
     }
 
     [Fact]
-    public void TestTryCollectHandlerTrimsRevisionMetadata()
-    {
-        KahunaConfiguration config = CreateConfiguration();
-        config.RevisionRetention = 4;
-        config.MetadataTrimInterval = 1;
-
-        (TryCollectHandler handler, KeyValueContext context, _, RaftManager raft) = CreateHandler(config);
-        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
-
-        KeyValueEntry entry = new()
-        {
-            Value = Encoding.UTF8.GetBytes("v"),
-            State = KeyValueState.Set,
-            LastUsed = now,
-            Revisions = new()
-        };
-
-        for (int i = 0; i < 20; i++)
-            entry.Revisions[i] = new KeyValueRevisionEntry(Encoding.UTF8.GetBytes("revision-" + i), now, HLCTimestamp.Zero, KeyValueState.Set);
-
-        context.InsertStoreEntry("hot/key", entry);
-
-        handler.Execute();
-
-        KeyValueEntry? surviving = context.Store.Get("hot/key");
-        Assert.NotNull(surviving?.Revisions);
-        Assert.Equal(4, surviving.Revisions.Count);
-    }
-
-    [Fact]
-    public void TestTryCollectHandlerSkipsMetadataTrimOffInterval()
-    {
-        KahunaConfiguration config = CreateConfiguration();
-        config.RevisionRetention = 4;
-        config.MetadataTrimInterval = 2;
-
-        (TryCollectHandler handler, KeyValueContext context, _, RaftManager raft) = CreateHandler(config);
-        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
-
-        KeyValueEntry entry = new()
-        {
-            Value = Encoding.UTF8.GetBytes("v"),
-            State = KeyValueState.Set,
-            LastUsed = now,
-            Revisions = new()
-        };
-
-        for (int i = 0; i < 20; i++)
-            entry.Revisions[i] = new KeyValueRevisionEntry(Encoding.UTF8.GetBytes("revision-" + i), now, HLCTimestamp.Zero, KeyValueState.Set);
-
-        context.InsertStoreEntry("hot/key", entry);
-
-        handler.Execute();
-        Assert.Equal(20, context.Store.Get("hot/key")!.Revisions!.Count);
-
-        handler.Execute();
-        Assert.Equal(4, context.Store.Get("hot/key")!.Revisions!.Count);
-    }
-
-    [Fact]
-    public void TestTryCollectHandlerReconcilesByteAccountingAfterMetadataTrim()
-    {
-        KahunaConfiguration config = CreateConfiguration();
-        config.RevisionRetention = 4;
-        config.MetadataTrimInterval = 1;
-
-        (TryCollectHandler handler, KeyValueContext context, _, RaftManager raft) = CreateHandler(config);
-        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
-
-        KeyValueEntry entry = new()
-        {
-            Value = Encoding.UTF8.GetBytes("v"),
-            State = KeyValueState.Set,
-            LastUsed = now,
-            Revisions = new()
-        };
-
-        byte[] revisionPayload = new byte[1024];
-        for (int i = 0; i < 20; i++)
-            entry.Revisions[i] = new KeyValueRevisionEntry(revisionPayload, now, HLCTimestamp.Zero, KeyValueState.Set);
-
-        context.InsertStoreEntry("hot/key", entry);
-        long bytesBeforeTrim = context.ApproximateStoreBytes;
-
-        handler.Execute();
-
-        Assert.Equal(4, context.Store.Get("hot/key")!.Revisions!.Count);
-        Assert.True(context.ApproximateStoreBytes < bytesBeforeTrim);
-    }
-
-    [Fact]
     public void TestTryCollectHandlerPreservesOptimisticMvccEntriesWithoutWriteIntent()
     {
         (TryCollectHandler handler, KeyValueContext context, _, RaftManager raft) = CreateHandler();
@@ -302,14 +211,20 @@ public sealed class TestKeyValueCollection
         Assert.True(surviving.MvccEntries.ContainsKey(liveTx));
     }
 
+    /// <summary>
+    /// Phase C.3: the collector no longer has a metadata pass — stale MVCC entries with elapsed
+    /// Expires are not trimmed by the collector. Trimming now happens at transaction resolve time
+    /// (Phase C.2). An entry carrying both a live and an expired MVCC entry must be left intact
+    /// by the collector.
+    /// </summary>
     [Fact]
-    public void TestTryCollectHandlerTrimsStaleMvccEntries()
+    public void Collector_DoesNotTrimStaleMvccEntries()
     {
         (TryCollectHandler handler, KeyValueContext context, _, RaftManager raft) = CreateHandler();
         HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
         HLCTimestamp liveTx = now;
-        HLCTimestamp staleTx = new(now.N, now.L + 1, now.C);
-        HLCTimestamp staleExpires = new(1, 1, 0);
+        HLCTimestamp staleTx = new(now.N, now.L + 1000, now.C);
+        HLCTimestamp staleExpires = new(1, 1, 0); // far in the past
 
         KeyValueEntry entry = new()
         {
@@ -318,18 +233,8 @@ public sealed class TestKeyValueCollection
             LastUsed = now,
             MvccEntries = new()
             {
-                [liveTx] = new KeyValueMvccEntry
-                {
-                    State = KeyValueState.Set,
-                    Revision = 1,
-                    Expires = Future(now, TimeSpan.FromMinutes(1))
-                },
-                [staleTx] = new KeyValueMvccEntry
-                {
-                    State = KeyValueState.Set,
-                    Revision = 0,
-                    Expires = staleExpires
-                }
+                [liveTx] = new KeyValueMvccEntry { State = KeyValueState.Set, Revision = 1, Expires = Future(now, TimeSpan.FromMinutes(1)) },
+                [staleTx] = new KeyValueMvccEntry { State = KeyValueState.Set, Revision = 0, Expires = staleExpires }
             }
         };
 
@@ -337,10 +242,136 @@ public sealed class TestKeyValueCollection
 
         handler.Execute();
 
+        // Collector leaves both entries untouched — MVCC trim is the resolver's job.
         KeyValueEntry? surviving = context.Store.Get("tx/key");
         Assert.NotNull(surviving?.MvccEntries);
-        Assert.Single(surviving.MvccEntries);
-        Assert.True(surviving.MvccEntries.ContainsKey(liveTx));
+        Assert.Equal(2, surviving.MvccEntries.Count);
+    }
+
+    /// <summary>
+    /// Phase C.2: TryRollbackMutationsHandler must trim expired-sibling MVCC entries at resolve
+    /// time, but leave non-expired siblings intact (selectivity check).
+    /// </summary>
+    [Fact]
+    public async Task Rollback_TrimsExpiredSiblingMvccEntries()
+    {
+        (_, KeyValueContext context, _, RaftManager raft) = CreateHandler();
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        HLCTimestamp rollingBackTx = now;
+        HLCTimestamp staleTx = new(now.N, now.L + 1000, now.C);
+        HLCTimestamp liveSiblingTx = new(now.N, now.L + 2000, now.C);
+        HLCTimestamp staleExpires = new(1, 1, 0); // far in the past
+
+        KeyValueEntry entry = new()
+        {
+            Value = Encoding.UTF8.GetBytes("v"),
+            State = KeyValueState.Set,
+            Revision = 1,
+            FlushedRevision = 1,
+            LastUsed = now,
+            LastModified = now,
+            WriteIntent = new KeyValueWriteIntent
+            {
+                TransactionId = rollingBackTx,
+                Expires = Future(now, TimeSpan.FromMinutes(1))
+            },
+            MvccEntries = new()
+            {
+                [rollingBackTx] = new KeyValueMvccEntry { State = KeyValueState.Set, Revision = 2, Expires = Future(now, TimeSpan.FromMinutes(1)) },
+                [staleTx]       = new KeyValueMvccEntry { State = KeyValueState.Set, Revision = 0, Expires = staleExpires },
+                [liveSiblingTx] = new KeyValueMvccEntry { State = KeyValueState.Set, Revision = 0, Expires = Future(now, TimeSpan.FromMinutes(5)) }
+            }
+        };
+
+        context.InsertStoreEntry("tx/key", entry);
+
+        TryRollbackMutationsHandler rollbackHandler = new(context);
+        KeyValueResponse response = await rollbackHandler.Execute(new KeyValueRequest(
+            KeyValueRequestType.TryRollbackMutations,
+            rollingBackTx,
+            HLCTimestamp.Zero,
+            "tx/key",
+            null, null, -1, KeyValueFlags.None, 0,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Ephemeral,
+            0, 0, null
+        ));
+
+        Assert.Equal(KeyValueResponseType.RolledBack, response.Type);
+
+        KeyValueEntry? surviving = context.Store.Get("tx/key");
+        Assert.NotNull(surviving);
+        Assert.Null(surviving.WriteIntent);
+        // rollingBackTx and staleTx removed; liveSiblingTx (not expired) must survive.
+        Assert.NotNull(surviving.MvccEntries);
+        Assert.Equal(1, surviving.MvccEntries.Count);
+        Assert.True(surviving.MvccEntries.ContainsKey(liveSiblingTx),
+            "non-expired sibling MVCC entry must not be trimmed");
+        Assert.False(surviving.MvccEntries.ContainsKey(staleTx),
+            "expired sibling MVCC entry must be trimmed at rollback time");
+    }
+
+    /// <summary>
+    /// Phase C.2 / lock-release path: TryReleaseExclusiveLockHandler must also trim expired
+    /// sibling MVCC entries at resolve time, and must leave non-expired siblings intact.
+    /// </summary>
+    [Fact]
+    public async Task LockRelease_TrimsExpiredSiblingMvccEntries()
+    {
+        (_, KeyValueContext context, _, RaftManager raft) = CreateHandler();
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        HLCTimestamp releasingTx = now;
+        HLCTimestamp staleTx = new(now.N, now.L + 1000, now.C);
+        HLCTimestamp liveSiblingTx = new(now.N, now.L + 2000, now.C);
+        HLCTimestamp staleExpires = new(1, 1, 0); // far in the past
+
+        KeyValueEntry entry = new()
+        {
+            Value = Encoding.UTF8.GetBytes("v"),
+            State = KeyValueState.Set,
+            Revision = 1,
+            FlushedRevision = 1,
+            LastUsed = now,
+            LastModified = now,
+            WriteIntent = new KeyValueWriteIntent
+            {
+                TransactionId = releasingTx,
+                Expires = Future(now, TimeSpan.FromMinutes(1))
+            },
+            MvccEntries = new()
+            {
+                [releasingTx]   = new KeyValueMvccEntry { State = KeyValueState.Set, Revision = 2, Expires = Future(now, TimeSpan.FromMinutes(1)) },
+                [staleTx]       = new KeyValueMvccEntry { State = KeyValueState.Set, Revision = 0, Expires = staleExpires },
+                [liveSiblingTx] = new KeyValueMvccEntry { State = KeyValueState.Set, Revision = 0, Expires = Future(now, TimeSpan.FromMinutes(5)) }
+            }
+        };
+
+        context.InsertStoreEntry("lock/key", entry);
+
+        TryReleaseExclusiveLockHandler lockReleaseHandler = new(context);
+        KeyValueResponse response = await lockReleaseHandler.Execute(new KeyValueRequest(
+            KeyValueRequestType.TryReleaseExclusiveLock,
+            releasingTx,
+            HLCTimestamp.Zero,
+            "lock/key",
+            null, null, -1, KeyValueFlags.None, 0,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Ephemeral,
+            0, 0, null
+        ));
+
+        Assert.Equal(KeyValueResponseType.Unlocked, response.Type);
+
+        KeyValueEntry? surviving = context.Store.Get("lock/key");
+        Assert.NotNull(surviving);
+        Assert.Null(surviving.WriteIntent);
+        // releasingTx and staleTx removed; liveSiblingTx (not expired) must survive.
+        Assert.NotNull(surviving.MvccEntries);
+        Assert.Equal(1, surviving.MvccEntries.Count);
+        Assert.True(surviving.MvccEntries.ContainsKey(liveSiblingTx),
+            "non-expired sibling MVCC entry must not be trimmed");
+        Assert.False(surviving.MvccEntries.ContainsKey(staleTx),
+            "expired sibling MVCC entry must be trimmed at lock release time");
     }
 
     [Fact]
@@ -507,10 +538,7 @@ public sealed class TestKeyValueCollection
             MaxEntriesPerActor = 50_000,
             MaxBytesPerActor = 256L * 1024 * 1024,
             CollectBatchMax = 1000,
-            RevisionRetention = 16,
-            LruSampleSize = 5,
-            LruSampleScanMax = 256,
-            MetadataTrimInterval = 1
+            RevisionRetention = 16
         });
     }
 
