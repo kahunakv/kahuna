@@ -47,6 +47,9 @@ internal sealed class TryGetByBucketHandler : BaseHandler
 
             if (response is { Type: KeyValueResponseType.Get, Entry: not null })
                 items.Add((key, response.Entry));
+
+            if (items.Count >= KeyValueScanLimits.MaxPrefixScanResults)
+                break;
         }
 
         items.Sort(EnsureLexicographicalOrder);
@@ -79,6 +82,9 @@ internal sealed class TryGetByBucketHandler : BaseHandler
                 response.Entry.LastModified,
                 response.Entry.State
             ));
+
+            if (items.Count >= KeyValueScanLimits.MaxPrefixScanResults)
+                break;
         }
 
         // step 2: join the in-memory store with the disk store
@@ -86,6 +92,9 @@ internal sealed class TryGetByBucketHandler : BaseHandler
 
         foreach ((string key, ReadOnlyKeyValueEntry readOnlyKeyValueEntry) in itemsFromDisk)
         {
+            if (items.Count >= KeyValueScanLimits.MaxPrefixScanResults)
+                break;
+
             if (items.ContainsKey(key))
                 continue;
 

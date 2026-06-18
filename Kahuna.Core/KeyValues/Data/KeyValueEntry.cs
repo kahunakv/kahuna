@@ -28,7 +28,17 @@ internal sealed class KeyValueEntry
     /// <summary>
     /// Current modification revision
     /// </summary>
-    public long Revision { get; set; }       
+    public long Revision { get; set; }
+
+    /// <summary>
+    /// The highest revision confirmed written to disk. Entry is dirty (ineligible for eviction
+    /// until the flush safety window elapses) when <see cref="Revision"/> &gt; FlushedRevision.
+    /// Ephemeral entries set this equal to <see cref="Revision"/> at commit time — they have no
+    /// disk copy, so the guard never applies. Entries loaded from disk are initialized to
+    /// <see cref="Revision"/> as well. Default -1 ensures a newly-committed persistent entry is
+    /// immediately marked dirty before any flush can occur.
+    /// </summary>
+    public long FlushedRevision { get; set; } = -1;
     
     /// <summary>
     /// HLC timestamp of the last time the key/value was used
@@ -74,6 +84,17 @@ internal sealed class KeyValueEntry
     /// accounting lookups on the write path are O(1) instead of O(history).
     /// </summary>
     internal long CachedBytes;
+
+    /// <summary>
+    /// Returns true when this entry's latest committed revision may not yet be on disk and the
+    /// entry is therefore ineligible for eviction.  Both conditions must hold: the revision counter
+    /// is ahead of what was last confirmed flushed, AND the entry was modified recently enough that
+    /// the flush cycle may not have run yet (time-guard proxy for the missing flush-ack).
+    /// Ephemeral entries always have FlushedRevision == Revision and return false.
+    /// </summary>
+    public bool IsDirty(long safetyWindowMs, HLCTimestamp currentTime) =>
+        Revision > FlushedRevision &&
+        (currentTime - LastModified) < TimeSpan.FromMilliseconds(safetyWindowMs);
 
     /// <summary>
     /// Finds the most recent archived revision whose <see cref="KeyValueRevisionEntry.LastModified"/>

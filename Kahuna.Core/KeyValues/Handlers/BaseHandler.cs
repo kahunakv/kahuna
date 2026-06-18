@@ -185,6 +185,7 @@ internal abstract class BaseHandler
                         Bucket = GetBucket(key),
                         Value = readKeyValueEntry.Value,
                         Revision = readKeyValueEntry.Revision,
+                        FlushedRevision = readKeyValueEntry.Revision,
                         Expires = readKeyValueEntry.Expires,
                         LastUsed = readKeyValueEntry.LastUsed,
                         LastModified = readKeyValueEntry.LastModified,
@@ -193,6 +194,7 @@ internal abstract class BaseHandler
 
                 if (entry is not null)
                 {
+                    entry.FlushedRevision = entry.Revision; // already on disk
                     entry.LastUsed = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
                     if (populateCache)
                         context.InsertStoreEntry(key, entry);

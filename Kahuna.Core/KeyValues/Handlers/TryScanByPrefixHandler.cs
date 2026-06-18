@@ -43,6 +43,9 @@ internal sealed class TryScanByPrefixHandler : BaseHandler
 
             if (response is { Type: KeyValueResponseType.Get, Entry: not null })
                 items.Add((key, response.Entry));
+
+            if (items.Count >= KeyValueScanLimits.MaxPrefixScanResults)
+                break;
         }
 
         return new(KeyValueResponseType.Get, items);

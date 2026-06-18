@@ -678,15 +678,17 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
             readerWriterLock.AcquireReaderLock(TimeSpan.FromSeconds(5));
 
             const string query = """
-             SELECT key, value, revision, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, lastUsedCounter, 
-                    lastModifiedNode, lastModifiedPhysical, lastModifiedCounter, state                               
+             SELECT key, value, revision, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, lastUsedCounter,
+                    lastModifiedNode, lastModifiedPhysical, lastModifiedCounter, state
              FROM keys
              WHERE key LIKE @key
+             LIMIT @limit
              """;
-            
+
             using SqliteCommand command = new(query, connection);
 
             command.Parameters.AddWithValue("@key", prefixKeyName + "%");
+            command.Parameters.AddWithValue("@limit", KeyValueScanLimits.MaxPrefixScanResults);
 
             using SqliteDataReader reader = command.ExecuteReader();
 

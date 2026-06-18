@@ -42,6 +42,18 @@ internal sealed class TryCollectHandler : BaseHandler
         bool trimMetadata = ShouldTrimMetadata(config);
         List<string>? metadataCandidates = trimMetadata ? [] : null;
 
+        // Dirty-entry safety window.  The time-guard proxy for "not yet flushed" is:
+        //   entry.IsDirty(safetyWindowMs, currentTime) = Revision > FlushedRevision
+        //                                                && (now - LastModified) < safetyWindowMs
+        // safetyWindowMs is floored at 10 000 ms so that the guard survives BackgroundWriterActor's
+        // worst-case flush path: DirtyObjectsWriterDelay tick + up to 5 retry rounds of
+        // DecorrelatedJitterBackoffV2(median 1000 ms) ≈ DirtyObjectsWriterDelay + ~10 000 ms.
+        // Without the floor, the standalone default (200 ms × 2 = 400 ms) would not cover a
+        // single retry cycle.  If FlushedRevision is eventually advanced by a flush-ack signal
+        // (the spec's primary approach) the window can be tightened or removed.
+        long rawDelayMs = config.DirtyObjectsWriterDelay > 0 ? config.DirtyObjectsWriterDelay : 5000L;
+        long safetyWindowMs = Math.Max(rawDelayMs * 2, 10_000L);
+
         // Step 1: always reclaim pure garbage (no entry floor).
         foreach (KeyValuePair<string, KeyValueEntry> key in context.Store.GetItems())
         {
@@ -55,10 +67,13 @@ internal sealed class TryCollectHandler : BaseHandler
 
                 continue;
             }
-            
+
             if (key.Value.WriteIntent is not null || key.Value.ReplicationIntent is not null)
                 continue;
-            
+
+            if (key.Value.IsDirty(safetyWindowMs, currentTime))
+                continue;
+
             if (key.Value.State is KeyValueState.Deleted or KeyValueState.Undefined)
             {
                 keysToEvict.Add(key.Key);
@@ -66,13 +81,13 @@ internal sealed class TryCollectHandler : BaseHandler
                 garbageEvicted++;
                 continue;
             }
-            
+
             if (key.Value.Expires == HLCTimestamp.Zero)
                 continue;
-            
+
             if ((key.Value.Expires - currentTime) > TimeSpan.Zero)
                 continue;
-            
+
             keysToEvict.Add(key.Key);
             evicted++;
             garbageEvicted++;
@@ -94,7 +109,8 @@ internal sealed class TryCollectHandler : BaseHandler
                 sampleSize,
                 scanMax,
                 batchMax - evicted,
-                ref lruSampleCursorKey
+                ref lruSampleCursorKey,
+                safetyWindowMs: safetyWindowMs
             );
 
             if (victims.Count == 0)
@@ -259,4 +275,5 @@ internal sealed class TryCollectHandler : BaseHandler
         return projectedCount > config.MaxEntriesPerActor
             || projectedBytes > config.MaxBytesPerActor;
     }
+
 }

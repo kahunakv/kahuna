@@ -150,7 +150,7 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
             IList<string> keys = keyValues.Keys;
             int start = LowerBound(keys, prefixKeyName);
 
-            for (int i = start; i < keys.Count; i++)
+            for (int i = start; i < keys.Count && items.Count < KeyValueScanLimits.MaxPrefixScanResults; i++)
             {
                 string key = keys[i];
                 if (!key.StartsWith(prefixKeyName, StringComparison.Ordinal))

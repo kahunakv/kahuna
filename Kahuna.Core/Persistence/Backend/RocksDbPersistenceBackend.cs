@@ -432,7 +432,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         using Iterator? iterator = db.NewIterator(cf: columnFamilyKeys);
         iterator.Seek(prefixBytes);
 
-        while (iterator.Valid())
+        while (iterator.Valid() && result.Count < KeyValueScanLimits.MaxPrefixScanResults)
         {
             // GetKeySpan returns a span directly over native memory — no byte[] copy.
             // Valid only until the next iterator move; consumed entirely before Next().

@@ -42,6 +42,7 @@ internal sealed class TrySetHandler : BaseHandler
                 newEntry = await context.Raft.ReadScheduler.EnqueueTask(message.PartitionId, () => context.PersistenceBackend.GetKeyValue(message.Key));
                 if (newEntry is not null)
                 {
+                    newEntry.FlushedRevision = newEntry.Revision; // already persisted
                     if (newEntry.State is KeyValueState.Deleted or KeyValueState.Undefined)
                     {
                         newEntry.Value = null;
@@ -275,6 +276,7 @@ internal sealed class TrySetHandler : BaseHandler
 
         entry.Value = proposal.Value;
         entry.Revision = proposal.Revision;
+        entry.FlushedRevision = entry.Revision; // ephemeral: no disk, always clean
         entry.Expires = proposal.Expires;
         entry.LastUsed = proposal.LastUsed;
         entry.LastModified = proposal.LastModified;

@@ -20,7 +20,8 @@ internal static class KeyValueCollectSampler
         int scanMax,
         int maxVictims,
         ref string? cursorKey,
-        int jitterOverride = -1
+        int jitterOverride = -1,
+        long safetyWindowMs = 0
     )
     {
         if (store.Count == 0 || scanMax <= 0 || sampleSize <= 0 || maxVictims <= 0)
@@ -34,7 +35,7 @@ internal static class KeyValueCollectSampler
             : scanMax > 1 ? Random.Shared.Next(0, scanMax) : 0;
 
         List<(string Key, HLCTimestamp LastUsed)> pool = new(sampleSize);
-        SampleState state = new(jitter, scanMax, sampleSize, currentTime, excludedKeys, pool);
+        SampleState state = new(jitter, scanMax, sampleSize, currentTime, excludedKeys, pool, safetyWindowMs);
 
         WalkRing(store, cursorKey, ref state);
 
@@ -74,7 +75,7 @@ internal static class KeyValueCollectSampler
             if (state.Examined >= state.ScanMax)
                 break;
 
-            if (!IsEligible(item, state.ExcludedKeys))
+            if (!IsEligible(item, state.ExcludedKeys, state.CurrentTime, state.SafetyWindowMs))
                 continue;
 
             ringEligible++;
@@ -140,12 +141,15 @@ internal static class KeyValueCollectSampler
         }
     }
 
-    private static bool IsEligible(KeyValuePair<string, KeyValueEntry> item, HashSet<string> excludedKeys)
+    private static bool IsEligible(KeyValuePair<string, KeyValueEntry> item, HashSet<string> excludedKeys, HLCTimestamp currentTime, long safetyWindowMs)
     {
         if (excludedKeys.Contains(item.Key))
             return false;
 
         if (item.Value.WriteIntent is not null || item.Value.ReplicationIntent is not null)
+            return false;
+
+        if (safetyWindowMs > 0 && item.Value.IsDirty(safetyWindowMs, currentTime))
             return false;
 
         return true;
@@ -193,6 +197,7 @@ internal static class KeyValueCollectSampler
         public List<(string Key, HLCTimestamp LastUsed)> Pool;
         public string? FirstSkippedKey;
         public string? LastExamined;
+        public long SafetyWindowMs;
 
         public SampleState(
             int jitter,
@@ -200,7 +205,8 @@ internal static class KeyValueCollectSampler
             int sampleSize,
             HLCTimestamp currentTime,
             HashSet<string> excludedKeys,
-            List<(string Key, HLCTimestamp LastUsed)> pool
+            List<(string Key, HLCTimestamp LastUsed)> pool,
+            long safetyWindowMs = 0
         )
         {
             JitterRemaining = jitter;
@@ -212,6 +218,7 @@ internal static class KeyValueCollectSampler
             Pool = pool;
             FirstSkippedKey = null;
             LastExamined = null;
+            SafetyWindowMs = safetyWindowMs;
         }
     }
 }
