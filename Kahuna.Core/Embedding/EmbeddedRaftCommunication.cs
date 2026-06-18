@@ -1,5 +1,9 @@
 using Kommander;
 using Kommander.Communication;
+using GossipPingRequest = Kommander.Gossip.PingRequest;
+using GossipPingResponse = Kommander.Gossip.PingResponse;
+using GossipPingReqRequest = Kommander.Gossip.PingReqRequest;
+using GossipPingReqResponse = Kommander.Gossip.PingReqResponse;
 using Kommander.Data;
 
 namespace Kahuna;
@@ -27,6 +31,10 @@ internal sealed class EmbeddedRaftCommunication : ICommunication
     private static readonly Task<JoinResponse> JoinResponse = Task.FromResult(new JoinResponse(false));
 
     private static readonly Task<LeaveResponse> LeaveResponse = Task.FromResult(new LeaveResponse(false));
+
+    private static readonly Task<GossipPingResponse> GossipPingResponseAlive = Task.FromResult(new GossipPingResponse(true, 0));
+
+    private static readonly Task<GossipPingReqResponse> GossipPingReqResponseReached = Task.FromResult(new GossipPingReqResponse(true));
 
     public Task<HandshakeResponse> Handshake(RaftManager manager, RaftNode node, HandshakeRequest request)
     {
@@ -63,6 +71,16 @@ internal sealed class EmbeddedRaftCommunication : ICommunication
     public Task<LeaveResponse> SendLeave(RaftManager manager, RaftNode node, LeaveRequest request, CancellationToken cancellationToken = default)
     {
         return LeaveResponse;
+    }
+
+    public Task<GossipPingResponse> SendPing(RaftManager manager, RaftNode node, GossipPingRequest request, CancellationToken cancellationToken = default)
+    {
+        return GossipPingResponseAlive;
+    }
+
+    public Task<GossipPingReqResponse> SendPingReq(RaftManager manager, RaftNode node, GossipPingReqRequest request, CancellationToken cancellationToken = default)
+    {
+        return GossipPingReqResponseReached;
     }
 
     public Task<BatchRequestsResponse> BatchRequests(RaftManager manager, RaftNode node, BatchRequestsRequest request)
