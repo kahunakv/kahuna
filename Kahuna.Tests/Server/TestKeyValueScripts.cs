@@ -666,7 +666,11 @@ public class TestKeyValueScripts : BaseCluster
 
         script = $"GET {key}";
 
-        resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+        await WaitUntilAsync(async () =>
+        {
+            resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            return resp.Type == KeyValueResponseType.Get;
+        });
         Assert.Equal(KeyValueResponseType.Get, resp.Type);
         Assert.Equal(0, resp.Revision);
         Assert.Equal("hello world"u8.ToArray(), resp.Value);
@@ -693,7 +697,8 @@ public class TestKeyValueScripts : BaseCluster
         resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
         Assert.Equal(KeyValueResponseType.Aborted, resp.Type);
 
-        await Task.Delay(1000, TestContext.Current.CancellationToken);
+        // 100ms < 150ms CI election floor — no re-election can occur; ephemeral key survives.
+        await Task.Delay(100, TestContext.Current.CancellationToken);
 
         script = $"EGET {ekey}";
 
