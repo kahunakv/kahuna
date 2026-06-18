@@ -383,7 +383,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
             entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
             return KeyValueStaticResponses.DoesNotExistContextResponse;
 
-        entry.LastUsed = currentTime;
+        context.TouchEntry(entry, currentTime);
 
         readOnlyKeyValueEntry = new(
             entry.Value,

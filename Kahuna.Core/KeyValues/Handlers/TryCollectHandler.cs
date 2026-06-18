@@ -18,7 +18,6 @@ namespace Kahuna.Server.KeyValues.Handlers;
 internal sealed class TryCollectHandler : BaseHandler
 {
     private readonly HashSet<string> keysToEvict = [];
-    private string? lruSampleCursorKey;
     private int collectCycleCount;
     
     public TryCollectHandler(KeyValueContext context) : base(context)
@@ -54,86 +53,146 @@ internal sealed class TryCollectHandler : BaseHandler
         long rawDelayMs = config.DirtyObjectsWriterDelay > 0 ? config.DirtyObjectsWriterDelay : 5000L;
         long safetyWindowMs = Math.Max(rawDelayMs * 2, 10_000L);
 
-        // Step 1: always reclaim pure garbage (no entry floor).
-        foreach (KeyValuePair<string, KeyValueEntry> key in context.Store.GetItems())
+        // Step 1a: drain tombstone queue — Deleted/Undefined entries.
+        // Dirty or intent-held tombstones are collected in deferredTombstones and re-enqueued
+        // AFTER the drain loop so they are not re-processed in the same cycle.
+        // Intent-held entries will also be re-added by the commit/rollback handler, but the
+        // duplicate is harmless — lazy re-validation discards stale queue entries on the next pop.
+        //
+        // Snapshot the queue depth at entry so deferred (non-evicted) entries don't cause the loop
+        // to process more than min(batchMax, snapshot) items per cycle. Without the snapshot the
+        // loop would drain the entire queue on every cycle — O(tombstone-backlog) — because
+        // deferred entries never increment `evicted`.
+        List<string>? deferredTombstones = null;
+        int tombstoneDrainLimit = Math.Min(batchMax, context.TombstoneQueue.Count);
+        int tombstoneDrained = 0;
+        while (evicted < batchMax && tombstoneDrained < tombstoneDrainLimit && context.TombstoneQueue.TryDequeue(out string? tombstoneKey))
         {
-            if (metadataCandidates is not null && MightNeedMetadataTrim(key.Value, config))
-                metadataCandidates.Add(key.Key);
+            tombstoneDrained++;
+            if (!context.Store.TryGetValue(tombstoneKey, out KeyValueEntry? tombstoneEntry))
+                continue; // already evicted by another path
 
-            if (evicted >= batchMax)
+            if (tombstoneEntry.State is not (KeyValueState.Deleted or KeyValueState.Undefined))
+                continue; // stale queue entry — entry was re-set after the tombstone was enqueued
+
+            if (tombstoneEntry.WriteIntent is not null || tombstoneEntry.ReplicationIntent is not null)
             {
-                if (metadataCandidates is null)
-                    break;
-
+                deferredTombstones ??= [];
+                deferredTombstones.Add(tombstoneKey);
                 continue;
             }
 
-            if (key.Value.WriteIntent is not null || key.Value.ReplicationIntent is not null)
-                continue;
-
-            if (key.Value.IsDirty(safetyWindowMs, currentTime))
-                continue;
-
-            if (key.Value.State is KeyValueState.Deleted or KeyValueState.Undefined)
+            if (tombstoneEntry.IsDirty(safetyWindowMs, currentTime))
             {
-                keysToEvict.Add(key.Key);
-                evicted++;
-                garbageEvicted++;
+                deferredTombstones ??= [];
+                deferredTombstones.Add(tombstoneKey);
                 continue;
             }
 
-            if (key.Value.Expires == HLCTimestamp.Zero)
-                continue;
-
-            if ((key.Value.Expires - currentTime) > TimeSpan.Zero)
-                continue;
-
-            keysToEvict.Add(key.Key);
+            keysToEvict.Add(tombstoneKey);
             evicted++;
             garbageEvicted++;
         }
 
+        if (deferredTombstones is not null)
+            foreach (string key in deferredTombstones)
+                context.TombstoneQueue.Enqueue(key);
+
+        // Step 1b: drain expiry heap — entries whose TTL has elapsed.
+        // Pop while the earliest-expiring entry is past its deadline, then re-validate:
+        //   • key still in store
+        //   • Expires on the live entry matches the heap priority (not stale after an Extend)
+        //   • entry is not dirty or intent-held
+        // Dirty or intent-held expired entries are deferred into deferredExpiry and re-enqueued
+        // AFTER the loop — re-enqueueing inside the loop would cause an immediate re-pop (the
+        // entry's expiry is already ≤ now), resulting in an infinite spin on the same key.
+        List<(string Key, HLCTimestamp Expiry)>? deferredExpiry = null;
+        while (evicted < batchMax)
+        {
+            if (!context.ExpiryHeap.TryPeek(out string? expiredKey, out HLCTimestamp heapExpiry))
+                break; // heap empty
+
+            if ((heapExpiry - currentTime) > TimeSpan.Zero)
+                break; // earliest entry has not yet elapsed; nothing later can have either
+
+            context.ExpiryHeap.Dequeue();
+
+            if (!context.Store.TryGetValue(expiredKey, out KeyValueEntry? expiredEntry))
+                continue; // evicted by another path
+
+            if (expiredEntry.Expires != heapExpiry)
+                continue; // stale: TryExtend pushed the deadline forward
+
+            if (expiredEntry.Expires == HLCTimestamp.Zero || (expiredEntry.Expires - currentTime) > TimeSpan.Zero)
+                continue; // defensive: expiry cleared or not yet due
+
+            if (expiredEntry.WriteIntent is not null || expiredEntry.ReplicationIntent is not null)
+            {
+                deferredExpiry ??= [];
+                deferredExpiry.Add((expiredKey, heapExpiry));
+                continue;
+            }
+
+            if (expiredEntry.IsDirty(safetyWindowMs, currentTime))
+            {
+                deferredExpiry ??= [];
+                deferredExpiry.Add((expiredKey, heapExpiry));
+                continue;
+            }
+
+            keysToEvict.Add(expiredKey);
+            evicted++;
+            garbageEvicted++;
+        }
+
+        if (deferredExpiry is not null)
+            foreach ((string key, HLCTimestamp expiry) in deferredExpiry)
+                context.ExpiryHeap.Enqueue(key, expiry);
+
+        // Metadata scan — runs only on the configured interval; removed in Phase C.
+        // Separate pass so the drain loops above stay O(reclaimed).
+        if (metadataCandidates is not null)
+        {
+            foreach (KeyValuePair<string, KeyValueEntry> pair in context.Store.GetItems())
+            {
+                if (MightNeedMetadataTrim(pair.Value, config))
+                    metadataCandidates.Add(pair.Key);
+            }
+        }
+
+        // Intentional asymmetry: IsOverStoreBudget (the entry gate) includes heap/queue node
+        // overhead so that stale-node accumulation triggers collection. IsProjectedOverBudget
+        // (the LRU loop guard) uses raw store bytes only — heap bloat should be relieved by the
+        // drain loops above, not by LRU-evicting live entries to compensate for phantom bytes.
         long projectedBytes = context.ApproximateStoreBytes - EstimateEvictionBytes(keysToEvict);
         int projectedCount = context.Store.Count - keysToEvict.Count;
 
-        // Step 2: bounded approximate LRU when over budget.
-        int sampleSize = config.LruSampleSize;
-        int scanMax = config.LruSampleScanMax;
-
-        while (IsProjectedOverBudget(projectedCount, projectedBytes, config) && evicted < batchMax)
+        // Step 2: intrusive O(1) LRU — walk from head (coldest) toward tail (hottest), evicting
+        // eligible entries until under budget or batchMax reached. Dirty and intent-held entries
+        // are skipped (advanced past), not evicted. Because the list is not modified until
+        // RemoveStoreEntry runs after the loop, LruNext pointers remain stable during the walk.
+        KeyValueEntry? lruCandidate = context.LruHead;
+        while (IsProjectedOverBudget(projectedCount, projectedBytes, config)
+            && evicted < batchMax
+            && lruCandidate is not null)
         {
-            List<string> victims = KeyValueCollectSampler.SampleOldestVictims(
-                context.Store,
-                keysToEvict,
-                currentTime,
-                sampleSize,
-                scanMax,
-                batchMax - evicted,
-                ref lruSampleCursorKey,
-                safetyWindowMs: safetyWindowMs
-            );
+            KeyValueEntry? next = lruCandidate.LruNext;
+            string? candidateKey = lruCandidate.StoreKey;
 
-            if (victims.Count == 0)
-                break;
-
-            foreach (string key in victims)
+            if (candidateKey is not null
+                && !keysToEvict.Contains(candidateKey)
+                && lruCandidate.WriteIntent is null
+                && lruCandidate.ReplicationIntent is null
+                && !lruCandidate.IsDirty(safetyWindowMs, currentTime))
             {
-                if (evicted >= batchMax)
-                    break;
-
-                if (!IsProjectedOverBudget(projectedCount, projectedBytes, config))
-                    break;
-
-                if (!keysToEvict.Add(key))
-                    continue;
-
+                keysToEvict.Add(candidateKey);
                 evicted++;
                 lruEvicted++;
-
                 projectedCount--;
-                if (context.Store.TryGetValue(key, out KeyValueEntry? entry))
-                    projectedBytes -= (key.Length * sizeof(char)) + entry.CachedBytes;
+                projectedBytes -= (candidateKey.Length * sizeof(char)) + lruCandidate.CachedBytes;
             }
+
+            lruCandidate = next;
         }
 
         foreach (string key in keysToEvict)

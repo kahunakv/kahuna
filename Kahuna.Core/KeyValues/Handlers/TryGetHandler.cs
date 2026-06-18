@@ -200,7 +200,7 @@ internal sealed class TryGetHandler : BaseHandler
         if (entry is null || entry.State is KeyValueState.Undefined or KeyValueState.Deleted || (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero))
             return KeyValueStaticResponses.DoesNotExistContextResponse;
 
-        entry.LastUsed = currentTime;
+        context.TouchEntry(entry, currentTime);
 
         readOnlyKeyValueEntry = new(
             entry.Value,

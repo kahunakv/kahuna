@@ -38,7 +38,7 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
                 newEntry = await context.Raft.ReadScheduler.EnqueueTask(message.PartitionId, () => context.PersistenceBackend.GetKeyValue(message.Key));
 
             newEntry ??= new() { Bucket = GetBucket(message.Key), State = KeyValueState.Undefined, Revision = -1 };
-            
+
             entry = newEntry;
 
             context.InsertStoreEntry(message.Key, newEntry);

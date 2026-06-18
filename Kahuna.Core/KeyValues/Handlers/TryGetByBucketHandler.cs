@@ -227,7 +227,7 @@ internal sealed class TryGetByBucketHandler : BaseHandler
         if (entry is null || entry.State is KeyValueState.Deleted or KeyValueState.Undefined || entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
             return KeyValueStaticResponses.DoesNotExistContextResponse;
 
-        entry.LastUsed = currentTime;
+        context.TouchEntry(entry, currentTime);
 
         readOnlyKeyValueEntry = new(
             entry.Value,

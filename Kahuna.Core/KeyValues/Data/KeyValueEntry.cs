@@ -86,6 +86,24 @@ internal sealed class KeyValueEntry
     internal long CachedBytes;
 
     /// <summary>
+    /// The store key this entry is filed under. Set by InsertStoreEntry; cleared on removal.
+    /// Required so the LRU head-pop path can evict by key without a reverse store lookup.
+    /// </summary>
+    internal string? StoreKey;
+
+    /// <summary>
+    /// Intrusive doubly-linked LRU list — previous node (toward head / coldest).
+    /// Null when this entry is the coldest in the actor or is not linked.
+    /// </summary>
+    internal KeyValueEntry? LruPrev;
+
+    /// <summary>
+    /// Intrusive doubly-linked LRU list — next node (toward tail / hottest).
+    /// Null when this entry is the hottest in the actor or is not linked.
+    /// </summary>
+    internal KeyValueEntry? LruNext;
+
+    /// <summary>
     /// Returns true when this entry's latest committed revision may not yet be on disk and the
     /// entry is therefore ineligible for eviction.  Both conditions must hold: the revision counter
     /// is ahead of what was last confirmed flushed, AND the entry was modified recently enough that

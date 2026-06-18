@@ -62,12 +62,15 @@ internal sealed class CompleteProposalHandler : BaseHandler
         entry.Value = proposal.Value;
         entry.Revision = proposal.Revision;
         entry.Expires = proposal.Expires;
-        entry.LastUsed = proposal.LastUsed;
+        context.TouchEntry(entry, proposal.LastUsed);
         entry.LastModified = proposal.LastModified;
         entry.State = proposal.State;
 
         context.AdjustEntryValueBytes(entry, previousValueLength, entry.Value?.Length ?? 0);
-        
+        context.EnqueueExpiry(proposal.Key, proposal.Expires);
+        if (proposal.State is KeyValueState.Deleted or KeyValueState.Undefined)
+            context.EnqueueTombstone(proposal.Key);
+
         context.BackgroundWriter.Send(new(
             BackgroundWriteType.QueueStoreKeyValue,
             message.PartitionId,

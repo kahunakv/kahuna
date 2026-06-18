@@ -65,9 +65,9 @@ internal sealed class TrySetHandler : BaseHandler
             }
 
             newEntry ??= new() { Bucket = GetBucket(message.Key), State = KeyValueState.Undefined, Revision = -1 };
-            
+
             entry = newEntry;
-            
+
             // logger.LogDebug("{0} {1}", context.State, context.Revision);
 
             context.InsertStoreEntry(message.Key, newEntry);
@@ -75,7 +75,10 @@ internal sealed class TrySetHandler : BaseHandler
         else
         {
             if (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
+            {
                 entry.State = KeyValueState.Deleted;
+                context.EnqueueTombstone(message.Key);
+            }
             
             if (entry.State is KeyValueState.Deleted or KeyValueState.Undefined)
             {
@@ -278,11 +281,12 @@ internal sealed class TrySetHandler : BaseHandler
         entry.Revision = proposal.Revision;
         entry.FlushedRevision = entry.Revision; // ephemeral: no disk, always clean
         entry.Expires = proposal.Expires;
-        entry.LastUsed = proposal.LastUsed;
+        context.TouchEntry(entry, proposal.LastUsed);
         entry.LastModified = proposal.LastModified;
         entry.State = proposal.State;
 
         context.AdjustEntryValueBytes(entry, previousValueLength, entry.Value?.Length ?? 0);
+        context.EnqueueExpiry(message.Key, proposal.Expires);
 
         return new(KeyValueResponseType.Set, entry.Revision);
     }

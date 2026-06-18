@@ -1,6 +1,7 @@
 
 using Nixie;
 using Kommander;
+using Kommander.Time;
 using Kahuna.Utils;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Ranges;
@@ -14,6 +15,20 @@ namespace Kahuna.Server.KeyValues;
 internal sealed class KeyValueContext
 {
     private long approximateStoreBytes;
+
+    // Intrusive doubly-linked LRU list: head = coldest (next eviction candidate),
+    // tail = hottest (most recently used). Maintained by InsertStoreEntry (LinkAtTail),
+    // RemoveStoreEntry (Unlink), and TouchEntry (move-to-tail on access).
+    private KeyValueEntry? lruHead;
+    private KeyValueEntry? lruTail;
+
+    // Min-heap keyed by (Expires, key): yields earliest-expiring entries first.
+    // Lazy-deletion: pop and re-validate (key present in Store and Expires matches) before acting.
+    private readonly PriorityQueue<string, HLCTimestamp> expiryHeap = new();
+
+    // FIFO of keys whose entry just transitioned to Deleted or Undefined.
+    // Lazy-validated on drain: re-check State before evicting.
+    private readonly Queue<string> tombstoneQueue = new();
 
     public IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> ActorContext { get; }
     
@@ -42,6 +57,12 @@ internal sealed class KeyValueContext
     public ILogger<IKahuna> Logger  { get; }
 
     public long ApproximateStoreBytes => approximateStoreBytes;
+
+    public KeyValueEntry? LruHead => lruHead;
+
+    public PriorityQueue<string, HLCTimestamp> ExpiryHeap => expiryHeap;
+
+    public Queue<string> TombstoneQueue => tombstoneQueue;
 
     public int CollectBatchMax =>
         Configuration.CollectBatchMax > 0
@@ -79,10 +100,78 @@ internal sealed class KeyValueContext
         Logger = logger;
     }
 
+    /// <summary>
+    /// Updates LastUsed and repositions the entry at the hot (tail) end of the LRU list.
+    /// Call on every read or write that constitutes genuine recency. Idempotent when already
+    /// at tail. Safe to call only after the entry has been inserted via InsertStoreEntry.
+    /// </summary>
+    public void TouchEntry(KeyValueEntry entry, HLCTimestamp lastUsed)
+    {
+        entry.LastUsed = lastUsed;
+        if (entry.StoreKey is null) return; // not linked (disk/scan entry — populateCache:false path)
+        if (entry == lruTail) return; // already hottest
+        Unlink(entry);
+        LinkAtTail(entry);
+    }
+
+    private void LinkAtTail(KeyValueEntry entry)
+    {
+        entry.LruPrev = lruTail;
+        entry.LruNext = null;
+        if (lruTail is not null)
+            lruTail.LruNext = entry;
+        else
+            lruHead = entry; // first entry in the list
+        lruTail = entry;
+    }
+
+    private void Unlink(KeyValueEntry entry)
+    {
+        if (entry.LruPrev is not null)
+            entry.LruPrev.LruNext = entry.LruNext;
+        else
+            lruHead = entry.LruNext; // entry was head
+
+        if (entry.LruNext is not null)
+            entry.LruNext.LruPrev = entry.LruPrev;
+        else
+            lruTail = entry.LruPrev; // entry was tail
+
+        entry.LruPrev = null;
+        entry.LruNext = null;
+    }
+
+    public void EnqueueExpiry(string key, HLCTimestamp expires)
+    {
+        if (expires != HLCTimestamp.Zero)
+            expiryHeap.Enqueue(key, expires);
+    }
+
+    public void EnqueueTombstone(string key) => tombstoneQueue.Enqueue(key);
+
     public bool IsOverStoreBudget()
     {
-        return Store.Count > Configuration.MaxEntriesPerActor
-            || approximateStoreBytes > Configuration.MaxBytesPerActor;
+        if (Store.Count > Configuration.MaxEntriesPerActor)
+            return true;
+
+        // Fold heap/queue node overhead into the byte budget so stale-node accumulation
+        // (one new heap node per TryExtend, old node not removable from PriorityQueue) is
+        // visible to budget pressure and eventually triggers collection to drain the duplicates.
+        // Per-node byte estimates:
+        //   expiry heap  ≈ 40 B (HLCTimestamp struct 24 B + string ref 8 B + array slot 8 B)
+        //   tombstone queue ≈ 16 B (string ref 8 B + array slot 8 B)
+        //
+        // Known limitation: duplicate nodes from repeated TryExtend carry future timestamps and
+        // are not drainable until their deadlines pass (Step 1b breaks at the first non-elapsed
+        // node). During that window this check can stay true and trigger collect cycles that
+        // cannot immediately shrink the heap. Steady-state is bounded (≈ renewals-per-TTL-window
+        // per key), not unbounded. Real dedup (track latest-expiry per key, drop stale on pop
+        // regardless of elapse) is the long-term fix — tracked as a follow-up, not a Phase A item.
+        long totalBytes = approximateStoreBytes
+            + ((long)expiryHeap.Count * 40)
+            + ((long)tombstoneQueue.Count * 16);
+
+        return totalBytes > Configuration.MaxBytesPerActor;
     }
 
     public void InsertStoreEntry(string key, KeyValueEntry entry)
@@ -95,6 +184,8 @@ internal sealed class KeyValueContext
                 $"CachedBytes drift on replace: key={key}, cached={existing.CachedBytes}, computed={KeyValueStoreAccounting.EstimateEntryBytes(key, existing) - (key.Length * sizeof(char))}");
 #endif
             approximateStoreBytes -= (key.Length * sizeof(char)) + existing.CachedBytes;
+            if (existing != entry)
+                Unlink(existing); // replacing with a new entry object; unlink the old one
         }
 
         // Initialize CachedBytes the first time an entry enters the store. For new entries
@@ -105,8 +196,26 @@ internal sealed class KeyValueContext
         if (entry.CachedBytes == 0)
             entry.CachedBytes = KeyValueStoreAccounting.EstimateEntryBytes(key, entry) - (key.Length * sizeof(char));
 
+        entry.StoreKey = key;
         Store.Insert(key, entry);
         approximateStoreBytes += (key.Length * sizeof(char)) + entry.CachedBytes;
+        if (entry != existing)   // same guard as Unlink above — symmetric, prevents double-link
+            LinkAtTail(entry);
+
+        // Auto-register with the expiry heap and tombstone queue so entries inserted through any
+        // path (handlers, disk-load, test helpers) are tracked without requiring callers to enqueue
+        // separately. Handlers that later mutate Expires or State on an existing entry still call
+        // EnqueueExpiry / EnqueueTombstone explicitly for those in-place transitions.
+        //
+        // Undefined is intentionally excluded: handlers insert Undefined stubs as cache-miss
+        // placeholders (TryGet, TryExists, TryAcquireExclusiveLock) that are usually promoted to
+        // Set or Deleted immediately after the disk read completes. Auto-enqueueing them would
+        // produce one stale tombstone queue entry per disk-loaded persistent key. Handlers that
+        // determine a key is genuinely absent call EnqueueTombstone explicitly.
+        if (entry.Expires != HLCTimestamp.Zero)
+            expiryHeap.Enqueue(key, entry.Expires);
+        if (entry.State is KeyValueState.Deleted)
+            tombstoneQueue.Enqueue(key);
     }
 
     public bool RemoveStoreEntry(string key)
@@ -116,6 +225,8 @@ internal sealed class KeyValueContext
 
         Store.Remove(key);
         approximateStoreBytes -= (key.Length * sizeof(char)) + entry.CachedBytes;
+        Unlink(entry);
+        entry.StoreKey = null;
         return true;
     }
 

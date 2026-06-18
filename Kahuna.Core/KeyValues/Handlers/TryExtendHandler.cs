@@ -130,8 +130,9 @@ internal sealed class TryExtendHandler : BaseHandler
             return CreateProposal(message, entry, proposal, currentTime);
         
         entry.Expires = proposal.Expires;
-        entry.LastUsed = proposal.LastUsed;
+        context.TouchEntry(entry, proposal.LastUsed);
         entry.LastModified = proposal.LastModified;
+        context.EnqueueExpiry(message.Key, proposal.Expires);
 
         return new(KeyValueResponseType.Extended, entry.Revision, entry.LastModified);
     }

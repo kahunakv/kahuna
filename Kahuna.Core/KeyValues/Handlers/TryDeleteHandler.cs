@@ -135,12 +135,13 @@ internal sealed class TryDeleteHandler : BaseHandler
         int previousValueLength = entry.Value?.Length ?? 0;
 
         entry.Value = proposal.Value;
-        entry.LastUsed = proposal.LastUsed;
+        context.TouchEntry(entry, proposal.LastUsed);
         entry.LastModified = proposal.LastModified;
         entry.State = proposal.State;
 
         context.AdjustEntryValueBytes(entry, previousValueLength, entry.Value?.Length ?? 0);
-        
+        context.EnqueueTombstone(message.Key);
+
         return new(KeyValueResponseType.Deleted, entry.Revision, entry.LastModified);
     }
 }

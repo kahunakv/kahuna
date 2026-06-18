@@ -155,10 +155,8 @@ public sealed class TestKeyValueDirtyEvictionGuard
         (TryCollectHandler handler, KeyValueContext context, RaftManager raft) = CreateHandler(config);
         HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
-        for (int i = 0; i < 8; i++)
-            InsertCleanEntry(context, $"filler/{i:D2}", KeyValueState.Set, now);
-
-        // Entry modified 30 s ago → 30 000 ms > 10 000 ms safety window.
+        // Insert stale/key FIRST so it sits at the cold end of the LRU list (intrusive O(1) LRU
+        // evicts from head; inserting first makes it the head before fillers push it down).
         HLCTimestamp oldModified = new(now.N, now.L - TimeSpan.FromSeconds(30).Ticks, now.C);
         context.InsertStoreEntry("stale/key", new KeyValueEntry
         {
@@ -171,6 +169,11 @@ public sealed class TestKeyValueDirtyEvictionGuard
             Expires = HLCTimestamp.Zero
         });
 
+        // Insert 8 clean filler entries after — they sit at the hot end.
+        for (int i = 0; i < 8; i++)
+            InsertCleanEntry(context, $"filler/{i:D2}", KeyValueState.Set, now);
+
+        // 9 entries, budget 5 → need to evict 4. stale/key is coldest eligible → evicted.
         handler.Execute();
 
         Assert.False(context.Store.ContainsKey("stale/key"),

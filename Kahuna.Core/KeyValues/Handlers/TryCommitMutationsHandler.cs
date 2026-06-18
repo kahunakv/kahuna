@@ -109,11 +109,14 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             entry.Value = proposal.Value;
             entry.Expires = proposal.Expires;
             entry.Revision = proposal.Revision;
-            entry.LastUsed = proposal.LastUsed;
+            context.TouchEntry(entry, proposal.LastUsed);
             entry.LastModified = proposal.LastModified;
             entry.State = proposal.State;
 
             context.AdjustEntryValueBytes(entry, previousValueLength, entry.Value?.Length ?? 0);
+            context.EnqueueExpiry(message.Key, proposal.Expires);
+            if (proposal.State is KeyValueState.Deleted or KeyValueState.Undefined)
+                context.EnqueueTombstone(message.Key);
 
             if (entry.MvccEntries.Remove(message.TransactionId, out KeyValueMvccEntry? removedMvccE))
                 context.AdjustEstimatedEntryBytes(entry, -KeyValueStoreAccounting.MvccEntryRemovedBytes(entry.MvccEntries.Count == 0, removedMvccE.Value));
@@ -157,12 +160,15 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         entry.Value = proposal.Value;
         entry.Expires = proposal.Expires;
         entry.Revision = proposal.Revision;
-        entry.LastUsed = proposal.LastUsed;
+        context.TouchEntry(entry, proposal.LastUsed);
         entry.LastModified = proposal.LastModified;
         entry.State = proposal.State;
 
         context.AdjustEntryValueBytes(entry, previousValueLength, entry.Value?.Length ?? 0);
-        
+        context.EnqueueExpiry(proposal.Key, proposal.Expires);
+        if (proposal.State is KeyValueState.Deleted or KeyValueState.Undefined)
+            context.EnqueueTombstone(proposal.Key);
+
         context.BackgroundWriter.Send(new(
             BackgroundWriteType.QueueStoreKeyValue,
             partitionId,

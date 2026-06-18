@@ -12,7 +12,7 @@ using Kommander.Time;
 /// </summary>
 internal static class KeyValueStoreAccounting
 {
-    public const int EntryOverheadBytes = 128;
+    public const int EntryOverheadBytes = 152; // +24 for StoreKey ref + LruPrev ref + LruNext ref
     internal const int DictionaryOverheadBytes = 64;
     internal const int RevisionEntryOverheadBytes = 16;
     private const int MvccEntryOverheadBytes = 64;
