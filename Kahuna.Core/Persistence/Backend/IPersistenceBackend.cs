@@ -2,6 +2,8 @@
 using Kahuna.Server.Locks;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.Locks.Data;
+using Kahuna.Server.Persistence.Pitr;
+using Kommander.Time;
 
 namespace Kahuna.Server.Persistence.Backend;
 
@@ -41,4 +43,28 @@ internal interface IPersistenceBackend
         int batchSize,
         out RevisionPruneResult result
     );
+
+    /// <summary>
+    /// Produces a crash-consistent base-image snapshot of the storage engine at
+    /// <paramref name="destinationPath"/>.  The image is accompanied by a
+    /// <see cref="CheckpointManifest"/> sidecar that records the WAL index and HLC
+    /// at which the snapshot was taken so restore can locate the correct replay start.
+    /// <para>
+    /// <b>Content policy:</b> all implementations snapshot both KV and lock state.
+    /// RocksDB and SQLite do so implicitly (full-DB copy); Memory serialises both tables
+    /// to JSON. The restore path decides which tables to apply.
+    /// </para>
+    /// <para>
+    /// All implementations write into a temp sibling directory first and rename it into
+    /// place atomically so a failure mid-copy never leaves a partial checkpoint at
+    /// <paramref name="destinationPath"/>.
+    /// </para>
+    /// <para>
+    /// RocksDB creates hard-links to live SST files — fast, does not stall foreground writes.
+    /// SQLite runs <c>VACUUM INTO</c> per shard under a per-shard exclusive lock — each shard
+    /// copy stalls writes to that shard for its duration; callers should schedule off the
+    /// hot write path. Memory serialises both tables to JSON.
+    /// </para>
+    /// </summary>
+    public CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime);
 }

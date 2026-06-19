@@ -4,6 +4,8 @@ using System.Runtime.InteropServices;
 using System.Text;
 using Kahuna.Server.Locks;
 using Kahuna.Persistence.Protos;
+using Kahuna.Server.Persistence.Pitr;
+using Kommander.Time;
 using RocksDbSharp;
 using Google.Protobuf;
 using Kahuna.Server.KeyValues;
@@ -838,10 +840,41 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         deleted += deletedInBatch;
     }
 
+    public CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime)
+    {
+        // rocksdb_checkpoint_create requires the leaf to NOT exist — it creates the directory
+        // itself. Use a temp sibling so a failure before the rename can never leave a partial
+        // checkpoint at destinationPath.
+        string? parent = Path.GetDirectoryName(destinationPath);
+        if (parent is not null)
+            Directory.CreateDirectory(parent);
+
+        string tmpPath = destinationPath + ".tmp_" + Guid.NewGuid().ToString("N")[..8];
+
+        try
+        {
+            using Checkpoint cp = db.Checkpoint();
+            cp.Save(tmpPath, logSizeForFlush: 0); // RocksDB creates tmpPath
+
+            CheckpointManifest manifest = CheckpointManifest.From(appliedIndex, appliedTime);
+            manifest.WriteTo(tmpPath);
+
+            Directory.Move(tmpPath, destinationPath);
+
+            return new(destinationPath, manifest);
+        }
+        catch
+        {
+            if (Directory.Exists(tmpPath))
+                Directory.Delete(tmpPath, recursive: true);
+            throw;
+        }
+    }
+
     public void Dispose()
     {
         GC.SuppressFinalize(this);
-        
+
         db.Dispose();
     }
 }

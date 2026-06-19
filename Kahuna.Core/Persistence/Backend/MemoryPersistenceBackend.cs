@@ -1,9 +1,11 @@
 
-using Kahuna.Server.Locks;
+using System.Text.Json;
 using Kahuna.Server.KeyValues;
-using System.Collections.Concurrent;
+using Kahuna.Server.Locks;
 using Kahuna.Server.Locks.Data;
+using Kahuna.Server.Persistence.Pitr;
 using Kommander.Time;
+using System.Collections.Concurrent;
 
 namespace Kahuna.Server.Persistence.Backend;
 
@@ -238,8 +240,170 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
         return true;
     }
 
+    public CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime)
+    {
+        string tmpPath = destinationPath + ".tmp_" + Guid.NewGuid().ToString("N")[..8];
+        Directory.CreateDirectory(tmpPath);
+
+        try
+        {
+            List<MemoryCheckpointEntry> kvEntries;
+            lock (kvLock)
+            {
+                kvEntries = new(keyValues.Count);
+                foreach (KeyValuePair<string, KeyValueEntry> kv in keyValues)
+                {
+                    KeyValueEntry e = kv.Value;
+                    kvEntries.Add(new()
+                    {
+                        Key = kv.Key,
+                        Value = e.Value,
+                        Revision = e.Revision,
+                        ExpiresNode = e.Expires.N,
+                        ExpiresPhysical = e.Expires.L,
+                        ExpiresCounter = e.Expires.C,
+                        LastUsedNode = e.LastUsed.N,
+                        LastUsedPhysical = e.LastUsed.L,
+                        LastUsedCounter = e.LastUsed.C,
+                        LastModifiedNode = e.LastModified.N,
+                        LastModifiedPhysical = e.LastModified.L,
+                        LastModifiedCounter = e.LastModified.C,
+                        State = (int)e.State
+                    });
+                }
+            }
+
+            List<MemoryCheckpointLockEntry> lockEntries = new(locks.Count);
+            foreach (KeyValuePair<string, LockEntry> kv in locks)
+            {
+                LockEntry l = kv.Value;
+                lockEntries.Add(new()
+                {
+                    Resource = kv.Key,
+                    Owner = l.Owner,
+                    FencingToken = l.FencingToken,
+                    ExpiresNode = l.Expires.N,
+                    ExpiresPhysical = l.Expires.L,
+                    ExpiresCounter = l.Expires.C,
+                    LastUsedNode = l.LastUsed.N,
+                    LastUsedPhysical = l.LastUsed.L,
+                    LastUsedCounter = l.LastUsed.C,
+                    LastModifiedNode = l.LastModified.N,
+                    LastModifiedPhysical = l.LastModified.L,
+                    LastModifiedCounter = l.LastModified.C,
+                    State = (int)l.State
+                });
+            }
+
+            File.WriteAllText(Path.Combine(tmpPath, "store.json"), JsonSerializer.Serialize(kvEntries));
+            File.WriteAllText(Path.Combine(tmpPath, "locks.json"), JsonSerializer.Serialize(lockEntries));
+
+            CheckpointManifest manifest = CheckpointManifest.From(appliedIndex, appliedTime);
+            manifest.WriteTo(tmpPath);
+
+            Directory.Move(tmpPath, destinationPath);
+
+            return new(destinationPath, manifest);
+        }
+        catch
+        {
+            if (Directory.Exists(tmpPath))
+                Directory.Delete(tmpPath, recursive: true);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Opens an existing memory-backend checkpoint written by <see cref="CreateCheckpoint"/>
+    /// as a read-only (non-writable) in-memory store.
+    /// </summary>
+    public static MemoryPersistenceBackend OpenCheckpoint(string checkpointPath)
+    {
+        MemoryPersistenceBackend backend = new();
+
+        List<MemoryCheckpointEntry>? kvEntries = JsonSerializer.Deserialize<List<MemoryCheckpointEntry>>(
+            File.ReadAllText(Path.Combine(checkpointPath, "store.json")));
+
+        if (kvEntries is { Count: > 0 })
+        {
+            List<PersistenceRequestItem> items = new(kvEntries.Count);
+            foreach (MemoryCheckpointEntry e in kvEntries)
+            {
+                items.Add(new(
+                    e.Key, e.Value, e.Revision,
+                    e.ExpiresNode, e.ExpiresPhysical, e.ExpiresCounter,
+                    e.LastUsedNode, e.LastUsedPhysical, e.LastUsedCounter,
+                    e.LastModifiedNode, e.LastModifiedPhysical, e.LastModifiedCounter,
+                    e.State
+                ));
+            }
+            backend.StoreKeyValues(items);
+        }
+
+        string locksFile = Path.Combine(checkpointPath, "locks.json");
+        if (File.Exists(locksFile))
+        {
+            List<MemoryCheckpointLockEntry>? lockEntries =
+                JsonSerializer.Deserialize<List<MemoryCheckpointLockEntry>>(File.ReadAllText(locksFile));
+
+            if (lockEntries is { Count: > 0 })
+            {
+                List<PersistenceRequestItem> lockItems = new(lockEntries.Count);
+                foreach (MemoryCheckpointLockEntry l in lockEntries)
+                {
+                    lockItems.Add(new(
+                        l.Resource, l.Owner, l.FencingToken,
+                        l.ExpiresNode, l.ExpiresPhysical, l.ExpiresCounter,
+                        l.LastUsedNode, l.LastUsedPhysical, l.LastUsedCounter,
+                        l.LastModifiedNode, l.LastModifiedPhysical, l.LastModifiedCounter,
+                        l.State
+                    ));
+                }
+                backend.StoreLocks(lockItems);
+            }
+        }
+
+        return backend;
+    }
+
     public void Dispose()
     {
         GC.SuppressFinalize(this);
+    }
+
+    // DTOs used exclusively by CreateCheckpoint / OpenCheckpoint serialization.
+
+    private sealed class MemoryCheckpointEntry
+    {
+        public string Key { get; set; } = "";
+        public byte[]? Value { get; set; }
+        public long Revision { get; set; }
+        public int ExpiresNode { get; set; }
+        public long ExpiresPhysical { get; set; }
+        public uint ExpiresCounter { get; set; }
+        public int LastUsedNode { get; set; }
+        public long LastUsedPhysical { get; set; }
+        public uint LastUsedCounter { get; set; }
+        public int LastModifiedNode { get; set; }
+        public long LastModifiedPhysical { get; set; }
+        public uint LastModifiedCounter { get; set; }
+        public int State { get; set; }
+    }
+
+    private sealed class MemoryCheckpointLockEntry
+    {
+        public string Resource { get; set; } = "";
+        public byte[]? Owner { get; set; }
+        public long FencingToken { get; set; }
+        public int ExpiresNode { get; set; }
+        public long ExpiresPhysical { get; set; }
+        public uint ExpiresCounter { get; set; }
+        public int LastUsedNode { get; set; }
+        public long LastUsedPhysical { get; set; }
+        public uint LastUsedCounter { get; set; }
+        public int LastModifiedNode { get; set; }
+        public long LastModifiedPhysical { get; set; }
+        public uint LastModifiedCounter { get; set; }
+        public int State { get; set; }
     }
 }

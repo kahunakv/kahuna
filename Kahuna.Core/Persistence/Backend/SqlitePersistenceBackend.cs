@@ -2,6 +2,8 @@
 using Kahuna.Server.Locks;
 using Kommander;
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.Persistence.Pitr;
+using Kommander.Time;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using System.Collections.Generic;
@@ -1194,6 +1196,59 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
             command.Parameters.AddWithValue("@cutoffPhysical", cutoffPhysical);
 
         return command.ExecuteScalar() is not null;
+    }
+
+    public CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime)
+    {
+        // Write into a temp sibling so any failure — lock timeout or VACUUM error — cannot
+        // leave a partial checkpoint at destinationPath that a catalog scan might treat as valid.
+        string tmpPath = destinationPath + ".tmp_" + Guid.NewGuid().ToString("N")[..8];
+        Directory.CreateDirectory(tmpPath);
+
+        try
+        {
+            // VACUUM INTO holds the per-shard exclusive lock for the entire copy duration,
+            // stalling writes to that shard. Schedule off the hot write path.
+            for (int shard = 0; shard < MaxShards; shard++)
+            {
+                // Skip shards whose DB file does not exist yet — opening an absent shard just
+                // to VACUUM INTO it would create empty .db files in the checkpoint directory.
+                string shardFile = Path.Combine(path, $"kahuna{shard}_{dbRevision}.db");
+                if (!File.Exists(shardFile))
+                    continue;
+
+                (ReaderWriterLock rwLock, SqliteConnection connection) = TryOpenDatabaseByShard(shard);
+                string destFile = Path.Combine(tmpPath, $"kahuna{shard}_{dbRevision}.db");
+
+                bool lockTaken = false;
+                try
+                {
+                    rwLock.AcquireWriterLock(TimeSpan.FromSeconds(5));
+                    lockTaken = true;
+
+                    using SqliteCommand cmd = new($"VACUUM INTO '{destFile.Replace("'", "''")}'", connection);
+                    cmd.ExecuteNonQuery();
+                }
+                finally
+                {
+                    if (lockTaken)
+                        rwLock.ReleaseWriterLock();
+                }
+            }
+
+            CheckpointManifest manifest = CheckpointManifest.From(appliedIndex, appliedTime);
+            manifest.WriteTo(tmpPath);
+
+            Directory.Move(tmpPath, destinationPath);
+
+            return new(destinationPath, manifest);
+        }
+        catch
+        {
+            if (Directory.Exists(tmpPath))
+                Directory.Delete(tmpPath, recursive: true);
+            throw;
+        }
     }
 
     public void Dispose()
