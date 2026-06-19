@@ -18,5 +18,6 @@ public static class MapGrpcRoutesExtensions
         app.MapGrpcService<LocksService>();
         app.MapGrpcService<KeyValuesService>();
         app.MapGrpcService<SequencesService>();
+        app.MapGrpcService<ClusterService>();
     }
 }

@@ -52,6 +52,12 @@
         </Protobuf>
     </ItemGroup>
 
+    <ItemGroup>
+        <Protobuf Include="Communication\Grpc\Protos\cluster.proto">
+            <Generator>MSBuild:Compile</Generator>
+        </Protobuf>
+    </ItemGroup>
+
     <!--<ItemGroup>
         <ProjectReference Include="..\Kommander\Kommander.csproj" />
     </ItemGroup> -->

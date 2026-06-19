@@ -226,6 +226,193 @@ public abstract class BaseCluster
 
         return (raft1, raft2, raft3, kahuna1, kahuna2, kahuna3, interNodeCommmunication);
     }
+
+    /// <summary>
+    /// Like <see cref="AssembleThreNodeCluster"/> but exposes both the Raft and inter-node transports so
+    /// tests can add or remove nodes after the initial cluster forms.
+    /// </summary>
+    protected static async Task<(IRaft, IRaft, IRaft, IKahuna, IKahuna, IKahuna, InMemoryCommunication, MemoryInterNodeCommmunication)> AssembleThreeNodeClusterFull(
+        string walStorage, int partitions,
+        ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger)
+    {
+        InMemoryCommunication raftCommunication = new();
+        MemoryInterNodeCommmunication interNodeCommmunication = new();
+
+        (IRaft raft1, IKahuna kahuna1) = GetNode1(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger);
+        (IRaft raft2, IKahuna kahuna2) = GetNode2(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger);
+        (IRaft raft3, IKahuna kahuna3) = GetNode3(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger);
+
+        await WaitForClusterToAssemble(interNodeCommmunication, raftCommunication, partitions, raft1, raft2, raft3, kahuna1, kahuna2, kahuna3);
+
+        return (raft1, raft2, raft3, kahuna1, kahuna2, kahuna3, raftCommunication, interNodeCommmunication);
+    }
+
+    /// <summary>
+    /// Creates a single Raft+Kahuna node with the given identity and wires it into the shared transports.
+    /// Does NOT call <c>JoinCluster</c> — callers are responsible for that step.
+    /// </summary>
+    protected static (IRaft, IKahuna) BuildNode(
+        MemoryInterNodeCommmunication interNodeComm,
+        InMemoryCommunication raftComm,
+        string walStorage,
+        int nodeId,
+        int port,
+        IEnumerable<string> peers,
+        ILogger<IRaft> raftLogger,
+        ILogger<IKahuna> kahunaLogger,
+        int initialPartitions = 3)
+    {
+        IWAL wal = GetWAL(walStorage, raftLogger);
+        ActorSystem actorSystem = new(logger: raftLogger);
+
+        RaftConfiguration config = new()
+        {
+            NodeName = $"kahuna{nodeId}",
+            NodeId = nodeId,
+            Host = "localhost",
+            Port = port,
+            InitialPartitions = initialPartitions,
+            StartElectionTimeout = (int)(50 * TimingScale),
+            EndElectionTimeout = (int)(150 * TimingScale),
+            ElectionTimeoutSeed = ElectionTimeoutSeedBase + nodeId,
+            CompactEveryOperations = 1000,
+            CompactNumberEntries = 50,
+            EnableQuiescence = false
+        };
+
+        RaftManager raft = new(
+            config,
+            new StaticDiscovery(peers.Select(p => new RaftNode(p)).ToList()),
+            wal,
+            raftComm,
+            new HybridLogicalClock(),
+            raftLogger
+        );
+
+        KahunaConfiguration configuration = new()
+        {
+            LocksWorkers = 8,
+            KeyValueWorkers = 8,
+            BackgroundWriterWorkers = 1,
+            Storage = "memory",
+            StoragePath = "/tmp",
+            StorageRevision = Guid.NewGuid().ToString(),
+            DefaultTransactionTimeout = 5000,
+            ScriptCacheExpiration = TimeSpan.FromMinutes(1)
+        };
+
+        KahunaManager kahuna = new(actorSystem, raft, configuration, interNodeComm, kahunaLogger);
+
+        raft.OnLogRestored += kahuna.OnLogRestored;
+        raft.OnReplicationReceived += kahuna.OnReplicationReceived;
+        raft.OnReplicationError += kahuna.OnReplicationError;
+
+        return (raft, kahuna);
+    }
+
+    /// <summary>
+    /// Like <see cref="AssembleThreeNodeClusterFull"/> but with SWIM enabled for failure-detector tests.
+    /// Uses scaled-down timeouts that sit above the fast election timers so the detector fires without
+    /// causing false evictions of healthy nodes.
+    /// </summary>
+    protected static async Task<(IRaft, IRaft, IRaft, IKahuna, IKahuna, IKahuna, InMemoryCommunication, MemoryInterNodeCommmunication)> AssembleSwimCluster(
+        string walStorage, int partitions,
+        ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger,
+        int pingIntervalMs = 200,
+        int pingTimeoutMs = 100,
+        int suspicionTimeoutMs = 400,
+        int deadMemberEvictionGraceMs = 300,
+        int updateNodesIntervalMs = 300)
+    {
+        InMemoryCommunication raftCommunication = new();
+        MemoryInterNodeCommmunication interNodeCommmunication = new();
+
+        (IRaft raft1, IKahuna kahuna1) = BuildSwimNode(interNodeCommmunication, raftCommunication, walStorage, partitions, 1, 8001, ["localhost:8002", "localhost:8003"], raftLogger, kahunaLogger, pingIntervalMs, pingTimeoutMs, suspicionTimeoutMs, deadMemberEvictionGraceMs, updateNodesIntervalMs);
+        (IRaft raft2, IKahuna kahuna2) = BuildSwimNode(interNodeCommmunication, raftCommunication, walStorage, partitions, 2, 8002, ["localhost:8001", "localhost:8003"], raftLogger, kahunaLogger, pingIntervalMs, pingTimeoutMs, suspicionTimeoutMs, deadMemberEvictionGraceMs, updateNodesIntervalMs);
+        (IRaft raft3, IKahuna kahuna3) = BuildSwimNode(interNodeCommmunication, raftCommunication, walStorage, partitions, 3, 8003, ["localhost:8001", "localhost:8002"], raftLogger, kahunaLogger, pingIntervalMs, pingTimeoutMs, suspicionTimeoutMs, deadMemberEvictionGraceMs, updateNodesIntervalMs);
+
+        await WaitForClusterToAssemble(interNodeCommmunication, raftCommunication, partitions, raft1, raft2, raft3, kahuna1, kahuna2, kahuna3);
+
+        return (raft1, raft2, raft3, kahuna1, kahuna2, kahuna3, raftCommunication, interNodeCommmunication);
+    }
+
+    private static (IRaft, IKahuna) BuildSwimNode(
+        MemoryInterNodeCommmunication interNodeComm,
+        InMemoryCommunication raftComm,
+        string walStorage,
+        int partitions,
+        int nodeId,
+        int port,
+        IEnumerable<string> peers,
+        ILogger<IRaft> raftLogger,
+        ILogger<IKahuna> kahunaLogger,
+        int pingIntervalMs,
+        int pingTimeoutMs,
+        int suspicionTimeoutMs,
+        int deadMemberEvictionGraceMs,
+        int updateNodesIntervalMs)
+    {
+        IWAL wal = GetWAL(walStorage, raftLogger);
+        ActorSystem actorSystem = new(logger: raftLogger);
+
+        RaftConfiguration config = new()
+        {
+            NodeName = $"kahuna{nodeId}",
+            NodeId = nodeId,
+            Host = "localhost",
+            Port = port,
+            InitialPartitions = partitions,
+            StartElectionTimeout = (int)(50 * TimingScale),
+            EndElectionTimeout = (int)(150 * TimingScale),
+            ElectionTimeoutSeed = ElectionTimeoutSeedBase + nodeId,
+            CompactEveryOperations = 1000,
+            CompactNumberEntries = 50,
+            EnableQuiescence = false,
+            PingInterval = TimeSpan.FromMilliseconds(pingIntervalMs * TimingScale),
+            PingTimeout = TimeSpan.FromMilliseconds(pingTimeoutMs * TimingScale),
+            SuspicionTimeout = TimeSpan.FromMilliseconds(suspicionTimeoutMs * TimingScale),
+            DeadMemberEvictionGrace = TimeSpan.FromMilliseconds(deadMemberEvictionGraceMs * TimingScale),
+            UpdateNodesInterval = TimeSpan.FromMilliseconds(updateNodesIntervalMs * TimingScale)
+        };
+
+        RaftManager raft = new(
+            config,
+            new StaticDiscovery(peers.Select(p => new RaftNode(p)).ToList()),
+            wal,
+            raftComm,
+            new HybridLogicalClock(),
+            raftLogger
+        );
+
+        KahunaConfiguration configuration = new()
+        {
+            LocksWorkers = 8,
+            KeyValueWorkers = 8,
+            BackgroundWriterWorkers = 1,
+            Storage = "memory",
+            StoragePath = "/tmp",
+            StorageRevision = Guid.NewGuid().ToString(),
+            DefaultTransactionTimeout = 5000,
+            ScriptCacheExpiration = TimeSpan.FromMinutes(1)
+        };
+
+        KahunaManager kahuna = new(actorSystem, raft, configuration, interNodeComm, kahunaLogger);
+
+        raft.OnLogRestored += kahuna.OnLogRestored;
+        raft.OnReplicationReceived += kahuna.OnReplicationReceived;
+        raft.OnReplicationError += kahuna.OnReplicationError;
+
+        return (raft, kahuna);
+    }
+
+    /// <summary>
+    /// Tears down a single node cleanly, for use in leave / eviction tests.
+    /// </summary>
+    protected static async Task LeaveClusterSingle(IRaft raft)
+    {
+        try { await raft.LeaveCluster(dispose: true); }
+        catch (ObjectDisposedException) { }
+    }
     
     private static async Task WaitForClusterToAssemble(
         MemoryInterNodeCommmunication interNodeCommmunication, 

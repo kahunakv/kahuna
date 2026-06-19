@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+service Cluster {
+  rpc GetMembership (GrpcGetMembershipRequest) returns (GrpcGetMembershipResponse);
+}
+
+message GrpcGetMembershipRequest {
+}
+
+message GrpcClusterMember {
+  string Endpoint = 1;
+  int32 NodeId = 2;
+  GrpcClusterMemberRole Role = 3;
+  int64 JoinedVersion = 4;
+}
+
+message GrpcGetMembershipResponse {
+  int64 MembershipVersion = 1;
+  repeated GrpcClusterMember Members = 2;
+  GrpcClusterMemberRole LocalRole = 3;
+}
+
+enum GrpcClusterMemberRole {
+  CLUSTER_MEMBER_ROLE_LEARNER = 0;
+  CLUSTER_MEMBER_ROLE_VOTER = 1;
+  CLUSTER_MEMBER_ROLE_LEAVING = 2;
+  CLUSTER_MEMBER_ROLE_NOT_MEMBER = 3;
+}
