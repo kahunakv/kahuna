@@ -1,5 +1,4 @@
 
-using System.Runtime.InteropServices;
 using Nixie;
 
 using Kommander;
@@ -51,104 +50,32 @@ internal sealed class KeyValueRestorer
         {
             KeyValueMessage keyValueMessage = ReplicationSerializer.UnserializeKeyValueMessage(log.LogData);
 
-            switch ((KeyValueRequestType)keyValueMessage.Type)
+            (KeyValueState state, byte[]? messageValue) = KeyValueMessageDecoder.Decode(keyValueMessage);
+
+            if (state == KeyValueState.Undefined)
             {
-                case KeyValueRequestType.TrySet:
-                {
-                    byte[]? messageValue;
-
-                    if (MemoryMarshal.TryGetArray(keyValueMessage.Value.Memory, out ArraySegment<byte> segment))
-                        messageValue = segment.Array;
-                    else
-                        messageValue = keyValueMessage.Value.ToByteArray();
-
-                    backgroundWriter.Send(new(
-                        BackgroundWriteType.QueueStoreKeyValue,
-                        partitionId,
-                        keyValueMessage.Key,
-                        messageValue,
-                        keyValueMessage.Revision,
-                        new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
-                        new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
-                        new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
-                        (int)KeyValueState.Set
-                    ));
-
-                    return true;
-                }
-
-                case KeyValueRequestType.TryDelete:
-                {
-                    byte[]? messageValue;
-
-                    if (MemoryMarshal.TryGetArray(keyValueMessage.Value.Memory, out ArraySegment<byte> segment))
-                        messageValue = segment.Array;
-                    else
-                        messageValue = keyValueMessage.Value.ToByteArray();
-
-                    backgroundWriter.Send(new(
-                        BackgroundWriteType.QueueStoreKeyValue,
-                        partitionId,
-                        keyValueMessage.Key,
-                        messageValue,
-                        keyValueMessage.Revision,
-                        new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
-                        new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
-                        new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
-                        (int)KeyValueState.Deleted
-                    ));
-
-                    return true;
-                }
-
-                case KeyValueRequestType.TryExtend:
-                {
-                    byte[]? messageValue;
-
-                    if (MemoryMarshal.TryGetArray(keyValueMessage.Value.Memory, out ArraySegment<byte> segment))
-                        messageValue = segment.Array;
-                    else
-                        messageValue = keyValueMessage.Value.ToByteArray();
-
-                    backgroundWriter.Send(new(
-                        BackgroundWriteType.QueueStoreKeyValue,
-                        partitionId,
-                        keyValueMessage.Key,
-                        messageValue,
-                        keyValueMessage.Revision,
-                        new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
-                        new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
-                        new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
-                        (int)KeyValueState.Set
-                    ));
-
-                    return true;
-                }
-
-                case KeyValueRequestType.TryGet:
-                case KeyValueRequestType.TryExists:
-                case KeyValueRequestType.TryAcquireExclusiveLock:
-                case KeyValueRequestType.TryReleaseExclusiveLock:
-                case KeyValueRequestType.TryPrepareMutations:
-                case KeyValueRequestType.TryCommitMutations:
-                case KeyValueRequestType.TryRollbackMutations:
-                case KeyValueRequestType.ScanByPrefix:
-                case KeyValueRequestType.GetByBucket:
-                case KeyValueRequestType.GetByRange:
-                case KeyValueRequestType.TryAcquireExclusivePrefixLock:
-                case KeyValueRequestType.TryReleaseExclusivePrefixLock:
-                case KeyValueRequestType.ScanByPrefixFromDisk:
-                default:
-                    logger.LogError("KeyValueRestorer: Unknown restore message type: {Type}", keyValueMessage.Type);
-                    break;
+                logger.LogError("KeyValueRestorer: Unknown restore message type: {Type}", keyValueMessage.Type);
+                return true;
             }
+
+            backgroundWriter.Send(new(
+                BackgroundWriteType.QueueStoreKeyValue,
+                partitionId,
+                keyValueMessage.Key,
+                messageValue,
+                keyValueMessage.Revision,
+                new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
+                new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
+                new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
+                (int)state
+            ));
+
+            return true;
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "KeyValueRestorer: Error processing replication message");
             return false;
         }
-
-        return true;
     }
 }

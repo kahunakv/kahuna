@@ -12,7 +12,7 @@ using Microsoft.Extensions.Logging;
 namespace Kahuna.Tests.Server;
 
 /// <summary>
-/// Durability tests for the range-descriptor map (Task 2c). The map's only durable home is the meta
+/// Durability tests for the range-descriptor map. The map's only durable home is the meta
 /// partition, so before Kommander compacts that WAL we persist a full snapshot to disk; on restart
 /// the map is reconstructed from disk and refined by replaying the WAL tail. These tests exercise
 /// the disk round-trip directly through the <c>Replicate</c> apply seam — no cluster or leader
@@ -80,7 +80,7 @@ public sealed class TestRangeMapCheckpoint : BaseCluster, IDisposable
 
         // A fresh store at the same path/revision rebuilds purely from disk — it never sees a WAL
         // entry. This is exactly what keeps the map alive after the meta WAL is checkpointed +
-        // compacted (Task 2c).
+        // compacted.
         RangeMapStore fresh = new(raft, tempDir, revision, kahunaLogger);
 
         RangeDescriptor? descriptor = fresh.Current.Find("t:r", "anything");

@@ -6,7 +6,7 @@ using Kommander.Time;
 namespace Kahuna.Tests.Server;
 
 /// <summary>
-/// Unit tests for P1.3 — storage-engine checkpoint primitive.
+/// Unit tests for the storage-engine checkpoint primitive.
 /// Uses <see cref="MemoryPersistenceBackend"/> (no disk DB required):
 /// write N keys → CreateCheckpoint → OpenCheckpoint → assert all N present;
 /// original store remains writable throughout.

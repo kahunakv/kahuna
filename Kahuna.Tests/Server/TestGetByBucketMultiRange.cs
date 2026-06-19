@@ -13,7 +13,7 @@ using Microsoft.Extensions.Logging;
 namespace Kahuna.Tests.Server;
 
 /// <summary>
-/// Integration tests for Task 10b — multi-range GetByBucket fan-out.
+/// Integration tests for multi-range GetByBucket fan-out.
 /// Verifies that a key-range space split across partitions returns a complete, ordered union
 /// and that hash/schema-log buckets still use the existing single-leader path.
 ///
@@ -394,7 +394,7 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
 
     /// <summary>
     /// Verifies that a split committed between two descriptor fan-out queries produces a complete,
-    /// duplicate-free result (F5 mid-scan safety, deferred from Task 10b).
+    /// duplicate-free result (F5 mid-scan safety).
     ///
     /// <para>
     /// Setup: bucket split into 2 descriptors (D0, D1). After D0's pages are collected, a second

@@ -47,7 +47,7 @@ internal sealed class RangeMapStore : IDisposable
     /// system coordinator).</summary>
     public const int FirstDataPartitionId = 1;
 
-    /// <summary>Default number of committed mutations between meta-partition checkpoints (Task 2c).</summary>
+    /// <summary>Default number of committed mutations between meta-partition checkpoints.</summary>
     public const int DefaultCheckpointEveryMutations = 32;
 
     private readonly IRaft raft;
@@ -88,7 +88,7 @@ internal sealed class RangeMapStore : IDisposable
             : Path.Combine(storagePath, $"rangemap_{storageRevision}.snapshot");
 
         // Seed from the durable snapshot before any WAL replay. This is what makes meta-partition
-        // compaction safe (Task 2c): the meta WAL is periodically checkpointed and trimmed of old
+        // compaction safe: the meta WAL is periodically checkpointed and trimmed of old
         // full-snapshot entries, so on restart the map is reconstructed from disk and then refined by
         // replaying whatever WAL tail survives — both are idempotent full snapshots.
         LoadFromDisk();

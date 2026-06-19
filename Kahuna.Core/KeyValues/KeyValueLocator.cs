@@ -1502,7 +1502,7 @@ internal sealed class KeyValueLocator
     /// Locates the appropriate node for the specified key prefix and retrieves the corresponding key-value items.
     /// For unsplit spaces routes to the single partition leader. For split key-range spaces fans out across
     /// all descriptors in parallel (F5), pages through each with <see cref="QueryDescriptorRange"/>, and
-    /// returns the concatenated result (Task 10b multi-range GetByBucket, F5 parallel upgrade).
+    /// returns the concatenated result via parallel fan-out (F5).
     ///
     /// <para>
     /// <b>Fan-out model (F5):</b> all descriptors are queried concurrently via <c>Task.WhenAll</c>,

@@ -48,7 +48,7 @@ message RangeSnapshotEntry {
   int32 state = 13;
 }
 
-// A bounded, checksummed page of a range snapshot (Task 5, design §5.3 "bound + checksum each page").
+// A bounded, checksummed page of a range snapshot.
 // The export stream is a sequence of length-delimited RangeSnapshotPage messages.
 message RangeSnapshotPage {
   repeated RangeSnapshotEntry entries = 1;
