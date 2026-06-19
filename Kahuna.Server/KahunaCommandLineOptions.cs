@@ -256,6 +256,12 @@ public sealed class KahunaCommandLineOptions
     [Option("disable-persistent-revision-cleanup-on-write", Required = false, HelpText = "Disable targeted persistent revision cleanup after key/value writes")]
     public bool DisablePersistentRevisionCleanupOnWrite { get; set; }
 
+    [Option("pitr-window", Required = false, HelpText = "Point-in-time recovery window in seconds; WAL entries older than now-window may be compacted. Valid range: (0, 21600]. Default 3600 (1 hour).", Default = 3600)]
+    public int PitrWindowSeconds { get; set; } = 3600;
+
+    [Option("base-snapshot-interval", Required = false, HelpText = "Interval between base checkpoints per shard in seconds. Must be positive and no greater than pitr-window. Default 1800 (30 minutes).", Default = 1800)]
+    public int BaseSnapshotIntervalSeconds { get; set; } = 1800;
+
     [Option("raft-allow-insecure-certificate-validation", Required = false, HelpText = "Skip TLS certificate validation for inter-node Raft gRPC connections (use only in dev/test environments)")]
     public bool RaftAllowInsecureCertificateValidation { get; set; }
 

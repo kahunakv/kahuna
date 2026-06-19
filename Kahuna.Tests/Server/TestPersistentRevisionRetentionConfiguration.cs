@@ -182,4 +182,142 @@ public sealed class TestPersistentRevisionRetentionConfiguration
         Assert.False(configuration.PersistentRevisionCleanupOnWrite);
         Assert.True(ConfigurationValidator.IsPersistentRevisionRetentionEnabled(configuration));
     }
+
+    // ── PITR config ─────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void PitrDefaults_AreApplied()
+    {
+        KahunaConfiguration configuration = ConfigurationValidator.Validate(new());
+
+        Assert.Equal(TimeSpan.FromHours(1), configuration.PitrWindow);
+        Assert.Equal(TimeSpan.FromMinutes(30), configuration.BaseSnapshotInterval);
+    }
+
+    [Fact]
+    public void PitrWindow_Zero_ClampsToDefault()
+    {
+        KahunaConfiguration configuration = ConfigurationValidator.Validate(new()
+        {
+            PitrWindow = TimeSpan.Zero
+        });
+
+        Assert.Equal(TimeSpan.FromHours(1), configuration.PitrWindow);
+    }
+
+    [Fact]
+    public void PitrWindow_Negative_ClampsToDefault()
+    {
+        KahunaConfiguration configuration = ConfigurationValidator.Validate(new()
+        {
+            PitrWindow = TimeSpan.FromMinutes(-10)
+        });
+
+        Assert.Equal(TimeSpan.FromHours(1), configuration.PitrWindow);
+    }
+
+    [Fact]
+    public void PitrWindow_AboveMax_ClampsToSixHours()
+    {
+        KahunaConfiguration configuration = ConfigurationValidator.Validate(new()
+        {
+            PitrWindow = TimeSpan.FromHours(8)
+        });
+
+        Assert.Equal(TimeSpan.FromHours(6), configuration.PitrWindow);
+    }
+
+    [Fact]
+    public void PitrWindow_ValidValue_PassesThrough()
+    {
+        KahunaConfiguration configuration = ConfigurationValidator.Validate(new()
+        {
+            PitrWindow = TimeSpan.FromHours(2)
+        });
+
+        Assert.Equal(TimeSpan.FromHours(2), configuration.PitrWindow);
+    }
+
+    [Fact]
+    public void BaseSnapshotInterval_Zero_ClampsToDefault()
+    {
+        KahunaConfiguration configuration = ConfigurationValidator.Validate(new()
+        {
+            BaseSnapshotInterval = TimeSpan.Zero
+        });
+
+        Assert.Equal(TimeSpan.FromMinutes(30), configuration.BaseSnapshotInterval);
+    }
+
+    [Fact]
+    public void BaseSnapshotInterval_ExceedsPitrWindow_ClampsToWindow()
+    {
+        KahunaConfiguration configuration = ConfigurationValidator.Validate(new()
+        {
+            PitrWindow = TimeSpan.FromMinutes(20),
+            BaseSnapshotInterval = TimeSpan.FromHours(1)
+        });
+
+        Assert.Equal(TimeSpan.FromMinutes(20), configuration.BaseSnapshotInterval);
+    }
+
+    [Fact]
+    public void BaseSnapshotInterval_EqualToPitrWindow_IsValid()
+    {
+        KahunaConfiguration configuration = ConfigurationValidator.Validate(new()
+        {
+            PitrWindow = TimeSpan.FromHours(2),
+            BaseSnapshotInterval = TimeSpan.FromHours(2)
+        });
+
+        Assert.Equal(TimeSpan.FromHours(2), configuration.PitrWindow);
+        Assert.Equal(TimeSpan.FromHours(2), configuration.BaseSnapshotInterval);
+    }
+
+    [Fact]
+    public void EmbeddedPitrOptions_MapIntoValidatedConfiguration()
+    {
+        EmbeddedKahunaOptions embedded = new()
+        {
+            PitrWindow = TimeSpan.FromHours(3),
+            BaseSnapshotInterval = TimeSpan.FromHours(1)
+        };
+
+        KahunaConfiguration configuration = ConfigurationValidator.Validate(new()
+        {
+            PitrWindow = embedded.PitrWindow,
+            BaseSnapshotInterval = embedded.BaseSnapshotInterval
+        });
+
+        Assert.Equal(TimeSpan.FromHours(3), configuration.PitrWindow);
+        Assert.Equal(TimeSpan.FromHours(1), configuration.BaseSnapshotInterval);
+    }
+
+    [Fact]
+    public void ServerCliAcceptsPitrOptions()
+    {
+        string[] args =
+        [
+            "--pitr-window", "7200",
+            "--base-snapshot-interval", "900"
+        ];
+
+        ParserResult<KahunaCommandLineOptions> result = Parser.Default.ParseArguments<KahunaCommandLineOptions>(args);
+
+        Assert.True(result.Tag == ParserResultType.Parsed);
+        KahunaCommandLineOptions options = result.Value;
+
+        Assert.Equal(7200, options.PitrWindowSeconds);
+        Assert.Equal(900, options.BaseSnapshotIntervalSeconds);
+    }
+
+    [Fact]
+    public void ServerCliPitrDefaults_AreOneHourAndThirtyMinutes()
+    {
+        ParserResult<KahunaCommandLineOptions> result = Parser.Default.ParseArguments<KahunaCommandLineOptions>([]);
+
+        Assert.True(result.Tag == ParserResultType.Parsed);
+        Assert.Equal(3600, result.Value.PitrWindowSeconds);
+        Assert.Equal(1800, result.Value.BaseSnapshotIntervalSeconds);
+    }
 }

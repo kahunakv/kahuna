@@ -114,4 +114,14 @@ public sealed class EmbeddedKahunaOptions
     public int PersistentRevisionCleanupBatchSize { get; set; } = 1000;
 
     public bool PersistentRevisionCleanupOnWrite { get; set; } = true;
+
+    /// <summary>
+    /// Length of the point-in-time recovery window. Valid range: (0, 6h].
+    /// </summary>
+    public TimeSpan PitrWindow { get; set; } = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// How often a new base checkpoint is taken per shard. Must be positive and no greater than <see cref="PitrWindow"/>.
+    /// </summary>
+    public TimeSpan BaseSnapshotInterval { get; set; } = TimeSpan.FromMinutes(30);
 }

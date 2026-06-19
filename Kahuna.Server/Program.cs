@@ -148,7 +148,9 @@ builder.Services.AddSingleton(ConfigurationValidator.Validate(new()
     PersistentRevisionRetentionAge = TimeSpan.FromSeconds(opts.PersistentRevisionRetentionAge),
     PersistentRevisionCleanupInterval = TimeSpan.FromSeconds(opts.PersistentRevisionCleanupInterval),
     PersistentRevisionCleanupBatchSize = opts.PersistentRevisionCleanupBatchSize,
-    PersistentRevisionCleanupOnWrite = opts.GetPersistentRevisionCleanupOnWrite()
+    PersistentRevisionCleanupOnWrite = opts.GetPersistentRevisionCleanupOnWrite(),
+    PitrWindow = TimeSpan.FromSeconds(opts.PitrWindowSeconds),
+    BaseSnapshotInterval = TimeSpan.FromSeconds(opts.BaseSnapshotIntervalSeconds)
 }, opts.WalPath));
 
 // Start server
@@ -201,7 +203,9 @@ static EmbeddedKahunaOptions CreateEmbeddedOptions(KahunaCommandLineOptions opts
     PersistentRevisionRetentionAge = TimeSpan.FromSeconds(opts.PersistentRevisionRetentionAge),
     PersistentRevisionCleanupInterval = TimeSpan.FromSeconds(opts.PersistentRevisionCleanupInterval),
     PersistentRevisionCleanupBatchSize = opts.PersistentRevisionCleanupBatchSize,
-    PersistentRevisionCleanupOnWrite = opts.GetPersistentRevisionCleanupOnWrite()
+    PersistentRevisionCleanupOnWrite = opts.GetPersistentRevisionCleanupOnWrite(),
+    PitrWindow = TimeSpan.FromSeconds(opts.PitrWindowSeconds),
+    BaseSnapshotInterval = TimeSpan.FromSeconds(opts.BaseSnapshotIntervalSeconds)
 };
 
 static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)

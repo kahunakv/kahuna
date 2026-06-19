@@ -62,7 +62,8 @@ public static class ConfigurationValidator
             configuration.RevisionRetention = configuration.RevisionsToKeepCached > 0 ? configuration.RevisionsToKeepCached : 16;
 
         ValidatePersistentRevisionRetention(configuration);
-        
+        ValidatePitr(configuration);
+
         return configuration;
     }
 
@@ -91,4 +92,19 @@ public static class ConfigurationValidator
     internal static bool IsPersistentRevisionRetentionEnabled(KahunaConfiguration configuration) =>
         configuration.PersistentRevisionRetentionCount != 0
         || configuration.PersistentRevisionRetentionAge > TimeSpan.Zero;
+
+    private static void ValidatePitr(KahunaConfiguration configuration)
+    {
+        if (configuration.PitrWindow <= TimeSpan.Zero)
+            configuration.PitrWindow = TimeSpan.FromHours(1);
+
+        if (configuration.PitrWindow > TimeSpan.FromHours(6))
+            configuration.PitrWindow = TimeSpan.FromHours(6);
+
+        if (configuration.BaseSnapshotInterval <= TimeSpan.Zero)
+            configuration.BaseSnapshotInterval = TimeSpan.FromMinutes(30);
+
+        if (configuration.BaseSnapshotInterval > configuration.PitrWindow)
+            configuration.BaseSnapshotInterval = configuration.PitrWindow;
+    }
 }

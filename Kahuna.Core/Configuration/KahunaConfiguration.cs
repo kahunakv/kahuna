@@ -91,4 +91,17 @@ public sealed class KahunaConfiguration
     /// than this value the auto-merge trigger coalesces them. 0 disables auto-merge.
     /// </summary>
     public int RangeMergeMinSize { get; set; } = 10;
+
+    /// <summary>
+    /// Length of the point-in-time recovery window. WAL entries older than
+    /// <c>now - PitrWindow</c> may be compacted away. Valid range: (0, 6h].
+    /// </summary>
+    public TimeSpan PitrWindow { get; set; } = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// How often a new base checkpoint is taken per shard. Must be positive and
+    /// no greater than <see cref="PitrWindow"/>; the sliding horizon is anchored
+    /// at <c>now - PitrWindow - BaseSnapshotInterval</c>.
+    /// </summary>
+    public TimeSpan BaseSnapshotInterval { get; set; } = TimeSpan.FromMinutes(30);
 }

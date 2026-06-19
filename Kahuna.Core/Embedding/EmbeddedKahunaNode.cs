@@ -78,7 +78,9 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             PersistentRevisionRetentionAge = options.PersistentRevisionRetentionAge,
             PersistentRevisionCleanupInterval = options.PersistentRevisionCleanupInterval,
             PersistentRevisionCleanupBatchSize = options.PersistentRevisionCleanupBatchSize,
-            PersistentRevisionCleanupOnWrite = options.PersistentRevisionCleanupOnWrite
+            PersistentRevisionCleanupOnWrite = options.PersistentRevisionCleanupOnWrite,
+            PitrWindow = options.PitrWindow,
+            BaseSnapshotInterval = options.BaseSnapshotInterval
         }, options.WalPath);
 
         this.standaloneComm = new();
@@ -148,7 +150,9 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             PersistentRevisionRetentionAge = options.PersistentRevisionRetentionAge,
             PersistentRevisionCleanupInterval = options.PersistentRevisionCleanupInterval,
             PersistentRevisionCleanupBatchSize = options.PersistentRevisionCleanupBatchSize,
-            PersistentRevisionCleanupOnWrite = options.PersistentRevisionCleanupOnWrite
+            PersistentRevisionCleanupOnWrite = options.PersistentRevisionCleanupOnWrite,
+            PitrWindow = options.PitrWindow,
+            BaseSnapshotInterval = options.BaseSnapshotInterval
         }, options.WalPath);
 
         this.standaloneComm = null;
