@@ -52,6 +52,12 @@ public sealed class KahunaCommandLineOptions
     [Option("initial-cluster", Required = false, HelpText = "Initial cluster configuration for static discovery")]
     public IEnumerable<string>? InitialCluster { get; set; }
 
+    [Option("join-existing", Required = false, HelpText = "Join a running cluster as a new node using --initial-cluster as the seed list. When false (default) the node boots via static discovery.", Default = false)]
+    public bool RaftJoinExisting { get; set; }
+
+    [Option("graceful-leave-on-shutdown", Required = false, HelpText = "On planned shutdown, commit a RemoveMember so the roster shrinks immediately rather than waiting for SWIM eviction. Default false; do not enable on rolling restarts.", Default = false)]
+    public bool RaftGracefulLeaveOnShutdown { get; set; }
+
     [Option("initial-cluster-partitions", Required = false, HelpText = "Initial cluster number of partitions", Default = 128)] // 32
     public int InitialClusterPartitions { get; set; } = 128;
     
@@ -156,6 +162,12 @@ public sealed class KahunaCommandLineOptions
 
     [Option("raft-max-wal-batch-size", Required = false, HelpText = "Maximum WAL writes batched per storage flush", Default = 256)]
     public int RaftMaxWalBatchSize { get; set; } = 256;
+
+    [Option("raft-max-wal-group-batch-partitions", Required = false, HelpText = "Maximum partitions coalesced into a single WAL cross-partition group-commit batch", Default = 64)]
+    public int RaftMaxWalGroupBatchPartitions { get; set; } = 64;
+
+    [Option("raft-sqlite-wal-shard-count", Required = false, HelpText = "Number of SQLite shard databases across which partitions are distributed (0 = resolved to processor count on first initialisation)", Default = 0)]
+    public int RaftSqliteWalShardCount { get; set; }
 
     [Option("raft-max-drain-quantum-control", Required = false, HelpText = "Max control-plane operations drained per executor wake cycle", Default = 8)]
     public int RaftMaxDrainQuantumControl { get; set; } = 8;

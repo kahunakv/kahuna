@@ -52,10 +52,14 @@ internal sealed class BackupDriver
     /// Flushes all pending writes to the storage engine, snapshots it, captures per-partition
     /// WAL coverage, writes a Full <see cref="BackupManifest"/> to <paramref name="catalog"/>,
     /// and returns the manifest.  Artifact files land in <c>{artifactsDir}/{backupId}/</c>.
+    /// When <paramref name="snapshotT"/> is supplied each partition's coverage is capped at the
+    /// last committed entry with <c>Time ≤ T</c> and T is recorded in the manifest as the
+    /// cluster-wide consistent-cut timestamp.
     /// </summary>
-    public Task<BackupManifest> TakeFullBackupAsync(string artifactsDir, BackupCatalog catalog) =>
+    public Task<BackupManifest> TakeFullBackupAsync(string artifactsDir, BackupCatalog catalog,
+        HLCTimestamp? snapshotT = null) =>
         RunFullAsync(_raft.WalAdapter, _raft.GetPartitionMap(), _persistenceBackend,
-            artifactsDir, catalog, _flushBeforeCheckpoint);
+            artifactsDir, catalog, _flushBeforeCheckpoint, snapshotT);
 
     /// <summary>
     /// Reads committed WAL entries since the parent backup's <c>ToIndex</c>, serialises them
@@ -64,10 +68,12 @@ internal sealed class BackupDriver
     /// Throws <see cref="BackupDriverException"/> when the parent range starts below the WAL
     /// compaction floor (a new full backup is required in that case).
     /// Artifact files land in <c>{artifactsDir}/{backupId}/</c>.
+    /// When <paramref name="snapshotT"/> is supplied each partition's segment is capped at the
+    /// first entry whose <c>Time > T</c> and T is recorded in the manifest.
     /// </summary>
     public BackupManifest TakeIncrementalBackup(Guid parentBackupId, string artifactsDir,
-        BackupCatalog catalog) =>
-        RunIncremental(_raft.WalAdapter, _raft.GetPartitionMap(), parentBackupId, artifactsDir, catalog);
+        BackupCatalog catalog, HLCTimestamp? snapshotT = null) =>
+        RunIncremental(_raft.WalAdapter, _raft.GetPartitionMap(), parentBackupId, artifactsDir, catalog, snapshotT);
 
     // ── core logic (internal so tests can exercise without an IRaft) ─────────────────────
 
@@ -76,13 +82,20 @@ internal sealed class BackupDriver
     /// so the checkpoint genuinely contains all committed data through the WAL committed-max.
     /// Pass <c>null</c> only in tests where the backend is already pre-populated.
     /// </summary>
+    /// <param name="snapshotT">
+    /// When provided, each partition's ToIndex is capped at the last committed entry with
+    /// <c>Time ≤ snapshotT</c>, and the timestamp is stored in the manifest as the
+    /// cluster-wide consistent-cut anchor. Use this for coordinated multi-partition backups
+    /// where every shard must present a state as-of the same HLC.
+    /// </param>
     internal static async Task<BackupManifest> RunFullAsync(
         IWAL wal,
         IReadOnlyList<RaftPartitionRange> partitions,
         IPersistenceBackend persistenceBackend,
         string artifactsDir,
         BackupCatalog catalog,
-        Func<Task>? flushBeforeCheckpoint = null)
+        Func<Task>? flushBeforeCheckpoint = null,
+        HLCTimestamp? snapshotT = null)
     {
         Guid backupId = Guid.NewGuid();
         string artifactPath = Path.Combine(artifactsDir, backupId.ToString("N"));
@@ -104,7 +117,9 @@ internal sealed class BackupDriver
                 continue;
 
             int partitionId = partition.PartitionId;
-            (long lastId, HLCTimestamp lastHlc) = FindLastCommitted(wal, partitionId);
+            (long lastId, HLCTimestamp lastHlc) = snapshotT.HasValue
+                ? FindLastCommittedAtOrBefore(wal, partitionId, snapshotT.Value)
+                : FindLastCommitted(wal, partitionId);
             if (lastId <= 0)
                 continue;
 
@@ -133,17 +148,26 @@ internal sealed class BackupDriver
         BackupManifest manifest = BackupManifest.CreateFull(ranges);
         manifest.BackupId = backupId;
         manifest.Checksums = checksums;
+        if (snapshotT.HasValue)
+            manifest.SetClusterSnapshotTime(snapshotT.Value);
 
         catalog.Put(manifest);
         return manifest;
     }
 
+    /// <param name="snapshotT">
+    /// When provided, each partition's WAL segment is capped at the first entry whose
+    /// <c>Time > snapshotT</c> (assuming per-partition HLC monotonicity), and the timestamp
+    /// is stored in the manifest. Combine with a Full backup taken at the same T to form a
+    /// consistent cluster-wide cut.
+    /// </param>
     internal static BackupManifest RunIncremental(
         IWAL wal,
         IReadOnlyList<RaftPartitionRange> partitions,
         Guid parentBackupId,
         string artifactsDir,
-        BackupCatalog catalog)
+        BackupCatalog catalog,
+        HLCTimestamp? snapshotT = null)
     {
         BackupManifest? parentManifest = catalog.Get(parentBackupId);
         if (parentManifest is null)
@@ -188,7 +212,7 @@ internal sealed class BackupDriver
             }
 
             (List<WalSegmentEntry> segment, long toIndex, HLCTimestamp toHlc, HLCTimestamp fromHlc) =
-                ReadSegment(wal, partitionId, fromIndex);
+                ReadSegment(wal, partitionId, fromIndex, snapshotT);
 
             if (toIndex == 0)
                 continue;
@@ -203,6 +227,8 @@ internal sealed class BackupDriver
         BackupManifest manifest = BackupManifest.CreateIncremental(parentBackupId, ranges);
         manifest.BackupId = backupId;
         manifest.Checksums = checksums;
+        if (snapshotT.HasValue)
+            manifest.SetClusterSnapshotTime(snapshotT.Value);
 
         catalog.Put(manifest);
         return manifest;
@@ -219,7 +245,7 @@ internal sealed class BackupDriver
     /// Pages until a committed entry is found or the start of the log is reached.
     /// Returns (0, default) when the partition has no committed entries at all.
     /// </summary>
-    private static (long id, HLCTimestamp hlc) FindLastCommitted(IWAL wal, int partitionId)
+    internal static (long id, HLCTimestamp hlc) FindLastCommitted(IWAL wal, int partitionId)
     {
         long maxLog = wal.GetMaxLog(partitionId);
         if (maxLog <= 0)
@@ -246,20 +272,59 @@ internal sealed class BackupDriver
     }
 
     /// <summary>
+    /// Scans backward through the WAL to find the last committed entry whose HLC is at or
+    /// before <paramref name="snapshotT"/>.  Used for coordinated backups where every partition
+    /// must be capped at the same cluster-wide timestamp T.
+    /// Returns (0, default) when no qualifying committed entry exists.
+    /// </summary>
+    private static (long id, HLCTimestamp hlc) FindLastCommittedAtOrBefore(
+        IWAL wal, int partitionId, HLCTimestamp snapshotT)
+    {
+        long maxLog = wal.GetMaxLog(partitionId);
+        if (maxLog <= 0)
+            return (0, default);
+
+        long ceiling = maxLog;
+        while (ceiling > 0)
+        {
+            long start = Math.Max(1, ceiling - PageSize + 1);
+            List<RaftLog> batch = wal.ReadLogsRange(partitionId, start, PageSize);
+            if (batch.Count == 0)
+                break;
+
+            for (int i = batch.Count - 1; i >= 0; i--)
+            {
+                RaftLog log = batch[i];
+                if (log.Type is RaftLogType.Committed or RaftLogType.CommittedCheckpoint
+                    && log.Time.CompareTo(snapshotT) <= 0)
+                    return (log.Id, log.Time);
+            }
+
+            ceiling = start - 1;
+        }
+
+        return (0, default);
+    }
+
+    /// <summary>
     /// Pages through the WAL from <paramref name="fromIndex"/> forward, collecting committed
-    /// entries. Returns the segment entries, the final log id/hlc, and the HLC of the first entry.
+    /// entries.  When <paramref name="snapshotT"/> is provided, collection stops at the first
+    /// entry whose <c>Time > snapshotT</c> (per-partition HLC monotonicity is assumed, which
+    /// holds in normal operation).
+    /// Returns the segment entries, the final log id/hlc, and the HLC of the first entry.
     /// </summary>
     private static (List<WalSegmentEntry> entries, long toId, HLCTimestamp toHlc, HLCTimestamp fromHlc)
-        ReadSegment(IWAL wal, int partitionId, long fromIndex)
+        ReadSegment(IWAL wal, int partitionId, long fromIndex, HLCTimestamp? snapshotT = null)
     {
         List<WalSegmentEntry> entries = [];
         long toId = 0;
         HLCTimestamp toHlc = default;
         HLCTimestamp fromHlc = default;
         bool first = true;
+        bool hitCap = false;
         long cursor = fromIndex;
 
-        while (true)
+        while (!hitCap)
         {
             List<RaftLog> batch = wal.ReadLogsRange(partitionId, cursor, PageSize);
             if (batch.Count == 0)
@@ -269,6 +334,12 @@ internal sealed class BackupDriver
             {
                 if (log.Type is not (RaftLogType.Committed or RaftLogType.CommittedCheckpoint))
                     continue;
+
+                if (snapshotT.HasValue && log.Time.CompareTo(snapshotT.Value) > 0)
+                {
+                    hitCap = true;
+                    break;
+                }
 
                 if (first)
                 {

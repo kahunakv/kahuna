@@ -186,6 +186,8 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
 
     private readonly ImportRangeLocksHandler importRangeLocksHandler;
 
+    private readonly GetSafeTimestampHandler getSafeTimestampHandler;
+
     /// <summary>
     /// Handles the preparation phase for mutations in the key/value store in the Two-Phase-Commit (2PC) protocol.
     /// This component ensures that any necessary preconditions, validations and conflict resolution
@@ -295,6 +297,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         tryReleaseExclusiveRangeLockHandler = new(context);
         getRangeLocksHandler = new(context);
         importRangeLocksHandler = new(context);
+        getSafeTimestampHandler = new(context);
         tryPrepareMutationsHandler = new(context);
         tryCommitMutationsHandler = new(context);
         tryRollbackMutationsHandler = new(context);
@@ -366,6 +369,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.TryReleaseExclusiveRangeLock => ReleaseExclusiveRangeLock(message),
                 KeyValueRequestType.GetRangeLocks => GetRangeLocks(message),
                 KeyValueRequestType.ImportRangeLocks => ImportRangeLocks(message),
+                KeyValueRequestType.GetSafeTimestamp => await getSafeTimestampHandler.Execute(message),
                 KeyValueRequestType.TryPrepareMutations => await TryPrepareMutations(message),
                 KeyValueRequestType.TryCommitMutations => await TryCommitMutations(message),
                 KeyValueRequestType.TryRollbackMutations => await TryRollbackMutations(message),

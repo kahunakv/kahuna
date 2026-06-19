@@ -37,6 +37,8 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.MaxWalQueueDepthPerPartition)] = nameof(KahunaCommandLineOptions.RaftMaxWalQueueDepthPerPartition),
         [nameof(RaftConfiguration.MaxGlobalWalQueueDepth)] = nameof(KahunaCommandLineOptions.RaftMaxGlobalWalQueueDepth),
         [nameof(RaftConfiguration.MaxWalBatchSize)] = nameof(KahunaCommandLineOptions.RaftMaxWalBatchSize),
+        [nameof(RaftConfiguration.MaxWalGroupBatchPartitions)] = nameof(KahunaCommandLineOptions.RaftMaxWalGroupBatchPartitions),
+        [nameof(RaftConfiguration.SqliteWalShardCount)] = nameof(KahunaCommandLineOptions.RaftSqliteWalShardCount),
         [nameof(RaftConfiguration.MaxDrainQuantumControl)] = nameof(KahunaCommandLineOptions.RaftMaxDrainQuantumControl),
         [nameof(RaftConfiguration.MaxDrainQuantumReplication)] = nameof(KahunaCommandLineOptions.RaftMaxDrainQuantumReplication),
         [nameof(RaftConfiguration.MaxDrainQuantumClient)] = nameof(KahunaCommandLineOptions.RaftMaxDrainQuantumClient),

@@ -42,6 +42,13 @@ internal sealed class BackupManifest
             ? new HLCTimestamp(ClusterSnapshotNode.Value, ClusterSnapshotPhysical!.Value, ClusterSnapshotCounter!.Value)
             : null;
 
+    internal void SetClusterSnapshotTime(HLCTimestamp t)
+    {
+        ClusterSnapshotNode = t.N;
+        ClusterSnapshotPhysical = t.L;
+        ClusterSnapshotCounter = t.C;
+    }
+
     /// <summary>SHA-256 hex digests keyed by artifact-relative file path.</summary>
     public Dictionary<string, string> Checksums { get; set; } = [];
 

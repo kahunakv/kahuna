@@ -32,4 +32,5 @@ public enum KeyValueRequestType
     TryCheckWriteIntent,
     GetRangeLocks,
     ImportRangeLocks,
+    GetSafeTimestamp,
 }

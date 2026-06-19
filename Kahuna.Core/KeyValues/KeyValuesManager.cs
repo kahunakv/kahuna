@@ -2968,5 +2968,35 @@ internal sealed class KeyValuesManager : IDisposable
         await Task.WhenAll(tasks);
     }
 
+    /// <summary>
+    /// Fans out a <c>GetSafeTimestamp</c> query to every key-value actor shard and returns
+    /// the minimum prepared <c>CommitTimestamp</c> across all live write intents in the cluster.
+    /// Returns <see cref="HLCTimestamp.Zero"/> when no shard has an in-flight prepared transaction.
+    /// </summary>
+    internal async Task<HLCTimestamp> GetSafeTimestampAsync()
+    {
+        KeyValueRequest request = new(KeyValueRequestType.GetSafeTimestamp);
+        List<Task<KeyValueResponse?>> tasks = new(ephemeralInstances.Count + persistentInstances.Count);
+
+        foreach (IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actor in ephemeralInstances)
+            tasks.Add(actor.Ask(request)!);
+
+        foreach (IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actor in persistentInstances)
+            tasks.Add(actor.Ask(request)!);
+
+        KeyValueResponse?[] results = await Task.WhenAll(tasks);
+
+        HLCTimestamp min = HLCTimestamp.Zero;
+        foreach (KeyValueResponse? r in results)
+        {
+            if (r is null || r.Ticket == HLCTimestamp.Zero)
+                continue;
+            if (min == HLCTimestamp.Zero || r.Ticket.CompareTo(min) < 0)
+                min = r.Ticket;
+        }
+
+        return min;
+    }
+
     public void Dispose() => rangeMapStore.Dispose();
 }

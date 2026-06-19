@@ -58,4 +58,11 @@ public enum KeyValueResponseType
     /// <see cref="KeyValueResponse.RangeLockList"/>. Not surfaced to external callers.
     /// </summary>
     RangeLocks = 106,
+
+    /// <summary>
+    /// Returned by <c>GetSafeTimestamp</c> actor messages; the payload is in
+    /// <see cref="KeyValueResponse.Ticket"/>. When <c>Ticket</c> equals
+    /// <c>HLCTimestamp.Zero</c> the shard has no in-flight prepared transactions.
+    /// </summary>
+    SafeTimestamp = 107,
 }

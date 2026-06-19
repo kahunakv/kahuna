@@ -82,6 +82,7 @@ else
     builder.Services.AddSingleton<ActorSystem>(services => new(services, services.GetRequiredService<ILogger<IRaft>>()));
     builder.Services.AddSingleton<IKahuna, KahunaManager>();
     builder.Services.AddSingleton<IInterNodeCommunication, GrpcInterNodeCommunication>();
+    builder.Services.AddSingleton(opts);
     builder.Services.AddHostedService<ReplicationService>();
 }
 
@@ -247,6 +248,8 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
         MaxWalQueueDepthPerPartition = opts.RaftMaxWalQueueDepthPerPartition,
         MaxGlobalWalQueueDepth = opts.RaftMaxGlobalWalQueueDepth,
         MaxWalBatchSize = opts.RaftMaxWalBatchSize,
+        MaxWalGroupBatchPartitions = opts.RaftMaxWalGroupBatchPartitions,
+        SqliteWalShardCount = opts.RaftSqliteWalShardCount,
         MaxDrainQuantumControl = opts.RaftMaxDrainQuantumControl,
         MaxDrainQuantumReplication = opts.RaftMaxDrainQuantumReplication,
         MaxDrainQuantumClient = opts.RaftMaxDrainQuantumClient,
