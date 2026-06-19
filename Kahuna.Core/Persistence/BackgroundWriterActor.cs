@@ -5,6 +5,9 @@ using System.Diagnostics;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Persistence.Logging;
+using Kahuna.Server.Persistence.Pitr;
+using Kommander.System;
+using Kommander.Time;
 using Polly.Contrib.WaitAndRetry;
 
 namespace Kahuna.Server.Persistence;
@@ -103,6 +106,12 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// at least one full interval has elapsed after startup.
     /// </summary>
     private DateTime lastFullSweepUtc = DateTime.UtcNow;
+
+    /// <summary>
+    /// Wall-clock timestamp of the last PITR horizon tick. Initialised to MinValue so the
+    /// first tick fires immediately on startup (re-asserting the floor after a restart).
+    /// </summary>
+    private DateTime lastPitrTickUtc = DateTime.MinValue;
     
     public BackgroundWriterActor(
         IActorContext<BackgroundWriterActor, BackgroundWriteRequest> context,
@@ -148,6 +157,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 await FlushKeyValues();
                 await RunTargetedRevisionCleanup();
                 await RunFullRevisionSweep();
+                UpdatePitrHorizon();
                 break;
 
             case BackgroundWriteType.FlushAndNotify:
@@ -562,6 +572,58 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         {
             logger.LogWarning(ex, "Exception during full revision sweep; will retry after next interval. backend={Backend}", configuration.Storage);
             fullSweepBacklogPending = true;
+        }
+    }
+
+    /// <summary>
+    /// Advances the PITR WAL-retention floor on every partition once per flush interval.
+    /// <para>
+    /// The protected boundary is <c>now − PitrWindow − BaseSnapshotInterval</c>: WAL entries
+    /// committed before that point are covered by at least one base snapshot and can be
+    /// compacted.  When the boundary cannot be mapped to a committed index (WAL empty or all
+    /// entries newer than the boundary) a non-positive value is passed so Kommander leaves the
+    /// existing floor unchanged rather than suppressing all compaction with a zero floor.
+    /// </para>
+    /// <para>
+    /// Initialised to <see cref="DateTime.MinValue"/> so the first call fires immediately on
+    /// startup — this re-asserts the in-memory floor after a process restart.
+    /// Note: a compaction that fires between process start and this first tick sees no floor
+    /// and may truncate up to the last checkpoint, shortening the recoverable window by up to
+    /// one flush cadence. This is inherent to the in-memory-floor design; flush cadence is
+    /// normally far shorter than compaction cadence so the gap is small in practice.
+    /// </para>
+    /// </summary>
+    private void UpdatePitrHorizon()
+    {
+        if (configuration.PitrWindow <= TimeSpan.Zero)
+            return;
+
+        DateTime now = DateTime.UtcNow;
+        TimeSpan tickInterval = configuration.BaseSnapshotInterval > TimeSpan.Zero
+            ? configuration.BaseSnapshotInterval
+            : configuration.PitrWindow;
+
+        if ((now - lastPitrTickUtc) < tickInterval)
+            return;
+
+        lastPitrTickUtc = now;
+
+        IReadOnlyList<RaftPartitionRange> partitions = raft.GetPartitionMap();
+        foreach (RaftPartitionRange partition in partitions)
+        {
+            int partitionId = partition.PartitionId;
+            long protectedIndex = PitrHorizon.ComputeProtectedIndex(
+                raft.WalAdapter, partitionId, now,
+                configuration.PitrWindow, configuration.BaseSnapshotInterval);
+
+            // Pass a negative value when no committed entry exists before the boundary so
+            // Kommander clears the floor rather than setting it to 0 (which suppresses all compaction).
+            raft.SetMinRetainIndex(partitionId, protectedIndex > 0 ? protectedIndex : -1);
+
+            // Recomputes the boundary for the log line; ComputeProtectedIndex derives it
+            // internally but does not expose it in order to keep the return type simple.
+            long logBoundaryMs = (long)((now - configuration.PitrWindow - configuration.BaseSnapshotInterval) - DateTime.UnixEpoch).TotalMilliseconds;
+            logger.LogPitrHorizonUpdated(partitionId, protectedIndex, logBoundaryMs);
         }
     }
 }

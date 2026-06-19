@@ -23,4 +23,7 @@ public static partial class KahunaLoggerPersistenceExtensions
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "Pruned persistent key/value revisions: mode=sweep keys={Keys} deleted={Deleted} backlog={Backlog} elapsedMs={Elapsed} backend={Backend} retentionCount={RetentionCount} retentionAge={RetentionAge}")]
     public static partial void LogPrunedKeyValueRevisionsSweep(this ILogger<IKahuna> logger, int keys, int deleted, bool backlog, long elapsed, string? backend, int retentionCount, TimeSpan retentionAge);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "PITR horizon: partition={PartitionId} protectedIndex={ProtectedIndex} boundaryMs={BoundaryMs}")]
+    public static partial void LogPitrHorizonUpdated(this ILogger<IKahuna> logger, int partitionId, long protectedIndex, long boundaryMs);
 }
