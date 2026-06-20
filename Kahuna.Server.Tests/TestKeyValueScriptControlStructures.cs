@@ -1,0 +1,572 @@
+
+using System.Diagnostics;
+using System.Text;
+using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Shared.KeyValue;
+using Kommander;
+using Microsoft.Extensions.Logging;
+
+namespace Kahuna.Server.Tests;
+
+[Collection("ClusterTests")]
+public class TestKeyValueScriptControlStructures : BaseCluster
+{
+    private readonly ILogger<IRaft> raftLogger;
+
+    private readonly ILogger<IKahuna> kahunaLogger;
+
+    public TestKeyValueScriptControlStructures(ITestOutputHelper outputHelper)
+    {
+        ILoggerFactory loggerFactory = TestLogFactory.Create(outputHelper, quietKommander: true);
+
+        raftLogger = loggerFactory.CreateLogger<IRaft>();
+        kahunaLogger = loggerFactory.CreateLogger<IKahuna>();
+    }
+
+    private static string GetRandomKey()
+    {
+        return Guid.NewGuid().ToString("N")[..10];
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestBasicIfScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        try
+        {
+            // Persistent tests
+            string script = """
+            SET pp 'other world'                
+            IF true THEN
+                SET pp 'hello world' EX 1000        
+            END                               
+            GET pp
+            """;
+
+            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(1, resp.Revision);
+            Assert.Equal("hello world"u8.ToArray(), resp.Value);
+        
+            script = """
+              ESET pp 'other world'                
+              IF true THEN
+                  ESET pp 'hello world' EX 1000        
+              END                               
+              EGET pp
+              """;
+
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(1, resp.Revision);
+            Assert.Equal("hello world"u8.ToArray(), resp.Value);
+
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestBasicIfScript2([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        try
+        {
+            // Persistent tests
+            string script = """
+            SET pp 'other world'                
+            IF false THEN
+                SET pp 'hello world' EX 1000        
+            END                               
+            GET pp
+            """;
+
+            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(0, resp.Revision);
+            Assert.Equal("other world"u8.ToArray(), resp.Value);
+        
+            script = """
+              ESET pp 'other world'                
+              IF false THEN
+                  ESET pp 'hello world' EX 1000        
+              END                               
+              EGET pp
+              """;
+
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(0, resp.Revision);
+            Assert.Equal("other world"u8.ToArray(), resp.Value);
+        
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestBasicIfElseScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        try
+        {
+            // Persistent tests
+            string script = """
+            SET pp 'other world'                
+            IF true THEN
+                SET pp 'hello world' EX 1000
+            ELSE       
+                SET pp 'big world' EX 1000
+            END
+            GET pp
+            """;
+
+            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(1, resp.Revision);
+            Assert.Equal("hello world"u8.ToArray(), resp.Value);
+        
+            script = """
+              ESET pp 'other world'                
+              IF true THEN
+                  ESET pp 'hello world' EX 1000
+              ELSE       
+                  ESET pp 'big world' EX 1000    
+              END                               
+              EGET pp
+              """;
+
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(1, resp.Revision);
+            Assert.Equal("hello world"u8.ToArray(), resp.Value);
+        
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestBasicIfElseScript2([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        try
+        {
+            // Persistent tests
+            string script = """
+            SET pp 'other world'                
+            IF false THEN
+                SET pp 'hello world' EX 1000
+            ELSE
+                SET pp 'big world' EX 1000
+            END                               
+            GET pp
+            """;
+
+            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(1, resp.Revision);
+            Assert.Equal("big world"u8.ToArray(), resp.Value);
+        
+            script = """
+              ESET pp 'other world'                
+              IF false THEN
+                  ESET pp 'hello world' EX 1000
+              ELSE
+                  ESET pp 'big world' EX 1000    
+              END                               
+              EGET pp
+              """;
+
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(1, resp.Revision);
+            Assert.Equal("big world"u8.ToArray(), resp.Value);
+        
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestNestedIfElseScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        try
+        {
+            // Persistent tests
+            string script = """
+            SET pp 'other world'    
+            IF true THEN
+                IF true THEN
+                   SET pp 'hello world' EX 1000
+                ELSE
+                   SET pp 'old world' EX 1000
+                END
+            ELSE       
+                SET pp 'big world' EX 1000
+            END
+            GET pp
+            """;
+
+            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(1, resp.Revision);
+            Assert.Equal("hello world"u8.ToArray(), resp.Value);
+        
+            script = """
+              ESET pp 'other world'    
+              IF true THEN
+                  IF true THEN
+                     ESET pp 'hello world' EX 1000
+                  ELSE
+                     ESET pp 'old world' EX 1000
+                  END
+              ELSE       
+                  ESET pp 'big world' EX 1000
+              END
+              EGET pp
+              """;
+
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(1, resp.Revision);
+            Assert.Equal("hello world"u8.ToArray(), resp.Value);
+        
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestNestedIfElseScript2([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        try
+        {
+            // Persistent tests
+            string script = """
+            SET pp 'other world'    
+            IF false THEN
+                IF true THEN
+                   SET pp 'hello world' EX 1000
+                ELSE
+                   SET pp 'old world' EX 1000
+                END
+            ELSE       
+                IF false THEN
+                   SET pp 'hello world' EX 1000
+                ELSE
+                   SET pp 'big world' EX 1000
+                END
+            END
+            GET pp
+            """;
+
+            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(1, resp.Revision);
+            Assert.Equal("big world"u8.ToArray(), resp.Value);
+        
+            script = """
+              ESET pp 'other world'    
+              IF false THEN
+                  IF true THEN
+                     ESET pp 'hello world' EX 1000
+                  ELSE
+                     ESET pp 'old world' EX 1000
+                  END
+              ELSE       
+                  IF false THEN
+                     ESET pp 'hello world' EX 1000
+                  ELSE
+                     ESET pp 'big world' EX 1000
+                  END
+              END
+              EGET pp
+              """;
+
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(1, resp.Revision);
+            Assert.Equal("big world"u8.ToArray(), resp.Value);
+        
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestLetReturnScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna _) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        try
+        {
+            // Persistent tests
+            string script = """
+            LET my_var = 'hello world'                               
+            RETURN my_var
+            """;
+
+            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(-1, resp.Revision);
+            Assert.Equal("hello world"u8.ToArray(), resp.Value);
+        
+            script = """
+              LET my_var = 'hello world'                               
+              LET my_var = 'another world'
+              RETURN my_var
+              """;
+
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(-1, resp.Revision);
+            Assert.Equal("another world"u8.ToArray(), resp.Value);
+
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestLetReturnComplexScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        try
+        {
+            // Persistent tests
+            string script = """
+            LET my_var = (100 + 50) * 2 - 1                               
+            RETURN my_var
+            """;
+
+            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(-1, resp.Revision);
+            Assert.Equal("299", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+            script = """
+              LET my_var = (100 + 50) * 2 - 1                               
+              LET my_var = my_var + (100 + 50) * 2 - 1
+              RETURN my_var
+              """;
+
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(-1, resp.Revision);
+            Assert.Equal("598", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+            script = """
+              LET my_var = true          
+              RETURN my_var
+              """;
+
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(-1, resp.Revision);
+            Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+            script = """
+              LET my_var = null          
+              RETURN my_var
+              """;
+
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(-1, resp.Revision);
+            Assert.Equal("", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+             script = """
+              LET my_var = 10.5          
+              RETURN my_var
+              """;
+
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(-1, resp.Revision);
+            Assert.Equal("10.5", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+            script = """
+              LET my_var = 10.5          
+              LET my_var2 = 0.5
+              RETURN my_var + my_var2
+              """;
+
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(-1, resp.Revision);
+            Assert.Equal("11", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+            script = "RETURN (100 + 50) * 2 - 1";
+
+            resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(-1, resp.Revision);
+            Assert.Equal("299", Encoding.UTF8.GetString(resp.Value ?? []));
+
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+
+    [Theory, CombinatorialData]
+    public async Task TestThrowScript([CombinatorialValues("memory")] string storage,[CombinatorialValues(1)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        try
+        {
+            // Persistent tests
+            string script = "throw 'my exception'";
+
+            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Errored, resp.Type);        
+            Assert.Equal("my exception at line 1", resp.Reason);
+
+            script = "throw 100";
+
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Errored, resp.Type);        
+            Assert.Equal("100 at line 1", resp.Reason);
+        
+            script = "throw false";
+
+            resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Errored, resp.Type);        
+            Assert.Equal("false at line 1", resp.Reason);
+        
+            script = "throw null";
+
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Errored, resp.Type);        
+            Assert.Equal("(null) at line 1", resp.Reason);
+        
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestSleepScript([CombinatorialValues("memory")] string storage,[CombinatorialValues(1)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+        
+        try
+        {
+            string script = "sleep 1050 return true";
+        
+            Stopwatch stopwatch = Stopwatch.StartNew();
+
+            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);        
+            Assert.True(stopwatch.ElapsedMilliseconds >= 1000);
+
+            stopwatch.Restart();
+
+            script = "sleep 3050 return true";
+
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);        
+            Assert.True(stopwatch.ElapsedMilliseconds >= 3000);
+        
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+    
+    [Theory, CombinatorialData]
+    public async Task TestBasicForScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        try
+        {
+            // Persistent tests
+            string script = """
+            let total = 0
+            for x in 1..10 do
+                let total = total + x
+            end
+            return total
+            """;
+
+            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(-1, resp.Revision);
+            Assert.Equal("55", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+            script = """
+             let total = 0
+             for x in 10..1 do
+                 let total = total + x
+             end
+             return total
+             """;
+
+            resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(-1, resp.Revision);
+            Assert.Equal("10", Encoding.UTF8.GetString(resp.Value ?? []));
+        
+            script = """
+             let r_start = 0
+             let r_end = 9
+             let total = 0
+             for x in r_start..r_end do
+                 let total = total + x
+             end
+             return total
+             """;
+
+            resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal(-1, resp.Revision);
+            Assert.Equal("36", Encoding.UTF8.GetString(resp.Value ?? []));
+
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+}
