@@ -275,6 +275,19 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
         // once it has been idle for QuiesceAfter and leans on SWIM node liveness instead. Requires
         // PingInterval > 0 and < StartElectionTimeout, validated by RaftConfiguration at startup.
         EnableQuiescence = opts.RaftEnableQuiescence,
-        QuiesceAfter = TimeSpan.FromMilliseconds(opts.RaftQuiesceAfter)
+        QuiesceAfter = TimeSpan.FromMilliseconds(opts.RaftQuiesceAfter),
+        EnableLeaderBalancer = opts.RaftEnableLeaderBalancer,
+        LeaderBalancerReportInterval = TimeSpan.FromMilliseconds(opts.RaftLeaderBalancerReportInterval),
+        LeaderBalancerInterval = TimeSpan.FromMilliseconds(opts.RaftLeaderBalancerInterval),
+        LeaderBalancerReportTtl = TimeSpan.FromMilliseconds(opts.RaftLeaderBalancerReportTtl),
+        CountDeadband = opts.RaftCountDeadband,
+        LoadImbalanceThreshold = opts.RaftLoadImbalanceThreshold,
+        MinLeaderStabilityMs = opts.RaftMinLeaderStabilityMs,
+        MoveCooldown = TimeSpan.FromMilliseconds(opts.RaftMoveCooldown),
+        MaxMovesPerPass = opts.RaftMaxMovesPerPass,
+        MaxConcurrentTransfers = opts.RaftMaxConcurrentTransfers,
+        LeaderBalancerOpsWeight = opts.RaftLeaderBalancerOpsWeight,
+        LeaderBalancerQueueWeight = opts.RaftLeaderBalancerQueueWeight,
+        SuggestionTimeout = TimeSpan.FromMilliseconds(opts.RaftSuggestionTimeout)
     };
 }

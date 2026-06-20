@@ -60,7 +60,20 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.GrpcEnableMultipleHttp2Connections)] = nameof(KahunaCommandLineOptions.RaftGrpcEnableMultipleHttp2Connections),
         [nameof(RaftConfiguration.GrpcEnableSnapshotCompression)] = nameof(KahunaCommandLineOptions.RaftGrpcEnableSnapshotCompression),
         [nameof(RaftConfiguration.EnableQuiescence)] = nameof(KahunaCommandLineOptions.RaftEnableQuiescence),
-        [nameof(RaftConfiguration.QuiesceAfter)] = nameof(KahunaCommandLineOptions.RaftQuiesceAfter)
+        [nameof(RaftConfiguration.QuiesceAfter)] = nameof(KahunaCommandLineOptions.RaftQuiesceAfter),
+        [nameof(RaftConfiguration.EnableLeaderBalancer)] = nameof(KahunaCommandLineOptions.RaftEnableLeaderBalancer),
+        [nameof(RaftConfiguration.LeaderBalancerReportInterval)] = nameof(KahunaCommandLineOptions.RaftLeaderBalancerReportInterval),
+        [nameof(RaftConfiguration.LeaderBalancerInterval)] = nameof(KahunaCommandLineOptions.RaftLeaderBalancerInterval),
+        [nameof(RaftConfiguration.LeaderBalancerReportTtl)] = nameof(KahunaCommandLineOptions.RaftLeaderBalancerReportTtl),
+        [nameof(RaftConfiguration.CountDeadband)] = nameof(KahunaCommandLineOptions.RaftCountDeadband),
+        [nameof(RaftConfiguration.LoadImbalanceThreshold)] = nameof(KahunaCommandLineOptions.RaftLoadImbalanceThreshold),
+        [nameof(RaftConfiguration.MinLeaderStabilityMs)] = nameof(KahunaCommandLineOptions.RaftMinLeaderStabilityMs),
+        [nameof(RaftConfiguration.MoveCooldown)] = nameof(KahunaCommandLineOptions.RaftMoveCooldown),
+        [nameof(RaftConfiguration.MaxMovesPerPass)] = nameof(KahunaCommandLineOptions.RaftMaxMovesPerPass),
+        [nameof(RaftConfiguration.MaxConcurrentTransfers)] = nameof(KahunaCommandLineOptions.RaftMaxConcurrentTransfers),
+        [nameof(RaftConfiguration.LeaderBalancerOpsWeight)] = nameof(KahunaCommandLineOptions.RaftLeaderBalancerOpsWeight),
+        [nameof(RaftConfiguration.LeaderBalancerQueueWeight)] = nameof(KahunaCommandLineOptions.RaftLeaderBalancerQueueWeight),
+        [nameof(RaftConfiguration.SuggestionTimeout)] = nameof(KahunaCommandLineOptions.RaftSuggestionTimeout)
     };
 
     [Fact]

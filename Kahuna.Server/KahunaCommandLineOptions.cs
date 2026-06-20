@@ -232,6 +232,45 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-quiesce-after", Required = false, HelpText = "How long a partition must be idle (no proposals, no in-flight replication) before its leader quiesces it, in milliseconds", Default = 1500)]
     public int RaftQuiesceAfter { get; set; } = 1500;
 
+    [Option("raft-enable-leader-balancer", Required = false, HelpText = "Master switch for advisory leader-balancing. When false (default) no load reports are built or gossiped and the balancer loop never runs. Enable only after all cluster nodes support the feature.", Default = false)]
+    public bool RaftEnableLeaderBalancer { get; set; } = false;
+
+    [Option("raft-leader-balancer-report-interval", Required = false, HelpText = "How often each node emits a load report on the gossip path in milliseconds. Shorter intervals give fresher data at the cost of more gossip traffic.", Default = 5000)]
+    public int RaftLeaderBalancerReportInterval { get; set; } = 5000;
+
+    [Option("raft-leader-balancer-interval", Required = false, HelpText = "How often the P0 leader runs a balancer planning pass and dispatches leader-move suggestions in milliseconds.", Default = 30000)]
+    public int RaftLeaderBalancerInterval { get; set; } = 30000;
+
+    [Option("raft-leader-balancer-report-ttl", Required = false, HelpText = "Maximum age of a node load report before it is considered stale and excluded from planning in milliseconds. Must be greater than raft-leader-balancer-report-interval.", Default = 20000)]
+    public int RaftLeaderBalancerReportTtl { get; set; } = 20000;
+
+    [Option("raft-count-deadband", Required = false, HelpText = "Minimum leader-count imbalance above the ideal per-node count before the balancer emits any moves. Prevents flip-flopping around balanced distributions.", Default = 1)]
+    public int RaftCountDeadband { get; set; } = 1;
+
+    [Option("raft-load-imbalance-threshold", Required = false, HelpText = "Fractional load skew threshold (maxLoad-minLoad)/maxLoad between the busiest and quietest node that triggers load-tier swaps when count is already balanced.", Default = 0.25)]
+    public double RaftLoadImbalanceThreshold { get; set; } = 0.25;
+
+    [Option("raft-min-leader-stability-ms", Required = false, HelpText = "How long a partition must remain on the same leader (ms) before it is eligible to be moved. Prevents immediate reshuffling of a partition after an election.", Default = 5000)]
+    public long RaftMinLeaderStabilityMs { get; set; } = 5000;
+
+    [Option("raft-move-cooldown", Required = false, HelpText = "How long a partition is excluded from further moves after a transfer suggestion in milliseconds. Prevents rapid oscillation on hot partitions.", Default = 60000)]
+    public int RaftMoveCooldown { get; set; } = 60000;
+
+    [Option("raft-max-moves-per-pass", Required = false, HelpText = "Maximum number of leader-move suggestions emitted in a single planner pass. Limits blast radius of a bad planning decision.", Default = 4)]
+    public int RaftMaxMovesPerPass { get; set; } = 4;
+
+    [Option("raft-max-concurrent-transfers", Required = false, HelpText = "Maximum number of in-flight transfer suggestions the P0 leader tracks simultaneously. No new moves are dispatched until outstanding ones confirm or time out.", Default = 2)]
+    public int RaftMaxConcurrentTransfers { get; set; } = 2;
+
+    [Option("raft-leader-balancer-ops-weight", Required = false, HelpText = "Weight of the EWMA ops/sec term in the composite per-partition load score. Higher values make the balancer more sensitive to throughput differences.", Default = 1.0)]
+    public double RaftLeaderBalancerOpsWeight { get; set; } = 1.0;
+
+    [Option("raft-leader-balancer-queue-weight", Required = false, HelpText = "Weight of the instantaneous queue-depth term in the composite per-partition load score. Higher values make the balancer more sensitive to pending-work backlog.", Default = 0.5)]
+    public double RaftLeaderBalancerQueueWeight { get; set; } = 0.5;
+
+    [Option("raft-suggestion-timeout", Required = false, HelpText = "How long the P0 leader waits for a suggested move to be confirmed before declaring it dropped in milliseconds. After timeout the partition is eligible again subject to raft-move-cooldown.", Default = 15000)]
+    public int RaftSuggestionTimeout { get; set; } = 15000;
+
     [Option("raft-transport-security", Required = false, HelpText = "Transport security and node authentication settings (JSON; prefer --raft-allow-insecure-certificate-validation for simple dev overrides)", Default = "")]
     public string RaftTransportSecurity { get; set; } = "";
 
