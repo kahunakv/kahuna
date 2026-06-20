@@ -147,7 +147,7 @@ internal sealed class KeyValueLocator
 
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
-            return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+            return await manager.TrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, routedGeneration);
 
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
@@ -344,8 +344,8 @@ internal sealed class KeyValueLocator
             
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
-            return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);               
-        
+            return await manager.TryDeleteKeyValue(transactionId, key, durability);
+
         logger.LogDeleteKeyValueRedirected(key, partitionId, leader);
         
         return await interNodeCommunication.TryDeleteKeyValue(leader, transactionId, key, durability, cancellationToken);
@@ -372,8 +372,8 @@ internal sealed class KeyValueLocator
             
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
-            return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);               
-        
+            return await manager.TryExtendKeyValue(transactionId, key, expiresMs, durability);
+
         logger.LogExtendKeyValueRedirected(key, partitionId, leader);
 
         return await interNodeCommunication.TryExtendKeyValue(leader, transactionId, key, expiresMs, durability, cancellationToken);
@@ -406,7 +406,7 @@ internal sealed class KeyValueLocator
 
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
-            return (KeyValueResponseType.MustRetry, null);
+            return await manager.TryGetValue(transactionId, key, revision, readTimestamp, durability);
 
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
@@ -445,7 +445,7 @@ internal sealed class KeyValueLocator
 
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
-            return (KeyValueResponseType.MustRetry, null);
+            return await manager.TryExistsValue(transactionId, key, revision, readTimestamp, durability);
 
         logger.LogExistsKeyValueRedirect(key, partitionId, leader);
 
@@ -603,12 +603,12 @@ internal sealed class KeyValueLocator
 
         int partitionId = RouteKey(key);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
-            return await manager.TryCheckWriteIntentValue(transactionId, key, durability);
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
+            return KeyValueResponseType.MustRetry;
 
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
-            return KeyValueResponseType.MustRetry;
+            return await manager.TryCheckWriteIntentValue(transactionId, key, durability);
 
         logger.LogCheckWriteIntentRedirect(key, partitionId, leader);
 
@@ -636,7 +636,7 @@ internal sealed class KeyValueLocator
 
         string leader = await raft.WaitForLeader(partitionId, cancelationToken);
         if (leader == raft.GetLocalEndpoint())
-            return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero);
+            return await manager.TryAcquireExclusiveLock(transactionId, key, expiresMs, durability);
 
         logger.LogAcquireLockKeyValueRedirected(key, partitionId, leader);
 
@@ -679,8 +679,8 @@ internal sealed class KeyValueLocator
             
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
-            return KeyValueResponseType.MustRetry;
-        
+            return await manager.TryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability);
+
         logger.LogAcquirePrefixLockKeyValueRedirected(prefixKey, partitionId, leader);
         
         return await interNodeCommunication.TryAcquireExclusivePrefixLock(leader, transactionId, prefixKey, expiresMs, durability, cancellationToken);

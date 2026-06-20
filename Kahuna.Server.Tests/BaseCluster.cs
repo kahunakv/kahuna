@@ -472,6 +472,102 @@ public abstract class BaseCluster
     }
 
     /// <summary>
+    /// Like <see cref="AssembleSwimCluster"/> but with the advisory leader balancer enabled on every
+    /// node. SWIM must be on because load reports ride the gossip path; the balancer intervals are
+    /// scaled far below their production defaults so several planning passes elapse within a test.
+    /// SWIM suspicion/eviction windows are kept generous so healthy nodes are never evicted while the
+    /// balancer runs.
+    /// </summary>
+    protected static async Task<(IRaft, IRaft, IRaft, IKahuna, IKahuna, IKahuna, InMemoryCommunication, MemoryInterNodeCommmunication)> AssembleLeaderBalancerCluster(
+        string walStorage, int partitions,
+        ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger)
+    {
+        InMemoryCommunication raftCommunication = new();
+        MemoryInterNodeCommmunication interNodeCommmunication = new();
+
+        (IRaft raft1, IKahuna kahuna1) = BuildLeaderBalancerNode(interNodeCommmunication, raftCommunication, walStorage, partitions, 1, 8001, ["localhost:8002", "localhost:8003"], raftLogger, kahunaLogger);
+        (IRaft raft2, IKahuna kahuna2) = BuildLeaderBalancerNode(interNodeCommmunication, raftCommunication, walStorage, partitions, 2, 8002, ["localhost:8001", "localhost:8003"], raftLogger, kahunaLogger);
+        (IRaft raft3, IKahuna kahuna3) = BuildLeaderBalancerNode(interNodeCommmunication, raftCommunication, walStorage, partitions, 3, 8003, ["localhost:8001", "localhost:8002"], raftLogger, kahunaLogger);
+
+        await WaitForClusterToAssemble(interNodeCommmunication, raftCommunication, partitions, raft1, raft2, raft3, kahuna1, kahuna2, kahuna3);
+
+        return (raft1, raft2, raft3, kahuna1, kahuna2, kahuna3, raftCommunication, interNodeCommmunication);
+    }
+
+    private static (IRaft, IKahuna) BuildLeaderBalancerNode(
+        MemoryInterNodeCommmunication interNodeComm,
+        InMemoryCommunication raftComm,
+        string walStorage,
+        int partitions,
+        int nodeId,
+        int port,
+        IEnumerable<string> peers,
+        ILogger<IRaft> raftLogger,
+        ILogger<IKahuna> kahunaLogger)
+    {
+        IWAL wal = GetWAL(walStorage, raftLogger);
+        ActorSystem actorSystem = new(logger: raftLogger);
+
+        RaftConfiguration config = new()
+        {
+            NodeName = $"kahuna{nodeId}",
+            NodeId = nodeId,
+            Host = "localhost",
+            Port = port,
+            InitialPartitions = partitions,
+            StartElectionTimeout = (int)(50 * TimingScale),
+            EndElectionTimeout = (int)(150 * TimingScale),
+            ElectionTimeoutSeed = ElectionTimeoutSeedBase + nodeId,
+            CompactEveryOperations = 1000,
+            CompactNumberEntries = 50,
+            EnableQuiescence = false,
+            // SWIM on (load reports ride gossip); generous suspicion/eviction so healthy nodes stay.
+            PingInterval = TimeSpan.FromMilliseconds(200 * TimingScale),
+            PingTimeout = TimeSpan.FromMilliseconds(100 * TimingScale),
+            SuspicionTimeout = TimeSpan.FromMilliseconds(5000 * TimingScale),
+            DeadMemberEvictionGrace = TimeSpan.FromMilliseconds(5000 * TimingScale),
+            UpdateNodesInterval = TimeSpan.FromMilliseconds(300 * TimingScale),
+            // Advisory leader balancer, intervals scaled down so passes run within the test window.
+            EnableLeaderBalancer = true,
+            LeaderBalancerReportInterval = TimeSpan.FromMilliseconds(200 * TimingScale),
+            LeaderBalancerReportTtl = TimeSpan.FromMilliseconds(2000 * TimingScale),
+            LeaderBalancerInterval = TimeSpan.FromMilliseconds(300 * TimingScale),
+            MinLeaderStabilityMs = (long)(200 * TimingScale),
+            MoveCooldown = TimeSpan.FromMilliseconds(500 * TimingScale),
+            SuggestionTimeout = TimeSpan.FromMilliseconds(1500 * TimingScale)
+        };
+
+        RaftManager raft = new(
+            config,
+            new StaticDiscovery(peers.Select(p => new RaftNode(p)).ToList()),
+            wal,
+            raftComm,
+            new HybridLogicalClock(),
+            raftLogger
+        );
+
+        KahunaConfiguration configuration = new()
+        {
+            LocksWorkers = 8,
+            KeyValueWorkers = 8,
+            BackgroundWriterWorkers = 1,
+            Storage = "memory",
+            StoragePath = "/tmp",
+            StorageRevision = Guid.NewGuid().ToString(),
+            DefaultTransactionTimeout = 5000,
+            ScriptCacheExpiration = TimeSpan.FromMinutes(1)
+        };
+
+        KahunaManager kahuna = new(actorSystem, raft, configuration, interNodeComm, kahunaLogger);
+
+        raft.OnLogRestored += kahuna.OnLogRestored;
+        raft.OnReplicationReceived += kahuna.OnReplicationReceived;
+        raft.OnReplicationError += kahuna.OnReplicationError;
+
+        return (raft, kahuna);
+    }
+
+    /// <summary>
     /// Tears down a single node cleanly, for use in leave / eviction tests.
     /// </summary>
     protected static async Task LeaveClusterSingle(IRaft raft)
