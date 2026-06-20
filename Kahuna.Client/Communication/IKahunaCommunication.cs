@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 using Kahuna.Shared.Sequences;
@@ -82,4 +83,6 @@ public interface IKahunaCommunication
      Task<(SequenceResponseType, int)> DeleteSequence(string url, string name, SequenceDurability durability, CancellationToken cancellationToken);
 
      Task<bool> RegisterKeyRange(string url, string keySpace, CancellationToken cancellationToken);
+
+     Task<KahunaClusterMembershipResponse> GetClusterMembership(string url, CancellationToken cancellationToken);
 }

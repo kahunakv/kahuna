@@ -1178,4 +1178,23 @@ public class RestCommunication : IKahunaCommunication
     {
         throw new NotSupportedException("RegisterKeyRange is not available over the REST transport; use the gRPC transport.");
     }
+
+    public async Task<KahunaClusterMembershipResponse> GetClusterMembership(string url, CancellationToken cancellationToken)
+    {
+        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
+
+        KahunaClusterMembershipResponse? response = await retryPolicy.ExecuteAsync(() =>
+            url
+                .WithOAuthBearerToken("xxx")
+                .AppendPathSegments("v1/cluster/membership")
+                .WithHeader("Accept", "application/json")
+                .WithSettings(o => o.HttpVersion = "2.0")
+                .GetAsync(cancellationToken: cancellationToken)
+                .ReceiveJson<KahunaClusterMembershipResponse>()).ConfigureAwait(false);
+
+        if (response is null)
+            throw new KahunaException("GetClusterMembership returned null", LockResponseType.Errored);
+
+        return response;
+    }
 }

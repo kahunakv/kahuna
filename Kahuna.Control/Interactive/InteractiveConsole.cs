@@ -151,7 +151,8 @@ public static class InteractiveConsole
                 "run",
                 "clear",
                 "exit",
-                "quit"
+                "quit",
+                "cluster"
             ];
 
             string[] constants =
@@ -327,6 +328,13 @@ public static class InteractiveConsole
                 if (commandTrim.StartsWith("delete-sequence ", StringComparison.InvariantCultureIgnoreCase))
                 {
                     await DeleteSequence(connection, history, commandTrim);
+                    continue;
+                }
+
+                if (commandTrim.Equals("cluster members", StringComparison.InvariantCultureIgnoreCase))
+                {
+                    history.Add(commandTrim);
+                    await ClusterMembersCommand.Execute(connection, null);
                     continue;
                 }
 

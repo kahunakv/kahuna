@@ -9,6 +9,7 @@
 using System.Text;
 using Grpc.Core;
 using Kahuna.Client.Communication;
+using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 using Kahuna.Shared.Sequences;
@@ -1039,6 +1040,13 @@ public class KahunaClient
     /// </summary>
     public Task<bool> RegisterKeyRange(string keySpace, CancellationToken cancellationToken = default) =>
         communication.RegisterKeyRange(GetRoundRobinUrl(), keySpace, cancellationToken);
+
+    /// <summary>
+    /// Returns the current cluster membership roster: version, members, and this node's role.
+    /// Honours the client's transport selection (gRPC or REST).
+    /// </summary>
+    public Task<KahunaClusterMembershipResponse> GetClusterMembership(CancellationToken cancellationToken = default) =>
+        communication.GetClusterMembership(GetRoundRobinUrl(), cancellationToken);
 
     /// <summary>
     /// Executes a script on the key-value store

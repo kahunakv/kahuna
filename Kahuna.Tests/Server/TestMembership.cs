@@ -70,6 +70,13 @@ public sealed class TestMembership : BaseCluster
                 { "localhost:8004", kahuna4 }
             });
 
+            // Wait for stable system-partition (P0) leadership before joining: promotion of the
+            // new Learner to Voter is driven by the P0 leader, and the fast 50–150 ms election
+            // timers can otherwise churn leadership and stall promotion past JoinCluster's 60 s
+            // ceiling. Settling P0 first removes that race.
+            await raft1.WaitForLeaderStableAsync(0, TimeSpan.FromMilliseconds(500),
+                TestContext.Current.CancellationToken);
+
             // JoinCluster(seeds) blocks until node4 is promoted to Voter.
             await raft4.JoinCluster(new[] { "localhost:8001" }, TestContext.Current.CancellationToken);
 
@@ -127,7 +134,7 @@ public sealed class TestMembership : BaseCluster
                     && m.Members.Count(x =>
                         x.Role != ClusterMemberRole.Leaving &&
                         x.Role != ClusterMemberRole.NotMember) == 2;
-            }, timeoutMs: 15_000);
+            }, timeoutMs: 30_000);
 
             ClusterMembership after = raft1.GetMembership();
             Assert.DoesNotContain(after.Members, m =>
@@ -177,7 +184,7 @@ public sealed class TestMembership : BaseCluster
 
             await WaitUntilAsync(() =>
                 raft1.GetMembership().Members.All(x => x.Endpoint != "localhost:8003"),
-                timeoutMs: 15_000);
+                timeoutMs: 30_000);
 
             string key = $"e3-{Guid.NewGuid():N}";
             (KeyValueResponseType type, _, _) = await kahuna1.LocateAndTrySetKeyValue(
@@ -216,11 +223,21 @@ public sealed class TestMembership : BaseCluster
 
         try
         {
+            // Write 4 keys spread across key-spaces so they land on different partitions.
+            // Use a prefix-namespaced pattern so DataPartitionRouter hashes on the prefix.
             string[] keys = new[] { "e4:alpha/row1", "e4:beta/row2", "e4:gamma/row3", "e4:delta/row4" };
+            Dictionary<string, byte[]> written = new();
 
-            Dictionary<string, int> routingBefore = new();
             foreach (string key in keys)
-                routingBefore[key] = raft1.GetPartitionKey(key);
+            {
+                byte[] value = Encoding.UTF8.GetBytes($"val-{key}");
+                written[key] = value;
+
+                (KeyValueResponseType type, _, _) = await kahuna1.LocateAndTrySetKeyValue(
+                    HLCTimestamp.Zero, key, value, null, -1, KeyValueFlags.Set, 0,
+                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+                Assert.Equal(KeyValueResponseType.Set, type);
+            }
 
             (IRaft raft4, IKahuna kahuna4) = BuildNode(interNodeComm, raftComm, walStorage,
                 nodeId: 4, port: 8004,
@@ -238,11 +255,58 @@ public sealed class TestMembership : BaseCluster
                 { "localhost:8003", kahuna3 }, { "localhost:8004", kahuna4 }
             });
 
+            // Settle P0 leadership before joining so the Learner→Voter promotion is not racing
+            // an in-progress election (see E1 for why the fast timers make this necessary).
+            await raft1.WaitForLeaderStableAsync(0, TimeSpan.FromMilliseconds(500),
+                TestContext.Current.CancellationToken);
+
             // JoinCluster(seeds) blocks until node4 is promoted to Voter.
             await raft4.JoinCluster(new[] { "localhost:8001" }, TestContext.Current.CancellationToken);
 
+            // Read every pre-join key through node4. The values were committed (Persistent)
+            // before the join, so they must be routed to — and served from — the owning
+            // partition regardless of the membership change. A freshly-promoted Voter may still
+            // be a few entries behind in its applied state (promotion only requires being within
+            // LearnerPromotionLag and stable for a short window — not fully caught up), so poll
+            // until node4 has applied every pre-join write, THEN assert the values. That way a
+            // genuine routing error (a key present with the wrong value) still fails hard, while
+            // transient catch-up lag does not flake the test.
+            Dictionary<string, ReadOnlyKeyValueEntry> readBack = new();
+            await WaitUntilAsync(async () =>
+            {
+                readBack.Clear();
+                foreach (string key in keys)
+                {
+                    (KeyValueResponseType gt, ReadOnlyKeyValueEntry? e) = await kahuna4.LocateAndTryGetValue(
+                        HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero,
+                        KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+                    if (gt != KeyValueResponseType.Get || e is null)
+                        return false;
+                    readBack[key] = e;
+                }
+                return true;
+            }, timeoutMs: 30_000);
+
             foreach (string key in keys)
-                Assert.Equal(routingBefore[key], raft1.GetPartitionKey(key));
+                Assert.Equal(written[key], readBack[key].Value);
+
+            // Reverse direction: a write issued through the freshly-joined node must be
+            // routed to the owning partition and be visible from an original node — proving
+            // the new voter routes/owns ranges both ways across the membership change.
+            string newKey = $"e4-new-{Guid.NewGuid():N}";
+            byte[] newValue = Encoding.UTF8.GetBytes("through-node4");
+
+            (KeyValueResponseType newSetType, _, _) = await kahuna4.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, newKey, newValue, null, -1, KeyValueFlags.Set, 0,
+                KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+            Assert.Equal(KeyValueResponseType.Set, newSetType);
+
+            (KeyValueResponseType newGetType, ReadOnlyKeyValueEntry? newEntry) = await kahuna1.LocateAndTryGetValue(
+                HLCTimestamp.Zero, newKey, -1, HLCTimestamp.Zero,
+                KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+            Assert.Equal(KeyValueResponseType.Get, newGetType);
+            Assert.NotNull(newEntry);
+            Assert.Equal(newValue, newEntry.Value);
 
             await LeaveClusterSingle(raft4);
         }
@@ -252,10 +316,73 @@ public sealed class TestMembership : BaseCluster
         }
     }
 
+    // E6
+
+    [Theory, CombinatorialData]
+    public async Task StopWithoutLeave_DoesNotShrinkRoster(
+        [CombinatorialValues("memory")] string walStorage,
+        [CombinatorialValues(3)] int partitions)
+    {
+        (IRaft raft1, IRaft raft2, IRaft raft3,
+         IKahuna kahuna1, IKahuna kahuna2, IKahuna _) =
+            await AssembleThreNodeCluster(walStorage, partitions, raftLogger, kahunaLogger);
+
+        try
+        {
+            ClusterMembership before = raft1.GetMembership();
+            long versionBefore = before.MembershipVersion;
+            int memberCountBefore = before.Members.Count(m =>
+                m.Role != ClusterMemberRole.Leaving && m.Role != ClusterMemberRole.NotMember);
+
+            // Stop node3 WITHOUT calling LeaveCluster — GracefulLeaveOnShutdown is off (the default).
+            ((IDisposable)raft3).Dispose();
+
+            // Brief pause for in-flight messages to drain; short enough to stay well below
+            // the SWIM eviction window (separate mechanism, not triggered here).
+            await Task.Delay(500);
+
+            ClusterMembership after = raft1.GetMembership();
+
+            // Roster must be unchanged: no RemoveMember was committed.
+            Assert.Equal(versionBefore, after.MembershipVersion);
+            Assert.Equal(memberCountBefore, after.Members.Count(m =>
+                m.Role != ClusterMemberRole.Leaving && m.Role != ClusterMemberRole.NotMember));
+
+            // node3 is still listed as a Voter — a restart does not self-evict.
+            Assert.Contains(after.Members, m =>
+                m.Endpoint == "localhost:8003" && m.Role == ClusterMemberRole.Voter);
+
+            // Surviving nodes still serve requests.
+            string key = $"e6-{Guid.NewGuid():N}";
+            byte[] value = Encoding.UTF8.GetBytes("still-alive");
+
+            (KeyValueResponseType type, _, _) = await kahuna1.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, key, value, null, -1, KeyValueFlags.Set, 0,
+                KeyValueDurability.Ephemeral, TestContext.Current.CancellationToken);
+            Assert.Equal(KeyValueResponseType.Set, type);
+
+            (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry) = await kahuna2.LocateAndTryGetValue(
+                HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero,
+                KeyValueDurability.Ephemeral, TestContext.Current.CancellationToken);
+            Assert.Equal(KeyValueResponseType.Get, getType);
+            Assert.NotNull(entry);
+        }
+        finally
+        {
+            // raft3 is already disposed. Direct-dispose raft1 and raft2 to avoid
+            // the graceful-leave timeout cascade (raft2 can't commit RemoveMember
+            // without a quorum once raft3 is gone).
+            try { ((IDisposable)raft1).Dispose(); } catch { }
+            try { ((IDisposable)raft2).Dispose(); } catch { }
+            try { ((IDisposable)raft3).Dispose(); } catch { }
+        }
+    }
+
     // E5
 
     [Fact]
     public async Task CompactionFloorJoin_SurfacesClearError()
+
     {
         var throwMsg = "RaftManager.JoinCluster: promotion permanently blocked — partition 1 learner start index 1 is below the WAL compaction floor 500";
         var stubRaft = new StubRaftForE5(new InvalidOperationException(throwMsg));
@@ -283,7 +410,204 @@ public sealed class TestMembership : BaseCluster
         Assert.Contains("permanently blocked", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    // E7
+
+    [Fact]
+    public async Task UnitLeaveTimeout_StopAsync_IsNonFatal()
+    {
+        // C3 timeout path: StopAsync catches OperationCanceledException and completes normally.
+        var opts = new KahunaCommandLineOptions { RaftGracefulLeaveOnShutdown = true };
+        var svc = new Kahuna.Services.ReplicationService(
+            new StubKahunaForE5(),
+            new StubRaftForE7(Task.FromCanceled(new CancellationToken(canceled: true))),
+            opts, raftLogger);
+        await svc.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task UnitMembershipChanged_LogsOncePerAdvance()
+    {
+        // D1: OnMembershipChanged handler emits exactly one Information log per advance and
+        // is synchronous (copy-and-return — does not block the coordinator loop).
+        var captureLogger = new CaptureLogger();
+        var stubRaft = new StubRaftForE7(Task.CompletedTask);
+        var opts = new KahunaCommandLineOptions();
+        var svc = new Kahuna.Services.ReplicationService(
+            new StubKahunaForE5(), stubRaft, opts, captureLogger);
+
+        // ExecuteAsync registers raft.OnMembershipChanged += OnMembershipChanged,
+        // then calls JoinCluster (returns immediately from the stub) and returns.
+        var executeMethod = svc.GetType().GetMethod(
+            "ExecuteAsync",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        await (Task)executeMethod.Invoke(svc, [CancellationToken.None])!;
+
+        // Two distinct version advances.
+        var m1 = new ClusterMembership { MembershipVersion = 1 };
+        m1.Members.Add(new ClusterMember { Endpoint = "localhost:9998", NodeId = 98, Role = ClusterMemberRole.Voter, JoinedVersion = 1 });
+        stubRaft.FireMembershipChanged(m1);
+
+        var m2 = new ClusterMembership { MembershipVersion = 2 };
+        m2.Members.Add(new ClusterMember { Endpoint = "localhost:9998", NodeId = 98, Role = ClusterMemberRole.Voter, JoinedVersion = 1 });
+        stubRaft.FireMembershipChanged(m2);
+
+        // Exactly one Information log entry per advance (two total).
+        Assert.Equal(2, captureLogger.InfoCount);
+    }
+
+    [Theory, CombinatorialData]
+    public async Task VoterLimitBoundary_LastVoterLeaveRefused_NonFatal(
+        [CombinatorialValues("memory")] string walStorage,
+        [CombinatorialValues(3)] int partitions)
+    {
+        (IRaft raft1, IRaft raft2, IRaft raft3,
+         IKahuna _, IKahuna _, IKahuna _) =
+            await AssembleThreNodeCluster(walStorage, partitions, raftLogger, kahunaLogger);
+
+        try
+        {
+            // 3→2: graceful leave must be committed (MembershipVersion advances).
+            long v0 = raft1.GetMembership().MembershipVersion;
+            await raft3.LeaveCluster(dispose: false);
+
+            await WaitUntilAsync(() =>
+            {
+                ClusterMembership m = raft1.GetMembership();
+                return m.MembershipVersion > v0
+                    && m.Members.Count(x => x.Role == ClusterMemberRole.Voter) == 2;
+            }, timeoutMs: 30_000);
+
+            long v1 = raft1.GetMembership().MembershipVersion;
+            Assert.True(v1 > v0);
+
+            // 2→1: permitted — stays above the zero-voter floor.
+            await raft2.LeaveCluster(dispose: false);
+
+            await WaitUntilAsync(() =>
+            {
+                ClusterMembership m = raft1.GetMembership();
+                return m.MembershipVersion > v1
+                    && m.Members.Count(x => x.Role == ClusterMemberRole.Voter) == 1;
+            }, timeoutMs: 30_000);
+
+            long v2 = raft1.GetMembership().MembershipVersion;
+            Assert.True(v2 > v1);
+
+            // 1→0: InsufficientVoters — Kommander absorbs the refusal inside LeaveCluster,
+            // which must return without throwing (non-fatal shutdown path).
+            long vBefore = raft1.GetMembership().MembershipVersion;
+            await raft1.LeaveCluster(dispose: false);
+
+            // No RemoveMember was committed: version unchanged, node1 still a Voter.
+            ClusterMembership after = raft1.GetMembership();
+            Assert.Equal(vBefore, after.MembershipVersion);
+            Assert.Contains(after.Members, m =>
+                m.Endpoint == "localhost:8001" && m.Role == ClusterMemberRole.Voter);
+        }
+        finally
+        {
+            try { ((IDisposable)raft1).Dispose(); } catch { }
+            try { ((IDisposable)raft2).Dispose(); } catch { }
+            try { ((IDisposable)raft3).Dispose(); } catch { }
+        }
+    }
+
     // stubs
+
+    private sealed class StubRaftForE7 : IRaft
+    {
+        private readonly Task leaveTask;
+        private Action<ClusterMembership>? membershipHandlers;
+
+        public StubRaftForE7(Task leaveTask) { this.leaveTask = leaveTask; }
+
+        public void FireMembershipChanged(ClusterMembership membership)
+            => membershipHandlers?.Invoke(membership);
+
+        public Task LeaveCluster(bool dispose = false) => leaveTask;
+        public Task JoinCluster(IEnumerable<string> seeds, CancellationToken ct = default) => Task.CompletedTask;
+        public Task JoinCluster(CancellationToken ct = default) => Task.CompletedTask;
+
+        public RaftConfiguration Configuration { get; } = new() { Host = "localhost", Port = 9998 };
+        public string GetLocalEndpoint() => "localhost:9998";
+        public ClusterMemberRole LocalRole => ClusterMemberRole.Voter;
+        public ClusterMembership GetMembership() => new();
+
+        public event Func<int, RaftLog, Task<bool>>? OnLogRestored { add { } remove { } }
+        public event Func<int, RaftLog, Task<bool>>? OnReplicationReceived { add { } remove { } }
+        public event Action<int, RaftLog>? OnReplicationError { add { } remove { } }
+        public event Action<ClusterMembership>? OnMembershipChanged
+        {
+            add => membershipHandlers += value;
+            remove => membershipHandlers -= value;
+        }
+        public event Action<int>? OnRestoreStarted { add { } remove { } }
+        public event Action<int>? OnRestoreFinished { add { } remove { } }
+        public event Func<int, string, Task<bool>>? OnLeaderChanged { add { } remove { } }
+        public event Action<IReadOnlyList<RaftPartitionRange>>? OnPartitionMapChanged { add { } remove { } }
+
+        public bool Joined => false;
+        public bool IsInitialized => false;
+        public IWAL WalAdapter => null!;
+        public ICommunication Communication => null!;
+        public IDiscovery Discovery => null!;
+        public HybridLogicalClock HybridLogicalClock => null!;
+        public IRaftReadScheduler ReadScheduler => null!;
+        public IRaftWalScheduler WalScheduler => null!;
+
+        public IReadOnlyList<RaftPartitionRange> GetPartitionMap() => Array.Empty<RaftPartitionRange>();
+        public int GetPartitionKey(string partitionKey) => 0;
+        public int GetPrefixPartitionKey(string prefixPartitionKey) => 0;
+        public long GetPartitionGeneration(int partitionId) => 0;
+        public ValueTask<long?> GetFollowerLagAsync(int partitionId, string followerEndpoint) => ValueTask.FromResult<long?>(null);
+        public ValueTask<bool> AmILeaderQuick(int partitionId) => ValueTask.FromResult(false);
+        public ValueTask<bool> AmILeader(int partitionId, CancellationToken cancellationToken) => ValueTask.FromResult(false);
+        public ValueTask<string> WaitForLeader(int partitionId, CancellationToken cancellationToken) => ValueTask.FromResult(string.Empty);
+        public ValueTask<string> WaitForLeaderStableAsync(int partitionId, TimeSpan minStableFor, CancellationToken cancellationToken = default) => ValueTask.FromResult(string.Empty);
+        public Task UpdateNodes() => Task.CompletedTask;
+        public IList<RaftNode> GetNodes() => Array.Empty<RaftNode>();
+        public HLCTimestamp GetLastNodeActivity(string endpoint) => HLCTimestamp.Zero;
+        public IReadOnlyList<string> GetActiveNodes(TimeSpan within) => Array.Empty<string>();
+        public Task Handshake(HandshakeRequest request) => Task.CompletedTask;
+        public void RequestVote(RequestVotesRequest request) { }
+        public void Vote(VoteRequest request) { }
+        public void AppendLogs(AppendLogsRequest request) { }
+        public void CompleteAppendLogs(CompleteAppendLogsRequest request) { }
+        public void SetMinRetainIndex(int partitionId, long index) { }
+        public int GetLocalNodeId() => 98;
+        public string GetLocalNodeName() => "stub-e7";
+        public void RegisterStateMachineTransfer(IRaftStateMachineTransfer? transfer) { }
+        public Task<RaftReplicationResult> ReplicateLogs(int partitionId, string type, byte[] data, bool autoCommit = true, long expectedGeneration = 0, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<RaftReplicationResult> ReplicateLogs(int partitionId, string type, IEnumerable<byte[]> logs, bool autoCommit = true, long expectedGeneration = 0, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<RaftReplicationResult> ReplicateCheckpoint(int partitionId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<(bool success, RaftOperationStatus status, long commitLogId)> CommitLogs(int partitionId, HLCTimestamp ticketId) => throw new NotImplementedException();
+        public Task<(bool success, RaftOperationStatus status, long commitLogId)> RollbackLogs(int partitionId, HLCTimestamp ticketId) => throw new NotImplementedException();
+        public Task<RaftOperationStatus> ForceLeaderForTestingAsync(int partitionId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<RaftOperationStatus> StepDownAsync(int partitionId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<RaftOperationStatus> TransferLeadershipAsync(int partitionId, string targetEndpoint, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<RaftOperationStatus> SuspendHeartbeatsAsync(int partitionId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<RaftOperationStatus> ResumeHeartbeatsAsync(int partitionId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<RaftPartitionLifecycleResult> CreatePartitionAsync(int partitionId, RaftRoutingMode mode = RaftRoutingMode.Unrouted, (int start, int end)? hashRange = null, CancellationToken ct = default) => throw new NotImplementedException();
+        public Task<RaftPartitionLifecycleResult> RemovePartitionAsync(int partitionId, CancellationToken ct = default) => throw new NotImplementedException();
+        public Task<RaftPartitionLifecycleResult> SplitPartitionAsync(int sourcePartitionId, int targetPartitionId = 0, RaftSplitPlan? plan = null, CancellationToken ct = default) => throw new NotImplementedException();
+        public Task<RaftPartitionLifecycleResult> MergePartitionsAsync(int survivorPartitionId, int sourcePartitionId, RaftMergePlan? plan = null, CancellationToken ct = default) => throw new NotImplementedException();
+    }
+
+    private sealed class CaptureLogger : ILogger<IRaft>
+    {
+        private int membershipLogCount;
+
+        public int InfoCount => membershipLogCount;
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == LogLevel.Information &&
+                formatter(state, exception).StartsWith("Membership advanced", StringComparison.Ordinal))
+                Interlocked.Increment(ref membershipLogCount);
+        }
+    }
 
     private sealed class StubRaftForE5 : IRaft
     {

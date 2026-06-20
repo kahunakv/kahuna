@@ -97,6 +97,12 @@ if (IsSingleCommand(opts))
             await SequenceCommand.Delete(connection, opts.DeleteSequence, format);
             return;
         }
+
+        if (opts.ClusterMembers)
+        {
+            await ClusterMembersCommand.Execute(connection, format);
+            return;
+        }
     }
     catch (Exception ex)
     {
@@ -173,6 +179,9 @@ static bool IsSingleCommand(KahunaControlOptions kahunaControlOptions)
         return true;
 
     if (!string.IsNullOrEmpty(kahunaControlOptions.DeleteSequence))
+        return true;
+
+    if (kahunaControlOptions.ClusterMembers)
         return true;
 
     return false;

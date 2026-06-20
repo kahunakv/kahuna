@@ -84,4 +84,7 @@ public sealed class KahunaControlOptions
 
     [Option("insecure", Required = false, HelpText = "Skip TLS certificate validation (useful for self-signed certs in dev/standalone mode)")]
     public bool Insecure { get; set; }
+
+    [Option("cluster-members", Required = false, HelpText = "Prints the live cluster membership roster")]
+    public bool ClusterMembers { get; set; }
 }

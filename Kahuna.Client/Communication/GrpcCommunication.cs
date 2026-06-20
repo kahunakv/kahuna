@@ -14,6 +14,7 @@ using Google.Protobuf.Collections;
 using Grpc.Core;
 using Grpc.Net.Client;
 using Grpc.Net.Client.Configuration;
+using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 using Kahuna.Shared.Sequences;
@@ -2001,4 +2002,42 @@ public class GrpcCommunication : IKahunaCommunication
 
         return response.Success;
     }
+
+    public async Task<KahunaClusterMembershipResponse> GetClusterMembership(string url, CancellationToken cancellationToken)
+    {
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+        Cluster.ClusterClient client = new(channel);
+
+        GrpcGetMembershipResponse response = await client.GetMembershipAsync(
+            new GrpcGetMembershipRequest(),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        List<KahunaClusterMemberResponse> members = new(response.Members.Count);
+        foreach (GrpcClusterMember m in response.Members)
+        {
+            members.Add(new KahunaClusterMemberResponse
+            {
+                Endpoint = m.Endpoint,
+                NodeId = m.NodeId,
+                Role = GrpcRoleToString(m.Role),
+                JoinedVersion = m.JoinedVersion
+            });
+        }
+
+        return new KahunaClusterMembershipResponse
+        {
+            MembershipVersion = response.MembershipVersion,
+            Members = members,
+            LocalRole = GrpcRoleToString(response.LocalRole)
+        };
+    }
+
+    private static string GrpcRoleToString(GrpcClusterMemberRole role) => role switch
+    {
+        GrpcClusterMemberRole.ClusterMemberRoleLearner   => "Learner",
+        GrpcClusterMemberRole.ClusterMemberRoleVoter     => "Voter",
+        GrpcClusterMemberRole.ClusterMemberRoleLeaving   => "Leaving",
+        GrpcClusterMemberRole.ClusterMemberRoleNotMember => "NotMember",
+        _                                                 => "NotMember"
+    };
 }

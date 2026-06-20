@@ -3,6 +3,7 @@ using Kahuna.Client;
 using Kahuna.Client.Communication;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 using Kahuna.Shared.Sequences;
@@ -230,4 +231,7 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
     public Task<(SequenceResponseType, int)> DeleteSequence(string url, string name, SequenceDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
     public Task<bool> RegisterKeyRange(string url, string keySpace, CancellationToken cancellationToken) =>
         kahuna.RegisterKeyRangeAsync(keySpace, cancellationToken);
+
+    public Task<KahunaClusterMembershipResponse> GetClusterMembership(string url, CancellationToken cancellationToken) =>
+        throw new NotImplementedException();
 }
