@@ -139,6 +139,15 @@ internal sealed class KeyValuesManager : IDisposable
         );
 
         txCoordinator = new(this, configuration, raft, logger);
+
+        // Periodic reaper for interactive transaction sessions abandoned without commit/rollback.
+        actorSystem.Spawn<TransactionReaperActor, TransactionReaperRequest>(
+            "transaction-reaper",
+            txCoordinator,
+            configuration,
+            logger
+        );
+
         locator = new(this, configuration, raft, interNodeCommunication, keySpaceRegistry, rangeQuiesceStore, logger);
 
         restorer = new(backgroundWriter, raft, logger);

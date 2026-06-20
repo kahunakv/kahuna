@@ -207,6 +207,40 @@ public sealed class TestKeyValueEvictionSweep
         Assert.True(context.Store.Count <= 5);
     }
 
+    /// <summary>
+    /// An entry whose WriteIntent has already expired must NOT pin it against eviction: the owning
+    /// transaction was abandoned, so the collector must treat the intent as gone (matching the lazy
+    /// expiry that every op handler applies), clear it, and evict the entry under budget pressure.
+    /// Without this the cold key would leak forever.
+    /// </summary>
+    [Fact]
+    public void ExpiredWriteIntent_EntryEvicted_UnderBudgetPressure()
+    {
+        KahunaConfiguration config = CreateConfiguration(maxEntries: 5, batchMax: 100);
+        (TryCollectHandler handler, KeyValueContext context, RaftManager raft) = CreateHandler(config);
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        // Insert the entry first so it sits at the cold end, then stamp an already-expired intent
+        // (Expires one hour in the past relative to `now`).
+        InsertClean(context, "abandoned", now);
+        context.Store.Get("abandoned")!.WriteIntent = new KeyValueWriteIntent
+        {
+            TransactionId = new HLCTimestamp(now.N, now.L - TimeSpan.FromHours(1).Ticks, now.C),
+            Expires = new HLCTimestamp(now.N, now.L - TimeSpan.FromMinutes(30).Ticks, now.C)
+        };
+
+        // Insert 9 clean entries after → they are hotter.
+        for (int i = 0; i < 9; i++)
+            InsertClean(context, $"filler/{i}", now);
+
+        handler.Execute();
+
+        Assert.False(context.Store.ContainsKey("abandoned"),
+            "entry with an expired WriteIntent must be evicted, not pinned");
+        Assert.True(context.Store.Count <= 5,
+            "store must be within budget after collect");
+    }
+
     // ── E.3 disk fallback (unit-level) ───────────────────────────────────────────────
 
     /// <summary>

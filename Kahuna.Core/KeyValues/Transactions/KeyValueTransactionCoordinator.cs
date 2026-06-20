@@ -52,6 +52,13 @@ namespace Kahuna.Server.KeyValues.Transactions;
 internal sealed class KeyValueTransactionCoordinator
 {
     private const int ExtraLockingDelay = 10;
+
+    /// <summary>
+    /// Grace added on top of a session's own timeout before the reaper reclaims it. Kept at or above
+    /// the write-intent TTL (DefaultTxCompleteTimeout, 15 s) so that by the time a session is reaped
+    /// any commit it could still attempt would already fail on expired intents — making the release safe.
+    /// </summary>
+    private const int ReapGraceMs = 15_000;
     
     private readonly KeyValuesManager manager;
 
@@ -417,6 +424,51 @@ internal sealed class KeyValueTransactionCoordinator
                 // key will see AlreadyLocked.
                 await ReleaseAcquiredLocks(context);
             }
+        }
+    }
+
+    /// <summary>
+    /// Reclaims interactive transaction sessions that were started via <see cref="StartTransaction"/>
+    /// but never committed or rolled back — e.g. the client crashed, timed out, or dropped its
+    /// connection. Without this, every abandoned session leaks its <see cref="KeyValueTransactionContext"/>
+    /// (and keeps any exclusive/prefix locks it acquired held) for the lifetime of the process.
+    ///
+    /// A session is reaped once its own timeout plus <see cref="ReapGraceMs"/> have elapsed (measured
+    /// against the HLC) and it is not in the middle of a commit/rollback transition — those remove
+    /// themselves. Released locks use the same path as a rollback; any write intents the session
+    /// placed on keys expire by TTL and are reclaimed by the collector.
+    /// </summary>
+    public async Task ReapAbandonedSessions()
+    {
+        if (sessions.IsEmpty)
+            return;
+
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        foreach (KeyValuePair<HLCTimestamp, KeyValueTransactionContext> pair in sessions)
+        {
+            KeyValueTransactionContext context = pair.Value;
+
+            // A commit/rollback already in flight owns this session and will remove it itself;
+            // don't race it.
+            if (context.State is KeyValueTransactionState.Preparing
+                or KeyValueTransactionState.Committing
+                or KeyValueTransactionState.RollingBack)
+                continue;
+
+            HLCTimestamp deadline = pair.Key + (context.Timeout + ReapGraceMs);
+
+            if ((deadline - now) > TimeSpan.Zero)
+                continue; // still within its lifetime
+
+            if (!sessions.TryRemove(pair.Key, out _))
+                continue; // committed/rolled back concurrently
+
+            context.Action = KeyValueTransactionAction.Abort;
+
+            logger.LogWarning("Reaping abandoned interactive transaction {TransactionId}", pair.Key);
+
+            await ReleaseAcquiredLocks(context);
         }
     }
 

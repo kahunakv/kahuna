@@ -85,7 +85,7 @@ internal sealed class TryCollectHandler : BaseHandler
             if (tombstoneEntry.State is not (KeyValueState.Deleted or KeyValueState.Undefined))
                 continue; // stale queue entry — entry was re-set after the tombstone was enqueued
 
-            if (tombstoneEntry.WriteIntent is not null || tombstoneEntry.ReplicationIntent is not null)
+            if (HasLiveWriteIntent(tombstoneEntry, currentTime) || tombstoneEntry.ReplicationIntent is not null)
             {
                 deferredTombstones ??= [];
                 deferredTombstones.Add(tombstoneKey);
@@ -136,7 +136,7 @@ internal sealed class TryCollectHandler : BaseHandler
             if (expiredEntry.Expires == HLCTimestamp.Zero || (expiredEntry.Expires - currentTime) > TimeSpan.Zero)
                 continue; // defensive: expiry cleared or not yet due
 
-            if (expiredEntry.WriteIntent is not null || expiredEntry.ReplicationIntent is not null)
+            if (HasLiveWriteIntent(expiredEntry, currentTime) || expiredEntry.ReplicationIntent is not null)
             {
                 deferredExpiry ??= [];
                 deferredExpiry.Add((expiredKey, heapExpiry));
@@ -182,7 +182,7 @@ internal sealed class TryCollectHandler : BaseHandler
 
             if (candidateKey is not null
                 && !keysToEvict.Contains(candidateKey)
-                && lruCandidate.WriteIntent is null
+                && !HasLiveWriteIntent(lruCandidate, currentTime)
                 && lruCandidate.ReplicationIntent is null
                 && !lruCandidate.IsDirty(safetyWindowMs, currentTime))
             {
@@ -230,6 +230,30 @@ internal sealed class TryCollectHandler : BaseHandler
 
         if (backlog)
             context.ScheduleFollowUpCollect();
+    }
+
+    /// <summary>
+    /// Reports whether the entry holds a write intent that is still live, clearing the intent in
+    /// place when it has expired. The op handlers (TryGet/TrySet/TryExists/…) already treat an
+    /// expired intent as gone and null it lazily on access; the collector must apply the same rule
+    /// or a cold key whose owning transaction was abandoned would pin the entry against eviction
+    /// forever (and re-enqueue itself on the tombstone/expiry path every cycle). An intent with
+    /// Expires == Zero is an unprepared lock/intent with no determined deadline and is treated as live.
+    /// </summary>
+    private static bool HasLiveWriteIntent(KeyValueEntry entry, HLCTimestamp currentTime)
+    {
+        KeyValueWriteIntent? intent = entry.WriteIntent;
+
+        if (intent is null)
+            return false;
+
+        if (intent.Expires != HLCTimestamp.Zero && (intent.Expires - currentTime) <= TimeSpan.Zero)
+        {
+            entry.WriteIntent = null;
+            return false;
+        }
+
+        return true;
     }
 
     private long EstimateEvictionBytes(HashSet<string> keys)
