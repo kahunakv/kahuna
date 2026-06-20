@@ -18,6 +18,23 @@ KahunaControlOptions? opts = optsResult.Value;
 if (opts is null)
     return;
 
+// When --restore / --backup-incremental / --backup-chain appear in the raw args but the parser
+// couldn't bind a value (the flag was passed without its required argument), the nullable
+// property stays null and IsSingleCommand() returns false — silently falling into the
+// interactive shell. Catch that here and emit a helpful error instead.
+if (args.Any(a => a is "--restore") && !opts.Restore.HasValue)
+{
+    AnsiConsole.MarkupLine("[red]--restore requires a backup ID (UUID). Example: --restore <leaf-backup-id>[/]");
+    return;
+}
+
+if (args.Any(a => a is "--backup-incremental" or "--backup-chain") &&
+    !opts.ParentBackupId.HasValue && !opts.BackupChain.HasValue)
+{
+    AnsiConsole.MarkupLine("[red]--backup-incremental and --backup-chain require a backup ID (UUID).[/]");
+    return;
+}
+
 KahunaClient connection = await GetConnection(opts);
 
 if (IsSingleCommand(opts))

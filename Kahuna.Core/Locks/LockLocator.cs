@@ -60,12 +60,15 @@ internal sealed class LockLocator
 
         int partitionId = dataPartitionRouter.Locate(resource);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+        if (!raft.Joined)
+            return (LockResponseType.MustRetry, 0);
+
+        if (await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryLock(resource, owner, expiresMs, durability);
 
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
-            return (LockResponseType.MustRetry, 0);
+            return await manager.TryLock(resource, owner, expiresMs, durability);
 
         logger.LogLockRedirect(resource, partitionId, leader);
 
@@ -88,12 +91,15 @@ internal sealed class LockLocator
 
         int partitionId = dataPartitionRouter.Locate(resource);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+        if (!raft.Joined)
+            return (LockResponseType.MustRetry, 0);
+
+        if (await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryExtendLock(resource, owner, expiresMs, durability);
 
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
-            return (LockResponseType.MustRetry, 0);
+            return await manager.TryExtendLock(resource, owner, expiresMs, durability);
 
         logger.LogExtendLockRedirect(resource, partitionId, leader);
 
@@ -116,12 +122,15 @@ internal sealed class LockLocator
 
         int partitionId = dataPartitionRouter.Locate(resource);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+        if (!raft.Joined)
+            return LockResponseType.MustRetry;
+
+        if (await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryUnlock(resource, owner, durability);
 
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
-            return LockResponseType.MustRetry;
+            return await manager.TryUnlock(resource, owner, durability);
 
         logger.LogExtendLockRedirect(resource, partitionId, leader);
 
@@ -142,12 +151,15 @@ internal sealed class LockLocator
 
         int partitionId = dataPartitionRouter.Locate(resource);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+        if (!raft.Joined)
+            return (LockResponseType.MustRetry, null);
+
+        if (await raft.AmILeader(partitionId, cancellationToken))
             return await manager.GetLock(resource, durability);
 
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
-            return (LockResponseType.MustRetry, null);
+            return await manager.GetLock(resource, durability);
 
         logger.LogGetLockRedirect(resource, partitionId, leader);
 

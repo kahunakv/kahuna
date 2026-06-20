@@ -130,7 +130,10 @@ internal sealed class KeyValueLocator
             partitionId = dataPartitionRouter.Locate(key);
         }
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+        if (!raft.Joined)
+            return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+
+        if (await raft.AmILeader(partitionId, cancellationToken))
         {
             return await manager.TrySetKeyValue(
                 transactionId,
@@ -339,7 +342,10 @@ internal sealed class KeyValueLocator
         
         int partitionId = RouteKey(key);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+        if (!raft.Joined)
+            return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+
+        if (await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryDeleteKeyValue(transactionId, key, durability);
             
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
@@ -367,7 +373,10 @@ internal sealed class KeyValueLocator
         
         int partitionId = RouteKey(key);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+        if (!raft.Joined)
+            return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+
+        if (await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryExtendKeyValue(transactionId, key, expiresMs, durability);
             
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
@@ -401,7 +410,10 @@ internal sealed class KeyValueLocator
 
         int partitionId = RouteKey(key);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+        if (!raft.Joined)
+            return (KeyValueResponseType.MustRetry, null);
+
+        if (await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryGetValue(transactionId, key, revision, readTimestamp, durability);
 
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
@@ -440,7 +452,10 @@ internal sealed class KeyValueLocator
 
         int partitionId = RouteKey(key);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+        if (!raft.Joined)
+            return (KeyValueResponseType.MustRetry, null);
+
+        if (await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryExistsValue(transactionId, key, revision, readTimestamp, durability);
 
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
@@ -603,7 +618,10 @@ internal sealed class KeyValueLocator
 
         int partitionId = RouteKey(key);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+        if (!raft.Joined)
+            return KeyValueResponseType.MustRetry;
+
+        if (await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryCheckWriteIntentValue(transactionId, key, durability);
 
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
@@ -631,7 +649,10 @@ internal sealed class KeyValueLocator
 
         int partitionId = RouteKey(key);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
+        if (!raft.Joined)
+            return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero);
+
+        if (await raft.AmILeader(partitionId, cancelationToken))
             return await manager.TryAcquireExclusiveLock(transactionId, key, expiresMs, durability);
 
         string leader = await raft.WaitForLeader(partitionId, cancelationToken);
@@ -674,7 +695,10 @@ internal sealed class KeyValueLocator
 
         int partitionId = RoutePrefixKey(prefixKey);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+        if (!raft.Joined)
+            return KeyValueResponseType.MustRetry;
+
+        if (await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability);
             
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);

@@ -49,10 +49,23 @@ internal sealed class BackupService
         return ToDto(manifest);
     }
 
-    public Task<KahunaBackupInfo> TakeIncrementalAsync(Guid parentBackupId, HLCTimestamp? snapshotT = null)
+    public async Task<KahunaBackupInfo> TakeIncrementalAsync(Guid parentBackupId, HLCTimestamp? snapshotT = null)
     {
-        BackupManifest manifest = _driver.TakeIncrementalBackup(parentBackupId, _backupDir, _catalog, snapshotT);
-        return Task.FromResult(ToDto(manifest));
+        try
+        {
+            BackupManifest manifest = _driver.TakeIncrementalBackup(parentBackupId, _backupDir, _catalog, snapshotT);
+            return ToDto(manifest);
+        }
+        catch (BackupDriverException ex) when (ex.NeedsFullBackup)
+        {
+            _logger?.LogWarning(
+                "Incremental backup from {ParentId} not possible — WAL compaction floor advanced past " +
+                "parent range. Falling back to full backup. Reason: {Message}",
+                parentBackupId, ex.Message);
+
+            BackupManifest full = await _driver.TakeFullBackupAsync(_backupDir, _catalog, snapshotT);
+            return ToDto(full);
+        }
     }
 
     public async Task<KahunaBackupInfo> TakeCoordinatedBackupAsync()
@@ -79,9 +92,9 @@ internal sealed class BackupService
     /// <summary>
     /// Offline restore: produces a populated storage-engine directory at <paramref name="targetDir"/>
     /// by copying the Full backup's checkpoint and replaying incremental WAL segments up to
-    /// <paramref name="targetTime"/>. The operator can then start a fresh node with
-    /// <c>--storage-path=targetDir</c>. No WAL seeding is performed; the node will catch up via
-    /// normal Raft log delivery from the leader.
+    /// <paramref name="targetTime"/>. The operator can then start a fresh standalone node with
+    /// <c>--storage-path=targetDir --storage-revision={revision}</c> (omit revision for memory).
+    /// No WAL seeding is performed; reads fall back to the persistence backend for durability=Persistent keys.
     /// </summary>
     public KahunaRestoreResponse RestoreTo(
         Guid leafBackupId,
@@ -108,8 +121,15 @@ internal sealed class BackupService
                 .Aggregate(HLCTimestamp.Zero, (acc, hlc) => hlc.CompareTo(acc) > 0 ? hlc : acc);
         }
 
-        Directory.CreateDirectory(targetDir);
-        CopyDirectory(checkpointSrc, targetDir);
+        // RocksDB opens at {targetDir}/{revision}/ (revision is a subdir).
+        // SQLite embeds the revision in the filename, so files live directly in {targetDir}/.
+        // Copy the checkpoint into the right location so OpenBackendAt can open it.
+        string checkpointDest = _storageType == "rocksdb" && !string.IsNullOrEmpty(_storageRevision)
+            ? Path.Combine(targetDir, _storageRevision)
+            : targetDir;
+
+        Directory.CreateDirectory(checkpointDest);
+        CopyDirectory(checkpointSrc, checkpointDest);
 
         IPersistenceBackend targetBackend = OpenBackendAt(targetDir);
         RestoreResult result = RestoreEngine.Restore(chain, _backupDir, targetTime, targetBackend, pitrWindow);

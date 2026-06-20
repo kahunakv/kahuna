@@ -219,7 +219,14 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             Raft.OnReplicationReceived -= Kahuna.OnReplicationReceived;
             Raft.OnReplicationError -= Kahuna.OnReplicationError;
 
-            await Raft.LeaveCluster(dispose: true).ConfigureAwait(false);
+            // Skip the graceful-leave commit (CommitGracefulLeaveAsync) — in a
+            // single-node embedded cluster there are no peers to notify, and the
+            // 10-second retry loop inside LeaveCluster always times out during
+            // shutdown because the system-partition actors are already draining.
+            // Dispose() performs the same orderly shutdown (drain queues, stop
+            // schedulers, stop actors) without the membership-change round-trip.
+            if (Raft is IDisposable disposableRaft)
+                disposableRaft.Dispose();
 
             // Drain all actor inboxes before disposing, so that background tasks
             // from this instance do not race with the next instance's actors on the

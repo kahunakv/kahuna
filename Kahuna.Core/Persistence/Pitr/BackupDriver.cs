@@ -202,7 +202,10 @@ internal sealed class BackupDriver
                 if (floor > 0 && fromIndex < floor)
                     throw new BackupDriverException(
                         $"Partition {partitionId}: incremental would start at WAL index {fromIndex} " +
-                        $"but the compaction floor is {floor}; a new full backup is required.");
+                        $"but the compaction floor is {floor}; a new full backup is required.")
+                    {
+                        NeedsFullBackup = true
+                    };
             }
             else
             {
