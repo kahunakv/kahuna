@@ -603,8 +603,8 @@ internal sealed class KeyValueLocator
 
         int partitionId = RouteKey(key);
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
-            return KeyValueResponseType.MustRetry;
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+            return await manager.TryCheckWriteIntentValue(transactionId, key, durability);
 
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
