@@ -380,7 +380,112 @@ Rules of thumb:
 
 ---
 
-## 11. What to expect at scale
+## 11. Triggering backups and inspecting the catalog
+
+### 11a. Configuration
+
+Add `--pitr-backup-dir <path>` to the server command line (or set `BackupDir` in the JSON config) to
+enable backups.  The same directory is used for catalog manifests and artifact subdirectories.
+
+### 11b. REST API
+
+All endpoints return or consume JSON.  Responses use camelCase field names.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/v1/backups/full` | Take a full backup now. |
+| `POST` | `/v1/backups/incremental` | Take an incremental backup. Body: `{"parentBackupId":"<guid>"}`. |
+| `POST` | `/v1/backups/coordinated` | Take a cluster-wide coordinated full backup. |
+| `GET`  | `/v1/backups` | List all backups in the local catalog. |
+| `GET`  | `/v1/backups/{id}/chain` | Resolve and validate the chain ending at `id`. |
+| `POST` | `/v1/backups/validate-chain` | Validate a chain. Body: `{"leafBackupId":"<guid>","targetDir":"","targetTimeMs":0}`. |
+| `POST` | `/v1/restore` | Offline restore: copies Full checkpoint to `targetDir` and replays WAL to `targetTimeMs`. Body: `{"leafBackupId":"<guid>","targetDir":"/data/restored","targetTimeMs":0}`. |
+
+All endpoints return `503` when `--pitr-backup-dir` is not set on the target node.
+
+### 11c. gRPC API
+
+A `Backups` service mirrors every REST endpoint.  RPC names match the action:
+`TakeFullBackup`, `TakeIncrementalBackup`, `TakeCoordinatedBackup`, `ListBackups`, `GetBackupChain`,
+`ValidateChain`, `Restore`.  See `Kahuna.Shared/Communication/Grpc/Protos/backups.proto` for message definitions.
+
+### 11d. `KahunaClient` methods
+
+```csharp
+KahunaClient client = new(urls);
+KahunaBackupInfo full   = await client.TakeFullBackupAsync();
+KahunaBackupInfo incr   = await client.TakeIncrementalBackupAsync(full.BackupId);
+KahunaBackupInfo coord  = await client.TakeCoordinatedBackupAsync();
+List<KahunaBackupInfo> all   = await client.ListBackupsAsync();
+List<KahunaBackupInfo> chain = await client.GetBackupChainAsync(incr.BackupId);
+
+// Offline restore: copies Full checkpoint to /data/restored and replays WAL
+KahunaRestoreResponse result = await client.RestoreAsync(
+    leafBackupId: incr.BackupId,
+    targetDir:    "/data/restored",
+    targetTimeMs: 0);  // 0 = chain max; or Unix ms for a specific T
+// Then: start a new node with --storage-path=/data/restored
+```
+
+### 11e. `kahuna.control` CLI verbs
+
+```
+# Take a full backup
+kahuna.control --backup-full
+
+# Take a coordinated backup (recommended for production)
+kahuna.control --backup-coordinated
+
+# Take an incremental backup on top of a previous one
+kahuna.control --backup-incremental --parent-backup-id <guid>
+
+# List all backups
+kahuna.control --list-backups
+
+# Resolve and validate a chain
+kahuna.control --backup-chain <leaf-guid>
+
+# Offline restore to a target directory (0 = chain max; set --target-time-ms for a specific T)
+kahuna.control --restore <leaf-guid> --target-dir /data/restored
+kahuna.control --restore <leaf-guid> --target-dir /data/restored --target-time-ms 1750000000000
+
+# Output as JSON
+kahuna.control --list-backups --format json
+```
+
+Interactive console verbs (type at the `>>` prompt):
+
+```
+backup full
+backup coordinated
+list backups
+```
+
+### 11f. Online versus offline operations (v1 boundary)
+
+In v1 the following operations are **online and safe** — they run while the node is serving
+traffic and do not affect client latency:
+
+- Trigger a full, incremental, or coordinated backup.
+- List backups and inspect the catalog.
+- Resolve and validate a chain.
+
+The following is an **offline operation** (runs via the REST/gRPC/client/CLI surface but writes to
+the local filesystem of the node receiving the request):
+
+- **`POST /v1/restore` / `client.RestoreAsync` / `--restore`** — copies the Full backup's checkpoint
+  to `targetDir`, replays incremental WAL segments up to the given time `T`, then returns.  The
+  operator then starts a **fresh** node with `--storage-path=<targetDir>` to use the restored image.
+  The restored node joins the cluster and catches up via normal Raft AppendEntries.
+
+The following is **out of scope for v1 and not supported**:
+
+- **Hot in-place restore** of a running node.  Shutdown the node, use the offline restore above to
+  populate a `targetDir`, then restart with `--storage-path=<targetDir>`.
+
+---
+
+## 12. What to expect at scale
 
 - Backups read the WAL a page at a time and write segment files atomically; they do not block the
   partitions serving live traffic.
@@ -393,7 +498,7 @@ Rules of thumb:
 
 ---
 
-## 12. The mental model in one paragraph
+## 13. The mental model in one paragraph
 
 Kahuna keeps an ordered, timestamped log of every change and a periodic base image of the storage
 engine. A **full backup** is a base image plus a manifest of what it covers; an **incremental** is

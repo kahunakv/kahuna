@@ -686,6 +686,7 @@ public sealed class TestMembership : BaseCluster
         public Task<bool> OnReplicationReceived(int partitionId, RaftLog log) => Task.FromResult(true);
         public void OnReplicationError(int partitionId, RaftLog log) { }
         public Task FlushPersistenceAsync() => Task.CompletedTask;
+        public Task BootstrapFromPitrBackupAsync(string backupDir, Guid leafBackupId, HLCTimestamp targetTime, Kommander.WAL.IWAL walAdapter, TimeSpan pitrWindow, TimeSpan baseSnapshotInterval) => throw new NotImplementedException();
         public void RegisterKeyRange(string keySpace) { }
         public Task<bool> RegisterKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default) => Task.FromResult(false);
         public Task<int> TriggerAutoSplitAsync(CancellationToken ct = default) => Task.FromResult(0);
@@ -763,5 +764,12 @@ public sealed class TestMembership : BaseCluster
         public Task<(SequenceResponseType, SequenceAllocation)> LocateAndNextSequenceValue(string name, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<(SequenceResponseType, SequenceAllocation)> LocateAndReserveSequenceRange(string name, int count, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<SequenceResponseType> LocateAndDeleteSequence(string name, SequenceDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public bool IsBackupConfigured => false;
+        public Task<KahunaBackupInfo> TakeFullBackupAsync(CancellationToken ct = default) => throw new NotImplementedException();
+        public Task<KahunaBackupInfo> TakeIncrementalBackupAsync(Guid parentBackupId, CancellationToken ct = default) => throw new NotImplementedException();
+        public Task<KahunaBackupInfo> TakeCoordinatedBackupAsync(CancellationToken ct = default) => throw new NotImplementedException();
+        public Task<IReadOnlyList<KahunaBackupInfo>> ListBackupsAsync(CancellationToken ct = default) => throw new NotImplementedException();
+        public Task<IReadOnlyList<KahunaBackupInfo>> GetBackupChainAsync(Guid leafBackupId, CancellationToken ct = default) => throw new NotImplementedException();
+        public Task<KahunaRestoreResponse> RestoreToAsync(Guid leafBackupId, string targetDir, long targetTimeMs, CancellationToken ct = default) => throw new NotImplementedException();
     }
 }

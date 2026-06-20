@@ -87,4 +87,31 @@ public sealed class KahunaControlOptions
 
     [Option("cluster-members", Required = false, HelpText = "Prints the live cluster membership roster")]
     public bool ClusterMembers { get; set; }
+
+    [Option("backup-full", Required = false, HelpText = "Takes a full backup on the connected node")]
+    public bool BackupFull { get; set; }
+
+    [Option("backup-incremental", Required = false, HelpText = "Takes an incremental backup; requires --parent-backup-id")]
+    public bool BackupIncremental { get; set; }
+
+    [Option("backup-coordinated", Required = false, HelpText = "Takes a coordinated full backup using the cluster-wide safe snapshot timestamp")]
+    public bool BackupCoordinated { get; set; }
+
+    [Option("list-backups", Required = false, HelpText = "Lists all backups in the node's catalog")]
+    public bool ListBackups { get; set; }
+
+    [Option("backup-chain", Required = false, HelpText = "Resolves and validates the backup chain for the given leaf backup ID")]
+    public Guid? BackupChain { get; set; }
+
+    [Option("parent-backup-id", Required = false, HelpText = "Parent backup ID for incremental backups")]
+    public Guid? ParentBackupId { get; set; }
+
+    [Option("restore", Required = false, HelpText = "Restores the backup chain ending at the given leaf backup ID to --target-dir")]
+    public Guid? Restore { get; set; }
+
+    [Option("target-dir", Required = false, HelpText = "Target directory for restore output")]
+    public string? TargetDir { get; set; }
+
+    [Option("target-time-ms", Required = false, HelpText = "Point-in-time to restore to (ms since Unix epoch; 0 = chain max)")]
+    public long TargetTimeMs { get; set; }
 }

@@ -72,7 +72,7 @@ internal static class SnapshotCoordinator
             if (partition.State is RaftPartitionState.Draining or RaftPartitionState.Removed)
                 continue;
 
-            (_, HLCTimestamp hlc) = BackupDriver.FindLastCommitted(wal, partition.PartitionId);
+            (_, HLCTimestamp hlc, _) = BackupDriver.FindLastCommitted(wal, partition.PartitionId);
             if (hlc.CompareTo(maxCommitted) > 0)
                 maxCommitted = hlc;
         }

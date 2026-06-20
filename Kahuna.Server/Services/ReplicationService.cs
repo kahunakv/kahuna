@@ -1,6 +1,7 @@
 
 using Kommander;
 using Kommander.System;
+using Kommander.Time;
 using Kahuna.Server.Diagnostics;
 
 namespace Kahuna.Services;
@@ -43,6 +44,36 @@ public sealed partial class ReplicationService : BackgroundService //, IDisposab
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
         raft.OnReplicationError += kahuna.OnReplicationError;
         raft.OnMembershipChanged += OnMembershipChanged;
+
+        if (options.PitrBootstrapFrom.HasValue)
+        {
+            if (!options.RaftJoinExisting)
+                throw new InvalidOperationException(
+                    "--pitr-bootstrap-from requires --join-existing (the node must join an existing cluster after seeding).");
+
+            if (string.IsNullOrWhiteSpace(options.PitrBackupDir))
+                throw new InvalidOperationException(
+                    "--pitr-bootstrap-from requires --pitr-backup-dir pointing to the backup catalog/artifacts directory.");
+
+            Guid leafId = options.PitrBootstrapFrom.Value;
+            HLCTimestamp targetTime = options.PitrTargetTimeMs > 0
+                ? new HLCTimestamp(0, options.PitrTargetTimeMs, 0)
+                : HLCTimestamp.Zero;
+            TimeSpan pitrWindow = TimeSpan.FromSeconds(options.PitrWindowSeconds);
+            TimeSpan baseSnapshotInterval = TimeSpan.FromSeconds(options.BaseSnapshotIntervalSeconds);
+
+            try
+            {
+                await kahuna.BootstrapFromPitrBackupAsync(
+                    options.PitrBackupDir, leafId, targetTime, raft.WalAdapter, pitrWindow, baseSnapshotInterval);
+                LogBootstrapComplete(logger, leafId, targetTime);
+            }
+            catch (Exception ex)
+            {
+                LogBootstrapFailed(logger, ex);
+                throw;
+            }
+        }
 
         if (options.RaftJoinExisting)
         {
@@ -118,6 +149,12 @@ public sealed partial class ReplicationService : BackgroundService //, IDisposab
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Membership advanced to version {Version}: {MemberCount} member(s), local role {LocalRole}")]
     private static partial void LogMembershipChanged(ILogger logger, long version, int memberCount, ClusterMemberRole localRole);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "PITR bootstrap from backup {LeafBackupId} at target time {TargetTime} completed successfully; proceeding to join cluster.")]
+    private static partial void LogBootstrapComplete(ILogger logger, Guid leafBackupId, HLCTimestamp targetTime);
+
+    [LoggerMessage(Level = LogLevel.Critical, Message = "PITR bootstrap failed. Check --pitr-backup-dir, --pitr-bootstrap-from, and --pitr-target-time-ms, and verify the backup chain is valid and within the retention window.")]
+    private static partial void LogBootstrapFailed(ILogger logger, Exception ex);
 
     [LoggerMessage(Level = LogLevel.Critical, Message = "Seed join permanently blocked — the joining node's start index is below the WAL compaction floor on one or more partitions. " +
         "Mitigation: restore from a PITR backup taken within the retention window so the start index lands above the floor, then retry. " +

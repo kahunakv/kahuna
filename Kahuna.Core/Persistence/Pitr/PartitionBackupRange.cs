@@ -24,13 +24,22 @@ internal sealed class PartitionBackupRange
     public long ToHlcPhysical { get; set; }
     public uint ToHlcCounter { get; set; }
 
+    /// <summary>
+    /// Raft term of the WAL entry at <see cref="ToIndex"/>. Required by
+    /// <see cref="BootstrapHelper"/> to write a synthetic CommittedCheckpoint with the
+    /// correct term so the leader's Log Matching check (prevLogTerm) passes and delta
+    /// catch-up via AppendEntries succeeds instead of falling back to InstallSnapshot.
+    /// </summary>
+    public long ToTerm { get; set; }
+
     public HLCTimestamp FromHlc => new(FromHlcNode, FromHlcPhysical, FromHlcCounter);
     public HLCTimestamp ToHlc => new(ToHlcNode, ToHlcPhysical, ToHlcCounter);
 
     public static PartitionBackupRange Create(
         int partitionId,
         long fromIndex, HLCTimestamp fromHlc,
-        long toIndex, HLCTimestamp toHlc) => new()
+        long toIndex, HLCTimestamp toHlc,
+        long toTerm = 0) => new()
     {
         PartitionId = partitionId,
         FromIndex = fromIndex,
@@ -40,6 +49,7 @@ internal sealed class PartitionBackupRange
         ToIndex = toIndex,
         ToHlcNode = toHlc.N,
         ToHlcPhysical = toHlc.L,
-        ToHlcCounter = toHlc.C
+        ToHlcCounter = toHlc.C,
+        ToTerm = toTerm
     };
 }

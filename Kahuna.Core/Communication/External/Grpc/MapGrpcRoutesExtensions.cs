@@ -19,5 +19,6 @@ public static class MapGrpcRoutesExtensions
         app.MapGrpcService<KeyValuesService>();
         app.MapGrpcService<SequencesService>();
         app.MapGrpcService<ClusterService>();
+        app.MapGrpcService<BackupsService>();
     }
 }

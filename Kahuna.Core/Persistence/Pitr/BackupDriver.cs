@@ -117,7 +117,7 @@ internal sealed class BackupDriver
                 continue;
 
             int partitionId = partition.PartitionId;
-            (long lastId, HLCTimestamp lastHlc) = snapshotT.HasValue
+            (long lastId, HLCTimestamp lastHlc, long lastTerm) = snapshotT.HasValue
                 ? FindLastCommittedAtOrBefore(wal, partitionId, snapshotT.Value)
                 : FindLastCommitted(wal, partitionId);
             if (lastId <= 0)
@@ -125,7 +125,7 @@ internal sealed class BackupDriver
 
             // Full ranges are always anchored at index 1; FromHlc is left at default because
             // the checkpoint image, not a WAL entry, is the actual starting point on restore.
-            ranges.Add(PartitionBackupRange.Create(partitionId, 1, default, lastId, lastHlc));
+            ranges.Add(PartitionBackupRange.Create(partitionId, 1, default, lastId, lastHlc, lastTerm));
 
             if (lastId > maxAppliedIndex)
             {
@@ -211,7 +211,7 @@ internal sealed class BackupDriver
                 fromIndex = floor > 0 ? floor : 1;
             }
 
-            (List<WalSegmentEntry> segment, long toIndex, HLCTimestamp toHlc, HLCTimestamp fromHlc) =
+            (List<WalSegmentEntry> segment, long toIndex, HLCTimestamp toHlc, long toTerm, HLCTimestamp fromHlc) =
                 ReadSegment(wal, partitionId, fromIndex, snapshotT);
 
             if (toIndex == 0)
@@ -221,7 +221,7 @@ internal sealed class BackupDriver
             WriteSegmentFile(walFile, segment);
             checksums[$"partition_{partitionId}.wal"] = ComputeSha256(walFile);
 
-            ranges.Add(PartitionBackupRange.Create(partitionId, fromIndex, fromHlc, toIndex, toHlc));
+            ranges.Add(PartitionBackupRange.Create(partitionId, fromIndex, fromHlc, toIndex, toHlc, toTerm));
         }
 
         BackupManifest manifest = BackupManifest.CreateIncremental(parentBackupId, ranges);
@@ -243,13 +243,13 @@ internal sealed class BackupDriver
     /// <summary>
     /// Scans backward through the WAL in page-sized windows to find the last committed entry.
     /// Pages until a committed entry is found or the start of the log is reached.
-    /// Returns (0, default) when the partition has no committed entries at all.
+    /// Returns (0, default, 0) when the partition has no committed entries at all.
     /// </summary>
-    internal static (long id, HLCTimestamp hlc) FindLastCommitted(IWAL wal, int partitionId)
+    internal static (long id, HLCTimestamp hlc, long term) FindLastCommitted(IWAL wal, int partitionId)
     {
         long maxLog = wal.GetMaxLog(partitionId);
         if (maxLog <= 0)
-            return (0, default);
+            return (0, default, 0);
 
         long ceiling = maxLog;
         while (ceiling > 0)
@@ -262,27 +262,27 @@ internal sealed class BackupDriver
             for (int i = batch.Count - 1; i >= 0; i--)
             {
                 if (batch[i].Type is RaftLogType.Committed or RaftLogType.CommittedCheckpoint)
-                    return (batch[i].Id, batch[i].Time);
+                    return (batch[i].Id, batch[i].Time, batch[i].Term);
             }
 
             ceiling = start - 1;
         }
 
-        return (0, default);
+        return (0, default, 0);
     }
 
     /// <summary>
     /// Scans backward through the WAL to find the last committed entry whose HLC is at or
     /// before <paramref name="snapshotT"/>.  Used for coordinated backups where every partition
     /// must be capped at the same cluster-wide timestamp T.
-    /// Returns (0, default) when no qualifying committed entry exists.
+    /// Returns (0, default, 0) when no qualifying committed entry exists.
     /// </summary>
-    private static (long id, HLCTimestamp hlc) FindLastCommittedAtOrBefore(
+    private static (long id, HLCTimestamp hlc, long term) FindLastCommittedAtOrBefore(
         IWAL wal, int partitionId, HLCTimestamp snapshotT)
     {
         long maxLog = wal.GetMaxLog(partitionId);
         if (maxLog <= 0)
-            return (0, default);
+            return (0, default, 0);
 
         long ceiling = maxLog;
         while (ceiling > 0)
@@ -297,13 +297,13 @@ internal sealed class BackupDriver
                 RaftLog log = batch[i];
                 if (log.Type is RaftLogType.Committed or RaftLogType.CommittedCheckpoint
                     && log.Time.CompareTo(snapshotT) <= 0)
-                    return (log.Id, log.Time);
+                    return (log.Id, log.Time, log.Term);
             }
 
             ceiling = start - 1;
         }
 
-        return (0, default);
+        return (0, default, 0);
     }
 
     /// <summary>
@@ -311,14 +311,15 @@ internal sealed class BackupDriver
     /// entries.  When <paramref name="snapshotT"/> is provided, collection stops at the first
     /// entry whose <c>Time > snapshotT</c> (per-partition HLC monotonicity is assumed, which
     /// holds in normal operation).
-    /// Returns the segment entries, the final log id/hlc, and the HLC of the first entry.
+    /// Returns the segment entries, the final log id/hlc/term, and the HLC of the first entry.
     /// </summary>
-    private static (List<WalSegmentEntry> entries, long toId, HLCTimestamp toHlc, HLCTimestamp fromHlc)
+    private static (List<WalSegmentEntry> entries, long toId, HLCTimestamp toHlc, long toTerm, HLCTimestamp fromHlc)
         ReadSegment(IWAL wal, int partitionId, long fromIndex, HLCTimestamp? snapshotT = null)
     {
         List<WalSegmentEntry> entries = [];
         long toId = 0;
         HLCTimestamp toHlc = default;
+        long toTerm = 0;
         HLCTimestamp fromHlc = default;
         bool first = true;
         bool hitCap = false;
@@ -350,6 +351,7 @@ internal sealed class BackupDriver
                 entries.Add(WalSegmentEntry.From(log));
                 toId = log.Id;
                 toHlc = log.Time;
+                toTerm = log.Term;
             }
 
             long lastInBatch = batch[^1].Id;
@@ -359,7 +361,7 @@ internal sealed class BackupDriver
             cursor = lastInBatch + 1;
         }
 
-        return (entries, toId, toHlc, fromHlc);
+        return (entries, toId, toHlc, toTerm, fromHlc);
     }
 
     private static void WriteSegmentFile(string path, List<WalSegmentEntry> entries)

@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+service Backups {
+  rpc TakeFullBackup        (GrpcTakeFullBackupRequest)        returns (GrpcBackupInfoResponse);
+  rpc TakeIncrementalBackup (GrpcTakeIncrementalBackupRequest) returns (GrpcBackupInfoResponse);
+  rpc TakeCoordinatedBackup (GrpcTakeCoordinatedBackupRequest) returns (GrpcBackupInfoResponse);
+  rpc ListBackups           (GrpcListBackupsRequest)           returns (GrpcListBackupsResponse);
+  rpc GetBackupChain        (GrpcGetBackupChainRequest)        returns (GrpcListBackupsResponse);
+  rpc ValidateChain         (GrpcValidateChainRequest)         returns (GrpcListBackupsResponse);
+  rpc Restore               (GrpcRestoreRequest)               returns (GrpcRestoreResponse);
+}
+
+message GrpcTakeFullBackupRequest {
+}
+
+message GrpcTakeIncrementalBackupRequest {
+  string ParentBackupId = 1;
+}
+
+message GrpcTakeCoordinatedBackupRequest {
+}
+
+message GrpcListBackupsRequest {
+}
+
+message GrpcGetBackupChainRequest {
+  string LeafBackupId = 1;
+}
+
+message GrpcValidateChainRequest {
+  string LeafBackupId = 1;
+}
+
+message GrpcBackupInfoResponse {
+  string BackupId           = 1;
+  string Type               = 2;
+  string CreatedAtUtc       = 3;
+  string ParentBackupId     = 4;
+  int32  PartitionCount     = 5;
+  bool   HasSnapshotTime    = 6;
+  int32  SnapshotNode       = 7;
+  int64  SnapshotPhysical   = 8;
+  uint32 SnapshotCounter    = 9;
+}
+
+message GrpcListBackupsResponse {
+  repeated GrpcBackupInfoResponse Backups = 1;
+}
+
+message GrpcRestoreRequest {
+  string LeafBackupId  = 1;
+  string TargetDir     = 2;
+  int64  TargetTimeMs  = 3;
+}
+
+message GrpcRestoreResponse {
+  string TargetDir             = 1;
+  int32  PartitionsRestored    = 2;
+  int64  EntriesApplied        = 3;
+  int64  LastAppliedPhysicalMs = 4;
+  repeated GrpcBackupInfoResponse Chain = 5;
+}

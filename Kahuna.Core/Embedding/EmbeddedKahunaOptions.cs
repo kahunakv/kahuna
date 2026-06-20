@@ -124,4 +124,10 @@ public sealed class EmbeddedKahunaOptions
     /// How often a new base checkpoint is taken per shard. Must be positive and no greater than <see cref="PitrWindow"/>.
     /// </summary>
     public TimeSpan BaseSnapshotInterval { get; set; } = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// Root directory for PITR backup artifacts and catalog manifests.
+    /// When empty, backup operations are disabled.
+    /// </summary>
+    public string BackupDir { get; set; } = "";
 }

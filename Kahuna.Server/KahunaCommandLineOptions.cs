@@ -274,6 +274,15 @@ public sealed class KahunaCommandLineOptions
     [Option("base-snapshot-interval", Required = false, HelpText = "Interval between base checkpoints per shard in seconds. Must be positive and no greater than pitr-window. Default 1800 (30 minutes).", Default = 1800)]
     public int BaseSnapshotIntervalSeconds { get; set; } = 1800;
 
+    [Option("pitr-backup-dir", Required = false, HelpText = "Root directory for PITR backup artifacts and catalog manifests. Required when --pitr-bootstrap-from is set; also used by the backup service to store new backups.", Default = "")]
+    public string PitrBackupDir { get; set; } = "";
+
+    [Option("pitr-bootstrap-from", Required = false, HelpText = "Backup ID (GUID) of the leaf backup to restore from before joining the cluster. Must be combined with --join-existing and --pitr-backup-dir. When omitted the node starts normally without seeding.")]
+    public Guid? PitrBootstrapFrom { get; set; }
+
+    [Option("pitr-target-time-ms", Required = false, HelpText = "HLC target time for PITR restore expressed as milliseconds since Unix epoch (the L/physical component). 0 or omitted means restore to the chain's natural maximum (i.e. the full backup chain).", Default = 0L)]
+    public long PitrTargetTimeMs { get; set; }
+
     [Option("raft-allow-insecure-certificate-validation", Required = false, HelpText = "Skip TLS certificate validation for inter-node Raft gRPC connections (use only in dev/test environments)")]
     public bool RaftAllowInsecureCertificateValidation { get; set; }
 

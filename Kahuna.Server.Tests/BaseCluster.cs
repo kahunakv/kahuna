@@ -1,6 +1,7 @@
 
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
+using Kahuna.Server.Persistence.Backend;
 using Kommander;
 using Kommander.Communication.Memory;
 using Kommander.Discovery;
@@ -302,6 +303,71 @@ public abstract class BaseCluster
         };
 
         KahunaManager kahuna = new(actorSystem, raft, configuration, interNodeComm, kahunaLogger);
+
+        raft.OnLogRestored += kahuna.OnLogRestored;
+        raft.OnReplicationReceived += kahuna.OnReplicationReceived;
+        raft.OnReplicationError += kahuna.OnReplicationError;
+
+        return (raft, kahuna);
+    }
+
+    /// <summary>
+    /// Like <see cref="BuildNode"/> but accepts a pre-seeded <paramref name="preSeededWal"/> and
+    /// <paramref name="preSeededBackend"/> instead of creating fresh instances. Used by PITR
+    /// bootstrap tests where the WAL and persistence backend are populated by
+    /// <c>BootstrapHelper.BootstrapNode</c> before the node joins the cluster.
+    /// </summary>
+    internal static (IRaft, IKahuna) BuildNodeWithExternalWal(
+        MemoryInterNodeCommmunication interNodeComm,
+        InMemoryCommunication raftComm,
+        IWAL preSeededWal,
+        IPersistenceBackend preSeededBackend,
+        int nodeId,
+        int port,
+        IEnumerable<string> peers,
+        ILogger<IRaft> raftLogger,
+        ILogger<IKahuna> kahunaLogger,
+        int initialPartitions = 3)
+    {
+        ActorSystem actorSystem = new(logger: raftLogger);
+
+        RaftConfiguration config = new()
+        {
+            NodeName = $"kahuna{nodeId}",
+            NodeId = nodeId,
+            Host = "localhost",
+            Port = port,
+            InitialPartitions = initialPartitions,
+            StartElectionTimeout = (int)(50 * TimingScale),
+            EndElectionTimeout = (int)(150 * TimingScale),
+            ElectionTimeoutSeed = ElectionTimeoutSeedBase + nodeId,
+            CompactEveryOperations = 1000,
+            CompactNumberEntries = 50,
+            EnableQuiescence = false
+        };
+
+        RaftManager raft = new(
+            config,
+            new StaticDiscovery(peers.Select(p => new RaftNode(p)).ToList()),
+            preSeededWal,
+            raftComm,
+            new HybridLogicalClock(),
+            raftLogger
+        );
+
+        KahunaConfiguration configuration = new()
+        {
+            LocksWorkers = 8,
+            KeyValueWorkers = 8,
+            BackgroundWriterWorkers = 1,
+            Storage = "memory",
+            StoragePath = "/tmp",
+            StorageRevision = Guid.NewGuid().ToString(),
+            DefaultTransactionTimeout = 5000,
+            ScriptCacheExpiration = TimeSpan.FromMinutes(1)
+        };
+
+        KahunaManager kahuna = new(actorSystem, raft, configuration, interNodeComm, preSeededBackend, kahunaLogger);
 
         raft.OnLogRestored += kahuna.OnLogRestored;
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;

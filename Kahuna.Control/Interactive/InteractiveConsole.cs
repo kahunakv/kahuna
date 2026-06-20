@@ -338,6 +338,27 @@ public static class InteractiveConsole
                     continue;
                 }
 
+                if (commandTrim.Equals("backup full", StringComparison.InvariantCultureIgnoreCase))
+                {
+                    history.Add(commandTrim);
+                    await BackupFullCommand.Execute(connection, null);
+                    continue;
+                }
+
+                if (commandTrim.Equals("backup coordinated", StringComparison.InvariantCultureIgnoreCase))
+                {
+                    history.Add(commandTrim);
+                    await BackupCoordinatedCommand.Execute(connection, null);
+                    continue;
+                }
+
+                if (commandTrim.Equals("list backups", StringComparison.InvariantCultureIgnoreCase))
+                {
+                    history.Add(commandTrim);
+                    await ListBackupsCommand.Execute(connection, null);
+                    continue;
+                }
+
                 await RunCommand(connection, scripts, history, commandTrim, options);
             }
             catch (RpcException ex) when (ex.StatusCode is StatusCode.Cancelled or StatusCode.Unavailable or StatusCode.Internal)

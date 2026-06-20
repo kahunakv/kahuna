@@ -1273,6 +1273,36 @@ public class KahunaClient
         return true;
     }
     
+    // ── Backup / PITR ────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Takes a full backup on the node and returns its manifest.</summary>
+    public Task<KahunaBackupInfo> TakeFullBackupAsync(CancellationToken cancellationToken = default) =>
+        communication.TakeFullBackup(GetRoundRobinUrl(), cancellationToken);
+
+    /// <summary>Takes an incremental backup on top of the given parent.</summary>
+    public Task<KahunaBackupInfo> TakeIncrementalBackupAsync(Guid parentBackupId, CancellationToken cancellationToken = default) =>
+        communication.TakeIncrementalBackup(GetRoundRobinUrl(), parentBackupId, cancellationToken);
+
+    /// <summary>Takes a coordinated full backup using the cluster-wide safe snapshot timestamp.</summary>
+    public Task<KahunaBackupInfo> TakeCoordinatedBackupAsync(CancellationToken cancellationToken = default) =>
+        communication.TakeCoordinatedBackup(GetRoundRobinUrl(), cancellationToken);
+
+    /// <summary>Lists all backup manifests in the node's local catalog.</summary>
+    public Task<List<KahunaBackupInfo>> ListBackupsAsync(CancellationToken cancellationToken = default) =>
+        communication.ListBackups(GetRoundRobinUrl(), cancellationToken);
+
+    /// <summary>Resolves and validates the backup chain ending at the given leaf backup.</summary>
+    public Task<List<KahunaBackupInfo>> GetBackupChainAsync(Guid leafBackupId, CancellationToken cancellationToken = default) =>
+        communication.GetBackupChain(GetRoundRobinUrl(), leafBackupId, cancellationToken);
+
+    /// <summary>
+    /// Offline restore: copies the Full backup's checkpoint to <paramref name="targetDir"/> and
+    /// replays incremental WAL segments up to <paramref name="targetTimeMs"/> (ms since Unix epoch;
+    /// 0 = chain max). The operator can then start a fresh node with <c>--storage-path=targetDir</c>.
+    /// </summary>
+    public Task<KahunaRestoreResponse> RestoreAsync(Guid leafBackupId, string targetDir, long targetTimeMs = 0, CancellationToken cancellationToken = default) =>
+        communication.Restore(GetRoundRobinUrl(), leafBackupId, targetDir, targetTimeMs, cancellationToken);
+
     /// <summary>
     /// Chooses the next server in the list of servers in a round-robin fashion
     /// </summary>

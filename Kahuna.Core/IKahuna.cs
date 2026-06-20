@@ -1,6 +1,7 @@
 
 using Kommander.Data;
 using Kommander.Time;
+using Kommander.WAL;
 
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
@@ -187,6 +188,28 @@ public interface IKahuna
     public Task FlushPersistenceAsync();
 
     /// <summary>
+    /// Seeds this node's persistence backend and Raft WAL from a PITR backup chain so that when
+    /// the node joins an existing cluster with <c>--join-existing</c>, the leader can catch it
+    /// up via a small AppendEntries delta rather than a full <c>InstallSnapshot</c>.
+    /// <para>
+    /// <paramref name="backupDir"/> is both the catalog root (where <c>.manifest</c> files live)
+    /// and the artifacts root (where per-backup subdirectories with checkpoint/WAL files live).
+    /// <paramref name="leafBackupId"/> is the most-recent backup in the chain to restore from.
+    /// When <paramref name="targetTime"/> is <see cref="HLCTimestamp.Zero"/> the restore uses
+    /// the chain's natural maximum HLC (equivalent to "restore everything").
+    /// </para>
+    /// <para>Throws <c>BackupDriverException</c> when the chain is invalid, the backup ID is not
+    /// found, or the target time falls outside the PITR retention window.</para>
+    /// </summary>
+    public Task BootstrapFromPitrBackupAsync(
+        string backupDir,
+        Guid leafBackupId,
+        HLCTimestamp targetTime,
+        IWAL walAdapter,
+        TimeSpan pitrWindow,
+        TimeSpan baseSnapshotInterval);
+
+    /// <summary>
     /// Marks <paramref name="keySpace"/> as key-range routed on this node. Must be called on every
     /// node at startup before accepting writes for the space (registry is node-local in-memory state;
     /// it is not replicated). Idempotent.
@@ -222,4 +245,41 @@ public interface IKahuna
     /// and meta partition (1); returns 0 on other nodes.
     /// </summary>
     public Task<int> TriggerAutoMergeAsync(CancellationToken ct = default);
+
+    // ── Backup / PITR ──────────────────────────────────────────────────────────────────────
+
+    /// <summary>Returns true when a backup directory is configured on this node.</summary>
+    public bool IsBackupConfigured { get; }
+
+    /// <summary>Takes a full backup and returns its manifest summary.</summary>
+    public Task<KahunaBackupInfo> TakeFullBackupAsync(CancellationToken ct = default);
+
+    /// <summary>Takes an incremental backup on top of the given parent and returns the manifest.</summary>
+    public Task<KahunaBackupInfo> TakeIncrementalBackupAsync(Guid parentBackupId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Computes the cluster-wide safe snapshot timestamp and takes a coordinated full backup
+    /// capped at that T.  All partitions present a state as of the same HLC.
+    /// </summary>
+    public Task<KahunaBackupInfo> TakeCoordinatedBackupAsync(CancellationToken ct = default);
+
+    /// <summary>Lists all backup manifests in the local catalog.</summary>
+    public Task<IReadOnlyList<KahunaBackupInfo>> ListBackupsAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Resolves and validates the backup chain ending at <paramref name="leafBackupId"/>.
+    /// Returns the chain in chronological order (Full first, leaf last).
+    /// </summary>
+    public Task<IReadOnlyList<KahunaBackupInfo>> GetBackupChainAsync(Guid leafBackupId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Offline restore: copies the Full backup's checkpoint to <paramref name="targetDir"/> and
+    /// replays incremental WAL segments up to <paramref name="targetTimeMs"/> (ms since Unix epoch;
+    /// 0 = chain max). The operator can then start a fresh node with <c>--storage-path=targetDir</c>.
+    /// </summary>
+    public Task<KahunaRestoreResponse> RestoreToAsync(
+        Guid leafBackupId,
+        string targetDir,
+        long targetTimeMs,
+        CancellationToken ct = default);
 }

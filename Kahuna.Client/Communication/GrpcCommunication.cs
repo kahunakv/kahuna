@@ -2040,4 +2040,80 @@ public class GrpcCommunication : IKahunaCommunication
         GrpcClusterMemberRole.ClusterMemberRoleNotMember => "NotMember",
         _                                                 => "NotMember"
     };
+
+    public async Task<KahunaBackupInfo> TakeFullBackup(string url, CancellationToken cancellationToken)
+    {
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+        Backups.BackupsClient client = new(channel);
+        GrpcBackupInfoResponse r = await client.TakeFullBackupAsync(
+            new GrpcTakeFullBackupRequest(), cancellationToken: cancellationToken).ConfigureAwait(false);
+        return FromGrpc(r);
+    }
+
+    public async Task<KahunaBackupInfo> TakeIncrementalBackup(string url, Guid parentBackupId, CancellationToken cancellationToken)
+    {
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+        Backups.BackupsClient client = new(channel);
+        GrpcBackupInfoResponse r = await client.TakeIncrementalBackupAsync(
+            new GrpcTakeIncrementalBackupRequest { ParentBackupId = parentBackupId.ToString() },
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        return FromGrpc(r);
+    }
+
+    public async Task<KahunaBackupInfo> TakeCoordinatedBackup(string url, CancellationToken cancellationToken)
+    {
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+        Backups.BackupsClient client = new(channel);
+        GrpcBackupInfoResponse r = await client.TakeCoordinatedBackupAsync(
+            new GrpcTakeCoordinatedBackupRequest(), cancellationToken: cancellationToken).ConfigureAwait(false);
+        return FromGrpc(r);
+    }
+
+    public async Task<List<KahunaBackupInfo>> ListBackups(string url, CancellationToken cancellationToken)
+    {
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+        Backups.BackupsClient client = new(channel);
+        GrpcListBackupsResponse r = await client.ListBackupsAsync(
+            new GrpcListBackupsRequest(), cancellationToken: cancellationToken).ConfigureAwait(false);
+        return r.Backups.Select(FromGrpc).ToList();
+    }
+
+    public async Task<List<KahunaBackupInfo>> GetBackupChain(string url, Guid leafBackupId, CancellationToken cancellationToken)
+    {
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+        Backups.BackupsClient client = new(channel);
+        GrpcListBackupsResponse r = await client.GetBackupChainAsync(
+            new GrpcGetBackupChainRequest { LeafBackupId = leafBackupId.ToString() },
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        return r.Backups.Select(FromGrpc).ToList();
+    }
+
+    public async Task<KahunaRestoreResponse> Restore(string url, Guid leafBackupId, string targetDir, long targetTimeMs, CancellationToken cancellationToken)
+    {
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+        Backups.BackupsClient client = new(channel);
+        GrpcRestoreResponse r = await client.RestoreAsync(
+            new GrpcRestoreRequest { LeafBackupId = leafBackupId.ToString(), TargetDir = targetDir, TargetTimeMs = targetTimeMs },
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        return new KahunaRestoreResponse
+        {
+            TargetDir = r.TargetDir,
+            PartitionsRestored = r.PartitionsRestored,
+            EntriesApplied = r.EntriesApplied,
+            LastAppliedPhysicalMs = r.LastAppliedPhysicalMs,
+            Chain = r.Chain.Select(FromGrpc).ToList()
+        };
+    }
+
+    private static KahunaBackupInfo FromGrpc(GrpcBackupInfoResponse r) => new()
+    {
+        BackupId = Guid.Parse(r.BackupId),
+        Type = r.Type,
+        CreatedAtUtc = DateTime.Parse(r.CreatedAtUtc),
+        ParentBackupId = string.IsNullOrEmpty(r.ParentBackupId) ? null : Guid.Parse(r.ParentBackupId),
+        PartitionCount = r.PartitionCount,
+        ClusterSnapshotNode = r.HasSnapshotTime ? r.SnapshotNode : null,
+        ClusterSnapshotPhysical = r.HasSnapshotTime ? r.SnapshotPhysical : null,
+        ClusterSnapshotCounter = r.HasSnapshotTime ? r.SnapshotCounter : null
+    };
 }

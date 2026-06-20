@@ -58,6 +58,12 @@
         </Protobuf>
     </ItemGroup>
 
+    <ItemGroup>
+        <Protobuf Include="Communication\Grpc\Protos\backups.proto">
+            <Generator>MSBuild:Compile</Generator>
+        </Protobuf>
+    </ItemGroup>
+
     <!--<ItemGroup>
         <ProjectReference Include="..\Kommander\Kommander.csproj" />
     </ItemGroup> -->

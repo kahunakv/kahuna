@@ -85,4 +85,11 @@ public interface IKahunaCommunication
      Task<bool> RegisterKeyRange(string url, string keySpace, CancellationToken cancellationToken);
 
      Task<KahunaClusterMembershipResponse> GetClusterMembership(string url, CancellationToken cancellationToken);
+
+     Task<KahunaBackupInfo> TakeFullBackup(string url, CancellationToken cancellationToken);
+     Task<KahunaBackupInfo> TakeIncrementalBackup(string url, Guid parentBackupId, CancellationToken cancellationToken);
+     Task<KahunaBackupInfo> TakeCoordinatedBackup(string url, CancellationToken cancellationToken);
+     Task<List<KahunaBackupInfo>> ListBackups(string url, CancellationToken cancellationToken);
+     Task<List<KahunaBackupInfo>> GetBackupChain(string url, Guid leafBackupId, CancellationToken cancellationToken);
+     Task<KahunaRestoreResponse> Restore(string url, Guid leafBackupId, string targetDir, long targetTimeMs, CancellationToken cancellationToken);
 }

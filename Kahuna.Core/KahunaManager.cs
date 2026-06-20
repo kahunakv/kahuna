@@ -12,6 +12,7 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Locks;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
+using Kahuna.Server.Persistence.Pitr;
 using Kahuna.Server.Replication;
 using Kahuna.Server.ScriptParser;
 using Kahuna.Server.Sequencer;
@@ -59,6 +60,14 @@ public sealed class KahunaManager : IKahuna, IDisposable
 
     private readonly IPersistenceBackend persistenceBackend;
 
+    private readonly BackupService? backupService;
+
+    /// <summary>
+    /// Exposes the persistence backend for PITR bootstrap tests that need to extract a
+    /// checkpoint from an already-running node before seeding a joining peer.
+    /// </summary>
+    internal IPersistenceBackend PersistenceBackend => persistenceBackend;
+
     /// <summary>
     /// Constructor
     /// </summary>
@@ -67,10 +76,20 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="configuration"></param>
     /// <param name="logger"></param>
     public KahunaManager(ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, IInterNodeCommunication interNodeCommunication, ILogger<IKahuna> logger)
+        : this(actorSystem, raft, configuration, interNodeCommunication, GetPersistence(configuration, logger), logger)
+    {
+    }
+
+    /// <summary>
+    /// Constructor variant used by PITR bootstrap: accepts a pre-seeded <paramref name="preSeededBackend"/>
+    /// instead of creating a fresh one from configuration.  The WAL for the Raft layer is also
+    /// pre-seeded externally; only the persistence-backend injection is handled here.
+    /// </summary>
+    internal KahunaManager(ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, IInterNodeCommunication interNodeCommunication, IPersistenceBackend preSeededBackend, ILogger<IKahuna> logger)
     {
         this.actorSystem = actorSystem;
 
-        persistenceBackend = GetPersistence(configuration, logger);
+        persistenceBackend = preSeededBackend;
 
         backgroundWriter = actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
             "background-writer",
@@ -87,6 +106,18 @@ public sealed class KahunaManager : IKahuna, IDisposable
         // Register the key-range data-movement hook once, here, so every host (embedded,
         // server, tests) gets it uniformly without reaching across the internal API boundary.
         raft.RegisterStateMachineTransfer(keyValues.KvStateMachineTransfer);
+
+        if (!string.IsNullOrWhiteSpace(configuration.BackupDir))
+        {
+            backupService = new BackupService(
+                raft,
+                persistenceBackend,
+                configuration.BackupDir,
+                configuration.Storage,
+                configuration.StorageRevision,
+                FlushPersistenceAsync,
+                keyValues.GetSafeTimestampAsync);
+        }
     }
 
     public void Dispose()
@@ -108,6 +139,30 @@ public sealed class KahunaManager : IKahuna, IDisposable
         TaskCompletionSource<bool> tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
         backgroundWriter.Send(new(BackgroundWriteType.FlushAndNotify, tcs));
         return tcs.Task;
+    }
+
+    /// <inheritdoc/>
+    public async Task BootstrapFromPitrBackupAsync(
+        string backupDir,
+        Guid leafBackupId,
+        HLCTimestamp targetTime,
+        Kommander.WAL.IWAL walAdapter,
+        TimeSpan pitrWindow,
+        TimeSpan baseSnapshotInterval)
+    {
+        BackupCatalog catalog = new(new LocalDirectoryStorageTarget(backupDir));
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(leafBackupId);
+
+        if (targetTime == HLCTimestamp.Zero)
+        {
+            targetTime = chain
+                .SelectMany(m => m.PartitionRanges)
+                .Select(r => r.ToHlc)
+                .Aggregate(HLCTimestamp.Zero, (acc, hlc) => hlc.CompareTo(acc) > 0 ? hlc : acc);
+        }
+
+        await FlushPersistenceAsync();
+        BootstrapHelper.BootstrapNode(chain, backupDir, targetTime, persistenceBackend, walAdapter, pitrWindow, DateTime.UtcNow, baseSnapshotInterval);
     }
 
     /// <summary>
@@ -1314,4 +1369,40 @@ public sealed class KahunaManager : IKahuna, IDisposable
     ) => keyValues.LocateAndTryAcquireExclusiveRangeLockWithHook(
             transactionId, prefix, startKey, startInclusive, endKey, endInclusive,
             expiresMs, durability, afterSnapshot, cancellationToken);
+
+    // ── Backup / PITR ──────────────────────────────────────────────────────────────────────
+
+    public bool IsBackupConfigured => backupService is not null;
+
+    public Task<KahunaBackupInfo> TakeFullBackupAsync(CancellationToken ct = default) =>
+        RequireBackupService().TakeFullAsync();
+
+    public Task<KahunaBackupInfo> TakeIncrementalBackupAsync(Guid parentBackupId, CancellationToken ct = default) =>
+        RequireBackupService().TakeIncrementalAsync(parentBackupId);
+
+    public Task<KahunaBackupInfo> TakeCoordinatedBackupAsync(CancellationToken ct = default) =>
+        RequireBackupService().TakeCoordinatedBackupAsync();
+
+    public Task<IReadOnlyList<KahunaBackupInfo>> ListBackupsAsync(CancellationToken ct = default) =>
+        Task.FromResult(RequireBackupService().ListBackups());
+
+    public Task<IReadOnlyList<KahunaBackupInfo>> GetBackupChainAsync(Guid leafBackupId, CancellationToken ct = default) =>
+        Task.FromResult(RequireBackupService().ResolveAndValidate(leafBackupId));
+
+    public Task<KahunaRestoreResponse> RestoreToAsync(
+        Guid leafBackupId,
+        string targetDir,
+        long targetTimeMs,
+        CancellationToken ct = default)
+    {
+        HLCTimestamp targetTime = targetTimeMs > 0
+            ? new HLCTimestamp(0, targetTimeMs, 0)
+            : HLCTimestamp.Zero;
+        KahunaRestoreResponse result = RequireBackupService().RestoreTo(leafBackupId, targetDir, targetTime);
+        return Task.FromResult(result);
+    }
+
+    private BackupService RequireBackupService() =>
+        backupService ?? throw new InvalidOperationException(
+            "Backup is not configured on this node. Set BackupDir in configuration or --pitr-backup-dir.");
 }

@@ -31,6 +31,11 @@ namespace Kahuna.Shared.Communication.Rest;
 [JsonSerializable(typeof(KahunaClusterMembershipResponse))]
 [JsonSerializable(typeof(KahunaClusterMemberResponse))]
 [JsonSerializable(typeof(List<KahunaClusterMemberResponse>))]
+[JsonSerializable(typeof(KahunaBackupInfo))]
+[JsonSerializable(typeof(List<KahunaBackupInfo>))]
+[JsonSerializable(typeof(KahunaBackupIncrementalRequest))]
+[JsonSerializable(typeof(KahunaBackupRestoreRequest))]
+[JsonSerializable(typeof(KahunaRestoreResponse))]
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 public sealed partial class KahunaJsonContext : JsonSerializerContext
 {

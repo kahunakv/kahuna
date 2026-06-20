@@ -103,6 +103,52 @@ if (IsSingleCommand(opts))
             await ClusterMembersCommand.Execute(connection, format);
             return;
         }
+
+        if (opts.BackupFull)
+        {
+            await BackupFullCommand.Execute(connection, format);
+            return;
+        }
+
+        if (opts.BackupIncremental)
+        {
+            if (opts.ParentBackupId is null)
+            {
+                AnsiConsole.MarkupLine("[red]--backup-incremental requires --parent-backup-id[/]");
+                return;
+            }
+            await BackupIncrementalCommand.Execute(connection, opts.ParentBackupId.Value, format);
+            return;
+        }
+
+        if (opts.BackupCoordinated)
+        {
+            await BackupCoordinatedCommand.Execute(connection, format);
+            return;
+        }
+
+        if (opts.ListBackups)
+        {
+            await ListBackupsCommand.Execute(connection, format);
+            return;
+        }
+
+        if (opts.BackupChain.HasValue)
+        {
+            await BackupChainCommand.Execute(connection, opts.BackupChain.Value, format);
+            return;
+        }
+
+        if (opts.Restore.HasValue)
+        {
+            if (string.IsNullOrWhiteSpace(opts.TargetDir))
+            {
+                AnsiConsole.MarkupLine("[red]--restore requires --target-dir[/]");
+                return;
+            }
+            await RestoreCommand.Execute(connection, opts.Restore.Value, opts.TargetDir, opts.TargetTimeMs, format);
+            return;
+        }
     }
     catch (Exception ex)
     {
@@ -182,6 +228,24 @@ static bool IsSingleCommand(KahunaControlOptions kahunaControlOptions)
         return true;
 
     if (kahunaControlOptions.ClusterMembers)
+        return true;
+
+    if (kahunaControlOptions.BackupFull)
+        return true;
+
+    if (kahunaControlOptions.BackupIncremental)
+        return true;
+
+    if (kahunaControlOptions.BackupCoordinated)
+        return true;
+
+    if (kahunaControlOptions.ListBackups)
+        return true;
+
+    if (kahunaControlOptions.BackupChain.HasValue)
+        return true;
+
+    if (kahunaControlOptions.Restore.HasValue)
         return true;
 
     return false;

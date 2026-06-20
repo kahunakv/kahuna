@@ -234,4 +234,28 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
 
     public Task<KahunaClusterMembershipResponse> GetClusterMembership(string url, CancellationToken cancellationToken) =>
         throw new NotImplementedException();
+
+    public Task<KahunaBackupInfo> TakeFullBackup(string url, CancellationToken cancellationToken) =>
+        kahuna.TakeFullBackupAsync(cancellationToken);
+
+    public Task<KahunaBackupInfo> TakeIncrementalBackup(string url, Guid parentBackupId, CancellationToken cancellationToken) =>
+        kahuna.TakeIncrementalBackupAsync(parentBackupId, cancellationToken);
+
+    public Task<KahunaBackupInfo> TakeCoordinatedBackup(string url, CancellationToken cancellationToken) =>
+        kahuna.TakeCoordinatedBackupAsync(cancellationToken);
+
+    public async Task<List<KahunaBackupInfo>> ListBackups(string url, CancellationToken cancellationToken)
+    {
+        IReadOnlyList<KahunaBackupInfo> result = await kahuna.ListBackupsAsync(cancellationToken);
+        return result.ToList();
+    }
+
+    public async Task<List<KahunaBackupInfo>> GetBackupChain(string url, Guid leafBackupId, CancellationToken cancellationToken)
+    {
+        IReadOnlyList<KahunaBackupInfo> result = await kahuna.GetBackupChainAsync(leafBackupId, cancellationToken);
+        return result.ToList();
+    }
+
+    public Task<KahunaRestoreResponse> Restore(string url, Guid leafBackupId, string targetDir, long targetTimeMs, CancellationToken cancellationToken) =>
+        kahuna.RestoreToAsync(leafBackupId, targetDir, targetTimeMs, cancellationToken);
 }
