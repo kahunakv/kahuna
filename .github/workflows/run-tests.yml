@@ -29,9 +29,9 @@ jobs:
       - name: Run Kahuna Server
         run: (cd scripts && chmod +x ./run-server.sh && ./run-server.sh)
       - name: Run Client Tests
-        run: (cd Kahuna.Tests && dotnet test -l "console;verbosity=normal" --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type none --filter "FullyQualifiedName~Kahuna.Tests.Client")
+        run: (cd Kahuna.Client.Tests && dotnet test -l "console;verbosity=normal" --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type none)
       - name: Stop Kahuna Server
         if: always()
         run: docker compose -f docker/local.yml down -v
       - name: Run Server Tests
-        run: (cd Kahuna.Tests && dotnet test -l "console;verbosity=normal" --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type none --filter "FullyQualifiedName~Kahuna.Tests.Server")
+        run: (cd Kahuna.Server.Tests && dotnet test -l "console;verbosity=normal" --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type none)

@@ -118,7 +118,15 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
             if (connections.TryGetValue(shard, out sqlConnection))
                 return sqlConnection;
             
-            string connectionString = $"Data Source={path}/kahuna{shard}_{dbRevision}.db";
+            // Pooling=False ensures that SqliteConnection.Dispose() physically closes the
+            // underlying file handle rather than returning it to the ADO.NET connection pool.
+            // Without this, pool entries accumulate over the process lifetime — every
+            // embedded node disposal leaves an open file descriptor.  Since
+            // SqlitePersistenceBackend already manages connection lifetime explicitly
+            // (connections are kept open for the lifetime of this instance and shared
+            // across all callers via the `connections` dict), ADO.NET pooling adds no
+            // benefit and only causes FD leaks.
+            string connectionString = $"Data Source={path}/kahuna{shard}_{dbRevision}.db;Pooling=False";
             SqliteConnection connection = new(connectionString);
 
             connection.Open();
