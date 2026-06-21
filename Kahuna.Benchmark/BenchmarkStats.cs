@@ -29,16 +29,19 @@ internal sealed class WorkerStats
 
     private readonly Dictionary<OperationType, LongHistogram> _histograms;
     private readonly Dictionary<OperationType, long[]> _counts; // [0]=success [1]=errors [2]=timeouts [3]=misses
+    private readonly Dictionary<OperationType, long> _sumMicros; // for mean computation
 
     public WorkerStats(long maxMicros)
     {
         _maxMicros = maxMicros;
         _histograms = new(AllOps.Length);
         _counts = new(AllOps.Length);
+        _sumMicros = new(AllOps.Length);
         foreach (OperationType op in AllOps)
         {
             _histograms[op] = new LongHistogram(_maxMicros, 3);
             _counts[op] = new long[4];
+            _sumMicros[op] = 0;
         }
     }
 
@@ -47,8 +50,10 @@ internal sealed class WorkerStats
         switch (outcome)
         {
             case OpOutcome.Success:
-                _histograms[op].RecordValue(Math.Clamp(elapsedMicros, 1, _maxMicros));
+                long clamped = Math.Clamp(elapsedMicros, 1, _maxMicros);
+                _histograms[op].RecordValue(clamped);
                 _counts[op][0]++;
+                _sumMicros[op] += clamped;
                 break;
             case OpOutcome.Error:
                 _counts[op][1]++;
@@ -73,16 +78,20 @@ internal sealed class WorkerStats
             target._counts[op][1] += _counts[op][1];
             target._counts[op][2] += _counts[op][2];
             target._counts[op][3] += _counts[op][3];
+            target._sumMicros[op] += _sumMicros[op];
         }
     }
 
     public long MaxMicros => _maxMicros;
 
-    public long GetSuccess(OperationType op) => _counts[op][0];
-    public long GetErrors(OperationType op) => _counts[op][1];
+    public long GetSuccess(OperationType op)  => _counts[op][0];
+    public long GetErrors(OperationType op)   => _counts[op][1];
     public long GetTimeouts(OperationType op) => _counts[op][2];
-    public long GetMisses(OperationType op)  => _counts[op][3];
+    public long GetMisses(OperationType op)   => _counts[op][3];
     public LongHistogram GetHistogram(OperationType op) => _histograms[op];
+
+    public double GetMeanMicros(OperationType op) =>
+        _counts[op][0] > 0 ? (double)_sumMicros[op] / _counts[op][0] : 0;
 
     /// <summary>
     /// Computes the histogram ceiling from the per-request timeout: timeout × 1.5,

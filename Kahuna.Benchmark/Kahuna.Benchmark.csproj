@@ -48,4 +48,8 @@
         <ProjectReference Include="..\Kahuna.Client\Kahuna.Client.csproj" />
     </ItemGroup>
 
+    <ItemGroup>
+        <InternalsVisibleTo Include="Kahuna.Benchmark.Tests" />
+    </ItemGroup>
+
 </Project>

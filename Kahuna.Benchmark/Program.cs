@@ -92,11 +92,14 @@ if (!validFormats.Contains(opts.Format, StringComparer.OrdinalIgnoreCase))
     return 1;
 }
 
-if (!opts.Format.Equals("console", StringComparison.OrdinalIgnoreCase))
-{
-    AnsiConsole.MarkupLine($"[red]--format {opts.Format} is not yet available (Phase C). Only --format console is supported.[/]");
-    return 1;
-}
+// ── diagnostic writer ─────────────────────────────────────────────────────────
+// For json/csv formats stdout must be pure machine output. Route every human-
+// readable banner and progress line to stderr so piping works correctly:
+//   kahuna-bench --format json | jq
+// For console format all output goes to stdout as before.
+
+bool isConsoleFormat = opts.Format.Equals("console", StringComparison.OrdinalIgnoreCase);
+TextWriter diag = isConsoleFormat ? Console.Out : Console.Error;
 
 // ── client construction ───────────────────────────────────────────────────────
 
@@ -106,24 +109,35 @@ KahunaClient client = new(endpoints, null, null, kahunaOptions);
 
 // ── run ───────────────────────────────────────────────────────────────────────
 
-string rateLabel = opts.Rate > 0 ? $"{opts.Rate} req/s" : "unbounded";
+string rateLabel   = opts.Rate > 0 ? $"{opts.Rate} req/s" : "unbounded";
 string warmupLabel = opts.Warmup > 0 ? $" + {opts.Warmup}s warmup" : "";
 
 string tlsLabel = insecure
     ? (opts.Insecure ? "disabled (--insecure)" : "disabled (localhost)")
     : "enabled";
 
-AnsiConsole.MarkupLine(
-    $"[bold]Kahuna Benchmark[/] — [cyan]{opts.Workload}[/], " +
-    $"{opts.Duration}s{warmupLabel}, concurrency={opts.Concurrency}, target={rateLabel}");
-AnsiConsole.MarkupLine(
-    $"  endpoints : {string.Join(", ", endpoints)}");
-AnsiConsole.MarkupLine(
-    $"  tls       : {tlsLabel}");
-AnsiConsole.MarkupLine(
-    $"  key-space : {opts.KeySpace}   value-size : {opts.ValueSize}B   durability : {opts.Durability}");
+if (isConsoleFormat)
+{
+    AnsiConsole.MarkupLine(
+        $"[bold]Kahuna Benchmark[/] — [cyan]{opts.Workload}[/], " +
+        $"{opts.Duration}s{warmupLabel}, concurrency={opts.Concurrency}, target={rateLabel}");
+    AnsiConsole.MarkupLine($"  endpoints : {string.Join(", ", endpoints)}");
+    AnsiConsole.MarkupLine($"  tls       : {tlsLabel}");
+    AnsiConsole.MarkupLine(
+        $"  key-space : {opts.KeySpace}   value-size : {opts.ValueSize}B   durability : {opts.Durability}");
+}
+else
+{
+    diag.WriteLine(
+        $"Kahuna Benchmark — {opts.Workload}, " +
+        $"{opts.Duration}s{warmupLabel}, concurrency={opts.Concurrency}, target={rateLabel}");
+    diag.WriteLine($"  endpoints : {string.Join(", ", endpoints)}");
+    diag.WriteLine($"  tls       : {tlsLabel}");
+    diag.WriteLine(
+        $"  key-space : {opts.KeySpace}   value-size : {opts.ValueSize}B   durability : {opts.Durability}");
+}
 
-await BenchmarkRunner.RunAsync(client, opts);
+await BenchmarkRunner.RunAsync(client, opts, diag);
 
 return 0;
 

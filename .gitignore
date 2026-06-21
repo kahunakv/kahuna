@@ -17,6 +17,9 @@ Kahuna.Server.Tests/.idea
 Kahuna.Benchmark/obj
 Kahuna.Benchmark/bin
 Kahuna.Benchmark/.idea
+Kahuna.Benchmark.Tests/obj
+Kahuna.Benchmark.Tests/bin
+Kahuna.Benchmark.Tests/.idea
 Kahuna.Shared/obj
 Kahuna.Shared/bin
 Kahuna.Shared/.idea

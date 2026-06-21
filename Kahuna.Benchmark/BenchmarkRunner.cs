@@ -9,43 +9,40 @@
 using System.Diagnostics;
 using System.Threading.Channels;
 using Kahuna.Client;
+using Spectre.Console;
 
 namespace Kahuna.Benchmark;
 
 /// <summary>
-/// Orchestrates the warmup + measurement window, dispatching either a closed-loop
+/// Orchestrates seed → warmup → measurement, dispatching either a closed-loop
 /// (<see cref="BenchmarkOptions.Rate"/> == 0) or open-loop (rate &gt; 0) runner.
 /// </summary>
 internal static class BenchmarkRunner
 {
-    public static async Task RunAsync(KahunaClient client, BenchmarkOptions opts)
+    public static async Task RunAsync(KahunaClient client, BenchmarkOptions opts, TextWriter diag)
     {
         using CancellationTokenSource globalCts = new();
-
-        Console.CancelKeyPress += (_, e) =>
-        {
-            e.Cancel = true;
-            globalCts.Cancel();
-        };
+        Console.CancelKeyPress += (_, e) => { e.Cancel = true; globalCts.Cancel(); };
 
         // ── seed ──────────────────────────────────────────────────────────────
-        Console.WriteLine("Seeding key-space…");
+        diag.WriteLine("Seeding key-space…");
         try
         {
-            using CancellationTokenSource seedCts = CancellationTokenSource.CreateLinkedTokenSource(globalCts.Token);
+            using CancellationTokenSource seedCts =
+                CancellationTokenSource.CreateLinkedTokenSource(globalCts.Token);
             seedCts.CancelAfter(TimeSpan.FromSeconds(30));
-            await WorkloadGenerator.SeedAsync(client, opts, seedCts.Token);
+            await WorkloadGenerator.SeedAsync(client, opts, seedCts.Token, diag);
         }
         catch (OperationCanceledException) when (globalCts.IsCancellationRequested)
         {
-            Console.WriteLine("Aborted during seeding.");
+            diag.WriteLine("Aborted during seeding.");
             return;
         }
 
         // ── warmup ────────────────────────────────────────────────────────────
         if (opts.Warmup > 0 && !globalCts.IsCancellationRequested)
         {
-            Console.WriteLine($"Warming up for {opts.Warmup}s…");
+            diag.WriteLine($"Warming up for {opts.Warmup}s…");
             WorkloadGenerator.ResetKeyCounter();
 
             using CancellationTokenSource warmupCts =
@@ -67,36 +64,98 @@ internal static class BenchmarkRunner
 
         if (globalCts.IsCancellationRequested)
         {
-            Console.WriteLine("Aborted during warmup.");
+            diag.WriteLine("Aborted during warmup.");
             return;
         }
 
         // ── measurement ───────────────────────────────────────────────────────
-        Console.WriteLine($"Running measurement for {opts.Duration}s…");
+        diag.WriteLine($"Running measurement for {opts.Duration}s…");
         WorkloadGenerator.ResetKeyCounter();
+
+        long ceiling   = WorkerStats.CeilingMicrosFromTimeout(opts.Timeout);
+        bool isConsole = opts.Format.Equals("console", StringComparison.OrdinalIgnoreCase);
+
+        // LiveMetrics is only needed when the live display is running.
+        // For json/csv runs, pass null so workers skip EndOp entirely —
+        // no lock, no histogram write, no observer effect on measured latency.
+        LiveMetrics? liveMetrics = isConsole ? new(ceiling) : null;
 
         using CancellationTokenSource measureCts =
             CancellationTokenSource.CreateLinkedTokenSource(globalCts.Token);
         measureCts.CancelAfter(TimeSpan.FromSeconds(opts.Duration));
 
         Stopwatch measureSw = Stopwatch.StartNew();
+        using CancellationTokenRegistration _reg =
+            measureCts.Token.Register(() => measureSw.Stop());
 
-        // Stop the clock the instant the deadline (or Ctrl+C) fires — before the
-        // open-loop drain flushes buffered tickets. The drain still runs so in-flight
-        // ops complete and their results are counted, but elapsed is pinned to the
-        // true measurement boundary, not the end of the drain.
-        using CancellationTokenRegistration _ = measureCts.Token.Register(() => measureSw.Stop());
+        using CancellationTokenSource liveCts = new();
 
-        // Workers swallow cancellation internally and return their accumulated stats,
-        // so the runners always complete normally — no catch needed here.
+        Task liveTask = isConsole
+            ? RunLiveDisplayAsync(liveMetrics!, opts.Duration, measureSw, liveCts.Token)
+            : Task.CompletedTask;
+
+        // Workers swallow cancellation internally and always return their accumulated
+        // stats — the runners complete normally on deadline or Ctrl+C.
         IReadOnlyList<WorkerStats> workerStats = opts.Rate > 0
-            ? await RunOpenLoopPhaseAsync(client, opts, measureCts.Token)
-            : await RunClosedLoopPhaseAsync(client, opts, measureCts.Token);
+            ? await RunOpenLoopPhaseAsync(client, opts, measureCts.Token, liveMetrics)
+            : await RunClosedLoopPhaseAsync(client, opts, measureCts.Token, liveMetrics);
+
+        await liveCts.CancelAsync();
+        await liveTask;
 
         double elapsed = measureSw.Elapsed.TotalSeconds;
 
         BenchmarkStats stats = BenchmarkStats.Merge(workerStats, elapsed, opts);
-        BenchmarkReporter.PrintConsole(stats);
+        await BenchmarkReporter.ReportAsync(stats, opts);
+    }
+
+    // ── live display ─────────────────────────────────────────────────────────
+
+    // Updates a single status line in place using CR + "erase line" (ESC[2K). This deliberately
+    // avoids Spectre's Live region: a one-line status doesn't need multi-line region accounting,
+    // and Live was moving the cursor up and clobbering surrounding output (build warnings, the
+    // command echo) when its region estimate didn't match the real terminal. CR-rewrite only ever
+    // touches the current line, so it can't corrupt anything above it.
+    private static async Task RunLiveDisplayAsync(
+        LiveMetrics metrics, int durationSec, Stopwatch measureSw, CancellationToken ct)
+    {
+        // No usable terminal (piped/redirected or no ANSI) — skip the live line; the final
+        // table is the authoritative output and raw escapes would just become noise.
+        if (Console.IsOutputRedirected || !AnsiConsole.Profile.Capabilities.Ansi)
+            return;
+
+        const string clearLine = "\r\u001b[2K"; // CR + ESC[2K: return to col 0 and erase the whole line
+        long prevSuccess = 0;
+
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                try { await Task.Delay(1000, ct); }
+                catch (OperationCanceledException) { break; }
+
+                long total    = metrics.TotalSuccess;
+                long rps      = total - prevSuccess;
+                prevSuccess   = total;
+                long inFlight = metrics.InFlight;
+                (long p99Micros, _) = metrics.SnapshotInterval();
+                int  elapsedSec = (int)measureSw.Elapsed.TotalSeconds;
+
+                string p99Str = p99Micros > 0 ? FormatMicros(p99Micros) : "—";
+
+                Console.Out.Write(
+                    $"{clearLine}  elapsed {elapsedSec,3}s/{durationSec}s  " +
+                    $"in-flight {inFlight,5}  rps {rps,8:N0}  p99 {p99Str,8}");
+                Console.Out.Flush();
+            }
+        }
+        finally
+        {
+            // Wipe the status line and return the cursor to column 0 so the final table
+            // starts on a clean line instead of after the last status text.
+            Console.Out.Write(clearLine);
+            Console.Out.Flush();
+        }
     }
 
     // ── closed-loop runner (B1) ───────────────────────────────────────────────
@@ -104,10 +163,11 @@ internal static class BenchmarkRunner
     private static async Task<IReadOnlyList<WorkerStats>> RunClosedLoopPhaseAsync(
         KahunaClient client,
         BenchmarkOptions opts,
-        CancellationToken ct)
+        CancellationToken ct,
+        LiveMetrics? liveMetrics = null)
     {
-        WorkerStats[] stats = new WorkerStats[opts.Concurrency];
-        Task[] workers = new Task[opts.Concurrency];
+        WorkerStats[] stats  = new WorkerStats[opts.Concurrency];
+        Task[]        workers = new Task[opts.Concurrency];
 
         for (int i = 0; i < opts.Concurrency; i++)
         {
@@ -126,11 +186,14 @@ internal static class BenchmarkRunner
                 {
                     try
                     {
+                        liveMetrics?.BeginOp();
                         (OperationType opType, OpOutcome outcome, long elapsedMicros) = await op(ct);
+                        liveMetrics?.EndOp(outcome, elapsedMicros);
                         workerStats.Record(opType, outcome, elapsedMicros);
                     }
                     catch (OperationCanceledException)
                     {
+                        liveMetrics?.AbortOp();
                         break;
                     }
                 }
@@ -148,56 +211,45 @@ internal static class BenchmarkRunner
     /// time</em>. Latency is measured from that intended start rather than the actual
     /// dispatch, so queuing delay caused by a saturated server inflates the measured
     /// tail latency rather than being silently hidden (coordinated-omission fix).
+    ///
+    /// Pacing — two-phase per producer iteration:
+    ///   1. Batch-emit all overdue tickets (nextIntended ≤ now) in a tight loop.
+    ///      At high rates the OS timer resolution (~1 ms) means tickets are released
+    ///      in bursts; CO timestamps still advance at 1/rate-second steps so
+    ///      coordinated-omission accounting stays correct.
+    ///   2. Hybrid wait: Task.Delay for the coarse portion (interval − 1 ms), then
+    ///      Thread.SpinWait for the sub-millisecond tail, achieving µs-level pacing
+    ///      accuracy at the cost of one thread-pool thread spinning.
     /// </summary>
     private static async Task<IReadOnlyList<WorkerStats>> RunOpenLoopPhaseAsync(
         KahunaClient client,
         BenchmarkOptions opts,
-        CancellationToken ct)
+        CancellationToken ct,
+        LiveMetrics? liveMetrics = null)
     {
-        int rate = opts.Rate;
-
-        // Channel capacity: allow up to 2 seconds of backlog so the producer is
-        // never immediately stalled. A deeper backlog inflates latency correctly.
+        int rate     = opts.Rate;
         int capacity = Math.Max(rate * 2, opts.Concurrency * 4);
+
         Channel<long> dispatch = Channel.CreateBounded<long>(new BoundedChannelOptions(capacity)
         {
-            FullMode = BoundedChannelFullMode.Wait,
+            FullMode    = BoundedChannelFullMode.Wait,
             SingleReader = false,
             SingleWriter = true
         });
 
         WorkerStats[] stats = new WorkerStats[opts.Concurrency];
 
-        // Producer: emits intended-start timestamps at 1/rate-second intervals.
-        //
-        // Pacing strategy — two-phase per iteration to work correctly at any rate:
-        //
-        //   1. Batch-emit: issue ALL overdue tickets immediately (nextIntended ≤ now).
-        //      At high rates (e.g. 50 000 req/s, 20 µs interval) the OS timer
-        //      resolution (~1 ms) means we wake up every ~1 ms and release ~50 tickets
-        //      at once. CO timestamps still advance in 20 µs steps, so coordinated-
-        //      omission accounting remains correct.
-        //
-        //   2. Hybrid wait: once caught up, sleep for (interval - 1 ms) with
-        //      Task.Delay so the thread is cooperative, then spin on
-        //      Stopwatch.GetTimestamp() for the sub-millisecond remainder.
-        //      For intervals < 1 ms (rate > ~1 000) step 2 is pure spin; the producer
-        //      burns one thread-pool thread but achieves µs-level pacing accuracy.
         Task producer = Task.Run(async () =>
         {
             long ticksPerRequest = Stopwatch.Frequency / rate;
-
-            // One tick = 1 / Stopwatch.Frequency seconds.
-            // 1 ms in ticks:
-            long oneMilliTicks = Stopwatch.Frequency / 1_000;
-
-            long nextIntended = Stopwatch.GetTimestamp();
+            long oneMilliTicks   = Stopwatch.Frequency / 1_000;
+            long nextIntended    = Stopwatch.GetTimestamp();
 
             try
             {
                 while (!ct.IsCancellationRequested)
                 {
-                    // ── Phase 1: batch-emit all overdue tickets ────────────────
+                    // Phase 1: batch-emit all overdue tickets.
                     long now = Stopwatch.GetTimestamp();
                     while (nextIntended <= now && !ct.IsCancellationRequested)
                     {
@@ -205,11 +257,10 @@ internal static class BenchmarkRunner
                         nextIntended += ticksPerRequest;
                     }
 
-                    // ── Phase 2: hybrid wait until nextIntended ────────────────
+                    // Phase 2: hybrid wait until nextIntended.
                     long waitTicks = nextIntended - Stopwatch.GetTimestamp();
                     if (waitTicks > 0)
                     {
-                        // Coarse sleep: give up the thread for all but the last ms.
                         long coarseTicks = waitTicks - oneMilliTicks;
                         if (coarseTicks > 0)
                         {
@@ -217,21 +268,15 @@ internal static class BenchmarkRunner
                             if (sleepMs > 0)
                                 await Task.Delay(sleepMs, ct);
                         }
-                        // Spin for the sub-millisecond tail (or the whole interval
-                        // when ticksPerRequest < oneMilliTicks).
                         while (Stopwatch.GetTimestamp() < nextIntended && !ct.IsCancellationRequested)
                             Thread.SpinWait(20);
                     }
                 }
             }
             catch (OperationCanceledException) { }
-            finally
-            {
-                dispatch.Writer.TryComplete();
-            }
+            finally { dispatch.Writer.TryComplete(); }
         });
 
-        // Consumers: read an intended-start ticket, measure latency from it.
         Task[] consumers = new Task[opts.Concurrency];
         for (int i = 0; i < opts.Concurrency; i++)
         {
@@ -251,20 +296,25 @@ internal static class BenchmarkRunner
                     if (ct.IsCancellationRequested)
                         break;
 
-                    // Latency is measured from the *intended* start: any queuing
-                    // delay is included, making tail latency reflect true server lag.
-                    long coStartTs = intendedStartTs;
+                    liveMetrics?.BeginOp();
 
-                    OperationType opType = OperationType.Get;
-                    OpOutcome outcome = OpOutcome.Error;
+                    OperationType opType  = OperationType.Get;
+                    OpOutcome     outcome = OpOutcome.Error;
                     try
                     {
                         (opType, outcome, _) = await op(ct);
                     }
-                    catch (OperationCanceledException) { break; }
+                    catch (OperationCanceledException)
+                    {
+                        liveMetrics?.AbortOp();
+                        break;
+                    }
 
-                    long elapsedMicros = (long)((Stopwatch.GetTimestamp() - coStartTs) * 1_000_000.0
-                                                / Stopwatch.Frequency);
+                    // Latency measured from the *intended* start: queuing delay is
+                    // included, so tail latency reflects true server lag.
+                    long elapsedMicros = (long)((Stopwatch.GetTimestamp() - intendedStartTs)
+                                                * 1_000_000.0 / Stopwatch.Frequency);
+                    liveMetrics?.EndOp(outcome, elapsedMicros);
                     workerStats.Record(opType, outcome, elapsedMicros);
                 }
             });
@@ -273,5 +323,15 @@ internal static class BenchmarkRunner
         await Task.WhenAll(consumers);
         await producer;
         return stats;
+    }
+
+    // ── helpers ───────────────────────────────────────────────────────────────
+
+    private static string FormatMicros(long micros)
+    {
+        double ms = micros / 1000.0;
+        return ms >= 1000 ? $"{ms / 1000:F1}s"
+             : ms >= 1    ? $"{ms:F1}ms"
+             :              $"{micros}µs";
     }
 }

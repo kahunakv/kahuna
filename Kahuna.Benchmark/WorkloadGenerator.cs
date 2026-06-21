@@ -28,7 +28,7 @@ internal static class WorkloadGenerator
     /// For <c>get</c>: writes a sample of keys so reads can find them.
     /// For <c>sequence</c>: creates the shared sequence if it does not exist.
     /// </summary>
-    public static async Task SeedAsync(KahunaClient client, BenchmarkOptions opts, CancellationToken ct)
+    public static async Task SeedAsync(KahunaClient client, BenchmarkOptions opts, CancellationToken ct, TextWriter? diag = null)
     {
         if (opts.Workload.Equals("sequence", StringComparison.OrdinalIgnoreCase))
         {
@@ -53,7 +53,7 @@ internal static class WorkloadGenerator
             int seedCount = Math.Min(opts.KeySpace, 100_000);
             int parallelism = Math.Min(opts.Concurrency, 64);
 
-            Console.WriteLine($"  Seeding {seedCount:N0} keys (parallelism={parallelism})…");
+            (diag ?? Console.Out).WriteLine($"  Seeding {seedCount:N0} keys (parallelism={parallelism})…");
 
             await Parallel.ForEachAsync(
                 Enumerable.Range(0, seedCount),
