@@ -1,4 +1,4 @@
-﻿
+
 /**
  * This file is part of Kahuna
  *
@@ -6,310 +6,131 @@
  * file that was distributed with this source code.
  */
 
-using System.Diagnostics;
+using CommandLine;
+using Kahuna.Benchmark;
 using Kahuna.Client;
-using Kahuna.Shared.KeyValue;
-using Kahuna.Shared.Locks;
+using Spectre.Console;
 
-Console.WriteLine("Kahuna Benchmark");
+ParserResult<BenchmarkOptions> result = Parser.Default.ParseArguments<BenchmarkOptions>(args);
 
-const int numberOfTasks = 250;
-const int MaxTokens = 15_000;
+BenchmarkOptions? opts = result.Value;
+if (opts is null)
+    return 1;
 
-int current = 0;
+// ── validation ────────────────────────────────────────────────────────────────
 
-List<string> tokens = new(MaxTokens);
+string[] endpoints = opts.ConnectionSource
+    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
-for (int k = 0; k < MaxTokens; k++)
-    tokens.Add(GetRandomLockName());
-
-KahunaClient locks = new(["https://localhost:8082", "https://localhost:8084", "https://localhost:8086"], null);
-
-const string myScript = """
-BEGIN
- SET ppa 1000 NX
- LET x = GET ppa
- LET xn = to_int(x) + 1
- SET ppa xn
- COMMIT
-END
-""";
-
-//KahunaScript kahunaScript = locks.LoadScript(myScript);
-
-List<Task> tasks = new(numberOfTasks);
-
-Stopwatch stopwatch = Stopwatch.StartNew();
-
-for (int j = 0; j < 5; j++)
+if (endpoints.Length == 0)
 {
-    tasks.Clear();
-
-    for (int i = 0; i < numberOfTasks; i++)
-    {
-        int remainder = (i + 1) % 8;
-        
-        switch (remainder)
-        {
-            case 7:
-            case 6:
-            case 5:
-            case 4:
-                tasks.Add(SetKeyConcurrently(locks));
-                break;
-            
-            case 3:
-                tasks.Add(ExistsKeyConcurrently(locks));
-                break;
-            
-            case 2:
-                tasks.Add(ExtendKeyConcurrently(locks));
-                break;
-                                   
-            case 1:
-                tasks.Add(GetKeyConcurrently(locks));
-                break;
-            
-            case 0:
-                tasks.Add(DeleteKeyConcurrently(locks));
-                break;                
-        }
-        
-        //tasks.Add(AcquireLockConcurrently(locks));
-    }
-
-    await Task.WhenAll(tasks);
-
-    if (j <= 1)
-        Console.WriteLine($"Warm Up: {stopwatch.Elapsed}");
-    else
-        Console.WriteLine($"[{(j - 2) + 1}] Total time: {stopwatch.Elapsed}");
-
-    if ((j + 1) % 10 == 0)
-        await Task.Delay(5000);
-
-    stopwatch.Restart();
+    AnsiConsole.MarkupLine("[red]--connection-source must specify at least one endpoint.[/]");
+    return 1;
 }
 
-return;
-
-async Task AcquireLockConcurrently(KahunaClient locksx)
+string[] validWorkloads = ["set", "get", "mixed", "lock", "sequence", "script"];
+if (!validWorkloads.Contains(opts.Workload, StringComparer.OrdinalIgnoreCase))
 {
-    try
-    {
-        using CancellationTokenSource cts = new();
-        cts.CancelAfter(TimeSpan.FromSeconds(15));
-
-        string lockName = GetRandomLockNameFromList(tokens);
-
-        await using KahunaLock kahunaLock = await locksx.GetOrCreateLock(
-            lockName,
-            expiry: TimeSpan.FromSeconds(30),
-            durability: LockDurability.Persistent,
-            cancellationToken: cts.Token
-        );
-
-        if (!kahunaLock.IsAcquired)
-            throw new KahunaException("Not acquired " + lockName, LockResponseType.Busy);
-
-        //if (kahunaLock.FencingToken > 1)
-        //    Console.WriteLine("Got repeated token " + kahunaLock.FencingToken);
-    }
-    catch (KahunaException ex)
-    {
-        Console.WriteLine("KahunaException {0} {1}", ex.Message, ex.LockErrorCode);
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine("Exception {0}", ex.Message);
-    }
+    AnsiConsole.MarkupLine($"[red]--workload must be one of: {string.Join(", ", validWorkloads)}[/]");
+    return 1;
 }
 
-async Task SetKeyConcurrently(KahunaClient keyValues)
+if (opts.Workload.Equals("script", StringComparison.OrdinalIgnoreCase) &&
+    string.IsNullOrWhiteSpace(opts.Script))
 {
-    try
-    {
-        using CancellationTokenSource cts = new();
-        cts.CancelAfter(TimeSpan.FromSeconds(10));
-
-        string key = GetRandomLockNameFromList(tokens);
-        string value = GetRandomLockNameFromList(tokens);
-
-        KahunaKeyValue result = await keyValues.SetKeyValue(
-            key, value,
-            TimeSpan.FromHours(5),
-            KeyValueFlags.Set,
-            KeyValueDurability.Persistent,
-            cancellationToken: cts.Token
-        );
-
-        if (!result.Success)
-            throw new KahunaException("Not set " + key, LockResponseType.Busy);
-
-        //if (revision > 1)
-        //    Console.WriteLine("Got repeated revision " + revision);
-    }
-    catch (KahunaException ex)
-    {
-        Console.WriteLine("KahunaException {0} {1}", ex.Message, ex.KeyValueErrorCode);
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine("Exception {0}", ex.Message);
-    }
+    AnsiConsole.MarkupLine("[red]--workload script requires --script <path>[/]");
+    return 1;
 }
 
-async Task DeleteKeyConcurrently(KahunaClient keyValues)
+if (opts.Duration <= 0)
 {
-    try
-    {
-        using CancellationTokenSource cts = new();
-        cts.CancelAfter(TimeSpan.FromSeconds(5));
-
-        string key = GetRandomLockNameFromList(tokens);        
-
-        KahunaKeyValue result = await keyValues.DeleteKeyValue(
-            key, 
-            KeyValueDurability.Persistent,
-            cancellationToken: cts.Token
-        );
-
-        //if (!result.Success)
-        //    throw new KahunaException("Not deleted " + key, LockResponseType.Busy);
-
-        //if (revision > 1)
-        //    Console.WriteLine("Got repeated revision " + revision);
-    }
-    catch (KahunaException ex)
-    {
-        Console.WriteLine("KahunaException {0} {1}", ex.Message, ex.KeyValueErrorCode);
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine("Exception {0}", ex.Message);
-    }
+    AnsiConsole.MarkupLine("[red]--duration must be > 0[/]");
+    return 1;
 }
 
-async Task ExtendKeyConcurrently(KahunaClient keyValues)
+if (opts.Concurrency <= 0)
 {
-    try
-    {
-        using CancellationTokenSource cts = new();
-        cts.CancelAfter(TimeSpan.FromSeconds(5));
-
-        string key = GetRandomLockNameFromList(tokens);        
-
-        KahunaKeyValue result = await keyValues.ExtendKeyValue(
-            key, 
-            TimeSpan.FromSeconds(120),
-            KeyValueDurability.Persistent,
-            cancellationToken: cts.Token
-        );
-
-        //if (!result.Success)
-        //    throw new KahunaException("Not deleted " + key, LockResponseType.Busy);
-
-        //if (revision > 1)
-        //    Console.WriteLine("Got repeated revision " + revision);
-    }
-    catch (KahunaException ex)
-    {
-        Console.WriteLine("KahunaException {0} {1}", ex.Message, ex.KeyValueErrorCode);
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine("Exception {0}", ex.Message);
-    }
+    AnsiConsole.MarkupLine("[red]--concurrency must be > 0[/]");
+    return 1;
 }
 
-async Task ExistsKeyConcurrently(KahunaClient keyValues)
+if (opts.KeySpace <= 0)
 {
-    try
-    {
-        using CancellationTokenSource cts = new();
-        cts.CancelAfter(TimeSpan.FromSeconds(5));
-
-        string key = GetRandomLockNameFromList(tokens);        
-
-        KahunaKeyValue result = await keyValues.ExistsKeyValue(
-            key,             
-            KeyValueDurability.Persistent,
-            cancellationToken: cts.Token
-        );
-
-        //if (!result.Success)
-        //    throw new KahunaException("Not deleted " + key, LockResponseType.Busy);
-
-        //if (revision > 1)
-        //    Console.WriteLine("Got repeated revision " + revision);
-    }
-    catch (KahunaException ex)
-    {
-        Console.WriteLine("KahunaException {0} {1}", ex.Message, ex.KeyValueErrorCode);
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine("Exception {0}", ex.Message);
-    }
+    AnsiConsole.MarkupLine("[red]--key-space must be > 0[/]");
+    return 1;
 }
 
-async Task GetKeyConcurrently(KahunaClient keyValues)
+if (opts.ValueSize <= 0)
 {
-    try
-    {
-        using CancellationTokenSource src = new();
-        src.CancelAfter(TimeSpan.FromSeconds(10));
-
-        string key = GetRandomLockNameFromList(tokens);
-
-        KahunaKeyValue result = await keyValues.GetKeyValue(key, KeyValueDurability.Persistent, cancellationToken: src.Token);
-
-        //if (revision > 1)
-        //   Console.WriteLine("Got repeated revision " + revision);
-    }
-    catch (KahunaException ex)
-    {
-        Console.WriteLine("KahunaException {0} {1}", ex.Message, ex.KeyValueErrorCode);
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine("Exception {0}", ex.Message);
-    }
+    AnsiConsole.MarkupLine("[red]--value-size must be > 0[/]");
+    return 1;
 }
 
-async Task ExecuteTxConcurrently(KahunaTransactionScript ks)
+if (opts.ReadPct is < 0 or > 100)
 {
-    for (int i = 0; i < 10; i++)
-    {
-        try
-        {
-            await ks.Run();
-            return;
-        }
-        catch (KahunaException ex)
-        {
-            if (ex.KeyValueErrorCode == KeyValueResponseType.Aborted)
-            {
-                await Task.Delay(50);
-                continue;
-            }
-
-            throw;
-        }
-    }
+    AnsiConsole.MarkupLine("[red]--read-pct must be between 0 and 100[/]");
+    return 1;
 }
 
-static string GetRandomLockName()
+if (opts.Timeout <= 0)
 {
-    return NanoidDotNet.Nanoid.Generate();
+    AnsiConsole.MarkupLine("[red]--timeout must be > 0[/]");
+    return 1;
 }
 
-string GetRandomLockNameFromList(List<string> tokensp)
+string[] validDurabilities = ["persistent", "ephemeral"];
+if (!validDurabilities.Contains(opts.Durability, StringComparer.OrdinalIgnoreCase))
 {
-    //return tokens[Random.Shared.Next(0, MaxTokens)];
-    int c = Interlocked.Increment(ref current);
-    if (c > MaxTokens)
-        c = 0;
-    
-    return tokensp[c];
+    AnsiConsole.MarkupLine("[red]--durability must be persistent or ephemeral[/]");
+    return 1;
+}
+
+string[] validFormats = ["console", "json", "csv"];
+if (!validFormats.Contains(opts.Format, StringComparer.OrdinalIgnoreCase))
+{
+    AnsiConsole.MarkupLine("[red]--format must be console, json, or csv[/]");
+    return 1;
+}
+
+if (!opts.Format.Equals("console", StringComparison.OrdinalIgnoreCase))
+{
+    AnsiConsole.MarkupLine($"[red]--format {opts.Format} is not yet available (Phase C). Only --format console is supported.[/]");
+    return 1;
+}
+
+// ── client construction ───────────────────────────────────────────────────────
+
+bool insecure = opts.Insecure || endpoints.All(IsLocalhost);
+KahunaOptions kahunaOptions = new() { AllowInsecureCertificateValidation = insecure };
+KahunaClient client = new(endpoints, null, null, kahunaOptions);
+
+// ── run ───────────────────────────────────────────────────────────────────────
+
+string rateLabel = opts.Rate > 0 ? $"{opts.Rate} req/s" : "unbounded";
+string warmupLabel = opts.Warmup > 0 ? $" + {opts.Warmup}s warmup" : "";
+
+string tlsLabel = insecure
+    ? (opts.Insecure ? "disabled (--insecure)" : "disabled (localhost)")
+    : "enabled";
+
+AnsiConsole.MarkupLine(
+    $"[bold]Kahuna Benchmark[/] — [cyan]{opts.Workload}[/], " +
+    $"{opts.Duration}s{warmupLabel}, concurrency={opts.Concurrency}, target={rateLabel}");
+AnsiConsole.MarkupLine(
+    $"  endpoints : {string.Join(", ", endpoints)}");
+AnsiConsole.MarkupLine(
+    $"  tls       : {tlsLabel}");
+AnsiConsole.MarkupLine(
+    $"  key-space : {opts.KeySpace}   value-size : {opts.ValueSize}B   durability : {opts.Durability}");
+
+await BenchmarkRunner.RunAsync(client, opts);
+
+return 0;
+
+static bool IsLocalhost(string url)
+{
+    if (!Uri.TryCreate(url, UriKind.Absolute, out Uri? uri))
+        return false;
+    string host = uri.Host;
+    return host is "localhost" or "127.0.0.1" or "::1" or "[::1]";
 }
