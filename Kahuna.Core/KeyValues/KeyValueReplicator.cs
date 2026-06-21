@@ -4,8 +4,8 @@ using Nixie;
 
 using Kommander;
 using Kommander.Data;
-using Kommander.Time;
 
+using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
@@ -27,16 +27,27 @@ namespace Kahuna.Server.KeyValues;
 internal sealed class KeyValueReplicator
 {
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
-    
+
     private readonly IRaft raft;
 
+    private readonly KeyWriteFrequencyRegistry writeFrequencyRegistry;
+
+    private readonly KeySpaceRegistry keySpaceRegistry;
+
     private readonly ILogger<IKahuna> logger;
-    
-    public KeyValueReplicator(IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, IRaft raft, ILogger<IKahuna> logger)
+
+    public KeyValueReplicator(
+        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
+        IRaft raft,
+        KeyWriteFrequencyRegistry writeFrequencyRegistry,
+        KeySpaceRegistry keySpaceRegistry,
+        ILogger<IKahuna> logger)
     {
-        this.backgroundWriter = backgroundWriter;
-        this.raft = raft;
-        this.logger = logger;
+        this.backgroundWriter       = backgroundWriter;
+        this.raft                   = raft;
+        this.writeFrequencyRegistry = writeFrequencyRegistry;
+        this.keySpaceRegistry       = keySpaceRegistry;
+        this.logger                 = logger;
     }
 
     /// <summary>
@@ -58,26 +69,8 @@ internal sealed class KeyValueReplicator
             {
                 case KeyValueRequestType.TrySet:
                 {
-                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
-                        PersistenceRequestType.StoreKeyValue,
-                        [new(
-                            keyValueMessage.Key,
-                            keyValueMessage.Value?.ToByteArray(),
-                            keyValueMessage.Revision,
-                            keyValueMessage.ExpireLogical,
-                            keyValueMessage.ExpireCounter,
-                            (int)KeyValueState.Set
-                        )]
-                    ));
-                    
-                    if (response is null)
-                        return false;
-
-                    if (response.Type == PersistenceResponseType.Success)
-                        logger.LogDebug("Replicated key/value set {Key} {Revision} to {Node}", keyValueMessage.Key, keyValueMessage.Revision, raft.GetLocalNodeId());*/
-                    
                     byte[]? messageValue;
-            
+
                     if (MemoryMarshal.TryGetArray(keyValueMessage.Value.Memory, out ArraySegment<byte> segment))
                         messageValue = segment.Array;
                     else
@@ -95,36 +88,27 @@ internal sealed class KeyValueReplicator
                         (int)KeyValueState.Set
                     ));
 
+                    // K1b: record the committed write into the local histogram.
+                    // Running on every node (leader + followers) so the P0/meta leader — which
+                    // runs the split trigger — always has warm data regardless of where the
+                    // partition leader sits.
+                    // Guard: only key-range spaces are load-split; skip hash-routed writes to
+                    // avoid building 4096-entry trackers for partitions the trigger never reads.
+                    if (RangeRouting.IsKeyRange(keySpaceRegistry, keyValueMessage.Key))
+                        writeFrequencyRegistry.GetOrCreate(partitionId).RecordWrite(keyValueMessage.Key);
+
                     return true;
                 }
 
                 case KeyValueRequestType.TryDelete:
                 {
-                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
-                        PersistenceRequestType.StoreKeyValue,
-                        [new(
-                            keyValueMessage.Key,
-                            keyValueMessage.Value?.ToByteArray(),
-                            keyValueMessage.Revision,
-                            keyValueMessage.ExpireLogical,
-                            keyValueMessage.ExpireCounter,
-                            (int)KeyValueState.Deleted
-                        )]
-                    ));
-                    
-                    if (response is null)
-                        return false;
-
-                    if (response.Type == PersistenceResponseType.Success)
-                        logger.LogDebug("Replicated key/value delete {Key} {Revision} to {Node}", keyValueMessage.Key, keyValueMessage.Revision, raft.GetLocalNodeId());*/
-                    
                     byte[]? messageValue;
-            
+
                     if (MemoryMarshal.TryGetArray(keyValueMessage.Value.Memory, out ArraySegment<byte> segment))
                         messageValue = segment.Array;
                     else
                         messageValue = keyValueMessage.Value.ToByteArray();
-                    
+
                     backgroundWriter.Send(new(
                         BackgroundWriteType.QueueStoreKeyValue,
                         partitionId,
@@ -137,36 +121,21 @@ internal sealed class KeyValueReplicator
                         (int)KeyValueState.Deleted
                     ));
 
+                    if (RangeRouting.IsKeyRange(keySpaceRegistry, keyValueMessage.Key))
+                        writeFrequencyRegistry.GetOrCreate(partitionId).RecordWrite(keyValueMessage.Key);
+
                     return true;
                 }
 
                 case KeyValueRequestType.TryExtend:
                 {
-                    /*PersistenceResponse? response = await persistenceActorRouter.Ask(new(
-                        PersistenceRequestType.StoreKeyValue,
-                        [new(
-                            keyValueMessage.Key,
-                            keyValueMessage.Value?.ToByteArray(),
-                            keyValueMessage.Revision,
-                            keyValueMessage.ExpireLogical,
-                            keyValueMessage.ExpireCounter,
-                            (int)KeyValueState.Set
-                        )]
-                    ));
-
-                    if (response is null)
-                        return false;
-
-                    if (response.Type == PersistenceResponseType.Success)
-                        logger.LogDebug("Replicated key/value extend {Key} {Revision} to {Node}", keyValueMessage.Key, keyValueMessage.Revision, raft.GetLocalNodeId());*/
-                    
                     byte[]? messageValue;
-            
+
                     if (MemoryMarshal.TryGetArray(keyValueMessage.Value.Memory, out ArraySegment<byte> segment))
                         messageValue = segment.Array;
                     else
                         messageValue = keyValueMessage.Value.ToByteArray();
-                    
+
                     backgroundWriter.Send(new(
                         BackgroundWriteType.QueueStoreKeyValue,
                         partitionId,
@@ -178,6 +147,9 @@ internal sealed class KeyValueReplicator
                         new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
                         (int)KeyValueState.Set
                     ));
+
+                    if (RangeRouting.IsKeyRange(keySpaceRegistry, keyValueMessage.Key))
+                        writeFrequencyRegistry.GetOrCreate(partitionId).RecordWrite(keyValueMessage.Key);
 
                     return true;
                 }

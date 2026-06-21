@@ -52,6 +52,7 @@ internal sealed class RangeSplitTrigger
     private readonly RangeMapStore rangeMapStore;
     private readonly RangeSplitter splitter;
     private readonly KeyValuesManager manager;
+    private readonly KeyWriteFrequencyRegistry writeFrequencyRegistry;
     private readonly int threshold;
     private readonly int minRangeSize;
     private readonly ILogger<IKahuna> logger;
@@ -61,16 +62,18 @@ internal sealed class RangeSplitTrigger
         RangeMapStore rangeMapStore,
         RangeSplitter splitter,
         KeyValuesManager manager,
+        KeyWriteFrequencyRegistry writeFrequencyRegistry,
         KahunaConfiguration configuration,
         ILogger<IKahuna> logger)
     {
-        this.raft         = raft;
-        this.rangeMapStore = rangeMapStore;
-        this.splitter      = splitter;
-        this.manager       = manager;
-        this.threshold     = configuration.RangeSplitThreshold;
-        this.minRangeSize  = configuration.RangeSplitMinRangeSize;
-        this.logger        = logger;
+        this.raft                   = raft;
+        this.rangeMapStore          = rangeMapStore;
+        this.splitter               = splitter;
+        this.manager                = manager;
+        this.writeFrequencyRegistry = writeFrequencyRegistry;
+        this.threshold              = configuration.RangeSplitThreshold;
+        this.minRangeSize           = configuration.RangeSplitMinRangeSize;
+        this.logger                 = logger;
     }
 
     /// <summary>
@@ -85,6 +88,15 @@ internal sealed class RangeSplitTrigger
         // gracefully when this node is not the P0 leader.
         if (!await raft.AmILeader(RangeMapStore.MetaPartitionId, ct))
             return 0;
+
+        // Decay all write-frequency histograms once per checker pass so counts reflect recent
+        // load rather than lifetime totals. This runs only on the meta-leader node (inside the
+        // AmILeader gate above); follower replicas accumulate un-decayed lifetime counts. On a
+        // meta-leader failover the new trigger node reads those lifetime-weighted counts until a
+        // few passes erode them — the centroid lags recency briefly after failover, which is
+        // acceptable given Decay()'s half-life convergence rate.
+        foreach (KeyValuePair<int, KeyWriteFrequencyTracker> kv in writeFrequencyRegistry.All)
+            kv.Value.Decay();
 
         RangeMap map = rangeMapStore.Current;
 
@@ -127,6 +139,9 @@ internal sealed class RangeSplitTrigger
                 {
                     splitsDone++;
                     logger.LogRangeSplitTriggerSplit(descriptor.KeySpace, splitKey, newId);
+
+                    // Transfer write-frequency histogram to the two child ranges (K1b).
+                    TransferTrackerOnSplit(descriptor, splitKey, newId);
                 }
                 else
                 {
@@ -195,6 +210,57 @@ internal sealed class RangeSplitTrigger
                 break;
         }
 
-        return RangeSplitPolicy.ComputeSplitKey(sample, threshold, minRangeSize);
+        // Look up the write-frequency snapshot for this partition (K1b).
+        // The snapshot may be empty (cold histogram — post-failover blind window or first run);
+        // ComputeSplitKey falls back to the count-based median/percentile path transparently.
+        IReadOnlyDictionary<string, long>? writeFreq =
+            writeFrequencyRegistry.TryGet(descriptor.PartitionId)?.GetSnapshot();
+
+        // TODO K2.3: achievableImbalance is discarded here. Once K2 is built, capture it and
+        // skip the split when imbalance >= RangeSplitPolicy.IndivisibleImbalance so an
+        // all-writes-on-one-key range doesn't re-trigger endlessly.
+        return RangeSplitPolicy.ComputeSplitKey(sample, threshold, minRangeSize, writeFreq, out _);
+    }
+
+    // ── split-tracker transfer (K1b) ─────────────────────────────────────────
+
+    /// <summary>
+    /// After a successful split of <paramref name="parentDescriptor"/> at <paramref name="splitKey"/>,
+    /// partitions the parent's write-frequency tracker into two child trackers keyed by the new
+    /// partition IDs so each child starts with a warm histogram rather than rebuilding from zero.
+    ///
+    /// <para>
+    /// The parent tracker is removed from the registry; the two children (parent-range and
+    /// child-range) are installed under their respective partition IDs. If the parent tracker is
+    /// absent (no writes recorded, or leadership was lost), this is a no-op — both children start
+    /// cold and fall back to the count-based median until their histograms warm up.
+    /// </para>
+    /// </summary>
+    internal void TransferTrackerOnSplit(
+        RangeDescriptor parentDescriptor,
+        string splitKey,
+        int childPartitionId)
+    {
+        KeyWriteFrequencyTracker? parent =
+            writeFrequencyRegistry.TryGet(parentDescriptor.PartitionId);
+
+        if (parent is null)
+            return;
+
+        // Left child: [parentStart, splitKey) stays on the original partition.
+        KeyWriteFrequencyTracker leftTracker =
+            parent.FilterForChild(parentDescriptor.StartKey, splitKey);
+        writeFrequencyRegistry.Replace(parentDescriptor.PartitionId, leftTracker);
+
+        // Right child: [splitKey, parentEnd) moves to the new partition.
+        KeyWriteFrequencyTracker rightTracker =
+            parent.FilterForChild(splitKey, parentDescriptor.EndKey);
+        writeFrequencyRegistry.Replace(childPartitionId, rightTracker);
+
+        // Note: this transfer only updates the trigger node's (meta-leader's) registry. Other
+        // replicas keep the parent-id tracker carrying both halves' keys until their out-of-range
+        // entries decay away. If meta leadership migrates before decay completes, the new trigger
+        // reads the un-split parent tracker for one or more passes — harmless since Decay() heals
+        // it within a few half-lives and the count-based fallback remains correct throughout.
     }
 }

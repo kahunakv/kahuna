@@ -86,6 +86,8 @@ internal sealed class KeyValuesManager : IDisposable
 
     private RangeMergeTrigger? rangeMergeTrigger;
 
+    private readonly KeyWriteFrequencyRegistry writeFrequencyRegistry = new();
+
     /// <summary>
     /// Constructor
     /// </summary>
@@ -151,15 +153,15 @@ internal sealed class KeyValuesManager : IDisposable
         locator = new(this, configuration, raft, interNodeCommunication, keySpaceRegistry, rangeQuiesceStore, logger);
 
         restorer = new(backgroundWriter, raft, logger);
-        replicator = new(backgroundWriter, raft, logger);
+        replicator = new(backgroundWriter, raft, writeFrequencyRegistry, keySpaceRegistry, logger);
         kvStateMachineTransfer = new(this, persistenceBackend, logger);
 
         // RangeSplitter and RangeSplitTrigger both depend on this (KeyValuesManager) being fully
         // constructed, so we assign after all other fields are set.
         rangeSplitter     = new(raft, rangeMapStore, kvStateMachineTransfer, rangeQuiesceStore, this, logger);
-        rangeSplitTrigger = new(raft, rangeMapStore, rangeSplitter, this, configuration, logger);
+        rangeSplitTrigger = new(raft, rangeMapStore, rangeSplitter, this, writeFrequencyRegistry, configuration, logger);
         rangeMerger       = new(raft, rangeMapStore, kvStateMachineTransfer, this, logger);
-        rangeMergeTrigger = new(raft, rangeMapStore, rangeMerger, configuration, logger);
+        rangeMergeTrigger = new(raft, rangeMapStore, rangeMerger, writeFrequencyRegistry, configuration, logger);
 
         // Periodic split checker: fires on every CollectionInterval and calls TriggerAsync.
         // Only executes the actual split work when this node is the dual-leader (guard is inside
@@ -356,7 +358,7 @@ internal sealed class KeyValuesManager : IDisposable
     internal Task<int> TriggerAutoMergeAsync(int minMergeSize, CancellationToken ct = default)
     {
         var cfg = new Configuration.KahunaConfiguration { RangeMergeMinSize = minMergeSize };
-        var trigger = new RangeMergeTrigger(raft, rangeMapStore, rangeMerger!, cfg, logger);
+        var trigger = new RangeMergeTrigger(raft, rangeMapStore, rangeMerger!, writeFrequencyRegistry, cfg, logger);
         return trigger.TriggerAsync(ct);
     }
 
@@ -378,7 +380,7 @@ internal sealed class KeyValuesManager : IDisposable
             RangeSplitThreshold    = threshold,
             RangeSplitMinRangeSize = minRangeSize
         };
-        var trigger = new RangeSplitTrigger(raft, rangeMapStore, rangeSplitter!, this, cfg, logger);
+        var trigger = new RangeSplitTrigger(raft, rangeMapStore, rangeSplitter!, this, writeFrequencyRegistry, cfg, logger);
         return trigger.TriggerAsync(ct);
     }
 

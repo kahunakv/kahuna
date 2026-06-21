@@ -20,11 +20,27 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// 75th-percentile key, which (a) moves the hot tail to the new partition and (b) keeps a
 /// reasonably-sized cold left half.
 /// </para>
+///
+/// <para>
+/// <b>Write-centroid split (K2.4 / K1b):</b> when a <c>writeFrequency</c> map is supplied and
+/// non-empty, the policy finds the split index that most evenly bisects the cumulative write
+/// count across the sample (the write centroid). If the centroid cannot put each child below
+/// <see cref="IndivisibleImbalance"/> the function still returns the best-effort split key but
+/// <paramref name="achievableImbalance"/> is set to the worst-case fraction so callers can apply
+/// the K2.3 indivisibility guard.
+/// </para>
 /// </summary>
 internal static class RangeSplitPolicy
 {
     /// <summary>
-    /// Computes the split key for the given ordered key sample.
+    /// Imbalance fraction at or above which a range is considered indivisible by load
+    /// (K2.3). A value of 1.0 means all writes are on one key.
+    /// </summary>
+    internal const double IndivisibleImbalance = 1.0;
+
+    /// <summary>
+    /// Computes the split key for the given ordered key sample using only key count
+    /// (count-based, unchanged from earlier behaviour).
     /// </summary>
     /// <param name="sample">
     /// Keys in ordinal order, each paired with their <c>LastModified</c> timestamp.
@@ -44,6 +60,46 @@ internal static class RangeSplitPolicy
         int threshold,
         int minRangeSize)
     {
+        return ComputeSplitKey(sample, threshold, minRangeSize, null, out _);
+    }
+
+    /// <summary>
+    /// Computes the split key for the given ordered key sample, optionally using a
+    /// write-frequency histogram to locate the write centroid (K2.4 / K1b).
+    /// </summary>
+    /// <param name="sample">
+    /// Keys in ordinal order, each paired with their <c>LastModified</c> timestamp.
+    /// Must be non-empty and already sorted ascending by key.
+    /// </param>
+    /// <param name="threshold">
+    /// The minimum number of keys a range must contain before a split is triggered.
+    /// If <c>sample.Count &lt; threshold</c> the method returns <c>null</c>.
+    /// </param>
+    /// <param name="minRangeSize">
+    /// Minimum keys each half must have after the split.
+    /// Ensures neither child range is trivially small.
+    /// </param>
+    /// <param name="writeFrequency">
+    /// Optional per-key write-count map (K1b snapshot). When non-null and non-empty the policy
+    /// picks the key that best bisects cumulative writes. When null or empty the policy falls
+    /// back to the count-based median/percentile path.
+    /// </param>
+    /// <param name="achievableImbalance">
+    /// Output: the best achievable write-imbalance fraction in <c>[0.5, 1.0]</c>.
+    /// <c>max(leftWrites, rightWrites) / totalWrites</c> at the chosen split index.
+    /// <c>0</c> when <paramref name="writeFrequency"/> is null or empty (count path).
+    /// Callers use this to enforce the K2.3 indivisibility guard.
+    /// </param>
+    /// <returns>The split key, or <c>null</c> if the range should not be split.</returns>
+    public static string? ComputeSplitKey(
+        IReadOnlyList<(string Key, HLCTimestamp LastModified)> sample,
+        int threshold,
+        int minRangeSize,
+        IReadOnlyDictionary<string, long>? writeFrequency,
+        out double achievableImbalance)
+    {
+        achievableImbalance = 0;
+
         if (sample.Count < threshold)
             return null;
 
@@ -54,6 +110,24 @@ internal static class RangeSplitPolicy
         if (sample.Count < 2 * minRangeSize)
             return null;
 
+        // ── Write-centroid path (K2.4) ─────────────────────────────────────────
+        // Use when the write-frequency histogram is warm (non-empty) and at least some of the
+        // sample keys are present in it, so the centroid is meaningful. Falls back to the
+        // count-based path when the histogram is cold (post-failover blind window).
+        if (writeFrequency is { Count: > 0 })
+        {
+            string? centroidKey = TryComputeWriteCentroid(
+                sample, minRangeSize, writeFrequency, out achievableImbalance);
+
+            if (centroidKey is not null)
+                return centroidKey;
+
+            // Histogram present but no sample keys matched (e.g. histogram is warming up on a
+            // different key set). Fall through to the count-based path.
+            achievableImbalance = 0;
+        }
+
+        // ── Count-based path (unchanged) ──────────────────────────────────────
         int splitIndex = IsMonotonicAppend(sample)
             ? ComputePercentileIndex(sample.Count, 75)
             : ComputePercentileIndex(sample.Count, 50);
@@ -66,6 +140,76 @@ internal static class RangeSplitPolicy
             return null;
 
         return sample[splitIndex].Key;
+    }
+
+    // ── write-centroid helpers ────────────────────────────────────────────────
+
+    /// <summary>
+    /// Finds the split index that best bisects cumulative writes across the ordered sample.
+    /// Returns null when fewer than <c>minRangeSize * 2</c> sample keys have a non-zero
+    /// write count (histogram too sparse to be meaningful).
+    /// </summary>
+    private static string? TryComputeWriteCentroid(
+        IReadOnlyList<(string Key, HLCTimestamp LastModified)> sample,
+        int minRangeSize,
+        IReadOnlyDictionary<string, long> writeFrequency,
+        out double achievableImbalance)
+    {
+        achievableImbalance = 0;
+
+        // Build per-sample-index write counts.
+        long[] weights = new long[sample.Count];
+        long totalWrites = 0;
+
+        for (int i = 0; i < sample.Count; i++)
+        {
+            long w = writeFrequency.TryGetValue(sample[i].Key, out long freq) ? freq : 0;
+            weights[i] = w;
+            totalWrites += w;
+        }
+
+        // No write signal at all — histogram is cold; caller falls back to count-based path.
+        if (totalWrites == 0)
+            return null;
+
+        // Prefix-sum sweep: find the split index i (left = [0..i), right = [i..n)) that
+        // minimises |leftSum − rightSum|, i.e. puts the split at the write centroid.
+        // Pre-seed leftSum with the first minRangeSize elements so the invariant holds:
+        // at the start of iteration i, leftSum = sum(weights[0..i-1]).
+        long leftSum = 0;
+        for (int j = 0; j < minRangeSize; j++)
+            leftSum += weights[j];
+
+        long bestDiff = long.MaxValue;
+        int bestIdx = -1;
+
+        for (int i = minRangeSize; i <= sample.Count - minRangeSize; i++)
+        {
+            // At this point leftSum = sum(weights[0..i-1]) — the left half for split at i.
+            long rightSum = totalWrites - leftSum;
+            long diff = Math.Abs(leftSum - rightSum);
+
+            if (diff < bestDiff)
+            {
+                bestDiff = diff;
+                bestIdx = i;
+            }
+
+            // Advance leftSum for the next iteration: include weights[i] in the left half.
+            leftSum += weights[i];
+        }
+
+        if (bestIdx <= 0 || bestIdx >= sample.Count)
+            return null;
+
+        // Compute and report the achievable imbalance fraction for the chosen split.
+        long bestLeft = 0;
+        for (int i = 0; i < bestIdx; i++)
+            bestLeft += weights[i];
+        long bestRight = totalWrites - bestLeft;
+        achievableImbalance = (double)Math.Max(bestLeft, bestRight) / totalWrites;
+
+        return sample[bestIdx].Key;
     }
 
     /// <summary>

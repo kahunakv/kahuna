@@ -128,17 +128,17 @@ internal sealed class KeyValueProposalActor : IActor<KeyValueProposalRequest>
         if (!result.Success)
         {
             logger.LogWarning("Failed to replicate key/value {Key} Partition={Partition} Status={Status} Ticket={Ticket}", proposal.Key, partitionId, result.Status, result.TicketId);
-            
+
             keyValueActor.Send(new(
                 KeyValueRequestType.ReleaseProposal,
                 HLCTimestamp.Zero,
                 HLCTimestamp.Zero,
-                proposal.Key, 
-                null, 
+                proposal.Key,
+                null,
                 null,
                 -1,
                 KeyValueFlags.None,
-                0, 
+                0,
                 HLCTimestamp.Zero,
                 proposal.Durability,
                 message.ProposalId,
@@ -148,7 +148,7 @@ internal sealed class KeyValueProposalActor : IActor<KeyValueProposalRequest>
 
             return;
         }
-        
+
         keyValueActor.Send(new(
             KeyValueRequestType.CompleteProposal,
             HLCTimestamp.Zero,

@@ -524,7 +524,7 @@ public sealed class TestMembership : BaseCluster
         public void FireMembershipChanged(ClusterMembership membership)
             => membershipHandlers?.Invoke(membership);
 
-        public Task LeaveCluster(bool dispose = false) => leaveTask;
+        public Task LeaveCluster(bool dispose = false, CancellationToken cancellationToken = default) => leaveTask;
         public Task JoinCluster(IEnumerable<string> seeds, CancellationToken ct = default) => Task.CompletedTask;
         public Task JoinCluster(CancellationToken ct = default) => Task.CompletedTask;
 
@@ -591,6 +591,9 @@ public sealed class TestMembership : BaseCluster
         public Task<RaftPartitionLifecycleResult> RemovePartitionAsync(int partitionId, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<RaftPartitionLifecycleResult> SplitPartitionAsync(int sourcePartitionId, int targetPartitionId = 0, RaftSplitPlan? plan = null, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<RaftPartitionLifecycleResult> MergePartitionsAsync(int survivorPartitionId, int sourcePartitionId, RaftMergePlan? plan = null, CancellationToken ct = default) => throw new NotImplementedException();
+        public double GetPartitionLogOpsPerSecond(int partitionId) => 0;
+        public int GetPartitionWalQueueDepth(int partitionId) => 0;
+        public double GetPartitionCommitWaitMs(int partitionId) => 0;
     }
 
     private sealed class CaptureLogger : ILogger<IRaft>
@@ -622,7 +625,7 @@ public sealed class TestMembership : BaseCluster
         public string GetLocalEndpoint() => "localhost:9999";
         public ClusterMemberRole LocalRole => ClusterMemberRole.NotMember;
         public ClusterMembership GetMembership() => new();
-        public Task LeaveCluster(bool dispose = false) => Task.CompletedTask;
+        public Task LeaveCluster(bool dispose = false, CancellationToken cancellationToken = default) => Task.CompletedTask;
 
         public event Func<int, RaftLog, Task<bool>>? OnLogRestored { add { } remove { } }
         public event Func<int, RaftLog, Task<bool>>? OnReplicationReceived { add { } remove { } }
@@ -678,6 +681,9 @@ public sealed class TestMembership : BaseCluster
         public Task<RaftPartitionLifecycleResult> RemovePartitionAsync(int partitionId, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<RaftPartitionLifecycleResult> SplitPartitionAsync(int sourcePartitionId, int targetPartitionId = 0, RaftSplitPlan? plan = null, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<RaftPartitionLifecycleResult> MergePartitionsAsync(int survivorPartitionId, int sourcePartitionId, RaftMergePlan? plan = null, CancellationToken ct = default) => throw new NotImplementedException();
+        public double GetPartitionLogOpsPerSecond(int partitionId) => 0;
+        public int GetPartitionWalQueueDepth(int partitionId) => 0;
+        public double GetPartitionCommitWaitMs(int partitionId) => 0;
     }
 
     private sealed class StubKahunaForE5 : IKahuna

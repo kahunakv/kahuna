@@ -38,6 +38,7 @@ internal sealed class RangeMergeTrigger
     private readonly IRaft raft;
     private readonly RangeMapStore rangeMapStore;
     private readonly RangeMerger merger;
+    private readonly KeyWriteFrequencyRegistry writeFrequencyRegistry;
     private readonly int minMergeSize;
     private readonly ILogger<IKahuna> logger;
 
@@ -48,14 +49,16 @@ internal sealed class RangeMergeTrigger
         IRaft raft,
         RangeMapStore rangeMapStore,
         RangeMerger merger,
+        KeyWriteFrequencyRegistry writeFrequencyRegistry,
         KahunaConfiguration configuration,
         ILogger<IKahuna> logger)
     {
-        this.raft         = raft;
-        this.rangeMapStore = rangeMapStore;
-        this.merger        = merger;
-        this.minMergeSize  = configuration.RangeMergeMinSize;
-        this.logger        = logger;
+        this.raft                   = raft;
+        this.rangeMapStore          = rangeMapStore;
+        this.merger                 = merger;
+        this.writeFrequencyRegistry = writeFrequencyRegistry;
+        this.minMergeSize           = configuration.RangeMergeMinSize;
+        this.logger                 = logger;
     }
 
     /// <summary>
@@ -81,6 +84,7 @@ internal sealed class RangeMergeTrigger
                 if (retryResult.Success)
                 {
                     pendingRemovals.Remove(partId);
+                    writeFrequencyRegistry.Remove(partId);
                     logger.LogRangeMergeTriggerRetryRetired(partId);
                 }
                 else
@@ -132,6 +136,8 @@ internal sealed class RangeMergeTrigger
                 }
                 else
                 {
+                    // Free the write-frequency tracker for the retired partition.
+                    writeFrequencyRegistry.Remove(outcome.RetiredPartitionId);
                     logger.LogRangeMergeTriggerRetired(outcome.RetiredPartitionId, keySpace);
                 }
 

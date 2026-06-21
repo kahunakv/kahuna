@@ -328,7 +328,7 @@ public sealed class TestBackupService : IDisposable
 
         public Task JoinCluster(IEnumerable<string> seeds, CancellationToken ct = default) => Task.CompletedTask;
         public Task JoinCluster(CancellationToken ct = default) => Task.CompletedTask;
-        public Task LeaveCluster(bool dispose = false) => Task.CompletedTask;
+        public Task LeaveCluster(bool dispose = false, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public int GetPartitionKey(string partitionKey) => 0;
         public int GetPrefixPartitionKey(string prefixPartitionKey) => 0;
         public long GetPartitionGeneration(int partitionId) => 0;
@@ -364,5 +364,8 @@ public sealed class TestBackupService : IDisposable
         public Task<RaftPartitionLifecycleResult> RemovePartitionAsync(int partitionId, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<RaftPartitionLifecycleResult> SplitPartitionAsync(int sourcePartitionId, int targetPartitionId = 0, RaftSplitPlan? plan = null, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<RaftPartitionLifecycleResult> MergePartitionsAsync(int survivorPartitionId, int sourcePartitionId, RaftMergePlan? plan = null, CancellationToken ct = default) => throw new NotImplementedException();
+        public double GetPartitionLogOpsPerSecond(int partitionId) => 0;
+        public int GetPartitionWalQueueDepth(int partitionId) => 0;
+        public double GetPartitionCommitWaitMs(int partitionId) => 0;
     }
 }
