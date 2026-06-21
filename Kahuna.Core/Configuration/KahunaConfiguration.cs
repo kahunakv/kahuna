@@ -85,6 +85,65 @@ public sealed class KahunaConfiguration
     /// </summary>
     public int RangeSplitMinRangeSize { get; set; } = 10;
 
+    // ── Load-based split knobs (K2.1) ─────────────────────────────────────────
+    // All off/inert by default so existing deployments are unaffected until opted in.
+    // The load branch of the split trigger (K2.2) gates on rate AND saturation, sourced from the
+    // Kommander per-partition signals (K1a: GetPartitionLogOpsPerSecond / GetPartitionWalQueueDepth
+    // / GetPartitionCommitWaitMs).
+
+    /// <summary>
+    /// Rate gate. A KeyRange partition's log-replication rate (writes/sec, from
+    /// <c>IRaft.GetPartitionLogOpsPerSecond</c>) must be at or above this before a load split is
+    /// considered. <c>0</c> disables load-based splitting entirely (preserving count-only behaviour).
+    /// </summary>
+    public double RangeSplitLoadThreshold { get; set; }
+
+    /// <summary>
+    /// Primary saturation gate. The partition's WAL queue depth (from
+    /// <c>IRaft.GetPartitionWalQueueDepth</c>) must be at or above this before a load split fires.
+    /// Rate alone is never sufficient — it plateaus at the fsync ceiling, so a sustained backlog is
+    /// what distinguishes an overloaded partition from a merely busy one.
+    /// </summary>
+    public int RangeSplitLoadMinQueueDepth { get; set; } = 8;
+
+    /// <summary>
+    /// Optional secondary saturation gate. When greater than <c>0</c>, the partition's commit-wait
+    /// latency (from <c>IRaft.GetPartitionCommitWaitMs</c>) must also be at or above this (ms).
+    /// Off by default: commit-wait is sticky when idle, so it is only ever AND-combined behind the
+    /// rate gate. Prefer <see cref="RangeSplitLoadMinQueueDepth"/> (self-clearing) as the primary.
+    /// </summary>
+    public double RangeSplitLoadMaxCommitWaitMs { get; set; }
+
+    /// <summary>
+    /// Debounce window. The full rate-AND-saturation predicate must hold continuously for at least
+    /// this long before a load split fires, so a single stale or bursty gossiped report cannot trip
+    /// one. Must be at least the gossip + EWMA lag (~10s) of the Kommander signals.
+    /// </summary>
+    public TimeSpan RangeSplitLoadWindow { get; set; } = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// Cadence at which the checker polls the cheap per-partition load signals to maintain each
+    /// descriptor's "hot since" timestamp, decoupled from the slower full key-count sampling pass.
+    /// Polling faster than <see cref="RangeSplitLoadWindow"/> is what makes "sustained for the
+    /// window" measurable.
+    /// </summary>
+    public TimeSpan RangeSplitLoadPollInterval { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Indivisibility guard (K2.3). A range is refused as indivisible when no split key can put each
+    /// child below this fraction of the parent's write rate — i.e. essentially all writes hit one
+    /// key. Catches the "thousands of keys, ~all writes on one" thrash case the key-count guard misses.
+    /// </summary>
+    public double RangeSplitLoadImbalanceMax { get; set; } = 0.8;
+
+    /// <summary>
+    /// Per-descriptor post-split cooldown (K6). A descriptor that just split (parent or either child)
+    /// is not re-evaluated for splitting until this elapses, so a still-hot child does not re-split
+    /// while its predecessor's leadership transfer is in flight. Defaults to roughly Kommander's
+    /// <c>MinLeaderStabilityMs</c> (5s) plus a margin.
+    /// </summary>
+    public TimeSpan RangeSplitSettleWindow { get; set; } = TimeSpan.FromSeconds(10);
+
     /// <summary>
     /// Maximum number of keys a KeyRange descriptor may contain before it is no longer
     /// considered an under-min merge candidate. When two adjacent descriptors both have fewer

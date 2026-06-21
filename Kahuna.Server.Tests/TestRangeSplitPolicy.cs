@@ -234,4 +234,54 @@ public sealed class TestRangeSplitPolicy
         Assert.True(snap.ContainsKey("k0050"));
         Assert.True(snap.ContainsKey("k0090"));
     }
+
+    // ── K2.3 indivisibility guard (policy layer) ─────────────────────────────
+
+    [Fact]
+    public void K23_HighImbalance_MeetsThreshold_IsIndivisible()
+    {
+        // All writes on one key → achievableImbalance close to 1.0.
+        // The trigger guards: if achievableImbalance >= loadImbalanceMax (0.8) → refuse.
+        var sample = MakeSample(100);
+        var freq   = new Dictionary<string, long> { ["k0050"] = 999 };
+
+        RangeSplitPolicy.ComputeSplitKey(
+            sample, threshold: 50, minRangeSize: 5, writeFrequency: freq, out double imbalance);
+
+        // Guard condition from K2.3 (applied in trigger, verified here at policy level):
+        //   loadImbalanceMax = 0.8, achievableImbalance ≈ 0.999 → indivisible
+        const double loadImbalanceMax = 0.8;
+        Assert.True(imbalance > 0 && imbalance >= loadImbalanceMax,
+            $"Expected imbalance > 0 and >= {loadImbalanceMax}, got {imbalance:F3}");
+    }
+
+    [Fact]
+    public void K23_BalancedLoad_BelowMax_IsNotIndivisible()
+    {
+        // Uniform writes → achievableImbalance ≈ 0.5, below any reasonable loadImbalanceMax.
+        var sample = MakeSample(100);
+        var freq   = sample.ToDictionary(e => e.Key, _ => 10L);
+
+        RangeSplitPolicy.ComputeSplitKey(
+            sample, threshold: 50, minRangeSize: 5, writeFrequency: freq, out double imbalance);
+
+        // With uniform weights the best split is near 0.5 — well below 0.8.
+        const double loadImbalanceMax = 0.8;
+        Assert.True(imbalance < loadImbalanceMax,
+            $"Expected imbalance < {loadImbalanceMax}, got {imbalance:F3}");
+    }
+
+    [Fact]
+    public void K23_ColdHistogram_ZeroImbalance_GuardDoesNotApply()
+    {
+        // Cold histogram (null writeFrequency) → achievableImbalance == 0.
+        // The trigger guard requires achievableImbalance > 0, so a cold histogram never
+        // triggers the indivisibility refusal.
+        var sample = MakeSample(100);
+
+        RangeSplitPolicy.ComputeSplitKey(
+            sample, threshold: 50, minRangeSize: 5, writeFrequency: null, out double imbalance);
+
+        Assert.Equal(0, imbalance); // count path, guard must not fire
+    }
 }

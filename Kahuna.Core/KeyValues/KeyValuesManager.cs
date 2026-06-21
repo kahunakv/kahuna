@@ -166,10 +166,24 @@ internal sealed class KeyValuesManager : IDisposable
         // Periodic split checker: fires on every CollectionInterval and calls TriggerAsync.
         // Only executes the actual split work when this node is the dual-leader (guard is inside
         // RangeSplitTrigger.TriggerAsync); on all other nodes it returns 0 immediately.
-        if (configuration.RangeSplitThreshold > 0)
+        // Spawns when either the count-based (K1) or the load-based (K2.1) trigger is enabled.
+        if (configuration.RangeSplitThreshold > 0 || configuration.RangeSplitLoadThreshold > 0)
         {
             actorSystem.Spawn<RangeSplitCheckerActor, RangeSplitCheckerRequest>(
                 "range-split-checker",
+                rangeSplitTrigger,
+                configuration,
+                logger
+            );
+        }
+
+        // K2.2 fast load-poll: fires at RangeSplitLoadPollInterval to evaluate the load predicate
+        // and debounce. Decoupled from the slow count-check cadence so sub-CollectionInterval
+        // windows can be measured. Spawned only when the load branch is enabled.
+        if (configuration.RangeSplitLoadThreshold > 0)
+        {
+            actorSystem.Spawn<RangeSplitLoadCheckerActor, RangeSplitLoadCheckerRequest>(
+                "range-split-load-checker",
                 rangeSplitTrigger,
                 configuration,
                 logger
