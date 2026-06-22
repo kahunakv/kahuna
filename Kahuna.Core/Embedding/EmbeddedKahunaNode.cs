@@ -81,7 +81,16 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             PersistentRevisionCleanupOnWrite = options.PersistentRevisionCleanupOnWrite,
             PitrWindow = options.PitrWindow,
             BaseSnapshotInterval = options.BaseSnapshotInterval,
-            BackupDir = options.BackupDir
+            BackupDir = options.BackupDir,
+            RangeSplitThreshold = options.RangeSplitThreshold,
+            RangeSplitMinRangeSize = options.RangeSplitMinRangeSize,
+            RangeSplitLoadThreshold = options.RangeSplitLoadThreshold,
+            RangeSplitLoadMinQueueDepth = options.RangeSplitLoadMinQueueDepth,
+            RangeSplitLoadMinCommitWaitMs = options.RangeSplitLoadMinCommitWaitMs,
+            RangeSplitLoadWindow = options.RangeSplitLoadWindow,
+            RangeSplitLoadPollInterval = options.RangeSplitLoadPollInterval,
+            RangeSplitLoadImbalanceMax = options.RangeSplitLoadImbalanceMax,
+            RangeSplitSettleWindow = options.RangeSplitSettleWindow
         }, options.WalPath);
 
         this.standaloneComm = new();
@@ -154,7 +163,16 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             PersistentRevisionCleanupOnWrite = options.PersistentRevisionCleanupOnWrite,
             PitrWindow = options.PitrWindow,
             BaseSnapshotInterval = options.BaseSnapshotInterval,
-            BackupDir = options.BackupDir
+            BackupDir = options.BackupDir,
+            RangeSplitThreshold = options.RangeSplitThreshold,
+            RangeSplitMinRangeSize = options.RangeSplitMinRangeSize,
+            RangeSplitLoadThreshold = options.RangeSplitLoadThreshold,
+            RangeSplitLoadMinQueueDepth = options.RangeSplitLoadMinQueueDepth,
+            RangeSplitLoadMinCommitWaitMs = options.RangeSplitLoadMinCommitWaitMs,
+            RangeSplitLoadWindow = options.RangeSplitLoadWindow,
+            RangeSplitLoadPollInterval = options.RangeSplitLoadPollInterval,
+            RangeSplitLoadImbalanceMax = options.RangeSplitLoadImbalanceMax,
+            RangeSplitSettleWindow = options.RangeSplitSettleWindow
         }, options.WalPath);
 
         this.standaloneComm = null;
@@ -292,7 +310,15 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             // O(N×M) heartbeat pressure that quiescence targets does not apply. Disabling it also
             // avoids the SWIM dependency quiescence requires (PingInterval > 0 and
             // < StartElectionTimeout), which the embedded fast timers would otherwise violate.
-            EnableQuiescence = false
+            EnableQuiescence = false,
+            // Leader balancer (K5): off by default; opt in via EmbeddedKahunaOptions.
+            EnableLeaderBalancer = options.EnableLeaderBalancer,
+            LeaderBalancerReportInterval = options.LeaderBalancerReportInterval,
+            LeaderBalancerInterval = options.LeaderBalancerInterval,
+            LeaderBalancerReportTtl = options.LeaderBalancerReportTtl,
+            MinLeaderStabilityMs = (long)options.MinLeaderStability.TotalMilliseconds,
+            LeaderBalancerOpsWeight = options.LeaderBalancerOpsWeight,
+            LeaderBalancerQueueWeight = options.LeaderBalancerQueueWeight
         };
     }
 
@@ -309,6 +335,14 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
         if (options.InitialPartitions <= 0)
             throw new ArgumentException("InitialPartitions must be greater than zero.", nameof(options));
+
+        if (options.EnableLeaderBalancer &&
+            options.LeaderBalancerReportInterval >= options.LeaderBalancerReportTtl)
+            throw new ArgumentException(
+                $"LeaderBalancerReportInterval ({options.LeaderBalancerReportInterval}) must be less than " +
+                $"LeaderBalancerReportTtl ({options.LeaderBalancerReportTtl}); " +
+                "otherwise the balancer treats every node as silent and never rebalances.",
+                nameof(options));
     }
 
     private static void EnsureStorageDirectories(EmbeddedKahunaOptions options)

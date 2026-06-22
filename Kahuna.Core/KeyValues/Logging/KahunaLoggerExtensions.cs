@@ -215,6 +215,12 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Warning, Message = "RangeSplitTrigger: SplitAsync failed for {Space} at {Key}: {Status}")]
     public static partial void LogRangeSplitTriggerSplitFailed(this ILogger<IKahuna> logger, string space, string key, string status);
 
+    [LoggerMessage(Level = LogLevel.Debug, Message = "RangeSplitTrigger: {Space} P{PartitionId} descriptor stale (gen advanced); skipping split")]
+    public static partial void LogRangeSplitTriggerDescriptorStale(this ILogger<IKahuna> logger, string space, int partitionId);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "RangeSplitTrigger: failed to remove orphaned P{PartitionId} after SplitAsync failure")]
+    public static partial void LogRangeSplitTriggerOrphanRemoveFailed(this ILogger<IKahuna> logger, int partitionId, Exception ex);
+
     [LoggerMessage(Level = LogLevel.Warning, Message = "RangeSplitTrigger: {Space} P{PartitionId} indivisible (imbalance={Imbalance:F3} >= max={Max:F3}); skipping")]
     public static partial void LogRangeSplitTriggerIndivisible(this ILogger<IKahuna> logger, string space, int partitionId, double imbalance, double max);
 

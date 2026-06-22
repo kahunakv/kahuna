@@ -818,9 +818,9 @@ public sealed class TestRangeSplit : BaseCluster
     /// return <c>MustRetry</c>. After the split window closes the same write succeeds.
     ///
     /// <para>
-    /// The test uses <c>SplitAsyncWithHook</c> to inject a direct <c>LocateAndTrySetKeyValue</c>
-    /// call while the quiesce is active (between catch-up import and cutover). After the split
-    /// completes the same write must succeed on the node that ran the split.
+    /// The test uses <c>ForceSplitAtKeyAsync</c> with a <c>duringQuiesce</c> hook to inject a
+    /// direct <c>LocateAndTrySetKeyValue</c> call while the quiesce is active (between catch-up
+    /// import and cutover). After the split completes the same write must succeed.
     /// </para>
     /// </summary>
     [Fact]
@@ -836,29 +836,29 @@ public sealed class TestRangeSplit : BaseCluster
 
         try
         {
-            (IRaft sysRaft, KahunaManager _) = await LeaderOf(SystemPartition, nodes);
-            int newPartitionId = RangeSplitter.ComputeNextPartitionId(metaLeader.RangeMapStore.Current);
-
-            RaftPartitionLifecycleResult createResult =
-                await sysRaft.CreatePartitionAsync(newPartitionId, RaftRoutingMode.Unrouted, null, ct);
-            Assert.True(createResult.Success);
-
-            // Re-acquire meta leader: CreatePartitionAsync can trigger re-elections.
-            (_, metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
-
             KeyValueResponseType? duringQuiesceResult = null;
 
-            SplitOutcome outcome = await metaLeader.SplitAsyncWithHook(
-                Space, Space + "/m", newPartitionId,
-                duringQuiesce: async () =>
-                {
-                    // Direct write into the quiesced range: must be bounced with MustRetry.
-                    (KeyValueResponseType rt, _, _) = await metaLeader.LocateAndTrySetKeyValue(
-                        HLCTimestamp.Zero, key, V(val),
-                        null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
-                    duringQuiesceResult = rt;
-                },
-                ct);
+            SplitOutcome outcome = SplitOutcome.PartitionCreationFailed;
+            for (int attempt = 0; attempt < 5; attempt++)
+            {
+                (_, metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+                outcome = await metaLeader.ForceSplitAtKeyAsync(
+                    Space, Space + "/m",
+                    duringQuiesce: async () =>
+                    {
+                        // Direct write into the quiesced range: must be bounced with MustRetry.
+                        (KeyValueResponseType rt, _, _) = await metaLeader.LocateAndTrySetKeyValue(
+                            HLCTimestamp.Zero, key, V(val),
+                            null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+                        duringQuiesceResult = rt;
+                    },
+                    ct);
+                if (outcome.IsSuccess || outcome.Status == SplitStatus.NoRange ||
+                    outcome.Status == SplitStatus.InvalidSplitKey ||
+                    outcome.Status == SplitStatus.BelowMinRangeSize)
+                    break;
+                await Task.Delay(100, ct);
+            }
 
             Assert.True(outcome.IsSuccess, $"Split failed: {outcome.Status}");
             Assert.Equal(KeyValueResponseType.MustRetry, duringQuiesceResult);
@@ -868,6 +868,209 @@ public sealed class TestRangeSplit : BaseCluster
                 HLCTimestamp.Zero, key, V(val),
                 null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
             Assert.Equal(KeyValueResponseType.Set, afterRt);
+        }
+        finally
+        {
+            await LeaveCluster(nodes[0].Item1, nodes[1].Item1, nodes[2].Item1);
+        }
+    }
+
+    // ── K4 — ForceSplitAtKeyAsync (threshold-bypassing split seam) ───────────────
+
+    /// <summary>
+    /// K4 acceptance: a small range (20 keys — far below the default 1000-key threshold) can be
+    /// split at a caller-supplied key via <c>ForceSplitAtKeyAsync</c> without generating
+    /// threshold-sized data. After the split: the range map has two descriptors, both children
+    /// are non-empty, and every pre-split key is still readable.
+    /// </summary>
+    [Fact]
+    public async Task K4_ForceSplitAtKey_SmallRange_SplitsAndKeepsAllKeys()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // 20 keys: 10 below and 10 above the chosen split point t:s/m.
+        string[] keysBelow = Enumerable.Range(0, 10).Select(i => $"{Space}/a{i:D2}").ToArray();
+        string[] keysAbove = Enumerable.Range(0, 10).Select(i => $"{Space}/p{i:D2}").ToArray();
+        const string splitKey = Space + "/m";
+
+        ((IRaft, KahunaManager)[] nodes, KahunaManager metaLeader, _, _) =
+            await Setup(keysBelow, keysAbove);
+
+        try
+        {
+            // Re-resolve the meta/system leader immediately before the split — Setup() caches it
+            // early and election churn during the write phase can move leadership to another node.
+            // Retry on PartitionCreationFailed (follower) and CutoverFailed (transient leader
+            // change between CreatePartitionAsync and MutateAsync), mirroring SplitViaLeaders.
+            SplitOutcome outcome = SplitOutcome.PartitionCreationFailed;
+            for (int attempt = 0; attempt < 5; attempt++)
+            {
+                (_, metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+                outcome = await metaLeader.ForceSplitAtKeyAsync(Space, splitKey, ct: ct);
+                if (outcome.IsSuccess || outcome.Status == SplitStatus.NoRange ||
+                    outcome.Status == SplitStatus.InvalidSplitKey ||
+                    outcome.Status == SplitStatus.BelowMinRangeSize)
+                    break;
+                await Task.Delay(100, ct);
+            }
+
+            Assert.True(outcome.IsSuccess, $"ForceSplitAtKeyAsync failed: {outcome.Status}");
+            Assert.True(outcome.NewPartitionId > RangeMapStore.FirstDataPartitionId,
+                "Expected new partition ID above the initial data partition");
+
+            // Wait for the split map to propagate to all nodes.
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+            {
+                await WaitUntilAsync(() =>
+                    kahuna.RangeMapStore.Current.Descriptors.Count(d => d.KeySpace == Space) == 2);
+            }
+
+            RangeMap finalMap = metaLeader.RangeMapStore.Current;
+
+            // No gap / no overlap.
+            Assert.True(finalMap.IsValid, "RangeMap.Validate() failed after forced split");
+
+            // Left half stays on original partition.
+            foreach (string k in keysBelow)
+            {
+                RangeDescriptor? d = finalMap.Find(Space, k);
+                Assert.NotNull(d);
+                Assert.Equal(RangeMapStore.FirstDataPartitionId, d.PartitionId);
+            }
+
+            // Right half moves to the new partition.
+            foreach (string k in keysAbove)
+            {
+                RangeDescriptor? d = finalMap.Find(Space, k);
+                Assert.NotNull(d);
+                Assert.Equal(outcome.NewPartitionId, d.PartitionId);
+            }
+
+            // Every key is still readable after the split.
+            foreach (string k in keysBelow.Concat(keysAbove))
+            {
+                string key = k;
+                (KeyValueResponseType rt, _) = await metaLeader.TryGetValue(
+                    HLCTimestamp.Zero, key, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent);
+                Assert.Equal(KeyValueResponseType.Get, rt);
+            }
+        }
+        finally
+        {
+            await LeaveCluster(nodes[0].Item1, nodes[1].Item1, nodes[2].Item1);
+        }
+    }
+
+    // ── ExecuteSplitAsync defensive branches (stale guard + orphan cleanup) ──────
+
+    /// <summary>
+    /// Regression for <c>ExecuteSplitAsync</c>'s stale-descriptor guard. When a descriptor's
+    /// generation no longer matches the live map (e.g. the other checker cadence already split that
+    /// range), the trigger must skip <b>without</b> creating a partition. The normal cadences only
+    /// hit this under a race, so we drive it directly: split once to bump the live generation, then
+    /// invoke <c>ExecuteSplitAsync</c> with the captured pre-split (now stale) descriptor.
+    /// </summary>
+    [Fact]
+    public async Task ExecuteSplit_StaleDescriptor_SkipsWithoutCreatingPartition()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        string[] keysBelow = Enumerable.Range(0, 10).Select(i => $"{Space}/a{i:D2}").ToArray();
+        string[] keysAbove = Enumerable.Range(0, 10).Select(i => $"{Space}/p{i:D2}").ToArray();
+
+        ((IRaft, KahunaManager)[] nodes, KahunaManager metaLeader, _, _) =
+            await Setup(keysBelow, keysAbove);
+
+        try
+        {
+            // Capture the original descriptor (generation 1) before any split.
+            RangeDescriptor stale = metaLeader.RangeMapStore.Current.Find(Space, Space + "/a00")!;
+            Assert.Equal(1, stale.Generation);
+
+            // Real split so the live partition-1 descriptor advances to generation 2.
+            SplitOutcome first = SplitOutcome.PartitionCreationFailed;
+            for (int attempt = 0; attempt < 5; attempt++)
+            {
+                (_, metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+                first = await metaLeader.ForceSplitAtKeyAsync(Space, Space + "/m", ct: ct);
+                if (first.IsSuccess) break;
+                await Task.Delay(100, ct);
+            }
+            Assert.True(first.IsSuccess, $"setup split failed: {first.Status}");
+
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                await WaitUntilAsync(() =>
+                    kahuna.RangeMapStore.Current.Descriptors.Count(d => d.KeySpace == Space) == 2);
+
+            (_, metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+            int descriptorsBefore = metaLeader.RangeMapStore.Current.Descriptors.Count(d => d.KeySpace == Space);
+            int nextIdBefore = RangeSplitter.ComputeNextPartitionId(metaLeader.RangeMapStore.Current);
+
+            // Drive the guard with the stale (gen-1) descriptor: live partition-1 is now gen 2.
+            bool didSplit = await metaLeader.RangeSplitTrigger.ExecuteSplitAsync(stale, Space + "/g", ct);
+
+            Assert.False(didSplit, "stale descriptor must not split");
+
+            // No partition created, no cutover: descriptor count and next id unchanged.
+            Assert.Equal(descriptorsBefore,
+                metaLeader.RangeMapStore.Current.Descriptors.Count(d => d.KeySpace == Space));
+            Assert.Equal(nextIdBefore, RangeSplitter.ComputeNextPartitionId(metaLeader.RangeMapStore.Current));
+        }
+        finally
+        {
+            await LeaveCluster(nodes[0].Item1, nodes[1].Item1, nodes[2].Item1);
+        }
+    }
+
+    /// <summary>
+    /// Regression for <c>ExecuteSplitAsync</c>'s orphan-cleanup branch. When <c>SplitAsync</c> fails
+    /// <b>after</b> the new partition was created (here: a split key past every key, so the right
+    /// half is empty → <c>BelowMinRangeSize</c>), the created partition must be removed so its id is
+    /// not leaked. With leadership confirmed before the call, <c>CreatePartitionAsync</c> succeeds and
+    /// the failure is forced downstream, so a generation of 0 afterwards proves the orphan was created
+    /// and then removed — break the cleanup and the partition would linger with a non-zero generation.
+    /// </summary>
+    /// <remarks>
+    /// Note: we do not assert the freed id is immediately reusable by a fresh split. Re-creating a
+    /// just-removed partition id requires the system partition-map change to converge across nodes,
+    /// which takes far longer than a test should block on; in production splits are minutes apart so
+    /// the id is reusable by then. The orphan-removed check is the reliable regression signal.
+    /// </remarks>
+    [Fact]
+    public async Task ExecuteSplit_SplitAsyncFailsAfterCreate_RemovesOrphanPartition()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        string[] keysBelow = Enumerable.Range(0, 10).Select(i => $"{Space}/a{i:D2}").ToArray();
+        string[] keysAbove = Enumerable.Range(0, 10).Select(i => $"{Space}/p{i:D2}").ToArray();
+
+        ((IRaft, KahunaManager)[] nodes, KahunaManager metaLeader, _, _) =
+            await Setup(keysBelow, keysAbove);
+
+        try
+        {
+            (IRaft sysRaft, KahunaManager leader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+            metaLeader = leader;
+
+            // Confirm leadership immediately before the call so CreatePartitionAsync actually runs
+            // (rather than throwing follower → caught → skipped, which would create no orphan).
+            Assert.True(await sysRaft.AmILeader(SystemPartition, ct), "expected the resolved node to lead P0");
+
+            RangeDescriptor current = metaLeader.RangeMapStore.Current.Find(Space, Space + "/a00")!;
+            int expectedNewId = RangeSplitter.ComputeNextPartitionId(metaLeader.RangeMapStore.Current);
+
+            // "/zzz" is past every key → right half empty → SplitAsync returns BelowMinRangeSize
+            // AFTER CreatePartitionAsync already created expectedNewId. Cleanup must remove it.
+            bool didSplit = await metaLeader.RangeSplitTrigger.ExecuteSplitAsync(current, Space + "/zzz", ct);
+
+            Assert.False(didSplit, "split with an empty half must fail");
+
+            // Orphan removed on the system-leader node (generation reads back as 0 = not present).
+            // If the cleanup branch is broken the created partition lingers here with a non-zero gen.
+            await WaitUntilAsync(() => sysRaft.GetPartitionGeneration(expectedNewId) == 0);
+
+            // Map unchanged (no cutover) — still a single descriptor.
+            Assert.Equal(1, metaLeader.RangeMapStore.Current.Descriptors.Count(d => d.KeySpace == Space));
         }
         finally
         {

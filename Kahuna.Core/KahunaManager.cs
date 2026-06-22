@@ -1277,6 +1277,9 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <summary>The split-transaction executor.</summary>
     internal RangeSplitter RangeSplitter => keyValues.RangeSplitter;
 
+    /// <summary>The auto-split trigger (exposed for regression tests of <c>ExecuteSplitAsync</c>).</summary>
+    internal RangeSplitTrigger RangeSplitTrigger => keyValues.RangeSplitTrigger;
+
     /// <summary>The merge-transaction executor.</summary>
     internal RangeMerger RangeMerger => keyValues.RangeMerger;
 
@@ -1327,17 +1330,17 @@ public sealed class KahunaManager : IKahuna, IDisposable
             KeyValueDurability.Persistent, routedGeneration);
 
     /// <summary>
-    /// Test seam: executes a split with a callback invoked inside the quiesce window (after catch-up
-    /// import, before cutover). Lets F3 tests race a direct write into the window to verify
-    /// <c>MustRetry</c> is returned.
+    /// K4 test seam: forces a split of the descriptor covering <paramref name="splitKey"/> at that
+    /// exact key without requiring a pre-computed partition ID or threshold-sized data.
+    /// Handles <c>ComputeNextPartitionId → CreatePartitionAsync → SplitAsync</c> internally.
+    /// Pass <paramref name="duringQuiesce"/> to race an operation into the quiesce window.
     /// </summary>
-    internal Task<SplitOutcome> SplitAsyncWithHook(
+    internal Task<SplitOutcome> ForceSplitAtKeyAsync(
         string keySpace,
         string splitKey,
-        int newPartitionId,
-        Func<Task> duringQuiesce,
+        Func<Task>? duringQuiesce = null,
         CancellationToken ct = default) =>
-        keyValues.RangeSplitter.SplitAsync(keySpace, splitKey, newPartitionId, duringQuiesce, ct);
+        keyValues.ForceSplitAtKeyAsync(keySpace, splitKey, duringQuiesce, ct);
 
     /// <summary>
     /// Test seam (F5): <paramref name="beforeQuery"/> is called before each descriptor's paged query

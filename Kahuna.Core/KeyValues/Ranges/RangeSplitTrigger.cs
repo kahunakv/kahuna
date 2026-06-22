@@ -61,9 +61,17 @@ internal sealed class RangeSplitTrigger
     // Load-branch config (K2.1 / K2.2)
     private readonly double loadThreshold;
     private readonly int    loadMinQueueDepth;
-    private readonly double loadMaxCommitWaitMs;
+    private readonly double loadMinCommitWaitMs;
     private readonly TimeSpan loadWindow;
     private readonly double loadImbalanceMax;
+
+    // Post-split settle window (K6)
+    private readonly TimeSpan settleWindow;
+
+    // Per-descriptor post-split cooldown (K6): partitionId → Stopwatch timestamp of the split.
+    // Both the left child (which inherits the parent partition ID) and the right child (newId) are
+    // recorded so neither can re-split until settleWindow elapses. Cleared on leadership loss.
+    private readonly ConcurrentDictionary<int, long> settledAt = new();
 
     // Per-descriptor debounce state for the load branch (K2.2):
     //   partitionId → Stopwatch.GetTimestamp() when the AND-predicate first held.
@@ -113,9 +121,10 @@ internal sealed class RangeSplitTrigger
         this.minRangeSize           = configuration.RangeSplitMinRangeSize;
         this.loadThreshold          = configuration.RangeSplitLoadThreshold;
         this.loadMinQueueDepth      = configuration.RangeSplitLoadMinQueueDepth;
-        this.loadMaxCommitWaitMs    = configuration.RangeSplitLoadMaxCommitWaitMs;
+        this.loadMinCommitWaitMs    = configuration.RangeSplitLoadMinCommitWaitMs;
         this.loadWindow             = configuration.RangeSplitLoadWindow;
         this.loadImbalanceMax       = configuration.RangeSplitLoadImbalanceMax;
+        this.settleWindow           = configuration.RangeSplitSettleWindow;
         this.logger                 = logger;
     }
 
@@ -164,6 +173,11 @@ internal sealed class RangeSplitTrigger
             {
                 ct.ThrowIfCancellationRequested();
 
+                // Skip descriptors that just split (K6 settle window): a still-hot child must not
+                // re-split while its predecessor's leadership transfer is in flight.
+                if (IsInSettleWindow(descriptor.PartitionId))
+                    continue;
+
                 // Skip if K2.3 refused this descriptor recently — avoids re-sampling 4096 keys
                 // every CollectionInterval for a persistently-skewed range.
                 if (IsInIndivisibleCooldown(descriptor.PartitionId))
@@ -202,9 +216,10 @@ internal sealed class RangeSplitTrigger
 
         if (!await raft.AmILeader(RangeMapStore.MetaPartitionId, ct))
         {
-            // Lost meta-leadership — reset all debounce state so a future promotion starts clean
-            // and doesn't inherit a hotSince timestamp from the previous leadership tenure.
+            // Lost meta-leadership — reset all debounce and cooldown state so a future promotion
+            // starts clean and doesn't inherit timestamps from the previous leadership tenure.
             hotSince.Clear();
+            settledAt.Clear();
             return 0;
         }
 
@@ -217,6 +232,10 @@ internal sealed class RangeSplitTrigger
             ct.ThrowIfCancellationRequested();
 
             int partitionId = descriptor.PartitionId;
+
+            // Skip descriptors still within the post-split settle window (K6).
+            if (IsInSettleWindow(partitionId))
+                continue;
 
             if (!EvaluateLoadPredicate(partitionId, out double ops, out int depth, out double commitWait))
             {
@@ -261,17 +280,46 @@ internal sealed class RangeSplitTrigger
     /// load checker cadences cannot race on the same newId computation.
     /// </summary>
     /// <returns><c>true</c> if the split succeeded.</returns>
-    private async Task<bool> ExecuteSplitAsync(RangeDescriptor descriptor, string splitKey, CancellationToken ct)
+    /// <remarks>
+    /// Internal (not private) so regression tests can drive the create-split-cleanup path directly
+    /// with a crafted descriptor — exercising the stale-descriptor guard and the orphan-cleanup
+    /// branch, which the normal trigger cadences only reach under a hard-to-reproduce race.
+    /// </remarks>
+    internal async Task<bool> ExecuteSplitAsync(RangeDescriptor descriptor, string splitKey, CancellationToken ct)
     {
         logger.LogRangeSplitTriggerSplitting(descriptor.KeySpace, descriptor.StartKey ?? "−∞", descriptor.EndKey ?? "+∞", splitKey);
 
         await splitLock.WaitAsync(ct);
         try
         {
-            int newId = RangeSplitter.ComputeNextPartitionId(rangeMapStore.Current);
+            // Re-read the map snapshot inside the lock so ComputeNextPartitionId sees any
+            // partition created by a concurrent split that beat us here.
+            RangeMap freshMap = rangeMapStore.Current;
+            int newId = RangeSplitter.ComputeNextPartitionId(freshMap);
 
-            RaftPartitionLifecycleResult createResult =
-                await raft.CreatePartitionAsync(newId, RaftRoutingMode.Unrouted, null, ct);
+            // Stale-descriptor guard: if another branch already split this range its generation
+            // has advanced in the live map. Bail out before issuing CreatePartitionAsync.
+            RangeDescriptor? live = freshMap.Descriptors.FirstOrDefault(d => d.PartitionId == descriptor.PartitionId);
+            if (live is null || live.Generation != descriptor.Generation)
+            {
+                logger.LogRangeSplitTriggerDescriptorStale(descriptor.KeySpace, descriptor.PartitionId);
+                return false;
+            }
+
+            RaftPartitionLifecycleResult createResult;
+            try
+            {
+                createResult = await raft.CreatePartitionAsync(newId, RaftRoutingMode.Unrouted, null, ct);
+            }
+            catch (RaftException ex)
+            {
+                // CreatePartitionAsync throws when this node lost system-partition leadership in
+                // the window between the AmILeader(0) check and here. Treat as a clean skip —
+                // the next checker tick will re-evaluate with a fresh AmILeader check.
+                logger.LogRangeSplitTriggerCreateFailed(newId, descriptor.KeySpace);
+                logger.LogDebug(ex, "RangeSplitTrigger: CreatePartitionAsync({Id}) threw — likely lost leadership", newId);
+                return false;
+            }
 
             if (!createResult.Success)
             {
@@ -284,6 +332,19 @@ internal sealed class RangeSplitTrigger
             if (!outcome.IsSuccess)
             {
                 logger.LogRangeSplitTriggerSplitFailed(descriptor.KeySpace, splitKey, outcome.Status.ToString());
+
+                // Best-effort cleanup: remove the partition we just created to avoid leaving it
+                // permanently orphaned (unreferenced by routing). Log but swallow any failure —
+                // the partition stays unreferenced until an operator or future cleanup removes it.
+                try
+                {
+                    await raft.RemovePartitionAsync(newId, ct);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogRangeSplitTriggerOrphanRemoveFailed(newId, ex);
+                }
+
                 return false;
             }
 
@@ -291,6 +352,13 @@ internal sealed class RangeSplitTrigger
 
             // Transfer write-frequency histogram to the two child ranges (K1b).
             TransferTrackerOnSplit(descriptor, splitKey, newId);
+
+            // Record settle-window timestamps for both children (K6): the left child
+            // inherits the parent partition ID; the right child gets newId. Neither
+            // will be re-evaluated until settleWindow elapses.
+            long splitTick = Stopwatch.GetTimestamp();
+            settledAt[descriptor.PartitionId] = splitTick;
+            settledAt[newId]                  = splitTick;
 
             // Reset load-branch debounce and indivisibility cooldown for the left child
             // (which inherits the parent partition ID) — the split changed the situation.
@@ -303,6 +371,22 @@ internal sealed class RangeSplitTrigger
         {
             splitLock.Release();
         }
+    }
+
+    /// <summary>
+    /// Returns <c>true</c> when <paramref name="partitionId"/> is still within the post-split
+    /// settle window (K6), meaning neither branch should re-evaluate it yet.
+    /// </summary>
+    private bool IsInSettleWindow(int partitionId)
+    {
+        if (settleWindow <= TimeSpan.Zero)
+            return false;
+
+        if (!settledAt.TryGetValue(partitionId, out long splitTick))
+            return false;
+
+        double elapsedMs = (Stopwatch.GetTimestamp() - splitTick) * 1000.0 / Stopwatch.Frequency;
+        return elapsedMs < settleWindow.TotalMilliseconds;
     }
 
     /// <summary>
@@ -337,7 +421,7 @@ internal sealed class RangeSplitTrigger
             return false;
 
         // Optional secondary saturation gate. AND-combined so it can never fire on its own.
-        if (loadMaxCommitWaitMs > 0 && commitWait < loadMaxCommitWaitMs)
+        if (loadMinCommitWaitMs > 0 && commitWait < loadMinCommitWaitMs)
             return false;
 
         return true;

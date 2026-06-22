@@ -112,7 +112,7 @@ public sealed class KahunaConfiguration
     /// Off by default: commit-wait is sticky when idle, so it is only ever AND-combined behind the
     /// rate gate. Prefer <see cref="RangeSplitLoadMinQueueDepth"/> (self-clearing) as the primary.
     /// </summary>
-    public double RangeSplitLoadMaxCommitWaitMs { get; set; }
+    public double RangeSplitLoadMinCommitWaitMs { get; set; }
 
     /// <summary>
     /// Debounce window. The full rate-AND-saturation predicate must hold continuously for at least

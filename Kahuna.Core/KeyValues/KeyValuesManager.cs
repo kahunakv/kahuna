@@ -6,6 +6,7 @@ using Polly.Contrib.WaitAndRetry;
 
 using Kommander;
 using Kommander.Data;
+using Kommander.System;
 using Kommander.Time;
 using Kommander.Support.Parallelization;
 
@@ -355,6 +356,9 @@ internal sealed class KeyValuesManager : IDisposable
     /// <summary>The split-transaction executor. Splits a key range at a given split key.</summary>
     internal RangeSplitter RangeSplitter => rangeSplitter!;
 
+    /// <summary>The auto-split trigger (exposed for regression tests of <c>ExecuteSplitAsync</c>).</summary>
+    internal RangeSplitTrigger RangeSplitTrigger => rangeSplitTrigger!;
+
     /// <summary>The merge-transaction executor. Merges adjacent under-min ranges.</summary>
     internal RangeMerger RangeMerger => rangeMerger!;
 
@@ -396,6 +400,44 @@ internal sealed class KeyValuesManager : IDisposable
         };
         var trigger = new RangeSplitTrigger(raft, rangeMapStore, rangeSplitter!, this, writeFrequencyRegistry, cfg, logger);
         return trigger.TriggerAsync(ct);
+    }
+
+    /// <summary>
+    /// K4 test seam: forces a split of the descriptor covering <paramref name="splitKey"/> at that
+    /// exact key, bypassing any key-count threshold. Handles the full
+    /// <c>ComputeNextPartitionId → CreatePartitionAsync → SplitAsync</c> sequence internally, so
+    /// callers do not need to manage partition IDs. Optionally invokes
+    /// <paramref name="duringQuiesce"/> inside the quiesce window (after catch-up import, before
+    /// cutover) for F3-style race tests.
+    /// </summary>
+    internal async Task<SplitOutcome> ForceSplitAtKeyAsync(
+        string keySpace,
+        string splitKey,
+        Func<Task>? duringQuiesce = null,
+        CancellationToken ct = default)
+    {
+        int newId = RangeSplitter.ComputeNextPartitionId(rangeMapStore.Current);
+
+        RaftPartitionLifecycleResult createResult;
+        try
+        {
+            createResult = await raft.CreatePartitionAsync(newId, RaftRoutingMode.Unrouted, null, ct);
+        }
+        catch (RaftException ex)
+        {
+            // CreatePartitionAsync throws when this node is not the system-partition leader.
+            // Return a clean failure so the caller can re-resolve the leader and retry.
+            logger.LogWarning(ex, "ForceSplitAtKeyAsync: CreatePartitionAsync({Id}) threw for {Space}/{Key}", newId, keySpace, splitKey);
+            return SplitOutcome.PartitionCreationFailed;
+        }
+
+        if (!createResult.Success)
+        {
+            logger.LogWarning("ForceSplitAtKeyAsync: CreatePartitionAsync({Id}) failed for {Space}/{Key}", newId, keySpace, splitKey);
+            return SplitOutcome.PartitionCreationFailed;
+        }
+
+        return await rangeSplitter!.SplitAsync(keySpace, splitKey, newId, duringQuiesce, ct);
     }
 
     private IActorRef<BalancingActor<KeyValueProposalActor, KeyValueProposalRequest>, KeyValueProposalRequest> GetProposalRouter(
