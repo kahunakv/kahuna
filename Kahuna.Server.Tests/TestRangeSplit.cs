@@ -1056,9 +1056,10 @@ public sealed class TestRangeSplit : BaseCluster
             InitialPartitions = 1,
             Storage         = "memory",
             WalStorage      = "memory",
-            RangeSplitThreshold   = 5,
+            RangeSplitThreshold    = 5,
             RangeSplitMinRangeSize = 2,
             RangeSplitSettleWindow = TimeSpan.FromMilliseconds(300),
+            MinLeaderStability     = TimeSpan.FromMilliseconds(200),
         });
 
         await node.StartAsync(ct);
