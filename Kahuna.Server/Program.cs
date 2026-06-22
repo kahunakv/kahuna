@@ -71,6 +71,7 @@ else
         {
             "rocksdb" => new RocksDbWAL(path: opts.WalPath, revision: opts.WalRevision, logger, syncWrites: walSyncWrites),
             "sqlite" => new SqliteWAL(path: opts.WalPath, revision: opts.WalRevision, logger, syncWrites: walSyncWrites),
+            "memory" => new InMemoryWAL(logger),
             _ => throw new KahunaServerException("Invalid WAL storage")
         };
 

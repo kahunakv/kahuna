@@ -25,7 +25,7 @@ public sealed class KahunaCommandLineOptions
     [Option("https-certificate-password", Required = false, HelpText = "Password of the HTTPs certificate", Default = "")]
     public string HttpsCertificatePassword { get; set; } = "";
     
-    [Option("storage", Required = false, HelpText = "Storage (rocksdb, sqlite)", Default = "rocksdb")]
+    [Option("storage", Required = false, HelpText = "Storage (rocksdb, sqlite, memory)", Default = "rocksdb")]
     public string Storage { get; set; } = "";
     
     [Option("storage-path", Required = false, HelpText = "Storage path")]
@@ -34,7 +34,7 @@ public sealed class KahunaCommandLineOptions
     [Option("storage-revision", Required = false, HelpText = "Storage revision")]
     public string StorageRevision{ get; set; } = "";
     
-    [Option("wal-storage", Required = false, HelpText = "WAL storage (rocksdb, sqlite)", Default = "rocksdb")]
+    [Option("wal-storage", Required = false, HelpText = "WAL storage (rocksdb, sqlite, memory)", Default = "rocksdb")]
     public string WalStorage { get; set; } = "";
     
     [Option("wal-path", Required = false, HelpText = "WAL path")]

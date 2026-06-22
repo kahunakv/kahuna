@@ -420,10 +420,20 @@ internal sealed class GrpcServerBatcher
 
     private async Task Receive(List<GrpcServerBatcherItem> requests)
     {
+        // Capture the size before dispatching: RunBatch returns the list to the pool
+        // (which clears it), so reading requests.Count afterwards always sees 0.
+        int batchSize = requests.Count;
+
         await RunBatch(requests);
-        
-        if (requests.Count < 10)
-            await Task.Delay(Random.Shared.Next(1, 2)); // Force large batches
+
+        // Coalescing throttle. Pausing briefly here lets the next batch accumulate more
+        // items, which improves throughput under sustained pipelined load. But it adds
+        // pure latency when there is nothing to coalesce, so only pay it when the batch we
+        // just sent already carried multiple items (evidence of real backpressure). An
+        // isolated write — the size-1 batch that dominates low-concurrency workloads — is
+        // dispatched with no artificial delay.
+        if (batchSize > 1 && batchSize < 10)
+            await Task.Delay(1);
     }
 
     private async Task RunBatch(List<GrpcServerBatcherItem> requests)
