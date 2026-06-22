@@ -35,6 +35,11 @@ if (opts is null)
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
+// Suppress noisy per-request ASP.NET Core infrastructure logs (request start/end,
+// endpoint routing). These fire on every Raft Ping and flood the console in a cluster.
+builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Warning);
+builder.Logging.AddFilter("Microsoft.AspNetCore.Routing.EndpointMiddleware", LogLevel.Warning);
+
 if (string.IsNullOrEmpty(opts.RaftNodeName))
     opts.RaftNodeName = Environment.MachineName;
 
