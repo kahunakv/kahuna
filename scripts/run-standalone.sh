@@ -34,7 +34,7 @@ RESTORE_STORAGE_PATH="${KAHUNA_RESTORE_STORAGE_PATH:-}"
 PUBLISH_DIR="/tmp/kahuna-standalone-bin"
 
 echo ">> Publishing Kahuna.Server to ${PUBLISH_DIR}"
-dotnet publish Kahuna.Server/Kahuna.Server.csproj -c Release -o "${PUBLISH_DIR}"
+dotnet publish Kahuna.Server/Kahuna.Server.csproj -c Release -p:PublishReadyToRun=true -o "${PUBLISH_DIR}"
 
 cp "${REPO_ROOT}/certs/development-certificate.pfx" "${PUBLISH_DIR}/certificate.pfx"
 
