@@ -185,6 +185,13 @@ public sealed class EmbeddedKahunaOptions
     public double RangeSplitLoadImbalanceMax { get; set; } = 0.8;
 
     /// <summary>
+    /// How long to suppress count-branch re-sampling after an indivisibility refusal. During this
+    /// window the descriptor is skipped entirely, avoiding an expensive 4096-key scan every
+    /// <c>CollectionInterval</c> for a persistently hot-key range.
+    /// </summary>
+    public TimeSpan RangeSplitIndivisibleCooldown { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>
     /// Per-descriptor cooldown after a split during which the descriptor is not re-evaluated.
     /// Prevents rapid re-splitting of a still-hot child before its new leader stabilises.
     /// </summary>

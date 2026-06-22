@@ -40,6 +40,13 @@ internal sealed class RangeMergeTrigger
     private readonly RangeMerger merger;
     private readonly KeyWriteFrequencyRegistry writeFrequencyRegistry;
     private readonly int minMergeSize;
+
+    // When > 0, a partition whose log-ops/sec meets or exceeds this value is considered warm
+    // and is ineligible for merging. Merging a warm partition would cause the merged result to
+    // immediately re-trigger a load split, oscillating between merge and split indefinitely.
+    // Mirrors RangeSplitLoadThreshold so the two triggers share the same rate boundary.
+    private readonly double loadThreshold;
+
     private readonly ILogger<IKahuna> logger;
 
     // Partition IDs whose RemovePartitionAsync failed on a prior tick; retried each invocation.
@@ -58,6 +65,7 @@ internal sealed class RangeMergeTrigger
         this.merger                 = merger;
         this.writeFrequencyRegistry = writeFrequencyRegistry;
         this.minMergeSize           = configuration.RangeMergeMinSize;
+        this.loadThreshold          = configuration.RangeSplitLoadThreshold;
         this.logger                 = logger;
     }
 
@@ -114,6 +122,18 @@ internal sealed class RangeMergeTrigger
             {
                 ct.ThrowIfCancellationRequested();
 
+                // Load-warm guard: refuse to merge when either partition is actively serving
+                // load at or above the split rate threshold. Merging a warm partition would
+                // produce a combined range that immediately re-triggers a load split, bouncing
+                // between merge and split indefinitely. Skip — the pair will be re-evaluated
+                // on the next checker tick once both sides have cooled.
+                if (IsWarm(left.PartitionId) || IsWarm(right.PartitionId))
+                {
+                    logger.LogRangeMergeTriggerWarmSkipped(keySpace, left.PartitionId, right.PartitionId);
+                    RangeSplitMetrics.MergeWarmSkips.Add(1, new KeyValuePair<string, object?>("keyspace", keySpace));
+                    continue;
+                }
+
                 logger.LogRangeMergeTriggerMerging(keySpace, left.StartKey ?? "-inf", left.EndKey, left.PartitionId, right.StartKey, right.EndKey ?? "+inf", right.PartitionId);
 
                 MergeOutcome outcome = await merger.MergeAsync(keySpace, left, right, ct);
@@ -151,5 +171,25 @@ internal sealed class RangeMergeTrigger
         }
 
         return mergesDone;
+    }
+
+    /// <summary>
+    /// Returns <c>true</c> when <paramref name="partitionId"/> is currently serving load at or
+    /// above the split rate threshold, making it ineligible for merging.
+    /// Always <c>false</c> when <see cref="loadThreshold"/> is zero (load-based splitting disabled).
+    /// </summary>
+    /// <remarks>
+    /// Intentionally rate-only (not the full rate-AND-saturation predicate used by the split
+    /// trigger). A partition busy enough to approach the split threshold should not be merged
+    /// regardless of queue depth or commit-wait, so the simpler check is both correct and safely
+    /// over-conservative: it refuses merges on partitions that are busy-but-not-yet-splitting,
+    /// which is the right direction to err in for oscillation prevention.
+    /// </remarks>
+    private bool IsWarm(int partitionId)
+    {
+        if (loadThreshold <= 0)
+            return false;
+
+        return raft.GetPartitionLogOpsPerSecond(partitionId) >= loadThreshold;
     }
 }

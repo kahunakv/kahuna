@@ -130,7 +130,7 @@ ThreadPool.SetMinThreads(256, 128);
 // @todo Review certificate validation
 FlurlHttp.Clients.WithDefaults(x => x.ConfigureInnerHandler(ih => ih.ServerCertificateCustomValidationCallback = (a, b, c, d) => true));
 
-builder.Services.AddSingleton(ConfigurationValidator.Validate(new()
+KahunaConfiguration kahunaConfiguration = ConfigurationValidator.Validate(new()
 {
     HttpsCertificate = opts.HttpsCertificate,
     HttpsCertificatePassword = opts.HttpsCertificatePassword,
@@ -152,7 +152,11 @@ builder.Services.AddSingleton(ConfigurationValidator.Validate(new()
     PersistentRevisionCleanupOnWrite = opts.GetPersistentRevisionCleanupOnWrite(),
     PitrWindow = TimeSpan.FromSeconds(opts.PitrWindowSeconds),
     BaseSnapshotInterval = TimeSpan.FromSeconds(opts.BaseSnapshotIntervalSeconds)
-}, opts.WalPath));
+}, opts.WalPath);
+
+ConfigurationValidator.ValidateSettleWindow(kahunaConfiguration, opts.RaftMinLeaderStabilityMs);
+
+builder.Services.AddSingleton(kahunaConfiguration);
 
 // Start server
 WebApplication app = builder.Build();

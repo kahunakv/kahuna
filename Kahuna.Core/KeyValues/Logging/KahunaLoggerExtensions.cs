@@ -224,8 +224,14 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Warning, Message = "RangeSplitTrigger: {Space} P{PartitionId} indivisible (imbalance={Imbalance:F3} >= max={Max:F3}); skipping")]
     public static partial void LogRangeSplitTriggerIndivisible(this ILogger<IKahuna> logger, string space, int partitionId, double imbalance, double max);
 
+    [LoggerMessage(Level = LogLevel.Information, Message = "RangeMergeTrigger: {Space} skipping merge of P{LeftId}+P{RightId} — at least one partition is warm (ops ≥ split threshold); merge would re-trigger split")]
+    public static partial void LogRangeMergeTriggerWarmSkipped(this ILogger<IKahuna> logger, string space, int leftId, int rightId);
+
     [LoggerMessage(Level = LogLevel.Information, Message = "RangeSplitTrigger: {Space} P{PartitionId} load-hot for {ElapsedMs:F0} ms (ops={Ops:F1}/s depth={Depth} commitWait={CommitWait:F1} ms) — triggering split")]
     public static partial void LogRangeSplitTriggerLoadHot(this ILogger<IKahuna> logger, string space, int partitionId, double elapsedMs, double ops, int depth, double commitWait);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "RangeSplitTrigger: {Space} P{PartitionId} load-hot but no active peer nodes visible — skipping split (no relocation target; split would add Raft overhead with zero relief)")]
+    public static partial void LogRangeSplitTriggerLoadNoReliefTarget(this ILogger<IKahuna> logger, string space, int partitionId);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "RangeSplitLoadChecker: performed {Count} load-triggered split(s)")]
     public static partial void LogRangeSplitLoadCheckerPerformed(this ILogger<IKahuna> logger, int count);

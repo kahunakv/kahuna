@@ -90,6 +90,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             RangeSplitLoadWindow = options.RangeSplitLoadWindow,
             RangeSplitLoadPollInterval = options.RangeSplitLoadPollInterval,
             RangeSplitLoadImbalanceMax = options.RangeSplitLoadImbalanceMax,
+            RangeSplitIndivisibleCooldown = options.RangeSplitIndivisibleCooldown,
             RangeSplitSettleWindow = options.RangeSplitSettleWindow
         }, options.WalPath);
 
@@ -172,6 +173,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             RangeSplitLoadWindow = options.RangeSplitLoadWindow,
             RangeSplitLoadPollInterval = options.RangeSplitLoadPollInterval,
             RangeSplitLoadImbalanceMax = options.RangeSplitLoadImbalanceMax,
+            RangeSplitIndivisibleCooldown = options.RangeSplitIndivisibleCooldown,
             RangeSplitSettleWindow = options.RangeSplitSettleWindow
         }, options.WalPath);
 
@@ -343,6 +345,17 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
                 $"LeaderBalancerReportTtl ({options.LeaderBalancerReportTtl}); " +
                 "otherwise the balancer treats every node as silent and never rebalances.",
                 nameof(options));
+
+        try
+        {
+            ConfigurationValidator.ValidateSettleWindow(
+                new() { RangeSplitSettleWindow = options.RangeSplitSettleWindow },
+                (long)options.MinLeaderStability.TotalMilliseconds);
+        }
+        catch (KahunaServerException ex)
+        {
+            throw new ArgumentException(ex.Message, nameof(options));
+        }
     }
 
     private static void EnsureStorageDirectories(EmbeddedKahunaOptions options)

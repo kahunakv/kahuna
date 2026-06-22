@@ -67,6 +67,27 @@ public static class ConfigurationValidator
         return configuration;
     }
 
+    /// <summary>
+    /// Validates that <see cref="KahunaConfiguration.RangeSplitSettleWindow"/> is at least as long
+    /// as <paramref name="minLeaderStabilityMs"/> (the Raft leader-stability gate). A shorter settle
+    /// window allows re-splitting before the new partition's leader has stabilised, which defeats
+    /// the cooldown entirely. Call this after both <see cref="KahunaConfiguration"/> and
+    /// <c>RaftConfiguration</c> are constructed, passing <c>RaftConfiguration.MinLeaderStabilityMs</c>.
+    /// No-op when either value is zero (feature disabled).
+    /// </summary>
+    /// <exception cref="KahunaServerException">Thrown when the constraint is violated.</exception>
+    public static void ValidateSettleWindow(KahunaConfiguration configuration, long minLeaderStabilityMs)
+    {
+        if (minLeaderStabilityMs <= 0 || configuration.RangeSplitSettleWindow <= TimeSpan.Zero)
+            return;
+
+        if (configuration.RangeSplitSettleWindow.TotalMilliseconds < minLeaderStabilityMs)
+            throw new KahunaServerException(
+                $"RangeSplitSettleWindow ({configuration.RangeSplitSettleWindow.TotalMilliseconds:F0} ms) " +
+                $"must be at least MinLeaderStabilityMs ({minLeaderStabilityMs} ms); " +
+                "a shorter window allows re-splitting before the new partition's leader has stabilised.");
+    }
+
     private static void ValidatePersistentRevisionRetention(KahunaConfiguration configuration)
     {
         if (configuration.PersistentRevisionRetentionCount < 0)

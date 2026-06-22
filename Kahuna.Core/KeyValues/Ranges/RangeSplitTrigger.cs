@@ -79,17 +79,14 @@ internal sealed class RangeSplitTrigger
     private readonly ConcurrentDictionary<int, long> hotSince = new();
 
     // Per-descriptor indivisibility refusal cooldown: partitionId → Stopwatch timestamp of last refusal.
-    // After a split is refused as indivisible, the count branch skips sampling for IndivisibleCooldown
+    // After a split is refused as indivisible, the count branch skips sampling for indivisibleCooldown
     // so a persistently-skewed large range is not re-sampled+re-logged every CollectionInterval.
     // The load branch is already rate-limited by the hotSince reset on refusal (one re-attempt
     // per loadWindow); this dict adds the same protection for the count branch.
     // Cleared when a split succeeds (histogram transferred, situation changed).
     private readonly ConcurrentDictionary<int, long> indivisibleAt = new();
 
-    // How long to suppress count-branch re-sampling after an indivisibility refusal.
-    // ~5× the default CollectionInterval (60 s); long enough to avoid spam while short enough
-    // that a genuine load shift (hot-key traffic stops, histogram decays) is re-evaluated.
-    private static readonly TimeSpan IndivisibleCooldown = TimeSpan.FromMinutes(5);
+    private readonly TimeSpan indivisibleCooldown;
 
     // Serializes the create-partition + split-async region across both checker cadences.
     // RangeSplitCheckerActor (count, ~60s) and RangeSplitLoadCheckerActor (load, ~5s) are
@@ -124,6 +121,7 @@ internal sealed class RangeSplitTrigger
         this.loadMinCommitWaitMs    = configuration.RangeSplitLoadMinCommitWaitMs;
         this.loadWindow             = configuration.RangeSplitLoadWindow;
         this.loadImbalanceMax       = configuration.RangeSplitLoadImbalanceMax;
+        this.indivisibleCooldown    = configuration.RangeSplitIndivisibleCooldown;
         this.settleWindow           = configuration.RangeSplitSettleWindow;
         this.logger                 = logger;
     }
@@ -188,7 +186,10 @@ internal sealed class RangeSplitTrigger
                 // Skip descriptors that just split (settle window): a still-hot child must not
                 // re-split while its predecessor's leadership transfer is in flight.
                 if (IsInSettleWindow(descriptor.PartitionId))
+                {
+                    RangeSplitMetrics.SettleSkips.Add(1, new KeyValuePair<string, object?>("keyspace", descriptor.KeySpace));
                     continue;
+                }
 
                 // Skip if the indivisibility guard refused this descriptor recently — avoids
                 // re-sampling 4096 keys every CollectionInterval for a persistently-skewed range.
@@ -247,7 +248,10 @@ internal sealed class RangeSplitTrigger
 
             // Skip descriptors still within the post-split settle window.
             if (IsInSettleWindow(partitionId))
+            {
+                RangeSplitMetrics.SettleSkips.Add(1, new KeyValuePair<string, object?>("keyspace", descriptor.KeySpace));
                 continue;
+            }
 
             if (!EvaluateLoadPredicate(partitionId, out double ops, out int depth, out double commitWait))
             {
@@ -265,6 +269,28 @@ internal sealed class RangeSplitTrigger
 
             // Debounce window satisfied — log using the values already read by EvaluateLoadPredicate.
             logger.LogRangeSplitTriggerLoadHot(descriptor.KeySpace, partitionId, elapsedMs, ops, depth, commitWait);
+
+            // Relief guard: a load split only redistributes pressure when the new child's leader
+            // can land on a different node. Without a viable relocation target the split adds
+            // Raft consensus overhead with zero throughput benefit — the parent and child both run
+            // on the same saturated node. Skip when no peer has been heard from within the
+            // debounce window (single-node cluster, or balancer disabled and all peers silent).
+            // Reset the debounce so the check repeats after a full loadWindow rather than every
+            // poll tick.
+            //
+            // Liveness proxy, not placement guarantee: GetActiveNodes > 0 confirms at least one
+            // peer is alive, but does not guarantee the balancer will actually move the child
+            // there (e.g. EnableLeaderBalancer = false with live peers — heartbeats pass the
+            // guard, yet the split lands on the same node). That residual falls to the operator
+            // enabling the leader balancer alongside RangeSplitLoadThreshold; this guard closes
+            // only the clearest case (no live peers at all).
+            if (raft.GetActiveNodes(loadWindow).Count == 0)
+            {
+                logger.LogRangeSplitTriggerLoadNoReliefTarget(descriptor.KeySpace, partitionId);
+                RangeSplitMetrics.NoReliefSkips.Add(1, new KeyValuePair<string, object?>("keyspace", descriptor.KeySpace));
+                hotSince.TryRemove(partitionId, out _);
+                continue;
+            }
 
             // Load branch uses 2*minRangeSize as the effective threshold — a small-but-hot range
             // can split even if it is far below the count threshold.
@@ -377,6 +403,8 @@ internal sealed class RangeSplitTrigger
             hotSince.TryRemove(descriptor.PartitionId, out _);
             indivisibleAt.TryRemove(descriptor.PartitionId, out _);
 
+            RangeSplitMetrics.Splits.Add(1, new KeyValuePair<string, object?>("keyspace", descriptor.KeySpace));
+
             return true;
         }
         finally
@@ -411,7 +439,7 @@ internal sealed class RangeSplitTrigger
         HashSet<int> activeIds = map.Descriptors.Select(d => d.PartitionId).ToHashSet();
         long now = Stopwatch.GetTimestamp();
         double settleMs      = settleWindow.TotalMilliseconds;
-        double cooldownMs    = IndivisibleCooldown.TotalMilliseconds;
+        double cooldownMs    = indivisibleCooldown.TotalMilliseconds;
 
         foreach (int id in settledAt.Keys)
         {
@@ -438,7 +466,7 @@ internal sealed class RangeSplitTrigger
 
     /// <summary>
     /// Returns <c>true</c> when the descriptor's last indivisibility refusal is still within the
-    /// <see cref="IndivisibleCooldown"/> window, meaning the count branch should skip sampling.
+    /// <see cref="indivisibleCooldown"/> window, meaning the count branch should skip sampling.
     /// </summary>
     private bool IsInIndivisibleCooldown(int partitionId)
     {
@@ -446,7 +474,7 @@ internal sealed class RangeSplitTrigger
             return false;
 
         double elapsedMs = (Stopwatch.GetTimestamp() - refusedTick) * 1000.0 / Stopwatch.Frequency;
-        return elapsedMs < IndivisibleCooldown.TotalMilliseconds;
+        return elapsedMs < indivisibleCooldown.TotalMilliseconds;
     }
 
     /// <summary>
@@ -552,6 +580,7 @@ internal sealed class RangeSplitTrigger
         {
             logger.LogRangeSplitTriggerIndivisible(descriptor.KeySpace, descriptor.PartitionId, achievableImbalance, loadImbalanceMax);
             indivisibleAt[descriptor.PartitionId] = Stopwatch.GetTimestamp();
+            RangeSplitMetrics.IndivisibleRefusals.Add(1, new KeyValuePair<string, object?>("keyspace", descriptor.KeySpace));
             return null;
         }
 
