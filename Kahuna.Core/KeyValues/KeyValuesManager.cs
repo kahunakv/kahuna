@@ -3065,5 +3065,9 @@ internal sealed class KeyValuesManager : IDisposable
         return min;
     }
 
-    public void Dispose() => rangeMapStore.Dispose();
+    public void Dispose()
+    {
+        rangeMapStore.Dispose();
+        rangeSplitTrigger?.Dispose();
+    }
 }

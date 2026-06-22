@@ -40,7 +40,7 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// rows, sampling must be redirected to that leader instead.
 /// </para>
 /// </summary>
-internal sealed class RangeSplitTrigger
+internal sealed class RangeSplitTrigger : IDisposable
 {
     /// <summary>Keys fetched per sample page.</summary>
     private const int SamplePageSize = 512;
@@ -355,7 +355,7 @@ internal sealed class RangeSplitTrigger
                 // the window between the AmILeader(0) check and here. Treat as a clean skip —
                 // the next checker tick will re-evaluate with a fresh AmILeader check.
                 logger.LogRangeSplitTriggerCreateFailed(newId, descriptor.KeySpace);
-                logger.LogDebug(ex, "RangeSplitTrigger: CreatePartitionAsync({Id}) threw — likely lost leadership", newId);
+                logger.LogRangeSplitTriggerCreateThrew(ex, newId);
                 return false;
             }
 
@@ -628,4 +628,6 @@ internal sealed class RangeSplitTrigger
         // reads the un-split parent tracker for one or more passes — harmless since Decay() heals
         // it within a few half-lives and the count-based fallback remains correct throughout.
     }
+
+    public void Dispose() => splitLock.Dispose();
 }

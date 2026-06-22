@@ -25,6 +25,9 @@ namespace Kahuna.Server.Tests;
 [Collection("ClusterTests")]
 public sealed class TestMembership : BaseCluster
 {
+    private static readonly string[] ThreeNodePeers = ["localhost:8001", "localhost:8002", "localhost:8003"];
+    private static readonly string[] SingleSeed = ["localhost:8001"];
+
     private readonly ILogger<IRaft> raftLogger;
     private readonly ILogger<IKahuna> kahunaLogger;
 
@@ -52,7 +55,7 @@ public sealed class TestMembership : BaseCluster
         {
             (IRaft raft4, IKahuna kahuna4) = BuildNode(interNodeComm, raftComm, walStorage,
                 nodeId: 4, port: 8004,
-                peers: new[] { "localhost:8001", "localhost:8002", "localhost:8003" },
+                peers: ThreeNodePeers,
                 raftLogger, kahunaLogger);
 
             raftComm.SetNodes(new Dictionary<string, IRaft>
@@ -78,7 +81,7 @@ public sealed class TestMembership : BaseCluster
                 TestContext.Current.CancellationToken);
 
             // JoinCluster(seeds) blocks until node4 is promoted to Voter.
-            await raft4.JoinCluster(new[] { "localhost:8001" }, TestContext.Current.CancellationToken);
+            await raft4.JoinCluster(SingleSeed, TestContext.Current.CancellationToken);
 
             Assert.Equal(ClusterMemberRole.Voter, raft4.LocalRole);
 
@@ -125,7 +128,7 @@ public sealed class TestMembership : BaseCluster
                 raft1.GetMembership().MembershipVersion,
                 raft2.GetMembership().MembershipVersion);
 
-            await raft3.LeaveCluster(dispose: false);
+            await raft3.LeaveCluster(dispose: false, TestContext.Current.CancellationToken);
 
             await WaitUntilAsync(() =>
             {
@@ -158,7 +161,7 @@ public sealed class TestMembership : BaseCluster
         {
             await LeaveClusterSingle(raft1);
             await LeaveClusterSingle(raft2);
-            try { await raft3.LeaveCluster(dispose: true); } catch { }
+            try { await raft3.LeaveCluster(dispose: true, TestContext.Current.CancellationToken); } catch { }
         }
     }
 
@@ -204,7 +207,7 @@ public sealed class TestMembership : BaseCluster
             raftComm.HealPartition("localhost:8003");
             await LeaveClusterSingle(raft1);
             await LeaveClusterSingle(raft2);
-            try { await raft3.LeaveCluster(dispose: true); } catch { }
+            try { await raft3.LeaveCluster(dispose: true, TestContext.Current.CancellationToken); } catch { }
         }
     }
 
@@ -241,7 +244,7 @@ public sealed class TestMembership : BaseCluster
 
             (IRaft raft4, IKahuna kahuna4) = BuildNode(interNodeComm, raftComm, walStorage,
                 nodeId: 4, port: 8004,
-                peers: new[] { "localhost:8001", "localhost:8002", "localhost:8003" },
+                peers: ThreeNodePeers,
                 raftLogger, kahunaLogger);
 
             raftComm.SetNodes(new Dictionary<string, IRaft>
@@ -261,7 +264,7 @@ public sealed class TestMembership : BaseCluster
                 TestContext.Current.CancellationToken);
 
             // JoinCluster(seeds) blocks until node4 is promoted to Voter.
-            await raft4.JoinCluster(new[] { "localhost:8001" }, TestContext.Current.CancellationToken);
+            await raft4.JoinCluster(SingleSeed, TestContext.Current.CancellationToken);
 
             // Read every pre-join key through node4. The values were committed (Persistent)
             // before the join, so they must be routed to — and served from — the owning
@@ -339,7 +342,7 @@ public sealed class TestMembership : BaseCluster
 
             // Brief pause for in-flight messages to drain; short enough to stay well below
             // the SWIM eviction window (separate mechanism, not triggered here).
-            await Task.Delay(500);
+            await Task.Delay(500, TestContext.Current.CancellationToken);
 
             ClusterMembership after = raft1.GetMembership();
 
@@ -468,7 +471,7 @@ public sealed class TestMembership : BaseCluster
         {
             // 3→2: graceful leave must be committed (MembershipVersion advances).
             long v0 = raft1.GetMembership().MembershipVersion;
-            await raft3.LeaveCluster(dispose: false);
+            await raft3.LeaveCluster(dispose: false, TestContext.Current.CancellationToken);
 
             await WaitUntilAsync(() =>
             {
@@ -481,7 +484,7 @@ public sealed class TestMembership : BaseCluster
             Assert.True(v1 > v0);
 
             // 2→1: permitted — stays above the zero-voter floor.
-            await raft2.LeaveCluster(dispose: false);
+            await raft2.LeaveCluster(dispose: false, TestContext.Current.CancellationToken);
 
             await WaitUntilAsync(() =>
             {
@@ -496,7 +499,7 @@ public sealed class TestMembership : BaseCluster
             // 1→0: InsufficientVoters — Kommander absorbs the refusal inside LeaveCluster,
             // which must return without throwing (non-fatal shutdown path).
             long vBefore = raft1.GetMembership().MembershipVersion;
-            await raft1.LeaveCluster(dispose: false);
+            await raft1.LeaveCluster(dispose: false, TestContext.Current.CancellationToken);
 
             // No RemoveMember was committed: version unchanged, node1 still a Voter.
             ClusterMembership after = raft1.GetMembership();
