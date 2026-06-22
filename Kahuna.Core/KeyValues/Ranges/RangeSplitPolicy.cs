@@ -22,19 +22,19 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// </para>
 ///
 /// <para>
-/// <b>Write-centroid split (K2.4 / K1b):</b> when a <c>writeFrequency</c> map is supplied and
+/// <b>Write-centroid split:</b> when a <c>writeFrequency</c> map is supplied and
 /// non-empty, the policy finds the split index that most evenly bisects the cumulative write
 /// count across the sample (the write centroid). If the centroid cannot put each child below
 /// <see cref="IndivisibleImbalance"/> the function still returns the best-effort split key but
 /// <paramref name="achievableImbalance"/> is set to the worst-case fraction so callers can apply
-/// the K2.3 indivisibility guard.
+/// the indivisibility guard.
 /// </para>
 /// </summary>
 internal static class RangeSplitPolicy
 {
     /// <summary>
-    /// Imbalance fraction at or above which a range is considered indivisible by load
-    /// (K2.3). A value of 1.0 means all writes are on one key.
+    /// Imbalance fraction at or above which a range is considered indivisible by load.
+    /// A value of 1.0 means all writes are on one key.
     /// </summary>
     internal const double IndivisibleImbalance = 1.0;
 
@@ -65,7 +65,7 @@ internal static class RangeSplitPolicy
 
     /// <summary>
     /// Computes the split key for the given ordered key sample, optionally using a
-    /// write-frequency histogram to locate the write centroid (K2.4 / K1b).
+    /// write-frequency histogram to locate the write centroid.
     /// </summary>
     /// <param name="sample">
     /// Keys in ordinal order, each paired with their <c>LastModified</c> timestamp.
@@ -80,7 +80,7 @@ internal static class RangeSplitPolicy
     /// Ensures neither child range is trivially small.
     /// </param>
     /// <param name="writeFrequency">
-    /// Optional per-key write-count map (K1b snapshot). When non-null and non-empty the policy
+    /// Optional per-key write-count map snapshot. When non-null and non-empty the policy
     /// picks the key that best bisects cumulative writes. When null or empty the policy falls
     /// back to the count-based median/percentile path.
     /// </param>
@@ -88,7 +88,7 @@ internal static class RangeSplitPolicy
     /// Output: the best achievable write-imbalance fraction in <c>[0.5, 1.0]</c>.
     /// <c>max(leftWrites, rightWrites) / totalWrites</c> at the chosen split index.
     /// <c>0</c> when <paramref name="writeFrequency"/> is null or empty (count path).
-    /// Callers use this to enforce the K2.3 indivisibility guard.
+    /// Callers use this to enforce the indivisibility guard.
     /// </param>
     /// <returns>The split key, or <c>null</c> if the range should not be split.</returns>
     public static string? ComputeSplitKey(
@@ -110,7 +110,7 @@ internal static class RangeSplitPolicy
         if (sample.Count < 2 * minRangeSize)
             return null;
 
-        // ── Write-centroid path (K2.4) ─────────────────────────────────────────
+        // ── Write-centroid path ────────────────────────────────────────────────
         // Use when the write-frequency histogram is warm (non-empty) and at least some of the
         // sample keys are present in it, so the centroid is meaningful. Falls back to the
         // count-based path when the histogram is cold (post-failover blind window).

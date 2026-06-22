@@ -12,7 +12,7 @@ namespace Kahuna.Server.KeyValues.Ranges;
 
 /// <summary>
 /// Per-partition, in-memory write-frequency tracker used exclusively to locate the
-/// write centroid for a load-based range split (K1b).
+/// write centroid for a load-based range split.
 ///
 /// <para>
 /// Design properties:

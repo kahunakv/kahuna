@@ -311,7 +311,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             // avoids the SWIM dependency quiescence requires (PingInterval > 0 and
             // < StartElectionTimeout), which the embedded fast timers would otherwise violate.
             EnableQuiescence = false,
-            // Leader balancer (K5): off by default; opt in via EmbeddedKahunaOptions.
+            // Leader balancer: off by default; opt in via EmbeddedKahunaOptions.
             EnableLeaderBalancer = options.EnableLeaderBalancer,
             LeaderBalancerReportInterval = options.LeaderBalancerReportInterval,
             LeaderBalancerInterval = options.LeaderBalancerInterval,

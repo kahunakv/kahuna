@@ -12,7 +12,7 @@ namespace Kahuna.Server.KeyValues.Ranges;
 
 /// <summary>
 /// Node-wide registry that maps Raft partition IDs to their
-/// <see cref="KeyWriteFrequencyTracker"/> instances (K1b).
+/// <see cref="KeyWriteFrequencyTracker"/> instances.
 ///
 /// <para>
 /// One tracker per partition is created on first write and lives until the partition is

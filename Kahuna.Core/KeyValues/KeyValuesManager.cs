@@ -167,7 +167,7 @@ internal sealed class KeyValuesManager : IDisposable
         // Periodic split checker: fires on every CollectionInterval and calls TriggerAsync.
         // Only executes the actual split work when this node is the dual-leader (guard is inside
         // RangeSplitTrigger.TriggerAsync); on all other nodes it returns 0 immediately.
-        // Spawns when either the count-based (K1) or the load-based (K2.1) trigger is enabled.
+        // Spawns when either the count-based or the load-based trigger is enabled.
         if (configuration.RangeSplitThreshold > 0 || configuration.RangeSplitLoadThreshold > 0)
         {
             actorSystem.Spawn<RangeSplitCheckerActor, RangeSplitCheckerRequest>(
@@ -178,7 +178,7 @@ internal sealed class KeyValuesManager : IDisposable
             );
         }
 
-        // K2.2 fast load-poll: fires at RangeSplitLoadPollInterval to evaluate the load predicate
+        // Fast load-poll: fires at RangeSplitLoadPollInterval to evaluate the load predicate
         // and debounce. Decoupled from the slow count-check cadence so sub-CollectionInterval
         // windows can be measured. Spawned only when the load branch is enabled.
         if (configuration.RangeSplitLoadThreshold > 0)
@@ -403,7 +403,7 @@ internal sealed class KeyValuesManager : IDisposable
     }
 
     /// <summary>
-    /// K4 test seam: forces a split of the descriptor covering <paramref name="splitKey"/> at that
+    /// Test seam: forces a split of the descriptor covering <paramref name="splitKey"/> at that
     /// exact key, bypassing any key-count threshold. Handles the full
     /// <c>ComputeNextPartitionId → CreatePartitionAsync → SplitAsync</c> sequence internally, so
     /// callers do not need to manage partition IDs. Optionally invokes

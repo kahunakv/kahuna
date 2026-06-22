@@ -7,7 +7,7 @@ using Kahuna.Server.KeyValues.Logging;
 namespace Kahuna.Server.KeyValues.Ranges;
 
 /// <summary>
-/// Periodically invokes <see cref="RangeSplitTrigger.LoadCheckAsync"/> to evaluate the K2.2
+/// Periodically invokes <see cref="RangeSplitTrigger.LoadCheckAsync"/> to evaluate the
 /// load branch for auto-split. Runs at <see cref="KahunaConfiguration.RangeSplitLoadPollInterval"/>
 /// (~5 s) — faster than the slow count-based <see cref="RangeSplitCheckerActor"/> — because the
 /// load predicate is cheap (three <c>IRaft</c> accessor reads per descriptor) and the

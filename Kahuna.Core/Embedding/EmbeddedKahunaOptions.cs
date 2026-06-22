@@ -131,7 +131,7 @@ public sealed class EmbeddedKahunaOptions
     /// </summary>
     public string BackupDir { get; set; } = "";
 
-    // ── Range-split knobs (K3) ────────────────────────────────────────────────
+    // ── Range-split knobs ────────────────────────────────────────────────────
 
     /// <summary>
     /// Minimum sampled key count before a range is split. 0 disables count-based auto-split.
@@ -179,18 +179,18 @@ public sealed class EmbeddedKahunaOptions
     public TimeSpan RangeSplitLoadPollInterval { get; set; } = TimeSpan.FromSeconds(5);
 
     /// <summary>
-    /// Maximum acceptable write-imbalance fraction after a split (K2.3 indivisibility guard).
+    /// Maximum acceptable write-imbalance fraction after a split (indivisibility guard).
     /// A range whose best achievable imbalance meets or exceeds this value is refused.
     /// </summary>
     public double RangeSplitLoadImbalanceMax { get; set; } = 0.8;
 
     /// <summary>
     /// Per-descriptor cooldown after a split during which the descriptor is not re-evaluated.
-    /// Prevents rapid re-splitting of a still-hot child before its new leader stabilises (K6).
+    /// Prevents rapid re-splitting of a still-hot child before its new leader stabilises.
     /// </summary>
     public TimeSpan RangeSplitSettleWindow { get; set; } = TimeSpan.FromSeconds(10);
 
-    // ── Leader-balancer knobs (K5) ────────────────────────────────────────────
+    // ── Leader-balancer knobs ────────────────────────────────────────────────
     // The Kommander leader balancer redistributes partition leadership across cluster nodes.
     // A freshly split partition starts with LeaderSinceMs = 0 and becomes a balancer candidate
     // automatically once MinLeaderStabilityMs elapses — no special registration needed.
@@ -199,7 +199,7 @@ public sealed class EmbeddedKahunaOptions
     /// <summary>
     /// Enables automatic leader rebalancing across nodes. When on, the balancer periodically
     /// transfers partition leaders from overloaded nodes to underloaded ones, ensuring split
-    /// partitions land on different nodes (K5).
+    /// partitions land on different nodes.
     /// <para>
     /// <b>Important:</b> this flag also gates gossip of per-partition load reports
     /// (ops/sec, WAL queue depth, commit-wait). With it off, those signals are never

@@ -1330,7 +1330,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
             KeyValueDurability.Persistent, routedGeneration);
 
     /// <summary>
-    /// K4 test seam: forces a split of the descriptor covering <paramref name="splitKey"/> at that
+    /// Test seam: forces a split of the descriptor covering <paramref name="splitKey"/> at that
     /// exact key without requiring a pre-computed partition ID or threshold-sized data.
     /// Handles <c>ComputeNextPartitionId → CreatePartitionAsync → SplitAsync</c> internally.
     /// Pass <paramref name="duringQuiesce"/> to race an operation into the quiesce window.

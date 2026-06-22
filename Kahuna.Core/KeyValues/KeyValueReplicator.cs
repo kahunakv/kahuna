@@ -88,7 +88,7 @@ internal sealed class KeyValueReplicator
                         (int)KeyValueState.Set
                     ));
 
-                    // K1b: record the committed write into the local histogram.
+                    // Record the committed write into the local histogram.
                     // Running on every node (leader + followers) so the P0/meta leader — which
                     // runs the split trigger — always has warm data regardless of where the
                     // partition leader sits.

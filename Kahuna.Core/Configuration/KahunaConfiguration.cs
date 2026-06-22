@@ -85,10 +85,10 @@ public sealed class KahunaConfiguration
     /// </summary>
     public int RangeSplitMinRangeSize { get; set; } = 10;
 
-    // ── Load-based split knobs (K2.1) ─────────────────────────────────────────
+    // ── Load-based split knobs ─────────────────────────────────────────────────
     // All off/inert by default so existing deployments are unaffected until opted in.
-    // The load branch of the split trigger (K2.2) gates on rate AND saturation, sourced from the
-    // Kommander per-partition signals (K1a: GetPartitionLogOpsPerSecond / GetPartitionWalQueueDepth
+    // The load branch of the split trigger gates on rate AND saturation, sourced from the
+    // Kommander per-partition signals (GetPartitionLogOpsPerSecond / GetPartitionWalQueueDepth
     // / GetPartitionCommitWaitMs).
 
     /// <summary>
@@ -130,14 +130,14 @@ public sealed class KahunaConfiguration
     public TimeSpan RangeSplitLoadPollInterval { get; set; } = TimeSpan.FromSeconds(5);
 
     /// <summary>
-    /// Indivisibility guard (K2.3). A range is refused as indivisible when no split key can put each
+    /// Indivisibility guard. A range is refused as indivisible when no split key can put each
     /// child below this fraction of the parent's write rate — i.e. essentially all writes hit one
     /// key. Catches the "thousands of keys, ~all writes on one" thrash case the key-count guard misses.
     /// </summary>
     public double RangeSplitLoadImbalanceMax { get; set; } = 0.8;
 
     /// <summary>
-    /// Per-descriptor post-split cooldown (K6). A descriptor that just split (parent or either child)
+    /// Per-descriptor post-split cooldown. A descriptor that just split (parent or either child)
     /// is not re-evaluated for splitting until this elapses, so a still-hot child does not re-split
     /// while its predecessor's leadership transfer is in flight. Defaults to roughly Kommander's
     /// <c>MinLeaderStabilityMs</c> (5s) plus a margin.

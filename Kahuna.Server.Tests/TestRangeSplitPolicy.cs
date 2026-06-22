@@ -13,7 +13,7 @@ namespace Kahuna.Server.Tests;
 
 /// <summary>
 /// Pure unit tests for <see cref="RangeSplitPolicy.ComputeSplitKey"/> —
-/// both the count-based (original) path and the write-centroid (K1b/K2.4) path.
+/// both the count-based (original) path and the write-centroid path.
 /// No cluster, no actors, no I/O.
 /// </summary>
 public sealed class TestRangeSplitPolicy
@@ -56,7 +56,7 @@ public sealed class TestRangeSplitPolicy
         Assert.Null(RangeSplitPolicy.ComputeSplitKey(sample, threshold: 10, minRangeSize: 10));
     }
 
-    // ── write-centroid path (K1b / K2.4) ────────────────────────────────────
+    // ── write-centroid path ──────────────────────────────────────────────────
 
     [Fact]
     public void WriteCentroid_NullFrequency_FallsBackToMedian()
@@ -134,7 +134,7 @@ public sealed class TestRangeSplitPolicy
         string? key = RangeSplitPolicy.ComputeSplitKey(
             sample, threshold: 50, minRangeSize: 5, writeFrequency: freq, out double imbalance);
 
-        // A split key is still returned (the policy doesn't refuse here — the caller applies K2.3).
+        // A split key is still returned (the policy doesn't refuse here — the caller applies the indivisibility guard).
         Assert.NotNull(key);
         // The imbalance must be very high because one key holds all the writes.
         Assert.True(imbalance > 0.9, $"Expected imbalance > 0.9, got {imbalance:F3}");
@@ -235,10 +235,10 @@ public sealed class TestRangeSplitPolicy
         Assert.True(snap.ContainsKey("k0090"));
     }
 
-    // ── K2.3 indivisibility guard (policy layer) ─────────────────────────────
+    // ── Indivisibility guard (policy layer) ──────────────────────────────────
 
     [Fact]
-    public void K23_HighImbalance_MeetsThreshold_IsIndivisible()
+    public void HighImbalance_MeetsThreshold_IsIndivisible()
     {
         // All writes on one key → achievableImbalance close to 1.0.
         // The trigger guards: if achievableImbalance >= loadImbalanceMax (0.8) → refuse.
@@ -248,7 +248,7 @@ public sealed class TestRangeSplitPolicy
         RangeSplitPolicy.ComputeSplitKey(
             sample, threshold: 50, minRangeSize: 5, writeFrequency: freq, out double imbalance);
 
-        // Guard condition from K2.3 (applied in trigger, verified here at policy level):
+        // Guard condition (applied in trigger, verified here at policy level):
         //   loadImbalanceMax = 0.8, achievableImbalance ≈ 0.999 → indivisible
         const double loadImbalanceMax = 0.8;
         Assert.True(imbalance > 0 && imbalance >= loadImbalanceMax,
@@ -256,7 +256,7 @@ public sealed class TestRangeSplitPolicy
     }
 
     [Fact]
-    public void K23_BalancedLoad_BelowMax_IsNotIndivisible()
+    public void BalancedLoad_BelowMax_IsNotIndivisible()
     {
         // Uniform writes → achievableImbalance ≈ 0.5, below any reasonable loadImbalanceMax.
         var sample = MakeSample(100);
@@ -272,7 +272,7 @@ public sealed class TestRangeSplitPolicy
     }
 
     [Fact]
-    public void K23_ColdHistogram_ZeroImbalance_GuardDoesNotApply()
+    public void ColdHistogram_ZeroImbalance_GuardDoesNotApply()
     {
         // Cold histogram (null writeFrequency) → achievableImbalance == 0.
         // The trigger guard requires achievableImbalance > 0, so a cold histogram never

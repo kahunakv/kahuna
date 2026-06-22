@@ -875,16 +875,16 @@ public sealed class TestRangeSplit : BaseCluster
         }
     }
 
-    // ── K4 — ForceSplitAtKeyAsync (threshold-bypassing split seam) ───────────────
+    // ── ForceSplitAtKeyAsync (threshold-bypassing split seam) ────────────────
 
     /// <summary>
-    /// K4 acceptance: a small range (20 keys — far below the default 1000-key threshold) can be
+    /// Acceptance test: a small range (20 keys — far below the default 1000-key threshold) can be
     /// split at a caller-supplied key via <c>ForceSplitAtKeyAsync</c> without generating
     /// threshold-sized data. After the split: the range map has two descriptors, both children
     /// are non-empty, and every pre-split key is still readable.
     /// </summary>
     [Fact]
-    public async Task K4_ForceSplitAtKey_SmallRange_SplitsAndKeepsAllKeys()
+    public async Task ForceSplitAtKey_SmallRange_SplitsAndKeepsAllKeys()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
@@ -1036,6 +1036,80 @@ public sealed class TestRangeSplit : BaseCluster
     /// which takes far longer than a test should block on; in production splits are minutes apart so
     /// the id is reusable by then. The orphan-removed check is the reliable regression signal.
     /// </remarks>
+    /// <summary>
+    /// Acceptance test: after a successful split the settle window suppresses immediate re-evaluation
+    /// of the child descriptors, and re-eligibility is restored once the window elapses.
+    ///
+    /// Uses a single-node <see cref="EmbeddedKahunaNode"/> with a short threshold and settle
+    /// window so the lifecycle can be exercised without multi-second sleeps.
+    /// </summary>
+    [Fact]
+    public async Task SettleWindow_BlocksImmediateReSplitThenRestoresEligibility()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // Short settle window so the re-eligibility leg completes in < 200 ms.
+        await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
+        {
+            NodeName        = "k6-node",
+            Host            = "localhost",
+            InitialPartitions = 1,
+            Storage         = "memory",
+            WalStorage      = "memory",
+            RangeSplitThreshold   = 5,
+            RangeSplitMinRangeSize = 2,
+            RangeSplitSettleWindow = TimeSpan.FromMilliseconds(300),
+        });
+
+        await node.StartAsync(ct);
+
+        KahunaManager kahuna = (KahunaManager)node.Kahuna;
+        kahuna.RegisterKeyRange(Space);
+
+        bool seeded = await kahuna.RangeMapStore.MutateAsync(
+            _ => [new RangeDescriptor
+            {
+                KeySpace    = Space,
+                StartKey    = null,
+                EndKey      = null,
+                PartitionId = RangeMapStore.FirstDataPartitionId,
+                Generation  = 1
+            }], ct);
+        Assert.True(seeded, "Failed to seed initial range descriptor");
+
+        // Write 20 keys spread across the range (threshold = 5, so well above it).
+        for (int i = 0; i < 20; i++)
+        {
+            (KeyValueResponseType type, _, _) = await kahuna.TrySetKeyValue(
+                HLCTimestamp.Zero, $"{Space}/k{i:D2}", V($"v{i}"), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent);
+            Assert.Equal(KeyValueResponseType.Set, type);
+        }
+
+        RangeSplitTrigger trigger = kahuna.RangeSplitTrigger;
+
+        // First pass: at least one split fires and both children enter the settle window.
+        int splitsFirst = await trigger.TriggerAsync(ct);
+        Assert.True(splitsFirst > 0, $"Expected at least one split on first pass; got {splitsFirst}");
+
+        int descriptorsAfterFirst = kahuna.RangeMapStore.Current.Descriptors.Count(d => d.KeySpace == Space);
+        Assert.Equal(splitsFirst + 1, descriptorsAfterFirst);
+
+        // Immediate re-pass: settle window blocks all children → 0 splits.
+        int splitsImmediate = await trigger.TriggerAsync(ct);
+        Assert.Equal(0, splitsImmediate);
+        Assert.Equal(
+            descriptorsAfterFirst,
+            kahuna.RangeMapStore.Current.Descriptors.Count(d => d.KeySpace == Space));
+
+        // After the settle window elapses, children are re-eligible.
+        await Task.Delay(400, ct); // > 300 ms window, with margin for GC/scheduling jitter
+
+        int splitsAfterExpiry = await trigger.TriggerAsync(ct);
+        Assert.True(splitsAfterExpiry > 0,
+            $"Expected re-eligibility after settle window; got {splitsAfterExpiry}");
+    }
+
     [Fact]
     public async Task ExecuteSplit_SplitAsyncFailsAfterCreate_RemovesOrphanPartition()
     {

@@ -17,7 +17,7 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// Checks every registered KeyRange descriptor and splits those that exceed
 /// <see cref="KahunaConfiguration.RangeSplitThreshold"/> keys (count branch) or that have
 /// been hot and backlogged for the full <see cref="KahunaConfiguration.RangeSplitLoadWindow"/>
-/// (load branch, K2.2).
+/// (load branch).
 ///
 /// <para>
 /// <b>Leader requirement.</b> Both branches require this node to be the meta-partition (P0)
@@ -58,35 +58,35 @@ internal sealed class RangeSplitTrigger
     private readonly int threshold;
     private readonly int minRangeSize;
 
-    // Load-branch config (K2.1 / K2.2)
+    // Load-branch config
     private readonly double loadThreshold;
     private readonly int    loadMinQueueDepth;
     private readonly double loadMinCommitWaitMs;
     private readonly TimeSpan loadWindow;
     private readonly double loadImbalanceMax;
 
-    // Post-split settle window (K6)
+    // Post-split settle window
     private readonly TimeSpan settleWindow;
 
-    // Per-descriptor post-split cooldown (K6): partitionId → Stopwatch timestamp of the split.
+    // Per-descriptor post-split cooldown: partitionId → Stopwatch timestamp of the split.
     // Both the left child (which inherits the parent partition ID) and the right child (newId) are
     // recorded so neither can re-split until settleWindow elapses. Cleared on leadership loss.
     private readonly ConcurrentDictionary<int, long> settledAt = new();
 
-    // Per-descriptor debounce state for the load branch (K2.2):
+    // Per-descriptor debounce state for the load branch:
     //   partitionId → Stopwatch.GetTimestamp() when the AND-predicate first held.
     // Cleared on predicate failure, on split (success or refusal), and on leadership loss.
     private readonly ConcurrentDictionary<int, long> hotSince = new();
 
-    // Per-descriptor K2.3 refusal cooldown: partitionId → Stopwatch timestamp of last refusal.
-    // After K2.3 refuses a split, the count branch skips sampling for IndivisibleCooldown so
-    // a persistently-skewed large range is not re-sampled+re-logged every CollectionInterval.
+    // Per-descriptor indivisibility refusal cooldown: partitionId → Stopwatch timestamp of last refusal.
+    // After a split is refused as indivisible, the count branch skips sampling for IndivisibleCooldown
+    // so a persistently-skewed large range is not re-sampled+re-logged every CollectionInterval.
     // The load branch is already rate-limited by the hotSince reset on refusal (one re-attempt
     // per loadWindow); this dict adds the same protection for the count branch.
     // Cleared when a split succeeds (histogram transferred, situation changed).
     private readonly ConcurrentDictionary<int, long> indivisibleAt = new();
 
-    // How long to suppress count-branch re-sampling after a K2.3 refusal.
+    // How long to suppress count-branch re-sampling after an indivisibility refusal.
     // ~5× the default CollectionInterval (60 s); long enough to avoid spam while short enough
     // that a genuine load shift (hot-key traffic stops, histogram decays) is re-evaluated.
     private static readonly TimeSpan IndivisibleCooldown = TimeSpan.FromMinutes(5);
@@ -140,7 +140,15 @@ internal sealed class RangeSplitTrigger
         // require the same node — no P0+P1 colocation to coordinate. The periodic caller skips
         // gracefully when this node is not the P0 leader.
         if (!await raft.AmILeader(RangeMapStore.MetaPartitionId, ct))
+        {
+            // Clear all trigger-local state symmetrically with LoadCheckAsync, so a re-promotion
+            // starts clean. In count-only mode (loadThreshold == 0) the load checker may never run,
+            // making this the only path that resets these maps on leadership loss.
+            hotSince.Clear();
+            settledAt.Clear();
+            indivisibleAt.Clear();
             return 0;
+        }
 
         // Decay all write-frequency histograms once per checker pass so counts reflect recent
         // load rather than lifetime totals. This runs only on the meta-leader node (inside the
@@ -151,13 +159,17 @@ internal sealed class RangeSplitTrigger
         foreach (KeyValuePair<int, KeyWriteFrequencyTracker> kv in writeFrequencyRegistry.All)
             kv.Value.Decay();
 
-        // Count branch is disabled when threshold == 0. Return early but AFTER Decay() so the
-        // load branch (LoadCheckAsync) always reads decayed histogram counts regardless of whether
-        // the count branch is enabled.
+        RangeMap map = rangeMapStore.Current;
+
+        // Prune expired and orphaned entries from the cooldown dictionaries before the threshold
+        // gate — in load-only mode (threshold == 0) TriggerAsync returns early below and pruning
+        // would never run otherwise, leaving settledAt/indivisibleAt growing unbounded per split.
+        PruneExpiredCooldowns(map);
+
+        // Count branch is disabled when threshold == 0. Return early but AFTER Decay() and
+        // PruneExpiredCooldowns() so both run regardless of which branch is enabled.
         if (threshold <= 0)
             return 0;
-
-        RangeMap map = rangeMapStore.Current;
 
         // Collect all unique KeyRange spaces from the descriptor map.
         // We use the map rather than KeySpaceRegistry.GetMode to avoid a cross-assembly enum import
@@ -173,13 +185,13 @@ internal sealed class RangeSplitTrigger
             {
                 ct.ThrowIfCancellationRequested();
 
-                // Skip descriptors that just split (K6 settle window): a still-hot child must not
+                // Skip descriptors that just split (settle window): a still-hot child must not
                 // re-split while its predecessor's leadership transfer is in flight.
                 if (IsInSettleWindow(descriptor.PartitionId))
                     continue;
 
-                // Skip if K2.3 refused this descriptor recently — avoids re-sampling 4096 keys
-                // every CollectionInterval for a persistently-skewed range.
+                // Skip if the indivisibility guard refused this descriptor recently — avoids
+                // re-sampling 4096 keys every CollectionInterval for a persistently-skewed range.
                 if (IsInIndivisibleCooldown(descriptor.PartitionId))
                     continue;
 
@@ -197,7 +209,7 @@ internal sealed class RangeSplitTrigger
     }
 
     /// <summary>
-    /// Fast-path load poll (K2.2). Evaluates the load predicate for every KeyRange descriptor
+    /// Fast-path load poll. Evaluates the load predicate for every KeyRange descriptor
     /// and fires a split when the predicate has held continuously for
     /// <see cref="KahunaConfiguration.RangeSplitLoadWindow"/>. Returns the number of splits done.
     /// </summary>
@@ -233,7 +245,7 @@ internal sealed class RangeSplitTrigger
 
             int partitionId = descriptor.PartitionId;
 
-            // Skip descriptors still within the post-split settle window (K6).
+            // Skip descriptors still within the post-split settle window.
             if (IsInSettleWindow(partitionId))
                 continue;
 
@@ -350,10 +362,10 @@ internal sealed class RangeSplitTrigger
 
             logger.LogRangeSplitTriggerSplit(descriptor.KeySpace, splitKey, newId);
 
-            // Transfer write-frequency histogram to the two child ranges (K1b).
+            // Transfer write-frequency histogram to the two child ranges.
             TransferTrackerOnSplit(descriptor, splitKey, newId);
 
-            // Record settle-window timestamps for both children (K6): the left child
+            // Record settle-window timestamps for both children: the left child
             // inherits the parent partition ID; the right child gets newId. Neither
             // will be re-evaluated until settleWindow elapses.
             long splitTick = Stopwatch.GetTimestamp();
@@ -375,7 +387,7 @@ internal sealed class RangeSplitTrigger
 
     /// <summary>
     /// Returns <c>true</c> when <paramref name="partitionId"/> is still within the post-split
-    /// settle window (K6), meaning neither branch should re-evaluate it yet.
+    /// settle window, meaning neither branch should re-evaluate it yet.
     /// </summary>
     private bool IsInSettleWindow(int partitionId)
     {
@@ -390,7 +402,42 @@ internal sealed class RangeSplitTrigger
     }
 
     /// <summary>
-    /// Returns <c>true</c> when the descriptor's last K2.3 refusal is still within the
+    /// Removes expired and partition-no-longer-exists entries from <see cref="settledAt"/>,
+    /// <see cref="indivisibleAt"/>, and <see cref="hotSince"/>. Called once per slow-cadence
+    /// <see cref="TriggerAsync"/> pass to bound dict growth within a leadership tenure.
+    /// </summary>
+    private void PruneExpiredCooldowns(RangeMap map)
+    {
+        HashSet<int> activeIds = map.Descriptors.Select(d => d.PartitionId).ToHashSet();
+        long now = Stopwatch.GetTimestamp();
+        double settleMs      = settleWindow.TotalMilliseconds;
+        double cooldownMs    = IndivisibleCooldown.TotalMilliseconds;
+
+        foreach (int id in settledAt.Keys)
+        {
+            if (!activeIds.Contains(id) ||
+                (settledAt.TryGetValue(id, out long tick) &&
+                 (now - tick) * 1000.0 / Stopwatch.Frequency >= settleMs))
+                settledAt.TryRemove(id, out _);
+        }
+
+        foreach (int id in indivisibleAt.Keys)
+        {
+            if (!activeIds.Contains(id) ||
+                (indivisibleAt.TryGetValue(id, out long tick) &&
+                 (now - tick) * 1000.0 / Stopwatch.Frequency >= cooldownMs))
+                indivisibleAt.TryRemove(id, out _);
+        }
+
+        foreach (int id in hotSince.Keys)
+        {
+            if (!activeIds.Contains(id))
+                hotSince.TryRemove(id, out _);
+        }
+    }
+
+    /// <summary>
+    /// Returns <c>true</c> when the descriptor's last indivisibility refusal is still within the
     /// <see cref="IndivisibleCooldown"/> window, meaning the count branch should skip sampling.
     /// </summary>
     private bool IsInIndivisibleCooldown(int partitionId)
@@ -403,9 +450,9 @@ internal sealed class RangeSplitTrigger
     }
 
     /// <summary>
-    /// Returns <c>true</c> when partition <paramref name="partitionId"/> satisfies the K2.2
+    /// Returns <c>true</c> when partition <paramref name="partitionId"/> satisfies the
     /// load AND-predicate: rate ≥ threshold AND WAL queue depth ≥ min AND (commit-wait gate
-    /// disabled OR commit-wait ≥ configured max). All values come from the K1a gossiped load
+    /// disabled OR commit-wait ≥ configured max). All values come from the gossiped load
     /// report, so the check is valid even when the partition is led on another node.
     /// </summary>
     private bool EvaluateLoadPredicate(int partitionId, out double ops, out int depth, out double commitWait)
@@ -430,7 +477,7 @@ internal sealed class RangeSplitTrigger
     /// <summary>
     /// Samples <paramref name="descriptor"/>'s key range and returns a split key when the
     /// sample size meets <paramref name="effectiveThreshold"/>, or <c>null</c> if no split
-    /// is warranted. Applies the K2.3 indivisibility guard when a write-frequency histogram
+    /// is warranted. Applies the indivisibility guard when a write-frequency histogram
     /// is available and <see cref="loadImbalanceMax"/> is configured.
     /// </summary>
     /// <param name="effectiveThreshold">
@@ -488,7 +535,7 @@ internal sealed class RangeSplitTrigger
                 break;
         }
 
-        // Look up the write-frequency snapshot for this partition (K1b).
+        // Look up the write-frequency snapshot for this partition.
         // The snapshot may be empty (cold histogram — post-failover blind window or first run);
         // ComputeSplitKey falls back to the count-based median/percentile path transparently.
         IReadOnlyDictionary<string, long>? writeFreq =
@@ -496,7 +543,7 @@ internal sealed class RangeSplitTrigger
 
         string? splitKey = RangeSplitPolicy.ComputeSplitKey(sample, effectiveThreshold, minRangeSize, writeFreq, out double achievableImbalance);
 
-        // K2.3 indivisibility guard: refuse the split when the best achievable write-centroid
+        // Indivisibility guard: refuse the split when the best achievable write-centroid
         // still concentrates too many writes on one child (e.g. all traffic on a single hot key).
         // Applies to both count and load branches whenever loadImbalanceMax is configured.
         // achievableImbalance == 0 means the histogram was cold and the count path was used —
@@ -511,7 +558,7 @@ internal sealed class RangeSplitTrigger
         return splitKey;
     }
 
-    // ── split-tracker transfer (K1b) ─────────────────────────────────────────
+    // ── split-tracker transfer ───────────────────────────────────────────────
 
     /// <summary>
     /// After a successful split of <paramref name="parentDescriptor"/> at <paramref name="splitKey"/>,
