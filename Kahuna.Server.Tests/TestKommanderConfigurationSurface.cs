@@ -73,7 +73,11 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.MaxConcurrentTransfers)] = nameof(KahunaCommandLineOptions.RaftMaxConcurrentTransfers),
         [nameof(RaftConfiguration.LeaderBalancerOpsWeight)] = nameof(KahunaCommandLineOptions.RaftLeaderBalancerOpsWeight),
         [nameof(RaftConfiguration.LeaderBalancerQueueWeight)] = nameof(KahunaCommandLineOptions.RaftLeaderBalancerQueueWeight),
-        [nameof(RaftConfiguration.SuggestionTimeout)] = nameof(KahunaCommandLineOptions.RaftSuggestionTimeout)
+        [nameof(RaftConfiguration.SuggestionTimeout)] = nameof(KahunaCommandLineOptions.RaftSuggestionTimeout),
+        [nameof(RaftConfiguration.GrpcEnableAppendLogsCoalescing)] = nameof(KahunaCommandLineOptions.RaftGrpcEnableAppendLogsCoalescing),
+        [nameof(RaftConfiguration.GrpcAppendLogsMaxCoalesceBatch)] = nameof(KahunaCommandLineOptions.RaftGrpcAppendLogsMaxCoalesceBatch),
+        [nameof(RaftConfiguration.EnableSharedExecutorPool)] = nameof(KahunaCommandLineOptions.RaftEnableSharedExecutorPool),
+        [nameof(RaftConfiguration.PartitionExecutorPoolSize)] = nameof(KahunaCommandLineOptions.RaftExecutorPoolSize)
     };
 
     [Fact]

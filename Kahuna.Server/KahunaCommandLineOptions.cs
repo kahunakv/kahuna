@@ -277,6 +277,12 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-suggestion-timeout", Required = false, HelpText = "How long the P0 leader waits for a suggested move to be confirmed before declaring it dropped in milliseconds. After timeout the partition is eligible again subject to raft-move-cooldown.", Default = 15000)]
     public int RaftSuggestionTimeout { get; set; } = 15000;
 
+    [Option("raft-grpc-enable-append-logs-coalescing", Required = false, HelpText = "Enable coalescing of multiple AppendLogs calls into a single gRPC frame per write cycle. Useful for write-heavy multi-partition workloads where per-peer send concurrency is the bottleneck.", Default = false)]
+    public bool RaftGrpcEnableAppendLogsCoalescing { get; set; }
+
+    [Option("raft-grpc-append-logs-max-coalesce-batch", Required = false, HelpText = "Maximum number of AppendLogs items drained into a single gRPC frame per write cycle when coalescing is enabled.", Default = 256)]
+    public int RaftGrpcAppendLogsMaxCoalesceBatch { get; set; } = 256;
+
     [Option("raft-transport-security", Required = false, HelpText = "Transport security and node authentication settings (JSON; prefer --raft-allow-insecure-certificate-validation for simple dev overrides)", Default = "")]
     public string RaftTransportSecurity { get; set; } = "";
 

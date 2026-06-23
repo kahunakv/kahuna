@@ -278,6 +278,8 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
         GrpcChannelsPerNode = opts.RaftGrpcChannelsPerNode,
         GrpcEnableMultipleHttp2Connections = opts.RaftGrpcEnableMultipleHttp2Connections,
         GrpcEnableSnapshotCompression = opts.RaftGrpcEnableSnapshotCompression,
+        GrpcEnableAppendLogsCoalescing = opts.RaftGrpcEnableAppendLogsCoalescing,
+        GrpcAppendLogsMaxCoalesceBatch = opts.RaftGrpcAppendLogsMaxCoalesceBatch,
         BackfillThreshold = opts.RaftBackfillThreshold,
         MaxBackfillEntriesPerRound = opts.RaftMaxBackfillEntriesPerRound,
         LearnerPromotionLag = opts.RaftLearnerPromotionLag,

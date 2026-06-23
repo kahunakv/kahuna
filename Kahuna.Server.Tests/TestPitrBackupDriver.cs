@@ -439,6 +439,7 @@ public sealed class TestPitrBackupDriver : IDisposable
             inner.CompactLogsOlderThan(p, lc, ce, max);
         public RaftOperationStatus DeletePartitionWAL(int p) => inner.DeletePartitionWAL(p);
         public RaftOperationStatus TruncateLogsAfter(int p, long after) => inner.TruncateLogsAfter(p, after);
+        public (RaftOperationStatus Status, long MaxLogId) TruncateLogsAfterAndGetMax(int p, long after) => inner.TruncateLogsAfterAndGetMax(p, after);
         public void Dispose() => inner.Dispose();
     }
 }
