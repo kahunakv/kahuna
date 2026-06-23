@@ -91,6 +91,12 @@ public sealed class KahunaCommandLineOptions
     [Option("write-io-threads", Required = false, HelpText = "Write I/O threads", Default = 16)]
     public int WriteIOThreads { get; set; } = 16;
 
+    [Option("raft-enable-shared-executor-pool", Required = false, HelpText = "Share a bounded pool of worker threads across all Raft partitions instead of one OS thread per partition. Required to run thousands of partitions (e.g. after range splits). Disable only to isolate scheduler issues.", Default = true)]
+    public bool RaftEnableSharedExecutorPool { get; set; } = true;
+
+    [Option("raft-executor-pool-size", Required = false, HelpText = "Number of shared Raft executor worker threads. 0 auto-sizes to the processor count. Raise above the core count only if ops queue behind busy partitions while CPU is not saturated.", Default = 0)]
+    public int RaftExecutorPoolSize { get; set; }
+
     [Option("raft-http-scheme", Required = false, HelpText = "Raft HTTP scheme used by REST communication", Default = "https://")]
     public string RaftHttpScheme { get; set; } = "https://";
 

@@ -38,6 +38,12 @@ internal static class BenchmarkRunner
             diag.WriteLine("Aborted during seeding.");
             return;
         }
+        catch (OperationCanceledException)
+        {
+            // Seed timeout expired (30 s). Proceed with whatever keys were written;
+            // workers will encounter misses for unseeded keys but the report tracks that.
+            diag.WriteLine("Seeding timed out; proceeding with partial key-space.");
+        }
 
         // ── warmup ────────────────────────────────────────────────────────────
         if (opts.Warmup > 0 && !globalCts.IsCancellationRequested)

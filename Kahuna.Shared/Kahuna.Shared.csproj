@@ -22,8 +22,8 @@
         <PackageTags>distributed lock;locks;redlock;raft;consensus;paxos;distributed consensus;leader election;zookeeper</PackageTags>
     </PropertyGroup>
 
-    <ItemGroup>        
-	<PackageReference Include="Kommander" Version="0.17.0" />
+    <ItemGroup>
+	<PackageReference Include="Kommander" Version="0.17.6" />
         <PackageReference Include="Grpc.Tools" Version="2.68.1">
             <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
             <PrivateAssets>all</PrivateAssets>

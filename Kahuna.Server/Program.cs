@@ -195,6 +195,8 @@ static EmbeddedKahunaOptions CreateEmbeddedOptions(KahunaCommandLineOptions opts
     Host = opts.RaftHost,
     Port = opts.RaftPort,
     InitialPartitions = opts.InitialClusterPartitions,
+    EnableSharedExecutorPool = opts.RaftEnableSharedExecutorPool,
+    PartitionExecutorPoolSize = opts.RaftExecutorPoolSize,
     Storage = opts.Storage,
     StoragePath = opts.StoragePath,
     StorageRevision = opts.StorageRevision,
@@ -251,6 +253,13 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
         SlowRaftWALMachineLog = opts.RaftSlowWalMachineLog,
         ReadIOThreads = opts.ReadIOThreads,
         WriteIOThreads = opts.WriteIOThreads,
+        // Share a bounded thread pool across all partitions so a large cluster (and split-created
+        // partitions) does not spend one OS thread per partition. PoolSize 0 auto-sizes to the core count.
+        // KAHUNA_SHARED_POOL=0 forces the original one-thread-per-partition model (diagnostic escape
+        // hatch — the CLI bool is a bare switch and cannot express "false").
+        EnableSharedExecutorPool = opts.RaftEnableSharedExecutorPool
+            && Environment.GetEnvironmentVariable("KAHUNA_SHARED_POOL") != "0",
+        PartitionExecutorPoolSize = opts.RaftExecutorPoolSize,
         CompactEveryOperations = opts.RaftCompactEveryOperations,
         CompactNumberEntries = opts.RaftCompactNumberEntries,
         MaxEntriesPerCompaction = opts.RaftMaxEntriesPerCompaction,
@@ -284,7 +293,10 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
         // keep-alive heartbeats dominate idle traffic, so a leader stops heartbeating a partition
         // once it has been idle for QuiesceAfter and leans on SWIM node liveness instead. Requires
         // PingInterval > 0 and < StartElectionTimeout, validated by RaftConfiguration at startup.
-        EnableQuiescence = opts.RaftEnableQuiescence,
+        // KAHUNA_QUIESCENCE=0 forces quiescence off (diagnostic escape hatch — the CLI bool is a
+        // bare switch and cannot express "false").
+        EnableQuiescence = opts.RaftEnableQuiescence
+            && Environment.GetEnvironmentVariable("KAHUNA_QUIESCENCE") != "0",
         QuiesceAfter = TimeSpan.FromMilliseconds(opts.RaftQuiesceAfter),
         EnableLeaderBalancer = opts.RaftEnableLeaderBalancer,
         LeaderBalancerReportInterval = TimeSpan.FromMilliseconds(opts.RaftLeaderBalancerReportInterval),

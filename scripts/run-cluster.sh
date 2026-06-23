@@ -101,6 +101,16 @@ start_node() {
         --initial-cluster-partitions "${PARTITIONS}"
     )
 
+    # Diagnostic knob: force a single gRPC stream per peer to remove cross-stream reordering
+    # of AppendLogs (set KAHUNA_GRPC_CHANNELS=1). Unset => server default (4).
+    if [ -n "${KAHUNA_GRPC_CHANNELS:-}" ]; then
+        args+=(--raft-grpc-channels-per-node "${KAHUNA_GRPC_CHANNELS}")
+    fi
+
+    # Diagnostic knob: KAHUNA_SHARED_POOL=0 reverts to the original one-OS-thread-per-partition
+    # model (disables the shared executor pool). Honored via env in Program.cs because the CLI
+    # bool is a bare switch and cannot express "false". Unset => server default (on).
+
     if [ "${STORAGE}" = "memory" ]; then
         args+=(--storage memory --wal-storage memory)
     else
@@ -124,7 +134,13 @@ start_node() {
     sed -u "s/^/[kahuna${id}] /"      < "$out_fifo"      &
     sed -u "s/^/[kahuna${id}] /" >&2  < "$err_fifo"      &
 
-    dotnet "${PUBLISH_DIR}/Kahuna.Server.dll" "${args[@]}" \
+    # env passes the logging override directly to the child process, bypassing
+    # the CommandLine argument parser which rejects unknown --Key:Sub=Value flags.
+    # Dots in env var names require the `env` command; bash cannot export them directly.
+    # Diagnostic: KAHUNA_RAFT_LOG=Debug surfaces Kommander proposal/replication logs so we can
+    # see what is being written. Default Warning keeps the normal quiet output.
+    env "Logging__LogLevel__Kommander.IRaft=${KAHUNA_RAFT_LOG:-Warning}" \
+        dotnet "${PUBLISH_DIR}/Kahuna.Server.dll" "${args[@]}" \
         > "$out_fifo" 2> "$err_fifo" &
     local pid=$!
     pids+=($pid)

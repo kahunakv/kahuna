@@ -304,6 +304,10 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             SlowRaftWALMachineLog = options.SlowRaftWALMachineLog,
             ReadIOThreads = options.ReadIOThreads,
             WriteIOThreads = options.WriteIOThreads,
+            // Share a bounded thread pool across all partitions instead of one OS thread each, so
+            // split-created partitions stay cheap. PoolSize 0 auto-sizes to the core count.
+            EnableSharedExecutorPool = options.EnableSharedExecutorPool,
+            PartitionExecutorPoolSize = options.PartitionExecutorPoolSize,
             CompactEveryOperations = options.CompactEveryOperations,
             CompactNumberEntries = options.CompactNumberEntries,
             MaxEntriesPerCompaction = options.MaxEntriesPerCompaction,

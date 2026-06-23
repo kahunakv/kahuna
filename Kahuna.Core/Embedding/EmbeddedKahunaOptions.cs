@@ -67,6 +67,10 @@ public sealed class EmbeddedKahunaOptions
 
     public int WriteIOThreads { get; set; } = 8;
 
+    public bool EnableSharedExecutorPool { get; set; } = true;
+
+    public int PartitionExecutorPoolSize { get; set; }
+
     public string HttpScheme { get; set; } = "https://";
 
     public string HttpAuthBearerToken { get; set; } = "";
