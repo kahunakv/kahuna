@@ -10,6 +10,14 @@
 #   KAHUNA_PARTITIONS   initial partition count (default 3; 128 is cluster-scale)
 #   KAHUNA_DATA_DIR     base directory for node data/WAL when using rocksdb
 #                       (default /tmp/kahuna-cluster)
+#   KAHUNA_WAL_INSTRUMENT  set to 1 to enable WAL double-fsync phase instrumentation; each node
+#                       logs a per-phase snapshot (propose/commit/followerAppend) + fsync counters on Ctrl+C
+#   KAHUNA_WAL_SINGLE_FSYNC  single-fsync fast path (ack on propose-quorum + lazy commit marker).
+#                       ON by default now; set to 0 to A/B against the legacy two-fsync path.
+#   KAHUNA_WIPE         set to 1 to delete the rocksdb store before starting (clean A/B state every run;
+#                       also avoids replaying a store written by a different Kommander version)
+#   KAHUNA_LINGER_MS    WAL group-commit linger window in ms (default 0 = disabled, the measured best
+#                       pairing with the fast path). Raise to re-enable cross-write fsync coalescing.
 #
 # Port layout (all on 127.0.0.1):
 #   Node 1 — HTTP :8081  HTTPS/Raft :8082
@@ -35,6 +43,14 @@ cp "${REPO_ROOT}/certs/development-certificate.pfx" "${PUBLISH_DIR}/certificate.
 
 # ── Storage directories ───────────────────────────────────────────────────────
 if [ "${STORAGE}" = "rocksdb" ]; then
+    # KAHUNA_WIPE=1 deletes the persistent store before starting, so a benchmark A/B begins from a
+    # clean, identical state every run. Without it the store is reused across runs (handy for dev,
+    # but a confound for benchmarking — and replaying a store written by a different Kommander
+    # version can wedge recovery). Only ever removes the cluster's own DATA_DIR.
+    if [ "${KAHUNA_WIPE:-}" = "1" ]; then
+        echo ">> KAHUNA_WIPE=1: removing ${DATA_DIR} for a clean store"
+        rm -rf "${DATA_DIR}"
+    fi
     echo ">> Storage: rocksdb (persistent) under ${DATA_DIR}"
     for n in 1 2 3; do
         # Create only the parent dirs; RocksDB creates each <path>/<revision> dir
@@ -139,7 +155,13 @@ start_node() {
     # Dots in env var names require the `env` command; bash cannot export them directly.
     # Diagnostic: KAHUNA_RAFT_LOG=Debug surfaces Kommander proposal/replication logs so we can
     # see what is being written. Default Warning keeps the normal quiet output.
+    # Diagnostic: KAHUNA_WAL_INSTRUMENT=1 brackets the node's lifetime as a WAL double-fsync
+    # measurement window; each node logs a per-phase snapshot (propose/commit/followerAppend) on
+    # graceful shutdown (Ctrl+C). Inert when unset.
     env "Logging__LogLevel__Kommander.IRaft=${KAHUNA_RAFT_LOG:-Warning}" \
+        "KAHUNA_WAL_INSTRUMENT=${KAHUNA_WAL_INSTRUMENT:-}" \
+        "KAHUNA_WAL_SINGLE_FSYNC=${KAHUNA_WAL_SINGLE_FSYNC:-}" \
+        "KAHUNA_LINGER_MS=${KAHUNA_LINGER_MS:-}" \
         dotnet "${PUBLISH_DIR}/Kahuna.Server.dll" "${args[@]}" \
         > "$out_fifo" 2> "$err_fifo" &
     local pid=$!
