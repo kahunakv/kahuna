@@ -77,7 +77,9 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.GrpcEnableAppendLogsCoalescing)] = nameof(KahunaCommandLineOptions.RaftGrpcEnableAppendLogsCoalescing),
         [nameof(RaftConfiguration.GrpcAppendLogsMaxCoalesceBatch)] = nameof(KahunaCommandLineOptions.RaftGrpcAppendLogsMaxCoalesceBatch),
         [nameof(RaftConfiguration.EnableSharedExecutorPool)] = nameof(KahunaCommandLineOptions.RaftEnableSharedExecutorPool),
-        [nameof(RaftConfiguration.PartitionExecutorPoolSize)] = nameof(KahunaCommandLineOptions.RaftExecutorPoolSize)
+        [nameof(RaftConfiguration.PartitionExecutorPoolSize)] = nameof(KahunaCommandLineOptions.RaftExecutorPoolSize),
+        [nameof(RaftConfiguration.WalGroupCommitLingerMs)] = nameof(KahunaCommandLineOptions.RaftWalGroupCommitLingerMs),
+        [nameof(RaftConfiguration.WalSingleFsyncCommit)] = nameof(KahunaCommandLineOptions.RaftWalSingleFsyncCommit)
     };
 
     [Fact]

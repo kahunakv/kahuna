@@ -172,6 +172,12 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-max-wal-group-batch-partitions", Required = false, HelpText = "Maximum partitions coalesced into a single WAL cross-partition group-commit batch", Default = 64)]
     public int RaftMaxWalGroupBatchPartitions { get; set; } = 64;
 
+    [Option("raft-wal-group-commit-linger-ms", Required = false, HelpText = "Group-commit linger window in milliseconds (0 = disabled; raise on networks where fsync rate is the bottleneck)", Default = 0)]
+    public int RaftWalGroupCommitLingerMs { get; set; }
+
+    [Option("raft-wal-single-fsync-commit", Required = false, HelpText = "Enable single-fsync fast path: ack on propose-quorum-durable and demote the commit marker to a lazy write", Default = true)]
+    public bool RaftWalSingleFsyncCommit { get; set; } = true;
+
     [Option("raft-sqlite-wal-shard-count", Required = false, HelpText = "Number of SQLite shard databases across which partitions are distributed (0 = resolved to processor count on first initialisation)", Default = 0)]
     public int RaftSqliteWalShardCount { get; set; }
 

@@ -100,7 +100,7 @@ public sealed class TestKeyValueEvictionSweep
                 $"protected/{i:D4} must not be evicted");
 
         // 50 clean entries evicted (budget restored to 50); 30 clean entries remain.
-        Assert.Equal(stats.LruEvicted, 50);
+        Assert.Equal(50, stats.LruEvicted);
 
         // Visited = 20 skipped + 50 evicted = 70; well below Store.Count (100).
         Assert.True(stats.LruVisited <= 70,

@@ -191,20 +191,24 @@ if (Environment.GetEnvironmentVariable("KAHUNA_WAL_INSTRUMENT") == "1")
     app.Lifetime.ApplicationStopping.Register(() =>
     {
         WalPhaseInstrumentation.Enabled = false;
-        InstrumentationSnapshot snap = WalPhaseInstrumentation.Snapshot();
-        app.Logger.LogInformation(
-            "WAL phase instrumentation snapshot — " +
-            "propose[enq={ProposeEnq} dur={ProposeDur} p50={ProposeP50:F2}ms p99={ProposeP99:F2}ms] " +
-            "commit[enq={CommitEnq} dur={CommitDur} p50={CommitP50:F2}ms p99={CommitP99:F2}ms] " +
-            "followerAppend[enq={FollowerEnq} dur={FollowerDur} p50={FollowerP50:F2}ms p99={FollowerP99:F2}ms]",
-            snap.Propose.Enqueued, snap.Propose.Durable, snap.Propose.P50Ms, snap.Propose.P99Ms,
-            snap.Commit.Enqueued, snap.Commit.Durable, snap.Commit.P50Ms, snap.Commit.P99Ms,
-            snap.FollowerAppend.Enqueued, snap.FollowerAppend.Durable, snap.FollowerAppend.P50Ms, snap.FollowerAppend.P99Ms);
+        if (app.Logger.IsEnabled(LogLevel.Information))
+        {
+            InstrumentationSnapshot snap = WalPhaseInstrumentation.Snapshot();
+            app.Logger.LogInformation(
+                "WAL phase instrumentation snapshot — " +
+                "propose[enq={ProposeEnq} dur={ProposeDur} p50={ProposeP50:F2}ms p99={ProposeP99:F2}ms] " +
+                "commit[enq={CommitEnq} dur={CommitDur} p50={CommitP50:F2}ms p99={CommitP99:F2}ms] " +
+                "followerAppend[enq={FollowerEnq} dur={FollowerDur} p50={FollowerP50:F2}ms p99={FollowerP99:F2}ms]",
+                snap.Propose.Enqueued, snap.Propose.Durable, snap.Propose.P50Ms, snap.Propose.P99Ms,
+                snap.Commit.Enqueued, snap.Commit.Durable, snap.Commit.P50Ms, snap.Commit.P99Ms,
+                snap.FollowerAppend.Enqueued, snap.FollowerAppend.Durable, snap.FollowerAppend.P50Ms, snap.FollowerAppend.P99Ms);
+        }
 
         // fsyncs-per-committed-write: TotalSyncBatchesWritten (real fsyncs) drops toward ~1× with the
         // single-fsync fast path on, while TotalBatchesWritten (Write-call count) stays ~2×. The ratio
         // is the deterministic fsync-count assertion the double-fsync spec asks for, alongside p50.
-        if (app.Services.GetRequiredService<IRaft>().WalScheduler is FairWalScheduler wal)
+        if (app.Services.GetRequiredService<IRaft>().WalScheduler is FairWalScheduler wal
+            && app.Logger.IsEnabled(LogLevel.Information))
             app.Logger.LogInformation(
                 "WAL fsync counters — totalBatches={TotalBatches} totalSyncBatches={TotalSyncBatches} (sync/total={Ratio:F3})",
                 wal.TotalBatchesWritten, wal.TotalSyncBatchesWritten,
@@ -307,17 +311,8 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
         MaxGlobalWalQueueDepth = opts.RaftMaxGlobalWalQueueDepth,
         MaxWalBatchSize = opts.RaftMaxWalBatchSize,
         MaxWalGroupBatchPartitions = opts.RaftMaxWalGroupBatchPartitions,
-        // Group-commit linger window. Default 0 (disabled): with the single-fsync fast path on, the
-        // linger's cross-write coalescing no longer earns its ~2 ms wait on the critical path — the
-        // measured best pairing is fast-path-on + linger-0 (A/B: set p50 −22%, throughput +28% vs the
-        // prior fast-path-off / linger-2 config, 0 errors). Raise KAHUNA_LINGER_MS on a network where
-        // fsync rate (not the wait) is the bottleneck and cross-write coalescing pays again.
-        WalGroupCommitLingerMs = int.TryParse(Environment.GetEnvironmentVariable("KAHUNA_LINGER_MS"), out int lingerMs) ? lingerMs : 0,
-        // Single-fsync fast path: ack on propose-quorum-durable and demote the commit marker to a lazy
-        // (non-sync) write, removing the second fsync from the per-write critical path. ON by default
-        // (validated: 0 errors; crash-safe recovery covered by the deterministic crash matrix).
-        // KAHUNA_WAL_SINGLE_FSYNC=0 forces it off (e.g. to A/B against the legacy two-fsync path).
-        WalSingleFsyncCommit = Environment.GetEnvironmentVariable("KAHUNA_WAL_SINGLE_FSYNC") != "0",
+        WalGroupCommitLingerMs = opts.RaftWalGroupCommitLingerMs,
+        WalSingleFsyncCommit = opts.RaftWalSingleFsyncCommit,
         SqliteWalShardCount = opts.RaftSqliteWalShardCount,
         MaxDrainQuantumControl = opts.RaftMaxDrainQuantumControl,
         MaxDrainQuantumReplication = opts.RaftMaxDrainQuantumReplication,

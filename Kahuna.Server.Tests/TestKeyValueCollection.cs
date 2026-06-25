@@ -304,7 +304,7 @@ public sealed class TestKeyValueCollection
         Assert.Null(surviving.WriteIntent);
         // rollingBackTx and staleTx removed; liveSiblingTx (not expired) must survive.
         Assert.NotNull(surviving.MvccEntries);
-        Assert.Equal(1, surviving.MvccEntries.Count);
+        Assert.Single(surviving.MvccEntries);
         Assert.True(surviving.MvccEntries.ContainsKey(liveSiblingTx),
             "non-expired sibling MVCC entry must not be trimmed");
         Assert.False(surviving.MvccEntries.ContainsKey(staleTx),
@@ -367,7 +367,7 @@ public sealed class TestKeyValueCollection
         Assert.Null(surviving.WriteIntent);
         // releasingTx and staleTx removed; liveSiblingTx (not expired) must survive.
         Assert.NotNull(surviving.MvccEntries);
-        Assert.Equal(1, surviving.MvccEntries.Count);
+        Assert.Single(surviving.MvccEntries);
         Assert.True(surviving.MvccEntries.ContainsKey(liveSiblingTx),
             "non-expired sibling MVCC entry must not be trimmed");
         Assert.False(surviving.MvccEntries.ContainsKey(staleTx),
