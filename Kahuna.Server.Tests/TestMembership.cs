@@ -418,7 +418,7 @@ public sealed class TestMembership : BaseCluster
     [Fact]
     public async Task UnitLeaveTimeout_StopAsync_IsNonFatal()
     {
-        // C3 timeout path: StopAsync catches OperationCanceledException and completes normally.
+        // Timeout path: StopAsync catches OperationCanceledException and completes normally.
         var opts = new KahunaCommandLineOptions { RaftGracefulLeaveOnShutdown = true };
         var svc = new Kahuna.Services.ReplicationService(
             new StubKahunaForE5(),
