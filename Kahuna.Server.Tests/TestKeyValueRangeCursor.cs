@@ -101,6 +101,41 @@ public class TestKeyValueRangeCursor
     }
 
     [Fact]
+    public void TestEncodedStringMatchesLegacyBase64UrlFormat()
+    {
+        // Verifies format stability: the new encoder must produce byte-for-byte identical
+        // strings to the old Convert.ToBase64String + TrimEnd + Replace approach.
+        HLCTimestamp ts = new(7, 1_700_000_000_000L, 42);
+        string lastKey = "svc/0005";
+        string prefix  = "svc";
+
+        string newCursor = KeyValueRangeCursor.Encode(lastKey, KeyValueDurability.Persistent, prefix, ts);
+
+        // Reproduce old encoding inline so both paths are compared.
+        byte[] binaryBuf = BuildLegacyCursorBytes(lastKey, KeyValueDurability.Persistent, prefix, ts);
+        string legacyCursor = Convert.ToBase64String(binaryBuf).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+        Assert.Equal(legacyCursor, newCursor);
+    }
+
+    private static byte[] BuildLegacyCursorBytes(string lastKey, KeyValueDurability durability, string prefix, HLCTimestamp ts)
+    {
+        int lastKeyByteCount = System.Text.Encoding.UTF8.GetByteCount(lastKey);
+        int prefixByteCount  = System.Text.Encoding.UTF8.GetByteCount(prefix);
+        byte[] buf = new byte[1 + 4 + lastKeyByteCount + 4 + prefixByteCount + 1 + 4 + 8 + 4];
+        int pos = 0;
+        buf[pos++] = 0x01;
+        void WriteI32(int v) { buf[pos++]=(byte)v; buf[pos++]=(byte)(v>>8); buf[pos++]=(byte)(v>>16); buf[pos++]=(byte)(v>>24); }
+        void WriteI64(long v) { buf[pos++]=(byte)v; buf[pos++]=(byte)(v>>8); buf[pos++]=(byte)(v>>16); buf[pos++]=(byte)(v>>24); buf[pos++]=(byte)(v>>32); buf[pos++]=(byte)(v>>40); buf[pos++]=(byte)(v>>48); buf[pos++]=(byte)(v>>56); }
+        void WriteU32(uint v) { buf[pos++]=(byte)v; buf[pos++]=(byte)(v>>8); buf[pos++]=(byte)(v>>16); buf[pos++]=(byte)(v>>24); }
+        WriteI32(lastKeyByteCount); System.Text.Encoding.UTF8.GetBytes(lastKey, 0, lastKey.Length, buf, pos); pos += lastKeyByteCount;
+        WriteI32(prefixByteCount);  System.Text.Encoding.UTF8.GetBytes(prefix,  0, prefix.Length,  buf, pos); pos += prefixByteCount;
+        buf[pos++] = (byte)durability;
+        WriteI32(ts.N); WriteI64(ts.L); WriteU32(ts.C);
+        return buf;
+    }
+
+    [Fact]
     public void TestDecodeGarbageReturnsFalse()
     {
         Assert.False(KeyValueRangeCursor.TryDecode("not-a-valid-cursor!!!",
@@ -112,6 +147,53 @@ public class TestKeyValueRangeCursor
     {
         Assert.False(KeyValueRangeCursor.TryDecode("",
             out _, out _, out _, out _));
+    }
+
+    [Fact]
+    public void TestRoundTripEmptyLastKey()
+    {
+        HLCTimestamp ts = new(1, 500L, 0);
+        string cursor = KeyValueRangeCursor.Encode("", KeyValueDurability.Persistent, "svc", ts);
+
+        Assert.True(KeyValueRangeCursor.TryDecode(cursor,
+            out string lastKey, out _, out string prefix, out HLCTimestamp readTs));
+
+        Assert.Equal("", lastKey);
+        Assert.Equal("svc", prefix);
+        Assert.Equal(ts, readTs);
+    }
+
+    [Fact]
+    public void TestRoundTripEmptyPrefix()
+    {
+        HLCTimestamp ts = new(2, 999L, 7);
+        string cursor = KeyValueRangeCursor.Encode("some/key", KeyValueDurability.Ephemeral, "", ts);
+
+        Assert.True(KeyValueRangeCursor.TryDecode(cursor,
+            out string lastKey, out KeyValueDurability durability, out string prefix, out HLCTimestamp readTs));
+
+        Assert.Equal("some/key", lastKey);
+        Assert.Equal("", prefix);
+        Assert.Equal(KeyValueDurability.Ephemeral, durability);
+        Assert.Equal(ts, readTs);
+    }
+
+    [Fact]
+    public void TestRoundTripLongKeyForcesArrayPoolPath()
+    {
+        // lastKeyBytes (768) + prefixBytes (200) + 26 fixed = 994 > 256 threshold → ArrayPool
+        string longKey    = new('好', 256); // 768 UTF-8 bytes (3 bytes/char) — also exercises multi-byte UTF-8
+        string longPrefix = new('p', 200);  // 200 UTF-8 bytes (ASCII)
+        HLCTimestamp ts = new(5, 123456789L, 99);
+
+        string cursor = KeyValueRangeCursor.Encode(longKey, KeyValueDurability.Persistent, longPrefix, ts);
+
+        Assert.True(KeyValueRangeCursor.TryDecode(cursor,
+            out string decodedKey, out _, out string decodedPrefix, out HLCTimestamp readTs));
+
+        Assert.Equal(longKey, decodedKey);
+        Assert.Equal(longPrefix, decodedPrefix);
+        Assert.Equal(ts, readTs);
     }
 
     [Fact]

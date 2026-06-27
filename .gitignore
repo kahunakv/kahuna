@@ -29,10 +29,13 @@ Kahuna.Control/obj
 Kahuna.Control/bin
 Kahuna.Control/nupkg
 Kahuna.Control/.idea
+Kahuna.Microbenchmarks/obj
+Kahuna.Microbenchmarks/bin
 Radline/Radline/obj
 Radline/Radline/bin
 Radline/RadLine/obj
 Radline/RadLine/bin
+BenchmarkDotNet.Artifacts/
 Kommander
 Nixie
 .idea

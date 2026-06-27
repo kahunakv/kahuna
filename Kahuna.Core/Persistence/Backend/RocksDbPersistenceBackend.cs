@@ -1,4 +1,5 @@
 
+using System.Buffers;
 using System.Buffers.Text;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -44,6 +45,11 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     // UTF-8 encoding of CurrentMarker for allocation-free key construction. The Debug.Assert
     // below catches any future edit to the const that forgets to update this literal.
     private static ReadOnlySpan<byte> CurrentMarkerUtf8 => "~CURRENT"u8;
+
+    // Guard for stackalloc on key buffers. Inputs are caller-controlled, so we must bound the
+    // stack frame; anything larger goes through ArrayPool. Real keys are well under this, so the
+    // ArrayPool path is rarely taken while the per-call stack zeroing stays cheap.
+    private const int KeyStackThreshold = 256;
 
     /// <summary>
     /// Manages memory streams efficiently by utilizing the RecyclableMemoryStreamManager,
@@ -194,26 +200,43 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// <param name="columnFamily">The column family handle identifying the column family where the data is stored.</param>
     private static void PutLocksItems(WriteBatch batch, PersistenceRequestItem item, RocksDbLockMessage kvm, ColumnFamilyHandle columnFamily)
     {
-        byte[] serialized = Serialize(kvm);
-
+        int serializedSize = kvm.CalculateSize();
         int keyLen = Encoding.UTF8.GetByteCount(item.Key);
-
-        // ~CURRENT key: encode key + CurrentMarker suffix without an intermediate string.
-        System.Diagnostics.Debug.Assert(CurrentMarker.Length == CurrentMarkerUtf8.Length,
-            "CurrentMarker string and CurrentMarkerUtf8 span have drifted — update the u8 literal");
-        Span<byte> index1 = stackalloc byte[keyLen + CurrentMarkerUtf8.Length];
-        Encoding.UTF8.GetBytes(item.Key, index1);
-        CurrentMarkerUtf8.CopyTo(index1[keyLen..]);
-        batch.Put(index1, serialized, cf: columnFamily);
-
-        // ~<revision> key: encode key + '~' + decimal revision digits without an intermediate string.
+        // The ~<revision> key is the larger of the two indices; one bounded buffer serves both.
         // 21 = '~'(1) + 20 digits (long.MinValue = -9223372036854775808 is 20 chars including '-').
-        Span<byte> index2 = stackalloc byte[keyLen + 21];
-        Encoding.UTF8.GetBytes(item.Key, index2);
-        index2[keyLen] = (byte)'~';
-        bool formatted = Utf8Formatter.TryFormat(item.Revision, index2[(keyLen + 1)..], out int revLen);
-        System.Diagnostics.Debug.Assert(formatted, "Utf8Formatter.TryFormat failed for revision key");
-        batch.Put(index2[..(keyLen + 1 + revLen)], serialized, cf: columnFamily);
+        int maxLen = keyLen + 21;
+
+        byte[]? rentedKey = null;
+        byte[] rentedSer = ArrayPool<byte>.Shared.Rent(serializedSize);
+        Span<byte> buffer = maxLen <= KeyStackThreshold
+            ? stackalloc byte[KeyStackThreshold]
+            : (rentedKey = ArrayPool<byte>.Shared.Rent(maxLen));
+        try
+        {
+            using (CodedOutputStream cos = new(rentedSer))
+                kvm.WriteTo(cos);
+
+            ReadOnlySpan<byte> serialized = rentedSer.AsSpan(0, serializedSize);
+
+            // ~CURRENT key: encode key + CurrentMarker suffix without an intermediate string.
+            System.Diagnostics.Debug.Assert(CurrentMarker.Length == CurrentMarkerUtf8.Length,
+                "CurrentMarker string and CurrentMarkerUtf8 span have drifted — update the u8 literal");
+            Encoding.UTF8.GetBytes(item.Key, buffer);
+            CurrentMarkerUtf8.CopyTo(buffer[keyLen..]);
+            batch.Put(buffer[..(keyLen + CurrentMarkerUtf8.Length)], serialized, cf: columnFamily);
+
+            // ~<revision> key: reuse the key bytes already at buffer[0..keyLen), overwrite the suffix.
+            buffer[keyLen] = (byte)'~';
+            bool formatted = Utf8Formatter.TryFormat(item.Revision, buffer[(keyLen + 1)..], out int revLen);
+            System.Diagnostics.Debug.Assert(formatted, "Utf8Formatter.TryFormat failed for revision key");
+            batch.Put(buffer[..(keyLen + 1 + revLen)], serialized, cf: columnFamily);
+        }
+        finally
+        {
+            if (rentedKey is not null)
+                ArrayPool<byte>.Shared.Return(rentedKey);
+            ArrayPool<byte>.Shared.Return(rentedSer);
+        }
     }
 
     /// <summary>
@@ -269,26 +292,43 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// </param>
     private static void PutStoreItems(WriteBatch batch, PersistenceRequestItem item, RocksDbKeyValueMessage kvm, ColumnFamilyHandle columnFamily)
     {
-        byte[] serialized = Serialize(kvm);
-
+        int serializedSize = kvm.CalculateSize();
         int keyLen = Encoding.UTF8.GetByteCount(item.Key);
-
-        // ~CURRENT key: encode key + CurrentMarker suffix without an intermediate string.
-        System.Diagnostics.Debug.Assert(CurrentMarker.Length == CurrentMarkerUtf8.Length,
-            "CurrentMarker string and CurrentMarkerUtf8 span have drifted — update the u8 literal");
-        Span<byte> index1 = stackalloc byte[keyLen + CurrentMarkerUtf8.Length];
-        Encoding.UTF8.GetBytes(item.Key, index1);
-        CurrentMarkerUtf8.CopyTo(index1[keyLen..]);
-        batch.Put(index1, serialized, cf: columnFamily);
-
-        // ~<revision> key: encode key + '~' + decimal revision digits without an intermediate string.
+        // The ~<revision> key is the larger of the two indices; one bounded buffer serves both.
         // 21 = '~'(1) + 20 digits (long.MinValue = -9223372036854775808 is 20 chars including '-').
-        Span<byte> index2 = stackalloc byte[keyLen + 21];
-        Encoding.UTF8.GetBytes(item.Key, index2);
-        index2[keyLen] = (byte)'~';
-        bool formatted = Utf8Formatter.TryFormat(item.Revision, index2[(keyLen + 1)..], out int revLen);
-        System.Diagnostics.Debug.Assert(formatted, "Utf8Formatter.TryFormat failed for revision key");
-        batch.Put(index2[..(keyLen + 1 + revLen)], serialized, cf: columnFamily);
+        int maxLen = keyLen + 21;
+
+        byte[]? rentedKey = null;
+        byte[] rentedSer = ArrayPool<byte>.Shared.Rent(serializedSize);
+        Span<byte> buffer = maxLen <= KeyStackThreshold
+            ? stackalloc byte[KeyStackThreshold]
+            : (rentedKey = ArrayPool<byte>.Shared.Rent(maxLen));
+        try
+        {
+            using (CodedOutputStream cos = new(rentedSer))
+                kvm.WriteTo(cos);
+
+            ReadOnlySpan<byte> serialized = rentedSer.AsSpan(0, serializedSize);
+
+            // ~CURRENT key: encode key + CurrentMarker suffix without an intermediate string.
+            System.Diagnostics.Debug.Assert(CurrentMarker.Length == CurrentMarkerUtf8.Length,
+                "CurrentMarker string and CurrentMarkerUtf8 span have drifted — update the u8 literal");
+            Encoding.UTF8.GetBytes(item.Key, buffer);
+            CurrentMarkerUtf8.CopyTo(buffer[keyLen..]);
+            batch.Put(buffer[..(keyLen + CurrentMarkerUtf8.Length)], serialized, cf: columnFamily);
+
+            // ~<revision> key: reuse the key bytes already at buffer[0..keyLen), overwrite the suffix.
+            buffer[keyLen] = (byte)'~';
+            bool formatted = Utf8Formatter.TryFormat(item.Revision, buffer[(keyLen + 1)..], out int revLen);
+            System.Diagnostics.Debug.Assert(formatted, "Utf8Formatter.TryFormat failed for revision key");
+            batch.Put(buffer[..(keyLen + 1 + revLen)], serialized, cf: columnFamily);
+        }
+        finally
+        {
+            if (rentedKey is not null)
+                ArrayPool<byte>.Shared.Return(rentedKey);
+            ArrayPool<byte>.Shared.Return(rentedSer);
+        }
     }
 
     /// <summary>
@@ -301,35 +341,47 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// </returns>
     public LockEntry? GetLock(string resource)
     {
-        string currentKey = resource + CurrentMarker;
+        int keyLen = Encoding.UTF8.GetByteCount(resource);
+        int totalLen = keyLen + CurrentMarkerUtf8.Length;
 
-        Span<byte> buffer = stackalloc byte[Encoding.UTF8.GetByteCount(currentKey)];
-        Encoding.UTF8.GetBytes(currentKey.AsSpan(), buffer);
-        
-        byte[]? value = db.Get(buffer, cf: columnFamilyLocks);
-        if (value is null)
-            return null;
-
-        RocksDbLockMessage message = UnserializeLockMessage(value);
-        
-        byte[]? owner;
-        
-        if (MemoryMarshal.TryGetArray(message.Owner.Memory, out ArraySegment<byte> segment))
-            owner = segment.Array;
-        else
-            owner = message.Owner.ToByteArray();
-
-        LockEntry entry = new()
+        byte[]? rented = null;
+        Span<byte> buffer = totalLen <= KeyStackThreshold
+            ? stackalloc byte[KeyStackThreshold]
+            : (rented = ArrayPool<byte>.Shared.Rent(totalLen));
+        try
         {
-            Owner = owner,
-            FencingToken = message.FencingToken,
-            Expires = new(message.ExpiresNode, message.ExpiresPhysical, message.ExpiresCounter),
-            LastUsed = new(message.LastUsedNode, message.LastUsedPhysical, message.LastUsedCounter),
-            LastModified = new(message.LastModifiedNode, message.LastModifiedPhysical, message.LastModifiedCounter),
-            State = (LockState)message.State
-        };
+            buffer = buffer[..totalLen];
+            Encoding.UTF8.GetBytes(resource.AsSpan(), buffer);
+            CurrentMarkerUtf8.CopyTo(buffer[keyLen..]);
 
-        return entry;
+            byte[]? value = db.Get(buffer, cf: columnFamilyLocks);
+            if (value is null)
+                return null;
+
+            RocksDbLockMessage message = UnserializeLockMessage(value);
+
+            byte[]? owner;
+
+            if (MemoryMarshal.TryGetArray(message.Owner.Memory, out ArraySegment<byte> segment))
+                owner = segment.Array;
+            else
+                owner = message.Owner.ToByteArray();
+
+            return new()
+            {
+                Owner = owner,
+                FencingToken = message.FencingToken,
+                Expires = new(message.ExpiresNode, message.ExpiresPhysical, message.ExpiresCounter),
+                LastUsed = new(message.LastUsedNode, message.LastUsedPhysical, message.LastUsedCounter),
+                LastModified = new(message.LastModifiedNode, message.LastModifiedPhysical, message.LastModifiedCounter),
+                State = (LockState)message.State
+            };
+        }
+        finally
+        {
+            if (rented is not null)
+                ArrayPool<byte>.Shared.Return(rented);
+        }
     }
 
     /// <summary>
@@ -343,35 +395,47 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// </returns>
     public KeyValueEntry? GetKeyValue(string keyName)
     {
-        string currentKey = keyName + CurrentMarker;
-        
-        Span<byte> buffer = stackalloc byte[Encoding.UTF8.GetByteCount(currentKey)];
-        Encoding.UTF8.GetBytes(currentKey.AsSpan(), buffer);
-        
-        byte[]? value = db.Get(buffer, cf: columnFamilyKeys);
-        if (value is null)
-            return null;
+        int keyLen = Encoding.UTF8.GetByteCount(keyName);
+        int totalLen = keyLen + CurrentMarkerUtf8.Length;
 
-        RocksDbKeyValueMessage message = UnserializeKeyValueMessage(value);
-        
-        byte[]? messageValue;
-        
-        if (MemoryMarshal.TryGetArray(message.Value.Memory, out ArraySegment<byte> segment))
-            messageValue = segment.Array;
-        else
-            messageValue = message.Value.ToByteArray();
-
-        KeyValueEntry entry = new()
+        byte[]? rented = null;
+        Span<byte> buffer = totalLen <= KeyStackThreshold
+            ? stackalloc byte[KeyStackThreshold]
+            : (rented = ArrayPool<byte>.Shared.Rent(totalLen));
+        try
         {
-            Value = messageValue,
-            Revision = message.Revision,
-            Expires = new(message.ExpiresNode, message.ExpiresPhysical, message.ExpiresCounter),
-            LastUsed = new(message.LastUsedNode, message.LastUsedPhysical, message.LastUsedCounter),
-            LastModified = new(message.LastModifiedNode, message.LastModifiedPhysical, message.LastModifiedCounter),
-            State = (KeyValueState)message.State,
-        };
+            buffer = buffer[..totalLen];
+            Encoding.UTF8.GetBytes(keyName.AsSpan(), buffer);
+            CurrentMarkerUtf8.CopyTo(buffer[keyLen..]);
 
-        return entry;
+            byte[]? value = db.Get(buffer, cf: columnFamilyKeys);
+            if (value is null)
+                return null;
+
+            RocksDbKeyValueMessage message = UnserializeKeyValueMessage(value);
+
+            byte[]? messageValue;
+
+            if (MemoryMarshal.TryGetArray(message.Value.Memory, out ArraySegment<byte> segment))
+                messageValue = segment.Array;
+            else
+                messageValue = message.Value.ToByteArray();
+
+            return new()
+            {
+                Value = messageValue,
+                Revision = message.Revision,
+                Expires = new(message.ExpiresNode, message.ExpiresPhysical, message.ExpiresCounter),
+                LastUsed = new(message.LastUsedNode, message.LastUsedPhysical, message.LastUsedCounter),
+                LastModified = new(message.LastModifiedNode, message.LastModifiedPhysical, message.LastModifiedCounter),
+                State = (KeyValueState)message.State,
+            };
+        }
+        finally
+        {
+            if (rented is not null)
+                ArrayPool<byte>.Shared.Return(rented);
+        }
     }
 
     /// <summary>
@@ -534,49 +598,6 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         return result;
     }
 
-
-    /// <summary>
-    /// Serializes a provided <see cref="RocksDbLockMessage"/> instance into a byte array.
-    /// This method ensures that larger messages, in particular those with an Owner
-    /// property exceeding the maximum allowed size, are handled efficiently by utilizing
-    /// a recyclable memory stream.
-    /// </summary>
-    /// <param name="message">The <see cref="RocksDbLockMessage"/> instance to be serialized.</param>
-    /// <returns>A byte array representation of the serialized <see cref="RocksDbLockMessage"/>.</returns>
-    private static byte[] Serialize(RocksDbLockMessage message)
-    {
-        if (!message.Owner.IsEmpty && message.Owner.Length >= MaxMessageSize)
-        {
-            using RecyclableMemoryStream recyclableMemoryStream = manager.GetStream();
-            message.WriteTo((Stream)recyclableMemoryStream);
-            return recyclableMemoryStream.ToArray();    
-        }
-        
-        using MemoryStream memoryStream = manager.GetStream();
-        message.WriteTo(memoryStream);
-        return memoryStream.ToArray();
-    }
-
-    /// <summary>
-    /// Serializes a given <see cref="RocksDbKeyValueMessage"/> into a byte array representation.
-    /// Allows memory-efficient serialization of message objects, leveraging a memory stream manager
-    /// for large payloads exceeding a predefined size.
-    /// </summary>
-    /// <param name="message">The <see cref="RocksDbKeyValueMessage"/> instance to be serialized. This contains the data to convert into a byte array.</param>
-    /// <returns>A byte array representing the serialized form of the given message.</returns>
-    private static byte[] Serialize(RocksDbKeyValueMessage message)
-    {
-        if (!message.Value.IsEmpty && message.Value.Length >= MaxMessageSize)
-        {
-            using RecyclableMemoryStream recyclableMemoryStream = manager.GetStream();
-            message.WriteTo((Stream)recyclableMemoryStream);
-            return recyclableMemoryStream.ToArray();
-        }
-        
-        using MemoryStream memoryStream = manager.GetStream();
-        message.WriteTo(memoryStream);
-        return memoryStream.ToArray();
-    }
 
     /// <summary>
     /// Converts a serialized byte span into a <see cref="RocksDbLockMessage"/> object.
