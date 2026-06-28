@@ -42,9 +42,10 @@ internal sealed class KeyWriteFrequencyTracker
 
     /// <summary>
     /// Number of entries inspected when choosing an eviction victim. Sampling replaces the former
-    /// O(MaxEntries) full-scan: we walk a strided subset of the dictionary and evict the minimum
-    /// among the sample. At cap, low-count keys dominate the boundary so the sample reliably finds
-    /// an inexpensive victim without reading every entry.
+    /// O(MaxEntries) full scan: we read a small window of consecutive entries and evict the minimum
+    /// among them. Enumeration position in the dictionary is uncorrelated with write count, so a
+    /// consecutive window is as representative as a strided one — and stays O(EvictionSampleSize).
+    /// Hot keys survive because they are almost never the minimum of a small random sample.
     /// </summary>
     private const int EvictionSampleSize = 16;
 
@@ -61,43 +62,50 @@ internal sealed class KeyWriteFrequencyTracker
     /// </summary>
     public void RecordWrite(string key)
     {
-        bool added = false;
-        _counts.AddOrUpdate(key, _ => { added = true; return 1L; }, static (_, v) => v + 1);
-
-        if (added)
+        // TryAdd detects a genuine first insert without the per-call closure allocation an
+        // AddOrUpdate add-factory would incur, and is precise under races: only the thread that
+        // actually inserts takes the add path, so _approxCount cannot over-count.
+        if (!_counts.TryAdd(key, 1L))
         {
-            if (Interlocked.Increment(ref _approxCount) <= MaxEntries)
-                return;
+            // Existing key (or a lost insert race): increment its count.
+            _counts.AddOrUpdate(key, 1L, static (_, v) => v + 1);
+            return;
+        }
 
-            // Over budget: pick a victim from a small random sample and evict it.
-            // O(EvictionSampleSize) instead of O(MaxEntries); hot keys survive because
-            // they are unlikely to be the minimum in any random sample taken at the cap.
-            int counter = Interlocked.Increment(ref _evictCounter);
-            int stride = Math.Max(1, _approxCount / EvictionSampleSize);
-            int skip = counter % stride;
+        if (Interlocked.Increment(ref _approxCount) <= MaxEntries)
+            return;
 
-            string? evict = null;
-            long minCount = long.MaxValue;
-            int seen = 0;
+        // Over budget: evict the lowest-count key from a small window of entries. Truly
+        // O(EvictionSampleSize) — at most a bounded rotating offset plus the sample window are
+        // enumerated, never the whole dictionary. The offset varies the region across successive
+        // evictions; hot keys survive because they are almost never the minimum of the window.
+        int counter = Interlocked.Increment(ref _evictCounter);
+        int skip = (counter & int.MaxValue) % EvictionSampleSize;
 
-            foreach (KeyValuePair<string, long> pair in _counts)
+        string? evict = null;
+        long minCount = long.MaxValue;
+        int seen = 0;
+
+        foreach (KeyValuePair<string, long> pair in _counts)
+        {
+            if (skip > 0)
             {
-                if (skip-- > 0) continue;
-                skip = stride - 1;
-
-                if (pair.Value < minCount)
-                {
-                    minCount = pair.Value;
-                    evict = pair.Key;
-                }
-
-                if (++seen >= EvictionSampleSize)
-                    break;
+                skip--;
+                continue;
             }
 
-            if (evict is not null && _counts.TryRemove(evict, out _))
-                Interlocked.Decrement(ref _approxCount);
+            if (pair.Value < minCount)
+            {
+                minCount = pair.Value;
+                evict = pair.Key;
+            }
+
+            if (++seen >= EvictionSampleSize)
+                break;
         }
+
+        if (evict is not null && _counts.TryRemove(evict, out _))
+            Interlocked.Decrement(ref _approxCount);
     }
 
     /// <summary>
@@ -119,15 +127,13 @@ internal sealed class KeyWriteFrequencyTracker
         if (toRemove is null)
             return;
 
-        int removed = 0;
         foreach (string key in toRemove)
-        {
-            if (_counts.TryRemove(key, out _))
-                removed++;
-        }
+            _counts.TryRemove(key, out _);
 
-        if (removed > 0)
-            Interlocked.Add(ref _approxCount, -removed);
+        // Decay already enumerates the whole map, so reconcile the approximate counter with the exact
+        // size here. This bounds any RecordWrite drift (concurrent first-insert races can over-count)
+        // to a single decay interval.
+        Interlocked.Exchange(ref _approxCount, _counts.Count);
     }
 
     /// <summary>

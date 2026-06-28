@@ -1,83 +1,48 @@
 
 using Google.Protobuf;
 using Kahuna.Server.Replication.Protos;
-using Microsoft.IO;
 
 namespace Kahuna.Server.Replication;
 
 /// <summary>
 /// Provides serialization and deserialization utilities for replication messages,
-/// specifically for LockMessage and KeyValueMessage types, handling different
-/// message sizes efficiently.
+/// specifically for LockMessage, KeyValueMessage, and RangeMapMessage types.
 /// </summary>
 public static class ReplicationSerializer
 {
-    private const int MaxMessageSize = 1024;
-    
-    private static readonly RecyclableMemoryStreamManager manager = new();
-    
     public static byte[] Serialize(LockMessage message)
     {
-        if (!message.Owner.IsEmpty && message.Owner.Length >= MaxMessageSize)
-        {
-            using RecyclableMemoryStream recycledMemoryStream = manager.GetStream();
-            message.WriteTo((Stream)recycledMemoryStream);
-            return recycledMemoryStream.ToArray();
-        }
-        
-        using MemoryStream memoryStream = manager.GetStream();
-        message.WriteTo(memoryStream);
-        return memoryStream.ToArray();
+        int size = message.CalculateSize();
+        byte[] buf = new byte[size];
+        using CodedOutputStream cos = new(buf);
+        message.WriteTo(cos);
+        return buf;
     }
 
-    public static LockMessage UnserializeLockMessage(ReadOnlySpan<byte> serializedData)
-    {
-        if (serializedData.Length >= MaxMessageSize)
-        {
-            using RecyclableMemoryStream recycledMemoryStream = manager.GetStream(serializedData);
-            return LockMessage.Parser.ParseFrom(recycledMemoryStream);
-        }
-        
-        using MemoryStream memoryStream = manager.GetStream(serializedData);
-        return LockMessage.Parser.ParseFrom(memoryStream);
-    }
-    
+    public static LockMessage UnserializeLockMessage(ReadOnlySpan<byte> serializedData) =>
+        LockMessage.Parser.ParseFrom(serializedData);
+
     public static byte[] Serialize(KeyValueMessage message)
     {
-        if (!message.Value.IsEmpty && message.Value.Length >= MaxMessageSize)
-        {
-            using RecyclableMemoryStream recycledMemoryStream = manager.GetStream();
-            message.WriteTo((Stream)recycledMemoryStream);
-            return recycledMemoryStream.ToArray();    
-        }
-        
-        using MemoryStream memoryStream = manager.GetStream();
-        message.WriteTo(memoryStream);
-        return memoryStream.ToArray();
+        int size = message.CalculateSize();
+        byte[] buf = new byte[size];
+        using CodedOutputStream cos = new(buf);
+        message.WriteTo(cos);
+        return buf;
     }
-    
-    public static KeyValueMessage UnserializeKeyValueMessage(ReadOnlySpan<byte> serializedData)
-    {
-        if (serializedData.Length >= MaxMessageSize)
-        {
-            using RecyclableMemoryStream recycledMemoryStream = manager.GetStream(serializedData);
-            return KeyValueMessage.Parser.ParseFrom(recycledMemoryStream);
-        }
-        
-        using MemoryStream memoryStream = manager.GetStream(serializedData);
-        return KeyValueMessage.Parser.ParseFrom(memoryStream);
-    }
+
+    public static KeyValueMessage UnserializeKeyValueMessage(ReadOnlySpan<byte> serializedData) =>
+        KeyValueMessage.Parser.ParseFrom(serializedData);
 
     public static byte[] Serialize(RangeMapMessage message)
     {
-        using MemoryStream memoryStream = manager.GetStream();
-        message.WriteTo(memoryStream);
-        return memoryStream.ToArray();
+        int size = message.CalculateSize();
+        byte[] buf = new byte[size];
+        using CodedOutputStream cos = new(buf);
+        message.WriteTo(cos);
+        return buf;
     }
 
-    public static RangeMapMessage UnserializeRangeMapMessage(ReadOnlySpan<byte> serializedData)
-    {
-        using MemoryStream memoryStream = manager.GetStream(serializedData);
-        return RangeMapMessage.Parser.ParseFrom(memoryStream);
-    }
+    public static RangeMapMessage UnserializeRangeMapMessage(ReadOnlySpan<byte> serializedData) =>
+        RangeMapMessage.Parser.ParseFrom(serializedData);
 }

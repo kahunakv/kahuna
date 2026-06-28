@@ -105,4 +105,92 @@ public class TestRangeMap
         Assert.Equal(3, map.Find("x", "r/90")!.PartitionId);  // "r/90" >= "r/9"
         Assert.Equal(1, map.Find("x", "r/0")!.PartitionId);   // "r/0" < "r/10"
     }
+
+    // ── Descriptors_ReturnsAllEntriesInKeySpaceOrder ──────────────────────────
+
+    [Fact]
+    public void Descriptors_ReturnsAllEntriesInKeySpaceOrder()
+    {
+        RangeMap map = new([
+            R("b", "b0", null,  4),
+            R("a", "a1", "a2",  2),
+            R("a", null, "a1",  1),
+            R("b", null, "b0",  3),
+        ]);
+
+        IReadOnlyList<RangeDescriptor> d = map.Descriptors;
+        Assert.Equal(4, d.Count);
+
+        // Within each key space entries must be in ascending StartKey order.
+        // Dictionary enumeration order is insertion-order in .NET, but the important
+        // invariant is that each key space's slice is sorted (the flat list is the
+        // concatenation of per-space sorted arrays).
+        int[] partitions = d.Select(x => x.PartitionId).ToArray();
+
+        // Space "a": partitions 1 (null start) then 2 ("a1" start); space "b": 3 then 4.
+        // Exact order of spaces may vary, but within each space the sort must hold.
+        int idxA1 = Array.IndexOf(partitions, 1);
+        int idxA2 = Array.IndexOf(partitions, 2);
+        int idxB3 = Array.IndexOf(partitions, 3);
+        int idxB4 = Array.IndexOf(partitions, 4);
+
+        Assert.True(idxA1 < idxA2, "partition 1 must precede partition 2 within key space 'a'");
+        Assert.True(idxB3 < idxB4, "partition 3 must precede partition 4 within key space 'b'");
+
+        // Repeated reads return the same (cached) array reference, not a new allocation.
+        Assert.Same(map.Descriptors, map.Descriptors);
+    }
+
+    // ── FindAll_ReturnsSortedSliceForKeySpace ─────────────────────────────────
+
+    [Fact]
+    public void FindAll_ReturnsSortedSliceForKeySpace()
+    {
+        RangeMap map = new([
+            R("ks", "m", null, 2),
+            R("ks", null, "m", 1),
+        ]);
+
+        IReadOnlyList<RangeDescriptor> all = map.FindAll("ks");
+        Assert.Equal(2, all.Count);
+        Assert.Null(all[0].StartKey);    // null (−inf) sorts first
+        Assert.Equal("m", all[1].StartKey);
+
+        Assert.Empty(map.FindAll("missing-ks"));
+    }
+
+    // ── FindIntersecting_HalfOpenSemantics ────────────────────────────────────
+
+    [Fact]
+    public void FindIntersecting_HalfOpenSemantics()
+    {
+        // Three contiguous ranges: (-inf,"d") ("d","m") ("m",+inf)
+        RangeMap map = new([
+            R("ks", null, "d",  1),
+            R("ks", "d",  "m",  2),
+            R("ks", "m",  null, 3),
+        ]);
+
+        // Query spanning first two ranges.
+        IReadOnlyList<RangeDescriptor> r1 = map.FindIntersecting("ks", "a", "e");
+        Assert.Equal(2, r1.Count);
+        Assert.Equal(1, r1[0].PartitionId);
+        Assert.Equal(2, r1[1].PartitionId);
+
+        // Query touching only the exact boundary "d" should include [d,m) but not (-inf,d).
+        IReadOnlyList<RangeDescriptor> r2 = map.FindIntersecting("ks", "d", "e");
+        Assert.Single(r2);
+        Assert.Equal(2, r2[0].PartitionId);
+
+        // Null bounds = ±inf: full scan returns all three.
+        IReadOnlyList<RangeDescriptor> r3 = map.FindIntersecting("ks", null, null);
+        Assert.Equal(3, r3.Count);
+
+        // Query beyond the last range returns only the last.
+        IReadOnlyList<RangeDescriptor> r4 = map.FindIntersecting("ks", "z", null);
+        Assert.Single(r4);
+        Assert.Equal(3, r4[0].PartitionId);
+
+        Assert.Empty(map.FindIntersecting("missing", null, null));
+    }
 }

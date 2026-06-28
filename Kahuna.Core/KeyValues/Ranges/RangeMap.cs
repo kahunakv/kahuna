@@ -17,6 +17,9 @@ internal sealed class RangeMap
     /// <summary>Per key space, descriptors sorted ascending by <c>StartKey</c> (null first).</summary>
     private readonly Dictionary<string, RangeDescriptor[]> bySpace;
 
+    /// <summary>Pre-flattened view across all key spaces, built once in the constructor.</summary>
+    private readonly RangeDescriptor[] _descriptors;
+
     public RangeMap(IEnumerable<RangeDescriptor> descriptors)
     {
         bySpace = descriptors
@@ -25,6 +28,8 @@ internal sealed class RangeMap
                 static g => g.Key,
                 static g => g.OrderBy(static d => d.StartKey, StartKeyComparer.Instance).ToArray(),
                 StringComparer.Ordinal);
+
+        _descriptors = [.. bySpace.Values.SelectMany(static r => r)];
     }
 
     /// <summary>An empty map (no ranges registered for any key space).</summary>
@@ -34,8 +39,7 @@ internal sealed class RangeMap
     /// All descriptors across every key space, sorted within each space by <c>StartKey</c>. Used by
     /// <see cref="RangeMapStore"/> to snapshot the map for replication.
     /// </summary>
-    public IReadOnlyList<RangeDescriptor> Descriptors =>
-        bySpace.Values.SelectMany(static r => r).ToArray();
+    public IReadOnlyList<RangeDescriptor> Descriptors => _descriptors;
 
     /// <summary>
     /// Resolves the descriptor whose half-open ordinal interval contains <paramref name="key"/>
