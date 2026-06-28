@@ -1779,12 +1779,9 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to rollback key/value transaction: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
 
-    // Intentionally unary: sequence operations are low-frequency control-plane calls routed to a
-    // dedicated sequencer service via CreateSequenceChannel; they are not candidates for per-key
-    // coalescing in the streaming key-value batcher.
     public async Task<(SequenceResponseType, ReadOnlySequenceEntry?, int)> GetSequence(string url, string name, SequenceDurability durability, CancellationToken cancellationToken)
     {
-        using GrpcChannel channel = CreateSequenceChannel(url);
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
         Sequencer.SequencerClient client = new(channel);
 
         GrpcSequenceResponse response = await client.GetSequenceAsync(new()
@@ -1809,7 +1806,7 @@ public class GrpcCommunication : IKahunaCommunication
         if (maxValue.HasValue)
             request.MaxValue = maxValue.Value;
 
-        using GrpcChannel channel = CreateSequenceChannel(url);
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
         Sequencer.SequencerClient client = new(channel);
         GrpcSequenceResponse response = await client.CreateSequenceAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
@@ -1827,7 +1824,7 @@ public class GrpcCommunication : IKahunaCommunication
         if (idempotencyKey is not null)
             request.IdempotencyKey = idempotencyKey;
 
-        using GrpcChannel channel = CreateSequenceChannel(url);
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
         Sequencer.SequencerClient client = new(channel);
         GrpcSequenceAllocationResponse response = await client.NextSequenceValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
@@ -1846,7 +1843,7 @@ public class GrpcCommunication : IKahunaCommunication
         if (idempotencyKey is not null)
             request.IdempotencyKey = idempotencyKey;
 
-        using GrpcChannel channel = CreateSequenceChannel(url);
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
         Sequencer.SequencerClient client = new(channel);
         GrpcSequenceAllocationResponse response = await client.ReserveSequenceRangeAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
@@ -1855,7 +1852,7 @@ public class GrpcCommunication : IKahunaCommunication
 
     public async Task<(SequenceResponseType, int)> DeleteSequence(string url, string name, SequenceDurability durability, CancellationToken cancellationToken)
     {
-        using GrpcChannel channel = CreateSequenceChannel(url);
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
         Sequencer.SequencerClient client = new(channel);
 
         GrpcSequenceResponse response = await client.DeleteSequenceAsync(new()
@@ -1865,43 +1862,6 @@ public class GrpcCommunication : IKahunaCommunication
         }, cancellationToken: cancellationToken).ConfigureAwait(false);
 
         return ((SequenceResponseType)response.Type, response.TimeElapsedMs);
-    }
-
-    private GrpcChannel CreateSequenceChannel(string url)
-    {
-        SslClientAuthenticationOptions sslOptions = new()
-        {
-            RemoteCertificateValidationCallback = GrpcBatcher.BuildCertValidationCallback(options)
-        };
-
-        SocketsHttpHandler handler = new()
-        {
-            SslOptions = sslOptions,
-            ConnectTimeout = TimeSpan.FromSeconds(10),
-            PooledConnectionIdleTimeout = Timeout.InfiniteTimeSpan,
-            KeepAlivePingDelay = TimeSpan.FromSeconds(30),
-            KeepAlivePingTimeout = TimeSpan.FromSeconds(10),
-            EnableMultipleHttp2Connections = true,
-        };
-
-        MethodConfig defaultMethodConfig = new()
-        {
-            Names = { MethodName.Default },
-            RetryPolicy = new RetryPolicy
-            {
-                MaxAttempts = 5,
-                InitialBackoff = TimeSpan.FromSeconds(1),
-                MaxBackoff = TimeSpan.FromSeconds(5),
-                BackoffMultiplier = 1.5,
-                RetryableStatusCodes = { StatusCode.Unavailable }
-            }
-        };
-
-        return GrpcChannel.ForAddress(url, new()
-        {
-            HttpHandler = handler,
-            ServiceConfig = new() { MethodConfigs = { defaultMethodConfig } }
-        });
     }
 
     private static ReadOnlySequenceEntry? ToReadOnlySequenceEntry(GrpcSequenceEntry? entry)

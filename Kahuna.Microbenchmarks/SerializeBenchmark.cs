@@ -7,7 +7,7 @@ using Microsoft.IO;
 namespace Kahuna.Microbenchmarks;
 
 /// <summary>
-/// Before/after for the C3 write-path serialization in <c>RocksDbPersistenceBackend</c>
+/// Before/after for the write-path serialization in <c>RocksDbPersistenceBackend</c>
 /// (<c>PutLocksItems</c>/<c>PutStoreItems</c>).
 ///
 /// <para><b>Old</b> = <c>manager.GetStream()</c> (RecyclableMemoryStream) + <c>WriteTo(stream)</c> +

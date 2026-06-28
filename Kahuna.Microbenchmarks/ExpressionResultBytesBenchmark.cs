@@ -5,7 +5,7 @@ using BenchmarkDotNet.Attributes;
 namespace Kahuna.Microbenchmarks;
 
 /// <summary>
-/// Before/after comparison for the C4 changes in <c>KeyValueExpressionResult.ToBytes()</c>.
+/// Before/after comparison for <c>KeyValueExpressionResult.ToBytes()</c>.
 ///
 /// <para><b>Bool</b>: Old = <c>"true"u8.ToArray()</c> (fresh array per call) vs New = a shared
 /// <c>static readonly byte[]</c>. <b>Long</b>: Old = <c>Encoding.UTF8.GetBytes(v.ToString())</c>

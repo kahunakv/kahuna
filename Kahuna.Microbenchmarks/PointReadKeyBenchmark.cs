@@ -5,7 +5,7 @@ using BenchmarkDotNet.Attributes;
 namespace Kahuna.Microbenchmarks;
 
 /// <summary>
-/// Before/after for the C2 point-read key construction in
+/// Before/after for the point-read key construction in
 /// <c>RocksDbPersistenceBackend.GetLock</c>/<c>GetKeyValue</c>.
 ///
 /// <para><b>Old</b> = <c>resource + CurrentMarker</c> (heap string) + an unbounded

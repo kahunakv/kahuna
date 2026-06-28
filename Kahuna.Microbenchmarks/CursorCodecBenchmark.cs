@@ -7,7 +7,7 @@ using BenchmarkDotNet.Attributes;
 namespace Kahuna.Microbenchmarks;
 
 /// <summary>
-/// Before/after comparison for the C1 cursor-codec rewrite in <c>KeyValueRangeCursor</c>.
+/// Before/after comparison for the cursor-codec rewrite in <c>KeyValueRangeCursor</c>.
 ///
 /// <para><b>Old</b> = <c>new byte[]</c> buffer + manual little-endian writes +
 /// <c>Convert.ToBase64String().TrimEnd('=').Replace(...)</c> on encode, and
@@ -119,7 +119,7 @@ public class CursorCodecBenchmark
     private static bool OldReadI64(byte[] b, ref int p, out long v) { v = 0; if (p + 8 > b.Length) return false; for (int i = 0; i < 8; i++) v |= (long)b[p + i] << (i * 8); p += 8; return true; }
     private static bool OldReadU32(byte[] b, ref int p, out uint v) { v = 0; if (p + 4 > b.Length) return false; v = (uint)(b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)); p += 4; return true; }
 
-    // ── new implementation (C1, as shipped) ─────────────────────────────────────
+    // ── new implementation (as shipped) ─────────────────────────────────────────
 
     private static string NewEncode()
     {

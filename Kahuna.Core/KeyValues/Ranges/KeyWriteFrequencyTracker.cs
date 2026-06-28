@@ -40,34 +40,64 @@ internal sealed class KeyWriteFrequencyTracker
     /// <summary>Maximum distinct keys tracked. Entries beyond this cap are evicted (lowest count first).</summary>
     private const int MaxEntries = 4_096;
 
+    /// <summary>
+    /// Number of entries inspected when choosing an eviction victim. Sampling replaces the former
+    /// O(MaxEntries) full-scan: we walk a strided subset of the dictionary and evict the minimum
+    /// among the sample. At cap, low-count keys dominate the boundary so the sample reliably finds
+    /// an inexpensive victim without reading every entry.
+    /// </summary>
+    private const int EvictionSampleSize = 16;
+
     private readonly ConcurrentDictionary<string, long> _counts = new(StringComparer.Ordinal);
+
+    /// <summary>Approximate live entry count; updated with Interlocked to avoid frequent ConcurrentDictionary.Count reads.</summary>
+    private int _approxCount;
+
+    /// <summary>Rolling counter used to vary the sample start position across successive evictions.</summary>
+    private int _evictCounter;
 
     /// <summary>
     /// Records one write for <paramref name="key"/>. Lock-free; safe to call from any thread.
     /// </summary>
     public void RecordWrite(string key)
     {
-        _counts.AddOrUpdate(key, 1L, static (_, v) => v + 1);
+        bool added = false;
+        _counts.AddOrUpdate(key, _ => { added = true; return 1L; }, static (_, v) => v + 1);
 
-        if (_counts.Count <= MaxEntries)
-            return;
-
-        // Over budget: evict the entry with the lowest count.
-        // Linear scan is acceptable — this path is taken at most once per write when near capacity.
-        string? evict = null;
-        long minCount = long.MaxValue;
-
-        foreach (KeyValuePair<string, long> pair in _counts)
+        if (added)
         {
-            if (pair.Value < minCount)
-            {
-                minCount = pair.Value;
-                evict = pair.Key;
-            }
-        }
+            if (Interlocked.Increment(ref _approxCount) <= MaxEntries)
+                return;
 
-        if (evict is not null)
-            _counts.TryRemove(evict, out _);
+            // Over budget: pick a victim from a small random sample and evict it.
+            // O(EvictionSampleSize) instead of O(MaxEntries); hot keys survive because
+            // they are unlikely to be the minimum in any random sample taken at the cap.
+            int counter = Interlocked.Increment(ref _evictCounter);
+            int stride = Math.Max(1, _approxCount / EvictionSampleSize);
+            int skip = counter % stride;
+
+            string? evict = null;
+            long minCount = long.MaxValue;
+            int seen = 0;
+
+            foreach (KeyValuePair<string, long> pair in _counts)
+            {
+                if (skip-- > 0) continue;
+                skip = stride - 1;
+
+                if (pair.Value < minCount)
+                {
+                    minCount = pair.Value;
+                    evict = pair.Key;
+                }
+
+                if (++seen >= EvictionSampleSize)
+                    break;
+            }
+
+            if (evict is not null && _counts.TryRemove(evict, out _))
+                Interlocked.Decrement(ref _approxCount);
+        }
     }
 
     /// <summary>
@@ -89,15 +119,26 @@ internal sealed class KeyWriteFrequencyTracker
         if (toRemove is null)
             return;
 
+        int removed = 0;
         foreach (string key in toRemove)
-            _counts.TryRemove(key, out _);
+        {
+            if (_counts.TryRemove(key, out _))
+                removed++;
+        }
+
+        if (removed > 0)
+            Interlocked.Add(ref _approxCount, -removed);
     }
 
     /// <summary>
     /// Wipes the histogram. Must be called when this node loses leadership of the partition so
     /// the stale in-memory counts are not used by the next leader after re-election.
     /// </summary>
-    public void Clear() => _counts.Clear();
+    public void Clear()
+    {
+        _counts.Clear();
+        Interlocked.Exchange(ref _approxCount, 0);
+    }
 
     /// <summary>Returns true when no write has been recorded (e.g. immediately after construction or <see cref="Clear"/>).</summary>
     public bool IsEmpty => _counts.IsEmpty;
@@ -137,7 +178,10 @@ internal sealed class KeyWriteFrequencyTracker
                              string.Compare(pair.Key, endKey, StringComparison.Ordinal) < 0;
 
             if (afterStart && beforeEnd && pair.Value > 0)
+            {
                 child._counts[pair.Key] = pair.Value;
+                child._approxCount++;
+            }
         }
 
         return child;

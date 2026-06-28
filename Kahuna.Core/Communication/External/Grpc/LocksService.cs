@@ -194,12 +194,31 @@ public sealed class LocksService : Locker.LockerBase
         ServerCallContext context
     )
     {
+        int inFlight = 1;
+        TaskCompletionSource drain = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        void Track(Task task)
+        {
+            Interlocked.Increment(ref inFlight);
+            _ = task.ContinueWith(completed =>
+            {
+                if (completed.IsFaulted)
+                {
+                    Exception? e = completed.Exception?.InnerException;
+                    if (e is IOException or OperationCanceledException)
+                        logger.LogCommunicationIoException(e);
+                    else
+                        logger.LogError(completed.Exception, "Batch lock client handler faulted");
+                }
+                if (Interlocked.Decrement(ref inFlight) == 0)
+                    drain.TrySetResult();
+            }, TaskScheduler.Default);
+        }
+
+        using SemaphoreSlim semaphore = new(1, 1);
+
         try
         {
-            List<Task> tasks = [];
-
-            using SemaphoreSlim semaphore = new(1, 1);
-
             await foreach (GrpcBatchClientLockRequest request in requestStream.ReadAllAsync())
             {
                 switch (request.Type)
@@ -208,7 +227,7 @@ public sealed class LocksService : Locker.LockerBase
                     {
                         GrpcTryLockRequest? lockRequest = request.TryLock;
 
-                        tasks.Add(TryLockDelayed(semaphore, request.RequestId, lockRequest, responseStream, context));
+                        Track(TryLockDelayed(semaphore, request.RequestId, lockRequest, responseStream, context));
                     }
                     break;
                     
@@ -216,7 +235,7 @@ public sealed class LocksService : Locker.LockerBase
                     {
                         GrpcUnlockRequest? unlockRequest = request.Unlock;
 
-                        tasks.Add(TryUnlockDelayed(semaphore, request.RequestId, unlockRequest, responseStream, context));
+                        Track(TryUnlockDelayed(semaphore, request.RequestId, unlockRequest, responseStream, context));
                     }
                     break;
                     
@@ -224,7 +243,7 @@ public sealed class LocksService : Locker.LockerBase
                     {
                         GrpcExtendLockRequest? extendLockRequest = request.ExtendLock;
 
-                        tasks.Add(TryExtendLockDelayed(semaphore, request.RequestId, extendLockRequest, responseStream, context));
+                        Track(TryExtendLockDelayed(semaphore, request.RequestId, extendLockRequest, responseStream, context));
                     }
                     break;
                     
@@ -232,7 +251,7 @@ public sealed class LocksService : Locker.LockerBase
                     {
                         GrpcGetLockRequest? getLockRequest = request.GetLock;
 
-                        tasks.Add(TryGetLockDelayed(semaphore, request.RequestId, getLockRequest, responseStream, context));
+                        Track(TryGetLockDelayed(semaphore, request.RequestId, getLockRequest, responseStream, context));
                     }
                     break;
 
@@ -242,15 +261,18 @@ public sealed class LocksService : Locker.LockerBase
                         break;
                 }
             }
-
-            await Task.WhenAll(tasks);
         }
         catch (IOException ex)
         {
             logger.LogCommunicationIoException(ex);
         }
+        finally
+        {
+            if (Interlocked.Decrement(ref inFlight) == 0) drain.TrySetResult();
+            await drain.Task;
+        }
     }
-    
+
     private async Task TryLockDelayed(
         SemaphoreSlim semaphore, 
         int requestId, 
@@ -268,15 +290,16 @@ public sealed class LocksService : Locker.LockerBase
             TryLock = tryLockResponse
         };
 
+        bool acquired = false;
         try
         {
             await semaphore.WaitAsync(context.CancellationToken);
-
+            acquired = true;
             await responseStream.WriteAsync(response);
         }
         finally
         {
-            semaphore.Release();
+            if (acquired) semaphore.Release();
         }
     }
     
@@ -297,15 +320,16 @@ public sealed class LocksService : Locker.LockerBase
             Unlock = unlockResponse
         };
 
+        bool acquired = false;
         try
         {
             await semaphore.WaitAsync(context.CancellationToken);
-
+            acquired = true;
             await responseStream.WriteAsync(response);
         }
         finally
         {
-            semaphore.Release();
+            if (acquired) semaphore.Release();
         }
     }
     
@@ -326,15 +350,16 @@ public sealed class LocksService : Locker.LockerBase
             ExtendLock = extendLockResponse
         };
 
+        bool acquired = false;
         try
         {
             await semaphore.WaitAsync(context.CancellationToken);
-
+            acquired = true;
             await responseStream.WriteAsync(response);
         }
         finally
         {
-            semaphore.Release();
+            if (acquired) semaphore.Release();
         }
     }
     
@@ -355,15 +380,16 @@ public sealed class LocksService : Locker.LockerBase
             GetLock = getLockResponse
         };
 
+        bool acquired = false;
         try
         {
             await semaphore.WaitAsync(context.CancellationToken);
-
+            acquired = true;
             await responseStream.WriteAsync(response);
         }
         finally
         {
-            semaphore.Release();
+            if (acquired) semaphore.Release();
         }
     }
     
@@ -373,12 +399,31 @@ public sealed class LocksService : Locker.LockerBase
         ServerCallContext context
     )
     {
+        int inFlight = 1;
+        TaskCompletionSource drain = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        void Track(Task task)
+        {
+            Interlocked.Increment(ref inFlight);
+            _ = task.ContinueWith(completed =>
+            {
+                if (completed.IsFaulted)
+                {
+                    Exception? e = completed.Exception?.InnerException;
+                    if (e is IOException or OperationCanceledException)
+                        logger.LogCommunicationIoException(e);
+                    else
+                        logger.LogError(completed.Exception, "Batch lock server handler faulted");
+                }
+                if (Interlocked.Decrement(ref inFlight) == 0)
+                    drain.TrySetResult();
+            }, TaskScheduler.Default);
+        }
+
+        using SemaphoreSlim semaphore = new(1, 1);
+
         try
         {
-            List<Task> tasks = [];
-
-            using SemaphoreSlim semaphore = new(1, 1);
-
             await foreach (GrpcBatchServerLockRequest request in requestStream.ReadAllAsync())
             {
                 switch (request.Type)
@@ -387,7 +432,7 @@ public sealed class LocksService : Locker.LockerBase
                     {
                         GrpcTryLockRequest? lockRequest = request.TryLock;
 
-                        tasks.Add(TryLockServerDelayed(semaphore, request.RequestId, lockRequest, responseStream, context));
+                        Track(TryLockServerDelayed(semaphore, request.RequestId, lockRequest, responseStream, context));
                     }
                     break;
                     
@@ -395,7 +440,7 @@ public sealed class LocksService : Locker.LockerBase
                     {
                         GrpcUnlockRequest? unlockRequest = request.Unlock;
 
-                        tasks.Add(TryUnlockServerDelayed(semaphore, request.RequestId, unlockRequest, responseStream, context));
+                        Track(TryUnlockServerDelayed(semaphore, request.RequestId, unlockRequest, responseStream, context));
                     }
                     break;
                     
@@ -403,7 +448,7 @@ public sealed class LocksService : Locker.LockerBase
                     {
                         GrpcExtendLockRequest? extendLockRequest = request.ExtendLock;
 
-                        tasks.Add(ExtendLockServerDelayed(semaphore, request.RequestId, extendLockRequest, responseStream, context));
+                        Track(ExtendLockServerDelayed(semaphore, request.RequestId, extendLockRequest, responseStream, context));
                     }
                     break;
                     
@@ -411,7 +456,7 @@ public sealed class LocksService : Locker.LockerBase
                     {
                         GrpcGetLockRequest? getLockRequest = request.GetLock;
 
-                        tasks.Add(GetLockServerDelayed(semaphore, request.RequestId, getLockRequest, responseStream, context));
+                        Track(GetLockServerDelayed(semaphore, request.RequestId, getLockRequest, responseStream, context));
                     }
                     break;
 
@@ -421,12 +466,15 @@ public sealed class LocksService : Locker.LockerBase
                         break;
                 }
             }
-
-            await Task.WhenAll(tasks);
         }
         catch (IOException ex)
         {
             logger.LogCommunicationIoException(ex);
+        }
+        finally
+        {
+            if (Interlocked.Decrement(ref inFlight) == 0) drain.TrySetResult();
+            await drain.Task;
         }
     }
     
@@ -447,15 +495,16 @@ public sealed class LocksService : Locker.LockerBase
             TryLock = tryLockResponse
         };
 
+        bool acquired = false;
         try
         {
             await semaphore.WaitAsync(context.CancellationToken);
-
+            acquired = true;
             await responseStream.WriteAsync(response);
         }
         finally
         {
-            semaphore.Release();
+            if (acquired) semaphore.Release();
         }
     }
     
@@ -476,15 +525,16 @@ public sealed class LocksService : Locker.LockerBase
             ExtendLock = extendLockResponse
         };
 
+        bool acquired = false;
         try
         {
             await semaphore.WaitAsync(context.CancellationToken);
-
+            acquired = true;
             await responseStream.WriteAsync(response);
         }
         finally
         {
-            semaphore.Release();
+            if (acquired) semaphore.Release();
         }
     }
     
@@ -505,15 +555,16 @@ public sealed class LocksService : Locker.LockerBase
             Unlock = unlockResponse
         };
 
+        bool acquired = false;
         try
         {
             await semaphore.WaitAsync(context.CancellationToken);
-
+            acquired = true;
             await responseStream.WriteAsync(response);
         }
         finally
         {
-            semaphore.Release();
+            if (acquired) semaphore.Release();
         }
     }
     
@@ -534,15 +585,16 @@ public sealed class LocksService : Locker.LockerBase
             GetLock = getLockResponse
         };
 
+        bool acquired = false;
         try
         {
             await semaphore.WaitAsync(context.CancellationToken);
-
+            acquired = true;
             await responseStream.WriteAsync(response);
         }
         finally
         {
-            semaphore.Release();
+            if (acquired) semaphore.Release();
         }
     }
 }
