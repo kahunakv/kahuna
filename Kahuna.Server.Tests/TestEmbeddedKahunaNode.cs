@@ -11,6 +11,7 @@ using Microsoft.Extensions.Logging;
 
 namespace Kahuna.Server.Tests;
 
+[Collection("ClusterTests")]
 public sealed class TestEmbeddedKahunaNode
 {
     private readonly ILoggerFactory loggerFactory;

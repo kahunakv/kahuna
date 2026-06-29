@@ -22,6 +22,7 @@ namespace Kahuna.Server.Tests;
 /// <summary>
 /// Tests for Phase B — intrusive O(1) LRU eviction replacing the approximate sampler.
 /// </summary>
+[Collection("ClusterTests")]
 public sealed class TestKeyValueLruEviction
 {
     // ── B.1: LRU list maintenance ────────────────────────────────────────────────────────

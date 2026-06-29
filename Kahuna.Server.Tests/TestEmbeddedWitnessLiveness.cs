@@ -11,6 +11,7 @@ namespace Kahuna.Server.Tests;
 /// detector marks them Dead and Kommander evicts them, collapsing the roster to a lone voter
 /// that then spams "No other nodes availables to send hearthbeat" every heartbeat.
 /// </summary>
+[Collection("ClusterTests")]
 public sealed class TestEmbeddedWitnessLiveness
 {
     private readonly ILoggerFactory loggerFactory;

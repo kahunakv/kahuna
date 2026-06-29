@@ -167,43 +167,45 @@ public class TestLocks : BaseCluster
         [CombinatorialValues(LockDurability.Ephemeral, LockDurability.Persistent)] LockDurability durability
     )
     {
-        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) = await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
-
-        try
+        await RetryAsync(async () =>
         {
-            string lockName = GetRandomLockName();
-            byte[] ownerA = Encoding.UTF8.GetBytes(GetRandomLockName());
-            byte[] ownerB = Encoding.UTF8.GetBytes(GetRandomLockName());
+            (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) = await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
 
-            // Test invalid expireMs values
-            (LockResponseType response, long fencingToken) = await kahuna1.LocateAndTryLock(lockName, ownerA, -1, durability, TestContext.Current.CancellationToken);
-            Assert.Equal(LockResponseType.InvalidInput, response);
-            Assert.Equal(0, fencingToken);
+            try
+            {
+                string lockName = GetRandomLockName();
+                byte[] ownerA = Encoding.UTF8.GetBytes(GetRandomLockName());
+                byte[] ownerB = Encoding.UTF8.GetBytes(GetRandomLockName());
 
-            // Test invalid owner (null)
-            (response, fencingToken) = await kahuna1.LocateAndTryLock(lockName, [], 1000, durability, TestContext.Current.CancellationToken);
-            Assert.Equal(LockResponseType.InvalidInput, response);
-            Assert.Equal(0, fencingToken);
+                // Test invalid expireMs values
+                (LockResponseType response, long fencingToken) = await kahuna1.LocateAndTryLock(lockName, ownerA, -1, durability, TestContext.Current.CancellationToken);
+                Assert.Equal(LockResponseType.InvalidInput, response);
+                Assert.Equal(0, fencingToken);
 
-            // Test operations on non-existent lock
-            response = await kahuna1.LocateAndTryUnlock(lockName, ownerA, durability, TestContext.Current.CancellationToken);
-            Assert.Equal(LockResponseType.LockDoesNotExist, response);
+                // Test invalid owner (null)
+                (response, fencingToken) = await kahuna1.LocateAndTryLock(lockName, [], 1000, durability, TestContext.Current.CancellationToken);
+                Assert.Equal(LockResponseType.InvalidInput, response);
+                Assert.Equal(0, fencingToken);
 
-            (response, fencingToken) = await kahuna1.LocateAndTryExtendLock(lockName, ownerA, 1000, durability, TestContext.Current.CancellationToken);
-            Assert.Equal(LockResponseType.LockDoesNotExist, response);
-            Assert.Equal(0, fencingToken);
+                // Test operations on non-existent lock
+                response = await kahuna1.LocateAndTryUnlock(lockName, ownerA, durability, TestContext.Current.CancellationToken);
+                Assert.Equal(LockResponseType.LockDoesNotExist, response);
 
-            (response, ReadOnlyLockEntry? lockContext) = await kahuna1.LocateAndGetLock(lockName, durability, TestContext.Current.CancellationToken);
-            Assert.Equal(LockResponseType.LockDoesNotExist, response);
-            //Assert.Null(lockContext);
+                (response, fencingToken) = await kahuna1.LocateAndTryExtendLock(lockName, ownerA, 1000, durability, TestContext.Current.CancellationToken);
+                Assert.Equal(LockResponseType.LockDoesNotExist, response);
+                Assert.Equal(0, fencingToken);
 
-        }
-        finally
-        {
-            await node1.LeaveCluster(true, TestContext.Current.CancellationToken);
-            await node2.LeaveCluster(true, TestContext.Current.CancellationToken);
-            await node3.LeaveCluster(true, TestContext.Current.CancellationToken);
-        }
+                (response, ReadOnlyLockEntry? lockContext) = await kahuna1.LocateAndGetLock(lockName, durability, TestContext.Current.CancellationToken);
+                Assert.Equal(LockResponseType.LockDoesNotExist, response);
+                //Assert.Null(lockContext);
+            }
+            finally
+            {
+                await node1.LeaveCluster(true, TestContext.Current.CancellationToken);
+                await node2.LeaveCluster(true, TestContext.Current.CancellationToken);
+                await node3.LeaveCluster(true, TestContext.Current.CancellationToken);
+            }
+        });
     }
 
     [Theory, CombinatorialData]

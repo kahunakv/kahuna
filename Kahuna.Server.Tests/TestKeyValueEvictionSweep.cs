@@ -24,6 +24,7 @@ namespace Kahuna.Server.Tests;
 /// Phase E test sweep: no-full-scan invariant (E.1), latency bound (E.2),
 /// correctness under intents (E.3), and metadata bound under sustained writes (E.4).
 /// </summary>
+[Collection("ClusterTests")]
 public sealed class TestKeyValueEvictionSweep
 {
     // ── E.1: large-store no-full-scan invariant ───────────────────────────────────────

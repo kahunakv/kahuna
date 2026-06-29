@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 
 namespace Kahuna.Server.Tests;
 
+[Collection("ClusterTests")]
 public sealed class TestClientRangeScan
 {
     private readonly ILoggerFactory loggerFactory;

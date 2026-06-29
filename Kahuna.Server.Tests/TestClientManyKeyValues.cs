@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 
 namespace Kahuna.Server.Tests;
 
+[Collection("ClusterTests")]
 public sealed class TestClientManyKeyValues
 {
     private readonly ILoggerFactory loggerFactory;

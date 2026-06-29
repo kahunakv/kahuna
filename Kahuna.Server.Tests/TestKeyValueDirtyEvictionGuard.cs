@@ -25,6 +25,7 @@ namespace Kahuna.Server.Tests;
 /// fires before the BackgroundWriter flush removes the in-memory entry; the next read falls back to
 /// disk and returns a stale revision (or DoesNotExist for a brand-new key).
 /// </summary>
+[Collection("ClusterTests")]
 public sealed class TestKeyValueDirtyEvictionGuard
 {
     private readonly ILoggerFactory loggerFactory;
