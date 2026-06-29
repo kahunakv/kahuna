@@ -1054,6 +1054,98 @@ public class TestKeyValueScriptOperators : BaseCluster
     }
     
     [Theory, CombinatorialData]
+    public async Task TestEqualsOperatorBytesStringScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        try
+        {
+            // bytes == string: GET returns BytesType; comparing to a string literal hits BytesType/StringType branch
+            string script = """
+                SET mykey 'hello'
+                LET v = GET mykey
+                RETURN v = 'hello'
+                """;
+
+            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
+
+            script = """
+                SET mykey 'hello'
+                LET v = GET mykey
+                RETURN v = 'world'
+                """;
+
+            resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
+
+            // string == bytes: reversed operand order hits StringType/BytesType branch
+            script = """
+                SET mykey 'hello'
+                LET v = GET mykey
+                RETURN 'hello' = v
+                """;
+
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
+
+            script = """
+                SET mykey 'hello'
+                LET v = GET mykey
+                RETURN 'world' = v
+                """;
+
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
+
+            // multi-byte UTF-8: each Japanese character is 3 UTF-8 bytes
+            const string japanese = "日本語テスト";
+            script = $"""
+                SET mykey '{japanese}'
+                LET v = GET mykey
+                RETURN v = '{japanese}'
+                """;
+
+            resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
+
+            // large string (> 256 bytes) exercises the ArrayPool fallback path
+            string large = new string('x', 300);
+            script = $"""
+                SET mykey '{large}'
+                LET v = GET mykey
+                RETURN v = '{large}'
+                """;
+
+            resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
+
+            // large string mismatch
+            string large2 = new string('y', 300);
+            script = $"""
+                SET mykey '{large}'
+                LET v = GET mykey
+                RETURN v = '{large2}'
+                """;
+
+            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            Assert.Equal(KeyValueResponseType.Get, resp.Type);
+            Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+
+    [Theory, CombinatorialData]
     public async Task TestLessThanOperatorNoConversionScript([CombinatorialValues("memory")] string storage, [CombinatorialValues(4)] int partitions)
     {
         (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =

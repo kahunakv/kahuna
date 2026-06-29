@@ -30,6 +30,18 @@ public class KahunaClient
 {
     private readonly string[] urls;
 
+    /// <summary>
+    /// Creates a 32-byte ASCII lock-owner token from a new GUID without allocating an intermediate string.
+    /// </summary>
+    internal static byte[] NewLockOwner()
+    {
+        byte[] owner = new byte[32];
+        Span<char> chars = stackalloc char[32];
+        Guid.NewGuid().TryFormat(chars, out _, "N");
+        Encoding.ASCII.GetBytes(chars, owner);
+        return owner;
+    }
+
     private readonly ILogger<KahunaClient>? logger;
 
     private readonly IKahunaCommunication communication;
@@ -110,7 +122,7 @@ public class KahunaClient
         CancellationToken cancellationToken = default
     )
     {
-        byte[] owner = Encoding.UTF8.GetBytes(Guid.NewGuid().ToString("N"));
+        byte[] owner = NewLockOwner();
         
         ValueStopwatch stopWatch = ValueStopwatch.StartNew();
         
@@ -151,7 +163,7 @@ public class KahunaClient
     /// <returns>A <see cref="KahunaLock"/> instance representing the acquired lock.</returns>
     private async Task<KahunaLock> SingleTimeTryAcquireLock(string resource, int expiryTime, LockDurability durability, CancellationToken cancellationToken = default)
     {
-        byte[] owner = Encoding.UTF8.GetBytes(Guid.NewGuid().ToString("N"));
+        byte[] owner = NewLockOwner();
 
         (KahunaLockAcquireResult result, long fencingToken, string? servedFrom) = await TryAcquireLock(
             resource, 
@@ -174,7 +186,7 @@ public class KahunaClient
     /// <returns>Returns a <see cref="KahunaLock"/> object representing the acquired lock, including lock details and metadata.</returns>
     private async Task<KahunaLock> SingleTimeTryAcquireLock(string resource, TimeSpan expiryTime, LockDurability durability, CancellationToken cancellationToken = default)
     {
-        byte[] owner = Encoding.UTF8.GetBytes(Guid.NewGuid().ToString("N"));
+        byte[] owner = NewLockOwner();
 
         (KahunaLockAcquireResult result, long fencingToken, string? servedFrom) = await TryAcquireLock(resource, owner, expiryTime, durability, cancellationToken).ConfigureAwait(false);
 

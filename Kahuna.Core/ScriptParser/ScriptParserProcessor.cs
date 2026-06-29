@@ -1,4 +1,5 @@
 
+using System.Buffers;
 using System.Text;
 using Kahuna.Server.Configuration;
 using Microsoft.Extensions.ObjectPool;
@@ -12,6 +13,8 @@ namespace Kahuna.Server.ScriptParser;
 /// </summary>
 internal sealed class ScriptParserProcessor
 {
+    private const int StackAllocThreshold = 4096;
+
     private static readonly DefaultObjectPoolProvider ScriptPoolProvider = new();
 
     private readonly ObjectPool<scriptParser> scriptParserPool;
@@ -54,15 +57,23 @@ internal sealed class ScriptParserProcessor
         scriptParser scriptParser = scriptParserPool.Get();
 
         try
-        {        
-            Span<byte> scriptBytes = stackalloc byte[Encoding.UTF8.GetByteCount(script)];
-            Encoding.UTF8.GetBytes(script.AsSpan(), scriptBytes);
-            
-            return scriptParser.Parse(scriptBytes, null);
+        {
+            int byteCount = Encoding.UTF8.GetByteCount(script);
+            byte[]? rented = byteCount > StackAllocThreshold ? ArrayPool<byte>.Shared.Rent(byteCount) : null;
+            Span<byte> scriptBytes = rented is not null ? rented.AsSpan(0, byteCount) : stackalloc byte[byteCount];
+            try
+            {
+                Encoding.UTF8.GetBytes(script.AsSpan(), scriptBytes);
+                return scriptParser.Parse(scriptBytes, null);
+            }
+            finally
+            {
+                if (rented is not null) ArrayPool<byte>.Shared.Return(rented);
+            }
         }
         finally
         {
             scriptParserPool.Return(scriptParser);
-        } 
+        }
     }
 }

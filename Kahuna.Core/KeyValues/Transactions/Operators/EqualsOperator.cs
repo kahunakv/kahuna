@@ -1,4 +1,5 @@
 
+using System.Buffers;
 using System.Text;
 using System.Globalization;
 using Kahuna.Server.KeyValues.Transactions.Data;
@@ -8,6 +9,8 @@ namespace Kahuna.Server.KeyValues.Transactions.Operators;
 
 internal static class EqualsOperator
 {
+    private const int StackAllocThreshold = 256;
+
     public static KeyValueExpressionResult Eval(KeyValueTransactionContext context, NodeAst ast, string operatorType)
     {
         if (ast.leftAst is null)
@@ -46,14 +49,38 @@ internal static class EqualsOperator
                 return new(Math.Abs(left.DoubleValue - right.LongValue) <= 0.001);
             
             case KeyValueExpressionType.BytesType when right.Type == KeyValueExpressionType.StringType:
-                Span<byte> rightBytes = stackalloc byte[Encoding.UTF8.GetByteCount(right.StrValue ?? "")];
-                Encoding.UTF8.GetBytes(left.StrValue.AsSpan(), rightBytes);
-                return new(((ReadOnlySpan<byte>)left.BytesValue).SequenceEqual(rightBytes));
-            
+            {
+                string str = right.StrValue ?? "";
+                int byteCount = Encoding.UTF8.GetByteCount(str);
+                byte[]? rented = byteCount > StackAllocThreshold ? ArrayPool<byte>.Shared.Rent(byteCount) : null;
+                Span<byte> buf = rented is not null ? rented.AsSpan(0, byteCount) : stackalloc byte[byteCount];
+                try
+                {
+                    Encoding.UTF8.GetBytes(str.AsSpan(), buf);
+                    return new(((ReadOnlySpan<byte>)left.BytesValue).SequenceEqual(buf));
+                }
+                finally
+                {
+                    if (rented is not null) ArrayPool<byte>.Shared.Return(rented);
+                }
+            }
+
             case KeyValueExpressionType.StringType when right.Type == KeyValueExpressionType.BytesType:
-                Span<byte> leftBytes = stackalloc byte[Encoding.UTF8.GetByteCount(left.StrValue ?? "")];
-                Encoding.UTF8.GetBytes(left.StrValue.AsSpan(), leftBytes);
-                return new(((ReadOnlySpan<byte>)right.BytesValue).SequenceEqual(leftBytes));
+            {
+                string str = left.StrValue ?? "";
+                int byteCount = Encoding.UTF8.GetByteCount(str);
+                byte[]? rented = byteCount > StackAllocThreshold ? ArrayPool<byte>.Shared.Rent(byteCount) : null;
+                Span<byte> buf = rented is not null ? rented.AsSpan(0, byteCount) : stackalloc byte[byteCount];
+                try
+                {
+                    Encoding.UTF8.GetBytes(str.AsSpan(), buf);
+                    return new(((ReadOnlySpan<byte>)right.BytesValue).SequenceEqual(buf));
+                }
+                finally
+                {
+                    if (rented is not null) ArrayPool<byte>.Shared.Return(rented);
+                }
+            }
             
             case KeyValueExpressionType.BytesType when right.Type == KeyValueExpressionType.BytesType:
                 return new(((ReadOnlySpan<byte>)left.BytesValue).SequenceEqual(right.BytesValue));

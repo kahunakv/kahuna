@@ -570,18 +570,44 @@ internal sealed class KvStateMachineTransfer : IRaftStateMachineTransfer
     /// <summary>FNV-1a 64 over the serialized entries (order-sensitive), for per-page integrity.</summary>
     private static ulong ChecksumOf(IEnumerable<RangeSnapshotEntry> entries)
     {
-        ulong hash = FnvOffsetBasis;
-
-        using MemoryStream buffer = new();
+        FnvHashStream hasher = new();
         foreach (RangeSnapshotEntry entry in entries)
-            entry.WriteTo(buffer);
+            entry.WriteTo(hasher);
+        return hasher.Hash;
+    }
 
-        foreach (byte b in buffer.GetBuffer().AsSpan(0, (int)buffer.Length))
+    /// <summary>
+    /// Write-only <see cref="Stream"/> that folds every byte directly into a running FNV-1a 64-bit
+    /// hash. No bytes are retained — the page-sized intermediate buffer is gone.
+    /// </summary>
+    internal sealed class FnvHashStream : Stream
+    {
+        private ulong _hash = FnvOffsetBasis;
+
+        public ulong Hash => _hash;
+
+        public override void Write(byte[] buffer, int offset, int count) =>
+            Write(buffer.AsSpan(offset, count));
+
+        public override void Write(ReadOnlySpan<byte> buffer)
         {
-            hash ^= b;
-            hash *= FnvPrime;
+            // Hoist the accumulator into a local so it stays in a register across the loop instead of
+            // a field load+store per byte; iterate the span so the fold is bounds-check-free. FNV-1a is
+            // a serial dependency chain, so this register-resident tight loop is the main lever.
+            ulong hash = _hash;
+            foreach (byte b in buffer)
+                hash = (hash ^ b) * FnvPrime;
+            _hash = hash;
         }
 
-        return hash;
+        public override bool CanRead  => false;
+        public override bool CanSeek  => false;
+        public override bool CanWrite => true;
+        public override long Length   => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int  Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin)       => throw new NotSupportedException();
+        public override void SetLength(long value)                       => throw new NotSupportedException();
     }
 }

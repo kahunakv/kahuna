@@ -796,6 +796,25 @@ public class TestPersistenceBackends
     }
 
     [Fact]
+    public void TestRocksDbRetentionLongKeyExceedsStackThreshold()
+    {
+        // Key whose UTF-8 byte count exceeds the 256-byte KeyStackThreshold so
+        // PruneRevisionsForKey takes the ArrayPool path for both key lookups.
+        string key = "services/" + new string('k', 260) + "/state";
+        string path = RocksDbTempPath();
+        using RocksDbPersistenceBackend backend = new(path, "v1");
+
+        StoreRevisionsRocksDb(backend, key, 6);
+
+        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 2, TimeSpan.Zero, batchSize: 1000, out RevisionPruneResult result));
+        Assert.Equal(4, result.RevisionsDeleted);
+        Assert.Equal(2, CountRocksDbRevisionEntries(backend, key));
+        Assert.NotNull(backend.GetKeyValue(key));
+        Assert.NotNull(backend.GetKeyValueRevision(key, 6));
+        Assert.Null(backend.GetKeyValueRevision(key, 3));
+    }
+
+    [Fact]
     public void TestRocksDbTargetedBacklogRequeuesOnlyKeysWithRemainingWork()
     {
         const string keyA = "ret/a";

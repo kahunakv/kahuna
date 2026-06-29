@@ -11,8 +11,6 @@ using RocksDbSharp;
 using Google.Protobuf;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.Locks.Data;
-using Microsoft.IO;
-
 namespace Kahuna.Server.Persistence.Backend;
 
 /// <summary>
@@ -26,14 +24,6 @@ namespace Kahuna.Server.Persistence.Backend;
 /// </remarks>
 internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposable
 {
-    /// <summary>
-    /// Represents the maximum allowable size, in bytes, for a serialized message
-    /// within the persistence backend. This limit is applied to both lock and
-    /// key-value messages being processed to ensure they do not exceed memory
-    /// constraints and to maintain efficient performance.
-    /// </summary>
-    private const int MaxMessageSize = 1024;
-
     /// <summary>
     /// Defines a constant string value used as a marker suffix appended to keys
     /// within the database operations. This marker is utilized to represent the
@@ -50,15 +40,6 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     // stack frame; anything larger goes through ArrayPool. Real keys are well under this, so the
     // ArrayPool path is rarely taken while the per-call stack zeroing stays cheap.
     private const int KeyStackThreshold = 256;
-
-    /// <summary>
-    /// Manages memory streams efficiently by utilizing the RecyclableMemoryStreamManager,
-    /// which is designed to reduce memory fragmentation and improve memory allocation
-    /// performance for I/O operations. This variable is used to acquire recyclable memory
-    /// streams throughout the RocksDbPersistenceBackend implementation to handle operations
-    /// like serialization and deserialization efficiently.
-    /// </summary>
-    private static readonly RecyclableMemoryStreamManager manager = new();
 
     /// <summary>
     /// Represents the default write options for write operations in the persistence backend.
@@ -645,49 +626,11 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     }
 
 
-    /// <summary>
-    /// Converts a serialized byte span into a <see cref="RocksDbLockMessage"/> object.
-    /// This method deserializes the provided byte data, supporting efficient memory
-    /// handling through the use of recyclable memory streams.
-    /// </summary>
-    /// <param name="serializedData">The serialized data represented as a read-only span
-    /// of bytes, which encodes the <see cref="RocksDbLockMessage"/> object.</param>
-    /// <returns>Returns a deserialized instance of <see cref="RocksDbLockMessage"/>
-    /// based on the provided byte data.</returns>
-    private static RocksDbLockMessage UnserializeLockMessage(ReadOnlySpan<byte> serializedData)
-    {
-        if (serializedData.Length >= MaxMessageSize)
-        {
-            using RecyclableMemoryStream recycledMemoryStream = manager.GetStream(serializedData);
-            return RocksDbLockMessage.Parser.ParseFrom(recycledMemoryStream);
-        }
-        
-        using RecyclableMemoryStream memoryStream = manager.GetStream(serializedData);
-        return RocksDbLockMessage.Parser.ParseFrom(memoryStream);
-    }
+    private static RocksDbLockMessage UnserializeLockMessage(ReadOnlySpan<byte> serializedData) =>
+        RocksDbLockMessage.Parser.ParseFrom(serializedData);
 
-    /// <summary>
-    /// Converts a serialized byte span into a <see cref="RocksDbKeyValueMessage"/> object.
-    /// This method deserializes the provided binary data into a structured message format
-    /// to facilitate further operations on the key-value store.
-    /// </summary>
-    /// <param name="serializedData">
-    /// A read-only span of bytes representing the serialized data of a key-value message.
-    /// </param>
-    /// <returns>
-    /// An instance of <see cref="RocksDbKeyValueMessage"/> representing the deserialized key-value message.
-    /// </returns>
-    private static RocksDbKeyValueMessage UnserializeKeyValueMessage(ReadOnlySpan<byte> serializedData)
-    {
-        if (serializedData.Length >= MaxMessageSize)
-        {
-            using RecyclableMemoryStream recycledMemoryStream = manager.GetStream(serializedData);
-            return RocksDbKeyValueMessage.Parser.ParseFrom(recycledMemoryStream);
-        }
-        
-        using MemoryStream memoryStream = manager.GetStream(serializedData);
-        return RocksDbKeyValueMessage.Parser.ParseFrom(memoryStream);
-    }
+    private static RocksDbKeyValueMessage UnserializeKeyValueMessage(ReadOnlySpan<byte> serializedData) =>
+        RocksDbKeyValueMessage.Parser.ParseFrom(serializedData);
 
     public bool PruneKeyValueRevisions(
         IReadOnlyCollection<string>? keys,
@@ -803,108 +746,125 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     {
         batchLimitReached = false;
 
-        // Determine the current revision so we never delete its historical record.
-        string currentMarkerKey = key + CurrentMarker;
-        byte[] currentMarkerBytes = Encoding.UTF8.GetBytes(currentMarkerKey);
+        int keyLen = Encoding.UTF8.GetByteCount(key);
+        // ~CURRENT is the longer suffix; one buffer serves both the marker lookup and the ~ prefix.
+        int maxLen = keyLen + CurrentMarkerUtf8.Length;
 
-        byte[]? currentData = db.Get(currentMarkerBytes, cf: columnFamilyKeys);
-        if (currentData is null)
-            return;
-
-        RocksDbKeyValueMessage currentMessage = UnserializeKeyValueMessage(currentData);
-        long currentRevision = currentMessage.Revision;
-
-        // Collect all revision entries for this key by seeking to "<key>~".
-        // Revision entries have numeric suffixes; ~CURRENT is skipped.
-        string revisionPrefix = key + "~";
-        byte[] prefixBytes = Encoding.UTF8.GetBytes(revisionPrefix);
-
-        bool needAge = retentionAge > TimeSpan.Zero;
-        long cutoffPhysical = needAge
-            ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - (long)retentionAge.TotalMilliseconds
-            : long.MinValue;
-
-        List<(long Revision, long LastModifiedPhysical, byte[] RawKeyBytes)> revisions = [];
-
-        using (Iterator iterator = db.NewIterator(cf: columnFamilyKeys))
+        byte[]? rentedKey = null;
+        Span<byte> keyBuffer = maxLen <= KeyStackThreshold
+            ? stackalloc byte[KeyStackThreshold]
+            : (rentedKey = ArrayPool<byte>.Shared.Rent(maxLen));
+        try
         {
-            iterator.Seek(prefixBytes);
+            // Encode the key once; both RocksDB lookups reuse these bytes.
+            Encoding.UTF8.GetBytes(key.AsSpan(), keyBuffer);
 
-            while (iterator.Valid())
+            // Determine the current revision so we never delete its historical record.
+            CurrentMarkerUtf8.CopyTo(keyBuffer[keyLen..]);
+            byte[]? currentData = db.Get(keyBuffer[..(keyLen + CurrentMarkerUtf8.Length)], cf: columnFamilyKeys);
+            if (currentData is null)
+                return;
+
+            RocksDbKeyValueMessage currentMessage = UnserializeKeyValueMessage(currentData);
+            long currentRevision = currentMessage.Revision;
+
+            // Collect all revision entries for this key by seeking to "<key>~".
+            // Revision entries have numeric suffixes; ~CURRENT is skipped.
+            // Reuse key bytes already in keyBuffer[0..keyLen); overwrite suffix to just "~".
+            keyBuffer[keyLen] = (byte)'~';
+            ReadOnlySpan<byte> prefixBytes = keyBuffer[..(keyLen + 1)];
+
+            bool needAge = retentionAge > TimeSpan.Zero;
+            long cutoffPhysical = needAge
+                ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - (long)retentionAge.TotalMilliseconds
+                : long.MinValue;
+
+            List<(long Revision, long LastModifiedPhysical, byte[] RawKeyBytes)> revisions = [];
+
+            using (Iterator iterator = db.NewIterator(cf: columnFamilyKeys))
             {
-                // Filter on the native key span — no per-row string decode. Only rows we keep are
-                // materialised (their key bytes are retained below for the later batch.Delete).
-                ReadOnlySpan<byte> entryKey = iterator.GetKeySpan();
+                iterator.Seek(prefixBytes);
 
-                if (!entryKey.StartsWith(prefixBytes))
+                while (iterator.Valid())
+                {
+                    // Filter on the native key span — no per-row string decode. Only rows we keep are
+                    // materialised (their key bytes are retained below for the later batch.Delete).
+                    ReadOnlySpan<byte> entryKey = iterator.GetKeySpan();
+
+                    if (!entryKey.StartsWith(prefixBytes))
+                        break;
+
+                    // Skip the ~CURRENT sentinel — never a candidate for deletion.
+                    if (entryKey.EndsWith(CurrentMarkerUtf8))
+                    {
+                        iterator.Next();
+                        continue;
+                    }
+
+                    // The suffix after "<key>~" must be a numeric revision; reject any trailing junk
+                    // so "<key>~123abc" is ignored exactly as long.TryParse would.
+                    ReadOnlySpan<byte> suffix = entryKey[prefixBytes.Length..];
+                    if (!Utf8Parser.TryParse(suffix, out long revisionNum, out int consumed) || consumed != suffix.Length)
+                    {
+                        iterator.Next();
+                        continue;
+                    }
+
+                    long lastModifiedPhysical = 0;
+                    if (needAge)
+                    {
+                        RocksDbKeyValueMessage msg = UnserializeKeyValueMessage(iterator.GetValueSpan());
+                        lastModifiedPhysical = msg.LastModifiedPhysical;
+                    }
+
+                    // Copy the key out of native memory: it must outlive the iterator for batch.Delete.
+                    revisions.Add((revisionNum, lastModifiedPhysical, entryKey.ToArray()));
+                    iterator.Next();
+                }
+            }
+
+            if (revisions.Count == 0)
+                return;
+
+            // Sort descending so index 0 is the newest revision.
+            revisions.Sort(RevisionDescComparer);
+
+            using WriteBatch batch = new();
+            int deletedInBatch = 0;
+
+            for (int i = 0; i < revisions.Count; i++)
+            {
+                (long revNum, long lastModifiedPhysical, byte[] rawKeyBytes) = revisions[i];
+
+                // Always protect the current revision's historical record.
+                if (revNum == currentRevision)
+                    continue;
+
+                bool deleteByCount = retentionCount > 0 && i >= retentionCount;
+                bool deleteByAge = needAge && lastModifiedPhysical < cutoffPhysical;
+
+                if (!deleteByCount && !deleteByAge)
+                    continue;
+
+                if (deleted + deletedInBatch >= batchSize)
+                {
+                    batchLimitReached = true;
                     break;
-
-                // Skip the ~CURRENT sentinel — never a candidate for deletion.
-                if (entryKey.EndsWith(CurrentMarkerUtf8))
-                {
-                    iterator.Next();
-                    continue;
                 }
 
-                // The suffix after "<key>~" must be a numeric revision; reject any trailing junk
-                // so "<key>~123abc" is ignored exactly as long.TryParse would.
-                ReadOnlySpan<byte> suffix = entryKey[prefixBytes.Length..];
-                if (!Utf8Parser.TryParse(suffix, out long revisionNum, out int consumed) || consumed != suffix.Length)
-                {
-                    iterator.Next();
-                    continue;
-                }
-
-                long lastModifiedPhysical = 0;
-                if (needAge)
-                {
-                    RocksDbKeyValueMessage msg = UnserializeKeyValueMessage(iterator.GetValueSpan());
-                    lastModifiedPhysical = msg.LastModifiedPhysical;
-                }
-
-                // Copy the key out of native memory: it must outlive the iterator for batch.Delete.
-                revisions.Add((revisionNum, lastModifiedPhysical, entryKey.ToArray()));
-                iterator.Next();
+                batch.Delete(rawKeyBytes, cf: columnFamilyKeys);
+                deletedInBatch++;
             }
+
+            if (deletedInBatch > 0)
+                db.Write(batch, DefaultWriteOptions);
+
+            deleted += deletedInBatch;
         }
-
-        if (revisions.Count == 0)
-            return;
-
-        // Sort descending so index 0 is the newest revision.
-        revisions.Sort(RevisionDescComparer);
-
-        using WriteBatch batch = new();
-        int deletedInBatch = 0;
-
-        for (int i = 0; i < revisions.Count; i++)
+        finally
         {
-            (long revNum, long lastModifiedPhysical, byte[] rawKeyBytes) = revisions[i];
-
-            // Always protect the current revision's historical record.
-            if (revNum == currentRevision)
-                continue;
-
-            bool deleteByCount = retentionCount > 0 && i >= retentionCount;
-            bool deleteByAge = needAge && lastModifiedPhysical < cutoffPhysical;
-
-            if (!deleteByCount && !deleteByAge)
-                continue;
-
-            if (deleted + deletedInBatch >= batchSize)
-            {
-                batchLimitReached = true;
-                break;
-            }
-
-            batch.Delete(rawKeyBytes, cf: columnFamilyKeys);
-            deletedInBatch++;
+            if (rentedKey is not null) ArrayPool<byte>.Shared.Return(rentedKey);
         }
-
-        if (deletedInBatch > 0)
-            db.Write(batch, DefaultWriteOptions);
-
-        deleted += deletedInBatch;
     }
 
     public CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime)

@@ -96,7 +96,7 @@ public sealed class KeyValueExpressionResult
             KeyValueExpressionType.NullType   => [],
             KeyValueExpressionType.BoolType   => BoolValue ? TrueBytes : FalseBytes,
             KeyValueExpressionType.LongType   => EncodeLong(LongValue),
-            KeyValueExpressionType.DoubleType => Encoding.UTF8.GetBytes(DoubleValue.ToString(CultureInfo.InvariantCulture)),
+            KeyValueExpressionType.DoubleType => EncodeDouble(DoubleValue),
             KeyValueExpressionType.StringType => StrValue is not null ? Encoding.UTF8.GetBytes(StrValue) : null,
             KeyValueExpressionType.BytesType  => BytesValue,
             KeyValueExpressionType.ArrayType  => throw new InvalidOperationException("Cannot convert array to bytes"),
@@ -113,7 +113,7 @@ public sealed class KeyValueExpressionResult
             KeyValueExpressionType.LongType   => LongValue,
             KeyValueExpressionType.DoubleType => (long)DoubleValue,
             KeyValueExpressionType.StringType => StrValue is not null ? long.Parse(StrValue, NumberStyles.Integer, CultureInfo.InvariantCulture) : -1,
-            KeyValueExpressionType.BytesType  => BytesValue is not null ? long.Parse(Encoding.UTF8.GetString(BytesValue), NumberStyles.Integer, CultureInfo.InvariantCulture) : -1,
+            KeyValueExpressionType.BytesType  => BytesValue is not null ? ParseLongFromBytes(BytesValue) : -1,
             KeyValueExpressionType.ArrayType  => throw new InvalidOperationException("Cannot convert array to bytes"),
             _ => throw new ArgumentOutOfRangeException()
         };
@@ -141,7 +141,7 @@ public sealed class KeyValueExpressionResult
             KeyValueExpressionType.DoubleType => new()
             {
                 Type = KeyValueResponseType.Get,
-                Values = [new() { Value = Encoding.UTF8.GetBytes(DoubleValue.ToString(CultureInfo.InvariantCulture)), Revision = Revision, Expires = new(0, Expires, 0) }]
+                Values = [new() { Value = EncodeDouble(DoubleValue), Revision = Revision, Expires = new(0, Expires, 0) }]
             },
             KeyValueExpressionType.StringType => new()
             {
@@ -169,7 +169,7 @@ public sealed class KeyValueExpressionResult
             KeyValueExpressionType.NullType   => new() { Value = [], Revision = value.Revision, Expires = new(0, value.Expires, 0) },
             KeyValueExpressionType.BoolType   => new() { Value = value.BoolValue ? TrueBytes : FalseBytes, Revision = value.Revision, Expires = new(0, value.Expires, 0) },
             KeyValueExpressionType.LongType   => new() { Value = EncodeLong(value.LongValue), Revision = value.Revision, Expires = new(0, value.Expires, 0) },
-            KeyValueExpressionType.DoubleType => new() { Value = Encoding.UTF8.GetBytes(value.DoubleValue.ToString(CultureInfo.InvariantCulture)), Revision = value.Revision, Expires = new(0, value.Expires, 0) },
+            KeyValueExpressionType.DoubleType => new() { Value = EncodeDouble(value.DoubleValue), Revision = value.Revision, Expires = new(0, value.Expires, 0) },
             KeyValueExpressionType.StringType => new() { Value = value.StrValue is not null ? Encoding.UTF8.GetBytes(value.StrValue) : null, Revision = value.Revision, Expires = new(0, value.Expires, 0) },
             KeyValueExpressionType.BytesType  => new() { Value = value.BytesValue, Revision = value.Revision, Expires = new(0, value.Expires, 0) },
             _ => throw new ArgumentOutOfRangeException()
@@ -194,5 +194,19 @@ public sealed class KeyValueExpressionResult
         Span<byte> buf = stackalloc byte[32];
         Utf8Formatter.TryFormat(value, buf, out int written);
         return buf[..written].ToArray();
+    }
+
+    private static byte[] EncodeDouble(double value)
+    {
+        Span<byte> buf = stackalloc byte[32];
+        value.TryFormat(buf, out int written, default, CultureInfo.InvariantCulture);
+        return buf[..written].ToArray();
+    }
+
+    private static long ParseLongFromBytes(byte[] bytes)
+    {
+        if (Utf8Parser.TryParse(bytes, out long value, out int consumed) && consumed == bytes.Length)
+            return value;
+        return long.Parse(Encoding.UTF8.GetString(bytes), NumberStyles.Integer, CultureInfo.InvariantCulture);
     }
 }
