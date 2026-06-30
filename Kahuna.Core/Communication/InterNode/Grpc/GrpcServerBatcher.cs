@@ -19,7 +19,11 @@ internal sealed class GrpcServerBatcher
 
     private static readonly ConcurrentDictionary<int, GrpcServerBatcherItem> requestRefs = new();
 
+    private static readonly ConcurrentDictionary<int, long> requestStreamRefs = new();
+
     private static int requestId;
+
+    private static long streamingId;
 
     private readonly string url;
 
@@ -420,20 +424,7 @@ internal sealed class GrpcServerBatcher
 
     private async Task Receive(List<GrpcServerBatcherItem> requests)
     {
-        // Capture the size before dispatching: RunBatch returns the list to the pool
-        // (which clears it), so reading requests.Count afterwards always sees 0.
-        int batchSize = requests.Count;
-
         await RunBatch(requests);
-
-        // Coalescing throttle. Pausing briefly here lets the next batch accumulate more
-        // items, which improves throughput under sustained pipelined load. But it adds
-        // pure latency when there is nothing to coalesce, so only pay it when the batch we
-        // just sent already carried multiple items (evidence of real backpressure). An
-        // isolated write — the size-1 batch that dominates low-concurrency workloads — is
-        // dispatched with no artificial delay.
-        if (batchSize > 1 && batchSize < 10)
-            await Task.Delay(1);
     }
 
     private async Task RunBatch(List<GrpcServerBatcherItem> requests)
@@ -445,6 +436,7 @@ internal sealed class GrpcServerBatcher
             foreach (GrpcServerBatcherItem request in requests)
             {
                 requestRefs.TryAdd(request.RequestId, request);
+                requestStreamRefs[request.RequestId] = sharedStreaming.Id;
 
                 switch (request.Type)
                 {
@@ -464,13 +456,31 @@ internal sealed class GrpcServerBatcher
         catch (Exception ex)
         {
             foreach (GrpcServerBatcherItem request in requests)
-                request.Promise.SetException(ex);
+            {
+                requestRefs.TryRemove(request.RequestId, out _);
+                requestStreamRefs.TryRemove(request.RequestId, out _);
+                request.Promise.TrySetException(ex);
+            }
 
             logger.LogError(ex, "GrpcServerBatcher RunBatch failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
         }
         finally
         {
             GrpcServerBatcherPool.Return(requests);
+        }
+    }
+
+    private static void FailPendingRequests(long sharedStreamingId, Exception ex)
+    {
+        foreach (KeyValuePair<int, long> entry in requestStreamRefs.ToArray())
+        {
+            if (entry.Value != sharedStreamingId)
+                continue;
+
+            requestStreamRefs.TryRemove(entry.Key, out _);
+
+            if (requestRefs.TryRemove(entry.Key, out GrpcServerBatcherItem item))
+                item.Promise.TrySetException(ex);
         }
     }
 
@@ -712,213 +722,231 @@ internal sealed class GrpcServerBatcher
         }
     }
     
-    private static async Task ReadLockMessages(AsyncDuplexStreamingCall<GrpcBatchServerLockRequest, GrpcBatchServerLockResponse> streaming, ILogger logger)
+    private static async Task ReadLockMessages(long sharedStreamingId, AsyncDuplexStreamingCall<GrpcBatchServerLockRequest, GrpcBatchServerLockResponse> streaming, ILogger logger)
     {
         try
         {
             await foreach (GrpcBatchServerLockResponse response in streaming.ResponseStream.ReadAllAsync())
             {
-                if (!requestRefs.TryGetValue(response.RequestId, out GrpcServerBatcherItem item))
+                if (!requestRefs.TryRemove(response.RequestId, out GrpcServerBatcherItem item))
                 {
                     logger.LogWarning("GrpcServerBatcher lock response: request not found {RequestId}", response.RequestId);
                     continue;
                 }
 
+                requestStreamRefs.TryRemove(response.RequestId, out _);
+
                 switch (response.Type)
                 {
                     case GrpcLockServerBatchType.ServerTypeTryLock:
-                        item.Promise.SetResult(new(response.TryLock));
+                        item.Promise.TrySetResult(new(response.TryLock));
                         break;
-                    
+
                     case GrpcLockServerBatchType.ServerTypeUnlock:
-                        item.Promise.SetResult(new(response.Unlock));
+                        item.Promise.TrySetResult(new(response.Unlock));
                         break;
-                    
+
                     case GrpcLockServerBatchType.ServerTypeExtendLock:
-                        item.Promise.SetResult(new(response.ExtendLock));
+                        item.Promise.TrySetResult(new(response.ExtendLock));
                         break;
-                    
+
                     case GrpcLockServerBatchType.ServerTypeGetLock:
-                        item.Promise.SetResult(new(response.GetLock));
+                        item.Promise.TrySetResult(new(response.GetLock));
                         break;
 
                     case GrpcLockServerBatchType.ServerTypeNone:
                     default:
-                        item.Promise.SetException(new KahunaServerException("Unknown response type: " + response.Type));
+                        item.Promise.TrySetException(new KahunaServerException("Unknown response type: " + response.Type));
                         break;
                 }
-
-                requestRefs.TryRemove(response.RequestId, out _);
             }
+
+            RpcException streamClosed = new(new(StatusCode.Unavailable, "gRPC inter-node lock stream closed."));
+            FailPendingRequests(sharedStreamingId, streamClosed);
+        }
+        catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.Cancelled)
+        {
+            logger.LogWarning("GrpcServerBatcher lock stream closed: {Status}", ex.Status);
+            FailPendingRequests(sharedStreamingId, ex);
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "GrpcServerBatcher ReadLockMessages failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
+            FailPendingRequests(sharedStreamingId, ex);
         }
     }
 
-    private static async Task ReadKeyValueMessages(AsyncDuplexStreamingCall<GrpcBatchServerKeyValueRequest, GrpcBatchServerKeyValueResponse> streaming, ILogger logger)
+    private static async Task ReadKeyValueMessages(long sharedStreamingId, AsyncDuplexStreamingCall<GrpcBatchServerKeyValueRequest, GrpcBatchServerKeyValueResponse> streaming, ILogger logger)
     {
         try
         {
             await foreach (GrpcBatchServerKeyValueResponse response in streaming.ResponseStream.ReadAllAsync())
             {
-                if (!requestRefs.TryGetValue(response.RequestId, out GrpcServerBatcherItem item))
+                if (!requestRefs.TryRemove(response.RequestId, out GrpcServerBatcherItem item))
                 {
                     logger.LogWarning("GrpcServerBatcher key-value response: request not found {RequestId}", response.RequestId);
                     continue;
                 }
 
+                requestStreamRefs.TryRemove(response.RequestId, out _);
+
                 switch (response.Type)
                 {
                     case GrpcServerBatchType.ServerTrySetKeyValue:
-                        item.Promise.SetResult(new(response.TrySetKeyValue));
+                        item.Promise.TrySetResult(new(response.TrySetKeyValue));
                         break;
-                    
+
                     case GrpcServerBatchType.ServerTrySetManyKeyValue:
-                        item.Promise.SetResult(new(response.TrySetManyKeyValue));
+                        item.Promise.TrySetResult(new(response.TrySetManyKeyValue));
                         break;
 
                     case GrpcServerBatchType.ServerTryDeleteManyKeyValue:
-                        item.Promise.SetResult(new(response.TryDeleteManyKeyValue));
+                        item.Promise.TrySetResult(new(response.TryDeleteManyKeyValue));
                         break;
 
                     case GrpcServerBatchType.ServerTryGetKeyValue:
-                        item.Promise.SetResult(new(response.TryGetKeyValue));
+                        item.Promise.TrySetResult(new(response.TryGetKeyValue));
                         break;
 
                     case GrpcServerBatchType.ServerTryGetManyValues:
-                        item.Promise.SetResult(new(response.TryGetManyValues));
+                        item.Promise.TrySetResult(new(response.TryGetManyValues));
                         break;
 
                     case GrpcServerBatchType.ServerTryDeleteKeyValue:
-                        item.Promise.SetResult(new(response.TryDeleteKeyValue));
+                        item.Promise.TrySetResult(new(response.TryDeleteKeyValue));
                         break;
 
                     case GrpcServerBatchType.ServerTryExtendKeyValue:
-                        item.Promise.SetResult(new(response.TryExtendKeyValue));
+                        item.Promise.TrySetResult(new(response.TryExtendKeyValue));
                         break;
 
                     case GrpcServerBatchType.ServerTryExistsKeyValue:
-                        item.Promise.SetResult(new(response.TryExistsKeyValue));
+                        item.Promise.TrySetResult(new(response.TryExistsKeyValue));
                         break;
 
                     case GrpcServerBatchType.ServerTryExistsManyValues:
-                        item.Promise.SetResult(new(response.TryExistsManyValues));
+                        item.Promise.TrySetResult(new(response.TryExistsManyValues));
                         break;
 
                     case GrpcServerBatchType.ServerTryCheckWriteIntent:
-                        item.Promise.SetResult(new(response.TryCheckWriteIntent));
+                        item.Promise.TrySetResult(new(response.TryCheckWriteIntent));
                         break;
 
                     case GrpcServerBatchType.ServerTryGetByBucket:
-                        item.Promise.SetResult(new(response.GetByBucket));
+                        item.Promise.TrySetResult(new(response.GetByBucket));
                         break;
 
                     case GrpcServerBatchType.ServerTryGetByRange:
-                        item.Promise.SetResult(new(response.GetByRange));
+                        item.Promise.TrySetResult(new(response.GetByRange));
                         break;
-                    
+
                     case GrpcServerBatchType.ServerTryScanByPrefix:
-                        item.Promise.SetResult(new(response.ScanByPrefix));
+                        item.Promise.TrySetResult(new(response.ScanByPrefix));
                         break;
 
                     case GrpcServerBatchType.ServerTryExecuteTransactionScript:
-                        item.Promise.SetResult(new(response.TryExecuteTransactionScript));
+                        item.Promise.TrySetResult(new(response.TryExecuteTransactionScript));
                         break;
-                    
+
                     case GrpcServerBatchType.ServerTryAcquireExclusiveLock:
-                        item.Promise.SetResult(new(response.TryAcquireExclusiveLock));
+                        item.Promise.TrySetResult(new(response.TryAcquireExclusiveLock));
                         break;
-                    
+
                     case GrpcServerBatchType.ServerTryAcquireExclusivePrefixLock:
-                        item.Promise.SetResult(new(response.TryAcquireExclusivePrefixLock));
+                        item.Promise.TrySetResult(new(response.TryAcquireExclusivePrefixLock));
                         break;
 
                     case GrpcServerBatchType.ServerTryAcquireExclusiveRangeLock:
-                        item.Promise.SetResult(new(response.TryAcquireExclusiveRangeLock));
+                        item.Promise.TrySetResult(new(response.TryAcquireExclusiveRangeLock));
                         break;
 
                     case GrpcServerBatchType.ServerTryAcquireManyExclusiveLocks:
-                        item.Promise.SetResult(new(response.TryAcquireManyExclusiveLocks));
+                        item.Promise.TrySetResult(new(response.TryAcquireManyExclusiveLocks));
                         break;
-                    
+
                     case GrpcServerBatchType.ServerTryReleaseExclusiveLock:
-                        item.Promise.SetResult(new(response.TryReleaseExclusiveLock));
+                        item.Promise.TrySetResult(new(response.TryReleaseExclusiveLock));
                         break;
-                    
+
                     case GrpcServerBatchType.ServerTryReleaseExclusivePrefixLock:
-                        item.Promise.SetResult(new(response.TryReleaseExclusivePrefixLock));
+                        item.Promise.TrySetResult(new(response.TryReleaseExclusivePrefixLock));
                         break;
 
                     case GrpcServerBatchType.ServerTryReleaseExclusiveRangeLock:
-                        item.Promise.SetResult(new(response.TryReleaseExclusiveRangeLock));
+                        item.Promise.TrySetResult(new(response.TryReleaseExclusiveRangeLock));
                         break;
 
                     case GrpcServerBatchType.ServerTryReleaseManyExclusiveLocks:
-                        item.Promise.SetResult(new(response.TryReleaseManyExclusiveLocks));
+                        item.Promise.TrySetResult(new(response.TryReleaseManyExclusiveLocks));
                         break;
-                    
+
                     case GrpcServerBatchType.ServerTryPrepareMutations:
-                        item.Promise.SetResult(new(response.TryPrepareMutations));
+                        item.Promise.TrySetResult(new(response.TryPrepareMutations));
                         break;
-                    
+
                     case GrpcServerBatchType.ServerTryPrepareManyMutations:
-                        item.Promise.SetResult(new(response.TryPrepareManyMutations));
+                        item.Promise.TrySetResult(new(response.TryPrepareManyMutations));
                         break;
-                    
+
                     case GrpcServerBatchType.ServerTryCommitMutations:
-                        item.Promise.SetResult(new(response.TryCommitMutations));
+                        item.Promise.TrySetResult(new(response.TryCommitMutations));
                         break;
-                    
+
                     case GrpcServerBatchType.ServerTryCommitManyMutations:
-                        item.Promise.SetResult(new(response.TryCommitManyMutations));
+                        item.Promise.TrySetResult(new(response.TryCommitManyMutations));
                         break;
-                    
+
                     case GrpcServerBatchType.ServerTryRollbackMutations:
-                        item.Promise.SetResult(new(response.TryRollbackMutations));
+                        item.Promise.TrySetResult(new(response.TryRollbackMutations));
                         break;
-                    
+
                     case GrpcServerBatchType.ServerTryRollbackManyMutations:
-                        item.Promise.SetResult(new(response.TryRollbackManyMutations));
+                        item.Promise.TrySetResult(new(response.TryRollbackManyMutations));
                         break;
-                    
+
                     case GrpcServerBatchType.ServerTryStartTransaction:
-                        item.Promise.SetResult(new(response.StartTransaction));
+                        item.Promise.TrySetResult(new(response.StartTransaction));
                         break;
-                    
+
                     case GrpcServerBatchType.ServerTryCommitTransaction:
-                        item.Promise.SetResult(new(response.CommitTransaction));
+                        item.Promise.TrySetResult(new(response.CommitTransaction));
                         break;
-                    
+
                     case GrpcServerBatchType.ServerTryRollbackTransaction:
-                        item.Promise.SetResult(new(response.RollbackTransaction));
+                        item.Promise.TrySetResult(new(response.RollbackTransaction));
                         break;
 
                     case GrpcServerBatchType.ServerTryEnsureKeyRangeSeeded:
-                        item.Promise.SetResult(new(response.EnsureKeyRangeSeeded));
+                        item.Promise.TrySetResult(new(response.EnsureKeyRangeSeeded));
                         break;
 
                     case GrpcServerBatchType.ServerTryGetRangeLocks:
-                        item.Promise.SetResult(new(response.GetRangeLocks));
+                        item.Promise.TrySetResult(new(response.GetRangeLocks));
                         break;
 
                     case GrpcServerBatchType.ServerTryImportRangeLocks:
-                        item.Promise.SetResult(new(response.ImportRangeLocks));
+                        item.Promise.TrySetResult(new(response.ImportRangeLocks));
                         break;
 
                     case GrpcServerBatchType.ServerTypeNone:
                     default:
-                        item.Promise.SetException(new KahunaServerException("Unknown response type: " + response.Type));
+                        item.Promise.TrySetException(new KahunaServerException("Unknown response type: " + response.Type));
                         break;
                 }
-
-                requestRefs.TryRemove(response.RequestId, out _);
             }
+
+            RpcException streamClosed = new(new(StatusCode.Unavailable, "gRPC inter-node key-value stream closed."));
+            FailPendingRequests(sharedStreamingId, streamClosed);
+        }
+        catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.Cancelled)
+        {
+            logger.LogWarning("GrpcServerBatcher key-value stream closed: {Status}", ex.Status);
+            FailPendingRequests(sharedStreamingId, ex);
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "GrpcServerBatcher ReadKeyValueMessages failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
+            FailPendingRequests(sharedStreamingId, ex);
         }
     }
 
@@ -953,10 +981,12 @@ internal sealed class GrpcServerBatcher
             AsyncDuplexStreamingCall<GrpcBatchServerLockRequest, GrpcBatchServerLockResponse>? locksStreaming = lockClient.BatchServerLockRequests();
             AsyncDuplexStreamingCall<GrpcBatchServerKeyValueRequest, GrpcBatchServerKeyValueResponse>? keyValueStreaming = keyValueClient.BatchServerKeyValueRequests();
 
-            _ = ReadLockMessages(locksStreaming, logger);
-            _ = ReadKeyValueMessages(keyValueStreaming, logger);
+            long id = Interlocked.Increment(ref streamingId);
 
-            nodeStreamings.Add(new(locksStreaming, keyValueStreaming));
+            _ = ReadLockMessages(id, locksStreaming, logger);
+            _ = ReadKeyValueMessages(id, keyValueStreaming, logger);
+
+            nodeStreamings.Add(new(id, locksStreaming, keyValueStreaming));
         }
 
         return nodeStreamings;

@@ -2,9 +2,9 @@
 namespace Kahuna.Server.Persistence;
 
 /// <summary>
-/// 
+///
 /// </summary>
-public sealed class PersistenceRequestItem
+public readonly struct PersistenceRequestItem
 {
     public string Key { get; }
     

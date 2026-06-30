@@ -106,8 +106,19 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
                     });
                 }
 
+                // Store an independent snapshot per revision — NOT a reference to the shared current
+                // entry, which is mutated in place on every later write (that aliasing would make all
+                // revisions report the latest values, breaking historical/snapshot reads).
                 ConcurrentDictionary<long, KeyValueEntry> revisions = keyValueRevisions.GetOrAdd(item.Key, _ => new());
-                revisions[item.Revision] = keyValues[item.Key];
+                revisions[item.Revision] = new()
+                {
+                    Value = item.Value,
+                    Revision = item.Revision,
+                    Expires = new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter),
+                    LastUsed = new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter),
+                    LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
+                    State = (KeyValueState)item.State
+                };
             }
         }
 
@@ -135,6 +146,29 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
             return entry;
 
         return null;
+    }
+
+    public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp)
+    {
+        if (!keyValueRevisions.TryGetValue(keyName, out ConcurrentDictionary<long, KeyValueEntry>? revisions))
+            return null;
+
+        KeyValueEntry? best = null;
+        long bestRevision = -1;
+
+        foreach (KeyValuePair<long, KeyValueEntry> kv in revisions)
+        {
+            long rev = kv.Key;
+            KeyValueEntry entry = kv.Value;
+
+            if (rev <= maxRevision && entry.LastModified.CompareTo(readTimestamp) <= 0 && rev > bestRevision)
+            {
+                best = entry;
+                bestRevision = rev;
+            }
+        }
+
+        return best;
     }
 
     /// <summary>

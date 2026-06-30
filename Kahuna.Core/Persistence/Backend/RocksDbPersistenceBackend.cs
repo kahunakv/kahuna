@@ -475,6 +475,99 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     }
 
     /// <summary>
+    /// Scans the <c>keyName~{decimal}</c> revision rows for <paramref name="keyName"/> in one
+    /// forward pass and returns the entry with the highest revision that satisfies both
+    /// <c>revision ≤ maxRevision</c> and <c>LastModified ≤ readTimestamp</c>.
+    /// Returns <c>null</c> when no qualifying retained revision exists.
+    /// </summary>
+    public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp)
+    {
+        int keyLen = Encoding.UTF8.GetByteCount(keyName);
+        int prefixLen = keyLen + 1; // keyName + '~'
+
+        byte[]? rented = null;
+        Span<byte> prefixBuffer = prefixLen <= KeyStackThreshold
+            ? stackalloc byte[KeyStackThreshold]
+            : (rented = ArrayPool<byte>.Shared.Rent(prefixLen));
+
+        try
+        {
+            prefixBuffer = prefixBuffer[..prefixLen];
+            Encoding.UTF8.GetBytes(keyName, prefixBuffer);
+            prefixBuffer[keyLen] = (byte)'~';
+
+            using Iterator? iterator = db.NewIterator(cf: columnFamilyKeys);
+            iterator.Seek(prefixBuffer);
+
+            KeyValueEntry? best = null;
+            long bestRevision = -1;
+
+            while (iterator.Valid())
+            {
+                ReadOnlySpan<byte> rawKey = iterator.GetKeySpan();
+
+                if (!rawKey.StartsWith(prefixBuffer))
+                    break;
+
+                ReadOnlySpan<byte> revSuffix = rawKey[prefixLen..];
+
+                // keyName's own current-marker row terminates the scan: all of keyName's revision rows
+                // are decimal-suffixed and sort before "CURRENT" ('0'..'9' < 'C'). Keys may contain '~',
+                // so sibling keys named "keyName~…" also share this prefix and contribute their own
+                // "~CURRENT"/revision rows; only keyName's *exact* "CURRENT" suffix is the terminator —
+                // a sibling's "~CURRENT" row must be skipped, not break the scan (it can sort before
+                // keyName's own revisions and would otherwise drop them).
+                if (revSuffix.SequenceEqual(CurrentMarkerUtf8[1..]))
+                    break;
+
+                // Only a suffix that is *entirely* a decimal number is one of keyName's own revision
+                // rows. A partial parse — e.g. "2024~5" from a sibling key "keyName~2024" — must be
+                // rejected, otherwise the sibling's row would be mis-attributed to keyName.
+                if (!Utf8Parser.TryParse(revSuffix, out long revision, out int consumed) || consumed != revSuffix.Length)
+                {
+                    iterator.Next();
+                    continue;
+                }
+
+                if (revision <= maxRevision)
+                {
+                    RocksDbKeyValueMessage message = UnserializeKeyValueMessage(iterator.GetValueSpan());
+                    HLCTimestamp lastModified = new(message.LastModifiedNode, message.LastModifiedPhysical, message.LastModifiedCounter);
+
+                    if (lastModified.CompareTo(readTimestamp) <= 0 && revision > bestRevision)
+                    {
+                        byte[]? messageValue;
+                        if (MemoryMarshal.TryGetArray(message.Value.Memory, out ArraySegment<byte> segment))
+                            messageValue = segment.Array;
+                        else
+                            messageValue = message.Value.ToByteArray();
+
+                        best = new()
+                        {
+                            Value = messageValue,
+                            Revision = message.Revision,
+                            Expires = new(message.ExpiresNode, message.ExpiresPhysical, message.ExpiresCounter),
+                            LastUsed = new(message.LastUsedNode, message.LastUsedPhysical, message.LastUsedCounter),
+                            LastModified = lastModified,
+                            State = (KeyValueState)message.State,
+                        };
+                        bestRevision = revision;
+                    }
+                }
+
+                iterator.Next();
+            }
+
+            return best;
+        }
+        finally
+        {
+            if (rented is not null)
+                ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>
     /// Retrieves a list of key-value pairs that match the specified prefix key.
     /// </summary>
     /// <param name="prefixKeyName">The prefix string used to filter and retrieve matching key-value pairs.</param>

@@ -218,33 +218,31 @@ public class TestKeyValueScripts : BaseCluster
             Assert.Equal(3, resp.Revision);
             Assert.Equal("hello world"u8.ToArray(), resp.Value);   
         
-            // Ephemeral tests — use a short TTL (50ms) + short delay (100ms, below the CI minimum
-            // election timeout of 150ms) so a Raft re-election cannot occur during the wait and evict
-            // the non-replicated ephemeral key.
-            script = "ESET pp 'hello world' EX 50";
+            // Ephemeral tests — use a short TTL (200ms) + short delay (300ms, below the CI minimum
+            // election timeout of ~500ms) so a Raft re-election cannot occur during the wait and evict
+            // the non-replicated ephemeral key. No intermediate EGET between ESET and EEXTEND to avoid
+            // consuming the TTL window before the extend runs.
+            script = "ESET pp 'hello world' EX 200";
 
             resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Set, resp.Type);
             Assert.Equal(0, resp.Revision);
-
-            script = "EGET pp";
-
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-            Assert.Equal(KeyValueResponseType.Get, resp.Type);
-            Assert.Equal(0, resp.Revision);
-            Assert.Equal("hello world"u8.ToArray(), resp.Value);
 
             script = "EEXTEND pp 2000";
 
             resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Extended, resp.Type);
 
-            // 100ms > 50ms original TTL: key would have expired without the extend.
-            await Task.Delay(100, TestContext.Current.CancellationToken);
+            // 300ms > 200ms original TTL: key would have expired without the extend.
+            await Task.Delay(300, TestContext.Current.CancellationToken);
 
             script = "EGET pp";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            await WaitUntilAsync(async () =>
+            {
+                resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+                return resp.Type == KeyValueResponseType.Get;
+            });
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(0, resp.Revision);
             Assert.Equal("hello world"u8.ToArray(), resp.Value);

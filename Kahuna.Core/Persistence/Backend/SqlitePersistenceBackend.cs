@@ -660,7 +660,79 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         {
             logger.LogError(ex, "GetKeyValueRevision failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
         }
-        
+
+        return null;
+    }
+
+    public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp)
+    {
+        try
+        {
+            (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabase(keyName);
+
+            try
+            {
+                readerWriterLock.AcquireReaderLock(TimeSpan.FromSeconds(5));
+
+                // HLC comparison encodes (L, C, N) lexicographic order: physical first, then counter, then node.
+                const string query = """
+                 SELECT value, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, lastUsedCounter,
+                        lastModifiedNode, lastModifiedPhysical, lastModifiedCounter, revision, state
+                 FROM keys_revisions
+                 WHERE key = @key
+                   AND revision <= @maxRevision
+                   AND (
+                       lastModifiedPhysical < @tsPhysical
+                       OR (lastModifiedPhysical = @tsPhysical AND lastModifiedCounter < @tsCounter)
+                       OR (lastModifiedPhysical = @tsPhysical AND lastModifiedCounter = @tsCounter AND lastModifiedNode <= @tsNode)
+                   )
+                 ORDER BY revision DESC
+                 LIMIT 1
+                 """;
+
+                using SqliteCommand command = new(query, connection);
+
+                command.Parameters.AddWithValue("@key", keyName);
+                command.Parameters.AddWithValue("@maxRevision", maxRevision);
+                command.Parameters.AddWithValue("@tsPhysical", readTimestamp.L);
+                command.Parameters.AddWithValue("@tsCounter", (long)readTimestamp.C);
+                command.Parameters.AddWithValue("@tsNode", readTimestamp.N);
+
+                using SqliteDataReader reader = command.ExecuteReader();
+
+                while (reader.Read())
+                    return new()
+                    {
+                        Value = reader.IsDBNull(0) ? null : (byte[])reader[0],
+                        Expires = new(
+                            reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+                            reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                            reader.IsDBNull(3) ? 0 : (uint)reader.GetInt64(3)
+                        ),
+                        LastUsed = new(
+                            reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
+                            reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                            reader.IsDBNull(6) ? 0 : (uint)reader.GetInt64(6)
+                        ),
+                        LastModified = new(
+                            reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
+                            reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
+                            reader.IsDBNull(9) ? 0 : (uint)reader.GetInt64(9)
+                        ),
+                        Revision = reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+                        State = reader.IsDBNull(11) ? KeyValueState.Undefined : (KeyValueState)reader.GetInt32(11)
+                    };
+            }
+            finally
+            {
+                readerWriterLock.ReleaseReaderLock();
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "GetKeyValueRevisionAtOrBefore failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
+        }
+
         return null;
     }
 

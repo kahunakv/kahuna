@@ -59,8 +59,9 @@ internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
                         continue;
                     }
 
-                    if (TryResolveRevisionAtOrBefore(key, entry.Revision, readTimestamp, out ReadOnlyKeyValueEntry snapshot))
-                        projected.Add((key, snapshot));
+                    KeyValueEntry? snapshot = context.PersistenceBackend.GetKeyValueRevisionAtOrBefore(key, entry.Revision - 1, readTimestamp);
+                    if (snapshot is not null && snapshot.State != KeyValueState.Deleted)
+                        projected.Add((key, new(snapshot.Value, snapshot.Revision, snapshot.Expires, snapshot.LastUsed, snapshot.LastModified, snapshot.State)));
                 }
 
                 return projected;
@@ -78,40 +79,5 @@ internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
         }
 
         return new(KeyValueResponseType.Get, items.Select(kv => (kv.Key, kv.Value)).ToList());
-    }
-
-    /// <summary>
-    /// Walks the persisted revision history of <paramref name="key"/> from <paramref name="latestRevision"/>
-    /// downwards, returning the most recent revision whose LastModified is at-or-before
-    /// <paramref name="readTimestamp"/>. Returns false when no such revision is retained.
-    /// </summary>
-    private bool TryResolveRevisionAtOrBefore(string key, long latestRevision, HLCTimestamp readTimestamp, out ReadOnlyKeyValueEntry snapshot)
-    {
-        snapshot = default!;
-
-        for (long revision = latestRevision - 1; revision >= 0; revision--)
-        {
-            KeyValueEntry? historical = context.PersistenceBackend.GetKeyValueRevision(key, revision);
-            if (historical is null)
-                return false;
-
-            if (historical.LastModified.CompareTo(readTimestamp) > 0)
-                continue;
-
-            if (historical.State == KeyValueState.Deleted)
-                return false;
-
-            snapshot = new(
-                historical.Value,
-                historical.Revision,
-                historical.Expires,
-                historical.LastUsed,
-                historical.LastModified,
-                historical.State);
-
-            return true;
-        }
-
-        return false;
     }
 }

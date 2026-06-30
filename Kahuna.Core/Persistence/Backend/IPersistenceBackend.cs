@@ -23,6 +23,13 @@ internal interface IPersistenceBackend
     
     public KeyValueEntry? GetKeyValueRevision(string keyName, long revision);
 
+    /// <summary>
+    /// Returns the highest-revision entry for <paramref name="keyName"/> where
+    /// <c>revision ≤ maxRevision</c> and <c>LastModified ≤ readTimestamp</c>,
+    /// or <c>null</c> when no such retained revision exists.
+    /// </summary>
+    public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp);
+
     public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName);
 
     public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit);

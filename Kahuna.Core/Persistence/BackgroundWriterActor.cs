@@ -54,6 +54,8 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     private readonly KahunaConfiguration configuration;
 
     private readonly ILogger<IKahuna> logger;
+
+    private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> self;
     
     /// <summary>
     /// Dirty locks that need to be written to the persistence backend.
@@ -125,7 +127,8 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         this.persistenceBackend = persistenceBackend;
         this.configuration = configuration;
         this.logger = logger;
-        
+        this.self = context.Self;
+
         TimeSpan writerDelay = configuration.DirtyObjectsWriterDelay > 0
             ? TimeSpan.FromMilliseconds(configuration.DirtyObjectsWriterDelay)
             : TimeSpan.FromSeconds(5);
@@ -158,11 +161,17 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 await RunTargetedRevisionCleanup();
                 await RunFullRevisionSweep();
                 UpdatePitrHorizon();
+                // If either queue still has items after the time budget, reschedule immediately
+                // instead of waiting for the next periodic timer tick.
+                if (dirtyLocks.Count > 0 || dirtyKeyValues.Count > 0)
+                    self.Send(new(BackgroundWriteType.Flush));
                 break;
 
             case BackgroundWriteType.FlushAndNotify:
-                await FlushLocks();
-                await FlushKeyValues();
+                // Explicit pre-backup/pre-close flush: drain fully (ignore the time budget) so the
+                // completion signal means every queued write has landed in storage.
+                await FlushLocks(drainFully: true);
+                await FlushKeyValues(drainFully: true);
                 await RunTargetedRevisionCleanup();
                 message.CompletionSource?.TrySetResult(true);
                 break;
@@ -225,173 +234,213 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
     /// <summary>
     /// Attempts to flush all pending locks in the background writer to the persistence backend.
-    /// If there are no pending locks, the method returns immediately.
-    /// If any locks fail to flush, they may be retried up to the maximum retry count.
-    /// Successfully flushed locks are removed from the queue, and any failed locks are retained for future retries.
+    /// Drains multiple batches per call until the queue is empty or the flush time budget is
+    /// exhausted. On budget expiry the caller reschedules immediately via self-Send.
+    /// If any batch fails all retries, it is retained in <see cref="pendingLockItems"/> for the
+    /// next flush cycle.
     /// </summary>
+    /// <param name="drainFully">When true, ignores the per-call time budget and drains the queue
+    /// completely. Used by the explicit pre-backup/pre-close flush so its completion signal means
+    /// every queued write has landed.</param>
     /// <returns>A task that represents the asynchronous operation of flushing locks.</returns>
-    private async ValueTask FlushLocks()
+    private async ValueTask FlushLocks(bool drainFully = false)
     {
-        if (dirtyLocks.Count == 0)
+        if (dirtyLocks.Count == 0 && pendingLockItems == null)
             return;
 
-        stopwatch.Restart();
-        
-        List<PersistenceRequestItem> items;
+        long budgetMs = configuration.DirtyObjectsWriterDelay > 0
+            ? configuration.DirtyObjectsWriterDelay
+            : 5000;
 
-        if (pendingLockItems != null)
-            items = pendingLockItems;
-        else
+        long startTick = Environment.TickCount64;
+
+        while (dirtyLocks.Count > 0 || pendingLockItems != null)
         {
-            items = [];
-            
-            long size = 0;
-            int counter = 0;
-            DateTime timestamp = DateTime.UtcNow;
+            stopwatch.Restart();
 
-            while (dirtyLocks.TryDequeue(out BackgroundWriteRequest? lockRequest))
+            List<PersistenceRequestItem> items;
+
+            if (pendingLockItems != null)
             {
-                if (lockRequest.PartitionId >= 0)
-                {
-                    if (partitionIds.TryGetValue(lockRequest.PartitionId, out DateTime currentTimestamp))
-                    {
-                        if (timestamp >= currentTimestamp)
-                            partitionIds[lockRequest.PartitionId] = timestamp;
-                    }
-                    else
-                        partitionIds.Add(lockRequest.PartitionId, timestamp);
-                }
-
-                items.Add(new(
-                    lockRequest.Key,
-                    lockRequest.Value,
-                    lockRequest.Revision,
-                    lockRequest.Expires.N,
-                    lockRequest.Expires.L,
-                    lockRequest.Expires.C,
-                    lockRequest.LastUsed.N,
-                    lockRequest.LastUsed.L,
-                    lockRequest.LastUsed.C,
-                    lockRequest.LastModified.N,
-                    lockRequest.LastModified.L,
-                    lockRequest.LastModified.C,
-                    lockRequest.State
-                ));
-
-                if (lockRequest.Value is not null)
-                    size += lockRequest.Value.Length;
-                
-                if (++counter >= MaxBatchSize || size >= MaxPacketSize)
-                    break;
+                items = pendingLockItems;
+                pendingLockItems = null;
             }
-        }
+            else
+            {
+                items = [];
 
-        IEnumerable<TimeSpan> backoffDelays = Backoff.DecorrelatedJitterBackoffV2(
-            medianFirstRetryDelay: TimeSpan.FromMilliseconds(1000),
-            retryCount: WriteRetries
-        );
+                long size = 0;
+                int counter = 0;
+                DateTime timestamp = DateTime.UtcNow;
 
-        foreach (TimeSpan timeSpan in backoffDelays)
-        {
-            bool success = await raft.ReadScheduler.EnqueueTask(0, () => persistenceBackend.StoreLocks(items));
+                while (dirtyLocks.TryDequeue(out BackgroundWriteRequest? lockRequest))
+                {
+                    if (lockRequest.PartitionId >= 0)
+                    {
+                        if (partitionIds.TryGetValue(lockRequest.PartitionId, out DateTime currentTimestamp))
+                        {
+                            if (timestamp >= currentTimestamp)
+                                partitionIds[lockRequest.PartitionId] = timestamp;
+                        }
+                        else
+                            partitionIds.Add(lockRequest.PartitionId, timestamp);
+                    }
+
+                    items.Add(new(
+                        lockRequest.Key,
+                        lockRequest.Value,
+                        lockRequest.Revision,
+                        lockRequest.Expires.N,
+                        lockRequest.Expires.L,
+                        lockRequest.Expires.C,
+                        lockRequest.LastUsed.N,
+                        lockRequest.LastUsed.L,
+                        lockRequest.LastUsed.C,
+                        lockRequest.LastModified.N,
+                        lockRequest.LastModified.L,
+                        lockRequest.LastModified.C,
+                        lockRequest.State
+                    ));
+
+                    if (lockRequest.Value is not null)
+                        size += lockRequest.Value.Length;
+
+                    if (++counter >= MaxBatchSize || size >= MaxPacketSize)
+                        break;
+                }
+            }
+
+            IEnumerable<TimeSpan> backoffDelays = Backoff.DecorrelatedJitterBackoffV2(
+                medianFirstRetryDelay: TimeSpan.FromMilliseconds(1000),
+                retryCount: WriteRetries
+            );
+
+            bool success = false;
+            foreach (TimeSpan timeSpan in backoffDelays)
+            {
+                success = await raft.ReadScheduler.EnqueueTask(0, () => persistenceBackend.StoreLocks(items));
+                if (success)
+                    break;
+
+                logger.LogWarning("Coundn't store batch of {Count} locks. Waiting...", items.Count);
+                await Task.Delay(timeSpan);
+            }
+
             if (!success)
             {
-                logger.LogWarning("Coundn't store batch of {Count} locks. Waiting...", items.Count);
-
-                await Task.Delay(timeSpan);
-                continue;
+                pendingLockItems = items;
+                logger.LogError("Coundn't store batch of {Count} locks", items.Count);
+                return;
             }
 
             logger.LogSuccessfullyStoredLocks(items.Count, stopwatch.ElapsedMilliseconds);
-            
             pendingCheckpoint = true;
-            pendingLockItems = null;
-            return;
-        }
 
-        pendingLockItems = items;
-        
-        logger.LogError("Coundn't store batch of {Count} locks", items.Count);
+            if (!drainFully && (Environment.TickCount64 - startTick) >= budgetMs)
+                return;
+        }
     }
 
     /// <summary>
     /// Flushes the queued key-value items by processing and storing them persistently.
-    /// If there are no queued key-value items, the method immediately returns.
-    /// Batches are created from the queue, retrying on failure with exponential backoff.
-    /// Successfully stored items are cleared, while failed batches are retained for further attempts.
+    /// Drains multiple batches per call until the queue is empty or the flush time budget is
+    /// exhausted. On budget expiry the caller reschedules immediately via self-Send.
+    /// Successfully stored batches update the revision-cleanup set; failed batches are retained
+    /// in <see cref="pendingKeyValuesItems"/> for the next flush cycle.
     /// </summary>
+    /// <param name="drainFully">When true, ignores the per-call time budget and drains the queue
+    /// completely. Used by the explicit pre-backup/pre-close flush so its completion signal means
+    /// every queued write has landed.</param>
     /// <returns>A value task representing the asynchronous operation of flushing key-value items.</returns>
-    private async ValueTask FlushKeyValues()
+    private async ValueTask FlushKeyValues(bool drainFully = false)
     {
-        if (dirtyKeyValues.Count == 0)
+        if (dirtyKeyValues.Count == 0 && pendingKeyValuesItems == null)
             return;
-        
-        stopwatch.Restart();
 
-        List<PersistenceRequestItem> items;
+        long budgetMs = configuration.DirtyObjectsWriterDelay > 0
+            ? configuration.DirtyObjectsWriterDelay
+            : 5000;
 
-        if (pendingKeyValuesItems != null)
-            items = pendingKeyValuesItems;
-        else
+        long startTick = Environment.TickCount64;
+
+        while (dirtyKeyValues.Count > 0 || pendingKeyValuesItems != null)
         {
-            items = [];
-            
-            long size = 0;
-            int counter = 0;
-            
-            DateTime timestamp = DateTime.UtcNow;
+            stopwatch.Restart();
 
-            while (dirtyKeyValues.TryDequeue(out BackgroundWriteRequest? keyValueRequest))
+            List<PersistenceRequestItem> items;
+
+            if (pendingKeyValuesItems != null)
             {
-                if (keyValueRequest.PartitionId >= 0)
-                {
-                    if (partitionIds.TryGetValue(keyValueRequest.PartitionId, out DateTime currentTimestamp))
-                    {
-                        if (timestamp >= currentTimestamp)
-                            partitionIds[keyValueRequest.PartitionId] = timestamp;
-                    }
-                    else
-                        partitionIds.Add(keyValueRequest.PartitionId, timestamp);
-                }
-
-                items.Add(new(
-                    keyValueRequest.Key,
-                    keyValueRequest.Value,
-                    keyValueRequest.Revision,
-                    keyValueRequest.Expires.N,
-                    keyValueRequest.Expires.L,
-                    keyValueRequest.Expires.C,
-                    keyValueRequest.LastUsed.N,
-                    keyValueRequest.LastUsed.L,
-                    keyValueRequest.LastUsed.C,
-                    keyValueRequest.LastModified.N,
-                    keyValueRequest.LastModified.L,
-                    keyValueRequest.LastModified.C,
-                    keyValueRequest.State
-                ));
-                
-                if (keyValueRequest.Value is not null)
-                    size += keyValueRequest.Value.Length;
-                
-                if (++counter >= MaxBatchSize || size >= MaxPacketSize)
-                    break;
+                items = pendingKeyValuesItems;
+                pendingKeyValuesItems = null;
             }
-        }
+            else
+            {
+                items = [];
 
-        IEnumerable<TimeSpan> backoffDelays = Backoff.DecorrelatedJitterBackoffV2(
-            medianFirstRetryDelay: TimeSpan.FromMilliseconds(1000),
-            retryCount: WriteRetries
-        );
-        
-        foreach (TimeSpan timeSpan in backoffDelays)
-        {
-            bool success = await raft.ReadScheduler.EnqueueTask(0, () => persistenceBackend.StoreKeyValues(items));
+                long size = 0;
+                int counter = 0;
+
+                DateTime timestamp = DateTime.UtcNow;
+
+                while (dirtyKeyValues.TryDequeue(out BackgroundWriteRequest? keyValueRequest))
+                {
+                    if (keyValueRequest.PartitionId >= 0)
+                    {
+                        if (partitionIds.TryGetValue(keyValueRequest.PartitionId, out DateTime currentTimestamp))
+                        {
+                            if (timestamp >= currentTimestamp)
+                                partitionIds[keyValueRequest.PartitionId] = timestamp;
+                        }
+                        else
+                            partitionIds.Add(keyValueRequest.PartitionId, timestamp);
+                    }
+
+                    items.Add(new(
+                        keyValueRequest.Key,
+                        keyValueRequest.Value,
+                        keyValueRequest.Revision,
+                        keyValueRequest.Expires.N,
+                        keyValueRequest.Expires.L,
+                        keyValueRequest.Expires.C,
+                        keyValueRequest.LastUsed.N,
+                        keyValueRequest.LastUsed.L,
+                        keyValueRequest.LastUsed.C,
+                        keyValueRequest.LastModified.N,
+                        keyValueRequest.LastModified.L,
+                        keyValueRequest.LastModified.C,
+                        keyValueRequest.State
+                    ));
+
+                    if (keyValueRequest.Value is not null)
+                        size += keyValueRequest.Value.Length;
+
+                    if (++counter >= MaxBatchSize || size >= MaxPacketSize)
+                        break;
+                }
+            }
+
+            IEnumerable<TimeSpan> backoffDelays = Backoff.DecorrelatedJitterBackoffV2(
+                medianFirstRetryDelay: TimeSpan.FromMilliseconds(1000),
+                retryCount: WriteRetries
+            );
+
+            bool success = false;
+            foreach (TimeSpan timeSpan in backoffDelays)
+            {
+                success = await raft.ReadScheduler.EnqueueTask(0, () => persistenceBackend.StoreKeyValues(items));
+                if (success)
+                    break;
+
+                logger.LogWarning("Coundn't store batch of {Count} key-values. Waiting...", items.Count);
+                await Task.Delay(timeSpan);
+            }
+
             if (!success)
             {
-                logger.LogWarning("Coundn't store batch of {Count} key-values. Waiting...", items.Count);
-                
-                await Task.Delay(timeSpan);
-                continue;
+                pendingKeyValuesItems = items;
+                logger.LogError("Coundn't store batch of {Count} key-values", items.Count);
+                return;
             }
 
             logger.LogSuccessfullyStoredKeyValues(items.Count, stopwatch.ElapsedMilliseconds);
@@ -407,13 +456,10 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             }
 
             pendingCheckpoint = true;
-            pendingKeyValuesItems = null;
-            return;
-        }
-        
-        pendingKeyValuesItems = items;
 
-        logger.LogError("Coundn't store batch of {Count} key-values", items.Count);
+            if (!drainFully && (Environment.TickCount64 - startTick) >= budgetMs)
+                return;
+        }
     }
 
     /// <summary>

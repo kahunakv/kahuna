@@ -1219,10 +1219,17 @@ internal sealed class KeyValuesManager : IDisposable
     /// <returns>A task that represents the asynchronous operation. The task result contains a list of responses for each set request, indicating the outcome of the operation.</returns>
     public async Task<List<KahunaSetKeyValueResponseItem>> SetManyNodeKeyValue(List<KahunaSetKeyValueRequestItem> items)
     {
-        Lock sync = new();
-        List<KahunaSetKeyValueResponseItem> responses = new(items.Count);
+        Task<KahunaSetKeyValueResponseItem>[] tasks = new Task<KahunaSetKeyValueResponseItem>[items.Count];
 
-        await items.ForEachAsync(5, async item =>
+        for (int i = 0; i < items.Count; i++)
+        {
+            KahunaSetKeyValueRequestItem item = items[i];
+            tasks[i] = SetOneNodeKeyValue(item);
+        }
+
+        return [.. await Task.WhenAll(tasks)];
+
+        async Task<KahunaSetKeyValueResponseItem> SetOneNodeKeyValue(KahunaSetKeyValueRequestItem item)
         {
             KeyValueRequest request = KeyValueRequestPool.Rent(
                 KeyValueRequestType.TrySet,
@@ -1246,43 +1253,44 @@ internal sealed class KeyValuesManager : IDisposable
             try
             {
                 KeyValueResponse? response;
-                
+
                 if (item.Durability == KeyValueDurability.Ephemeral)
                     response = await ephemeralKeyValuesRouter.Ask(request);
                 else
                     response = await persistentKeyValuesRouter.Ask(request);
 
                 if (response is null || response.Type == KeyValueResponseType.WaitingForReplication)
-                {
-                    responses.Add(new() { Type = KeyValueResponseType.Errored });
-                    return;
-                }
+                    return new() { Type = KeyValueResponseType.Errored };
 
-                lock (sync)
-                    responses.Add(new()
-                    {
-                        Key = item.Key ?? "",
-                        Type = response.Type,
-                        Revision = response.Revision,
-                        LastModified = response.Ticket,
-                        Durability = item.Durability
-                    });
+                return new()
+                {
+                    Key = item.Key ?? "",
+                    Type = response.Type,
+                    Revision = response.Revision,
+                    LastModified = response.Ticket,
+                    Durability = item.Durability
+                };
             }
             finally
             {
                 KeyValueRequestPool.Return(request);
             }
-        });
-
-        return responses;
+        }
     }
 
     public async Task<List<KahunaDeleteKeyValueResponseItem>> DeleteManyNodeKeyValue(List<KahunaDeleteKeyValueRequestItem> items)
     {
-        Lock sync = new();
-        List<KahunaDeleteKeyValueResponseItem> responses = new(items.Count);
+        Task<KahunaDeleteKeyValueResponseItem>[] tasks = new Task<KahunaDeleteKeyValueResponseItem>[items.Count];
 
-        await items.ForEachAsync(5, async item =>
+        for (int i = 0; i < items.Count; i++)
+        {
+            KahunaDeleteKeyValueRequestItem item = items[i];
+            tasks[i] = DeleteOneNodeKeyValue(item);
+        }
+
+        return [.. await Task.WhenAll(tasks)];
+
+        async Task<KahunaDeleteKeyValueResponseItem> DeleteOneNodeKeyValue(KahunaDeleteKeyValueRequestItem item)
         {
             KeyValueRequest request = KeyValueRequestPool.Rent(
                 KeyValueRequestType.TryDelete,
@@ -1313,18 +1321,14 @@ internal sealed class KeyValuesManager : IDisposable
                         response = await persistentKeyValuesRouter.Ask(request);
 
                     if (response is null)
-                    {
-                        lock (sync)
-                            responses.Add(new()
-                            {
-                                Key = item.Key ?? "",
-                                Type = KeyValueResponseType.Errored,
-                                Revision = -1,
-                                LastModified = HLCTimestamp.Zero,
-                                Durability = item.Durability
-                            });
-                        return;
-                    }
+                        return new()
+                        {
+                            Key = item.Key ?? "",
+                            Type = KeyValueResponseType.Errored,
+                            Revision = -1,
+                            LastModified = HLCTimestamp.Zero,
+                            Durability = item.Durability
+                        };
 
                     if (response.Type == KeyValueResponseType.WaitingForReplication)
                     {
@@ -1332,35 +1336,30 @@ internal sealed class KeyValuesManager : IDisposable
                         continue;
                     }
 
-                    lock (sync)
-                        responses.Add(new()
-                        {
-                            Key = item.Key ?? "",
-                            Type = response.Type,
-                            Revision = response.Revision,
-                            LastModified = response.Ticket,
-                            Durability = item.Durability
-                        });
-                    return;
-                }
-
-                lock (sync)
-                    responses.Add(new()
+                    return new()
                     {
                         Key = item.Key ?? "",
-                        Type = KeyValueResponseType.MustRetry,
-                        Revision = -1,
-                        LastModified = HLCTimestamp.Zero,
+                        Type = response.Type,
+                        Revision = response.Revision,
+                        LastModified = response.Ticket,
                         Durability = item.Durability
-                    });
+                    };
+                }
+
+                return new()
+                {
+                    Key = item.Key ?? "",
+                    Type = KeyValueResponseType.MustRetry,
+                    Revision = -1,
+                    LastModified = HLCTimestamp.Zero,
+                    Durability = item.Durability
+                };
             }
             finally
             {
                 KeyValueRequestPool.Return(request);
             }
-        });
-
-        return responses;
+        }
     }
     
     /// <summary>
@@ -2445,10 +2444,19 @@ internal sealed class KeyValuesManager : IDisposable
         List<(string key, KeyValueDurability durability)> keys
     )
     {
-        Lock sync = new();
-        List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> responses = new(keys.Count);
+        Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>[] tasks =
+            new Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>[keys.Count];
 
-        await keys.ForEachAsync(5, async key =>
+        for (int i = 0; i < keys.Count; i++)
+        {
+            (string key, KeyValueDurability durability) key = keys[i];
+            tasks[i] = PrepareOneMutation(key);
+        }
+
+        return [.. await Task.WhenAll(tasks)];
+
+        async Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> PrepareOneMutation(
+            (string key, KeyValueDurability durability) key)
         {
             KeyValueRequest request = KeyValueRequestPool.Rent(
                 KeyValueRequestType.TryPrepareMutations,
@@ -2477,23 +2485,15 @@ internal sealed class KeyValuesManager : IDisposable
                     response = await persistentKeyValuesRouter.Ask(request);
 
                 if (response is null || response.Type == KeyValueResponseType.WaitingForReplication)
-                {
-                    lock (sync)
-                        responses.Add((KeyValueResponseType.Errored, HLCTimestamp.Zero, key.key, key.durability));
-                    
-                    return;
-                }
+                    return (KeyValueResponseType.Errored, HLCTimestamp.Zero, key.key, key.durability);
 
-                lock (sync)
-                    responses.Add((response.Type, response.Ticket, key.key, key.durability));
+                return (response.Type, response.Ticket, key.key, key.durability);
             }
             finally
             {
                 KeyValueRequestPool.Return(request);
             }
-        });
-
-        return responses;
+        }
     }
     
     /// <summary>
@@ -2566,14 +2566,23 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="keys"></param>
     /// <returns></returns>
     public async Task<List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)>> TryCommitManyMutations(
-        HLCTimestamp transactionId, 
+        HLCTimestamp transactionId,
         List<(string key, HLCTimestamp proposalTicketId, KeyValueDurability durability)> keys
     )
     {
-        Lock sync = new();
-        List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> responses = new(keys.Count);
+        Task<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)>[] tasks =
+            new Task<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)>[keys.Count];
 
-        await keys.ForEachAsync(5, async key =>
+        for (int i = 0; i < keys.Count; i++)
+        {
+            (string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) key = keys[i];
+            tasks[i] = CommitOneMutation(key);
+        }
+
+        return [.. await Task.WhenAll(tasks)];
+
+        async Task<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> CommitOneMutation(
+            (string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) key)
         {
             KeyValueRequest request = KeyValueRequestPool.Rent(
                 KeyValueRequestType.TryCommitMutations,
@@ -2602,23 +2611,15 @@ internal sealed class KeyValuesManager : IDisposable
                     response = await persistentKeyValuesRouter.Ask(request);
 
                 if (response is null || response.Type == KeyValueResponseType.WaitingForReplication)
-                {
-                    lock (sync)
-                        responses.Add((KeyValueResponseType.Errored, key.key, -1, key.durability));
-                    
-                    return;
-                }
+                    return (KeyValueResponseType.Errored, key.key, -1, key.durability);
 
-                lock (sync)
-                    responses.Add((response.Type, key.key, response.Revision, key.durability));
+                return (response.Type, key.key, response.Revision, key.durability);
             }
             finally
             {
                 KeyValueRequestPool.Return(request);
             }
-        });
-
-        return responses;
+        }
     }
     
     /// <summary>
@@ -2675,14 +2676,23 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="durability"></param>
     /// <returns></returns>
     public async Task<List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)>> TryRollbackManyMutations(
-        HLCTimestamp transactionId, 
+        HLCTimestamp transactionId,
         List<(string key, HLCTimestamp proposalTicketId, KeyValueDurability durability)> keys
     )
     {
-        Lock sync = new();
-        List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> responses = new(keys.Count);
+        Task<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)>[] tasks =
+            new Task<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)>[keys.Count];
 
-        await keys.ForEachAsync(5, async key =>
+        for (int i = 0; i < keys.Count; i++)
+        {
+            (string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) key = keys[i];
+            tasks[i] = RollbackOneMutation(key);
+        }
+
+        return [.. await Task.WhenAll(tasks)];
+
+        async Task<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> RollbackOneMutation(
+            (string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) key)
         {
             KeyValueRequest request = new(
                 KeyValueRequestType.TryRollbackMutations,
@@ -2709,13 +2719,10 @@ internal sealed class KeyValuesManager : IDisposable
                 response = await persistentKeyValuesRouter.Ask(request);
 
             if (response is null)
-                return;
+                return (KeyValueResponseType.Errored, key.key, -1, key.durability);
 
-            lock (sync)
-                responses.Add((response.Type, key.key, response.Revision, key.durability));
-        });
-
-        return responses;
+            return (response.Type, key.key, response.Revision, key.durability);
+        }
     }
 
     /// <summary>

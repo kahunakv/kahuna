@@ -116,7 +116,7 @@ internal static class RestoreEngine
                     if (item is null)
                         continue;
 
-                    batch.Add(item);
+                    batch.Add(item.Value);
                     if (entry.Time.CompareTo(lastAppliedTime) >= 0)
                     {
                         lastAppliedTime = entry.Time;
