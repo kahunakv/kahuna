@@ -409,7 +409,8 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                         keyValueRequest.LastModified.N,
                         keyValueRequest.LastModified.L,
                         keyValueRequest.LastModified.C,
-                        keyValueRequest.State
+                        keyValueRequest.State,
+                        keyValueRequest.NoRevision
                     ));
 
                     if (keyValueRequest.Value is not null)

@@ -31,11 +31,13 @@ public readonly struct PersistenceRequestItem
     public uint LastModifiedCounter { get; }
     
     public int State { get; }
-    
+
+    public bool NoRevision { get; }
+
     public PersistenceRequestItem(
-        string key, 
-        byte[]? value, 
-        long revision, 
+        string key,
+        byte[]? value,
+        long revision,
         int expiresNode,
         long expiresPhysical,
         uint expiresCounter,
@@ -45,7 +47,8 @@ public readonly struct PersistenceRequestItem
         int lastModifiedNode,
         long lastModifiedPhysical,
         uint lastModifiedCounter,
-        int state
+        int state,
+        bool noRevision = false
     )
     {
         Key = key;
@@ -61,5 +64,6 @@ public readonly struct PersistenceRequestItem
         LastModifiedPhysical = lastModifiedPhysical;
         LastModifiedCounter = lastModifiedCounter;
         State = state;
+        NoRevision = noRevision;
     }
 }

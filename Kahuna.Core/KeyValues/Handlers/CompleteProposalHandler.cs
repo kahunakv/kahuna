@@ -52,10 +52,13 @@ internal sealed class CompleteProposalHandler : BaseHandler
         if (entry.Revisions is not null)
             RemoveExpiredRevisions(entry, proposal.Revision);
 
-        bool revisionsCreated = entry.Revisions is null;
-        entry.Revisions ??= new();
-        entry.Revisions[entry.Revision] = new KeyValueRevisionEntry(entry.Value, entry.LastModified, entry.Expires, entry.State);
-        context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreated, entry.Value));
+        if (!proposal.NoRevision)
+        {
+            bool revisionsCreated = entry.Revisions is null;
+            entry.Revisions ??= new();
+            entry.Revisions[entry.Revision] = new KeyValueRevisionEntry(entry.Value, entry.LastModified, entry.Expires, entry.State);
+            context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreated, entry.Value));
+        }
 
         int previousValueLength = entry.Value?.Length ?? 0;
 
@@ -80,7 +83,8 @@ internal sealed class CompleteProposalHandler : BaseHandler
             proposal.Expires,
             proposal.LastUsed,
             proposal.LastModified,
-            (int)proposal.State
+            (int)proposal.State,
+            proposal.NoRevision
         ));
         
         entry.ReplicationIntent = null;

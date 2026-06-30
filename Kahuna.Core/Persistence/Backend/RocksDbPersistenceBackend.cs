@@ -298,11 +298,14 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             CurrentMarkerUtf8.CopyTo(buffer[keyLen..]);
             batch.Put(buffer[..(keyLen + CurrentMarkerUtf8.Length)], serialized, cf: columnFamily);
 
-            // ~<revision> key: reuse the key bytes already at buffer[0..keyLen), overwrite the suffix.
-            buffer[keyLen] = (byte)'~';
-            bool formatted = Utf8Formatter.TryFormat(item.Revision, buffer[(keyLen + 1)..], out int revLen);
-            System.Diagnostics.Debug.Assert(formatted, "Utf8Formatter.TryFormat failed for revision key");
-            batch.Put(buffer[..(keyLen + 1 + revLen)], serialized, cf: columnFamily);
+            // ~<revision> key: skipped for no-revision writes — only the current value is kept.
+            if (!item.NoRevision)
+            {
+                buffer[keyLen] = (byte)'~';
+                bool formatted = Utf8Formatter.TryFormat(item.Revision, buffer[(keyLen + 1)..], out int revLen);
+                System.Diagnostics.Debug.Assert(formatted, "Utf8Formatter.TryFormat failed for revision key");
+                batch.Put(buffer[..(keyLen + 1 + revLen)], serialized, cf: columnFamily);
+            }
         }
         finally
         {

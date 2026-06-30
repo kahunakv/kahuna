@@ -399,6 +399,21 @@ public class KahunaClient
     }
 
     /// <summary>
+    /// Sets a key to the given value without archiving a historical revision entry.
+    /// The revision counter still increments and conditional-set semantics are preserved,
+    /// but by-revision and snapshot reads for this write return NotFound.
+    /// Intended for ephemeral / cache keys where revision history is wasted overhead.
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="value"></param>
+    /// <param name="expiryTime"></param>
+    /// <param name="durability"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public Task<KahunaKeyValue> SetKeyValueNoRevision(string key, byte[]? value, int expiryTime = 0, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
+        => SetKeyValue(key, value, expiryTime, KeyValueFlags.SetNoRevision, durability, cancellationToken);
+
+    /// <summary>
     /// Sets multiple key-value pairs in the Kahuna system.
     /// </summary>
     /// <param name="requestItems">The collection of key-value pairs to be set in the system.</param>

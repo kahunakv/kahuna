@@ -41,4 +41,9 @@ internal sealed class KeyValueMvccEntry
     /// State of the key
     /// </summary>
     public KeyValueState State { get; set; }
+
+    /// <summary>
+    /// When true this write must not archive a historical revision entry.
+    /// </summary>
+    public bool NoRevision { get; set; }
 }

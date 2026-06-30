@@ -170,7 +170,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             message.Key,
             mvccEntry.Value,
             mvccEntry.Revision,
-            false,
+            mvccEntry.NoRevision,
             mvccEntry.Expires,
             mvccEntry.LastUsed,
             mvccEntry.LastModified,
@@ -221,7 +221,8 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             LastModifiedPhysical = proposal.LastModified.L,
             LastModifiedCounter = proposal.LastModified.C,
             TimePhysical = currentTime.L,
-            TimeCounter = currentTime.C
+            TimeCounter = currentTime.C,
+            NoRevision = proposal.NoRevision
         };
         
         if (proposal.Value is not null)

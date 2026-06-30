@@ -26,6 +26,8 @@ public sealed class BackgroundWriteRequest
 
     public int State { get; }
 
+    public bool NoRevision { get; }
+
     public TaskCompletionSource<bool>? CompletionSource { get; }
 
     public BackgroundWriteRequest(
@@ -37,7 +39,8 @@ public sealed class BackgroundWriteRequest
         HLCTimestamp expires,
         HLCTimestamp lastUsed,
         HLCTimestamp lastModified,
-        int state
+        int state,
+        bool noRevision = false
     )
     {
         Type = type;
@@ -49,6 +52,7 @@ public sealed class BackgroundWriteRequest
         LastUsed = lastUsed;
         LastModified = lastModified;
         State = state;
+        NoRevision = noRevision;
     }
 
     public BackgroundWriteRequest(BackgroundWriteType type)

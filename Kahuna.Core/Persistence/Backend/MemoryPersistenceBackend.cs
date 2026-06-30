@@ -109,16 +109,20 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
                 // Store an independent snapshot per revision — NOT a reference to the shared current
                 // entry, which is mutated in place on every later write (that aliasing would make all
                 // revisions report the latest values, breaking historical/snapshot reads).
-                ConcurrentDictionary<long, KeyValueEntry> revisions = keyValueRevisions.GetOrAdd(item.Key, _ => new());
-                revisions[item.Revision] = new()
+                // Skipped for no-revision writes; only keyValues (the current-value store) is updated.
+                if (!item.NoRevision)
                 {
-                    Value = item.Value,
-                    Revision = item.Revision,
-                    Expires = new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter),
-                    LastUsed = new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter),
-                    LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
-                    State = (KeyValueState)item.State
-                };
+                    ConcurrentDictionary<long, KeyValueEntry> revisions = keyValueRevisions.GetOrAdd(item.Key, _ => new());
+                    revisions[item.Revision] = new()
+                    {
+                        Value = item.Value,
+                        Revision = item.Revision,
+                        Expires = new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter),
+                        LastUsed = new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter),
+                        LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
+                        State = (KeyValueState)item.State
+                    };
+                }
             }
         }
 

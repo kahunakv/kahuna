@@ -59,7 +59,8 @@ internal sealed class TryGetByBucketHandler : BaseHandler
 
     private async Task<KeyValueResponse> GetByBucketPersistent(KeyValueRequest message)
     {
-        Dictionary<string, ReadOnlyKeyValueEntry> items = new();
+        List<(string, ReadOnlyKeyValueEntry)> items = [];
+        HashSet<string> seenKeys = [];
 
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
 
@@ -74,14 +75,15 @@ internal sealed class TryGetByBucketHandler : BaseHandler
             if (response.Type != KeyValueResponseType.Get || response.Entry is null)
                 return new(response.Type, []);
 
-            items.Add(key, new(
+            seenKeys.Add(key);
+            items.Add((key, new(
                 response.Entry.Value,
                 response.Entry.Revision,
                 response.Entry.Expires,
                 response.Entry.LastUsed,
                 response.Entry.LastModified,
                 response.Entry.State
-            ));
+            )));
 
             if (items.Count >= KeyValueScanLimits.MaxPrefixScanResults)
                 break;
@@ -95,7 +97,7 @@ internal sealed class TryGetByBucketHandler : BaseHandler
             if (items.Count >= KeyValueScanLimits.MaxPrefixScanResults)
                 break;
 
-            if (items.ContainsKey(key))
+            if (seenKeys.Contains(key))
                 continue;
 
             KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability, message.ReadTimestamp, readOnlyKeyValueEntry);
@@ -104,15 +106,16 @@ internal sealed class TryGetByBucketHandler : BaseHandler
                 continue;
 
             if (response is { Type: KeyValueResponseType.Get, Entry: not null })
-                items.Add(key, response.Entry);
+            {
+                seenKeys.Add(key);
+                items.Add((key, response.Entry));
+            }
         }
 
         // step 3: make sure the items are sorted in lexicographical order
-        List<(string Key, ReadOnlyKeyValueEntry Value)> itemsToReturn = items.Select(kv => (kv.Key, kv.Value)).ToList();
-        
-        itemsToReturn.Sort(EnsureLexicographicalOrder);
-                
-        return new(KeyValueResponseType.Get, itemsToReturn);
+        items.Sort(EnsureLexicographicalOrder);
+
+        return new(KeyValueResponseType.Get, items);
     }
 
     private async Task<KeyValueResponse> Get(

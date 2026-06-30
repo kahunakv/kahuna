@@ -432,8 +432,11 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
 
                         foreach (PersistenceRequestItem item in kv.Value)
                         {
-                            revisionsParams.Bind(item);
-                            revisionsCommand.ExecuteNonQuery();
+                            if (!item.NoRevision)
+                            {
+                                revisionsParams.Bind(item);
+                                revisionsCommand.ExecuteNonQuery();
+                            }
 
                             keysParams.Bind(item);
                             keysCommand.ExecuteNonQuery();

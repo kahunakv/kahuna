@@ -85,7 +85,8 @@ internal sealed class KeyValueReplicator
                         new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
                         new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
                         new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
-                        (int)KeyValueState.Set
+                        (int)KeyValueState.Set,
+                        keyValueMessage.NoRevision
                     ));
 
                     // Record the committed write into the local histogram.
@@ -118,7 +119,8 @@ internal sealed class KeyValueReplicator
                         new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
                         new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
                         new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
-                        (int)KeyValueState.Deleted
+                        (int)KeyValueState.Deleted,
+                        keyValueMessage.NoRevision
                     ));
 
                     if (RangeRouting.IsKeyRange(keySpaceRegistry, keyValueMessage.Key))
@@ -145,7 +147,8 @@ internal sealed class KeyValueReplicator
                         new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
                         new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
                         new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
-                        (int)KeyValueState.Set
+                        (int)KeyValueState.Set,
+                        keyValueMessage.NoRevision
                     ));
 
                     if (RangeRouting.IsKeyRange(keySpaceRegistry, keyValueMessage.Key))

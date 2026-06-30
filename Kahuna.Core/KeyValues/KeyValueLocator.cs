@@ -1979,50 +1979,58 @@ internal sealed class KeyValueLocator
     /// <returns></returns>
     public async Task<KeyValueGetByBucketResult> ScanAllByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        ConcurrentDictionary<string, ReadOnlyKeyValueEntry> unionItems = [];
+        List<(string, ReadOnlyKeyValueEntry)> unionItems = [];
+        HashSet<string> seenKeys = [];
 
         KeyValueGetByBucketResult items = await manager.ScanByPrefix(prefixKeyName, readTimestamp, durability);
 
         if (items.Type == KeyValueResponseType.Get)
         {
-            foreach ((string, ReadOnlyKeyValueEntry) item in items.Items)
-                unionItems.TryAdd(item.Item1, item.Item2);
+            foreach ((string key, ReadOnlyKeyValueEntry entry) in items.Items)
+            {
+                if (seenKeys.Add(key))
+                    unionItems.Add((key, entry));
+            }
         }
 
         IList<RaftNode> nodes = raft.GetNodes();
 
-        List<Task> tasks = new(nodes.Count);
+        Task<KeyValueGetByBucketResult>[] tasks = new Task<KeyValueGetByBucketResult>[nodes.Count];
+        for (int i = 0; i < nodes.Count; i++)
+            tasks[i] = NodeScanByPrefix(nodes[i], prefixKeyName, readTimestamp, durability, cancellationToken);
 
-        foreach (RaftNode node in nodes)
-            tasks.Add(NodeScanByPrefix(unionItems, node, prefixKeyName, readTimestamp, durability, cancellationToken));
+        KeyValueGetByBucketResult[] nodeResults = await Task.WhenAll(tasks);
 
-        await Task.WhenAll(tasks);
+        foreach (KeyValueGetByBucketResult nodeResult in nodeResults)
+        {
+            if (nodeResult.Type == KeyValueResponseType.Get)
+            {
+                foreach ((string key, ReadOnlyKeyValueEntry entry) in nodeResult.Items)
+                {
+                    if (seenKeys.Add(key))
+                        unionItems.Add((key, entry));
+                }
+            }
+        }
 
         if (durability == KeyValueDurability.Persistent)
         {
             KeyValueGetByBucketResult result = await manager.ScanByPrefixFromDisk(prefixKeyName, readTimestamp);
 
-            if (items.Type == KeyValueResponseType.Get)
+            if (result.Type == KeyValueResponseType.Get)
             {
-                foreach ((string, ReadOnlyKeyValueEntry) item in result.Items)
-                    unionItems.TryAdd(item.Item1, item.Item2);
+                foreach ((string key, ReadOnlyKeyValueEntry entry) in result.Items)
+                {
+                    if (seenKeys.Add(key))
+                        unionItems.Add((key, entry));
+                }
             }
         }
 
-        return new(KeyValueResponseType.Get, unionItems.Select(kv => (kv.Key, kv.Value)).ToList());
+        return new(KeyValueResponseType.Get, unionItems);
     }
 
-    /// <summary>
-    ///
-    /// </summary>
-    /// <param name="unionItems"></param>
-    /// <param name="node"></param>
-    /// <param name="prefixKeyName"></param>
-    /// <param name="readTimestamp"></param>
-    /// <param name="durability"></param>
-    /// <param name="cancellationToken"></param>
-    private async Task NodeScanByPrefix(
-        ConcurrentDictionary<string, ReadOnlyKeyValueEntry> unionItems,
+    private async Task<KeyValueGetByBucketResult> NodeScanByPrefix(
         RaftNode node,
         string prefixKeyName,
         HLCTimestamp readTimestamp,
@@ -2030,12 +2038,6 @@ internal sealed class KeyValueLocator
         CancellationToken cancellationToken
     )
     {
-        KeyValueGetByBucketResult response = await interNodeCommunication.ScanByPrefix(node.Endpoint, prefixKeyName, readTimestamp, durability, cancellationToken);
-        
-        if (response.Type == KeyValueResponseType.Get)
-        {
-            foreach ((string, ReadOnlyKeyValueEntry) item in response.Items)
-                unionItems.TryAdd(item.Item1, item.Item2);
-        }
-    }    
+        return await interNodeCommunication.ScanByPrefix(node.Endpoint, prefixKeyName, readTimestamp, durability, cancellationToken);
+    }
 }

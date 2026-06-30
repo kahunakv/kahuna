@@ -203,6 +203,7 @@ internal sealed class TrySetHandler : BaseHandler
             mvccEntry.LastUsed = currentTime;
             mvccEntry.LastModified = currentTime;
             mvccEntry.State = KeyValueState.Set;
+            mvccEntry.NoRevision = (message.Flags & KeyValueFlags.SetNoRevision) != 0;
 
             // Set write intent so concurrent transactions detect this pending write during ValidateReadSet.
             // Without this, optimistic transactions writing different keys can both pass validation and commit,
@@ -270,10 +271,13 @@ internal sealed class TrySetHandler : BaseHandler
         if (entry.Revisions is not null)
             RemoveExpiredRevisions(entry, proposal.Revision);
 
-        bool revisionsCreated = entry.Revisions is null || entry.Revisions.Count == 0;
-        entry.Revisions ??= new();
-        entry.Revisions[entry.Revision] = new KeyValueRevisionEntry(entry.Value, entry.LastModified, entry.Expires, entry.State);
-        context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreated, entry.Value));
+        if (!proposal.NoRevision)
+        {
+            bool revisionsCreated = entry.Revisions is null || entry.Revisions.Count == 0;
+            entry.Revisions ??= new();
+            entry.Revisions[entry.Revision] = new KeyValueRevisionEntry(entry.Value, entry.LastModified, entry.Expires, entry.State);
+            context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreated, entry.Value));
+        }
 
         int previousValueLength = entry.Value?.Length ?? 0;
 

@@ -84,7 +84,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             message.Key,
             mvccEntry.Value,
             mvccEntry.Revision,
-            false,
+            mvccEntry.NoRevision,
             mvccEntry.Expires,
             mvccEntry.LastUsed,
             mvccEntry.LastModified,
@@ -99,12 +99,15 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             if (entry.Revisions is not null)
                 RemoveExpiredRevisions(entry, proposal.Revision);
 
-            bool revisionsCreatedEphemeral = entry.Revisions is null || entry.Revisions.Count == 0;
-            entry.Revisions ??= new();
-            // Idempotent archive (see the persistent path below): a revision can recur across a
-            // delete→re-set cycle; Dictionary.Add would throw and corrupt the commit.
-            entry.Revisions[entry.Revision] = new KeyValueRevisionEntry(entry.Value, entry.LastModified, entry.Expires, entry.State);
-            context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreatedEphemeral, entry.Value));
+            if (!proposal.NoRevision)
+            {
+                bool revisionsCreatedEphemeral = entry.Revisions is null || entry.Revisions.Count == 0;
+                entry.Revisions ??= new();
+                // Idempotent archive (see the persistent path below): a revision can recur across a
+                // delete→re-set cycle; Dictionary.Add would throw and corrupt the commit.
+                entry.Revisions[entry.Revision] = new KeyValueRevisionEntry(entry.Value, entry.LastModified, entry.Expires, entry.State);
+                context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreatedEphemeral, entry.Value));
+            }
 
             previousValueLength = entry.Value?.Length ?? 0;
 
@@ -149,15 +152,18 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         if (entry.Revisions is not null)
             RemoveExpiredRevisions(entry, proposal.Revision);
 
-        bool revisionsCreatedPersistent = entry.Revisions is null || entry.Revisions.Count == 0;
-        entry.Revisions ??= new();
-        // Idempotent archive: a revision number can recur across a delete→re-set cycle for the same
-        // key. Dictionary.Add throws on a duplicate key, and that exception used to abort the index
-        // entry's commit while the row commit had already succeeded — leaving the row persisted but
-        // its unique-index entry stuck in the Deleted state (orphaned row → broken PK lookups and
-        // duplicate inserts). Overwriting is safe: the same revision carries the same value.
-        entry.Revisions[entry.Revision] = new KeyValueRevisionEntry(entry.Value, entry.LastModified, entry.Expires, entry.State);
-        context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreatedPersistent, entry.Value));
+        if (!proposal.NoRevision)
+        {
+            bool revisionsCreatedPersistent = entry.Revisions is null || entry.Revisions.Count == 0;
+            entry.Revisions ??= new();
+            // Idempotent archive: a revision number can recur across a delete→re-set cycle for the same
+            // key. Dictionary.Add throws on a duplicate key, and that exception used to abort the index
+            // entry's commit while the row commit had already succeeded — leaving the row persisted but
+            // its unique-index entry stuck in the Deleted state (orphaned row → broken PK lookups and
+            // duplicate inserts). Overwriting is safe: the same revision carries the same value.
+            entry.Revisions[entry.Revision] = new KeyValueRevisionEntry(entry.Value, entry.LastModified, entry.Expires, entry.State);
+            context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreatedPersistent, entry.Value));
+        }
 
         previousValueLength = entry.Value?.Length ?? 0;
 
@@ -182,7 +188,8 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             proposal.Expires,
             proposal.LastUsed,
             proposal.LastModified,
-            (int)proposal.State
+            (int)proposal.State,
+            proposal.NoRevision
         ));                       
 
         return new(KeyValueResponseType.Committed, commitIndex);

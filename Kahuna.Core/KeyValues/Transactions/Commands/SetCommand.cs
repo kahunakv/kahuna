@@ -83,7 +83,11 @@ internal sealed class SetCommand : BaseCommand
                         flags |= KeyValueFlags.SetIfEqualToRevision;
                         compareRevision = KeyValueTransactionExpression.Eval(context, flag.ExprAst).ToLong();
                         break;
-                    
+
+                    case NodeType.SetNoRev:
+                        flags |= KeyValueFlags.SetNoRevision;
+                        break;
+
                     default:
                         throw new NotImplementedException();
                 }

@@ -67,7 +67,8 @@ internal sealed class KeyValueRestorer
                 new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
                 new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
                 new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
-                (int)state
+                (int)state,
+                keyValueMessage.NoRevision
             ));
 
             return true;

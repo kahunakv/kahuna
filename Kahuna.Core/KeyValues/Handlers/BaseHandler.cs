@@ -124,9 +124,10 @@ internal abstract class BaseHandler
             LastModifiedCounter = proposal.LastModified.C,
             TimeNode = currentTime.N,
             TimePhysical = currentTime.L,
-            TimeCounter = currentTime.C
+            TimeCounter = currentTime.C,
+            NoRevision = proposal.NoRevision
         };
-        
+
         if (proposal.Value is not null)
             kvm.Value = UnsafeByteOperations.UnsafeWrap(proposal.Value);
 
@@ -152,7 +153,8 @@ internal abstract class BaseHandler
             proposal.Expires,
             proposal.LastUsed,
             proposal.LastModified,
-            (int)proposal.State
+            (int)proposal.State,
+            proposal.NoRevision
         ));
 
         return result.Success;

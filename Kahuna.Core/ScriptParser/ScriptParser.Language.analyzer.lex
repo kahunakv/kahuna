@@ -22,6 +22,7 @@ TXx             (X|x)(X|x)
 TEx             (E|e)(X|x)
 TCmp            (C|c)(M|m)(P|p)
 TCmpRev         (C|c)(M|m)(P|p)(R|r)(E|e)(V|v)
+TNoRev          (N|n)(O|o)(R|r)(E|e)(V|v)
 TBegin          (B|b)(E|e)(G|g)(I|i)(N|n)
 TCommit         (C|c)(O|o)(M|m)(M|m)(I|i)(T|t)
 TRollback       (R|r)(O|o)(L|l)(L|l)(B|b)(A|a)(C|c)(K|k)
@@ -185,6 +186,8 @@ TAnd            &&
 {TCmp} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TCMP; }
 
 {TCmpRev} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TCMPREV; }
+
+{TNoRev} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TNOREV; }
 
 {TReturn} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TRETURN; }
 

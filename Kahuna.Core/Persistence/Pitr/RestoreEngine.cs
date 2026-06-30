@@ -192,6 +192,7 @@ internal static class RestoreEngine
             msg.LastModifiedNode,
             msg.LastModifiedPhysical,
             msg.LastModifiedCounter,
-            (int)state);
+            (int)state,
+            msg.NoRevision);
     }
 }

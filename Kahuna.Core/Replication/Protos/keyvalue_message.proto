@@ -19,4 +19,5 @@ message KeyValueMessage {
   int32 timeNode = 15;
   int64 timePhysical = 16;
   uint32 timeCounter = 17;
+  optional bool noRevision = 18;
 }
