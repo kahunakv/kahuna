@@ -241,6 +241,10 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
 
     private readonly KeyValueContext? kvContext;
 
+    internal long ApproximateStoreBytes => kvContext?.ApproximateStoreBytes ?? 0L;
+
+    internal int PendingReadsCount => kvContext?.PendingReads.Count ?? 0;
+
     /// <summary>
     /// Constructor
     /// </summary>

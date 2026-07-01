@@ -28,7 +28,21 @@ internal sealed class ResumeReadHandler : BaseHandler
             return KeyValueStaticResponses.ErroredResponse;
         }
 
-        continuation.Execute(context);
+        try
+        {
+            continuation.Execute(context);
+        }
+        catch (Exception ex)
+        {
+            // A throwing continuation must never strand its callers: the ResumeRead message is
+            // fire-and-forget, so the actor's own catch would resolve only this message's (unused)
+            // promise, leaving the coalesced waiters' promises unresolved and, if the throw
+            // happened before the in-flight key was removed, a stale registration that later
+            // arrivals would attach to. Fail() removes the key and resolves every waiter.
+            context.Logger.LogError(
+                ex, "KeyValueActor/ResumeRead: continuation Execute threw for key {Key}", message.Key);
+            continuation.Fail(context, KeyValueStaticResponses.MustRetryResponse);
+        }
 
         // Return value is discarded — ResumeRead is always sent fire-and-forget, never asked.
         return null;

@@ -21,12 +21,12 @@ public abstract class BaseCluster
     /// </summary>
     private const int ElectionTimeoutSeedBase = 91000;
 
-    private static (IRaft, IKahuna) GetNode1(MemoryInterNodeCommmunication interNodeCommmunication, InMemoryCommunication communication, string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger)
+    private static (IRaft, IKahuna) GetNode1(MemoryInterNodeCommmunication interNodeCommmunication, InMemoryCommunication communication, string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger, Action<KahunaConfiguration>? configure = null)
     {
         IWAL wal = GetWAL(walStorage, raftLogger);
-        
+
         ActorSystem actorSystem = new(logger: raftLogger);
-        
+
         RaftConfiguration config = new()
         {
             NodeName = "kahuna1",
@@ -57,7 +57,7 @@ public abstract class BaseCluster
             new HybridLogicalClock(),
             raftLogger
         );
-        
+
         KahunaConfiguration configuration = new()
         {
             HttpsCertificate = "",
@@ -71,10 +71,11 @@ public abstract class BaseCluster
             DefaultTransactionTimeout = 5000,
             ScriptCacheExpiration = TimeSpan.FromMinutes(1),
         };
+        configure?.Invoke(configuration);
 
         // ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, ILogger<IKahuna> logger
         KahunaManager kahuna = new(actorSystem, raft, configuration, interNodeCommmunication, kahunaLogger);
-        
+
         raft.OnLogRestored += kahuna.OnLogRestored;
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
         raft.OnReplicationError += kahuna.OnReplicationError;
@@ -82,12 +83,12 @@ public abstract class BaseCluster
         return (raft, kahuna);
     }
     
-    private static (IRaft, IKahuna) GetNode2(MemoryInterNodeCommmunication interNodeCommmunication, InMemoryCommunication communication, string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger)
+    private static (IRaft, IKahuna) GetNode2(MemoryInterNodeCommmunication interNodeCommmunication, InMemoryCommunication communication, string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger, Action<KahunaConfiguration>? configure = null)
     {
         IWAL wal = GetWAL(walStorage, raftLogger);
-        
+
         ActorSystem actorSystem = new(logger: raftLogger);
-        
+
         RaftConfiguration config = new()
         {
             NodeName = "kahuna2",
@@ -114,7 +115,7 @@ public abstract class BaseCluster
             new HybridLogicalClock(),
             raftLogger
         );
-        
+
         KahunaConfiguration configuration = new()
         {
             HttpsCertificate = "",
@@ -128,10 +129,11 @@ public abstract class BaseCluster
             DefaultTransactionTimeout = 5000,
             ScriptCacheExpiration = TimeSpan.FromMinutes(1),
         };
+        configure?.Invoke(configuration);
 
         // ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, ILogger<IKahuna> logger
         KahunaManager kahuna = new(actorSystem, raft, configuration, interNodeCommmunication, kahunaLogger);
-        
+
         raft.OnLogRestored += kahuna.OnLogRestored;
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
         raft.OnReplicationError += kahuna.OnReplicationError;
@@ -139,12 +141,12 @@ public abstract class BaseCluster
         return (raft, kahuna);
     }
     
-    private static (IRaft, IKahuna) GetNode3(MemoryInterNodeCommmunication interNodeCommmunication, InMemoryCommunication communication, string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger)
+    private static (IRaft, IKahuna) GetNode3(MemoryInterNodeCommmunication interNodeCommmunication, InMemoryCommunication communication, string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger, Action<KahunaConfiguration>? configure = null)
     {
         IWAL wal = GetWAL(walStorage, raftLogger);
-        
+
         ActorSystem actorSystem = new(logger: raftLogger);
-        
+
         RaftConfiguration config = new()
         {
             NodeName = "kahuna3",
@@ -171,7 +173,7 @@ public abstract class BaseCluster
             new HybridLogicalClock(),
             raftLogger
         );
-        
+
         KahunaConfiguration configuration = new()
         {
             HttpsCertificate = "",
@@ -185,10 +187,11 @@ public abstract class BaseCluster
             DefaultTransactionTimeout = 5000,
             ScriptCacheExpiration = TimeSpan.FromMinutes(1),
         };
+        configure?.Invoke(configuration);
 
         // ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, ILogger<IKahuna> logger
         KahunaManager kahuna = new(actorSystem, raft, configuration, interNodeCommmunication, kahunaLogger);
-        
+
         raft.OnLogRestored += kahuna.OnLogRestored;
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
         raft.OnReplicationError += kahuna.OnReplicationError;
@@ -196,14 +199,14 @@ public abstract class BaseCluster
         return (raft, kahuna);
     }
     
-    protected static async Task<(IRaft, IRaft, IRaft, IKahuna, IKahuna, IKahuna)> AssembleThreNodeCluster(string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger)
+    protected static async Task<(IRaft, IRaft, IRaft, IKahuna, IKahuna, IKahuna)> AssembleThreNodeCluster(string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger, Action<KahunaConfiguration>? configure = null)
     {
         InMemoryCommunication raftCommunication = new();
         MemoryInterNodeCommmunication interNodeCommmunication = new();
 
-        (IRaft raft1, IKahuna kahuna1) = GetNode1(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger);
-        (IRaft raft2, IKahuna kahuna2) = GetNode2(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger);
-        (IRaft raft3, IKahuna kahuna3) = GetNode3(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger);
+        (IRaft raft1, IKahuna kahuna1) = GetNode1(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger, configure);
+        (IRaft raft2, IKahuna kahuna2) = GetNode2(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger, configure);
+        (IRaft raft3, IKahuna kahuna3) = GetNode3(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger, configure);
 
         await WaitForClusterToAssemble(interNodeCommmunication, raftCommunication, partitions, raft1, raft2, raft3, kahuna1, kahuna2, kahuna3);
 

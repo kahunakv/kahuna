@@ -25,6 +25,7 @@ internal sealed class BucketScanContinuation : ReadContinuation
     private readonly List<(string, ReadOnlyKeyValueEntry)> inMemoryItems;
     private readonly HashSet<string> seenKeys;
     private readonly HLCTimestamp currentTime;
+    private readonly (string, long, bool)? scanKey;
 
     internal BucketScanContinuation(
         string prefix,
@@ -33,7 +34,8 @@ internal sealed class BucketScanContinuation : ReadContinuation
         List<(string, ReadOnlyKeyValueEntry)> inMemoryItems,
         HashSet<string> seenKeys,
         HLCTimestamp currentTime,
-        TaskCompletionSource<KeyValueResponse?> promise) : base(promise)
+        TaskCompletionSource<KeyValueResponse?> promise,
+        (string, long, bool)? scanKey) : base(promise)
     {
         this.prefix = prefix;
         this.transactionId = transactionId;
@@ -41,11 +43,21 @@ internal sealed class BucketScanContinuation : ReadContinuation
         this.inMemoryItems = inMemoryItems;
         this.seenKeys = seenKeys;
         this.currentTime = currentTime;
+        this.scanKey = scanKey;
+    }
+
+    internal override void RemovePendingKey(KeyValueContext context)
+    {
+        // Only remove from PendingReads if this continuation was registered there.
+        // Private (transactional / snapshot) continuations must not evict a concurrent
+        // plain scan's registered entry that happens to share the same prefix.
+        if (scanKey.HasValue)
+            context.PendingReads.Remove(scanKey.Value);
     }
 
     internal override void Execute(KeyValueContext context)
     {
-        context.PendingReads.Remove((prefix, -2L, false));
+        RemovePendingKey(context);
 
         if (Faulted)
         {

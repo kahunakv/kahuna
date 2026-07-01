@@ -35,10 +35,15 @@ internal sealed class ByRevisionReadContinuation : ReadContinuation
         this.responseType = responseType;
     }
 
-    internal override void Execute(KeyValueContext context)
+    internal override void RemovePendingKey(KeyValueContext context)
     {
         // The PendingReads key includes isExists to keep TryGet and TryExists separate.
         context.PendingReads.Remove((key, revision, responseType == KeyValueResponseType.Exists));
+    }
+
+    internal override void Execute(KeyValueContext context)
+    {
+        RemovePendingKey(context);
 
         if (Faulted)
         {

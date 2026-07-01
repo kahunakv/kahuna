@@ -8,7 +8,7 @@ using Microsoft.Extensions.Logging;
 namespace Kahuna.Server.Tests;
 
 /// <summary>
-/// Integration tests for GetByRange (Tasks 4 + 5).
+/// Integration tests for GetByRange.
 /// All tests use an in-process single-node EmbeddedKahunaNode (memory storage).
 /// </summary>
 [Collection("ClusterTests")]

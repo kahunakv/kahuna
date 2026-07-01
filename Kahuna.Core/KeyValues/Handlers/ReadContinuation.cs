@@ -79,6 +79,27 @@ internal abstract class ReadContinuation
     }
 
     /// <summary>
+    /// Removes this continuation's single-flight registration from the actor's in-flight read
+    /// map, if it registered one. The default is a no-op (used by continuations that never
+    /// coalesce, e.g. range scans); coalescing subtypes override it to remove their own key.
+    /// Idempotent: removing an already-removed or never-registered key is safe.
+    /// </summary>
+    internal virtual void RemovePendingKey(KeyValueContext context) { }
+
+    /// <summary>
+    /// Terminal failure path for stage 3. Removes any in-flight registration and resolves every
+    /// waiter with the given retryable/errored response. Invoked by the ResumeRead handler when
+    /// Execute throws, so a continuation bug can never strand coalesced callers or leak an
+    /// in-flight entry that later arrivals would attach to. Idempotent with respect to both
+    /// RemovePendingKey and Resolve (TrySetResult).
+    /// </summary>
+    internal void Fail(KeyValueContext context, KeyValueResponse? response)
+    {
+        RemovePendingKey(context);
+        Resolve(response);
+    }
+
+    /// <summary>
     /// Runs on the actor thread (stage 3). Reconciles DiskResult against the current
     /// resident store, updates actor-owned state, and resolves all Promises via Resolve().
     /// For multi-page scans, may instead dispatch the next backend page (stage 2) and defer

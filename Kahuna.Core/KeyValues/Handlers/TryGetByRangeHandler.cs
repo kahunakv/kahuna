@@ -12,14 +12,20 @@ namespace Kahuna.Server.KeyValues.Handlers;
 
 internal sealed class TryGetByRangeHandler : BaseHandler
 {
+    // Upper bound on how many resident rows stage 1 copies before dispatching the first disk page.
+    // Keeps the pre-check actor visit O(batch) instead of O(resident-range-size); the continuation
+    // re-queries the next batch on demand if the merge consumes past it. A batch this size means a
+    // scan over a resident range no larger than it behaves exactly as a single frozen snapshot.
+    private const int MemoryScanBatchSize = 512;
+
     public TryGetByRangeHandler(KeyValueContext context) : base(context) { }
 
-    public async Task<KeyValueResponse> Execute(KeyValueRequest message)
+    public Task<KeyValueResponse> Execute(KeyValueRequest message)
     {
         if (message.Durability == KeyValueDurability.Ephemeral)
-            return await GetByRangeEphemeral(message);
+            return GetByRangeEphemeral(message);
 
-        return await GetByRangePersistent(message);
+        return Task.FromResult(GetByRangePersistentStage1(message));
     }
 
     // ── Ephemeral (in-memory only) ────────────────────────────────────────────
@@ -62,9 +68,9 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         return BuildResponse(prefix, message.Durability, items, limit, snapshotTs);
     }
 
-    // ── Persistent (k-way merge of memory + disk) ────────────────────────────
+    // ── Persistent (K-way merge of memory + disk, detached off the actor mailbox) ──────────
 
-    private async Task<KeyValueResponse> GetByRangePersistent(KeyValueRequest message)
+    private KeyValueResponse GetByRangePersistentStage1(KeyValueRequest message)
     {
         string prefix = message.Key;
         int limit = message.Limit;
@@ -74,105 +80,72 @@ internal sealed class TryGetByRangeHandler : BaseHandler
 
         (string memStart, bool memStartIncl, string? memEnd, bool memEndIncl) = ComputeBounds(message);
 
-        // Step 1 — memory stream: lazy, no hard limit. The loop stops at limit+1 live items
-        // or exhaustion. A hard limit+1 window would produce premature HasMore=false when
-        // tombstones fill the window (same issue as ephemeral path above).
-        IEnumerable<KeyValuePair<string, KeyValueEntry>> memStream =
-            context.Store.GetByRange(memStart, memStartIncl, memEnd, memEndIncl, int.MaxValue);
+        // Stage 1: snapshot a bounded batch of the matching in-memory entries (actor thread,
+        // synchronous). Materialising the BTree range as a list before dispatching stage 2 avoids
+        // holding a live iterator across actor messages: concurrent writes between pages would
+        // cause BTree structural changes that could invalidate a deferred iterator. The copy is
+        // capped at MemoryScanBatchSize (or limit+1 if larger) so a large resident range does not
+        // turn this pre-check into O(resident-count) work; if the merge consumes the whole batch,
+        // the continuation re-queries the next batch on the actor thread.
+        int memBatch = Math.Max(limit + 1, MemoryScanBatchSize);
+        List<(string, KeyValueEntry)> memItems = [];
+        foreach (KeyValuePair<string, KeyValueEntry> kv in
+            context.Store.GetByRange(memStart, memStartIncl, memEnd, memEndIncl, memBatch))
+            memItems.Add((kv.Key, kv.Value));
 
-        // Step 2 — disk: initial page. We fetch limit+1 items; if all limit+1 arrive the
-        // backend has more. We keep all limit+1 in the list but only process the first limit
-        // (diskAvailable). The (limit+1)-th item is the "peek" — the exact start key for the
-        // next refill, so no item is ever skipped or double-counted.
+        // Full batch ⟹ there may be more resident keys past the last one copied.
+        bool memMaybeMore = memItems.Count == memBatch;
+
+        IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext = context.ActorContext;
+
+        if (!actorContext.Reply.HasValue)
+            return KeyValueStaticResponses.ErroredResponse;
+
+        TaskCompletionSource<KeyValueResponse?> promise = actorContext.Reply.Value.Promise;
+
         string diskCursor = message.StartKey ?? prefix;
-        List<(string, ReadOnlyKeyValueEntry)> diskPage = await context.Raft.ReadScheduler.EnqueueTask(
-            message.PartitionId,
-            () => context.PersistenceBackend.GetKeyValueByRange(prefix, diskCursor, limit + 1));
 
-        bool diskHasMore  = diskPage.Count > limit;
-        int  diskAvailable = diskHasMore ? diskPage.Count - 1 : diskPage.Count;
-        int  diskIdx       = 0;
+        // Route every disk page to the FairReadScheduler partition that owns this range, not
+        // message.PartitionId (which the manager leaves at 0 for scans). Enqueuing scans under
+        // partition 0 would collapse per-partition fairness/back-pressure and read-after-write
+        // FIFO ordering onto one queue. The continuation reuses this for subsequent pages.
+        int scanPartition = ResolvePartition(prefix);
 
-        // Step 3 — K-way merge
-        List<(string, ReadOnlyKeyValueEntry)> items = [];
+        RangeScanContinuation cont = new(
+            prefix, limit, message.Durability, scanPartition,
+            message.StartInclusive, message.StartKey,
+            message.EndKey, message.EndInclusive,
+            message.TransactionId, snapshotTs, currentTime,
+            isSnapshotRead: !message.ReadTimestamp.IsNull(),
+            memItems, memEnd, memEndIncl, memBatch, memMaybeMore, diskCursor, promise);
 
-        using IEnumerator<KeyValuePair<string, KeyValueEntry>> memEnum = memStream.GetEnumerator();
-        bool memHasNext = memEnum.MoveNext();
-
-        while (items.Count <= limit)
+        Task<List<(string, ReadOnlyKeyValueEntry)>> readTask;
+        try
         {
-            // Refill disk when the processable window is exhausted but more pages exist.
-            // Start from the peek item so no key is skipped or duplicated.
-            if (diskIdx >= diskAvailable && diskHasMore)
-            {
-                diskCursor  = diskPage[diskAvailable].Item1;
-                diskPage    = await context.Raft.ReadScheduler.EnqueueTask(
-                    message.PartitionId,
-                    () => context.PersistenceBackend.GetKeyValueByRange(prefix, diskCursor, limit + 1));
-                diskHasMore  = diskPage.Count > limit;
-                diskAvailable = diskHasMore ? diskPage.Count - 1 : diskPage.Count;
-                diskIdx      = 0;
-            }
-
-            string? memKey  = memHasNext ? memEnum.Current.Key : null;
-            string? diskKey = diskIdx < diskAvailable ? diskPage[diskIdx].Item1 : null;
-
-            if (memKey is null && diskKey is null)
-                break;
-
-            string keyToProcess;
-            ReadOnlyKeyValueEntry? diskEntry = null;
-
-            int cmp;
-            if (memKey is null)       cmp = 1;
-            else if (diskKey is null) cmp = -1;
-            else cmp = string.CompareOrdinal(memKey, diskKey);
-
-            if (cmp < 0)
-            {
-                keyToProcess = memKey!;
-                memHasNext = memEnum.MoveNext();
-            }
-            else if (cmp > 0)
-            {
-                keyToProcess = diskKey!;
-                diskEntry = diskPage[diskIdx].Item2;
-                diskIdx++;
-            }
-            else
-            {
-                // same key: memory wins (has MVCC / RYOW), advance both
-                keyToProcess = memKey!;
-                memHasNext = memEnum.MoveNext();
-                diskIdx++;
-            }
-
-            // Exclusive start — BTree handles this natively; apply the same skip for disk.
-            if (!message.StartInclusive && message.StartKey is not null &&
-                string.CompareOrdinal(keyToProcess, message.StartKey) == 0)
-                continue;
-
-            // EndKey enforcement for disk path: ComputeBounds passes memEnd to the
-            // BTree but GetKeyValueByRange has no endKey parameter; enforce it here for both.
-            if (message.EndKey is not null)
-            {
-                int cmpEnd = string.CompareOrdinal(keyToProcess, message.EndKey);
-                if (cmpEnd > 0 || (!message.EndInclusive && cmpEnd == 0))
-                    break;
-            }
-
-            KeyValueResponse response = await Get(currentTime, message.TransactionId, keyToProcess, message.Durability, snapshotTs, diskEntry, snapshotRead: !message.ReadTimestamp.IsNull());
-
-            if (response.Type == KeyValueResponseType.DoesNotExist)
-                continue;
-
-            if (response.Type != KeyValueResponseType.Get || response.Entry is null)
-                return new(response.Type, new KeyValueGetByRangeResult(response.Type, [], null, false));
-
-            items.Add((keyToProcess, response.Entry));
+            readTask = context.Raft.ReadScheduler.EnqueueTask(
+                scanPartition,
+                () => context.PersistenceBackend.GetKeyValueByRange(prefix, diskCursor, limit + 1));
+        }
+        catch (Exception ex)
+        {
+            context.Logger.LogWarning(
+                "KeyValueActor/RangeScan: read scheduler rejected enqueue for prefix {Prefix}: {Ex}",
+                prefix, ex.Message);
+            cont.Resolve(KeyValueStaticResponses.MustRetryResponse);
+            actorContext.ByPassReply = true;
+            return KeyValueStaticResponses.MustRetryResponse;
         }
 
-        return BuildResponse(prefix, message.Durability, items, limit, snapshotTs);
+        _ = readTask.ContinueWith(t =>
+        {
+            if (!t.IsCompletedSuccessfully) cont.SetFaulted();
+            else cont.ScanDiskResult = t.Result;
+            actorContext.Self.Send(
+                new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont });
+        }, TaskScheduler.Default);
+
+        actorContext.ByPassReply = true;
+        return KeyValueStaticResponses.WaitingForReplicationResponse;
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

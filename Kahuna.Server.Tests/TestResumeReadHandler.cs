@@ -323,6 +323,181 @@ public sealed class TestResumeReadHandler
         Assert.Equal(KeyValueResponseType.Errored, result!.Type);
     }
 
+    // ── stage-3 exception must fail every waiter and clear the in-flight registration ─────
+
+    [Fact]
+    public void ThrowingContinuation_ResolvesAllWaitersMustRetry_AndClearsPendingRegistration()
+    {
+        (ResumeReadHandler handler, KeyValueContext context, _) = CreateHandler();
+
+        (string, long, bool) key = ("hot", -1L, false);
+
+        var primary = new TaskCompletionSource<KeyValueResponse?>();
+        var cont = new ThrowingTestContinuation(key, primary);
+
+        // Two more callers coalesced onto the same in-flight read (as stage 1 would attach them).
+        var waiter2 = new TaskCompletionSource<KeyValueResponse?>();
+        var waiter3 = new TaskCompletionSource<KeyValueResponse?>();
+        cont.AddWaiter(waiter2);
+        cont.AddWaiter(waiter3);
+
+        // The in-flight read is registered so later arrivals would coalesce onto it.
+        context.PendingReads[key] = cont;
+
+        // Execute throws inside stage 3. The handler must swallow it (ResumeRead is fire-and-forget)
+        // and route through Fail() so no caller is left hanging and the registration is not leaked.
+        KeyValueResponse? ret = handler.Execute(MakeResumeMsg(cont));
+        Assert.Null(ret);
+
+        foreach (TaskCompletionSource<KeyValueResponse?> w in new[] { primary, waiter2, waiter3 })
+        {
+            Assert.True(w.Task.IsCompleted, "every coalesced waiter must be resolved, never stranded");
+            Assert.Equal(KeyValueResponseType.MustRetry, w.Task.Result!.Type);
+        }
+
+        // The dead continuation must be gone from the map, so the next miss starts a fresh read
+        // instead of attaching to a continuation that will never resolve.
+        Assert.False(context.PendingReads.ContainsKey(key));
+    }
+
+    // ── Range snapshot: in-memory entries are projected to their as-of revision ────────────
+
+    [Fact]
+    public void RangeSnapshotScan_ProjectsInMemoryEntriesToRevisionAtOrBeforeSnapshot()
+    {
+        (ResumeReadHandler handler, KeyValueContext context, RaftManager raft) = CreateHandler();
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        HLCTimestamp snapshotTs = new(0, 100, 0);
+
+        // r/a — current revision committed at-or-before the snapshot: served as its current value.
+        KeyValueEntry a = new()
+        {
+            Value = Encoding.UTF8.GetBytes("a-latest"),
+            Revision = 1,
+            LastUsed = now,
+            LastModified = new HLCTimestamp(0, 50, 0),
+            State = KeyValueState.Set
+        };
+
+        // r/b — current revision (5) is newer than the snapshot, but revision 2 was committed
+        // at-or-before it: the snapshot scan must serve revision 2, not 5.
+        KeyValueEntry b = new()
+        {
+            Value = Encoding.UTF8.GetBytes("b-v5"),
+            Revision = 5,
+            LastUsed = now,
+            LastModified = new HLCTimestamp(0, 150, 0),
+            State = KeyValueState.Set,
+            Revisions = new()
+            {
+                [2] = new KeyValueRevisionEntry(
+                    Encoding.UTF8.GetBytes("b-v2"), new HLCTimestamp(0, 60, 0),
+                    HLCTimestamp.Zero, KeyValueState.Set)
+            }
+        };
+
+        // r/c — current revision newer than the snapshot and no retained revision at-or-before it:
+        // the key did not exist as of the snapshot and must be excluded.
+        KeyValueEntry c = new()
+        {
+            Value = Encoding.UTF8.GetBytes("c-v3"),
+            Revision = 3,
+            LastUsed = now,
+            LastModified = new HLCTimestamp(0, 150, 0),
+            State = KeyValueState.Set
+        };
+
+        // memItems mirror the in-memory store snapshot taken at stage 1 (sorted, resident entries).
+        context.InsertStoreEntry("r/a", a);
+        context.InsertStoreEntry("r/b", b);
+        context.InsertStoreEntry("r/c", c);
+        List<(string, KeyValueEntry)> memItems = [("r/a", a), ("r/b", b), ("r/c", c)];
+
+        var promise = new TaskCompletionSource<KeyValueResponse?>();
+        var cont = new RangeScanContinuation(
+            prefix: "r/", limit: 10, durability: KeyValueDurability.Persistent, partitionId: 0,
+            startInclusive: true, startKey: null, endKey: null, endInclusive: false,
+            transactionId: HLCTimestamp.Zero, snapshotTs: snapshotTs, currentTime: now,
+            isSnapshotRead: true, memItems: memItems,
+            memEnd: null, memEndInclusive: false, memBatch: 512, memMaybeMore: false,
+            diskCursor: "r/", promise: promise)
+        {
+            ScanDiskResult = []   // no disk rows: all results come from the in-memory snapshot
+        };
+
+        handler.Execute(MakeResumeMsg(cont));
+
+        Assert.True(promise.Task.IsCompleted);
+        KeyValueResponse? resp = promise.Task.Result;
+        Assert.NotNull(resp);
+        Assert.Equal(KeyValueResponseType.Get, resp!.Type);
+        Assert.NotNull(resp.RangeResult);
+
+        Dictionary<string, (long Rev, string Val)> byKey = resp.RangeResult!.Items
+            .ToDictionary(i => i.Item1, i => (i.Item2.Revision, Encoding.UTF8.GetString(i.Item2.Value!)));
+
+        // r/a visible at its current revision.
+        Assert.True(byKey.ContainsKey("r/a"));
+        Assert.Equal((1L, "a-latest"), byKey["r/a"]);
+
+        // r/b projected back to the as-of revision, not its latest.
+        Assert.True(byKey.ContainsKey("r/b"));
+        Assert.Equal((2L, "b-v2"), byKey["r/b"]);
+
+        // r/c excluded — did not exist as of the snapshot.
+        Assert.False(byKey.ContainsKey("r/c"));
+    }
+
+    // ── Range scan re-queries memory in bounded batches (no O(N) stage-1 copy) ────────────
+
+    [Fact]
+    public void RangeScan_ResidentRangeExceedsBatch_ReQueriesRemainingBatchesInOrder()
+    {
+        (ResumeReadHandler handler, KeyValueContext context, RaftManager raft) = CreateHandler();
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        // Five resident keys under "m/", but the continuation is handed only the first bounded
+        // batch of two — as stage 1 would with a small batch. The merge must re-query the store
+        // for the remaining keys rather than dropping them.
+        string[] keys = ["m/a", "m/b", "m/c", "m/d", "m/e"];
+        foreach (string k in keys)
+            context.InsertStoreEntry(k, new KeyValueEntry
+            {
+                Value = Encoding.UTF8.GetBytes(k + "-val"),
+                Revision = 1,
+                LastUsed = now,
+                LastModified = now,
+                State = KeyValueState.Set
+            });
+
+        List<(string, KeyValueEntry)> firstBatch =
+            [("m/a", context.Store.Get("m/a")!), ("m/b", context.Store.Get("m/b")!)];
+
+        var promise = new TaskCompletionSource<KeyValueResponse?>();
+        var cont = new RangeScanContinuation(
+            prefix: "m/", limit: 10, durability: KeyValueDurability.Persistent, partitionId: 0,
+            startInclusive: true, startKey: null, endKey: null, endInclusive: false,
+            transactionId: HLCTimestamp.Zero, snapshotTs: HLCTimestamp.Zero, currentTime: now,
+            isSnapshotRead: false, memItems: firstBatch,
+            memEnd: null, memEndInclusive: false, memBatch: 2, memMaybeMore: true,
+            diskCursor: "m/", promise: promise)
+        {
+            ScanDiskResult = []   // disk empty: the whole result comes from re-queried memory batches
+        };
+
+        handler.Execute(MakeResumeMsg(cont));
+
+        Assert.True(promise.Task.IsCompleted);
+        KeyValueResponse? resp = promise.Task.Result;
+        Assert.NotNull(resp);
+        Assert.Equal(KeyValueResponseType.Get, resp!.Type);
+
+        // All five keys must be returned in order despite the initial batch holding only two.
+        List<string> returned = resp.RangeResult!.Items.Select(i => i.Item1).ToList();
+        Assert.Equal(keys, returned);
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────────────────
 
     private static KeyValueRequest MakeResumeMsg(ReadContinuation cont) =>
@@ -409,5 +584,29 @@ public sealed class TestResumeReadHandler
             }
             // First call: accumulate page results (simulated), defer resolution.
         }
+    }
+
+    /// <summary>
+    /// A continuation whose Execute always throws, used to prove the ResumeRead handler's
+    /// failure path: a stage-3 exception must fail every waiter and remove the in-flight key.
+    /// RemovePendingKey mirrors what a real coalescing continuation does, so Fail() can undo
+    /// the stage-1 registration.
+    /// </summary>
+    private sealed class ThrowingTestContinuation : ReadContinuation
+    {
+        private readonly (string, long, bool) pendingKey;
+
+        internal ThrowingTestContinuation(
+            (string, long, bool) pendingKey, TaskCompletionSource<KeyValueResponse?> promise)
+            : base(promise)
+        {
+            this.pendingKey = pendingKey;
+        }
+
+        internal override void RemovePendingKey(KeyValueContext context) =>
+            context.PendingReads.Remove(pendingKey);
+
+        internal override void Execute(KeyValueContext context) =>
+            throw new InvalidOperationException("simulated stage-3 continuation failure");
     }
 }

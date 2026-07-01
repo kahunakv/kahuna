@@ -15,7 +15,7 @@ internal sealed class TryGetHandler : BaseHandler
     public async Task<KeyValueResponse> Execute(KeyValueRequest message)
     {
         // ── By-revision path ─────────────────────────────────────────────────────────────
-        // Requires an entry loaded from cache/disk before checking; R4 will detach this path.
+        // Requires an entry loaded from cache/disk before checking; detached via the async resumable-read path.
         if (message.CompareRevision > -1)
             return ExecuteByRevision(message);
 
@@ -152,7 +152,24 @@ internal sealed class TryGetHandler : BaseHandler
         {
             if (!entry.TryGetRevisionAtOrBefore(message.ReadTimestamp,
                     out long snapRevision, out KeyValueRevisionEntry snapshot))
-                return KeyValueStaticResponses.DoesNotExistContextResponse;
+            {
+                // In-memory archive trimmed the as-of revision; fall back to the persisted
+                // revision history. This is correct because trimming drops the lowest revision
+                // numbers, so an in-memory miss means the true as-of answer (if any) is older
+                // and only on disk.
+                KeyValueEntry? diskSnapshot = context.PersistenceBackend.GetKeyValueRevisionAtOrBefore(
+                    message.Key, entry.Revision - 1, message.ReadTimestamp);
+
+                if (diskSnapshot is null
+                    || diskSnapshot.State is KeyValueState.Deleted or KeyValueState.Undefined
+                    || (diskSnapshot.Expires != HLCTimestamp.Zero
+                        && diskSnapshot.Expires - currentTime < TimeSpan.Zero))
+                    return KeyValueStaticResponses.DoesNotExistContextResponse;
+
+                return new(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
+                    diskSnapshot.Value, diskSnapshot.Revision, diskSnapshot.Expires,
+                    currentTime, diskSnapshot.LastModified, diskSnapshot.State));
+            }
 
             if (snapshot.State is KeyValueState.Deleted or KeyValueState.Undefined
                 || (snapshot.Expires != HLCTimestamp.Zero

@@ -63,15 +63,18 @@ internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
             return KeyValueStaticResponses.WaitingForReplicationResponse;
         }
 
-        PrefixFromDiskScanContinuation cont = new(message.Key, readTimestamp, currentTime, promise);
+        PrefixFromDiskScanContinuation cont = new(message.Key, readTimestamp, currentTime, promise, scanKey);
         if (scanKey.HasValue)
             context.PendingReads[scanKey.Value] = cont;
 
         Task<List<(string, ReadOnlyKeyValueEntry)>> readTask;
         try
         {
+            // Route the disk scan to the FairReadScheduler partition that owns this data range,
+            // not message.PartitionId (=0 for scans), matching the point-read path. Enqueuing
+            // scans under partition 0 collapses per-partition fairness/back-pressure and ordering.
             readTask = context.Raft.ReadScheduler.EnqueueTask(
-                message.PartitionId,
+                ResolvePartition(message.Key),
                 () =>
                 {
                     List<(string, ReadOnlyKeyValueEntry)> scanned =

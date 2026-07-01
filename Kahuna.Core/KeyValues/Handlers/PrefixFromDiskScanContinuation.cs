@@ -16,25 +16,34 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// </summary>
 internal sealed class PrefixFromDiskScanContinuation : ReadContinuation
 {
-    private readonly string prefix;
     private readonly HLCTimestamp readTimestamp;
     private readonly HLCTimestamp currentTime;
+    private readonly (string, long, bool)? scanKey;
 
     internal PrefixFromDiskScanContinuation(
         string prefix,
         HLCTimestamp readTimestamp,
         HLCTimestamp currentTime,
-        TaskCompletionSource<KeyValueResponse?> promise) : base(promise)
+        TaskCompletionSource<KeyValueResponse?> promise,
+        (string, long, bool)? scanKey) : base(promise)
     {
-        this.prefix = prefix;
         this.readTimestamp = readTimestamp;
         this.currentTime = currentTime;
+        this.scanKey = scanKey;
+    }
+
+    internal override void RemovePendingKey(KeyValueContext context)
+    {
+        // Only remove from PendingReads if this continuation was registered there.
+        // Snapshot continuations must not evict a concurrent non-snapshot scan's entry
+        // that happens to share the same prefix.
+        if (scanKey.HasValue)
+            context.PendingReads.Remove(scanKey.Value);
     }
 
     internal override void Execute(KeyValueContext context)
     {
-        // Only non-snapshot requests are registered in PendingReads; Remove is a no-op for others.
-        context.PendingReads.Remove((prefix, -3L, false));
+        RemovePendingKey(context);
 
         if (Faulted)
         {

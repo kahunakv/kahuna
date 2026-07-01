@@ -37,12 +37,17 @@ internal sealed class PointReadContinuation : ReadContinuation
         this.responseType = responseType;
     }
 
-    internal override void Execute(KeyValueContext context)
+    internal override void RemovePendingKey(KeyValueContext context)
     {
-        // Remove before resolving so any new miss after this resume starts a fresh read.
         // isExists drives the third tuple element to match the registration key used in stage 1.
         bool isExists = responseType == KeyValueResponseType.Exists;
         context.PendingReads.Remove((key, -1L, isExists));
+    }
+
+    internal override void Execute(KeyValueContext context)
+    {
+        // Remove before resolving so any new miss after this resume starts a fresh read.
+        RemovePendingKey(context);
 
         if (Faulted)
         {

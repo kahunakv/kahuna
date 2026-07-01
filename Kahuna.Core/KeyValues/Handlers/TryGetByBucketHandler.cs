@@ -99,7 +99,6 @@ internal sealed class TryGetByBucketHandler : BaseHandler
         }
 
         // Stage 2 dispatch: detach GetKeyValueByPrefix off the actor mailbox.
-        // Register a coalescing slot so concurrent requests for the same prefix share one disk read.
         IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext =
             context.ActorContext;
 
@@ -108,11 +107,19 @@ internal sealed class TryGetByBucketHandler : BaseHandler
 
         TaskCompletionSource<KeyValueResponse?> promise = actorContext.Reply.Value.Promise;
 
-        // (prefix, -2, false) = bucket scan. Sentinel -2 is distinct from latest-point (-1)
-        // and by-revision (>= 0) slots so bucket scans never cross-coalesce with point reads.
-        (string, long, bool) scanKey = (message.Key, -2L, false);
+        // Only plain (non-transactional, non-snapshot) bucket scans are coalesced.
+        // A transactional scan builds MVCC entries under its own txId; a snapshot scan
+        // reads as-of a specific readTimestamp — both produce caller-specific results
+        // that must not be shared with a different caller's scan of the same prefix.
+        // Such scans still detach but use a private, unregistered continuation.
+        bool isCoalesceable = message.TransactionId == HLCTimestamp.Zero && message.ReadTimestamp.IsNull();
 
-        if (context.PendingReads.TryGetValue(scanKey, out ReadContinuation? inflight))
+        // (prefix, -2, false) = plain bucket scan coalescing slot. Sentinel -2 is distinct
+        // from latest-point (-1) and by-revision (>= 0) so bucket scans never cross-coalesce
+        // with point reads.
+        (string, long, bool)? scanKey = isCoalesceable ? (message.Key, -2L, false) : null;
+
+        if (scanKey.HasValue && context.PendingReads.TryGetValue(scanKey.Value, out ReadContinuation? inflight))
         {
             inflight.AddWaiter(promise);
             actorContext.ByPassReply = true;
@@ -121,19 +128,26 @@ internal sealed class TryGetByBucketHandler : BaseHandler
 
         BucketScanContinuation cont = new(
             message.Key, message.TransactionId, message.ReadTimestamp,
-            items, seenKeys, currentTime, promise);
-        context.PendingReads[scanKey] = cont;
+            items, seenKeys, currentTime, promise, scanKey);
+        if (scanKey.HasValue)
+            context.PendingReads[scanKey.Value] = cont;
 
         Task<List<(string, ReadOnlyKeyValueEntry)>> readTask;
         try
         {
+            // Route the disk scan to the FairReadScheduler partition that owns this data range,
+            // not message.PartitionId (which the manager leaves at 0 for scans). Enqueuing every
+            // scan under partition 0 would collapse per-partition fairness/back-pressure and the
+            // read-after-write FIFO ordering onto a single scheduler queue. Point reads resolve
+            // the partition the same way.
             readTask = context.Raft.ReadScheduler.EnqueueTask(
-                message.PartitionId,
+                ResolvePartition(message.Key),
                 () => context.PersistenceBackend.GetKeyValueByPrefix(message.Key));
         }
         catch (Exception ex)
         {
-            context.PendingReads.Remove(scanKey);
+            if (scanKey.HasValue)
+                context.PendingReads.Remove(scanKey.Value);
             context.Logger.LogWarning(
                 "KeyValueActor/BucketScan: read scheduler rejected enqueue for prefix {Prefix}: {Ex}",
                 message.Key, ex.Message);

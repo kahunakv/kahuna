@@ -31,6 +31,7 @@ Kahuna.Control/nupkg
 Kahuna.Control/.idea
 Kahuna.Microbenchmarks/obj
 Kahuna.Microbenchmarks/bin
+Kahuna.Server.Tests/TestResults/
 Radline/Radline/obj
 Radline/Radline/bin
 Radline/RadLine/obj

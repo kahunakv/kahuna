@@ -53,15 +53,21 @@ internal sealed class KeyValueContext
     public Dictionary<int, KeyValueProposal> Proposals { get; }
 
     /// <summary>
-    /// Per-actor map of in-flight backend reads. The key is <c>(key, revision, isExists)</c>:
+    /// Per-actor map of in-flight backend reads. The key is <c>(key, revision, isExists)</c>,
+    /// where negative revisions are sentinels distinguishing the read shape:
     /// <list type="bullet">
     ///   <item>Latest-point TryGet: <c>(key, -1, false)</c></item>
+    ///   <item>Latest-point TryExists: <c>(key, -1, true)</c></item>
     ///   <item>By-revision TryGet: <c>(key, revision, false)</c></item>
     ///   <item>By-revision TryExists: <c>(key, revision, true)</c></item>
+    ///   <item>Bucket scan (plain, non-transactional, non-snapshot): <c>(prefix, -2, false)</c></item>
+    ///   <item>Prefix-from-disk scan (non-snapshot): <c>(prefix, -3, false)</c></item>
     /// </list>
     /// The <c>isExists</c> dimension prevents a TryGet and TryExists for the same key+revision
     /// from coalescing onto a single continuation whose fixed <c>responseType</c> would produce
-    /// the wrong shape for one of the callers.
+    /// the wrong shape for one of the callers. Transactional and snapshot scans are never
+    /// registered here (they carry a null scan key), so they neither coalesce nor evict a
+    /// concurrent plain scan's entry.
     /// Stage 1 registers; stage 3 removes before resolving all waiters.
     /// Mutated only on the actor thread — no synchronisation required.
     /// </summary>
@@ -181,7 +187,7 @@ internal sealed class KeyValueContext
         // node). During that window this check can stay true and trigger collect cycles that
         // cannot immediately shrink the heap. Steady-state is bounded (≈ renewals-per-TTL-window
         // per key), not unbounded. Real dedup (track latest-expiry per key, drop stale on pop
-        // regardless of elapse) is the long-term fix — tracked as a follow-up, not a Phase A item.
+        // regardless of elapse) is the long-term fix, tracked as a separate follow-up.
         long totalBytes = approximateStoreBytes
             + ((long)expiryHeap.Count * 40)
             + ((long)tombstoneQueue.Count * 16);

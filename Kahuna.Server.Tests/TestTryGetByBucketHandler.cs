@@ -24,7 +24,7 @@ namespace Kahuna.Server.Tests;
 
 /// <summary>
 /// Tests for the persistent bucket scan (GetByBucket / TryGetByBucketHandler) covering the
-/// detach-from-actor-mailbox path added in R5. Stage 1 is the in-memory scan; stage 2 runs
+/// detach-from-actor-mailbox path. Stage 1 is the in-memory scan; stage 2 runs
 /// GetKeyValueByPrefix off-actor; stage 3 merges the disk page against the current store.
 /// </summary>
 [Collection("ClusterTests")]
@@ -191,6 +191,120 @@ public sealed class TestTryGetByBucketHandler
         finally { scheduler.Stop(); }
     }
 
+    // ── Coalescing must not bleed across read shapes ─────────────────────────────────────
+
+    /// <summary>
+    /// Two concurrent bucket scans of the same prefix — one latest, one snapshot — must each
+    /// produce the result appropriate to their own read context. The snapshot scan must not
+    /// coalesce onto the latest scan's continuation and silently receive current data.
+    ///
+    /// Mechanism: the backend blocks until BOTH disk reads have started, proving that two
+    /// independent disk reads were dispatched (coalescing would produce only one).
+    /// The entry's LastModified is set after the snapshot's readTimestamp, so the snapshot
+    /// scan excludes it (no revision history available), while the latest scan includes it.
+    /// </summary>
+    [Fact]
+    public async Task ConcurrentLatestAndSnapshotBucketScans_SamePrefix_ResolveIndependently()
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("bucket-snapshot-isolation");
+
+        scheduler.Start();
+        try
+        {
+            // readTimestamp = 1; entry's LastModified = 1000 (well after the snapshot).
+            // Latest scan should include it; snapshot scan should exclude it (no revision history).
+            HLCTimestamp readTs = new(0, 1, 0);
+            HLCTimestamp lastModified = new(0, 1000, 0);
+
+            TwoReadBlockingPrefixBackend backend = new([
+                ("ord/x", Encoding.UTF8.GetBytes("current"), 1L, KeyValueState.Set, lastModified),
+            ]);
+
+            using ActorSystem actorSystem = new();
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                    "bucket-snap-actor", null!, null!, backend, raft,
+                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+
+            // Dispatch both scans before either completes; they will race to start their disk reads.
+            Task<KeyValueResponse?> latestTask = actorRef.Ask(MakeBucketScan("ord"), TimeSpan.FromSeconds(10));
+            Task<KeyValueResponse?> snapshotTask = actorRef.Ask(MakeSnapshotBucketScan("ord", readTs), TimeSpan.FromSeconds(10));
+
+            // Wait for both disk reads to enter the backend — if coalescing occurred only
+            // one disk read would start, and this wait would time out.
+            backend.BothEntered.Wait(TimeSpan.FromSeconds(5));
+            backend.Gate.Set();
+
+            KeyValueResponse? latest = await latestTask;
+            KeyValueResponse? snapshot = await snapshotTask;
+
+            // Latest scan sees the entry.
+            Assert.NotNull(latest);
+            Assert.Equal(KeyValueResponseType.Get, latest!.Type);
+            Assert.Equal(1, latest.Items!.Count);
+            Assert.Equal("ord/x", latest.Items[0].Item1);
+
+            // Snapshot scan excludes the entry (LastModified > readTs, no on-disk revision history).
+            Assert.NotNull(snapshot);
+            Assert.Equal(KeyValueResponseType.Get, snapshot!.Type);
+            Assert.Equal(0, snapshot.Items!.Count);
+        }
+        finally { scheduler.Stop(); }
+    }
+
+    /// <summary>
+    /// A transactional bucket scan must not coalesce onto a concurrent plain scan's continuation.
+    /// Coalescing would cause the transactional scan to evaluate entries under txId=0 instead of
+    /// its own txId, skipping MVCC-entry creation and breaking read-your-writes / conflict detection.
+    ///
+    /// Verified by counting disk reads: plain and transactional scans of the same prefix must each
+    /// produce an independent disk read (2 total), not share one.
+    /// </summary>
+    [Fact]
+    public async Task ConcurrentPlainAndTransactionalBucketScans_SamePrefix_ResolveIndependently()
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("bucket-txn-isolation");
+
+        scheduler.Start();
+        try
+        {
+            HLCTimestamp txId = new(0, 42, 0);
+
+            TwoReadBlockingPrefixBackend backend = new([
+                ("inv/a", Encoding.UTF8.GetBytes("item-a"), 1L, KeyValueState.Set, HLCTimestamp.Zero),
+            ]);
+
+            using ActorSystem actorSystem = new();
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                    "bucket-txn-actor", null!, null!, backend, raft,
+                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+
+            // Plain scan (coalesceable) then transactional scan (not coalesceable — must stay private).
+            Task<KeyValueResponse?> plainTask = actorRef.Ask(MakeBucketScan("inv"), TimeSpan.FromSeconds(10));
+            Task<KeyValueResponse?> txnTask = actorRef.Ask(MakeTransactionalBucketScan("inv", txId), TimeSpan.FromSeconds(10));
+
+            // Two independent disk reads must start — coalescing would prevent the second.
+            backend.BothEntered.Wait(TimeSpan.FromSeconds(5));
+            backend.Gate.Set();
+
+            KeyValueResponse? plain = await plainTask;
+            KeyValueResponse? txn = await txnTask;
+
+            // Both scans must complete successfully and return the entry independently.
+            Assert.NotNull(plain);
+            Assert.Equal(KeyValueResponseType.Get, plain!.Type);
+            Assert.Equal(1, plain.Items!.Count);
+
+            Assert.NotNull(txn);
+            Assert.Equal(KeyValueResponseType.Get, txn!.Type);
+            Assert.Equal(1, txn.Items!.Count);
+        }
+        finally { scheduler.Stop(); }
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────────────────
 
     private static KeyValueRequest MakeEphemeralGet(string key)
@@ -206,6 +320,46 @@ public sealed class TestTryGetByBucketHandler
             KeyValueDurability.Ephemeral, 0, 0, null);
     }
 
+    // ── Back-pressure on the scan enqueue surfaces as MustRetry and leaks no in-flight entry ─
+
+    [Fact]
+    public async Task PersistentBucketScan_EnqueueRejectedByBackpressure_ReturnsMustRetry_NoLeak()
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("bucket-backpressure");
+
+        scheduler.Start();
+        try
+        {
+            // Disk-only entries, empty memory store, so the scan takes the detach path and dispatches
+            // a backend read — which the scheduler rejects with back-pressure.
+            PrefixBackend backend = new([
+                ("doc/a", Encoding.UTF8.GetBytes("aaa"), 1L, KeyValueState.Set),
+                ("doc/b", Encoding.UTF8.GetBytes("bbb"), 2L, KeyValueState.Set),
+            ]);
+
+            RecordingReadScheduler rejecting = new(rejectWithBackpressure: true);
+            SchedulerOverridingRaft decoratedRaft = new(raft, rejecting);
+
+            using ActorSystem actorSystem = new();
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                    "bucket-backpressure-actor", null!, null!, backend, decoratedRaft,
+                    new KeySpaceRegistry(), new RangeMapStore(decoratedRaft, null, null, logger), config, logger);
+
+            KeyValueResponse? resp = await actorRef.Ask(MakeBucketScan("doc"), TimeSpan.FromSeconds(5));
+
+            // Rejected enqueue must surface as retryable, not a faulted actor or a lost promise.
+            Assert.NotNull(resp);
+            Assert.Equal(KeyValueResponseType.MustRetry, resp!.Type);
+
+            // The catch path must remove the in-flight registration it added in stage 1, so no dead
+            // continuation is left for later arrivals to coalesce onto.
+            Assert.Equal(0, ((KeyValueActor)actorRef.Runner.Actor!).PendingReadsCount);
+        }
+        finally { scheduler.Stop(); }
+    }
+
     private static KeyValueRequest MakeBucketScan(
         string prefix,
         KeyValueDurability durability = KeyValueDurability.Persistent)
@@ -219,6 +373,33 @@ public sealed class TestTryGetByBucketHandler
             KeyValueFlags.None, 0,
             HLCTimestamp.Zero,
             durability, 0, 0, null);
+    }
+
+    private static KeyValueRequest MakeSnapshotBucketScan(string prefix, HLCTimestamp readTimestamp)
+    {
+        return new KeyValueRequest(
+            KeyValueRequestType.GetByBucket,
+            HLCTimestamp.Zero,
+            HLCTimestamp.Zero,
+            prefix,
+            null, null, -1,
+            KeyValueFlags.None, 0,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Persistent, 0, 0, null)
+        { ReadTimestamp = readTimestamp };
+    }
+
+    private static KeyValueRequest MakeTransactionalBucketScan(string prefix, HLCTimestamp transactionId)
+    {
+        return new KeyValueRequest(
+            KeyValueRequestType.GetByBucket,
+            transactionId,
+            HLCTimestamp.Zero,
+            prefix,
+            null, null, -1,
+            KeyValueFlags.None, 0,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Persistent, 0, 0, null);
     }
 
     private static KeyValueRequest MakeSet(string key, byte[] value, long revision)
@@ -320,6 +501,50 @@ public sealed class TestTryGetByBucketHandler
         public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
         public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) => inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => diskEntries.Where(e => e.Key.StartsWith(prefixKeyName, StringComparison.Ordinal)).Select(e => (e.Key, e.Entry)).ToList();
+        public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) => inner.GetKeyValueByRange(prefix, startKey, limit);
+        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, out result);
+        public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) => inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
+    }
+
+    /// <summary>
+    /// Backend that blocks until two concurrent GetKeyValueByPrefix calls have both entered,
+    /// then releases both. Used to verify that two independent disk reads were dispatched
+    /// instead of one coalesced read.
+    /// </summary>
+    private sealed class TwoReadBlockingPrefixBackend : IPersistenceBackend
+    {
+        private readonly MemoryPersistenceBackend inner = new();
+        private readonly List<(string Key, ReadOnlyKeyValueEntry Entry)> diskEntries;
+        private int enterCount;
+
+        internal ManualResetEventSlim BothEntered { get; } = new(false);
+        internal ManualResetEventSlim Gate { get; } = new(false);
+
+        internal TwoReadBlockingPrefixBackend(
+            IEnumerable<(string Key, byte[]? Value, long Revision, KeyValueState State, HLCTimestamp LastModified)> entries)
+        {
+            diskEntries = entries.Select(e => (e.Key, new ReadOnlyKeyValueEntry(
+                e.Value, e.Revision,
+                HLCTimestamp.Zero, HLCTimestamp.Zero, e.LastModified, e.State))).ToList();
+        }
+
+        public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
+        public bool StoreKeyValues(List<PersistenceRequestItem> items) => inner.StoreKeyValues(items);
+        public LockEntry? GetLock(string resource) => inner.GetLock(resource);
+        public KeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
+        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
+        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) => inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
+
+        public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName)
+        {
+            if (Interlocked.Increment(ref enterCount) >= 2)
+                BothEntered.Set();
+            Gate.Wait();
+            return diskEntries
+                .Where(e => e.Key.StartsWith(prefixKeyName, StringComparison.Ordinal))
+                .Select(e => (e.Key, e.Entry)).ToList();
+        }
+
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) => inner.GetKeyValueByRange(prefix, startKey, limit);
         public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, out result);
         public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) => inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);

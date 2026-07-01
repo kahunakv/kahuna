@@ -143,7 +143,22 @@ internal sealed class TryExistsHandler : BaseHandler
         {
             if (!entry.TryGetRevisionAtOrBefore(message.ReadTimestamp,
                     out long snapRevision, out KeyValueRevisionEntry snapshot))
-                return KeyValueStaticResponses.DoesNotExistContextResponse;
+            {
+                // In-memory archive trimmed the as-of revision; fall back to the persisted
+                // revision history. Mirrors TryGetHandler's fallback — same reasoning applies.
+                KeyValueEntry? diskSnapshot = context.PersistenceBackend.GetKeyValueRevisionAtOrBefore(
+                    message.Key, entry.Revision - 1, message.ReadTimestamp);
+
+                if (diskSnapshot is null
+                    || diskSnapshot.State is KeyValueState.Deleted or KeyValueState.Undefined
+                    || (diskSnapshot.Expires != HLCTimestamp.Zero
+                        && diskSnapshot.Expires - currentTime < TimeSpan.Zero))
+                    return KeyValueStaticResponses.DoesNotExistContextResponse;
+
+                return new(KeyValueResponseType.Exists, new ReadOnlyKeyValueEntry(
+                    null, diskSnapshot.Revision, diskSnapshot.Expires,
+                    currentTime, diskSnapshot.LastModified, diskSnapshot.State));
+            }
 
             if (snapshot.State is KeyValueState.Deleted or KeyValueState.Undefined
                 || (snapshot.Expires != HLCTimestamp.Zero
