@@ -20,7 +20,7 @@ internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
 {
     public TryScanByPrefixFromDiskHandler(KeyValueContext context) : base(context)
     {
-        
+
     }
 
     /// <summary>
@@ -28,56 +28,104 @@ internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    public async Task<KeyValueResponse> Execute(KeyValueRequest message)
+    public Task<KeyValueResponse> Execute(KeyValueRequest message)
     {
-        Dictionary<string, ReadOnlyKeyValueEntry> items = new();
+        return Task.FromResult(ExecuteCore(message));
+    }
 
+    private KeyValueResponse ExecuteCore(KeyValueRequest message)
+    {
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
         HLCTimestamp readTimestamp = message.ReadTimestamp;
 
-        List<(string, ReadOnlyKeyValueEntry)> itemsFromDisk = await context.Raft.ReadScheduler.EnqueueTask(
-            message.PartitionId,
-            () =>
-            {
-                List<(string, ReadOnlyKeyValueEntry)> scanned = context.PersistenceBackend.GetKeyValueByPrefix(message.Key);
+        // Stage 2 dispatch: detach the full prefix scan (plus optional per-key snapshot
+        // revision walk) off the actor mailbox.
+        // Non-snapshot requests coalesce: multiple callers for the same prefix share one disk
+        // read. Snapshot requests are not coalesced because their result depends on readTimestamp.
+        IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext =
+            context.ActorContext;
 
-                if (readTimestamp.IsNull())
-                    return scanned;
+        if (!actorContext.Reply.HasValue)
+            return KeyValueStaticResponses.ErroredResponse;
 
-                // Snapshot scan: the prefix scan returns each key's latest committed revision. When that
-                // revision is newer than the snapshot, walk the persisted revision history backwards to the
-                // most recent revision at-or-before the snapshot, mirroring the in-memory scan path. A key
-                // with no retained revision at-or-before the snapshot is dropped (it did not exist, or was
-                // written, after the snapshot).
-                List<(string, ReadOnlyKeyValueEntry)> projected = new(scanned.Count);
+        TaskCompletionSource<KeyValueResponse?> promise = actorContext.Reply.Value.Promise;
 
-                foreach ((string key, ReadOnlyKeyValueEntry entry) in scanned)
-                {
-                    if (entry.LastModified.CompareTo(readTimestamp) <= 0)
-                    {
-                        projected.Add((key, entry));
-                        continue;
-                    }
+        // (prefix, -3, false) = non-snapshot prefix-from-disk scan.
+        // Snapshot scans are not registered in PendingReads (no coalescing).
+        bool isNonSnapshot = readTimestamp.IsNull();
+        (string, long, bool)? scanKey = isNonSnapshot ? (message.Key, -3L, false) : null;
 
-                    KeyValueEntry? snapshot = context.PersistenceBackend.GetKeyValueRevisionAtOrBefore(key, entry.Revision - 1, readTimestamp);
-                    if (snapshot is not null && snapshot.State != KeyValueState.Deleted)
-                        projected.Add((key, new(snapshot.Value, snapshot.Revision, snapshot.Expires, snapshot.LastUsed, snapshot.LastModified, snapshot.State)));
-                }
-
-                return projected;
-            });
-
-        foreach ((string key, ReadOnlyKeyValueEntry readOnlyKeyValueEntry) in itemsFromDisk)
+        if (scanKey.HasValue &&
+            context.PendingReads.TryGetValue(scanKey.Value, out ReadContinuation? inflight))
         {
-            if (items.ContainsKey(key))
-                continue;
-
-            if (readOnlyKeyValueEntry.State == KeyValueState.Deleted || readOnlyKeyValueEntry.Expires != HLCTimestamp.Zero && readOnlyKeyValueEntry.Expires - currentTime < TimeSpan.Zero)
-                continue;
-
-            items.Add(key, readOnlyKeyValueEntry);
+            inflight.AddWaiter(promise);
+            actorContext.ByPassReply = true;
+            return KeyValueStaticResponses.WaitingForReplicationResponse;
         }
 
-        return new(KeyValueResponseType.Get, items.Select(kv => (kv.Key, kv.Value)).ToList());
+        PrefixFromDiskScanContinuation cont = new(message.Key, readTimestamp, currentTime, promise);
+        if (scanKey.HasValue)
+            context.PendingReads[scanKey.Value] = cont;
+
+        Task<List<(string, ReadOnlyKeyValueEntry)>> readTask;
+        try
+        {
+            readTask = context.Raft.ReadScheduler.EnqueueTask(
+                message.PartitionId,
+                () =>
+                {
+                    List<(string, ReadOnlyKeyValueEntry)> scanned =
+                        context.PersistenceBackend.GetKeyValueByPrefix(message.Key);
+
+                    if (readTimestamp.IsNull())
+                        return scanned;
+
+                    // Snapshot scan: the prefix scan returns each key's latest committed revision.
+                    // When that revision is newer than the snapshot, walk the persisted revision
+                    // history backwards to the most recent revision at-or-before the snapshot,
+                    // mirroring the in-memory scan path. A key with no retained revision
+                    // at-or-before the snapshot is dropped (it did not exist at that time).
+                    List<(string, ReadOnlyKeyValueEntry)> projected = new(scanned.Count);
+
+                    foreach ((string key, ReadOnlyKeyValueEntry entry) in scanned)
+                    {
+                        if (entry.LastModified.CompareTo(readTimestamp) <= 0)
+                        {
+                            projected.Add((key, entry));
+                            continue;
+                        }
+
+                        KeyValueEntry? snapshot = context.PersistenceBackend.GetKeyValueRevisionAtOrBefore(
+                            key, entry.Revision - 1, readTimestamp);
+                        if (snapshot is not null && snapshot.State != KeyValueState.Deleted)
+                            projected.Add((key, new(snapshot.Value, snapshot.Revision,
+                                snapshot.Expires, snapshot.LastUsed, snapshot.LastModified, snapshot.State)));
+                    }
+
+                    return projected;
+                });
+        }
+        catch (Exception ex)
+        {
+            if (scanKey.HasValue)
+                context.PendingReads.Remove(scanKey.Value);
+            context.Logger.LogWarning(
+                "KeyValueActor/PrefixFromDiskScan: read scheduler rejected enqueue for prefix {Prefix}: {Ex}",
+                message.Key, ex.Message);
+            cont.Resolve(KeyValueStaticResponses.MustRetryResponse);
+            actorContext.ByPassReply = true;
+            return KeyValueStaticResponses.MustRetryResponse;
+        }
+
+        _ = readTask.ContinueWith(t =>
+        {
+            if (!t.IsCompletedSuccessfully) cont.SetFaulted();
+            else cont.ScanDiskResult = t.Result;
+            actorContext.Self.Send(
+                new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont });
+        }, TaskScheduler.Default);
+
+        actorContext.ByPassReply = true;
+        return KeyValueStaticResponses.WaitingForReplicationResponse;
     }
 }

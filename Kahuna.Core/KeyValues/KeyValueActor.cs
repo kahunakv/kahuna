@@ -223,9 +223,14 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private readonly CompleteProposalHandler completeProposalHandler;
     
     /// <summary>
-    /// 
+    ///
     /// </summary>
     private readonly ReleaseProposalHandler releaseProposalHandler;
+
+    /// <summary>
+    ///
+    /// </summary>
+    private readonly ResumeReadHandler resumeReadHandler;
 
     /// <summary>
     /// A high-resolution timer used to measure the time elapsed during the handling of requests within the actor.
@@ -304,6 +309,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         tryCollectHandler = new(context);
         completeProposalHandler = new(context);
         releaseProposalHandler = new(context);
+        resumeReadHandler = new(context);
     }
 
     /// <summary>
@@ -379,6 +385,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.ScanByPrefixFromDisk => await ScanByPrefixFromDisk(message),
                 KeyValueRequestType.CompleteProposal => CompleteProposal(message),
                 KeyValueRequestType.ReleaseProposal => ReleaseProposal(message),
+                KeyValueRequestType.ResumeRead => ResumeRead(message),
                 KeyValueRequestType.Collect => CollectMessage(),
                 _ => KeyValueStaticResponses.ErroredResponse
             };
@@ -610,6 +617,11 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private KeyValueResponse ReleaseProposal(KeyValueRequest message)
     {
         return releaseProposalHandler.Execute(message);
+    }
+
+    private KeyValueResponse? ResumeRead(KeyValueRequest message)
+    {
+        return resumeReadHandler.Execute(message);
     }
 
     /// <summary>

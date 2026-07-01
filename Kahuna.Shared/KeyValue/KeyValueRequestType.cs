@@ -33,4 +33,5 @@ public enum KeyValueRequestType
     GetRangeLocks,
     ImportRangeLocks,
     GetSafeTimestamp,
+    ResumeRead,
 }

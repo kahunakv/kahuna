@@ -14,7 +14,7 @@ internal sealed class TryGetByBucketHandler : BaseHandler
 {
     public TryGetByBucketHandler(KeyValueContext context) : base(context)
     {
-        
+
     }
 
     /// <summary>
@@ -22,12 +22,12 @@ internal sealed class TryGetByBucketHandler : BaseHandler
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    public async Task<KeyValueResponse> Execute(KeyValueRequest message)
+    public Task<KeyValueResponse> Execute(KeyValueRequest message)
     {
         if (message.Durability == KeyValueDurability.Ephemeral)
-            return await GetByBucketEphemeral(message);
+            return GetByBucketEphemeral(message);
 
-        return await GetByBucketPersistent(message);
+        return Task.FromResult(GetByBucketPersistent(message));
     }
 
     private async Task<KeyValueResponse> GetByBucketEphemeral(KeyValueRequest message)
@@ -35,18 +35,21 @@ internal sealed class TryGetByBucketHandler : BaseHandler
         List<(string, ReadOnlyKeyValueEntry)> items = [];
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
 
-        foreach ((string key, KeyValueEntry? _) in context.Store.GetByBucket(message.Key))
+        foreach ((string key, KeyValueEntry? entry) in context.Store.GetByBucket(message.Key))
         {
-            KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability, message.ReadTimestamp);
-
-            if (response.Type == KeyValueResponseType.DoesNotExist)
+            if (entry is null)
                 continue;
 
-            if (response.Type != KeyValueResponseType.Get)
-                return new(response.Type, []);
+            KeyValueResponse? result = BucketScanContinuation.EvaluateEntry(
+                context, currentTime, message.TransactionId, message.ReadTimestamp, key, entry);
 
-            if (response is { Type: KeyValueResponseType.Get, Entry: not null })
-                items.Add((key, response.Entry));
+            if (result is null || result.Type == KeyValueResponseType.DoesNotExist)
+                continue;
+
+            if (result.Type != KeyValueResponseType.Get || result.Entry is null)
+                return new(result.Type, []);
+
+            items.Add((key, result.Entry));
 
             if (items.Count >= KeyValueScanLimits.MaxPrefixScanResults)
                 break;
@@ -57,193 +60,100 @@ internal sealed class TryGetByBucketHandler : BaseHandler
         return new(KeyValueResponseType.Get, items);
     }
 
-    private async Task<KeyValueResponse> GetByBucketPersistent(KeyValueRequest message)
+    private KeyValueResponse GetByBucketPersistent(KeyValueRequest message)
     {
         List<(string, ReadOnlyKeyValueEntry)> items = [];
         HashSet<string> seenKeys = [];
 
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
 
-        // step 1: check the in-memory store to get the MVCC entry or the latest value
-        foreach ((string key, KeyValueEntry? _) in context.Store.GetByBucket(message.Key))
-        {
-            KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability, message.ReadTimestamp);
-
-            if (response.Type == KeyValueResponseType.DoesNotExist)
-                continue;
-
-            if (response.Type != KeyValueResponseType.Get || response.Entry is null)
-                return new(response.Type, []);
-
-            seenKeys.Add(key);
-            items.Add((key, new(
-                response.Entry.Value,
-                response.Entry.Revision,
-                response.Entry.Expires,
-                response.Entry.LastUsed,
-                response.Entry.LastModified,
-                response.Entry.State
-            )));
-
-            if (items.Count >= KeyValueScanLimits.MaxPrefixScanResults)
-                break;
-        }
-
-        // step 2: join the in-memory store with the disk store
-        List<(string, ReadOnlyKeyValueEntry)> itemsFromDisk = await context.Raft.ReadScheduler.EnqueueTask(message.PartitionId, () => context.PersistenceBackend.GetKeyValueByPrefix(message.Key));
-
-        foreach ((string key, ReadOnlyKeyValueEntry readOnlyKeyValueEntry) in itemsFromDisk)
-        {
-            if (items.Count >= KeyValueScanLimits.MaxPrefixScanResults)
-                break;
-
-            if (seenKeys.Contains(key))
-                continue;
-
-            KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability, message.ReadTimestamp, readOnlyKeyValueEntry);
-
-            if (response.Type == KeyValueResponseType.DoesNotExist)
-                continue;
-
-            if (response is { Type: KeyValueResponseType.Get, Entry: not null })
-            {
-                seenKeys.Add(key);
-                items.Add((key, response.Entry));
-            }
-        }
-
-        // step 3: make sure the items are sorted in lexicographical order
-        items.Sort(EnsureLexicographicalOrder);
-
-        return new(KeyValueResponseType.Get, items);
-    }
-
-    private async Task<KeyValueResponse> Get(
-        HLCTimestamp currentTime,
-        HLCTimestamp transactionId,
-        string key,
-        KeyValueDurability durability,
-        HLCTimestamp readTimestamp = default,
-        ReadOnlyKeyValueEntry? keyValueEntry = null
-    )
-    {
-        KeyValueEntry? entry = await GetKeyValueEntry(key, durability, keyValueEntry);
-
-        ReadOnlyKeyValueEntry readOnlyKeyValueEntry;
-
-        // Validate if there's an active replication entry on the key/value entry.
-        if (entry?.ReplicationIntent is not null)
-        {
-            if (entry.ReplicationIntent.Expires - currentTime > TimeSpan.Zero)
-                return KeyValueStaticResponses.WaitingForReplicationResponse;
-
-            entry.ReplicationIntent = null;
-        }
-
-        // Safe-time wait: when a snapshot readTimestamp is in play, a live foreign write intent
-        // whose pending commit could land at-or-before T must be awaited (mirror TryGetHandler).
-        // Without a snapshot (readTimestamp.IsNull()), fall through to committed state as before.
-        if (entry?.WriteIntent != null)
-        {
-            if (entry.WriteIntent.TransactionId != transactionId)
-            {
-                if (entry.WriteIntent.Expires - currentTime <= TimeSpan.Zero)
-                    entry.WriteIntent = null;
-                else if (!readTimestamp.IsNull())
-                {
-                    HLCTimestamp commitTs = entry.WriteIntent.CommitTimestamp;
-                    if (commitTs.IsNull() || commitTs.CompareTo(readTimestamp) <= 0)
-                        return KeyValueStaticResponses.WaitingForReplicationResponse;
-                    // commitTs > readTimestamp: write won't land in our snapshot; fall through
-                }
-                // live write intent without snapshot: fall through to committed state
-            }
-        }
-
-        // TransactionId is provided so we keep a MVCC entry for it.
-        // Exception: when readTimestamp is also set, this is an AS OF snapshot read — skip MVCC
-        // and fall through to the snapshot visibility path below.
-        if (transactionId != HLCTimestamp.Zero && readTimestamp.IsNull())
+        // Stage 1: in-memory scan (actor thread, synchronous).
+        // context.Store.GetByBucket only yields keys already in the resident store, so
+        // EvaluateEntry never issues a disk read from this loop.
+        foreach ((string key, KeyValueEntry? entry) in context.Store.GetByBucket(message.Key))
         {
             if (entry is null)
-            {
-                entry = new() { Bucket = GetBucket(key), State = KeyValueState.Undefined, Revision = -1 };
-                context.InsertStoreEntry(key, entry);
-            }
+                continue;
 
-            entry.MvccEntries ??= new();
+            KeyValueResponse? result = BucketScanContinuation.EvaluateEntry(
+                context, currentTime, message.TransactionId, message.ReadTimestamp, key, entry);
 
-            if (!entry.MvccEntries.TryGetValue(transactionId, out KeyValueMvccEntry? mvccEntry))
-            {
-                bool mvccDictJustCreated = entry.MvccEntries.Count == 0;
-                mvccEntry = new()
-                {
-                    Value = entry.Value,
-                    Revision = entry.Revision,
-                    Expires = entry.Expires,
-                    LastUsed = entry.LastUsed,
-                    LastModified = entry.LastModified,
-                    State = entry.State
-                };
+            if (result is null || result.Type == KeyValueResponseType.DoesNotExist)
+                continue;
 
-                entry.MvccEntries.Add(transactionId, mvccEntry);
-                context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.MvccEntryAddedBytes(mvccDictJustCreated, mvccEntry.Value));
-            }
+            if (result.Type != KeyValueResponseType.Get || result.Entry is null)
+                return new(result.Type, []); // scan-aborting response (WaitingForReplication, etc.)
 
-            if (entry.Revision > mvccEntry.Revision) // early conflict detection
-                return KeyValueStaticResponses.AbortedResponse;
+            seenKeys.Add(key);
+            items.Add((key, result.Entry));
 
-            if (mvccEntry.State is KeyValueState.Undefined or KeyValueState.Deleted || mvccEntry.Expires != HLCTimestamp.Zero && mvccEntry.Expires - currentTime < TimeSpan.Zero)
-                return KeyValueStaticResponses.DoesNotExistContextResponse;
-
-            readOnlyKeyValueEntry = new(
-                mvccEntry.Value,
-                mvccEntry.Revision,
-                mvccEntry.Expires,
-                mvccEntry.LastUsed,
-                mvccEntry.LastModified,
-                entry.State
-            );
-
-            return new(KeyValueResponseType.Get, readOnlyKeyValueEntry);
+            if (items.Count >= KeyValueScanLimits.MaxPrefixScanResults)
+                break;
         }
 
-        // Snapshot visibility (non-transactional or AS OF within transaction).
-        if (!readTimestamp.IsNull() && entry is not null && entry.LastModified > readTimestamp)
+        // If the cap was already reached from memory, skip the disk read entirely.
+        if (items.Count >= KeyValueScanLimits.MaxPrefixScanResults)
         {
-            if (!entry.TryGetRevisionAtOrBefore(readTimestamp, out long snapRevision, out KeyValueRevisionEntry snapshot))
-                return KeyValueStaticResponses.DoesNotExistContextResponse;
-
-            if (snapshot.State is KeyValueState.Deleted or KeyValueState.Undefined ||
-                (snapshot.Expires != HLCTimestamp.Zero && snapshot.Expires - currentTime < TimeSpan.Zero))
-                return KeyValueStaticResponses.DoesNotExistContextResponse;
-
-            return new(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
-                snapshot.Value,
-                snapRevision,
-                snapshot.Expires,
-                currentTime,
-                snapshot.LastModified,
-                snapshot.State));
+            items.Sort(EnsureLexicographicalOrder);
+            return new(KeyValueResponseType.Get, items);
         }
 
-        if (entry is null || entry.State is KeyValueState.Deleted or KeyValueState.Undefined || entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
-            return KeyValueStaticResponses.DoesNotExistContextResponse;
+        // Stage 2 dispatch: detach GetKeyValueByPrefix off the actor mailbox.
+        // Register a coalescing slot so concurrent requests for the same prefix share one disk read.
+        IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext =
+            context.ActorContext;
 
-        context.TouchEntry(entry, currentTime);
+        if (!actorContext.Reply.HasValue)
+            return KeyValueStaticResponses.ErroredResponse;
 
-        readOnlyKeyValueEntry = new(
-            entry.Value,
-            entry.Revision,
-            entry.Expires,
-            entry.LastUsed,
-            entry.LastModified,
-            entry.State
-        );
+        TaskCompletionSource<KeyValueResponse?> promise = actorContext.Reply.Value.Promise;
 
-        return new(KeyValueResponseType.Get, readOnlyKeyValueEntry);
+        // (prefix, -2, false) = bucket scan. Sentinel -2 is distinct from latest-point (-1)
+        // and by-revision (>= 0) slots so bucket scans never cross-coalesce with point reads.
+        (string, long, bool) scanKey = (message.Key, -2L, false);
+
+        if (context.PendingReads.TryGetValue(scanKey, out ReadContinuation? inflight))
+        {
+            inflight.AddWaiter(promise);
+            actorContext.ByPassReply = true;
+            return KeyValueStaticResponses.WaitingForReplicationResponse;
+        }
+
+        BucketScanContinuation cont = new(
+            message.Key, message.TransactionId, message.ReadTimestamp,
+            items, seenKeys, currentTime, promise);
+        context.PendingReads[scanKey] = cont;
+
+        Task<List<(string, ReadOnlyKeyValueEntry)>> readTask;
+        try
+        {
+            readTask = context.Raft.ReadScheduler.EnqueueTask(
+                message.PartitionId,
+                () => context.PersistenceBackend.GetKeyValueByPrefix(message.Key));
+        }
+        catch (Exception ex)
+        {
+            context.PendingReads.Remove(scanKey);
+            context.Logger.LogWarning(
+                "KeyValueActor/BucketScan: read scheduler rejected enqueue for prefix {Prefix}: {Ex}",
+                message.Key, ex.Message);
+            cont.Resolve(KeyValueStaticResponses.MustRetryResponse);
+            actorContext.ByPassReply = true;
+            return KeyValueStaticResponses.MustRetryResponse;
+        }
+
+        _ = readTask.ContinueWith(t =>
+        {
+            if (!t.IsCompletedSuccessfully) cont.SetFaulted();
+            else cont.ScanDiskResult = t.Result;
+            actorContext.Self.Send(
+                new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont });
+        }, TaskScheduler.Default);
+
+        actorContext.ByPassReply = true;
+        return KeyValueStaticResponses.WaitingForReplicationResponse;
     }
-    
+
     private static int EnsureLexicographicalOrder((string, ReadOnlyKeyValueEntry) x, (string, ReadOnlyKeyValueEntry) y)
     {
         return string.Compare(x.Item1, y.Item1, StringComparison.Ordinal);

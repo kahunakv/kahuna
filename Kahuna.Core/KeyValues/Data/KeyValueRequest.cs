@@ -84,6 +84,13 @@ public sealed class KeyValueRequest : IConsistentHashable
     ///
     /// </summary>
     public TaskCompletionSource<KeyValueResponse?>? Promise { get; private set; }
+
+    /// <summary>
+    /// Stage-3 continuation for a resumable backend read (ResumeRead messages only).
+    /// Carries the per-type reconciliation logic and the caller's Promise; null for all
+    /// other request types.
+    /// </summary>
+    internal Handlers.ReadContinuation? Continuation { get; set; }
     
     /// <summary>
     /// Creates a type-only request (e.g. periodic cache collection).
@@ -200,6 +207,7 @@ public sealed class KeyValueRequest : IConsistentHashable
         RangeLockImportList = null;
         Limit = 0;
         ReadTimestamp = HLCTimestamp.Zero;
+        Continuation = null;
     }
 
     public int GetHash()

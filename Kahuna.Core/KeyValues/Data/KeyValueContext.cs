@@ -52,6 +52,21 @@ internal sealed class KeyValueContext
 
     public Dictionary<int, KeyValueProposal> Proposals { get; }
 
+    /// <summary>
+    /// Per-actor map of in-flight backend reads. The key is <c>(key, revision, isExists)</c>:
+    /// <list type="bullet">
+    ///   <item>Latest-point TryGet: <c>(key, -1, false)</c></item>
+    ///   <item>By-revision TryGet: <c>(key, revision, false)</c></item>
+    ///   <item>By-revision TryExists: <c>(key, revision, true)</c></item>
+    /// </list>
+    /// The <c>isExists</c> dimension prevents a TryGet and TryExists for the same key+revision
+    /// from coalescing onto a single continuation whose fixed <c>responseType</c> would produce
+    /// the wrong shape for one of the callers.
+    /// Stage 1 registers; stage 3 removes before resolving all waiters.
+    /// Mutated only on the actor thread — no synchronisation required.
+    /// </summary>
+    internal Dictionary<(string Key, long Revision, bool IsExists), Handlers.ReadContinuation> PendingReads { get; } = new();
+
     public KahunaConfiguration Configuration  { get; }
 
     public ILogger<IKahuna> Logger  { get; }
