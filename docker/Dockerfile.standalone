@@ -1,0 +1,50 @@
+# Standalone Kahuna.Server image (single node, no Raft cluster).
+#
+# Build context MUST be the repository root, e.g.:
+#   docker build -f docker/Dockerfile.standalone -t kahunakv/kahuna .
+# or use docker/publish.sh which wires this up for Docker Hub (kahunakv/kahuna).
+
+# Pin the build stage to the NATIVE build platform. Running the .NET SDK under QEMU
+# emulation (e.g. building linux/amd64 on an arm64 host) throws MSB4184
+# GetTargetPlatformIdentifier('') during MSBuild evaluation. A framework-dependent
+# publish is portable IL and bundles per-RID native assets (runtimes/linux-x64,
+# runtimes/linux-arm64, including SQLite), which each target runtime image selects
+# at load time — so one native build serves all target architectures.
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0 AS build-env
+
+RUN rm -fr /src && mkdir -p /src
+COPY Kahuna.Shared /src/Kahuna.Shared/
+COPY Kahuna.Core /src/Kahuna.Core/
+COPY Kahuna.Server /src/Kahuna.Server/
+
+# Drop any host-built obj/bin that slipped into the context. A host-restored
+# obj/project.assets.json poisons the in-container restore for the target arch
+# (MSB4184: GetTargetPlatformIdentifier('') cannot be evaluated). .dockerignore
+# alone is not reliable across buildkit versions, so scrub explicitly.
+RUN find /src \( -type d -name obj -o -type d -name bin \) -prune -exec rm -rf {} +
+
+RUN cd /src/Kahuna.Server/ && dotnet publish --no-self-contained --configuration Release -p:RunAnalyzers=false -o /app
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
+WORKDIR /app
+
+# HTTP and HTTPS API (see KAHUNA_HTTP_PORT / KAHUNA_HTTPS_PORT).
+EXPOSE 8081
+EXPOSE 8082
+
+COPY --from=build-env /app .
+COPY certs/development-certificate.pfx /app/certificate.pfx
+
+# Database files live on a volume so data survives container restarts.
+RUN mkdir -p /data/data /data/wal
+VOLUME ["/data"]
+
+ENV DOTNET_SYSTEM_NET_SOCKETS_INLINE_COMPLETIONS=1
+ENV KAHUNA_HTTP_PORT=8081
+ENV KAHUNA_HTTPS_PORT=8082
+ENV KAHUNA_DATA_DIR=/data
+ENV KAHUNA_PARTITIONS=3
+
+COPY --chmod=755 docker/entrypoint-standalone.sh /app/entrypoint.sh
+
+ENTRYPOINT ["/app/entrypoint.sh"]
