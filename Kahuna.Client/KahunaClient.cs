@@ -1330,6 +1330,37 @@ public class KahunaClient
     public Task<KahunaRestoreResponse> RestoreAsync(Guid leafBackupId, string targetDir, long targetTimeMs = 0, CancellationToken cancellationToken = default) =>
         communication.Restore(GetRoundRobinUrl(), leafBackupId, targetDir, targetTimeMs, cancellationToken);
 
+    // ── MVCC snapshot floor ──────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Acquires or renews a refcounted snapshot hold protecting all revisions at/after the given timestamp.
+    /// Idempotent by (holderId, timestamp): a repeat returns the same holdId and renews the lease.
+    /// </summary>
+    public Task<(KeyValueResponseType type, string holdId, HLCTimestamp leaseExpiry)> AcquireSnapshotHold(
+        string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken cancellationToken = default) =>
+        communication.AcquireSnapshotHold(GetRoundRobinUrl(), holderId, timestamp, leaseMs, cancellationToken);
+
+    /// <summary>
+    /// Renews an existing snapshot hold's lease.
+    /// </summary>
+    public Task<(KeyValueResponseType type, HLCTimestamp leaseExpiry)> RenewSnapshotHold(
+        string holdId, int leaseMs, CancellationToken cancellationToken = default) =>
+        communication.RenewSnapshotHold(GetRoundRobinUrl(), holdId, leaseMs, cancellationToken);
+
+    /// <summary>
+    /// Releases a snapshot hold. The effective floor rises when the lowest hold is released.
+    /// </summary>
+    public Task<KeyValueResponseType> ReleaseSnapshotHold(
+        string holdId, CancellationToken cancellationToken = default) =>
+        communication.ReleaseSnapshotHold(GetRoundRobinUrl(), holdId, cancellationToken);
+
+    /// <summary>
+    /// Returns the current effective snapshot floor and live hold count.
+    /// </summary>
+    public Task<(HLCTimestamp effectiveFloor, int liveHolds)> GetSnapshotFloor(
+        CancellationToken cancellationToken = default) =>
+        communication.GetSnapshotFloor(GetRoundRobinUrl(), cancellationToken);
+
     /// <summary>
     /// Chooses the next server in the list of servers in a round-robin fashion
     /// </summary>

@@ -772,7 +772,7 @@ public sealed class TestTryGetHandler
     /// the target revision if matched. GetKeyValue returns null (cache miss forced).
     /// Used to keep by-revision reads in-flight simultaneously for shape-isolation testing.
     /// </summary>
-    private sealed class BlockingRevisionBackend : IPersistenceBackend
+    private sealed class BlockingRevisionBackend : IPersistenceBackend, IDisposable
     {
         private readonly MemoryPersistenceBackend inner = new();
         private readonly ManualResetEventSlim gate;
@@ -804,10 +804,11 @@ public sealed class TestTryGetHandler
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => inner.GetKeyValueByPrefix(prefixKeyName);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) =>
             inner.GetKeyValueByRange(prefix, startKey, limit);
-        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, out RevisionPruneResult result) =>
-            inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, out result);
+        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) =>
+            inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
         public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) =>
             inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
+        public void Dispose() => inner.Dispose();
     }
 
     private static KeyValueRequest MakeExists(string key, long compareRevision,
@@ -835,7 +836,7 @@ public sealed class TestTryGetHandler
     /// Backend that serves a specific historical revision from GetKeyValueRevision.
     /// GetKeyValue returns null (cache miss) so the by-revision detach path is exercised.
     /// </summary>
-    private sealed class RevisionBackend : IPersistenceBackend
+    private sealed class RevisionBackend : IPersistenceBackend, IDisposable
     {
         private readonly MemoryPersistenceBackend inner = new();
         private readonly long targetRevision;
@@ -864,10 +865,11 @@ public sealed class TestTryGetHandler
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => inner.GetKeyValueByPrefix(prefixKeyName);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) =>
             inner.GetKeyValueByRange(prefix, startKey, limit);
-        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, out RevisionPruneResult result) =>
-            inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, out result);
+        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) =>
+            inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
         public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) =>
             inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
+        public void Dispose() => inner.Dispose();
     }
 
     /// <summary>
@@ -875,7 +877,7 @@ public sealed class TestTryGetHandler
     /// block on the same ManualResetEvent gate so both reads are in-flight simultaneously,
     /// but return distinct values so cross-contamination would produce a wrong assertion.
     /// </summary>
-    private sealed class CrossResolveBackend : IPersistenceBackend
+    private sealed class CrossResolveBackend : IPersistenceBackend, IDisposable
     {
         private readonly MemoryPersistenceBackend inner = new();
         private readonly ManualResetEventSlim gate;
@@ -914,17 +916,18 @@ public sealed class TestTryGetHandler
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => inner.GetKeyValueByPrefix(prefixKeyName);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) =>
             inner.GetKeyValueByRange(prefix, startKey, limit);
-        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, out RevisionPruneResult result) =>
-            inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, out result);
+        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) =>
+            inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
         public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) =>
             inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
+        public void Dispose() => inner.Dispose();
     }
 
     /// <summary>
     /// Backend that blocks GetKeyValue on a gate semaphore and counts how many times it is
     /// called. Used by the coalescing test to verify exactly one backend read serves N misses.
     /// </summary>
-    private sealed class CountingBlockingBackend : IPersistenceBackend
+    private sealed class CountingBlockingBackend : IPersistenceBackend, IDisposable
     {
         private readonly MemoryPersistenceBackend inner = new();
         private readonly SemaphoreSlim gate;
@@ -950,10 +953,11 @@ public sealed class TestTryGetHandler
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => inner.GetKeyValueByPrefix(prefixKeyName);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) =>
             inner.GetKeyValueByRange(prefix, startKey, limit);
-        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, out RevisionPruneResult result) =>
-            inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, out result);
+        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) =>
+            inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
         public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) =>
             inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
+        public void Dispose() => inner.Dispose();
     }
 
     /// <summary>
@@ -961,7 +965,7 @@ public sealed class TestTryGetHandler
     /// faulted-read branch. All other members delegate to an in-memory backend so the actor
     /// can spawn and operate normally.
     /// </summary>
-    private sealed class FaultyReadBackend : IPersistenceBackend
+    private sealed class FaultyReadBackend : IPersistenceBackend, IDisposable
     {
         private readonly MemoryPersistenceBackend inner = new();
 
@@ -977,10 +981,11 @@ public sealed class TestTryGetHandler
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => inner.GetKeyValueByPrefix(prefixKeyName);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) =>
             inner.GetKeyValueByRange(prefix, startKey, limit);
-        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, out RevisionPruneResult result) =>
-            inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, out result);
+        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) =>
+            inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
         public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) =>
             inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
+        public void Dispose() => inner.Dispose();
     }
 
     private static KeyValueRequest MakeGet(

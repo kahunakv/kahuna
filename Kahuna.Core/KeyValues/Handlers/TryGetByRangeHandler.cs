@@ -119,12 +119,19 @@ internal sealed class TryGetByRangeHandler : BaseHandler
             isSnapshotRead: !message.ReadTimestamp.IsNull(),
             memItems, memEnd, memEndIncl, memBatch, memMaybeMore, diskCursor, promise);
 
-        Task<List<(string, ReadOnlyKeyValueEntry)>> readTask;
+        bool capturedSnapshotRead = !message.ReadTimestamp.IsNull();
+        HLCTimestamp capturedSnapshotTs = snapshotTs;
+        HLCTimestamp capturedCurrentTime = currentTime;
+
+        Task<RangeDiskPage> readTask;
         try
         {
             readTask = context.Raft.ReadScheduler.EnqueueTask(
                 scanPartition,
-                () => context.PersistenceBackend.GetKeyValueByRange(prefix, diskCursor, limit + 1));
+                () => ProjectSnapshotPage(
+                    context.PersistenceBackend.GetKeyValueByRange(prefix, diskCursor, limit + 1),
+                    limit, capturedSnapshotRead, capturedSnapshotTs, capturedCurrentTime,
+                    context.PersistenceBackend));
         }
         catch (Exception ex)
         {
@@ -139,7 +146,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         _ = readTask.ContinueWith(t =>
         {
             if (!t.IsCompletedSuccessfully) cont.SetFaulted();
-            else cont.ScanDiskResult = t.Result;
+            else cont.RangeScanPage = t.Result;
             actorContext.Self.Send(
                 new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont });
         }, TaskScheduler.Default);
@@ -149,6 +156,64 @@ internal sealed class TryGetByRangeHandler : BaseHandler
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Builds a <see cref="RangeDiskPage"/> from a raw disk page: extracts raw pagination
+    /// facts (has-more flag and next-cursor key) from the unfiltered <paramref name="rawPage"/>,
+    /// then snapshot-projects the usable rows (excluding the sentinel).
+    ///
+    /// Separating pagination from projection fixes a silent correctness bug: when all
+    /// <c>limit + 1</c> raw rows are post-snapshot and dropped by projection, the caller must
+    /// still know the raw page was full (RawHasMore=true) and fetch the next page rather than
+    /// concluding the disk is exhausted.
+    ///
+    /// Must run on the off-actor scheduler thread — per-key GetKeyValueRevisionAtOrBefore
+    /// calls do disk I/O and must not block the actor mailbox.
+    /// </summary>
+    internal static RangeDiskPage ProjectSnapshotPage(
+        List<(string, ReadOnlyKeyValueEntry)> rawPage,
+        int limit,
+        bool isSnapshotRead,
+        HLCTimestamp snapshotTs,
+        HLCTimestamp currentTime,
+        IPersistenceBackend backend)
+    {
+        // Derive raw pagination facts before any projection filtering.
+        bool rawHasMore = rawPage.Count > limit;
+        string? rawNextCursor = rawHasMore ? rawPage[limit].Item1 : null;
+        // Usable rows are rawPage[0..limit]; the (limit+1)-th entry is the pagination sentinel.
+        int usableCount = rawHasMore ? limit : rawPage.Count;
+
+        if (!isSnapshotRead)
+        {
+            // No snapshot filtering. Return the usable slice (strip the sentinel when present).
+            List<(string, ReadOnlyKeyValueEntry)> plain = usableCount == rawPage.Count
+                ? rawPage
+                : rawPage.GetRange(0, usableCount);
+            return new RangeDiskPage(plain, rawHasMore, rawNextCursor);
+        }
+
+        List<(string, ReadOnlyKeyValueEntry)> projected = new(usableCount);
+        for (int i = 0; i < usableCount; i++)
+        {
+            (string k, ReadOnlyKeyValueEntry e) = rawPage[i];
+
+            if (e.LastModified.CompareTo(snapshotTs) <= 0)
+            {
+                projected.Add((k, e));
+                continue;
+            }
+
+            KeyValueEntry? snap = backend.GetKeyValueRevisionAtOrBefore(k, e.Revision - 1, snapshotTs);
+            if (snap is null || snap.State is KeyValueState.Deleted or KeyValueState.Undefined)
+                continue;
+            if (snap.Expires != HLCTimestamp.Zero && snap.Expires.CompareTo(currentTime) < 0)
+                continue;
+            projected.Add((k, new ReadOnlyKeyValueEntry(
+                snap.Value, snap.Revision, snap.Expires, snap.LastUsed, snap.LastModified, snap.State)));
+        }
+        return new RangeDiskPage(projected, rawHasMore, rawNextCursor);
+    }
 
     /// <summary>Computes the effective BTree bounds, substituting the prefix upper bound when EndKey is null.</summary>
     private static (string start, bool startIncl, string? end, bool endIncl) ComputeBounds(KeyValueRequest message)

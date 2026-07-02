@@ -100,9 +100,12 @@ internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
 
                         KeyValueEntry? snapshot = context.PersistenceBackend.GetKeyValueRevisionAtOrBefore(
                             key, entry.Revision - 1, readTimestamp);
-                        if (snapshot is not null && snapshot.State != KeyValueState.Deleted)
-                            projected.Add((key, new(snapshot.Value, snapshot.Revision,
-                                snapshot.Expires, snapshot.LastUsed, snapshot.LastModified, snapshot.State)));
+                        if (snapshot is null || snapshot.State is KeyValueState.Deleted or KeyValueState.Undefined)
+                            continue;
+                        if (snapshot.Expires != HLCTimestamp.Zero && snapshot.Expires.CompareTo(currentTime) < 0)
+                            continue;
+                        projected.Add((key, new(snapshot.Value, snapshot.Revision,
+                            snapshot.Expires, snapshot.LastUsed, snapshot.LastModified, snapshot.State)));
                     }
 
                     return projected;

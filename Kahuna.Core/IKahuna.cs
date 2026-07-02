@@ -282,4 +282,35 @@ public interface IKahuna
         string targetDir,
         long targetTimeMs,
         CancellationToken ct = default);
+
+    // ── MVCC snapshot floor ─────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Acquires or renews a refcounted hold protecting all revisions at/after
+    /// <paramref name="timestamp"/>. Idempotent by (holderId, timestamp): a repeat returns the same
+    /// holdId and renews the lease. While the hold is live, Kahuna keeps the revision current at
+    /// <paramref name="timestamp"/> readable via every read path that honors <c>readTimestamp</c>.
+    /// </summary>
+    public Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)>
+        LocateAndAcquireSnapshotHold(string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken ct);
+
+    /// <summary>
+    /// Renews an existing hold's lease. Returns a non-Set type when the hold has already
+    /// expired or was never registered.
+    /// </summary>
+    public Task<(KeyValueResponseType Type, HLCTimestamp LeaseExpiry)>
+        LocateAndRenewSnapshotHold(string holdId, int leaseMs, CancellationToken ct);
+
+    /// <summary>
+    /// Releases a hold. The effective floor rises when the lowest hold is released.
+    /// </summary>
+    public Task<KeyValueResponseType>
+        LocateAndReleaseSnapshotHold(string holdId, CancellationToken ct);
+
+    /// <summary>
+    /// Returns the current effective floor (minimum live held timestamp, or
+    /// <see cref="HLCTimestamp.Zero"/> when no hold is live) and the count of live holds.
+    /// </summary>
+    public Task<(HLCTimestamp EffectiveFloor, int LiveHolds)>
+        GetSnapshotFloor(CancellationToken ct);
 }

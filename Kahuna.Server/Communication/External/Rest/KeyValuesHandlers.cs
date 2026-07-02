@@ -320,5 +320,44 @@ public static class KeyValuesHandlers
                 Reason = result.Reason
             };
         });
+
+        app.MapPost("/v1/kv/snapshot-hold/acquire", async (KahunaAcquireSnapshotHoldRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrEmpty(request.HolderId))
+                return new KahunaAcquireSnapshotHoldResponse { Type = KeyValueResponseType.InvalidInput };
+
+            (KeyValueResponseType type, string holdId, HLCTimestamp leaseExpiry) =
+                await keyValues.LocateAndAcquireSnapshotHold(request.HolderId, request.Timestamp, request.LeaseMs, cancellationToken);
+
+            return new KahunaAcquireSnapshotHoldResponse { Type = type, HoldId = holdId, LeaseExpiry = leaseExpiry };
+        });
+
+        app.MapPost("/v1/kv/snapshot-hold/renew", async (KahunaRenewSnapshotHoldRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrEmpty(request.HoldId))
+                return new KahunaRenewSnapshotHoldResponse { Type = KeyValueResponseType.InvalidInput };
+
+            (KeyValueResponseType type, HLCTimestamp leaseExpiry) =
+                await keyValues.LocateAndRenewSnapshotHold(request.HoldId, request.LeaseMs, cancellationToken);
+
+            return new KahunaRenewSnapshotHoldResponse { Type = type, LeaseExpiry = leaseExpiry };
+        });
+
+        app.MapPost("/v1/kv/snapshot-hold/release", async (KahunaReleaseSnapshotHoldRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrEmpty(request.HoldId))
+                return new KahunaReleaseSnapshotHoldResponse { Type = KeyValueResponseType.InvalidInput };
+
+            KeyValueResponseType type =
+                await keyValues.LocateAndReleaseSnapshotHold(request.HoldId, cancellationToken);
+
+            return new KahunaReleaseSnapshotHoldResponse { Type = type };
+        });
+
+        app.MapGet("/v1/kv/snapshot-floor", async (IKahuna keyValues, CancellationToken cancellationToken) =>
+        {
+            (HLCTimestamp floor, int liveHolds) = await keyValues.GetSnapshotFloor(cancellationToken);
+            return new KahunaGetSnapshotFloorResponse { EffectiveFloor = floor, LiveHolds = liveHolds };
+        });
     }
 }

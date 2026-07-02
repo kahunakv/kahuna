@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package Kahuna.Server.Replication.Protos;
+
+// A single client-held snapshot floor hold (mirrors SnapshotHold).
+message SnapshotHoldMessage {
+  string holdId = 1;
+  string holderId = 2;
+  int32  timestampNode     = 3;
+  int64  timestampPhysical = 4;
+  uint32 timestampCounter  = 5;
+  int32  leaseExpiryNode     = 6;
+  int64  leaseExpiryPhysical = 7;
+  uint32 leaseExpiryCounter  = 8;
+}
+
+// Full snapshot of all live holds, replicated on the meta partition.
+// Snapshot (not delta) semantics: each committed entry fully replaces the registry,
+// so replaying the meta log on restore/failover converges on the latest hold set.
+message SnapshotFloorMessage {
+  repeated SnapshotHoldMessage holds = 1;
+}

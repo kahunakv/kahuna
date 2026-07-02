@@ -42,6 +42,8 @@ internal sealed class KeyValueContext
 
     public RangeMapStore RangeMapStore { get; }
 
+    public SnapshotFloorStore? SnapshotFloorStore { get; }
+
     public IPersistenceBackend PersistenceBackend  { get; }
 
     public BTree<string, KeyValueEntry> Store  { get; }
@@ -103,7 +105,8 @@ internal sealed class KeyValueContext
         KeySpaceRegistry keySpaceRegistry,
         RangeMapStore rangeMapStore,
         KahunaConfiguration configuration,
-        ILogger<IKahuna> logger
+        ILogger<IKahuna> logger,
+        SnapshotFloorStore? snapshotFloorStore = null
     )
     {
         ActorContext = actorContext;
@@ -119,6 +122,7 @@ internal sealed class KeyValueContext
         RangeMapStore = rangeMapStore;
         Configuration = configuration;
         Logger = logger;
+        SnapshotFloorStore = snapshotFloorStore;
     }
 
     /// <summary>

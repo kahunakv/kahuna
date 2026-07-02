@@ -1234,6 +1234,98 @@ public class RestCommunication : IKahunaCommunication
         return response ?? throw new KahunaException("TakeCoordinatedBackup returned null", LockResponseType.Errored);
     }
 
+    public async Task<(KeyValueResponseType type, string holdId, HLCTimestamp leaseExpiry)> AcquireSnapshotHold(
+        string url, string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken cancellationToken)
+    {
+        KahunaAcquireSnapshotHoldRequest request = new()
+        {
+            HolderId  = holderId,
+            Timestamp = timestamp,
+            LeaseMs   = leaseMs
+        };
+
+        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaAcquireSnapshotHoldRequest);
+        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
+
+        KahunaAcquireSnapshotHoldResponse? response = await retryPolicy.ExecuteAsync(() =>
+            url.WithOAuthBearerToken("xxx")
+               .AppendPathSegments("v1/kv/snapshot-hold/acquire")
+               .WithHeader("Accept", "application/json")
+               .WithHeader("Content-Type", "application/json")
+               .WithSettings(o => o.HttpVersion = "2.0")
+               .PostStringAsync(payload, cancellationToken: cancellationToken)
+               .ReceiveJson<KahunaAcquireSnapshotHoldResponse>()).ConfigureAwait(false);
+
+        if (response is null)
+            throw new KahunaException("AcquireSnapshotHold returned null", KeyValueResponseType.Errored);
+
+        return (response.Type, response.HoldId, response.LeaseExpiry);
+    }
+
+    public async Task<(KeyValueResponseType type, HLCTimestamp leaseExpiry)> RenewSnapshotHold(
+        string url, string holdId, int leaseMs, CancellationToken cancellationToken)
+    {
+        KahunaRenewSnapshotHoldRequest request = new() { HoldId = holdId, LeaseMs = leaseMs };
+
+        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaRenewSnapshotHoldRequest);
+        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
+
+        KahunaRenewSnapshotHoldResponse? response = await retryPolicy.ExecuteAsync(() =>
+            url.WithOAuthBearerToken("xxx")
+               .AppendPathSegments("v1/kv/snapshot-hold/renew")
+               .WithHeader("Accept", "application/json")
+               .WithHeader("Content-Type", "application/json")
+               .WithSettings(o => o.HttpVersion = "2.0")
+               .PostStringAsync(payload, cancellationToken: cancellationToken)
+               .ReceiveJson<KahunaRenewSnapshotHoldResponse>()).ConfigureAwait(false);
+
+        if (response is null)
+            throw new KahunaException("RenewSnapshotHold returned null", KeyValueResponseType.Errored);
+
+        return (response.Type, response.LeaseExpiry);
+    }
+
+    public async Task<KeyValueResponseType> ReleaseSnapshotHold(
+        string url, string holdId, CancellationToken cancellationToken)
+    {
+        KahunaReleaseSnapshotHoldRequest request = new() { HoldId = holdId };
+
+        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaReleaseSnapshotHoldRequest);
+        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
+
+        KahunaReleaseSnapshotHoldResponse? response = await retryPolicy.ExecuteAsync(() =>
+            url.WithOAuthBearerToken("xxx")
+               .AppendPathSegments("v1/kv/snapshot-hold/release")
+               .WithHeader("Accept", "application/json")
+               .WithHeader("Content-Type", "application/json")
+               .WithSettings(o => o.HttpVersion = "2.0")
+               .PostStringAsync(payload, cancellationToken: cancellationToken)
+               .ReceiveJson<KahunaReleaseSnapshotHoldResponse>()).ConfigureAwait(false);
+
+        if (response is null)
+            throw new KahunaException("ReleaseSnapshotHold returned null", KeyValueResponseType.Errored);
+
+        return response.Type;
+    }
+
+    public async Task<(HLCTimestamp effectiveFloor, int liveHolds)> GetSnapshotFloor(
+        string url, CancellationToken cancellationToken)
+    {
+        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
+
+        KahunaGetSnapshotFloorResponse? response = await retryPolicy.ExecuteAsync(() =>
+            url.WithOAuthBearerToken("xxx")
+               .AppendPathSegments("v1/kv/snapshot-floor")
+               .WithSettings(o => o.HttpVersion = "2.0")
+               .GetAsync(cancellationToken: cancellationToken)
+               .ReceiveJson<KahunaGetSnapshotFloorResponse>()).ConfigureAwait(false);
+
+        if (response is null)
+            throw new KahunaException("GetSnapshotFloor returned null", KeyValueResponseType.Errored);
+
+        return (response.EffectiveFloor, response.LiveHolds);
+    }
+
     public async Task<List<KahunaBackupInfo>> ListBackups(string url, CancellationToken cancellationToken)
     {
         AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);

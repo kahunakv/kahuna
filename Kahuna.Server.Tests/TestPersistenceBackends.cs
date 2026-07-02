@@ -1,5 +1,6 @@
 
 using Kommander;
+using Kommander.Time;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
@@ -51,17 +52,17 @@ public class TestPersistenceBackends
         using MemoryPersistenceBackend backend = new();
         backend.StoreKeyValues(MakeItems("svc", 3));
 
-        Assert.True(backend.PruneKeyValueRevisions(["svc/0000"], retentionCount: 1, TimeSpan.FromHours(1), batchSize: 100, out RevisionPruneResult targeted));
+        Assert.True(backend.PruneKeyValueRevisions(["svc/0000"], retentionCount: 1, TimeSpan.FromHours(1), batchSize: 100, HLCTimestamp.Zero, out RevisionPruneResult targeted));
         Assert.Equal(0, targeted.KeysVisited);
         Assert.Equal(0, targeted.RevisionsDeleted);
         Assert.False(targeted.BatchLimitReached);
 
-        Assert.True(backend.PruneKeyValueRevisions(null, retentionCount: 3, TimeSpan.Zero, batchSize: 50, out RevisionPruneResult sweep));
+        Assert.True(backend.PruneKeyValueRevisions(null, retentionCount: 3, TimeSpan.Zero, batchSize: 50, HLCTimestamp.Zero, out RevisionPruneResult sweep));
         Assert.Equal(0, sweep.KeysVisited);
         Assert.Equal(0, sweep.RevisionsDeleted);
         Assert.False(sweep.BatchLimitReached);
 
-        Assert.True(backend.PruneKeyValueRevisions(["svc/0000"], retentionCount: 1, TimeSpan.FromHours(1), batchSize: 100, out RevisionPruneResult secondPass));
+        Assert.True(backend.PruneKeyValueRevisions(["svc/0000"], retentionCount: 1, TimeSpan.FromHours(1), batchSize: 100, HLCTimestamp.Zero, out RevisionPruneResult secondPass));
         Assert.Equal(targeted, secondPass);
     }
 
@@ -328,7 +329,7 @@ public class TestPersistenceBackends
 
         StoreRevisions(backend, key, 10);
 
-        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 3, TimeSpan.Zero, batchSize: 1000, out RevisionPruneResult result));
+        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 3, TimeSpan.Zero, batchSize: 1000, HLCTimestamp.Zero, out RevisionPruneResult result));
         Assert.False(result.BatchLimitReached);
         Assert.Equal(3, CountSqliteRevisionRows(path, "revtest", key));
 
@@ -351,7 +352,7 @@ public class TestPersistenceBackends
 
         StoreRevisions(backend, key, 5);
 
-        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 1, TimeSpan.Zero, batchSize: 1000, out _));
+        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 1, TimeSpan.Zero, batchSize: 1000, HLCTimestamp.Zero, out _));
 
         Assert.Equal(1, CountSqliteRevisionRows(path, "revtest", key));
         Assert.NotNull(backend.GetKeyValueRevision(key, 5));
@@ -367,12 +368,12 @@ public class TestPersistenceBackends
 
         StoreRevisions(backend, key, 10);
 
-        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 3, TimeSpan.Zero, batchSize: 2, out RevisionPruneResult firstPass));
+        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 3, TimeSpan.Zero, batchSize: 2, HLCTimestamp.Zero, out RevisionPruneResult firstPass));
         Assert.Equal(2, firstPass.RevisionsDeleted);
         Assert.True(firstPass.BatchLimitReached);
         Assert.True(CountSqliteRevisionRows(path, "revtest", key) > 3);
 
-        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 3, TimeSpan.Zero, batchSize: 1000, out RevisionPruneResult secondPass));
+        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 3, TimeSpan.Zero, batchSize: 1000, HLCTimestamp.Zero, out RevisionPruneResult secondPass));
         Assert.False(secondPass.BatchLimitReached);
         Assert.Equal(3, CountSqliteRevisionRows(path, "revtest", key));
     }
@@ -397,6 +398,7 @@ public class TestPersistenceBackends
             retentionCount: 0,
             TimeSpan.FromMinutes(30),
             batchSize: 1000,
+            HLCTimestamp.Zero,
             out RevisionPruneResult result));
 
         Assert.False(result.BatchLimitReached);
@@ -416,7 +418,7 @@ public class TestPersistenceBackends
 
         StoreRevisions(backend, key, 8);
 
-        Assert.True(backend.PruneKeyValueRevisions(null, retentionCount: 2, TimeSpan.Zero, batchSize: 1000, out RevisionPruneResult result));
+        Assert.True(backend.PruneKeyValueRevisions(null, retentionCount: 2, TimeSpan.Zero, batchSize: 1000, HLCTimestamp.Zero, out RevisionPruneResult result));
         Assert.Equal(2, CountSqliteRevisionRows(path, "revtest", key));
         Assert.NotNull(backend.GetKeyValueRevision(key, 8));
         Assert.Null(backend.GetKeyValueRevision(key, 6));
@@ -436,7 +438,7 @@ public class TestPersistenceBackends
         StoreRevisions(backend, keyB, 10);  // retentionCount 3 → 7 prunable
 
         // batchSize 4: keyA fully pruned (1 delete), keyB consumes the remaining 3 and still has work.
-        Assert.True(backend.PruneKeyValueRevisions([keyA, keyB], retentionCount: 3, TimeSpan.Zero, batchSize: 4, out RevisionPruneResult result));
+        Assert.True(backend.PruneKeyValueRevisions([keyA, keyB], retentionCount: 3, TimeSpan.Zero, batchSize: 4, HLCTimestamp.Zero, out RevisionPruneResult result));
 
         Assert.True(result.BatchLimitReached);
         Assert.NotNull(result.RemainingKeys);
@@ -463,7 +465,7 @@ public class TestPersistenceBackends
 
         while (true)
         {
-            Assert.True(backend.PruneKeyValueRevisions(null, retentionCount: 2, TimeSpan.Zero, batchSize: budget, out RevisionPruneResult r));
+            Assert.True(backend.PruneKeyValueRevisions(null, retentionCount: 2, TimeSpan.Zero, batchSize: budget, HLCTimestamp.Zero, out RevisionPruneResult r));
 
             // Each pass is bounded: at most `budget` keys visited and `budget` deletes.
             Assert.True(r.KeysVisited <= budget);
@@ -502,7 +504,7 @@ public class TestPersistenceBackends
 
         while (true)
         {
-            Assert.True(backend.PruneKeyValueRevisions(null, retentionCount: 2, TimeSpan.Zero, batchSize: budget, out RevisionPruneResult r));
+            Assert.True(backend.PruneKeyValueRevisions(null, retentionCount: 2, TimeSpan.Zero, batchSize: budget, HLCTimestamp.Zero, out RevisionPruneResult r));
 
             Assert.Equal(0, r.RevisionsDeleted);
             Assert.True(r.KeysVisited <= budget);
@@ -674,7 +676,7 @@ public class TestPersistenceBackends
 
         StoreRevisionsRocksDb(backend, key, 10);
 
-        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 3, TimeSpan.Zero, batchSize: 1000, out RevisionPruneResult result));
+        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 3, TimeSpan.Zero, batchSize: 1000, HLCTimestamp.Zero, out RevisionPruneResult result));
         Assert.False(result.BatchLimitReached);
         Assert.Equal(7, result.RevisionsDeleted);
         Assert.Equal(3, CountRocksDbRevisionEntries(backend, key));
@@ -698,7 +700,7 @@ public class TestPersistenceBackends
 
         StoreRevisionsRocksDb(backend, key, 5);
 
-        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 1, TimeSpan.Zero, batchSize: 1000, out _));
+        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 1, TimeSpan.Zero, batchSize: 1000, HLCTimestamp.Zero, out _));
 
         Assert.Equal(1, CountRocksDbRevisionEntries(backend, key));
         Assert.NotNull(backend.GetKeyValueRevision(key, 5));
@@ -714,12 +716,12 @@ public class TestPersistenceBackends
 
         StoreRevisionsRocksDb(backend, key, 10);
 
-        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 3, TimeSpan.Zero, batchSize: 2, out RevisionPruneResult firstPass));
+        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 3, TimeSpan.Zero, batchSize: 2, HLCTimestamp.Zero, out RevisionPruneResult firstPass));
         Assert.Equal(2, firstPass.RevisionsDeleted);
         Assert.True(firstPass.BatchLimitReached);
         Assert.True(CountRocksDbRevisionEntries(backend, key) > 3);
 
-        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 3, TimeSpan.Zero, batchSize: 1000, out RevisionPruneResult secondPass));
+        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 3, TimeSpan.Zero, batchSize: 1000, HLCTimestamp.Zero, out RevisionPruneResult secondPass));
         Assert.False(secondPass.BatchLimitReached);
         Assert.Equal(3, CountRocksDbRevisionEntries(backend, key));
     }
@@ -739,7 +741,7 @@ public class TestPersistenceBackends
             backend.StoreKeyValues([MakeItem(key, revision, lastModified)]);
         }
 
-        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 0, TimeSpan.FromMinutes(30), batchSize: 1000, out RevisionPruneResult result));
+        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 0, TimeSpan.FromMinutes(30), batchSize: 1000, HLCTimestamp.Zero, out RevisionPruneResult result));
         Assert.False(result.BatchLimitReached);
         Assert.Equal(1, CountRocksDbRevisionEntries(backend, key));
         Assert.NotNull(backend.GetKeyValue(key));
@@ -757,7 +759,7 @@ public class TestPersistenceBackends
 
         StoreRevisionsRocksDb(backend, key, 8);
 
-        Assert.True(backend.PruneKeyValueRevisions(null, retentionCount: 2, TimeSpan.Zero, batchSize: 1000, out RevisionPruneResult result));
+        Assert.True(backend.PruneKeyValueRevisions(null, retentionCount: 2, TimeSpan.Zero, batchSize: 1000, HLCTimestamp.Zero, out RevisionPruneResult result));
         Assert.Equal(2, CountRocksDbRevisionEntries(backend, key));
         Assert.NotNull(backend.GetKeyValueRevision(key, 8));
         Assert.Null(backend.GetKeyValueRevision(key, 6));
@@ -772,7 +774,7 @@ public class TestPersistenceBackends
 
         StoreRevisionsRocksDb(backend, key, 5);
 
-        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 1, TimeSpan.Zero, batchSize: 1000, out _));
+        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 1, TimeSpan.Zero, batchSize: 1000, HLCTimestamp.Zero, out _));
 
         Assert.NotNull(backend.GetKeyValue(key));
         Assert.Equal(5, backend.GetKeyValue(key)!.Revision);
@@ -787,7 +789,7 @@ public class TestPersistenceBackends
 
         StoreRevisionsRocksDb(backend, key, 6);
 
-        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 2, TimeSpan.Zero, batchSize: 1000, out RevisionPruneResult result));
+        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 2, TimeSpan.Zero, batchSize: 1000, HLCTimestamp.Zero, out RevisionPruneResult result));
         Assert.Equal(4, result.RevisionsDeleted);
         Assert.Equal(2, CountRocksDbRevisionEntries(backend, key));
         Assert.NotNull(backend.GetKeyValue(key));
@@ -806,7 +808,7 @@ public class TestPersistenceBackends
 
         StoreRevisionsRocksDb(backend, key, 6);
 
-        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 2, TimeSpan.Zero, batchSize: 1000, out RevisionPruneResult result));
+        Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 2, TimeSpan.Zero, batchSize: 1000, HLCTimestamp.Zero, out RevisionPruneResult result));
         Assert.Equal(4, result.RevisionsDeleted);
         Assert.Equal(2, CountRocksDbRevisionEntries(backend, key));
         Assert.NotNull(backend.GetKeyValue(key));
@@ -826,7 +828,7 @@ public class TestPersistenceBackends
         StoreRevisionsRocksDb(backend, keyB, 10);  // retentionCount 3 → 7 prunable
 
         // batchSize 4: keyA fully pruned (1 delete), keyB consumes the remaining 3 and still has work.
-        Assert.True(backend.PruneKeyValueRevisions([keyA, keyB], retentionCount: 3, TimeSpan.Zero, batchSize: 4, out RevisionPruneResult result));
+        Assert.True(backend.PruneKeyValueRevisions([keyA, keyB], retentionCount: 3, TimeSpan.Zero, batchSize: 4, HLCTimestamp.Zero, out RevisionPruneResult result));
 
         Assert.True(result.BatchLimitReached);
         Assert.NotNull(result.RemainingKeys);
@@ -851,7 +853,7 @@ public class TestPersistenceBackends
 
         while (true)
         {
-            Assert.True(backend.PruneKeyValueRevisions(null, retentionCount: 2, TimeSpan.Zero, batchSize: budget, out RevisionPruneResult r));
+            Assert.True(backend.PruneKeyValueRevisions(null, retentionCount: 2, TimeSpan.Zero, batchSize: budget, HLCTimestamp.Zero, out RevisionPruneResult r));
 
             Assert.True(r.KeysVisited <= budget);
             Assert.True(r.RevisionsDeleted <= budget);
@@ -887,7 +889,7 @@ public class TestPersistenceBackends
 
         while (true)
         {
-            Assert.True(backend.PruneKeyValueRevisions(null, retentionCount: 2, TimeSpan.Zero, batchSize: budget, out RevisionPruneResult r));
+            Assert.True(backend.PruneKeyValueRevisions(null, retentionCount: 2, TimeSpan.Zero, batchSize: budget, HLCTimestamp.Zero, out RevisionPruneResult r));
 
             Assert.Equal(0, r.RevisionsDeleted);
             Assert.True(r.KeysVisited <= budget);

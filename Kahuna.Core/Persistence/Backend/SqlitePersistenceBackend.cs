@@ -910,6 +910,7 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         int retentionCount,
         TimeSpan retentionAge,
         int batchSize,
+        HLCTimestamp floorTimestamp,
         out RevisionPruneResult result)
     {
         result = new(KeysVisited: 0, RevisionsDeleted: 0, BatchLimitReached: false);
@@ -973,7 +974,8 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                             retentionCount,
                             ageEnabled,
                             cutoffPhysical,
-                            budget);
+                            budget,
+                            floorTimestamp);
 
                         deleted += deletedForKey;
 
@@ -986,7 +988,8 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                                 countEnabled,
                                 retentionCount,
                                 ageEnabled,
-                                cutoffPhysical))
+                                cutoffPhysical,
+                                floorTimestamp))
                         {
                             batchLimitReached = true;
                             (remaining ??= []).Add(key);
@@ -1047,7 +1050,8 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                             retentionCount,
                             ageEnabled,
                             cutoffPhysical,
-                            budget);
+                            budget,
+                            floorTimestamp);
 
                         deleted += deletedForKey;
 
@@ -1165,7 +1169,8 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         int retentionCount,
         bool ageEnabled,
         long cutoffPhysical,
-        int limit)
+        int limit,
+        HLCTimestamp floorTimestamp)
     {
         if (limit <= 0)
             return 0;
@@ -1173,6 +1178,32 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         long? currentRevision = GetCurrentRevision(connection, key);
         if (currentRevision is null)
             return 0;
+
+        // Determine floor revision: the highest revision whose LastModified ≤ floorTimestamp.
+        // All revisions >= floorRevision are protected from deletion.
+        long floorRevision = -1;
+        if (floorTimestamp != HLCTimestamp.Zero)
+        {
+            const string floorQuery = """
+                SELECT COALESCE(MAX(revision), -1)
+                FROM keys_revisions
+                WHERE key = @key
+                  AND (
+                      lastModifiedPhysical < @floorPhysical
+                      OR (lastModifiedPhysical = @floorPhysical AND lastModifiedCounter < @floorCounter)
+                      OR (lastModifiedPhysical = @floorPhysical AND lastModifiedCounter = @floorCounter AND lastModifiedNode <= @floorNode)
+                  )
+                """;
+
+            using SqliteCommand floorCmd = new(floorQuery, connection);
+            floorCmd.Parameters.AddWithValue("@key", key);
+            floorCmd.Parameters.AddWithValue("@floorPhysical", floorTimestamp.L);
+            floorCmd.Parameters.AddWithValue("@floorCounter", (long)floorTimestamp.C);
+            floorCmd.Parameters.AddWithValue("@floorNode", floorTimestamp.N);
+
+            object? scalar = floorCmd.ExecuteScalar();
+            floorRevision = scalar is null or DBNull ? -1 : Convert.ToInt64(scalar);
+        }
 
         List<string> predicates = [];
 
@@ -1197,6 +1228,14 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
 
         string policy = string.Join(" OR ", predicates);
 
+        // Gate on floorTimestamp != Zero (not floorRevision >= 0): when a floor is active but
+        // no revision was written at-or-before it (key entirely created after the floor), all
+        // revisions must still be protected.  floorRevision = -1 makes "revision < -1" match
+        // nothing, so every row for that key is skipped — correct, since every revision is after
+        // the floor and must be kept.
+        bool floorActive = floorTimestamp != HLCTimestamp.Zero;
+        string floorFilter = floorActive ? "AND revision < @floorRevision" : "";
+
         string deleteQuery = $"""
             DELETE FROM keys_revisions
             WHERE rowid IN (
@@ -1204,6 +1243,7 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                 FROM keys_revisions
                 WHERE key = @key
                   AND revision <> @currentRevision
+                  {floorFilter}
                   AND ({policy})
                 LIMIT @limit
             )
@@ -1212,6 +1252,9 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         using SqliteCommand command = new(deleteQuery, connection);
         command.Parameters.AddWithValue("@key", key);
         command.Parameters.AddWithValue("@currentRevision", currentRevision.Value);
+
+        if (floorActive)
+            command.Parameters.AddWithValue("@floorRevision", floorRevision);
 
         if (countEnabled)
             command.Parameters.AddWithValue("@retentionCount", retentionCount);
@@ -1230,11 +1273,37 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         bool countEnabled,
         int retentionCount,
         bool ageEnabled,
-        long cutoffPhysical)
+        long cutoffPhysical,
+        HLCTimestamp floorTimestamp)
     {
         long? currentRevision = GetCurrentRevision(connection, key);
         if (currentRevision is null)
             return false;
+
+        // Compute floor revision the same way PruneKeyRevisions does.
+        long floorRevision = -1;
+        if (floorTimestamp != HLCTimestamp.Zero)
+        {
+            const string floorQuery = """
+                SELECT COALESCE(MAX(revision), -1)
+                FROM keys_revisions
+                WHERE key = @key
+                  AND (
+                      lastModifiedPhysical < @floorPhysical
+                      OR (lastModifiedPhysical = @floorPhysical AND lastModifiedCounter < @floorCounter)
+                      OR (lastModifiedPhysical = @floorPhysical AND lastModifiedCounter = @floorCounter AND lastModifiedNode <= @floorNode)
+                  )
+                """;
+
+            using SqliteCommand floorCmd = new(floorQuery, connection);
+            floorCmd.Parameters.AddWithValue("@key", key);
+            floorCmd.Parameters.AddWithValue("@floorPhysical", floorTimestamp.L);
+            floorCmd.Parameters.AddWithValue("@floorCounter", (long)floorTimestamp.C);
+            floorCmd.Parameters.AddWithValue("@floorNode", floorTimestamp.N);
+
+            object? scalar = floorCmd.ExecuteScalar();
+            floorRevision = scalar is null or DBNull ? -1 : Convert.ToInt64(scalar);
+        }
 
         List<string> predicates = [];
 
@@ -1259,11 +1328,15 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
 
         string policy = string.Join(" OR ", predicates);
 
+        bool floorActive = floorTimestamp != HLCTimestamp.Zero;
+        string floorFilter = floorActive ? "AND revision < @floorRevision" : "";
+
         string query = $"""
             SELECT 1
             FROM keys_revisions
             WHERE key = @key
               AND revision <> @currentRevision
+              {floorFilter}
               AND ({policy})
             LIMIT 1
             """;
@@ -1271,6 +1344,9 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         using SqliteCommand command = new(query, connection);
         command.Parameters.AddWithValue("@key", key);
         command.Parameters.AddWithValue("@currentRevision", currentRevision.Value);
+
+        if (floorActive)
+            command.Parameters.AddWithValue("@floorRevision", floorRevision);
 
         if (countEnabled)
             command.Parameters.AddWithValue("@retentionCount", retentionCount);

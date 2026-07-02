@@ -84,6 +84,18 @@ public interface IKahunaCommunication
 
      Task<bool> RegisterKeyRange(string url, string keySpace, CancellationToken cancellationToken);
 
+     Task<(KeyValueResponseType type, string holdId, HLCTimestamp leaseExpiry)> AcquireSnapshotHold(
+         string url, string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken cancellationToken);
+
+     Task<(KeyValueResponseType type, HLCTimestamp leaseExpiry)> RenewSnapshotHold(
+         string url, string holdId, int leaseMs, CancellationToken cancellationToken);
+
+     Task<KeyValueResponseType> ReleaseSnapshotHold(
+         string url, string holdId, CancellationToken cancellationToken);
+
+     Task<(HLCTimestamp effectiveFloor, int liveHolds)> GetSnapshotFloor(
+         string url, CancellationToken cancellationToken);
+
      Task<KahunaClusterMembershipResponse> GetClusterMembership(string url, CancellationToken cancellationToken);
 
      Task<KahunaBackupInfo> TakeFullBackup(string url, CancellationToken cancellationToken);

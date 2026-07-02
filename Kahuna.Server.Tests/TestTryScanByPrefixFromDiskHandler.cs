@@ -119,7 +119,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
             Assert.Equal(KeyValueResponseType.Get, resp!.Type);
             Assert.NotNull(resp.Items);
             // Tombstone must not appear in the result.
-            Assert.Equal(1, resp.Items!.Count);
+            Assert.Single(resp.Items!);
             Assert.Equal("ns/live", resp.Items[0].Item1);
         }
         finally { scheduler.Stop(); }
@@ -184,7 +184,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
             // ephemeral TryGet (never touches disk, completes immediately on the actor thread)
             // to drain the actor mailbox — by the time the sentinel returns, all N prefix
             // scans have been processed and coalesced onto the single continuation.
-            entered.Wait(TimeSpan.FromSeconds(5));
+            entered.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             KeyValueResponse? sentinel = await actorRef.Ask(
                 MakeEphemeralGet("sentinel"), TimeSpan.FromSeconds(10));
 
@@ -200,7 +200,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
             {
                 Assert.NotNull(r);
                 Assert.Equal(KeyValueResponseType.Get, r!.Type);
-                Assert.Equal(1, r.Items!.Count);
+                Assert.Single(r.Items!);
             }
         }
         finally { scheduler.Stop(); }
@@ -348,7 +348,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
 
     // ── inner backends ───────────────────────────────────────────────────────────────────
 
-    private sealed class PrefixBackend : IPersistenceBackend
+    private sealed class PrefixBackend : IPersistenceBackend, IDisposable
     {
         private readonly MemoryPersistenceBackend inner = new();
         private readonly List<(string Key, ReadOnlyKeyValueEntry Entry)> diskEntries;
@@ -368,8 +368,9 @@ public sealed class TestTryScanByPrefixFromDiskHandler
         public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) => inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => diskEntries.Where(e => e.Key.StartsWith(prefixKeyName, StringComparison.Ordinal)).Select(e => (e.Key, e.Entry)).ToList();
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) => inner.GetKeyValueByRange(prefix, startKey, limit);
-        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, out result);
+        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
         public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) => inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
+        public void Dispose() => inner.Dispose();
     }
 
     /// <summary>
@@ -377,7 +378,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
     /// revision-at-or-before-a-snapshot projection, so a snapshot scan's as-of behaviour can be
     /// asserted without materialising real multi-revision history.
     /// </summary>
-    private sealed class SnapshotPrefixBackend : IPersistenceBackend
+    private sealed class SnapshotPrefixBackend : IPersistenceBackend, IDisposable
     {
         private readonly MemoryPersistenceBackend inner = new();
         private readonly List<(string Key, ReadOnlyKeyValueEntry Entry)> latest;
@@ -401,11 +402,12 @@ public sealed class TestTryScanByPrefixFromDiskHandler
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) =>
             latest.Where(e => e.Key.StartsWith(prefixKeyName, StringComparison.Ordinal)).Select(e => (e.Key, e.Entry)).ToList();
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) => inner.GetKeyValueByRange(prefix, startKey, limit);
-        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, out result);
+        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
         public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) => inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
+        public void Dispose() => inner.Dispose();
     }
 
-    private sealed class FaultingBackend : IPersistenceBackend
+    private sealed class FaultingBackend : IPersistenceBackend, IDisposable
     {
         private readonly MemoryPersistenceBackend inner = new();
 
@@ -417,11 +419,12 @@ public sealed class TestTryScanByPrefixFromDiskHandler
         public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) => inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => throw new InvalidOperationException("simulated disk fault");
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) => inner.GetKeyValueByRange(prefix, startKey, limit);
-        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, out result);
+        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
         public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) => inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
+        public void Dispose() => inner.Dispose();
     }
 
-    private sealed class CountingPrefixBackend : IPersistenceBackend
+    private sealed class CountingPrefixBackend : IPersistenceBackend, IDisposable
     {
         private readonly MemoryPersistenceBackend inner = new();
         private readonly ManualResetEventSlim gate;
@@ -460,7 +463,8 @@ public sealed class TestTryScanByPrefixFromDiskHandler
         }
 
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) => inner.GetKeyValueByRange(prefix, startKey, limit);
-        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, out result);
+        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
         public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) => inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
+        public void Dispose() => inner.Dispose();
     }
 }

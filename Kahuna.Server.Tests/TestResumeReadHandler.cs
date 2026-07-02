@@ -28,7 +28,7 @@ public sealed class TestResumeReadHandler
     // ── (a) Disk result, no concurrent write — disk value served and cached ───────────────
 
     [Fact]
-    public void PointRead_NoConcurrentWrite_DiskValueCachedAndServed()
+    public async Task PointRead_NoConcurrentWrite_DiskValueCachedAndServed()
     {
         (ResumeReadHandler handler, KeyValueContext context, RaftManager raft) = CreateHandler();
         HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
@@ -51,7 +51,7 @@ public sealed class TestResumeReadHandler
         handler.Execute(msg);
 
         Assert.True(promise.Task.IsCompleted);
-        KeyValueResponse? resp = promise.Task.Result;
+        KeyValueResponse? resp = await promise.Task;
         Assert.NotNull(resp);
         Assert.Equal(KeyValueResponseType.Get, resp!.Type);
         Assert.NotNull(resp.Entry);
@@ -66,7 +66,7 @@ public sealed class TestResumeReadHandler
     // ── (b) Concurrent write landed — resident higher-revision entry wins ─────────────────
 
     [Fact]
-    public void PointRead_ConcurrentWriteLanded_ResidentHigherRevisionWins()
+    public async Task PointRead_ConcurrentWriteLanded_ResidentHigherRevisionWins()
     {
         (ResumeReadHandler handler, KeyValueContext context, RaftManager raft) = CreateHandler();
         HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
@@ -99,7 +99,7 @@ public sealed class TestResumeReadHandler
         handler.Execute(MakeResumeMsg(cont));
 
         Assert.True(promise.Task.IsCompleted);
-        KeyValueResponse? resp = promise.Task.Result;
+        KeyValueResponse? resp = await promise.Task;
         Assert.NotNull(resp);
         Assert.Equal(KeyValueResponseType.Get, resp!.Type);
         Assert.Equal(10L, resp.Entry!.Revision);
@@ -113,7 +113,7 @@ public sealed class TestResumeReadHandler
     // ── (b-variant) Disk result is null — DoesNotExist when nothing is resident either ───
 
     [Fact]
-    public void PointRead_DiskMiss_NoResident_DoesNotExistReturned()
+    public async Task PointRead_DiskMiss_NoResident_DoesNotExistReturned()
     {
         (ResumeReadHandler handler, KeyValueContext context, _) = CreateHandler();
 
@@ -123,7 +123,7 @@ public sealed class TestResumeReadHandler
         handler.Execute(MakeResumeMsg(cont));
 
         Assert.True(promise.Task.IsCompleted);
-        KeyValueResponse? resp = promise.Task.Result;
+        KeyValueResponse? resp = await promise.Task;
         Assert.NotNull(resp);
         Assert.Equal(KeyValueResponseType.DoesNotExist, resp!.Type);
 
@@ -163,7 +163,7 @@ public sealed class TestResumeReadHandler
     // ── tombstone / expiry guards ─────────────────────────────────────────────────────────
 
     [Fact]
-    public void PointRead_DiskTombstone_ReturnsDoesNotExist()
+    public async Task PointRead_DiskTombstone_ReturnsDoesNotExist()
     {
         (ResumeReadHandler handler, KeyValueContext context, RaftManager raft) = CreateHandler();
         HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
@@ -184,7 +184,7 @@ public sealed class TestResumeReadHandler
         handler.Execute(MakeResumeMsg(cont));
 
         Assert.True(promise.Task.IsCompleted);
-        Assert.Equal(KeyValueResponseType.DoesNotExist, promise.Task.Result!.Type);
+        Assert.Equal(KeyValueResponseType.DoesNotExist, (await promise.Task)!.Type);
 
         // Tombstone is inserted into the cache for housekeeping (eviction/expiry paths need it),
         // but must not be served as a live value.
@@ -193,7 +193,7 @@ public sealed class TestResumeReadHandler
     }
 
     [Fact]
-    public void PointRead_ResidentTombstone_ReturnsDoesNotExist()
+    public async Task PointRead_ResidentTombstone_ReturnsDoesNotExist()
     {
         (ResumeReadHandler handler, KeyValueContext context, RaftManager raft) = CreateHandler();
         HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
@@ -226,7 +226,7 @@ public sealed class TestResumeReadHandler
         handler.Execute(MakeResumeMsg(cont));
 
         Assert.True(promise.Task.IsCompleted);
-        Assert.Equal(KeyValueResponseType.DoesNotExist, promise.Task.Result!.Type);
+        Assert.Equal(KeyValueResponseType.DoesNotExist, (await promise.Task)!.Type);
 
         // Cache must still hold the resident tombstone (not overwritten with the stale live value).
         Assert.Equal(KeyValueState.Deleted, context.Store.Get("k")!.State);
@@ -234,7 +234,7 @@ public sealed class TestResumeReadHandler
     }
 
     [Fact]
-    public void PointRead_DiskExpiredEntry_ReturnsDoesNotExist()
+    public async Task PointRead_DiskExpiredEntry_ReturnsDoesNotExist()
     {
         (ResumeReadHandler handler, KeyValueContext context, RaftManager raft) = CreateHandler();
         HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
@@ -258,13 +258,13 @@ public sealed class TestResumeReadHandler
         handler.Execute(MakeResumeMsg(cont));
 
         Assert.True(promise.Task.IsCompleted);
-        Assert.Equal(KeyValueResponseType.DoesNotExist, promise.Task.Result!.Type);
+        Assert.Equal(KeyValueResponseType.DoesNotExist, (await promise.Task)!.Type);
     }
 
     // ── (c) Multi-page continuation — first call defers, second call resolves ─────────────
 
     [Fact]
-    public void MultiPage_FirstCallDefers_SecondCallResolvesWithAggregatedResult()
+    public async Task MultiPage_FirstCallDefers_SecondCallResolvesWithAggregatedResult()
     {
         (ResumeReadHandler handler, KeyValueContext context, _) = CreateHandler();
 
@@ -283,7 +283,7 @@ public sealed class TestResumeReadHandler
         Assert.Equal(2, cont.ExecuteCount);
         Assert.True(promise.Task.IsCompleted, "promise must be resolved after final page");
 
-        KeyValueResponse? resp = promise.Task.Result;
+        KeyValueResponse? resp = await promise.Task;
         Assert.NotNull(resp);
         Assert.Equal(KeyValueResponseType.Get, resp!.Type);
     }
@@ -326,7 +326,7 @@ public sealed class TestResumeReadHandler
     // ── stage-3 exception must fail every waiter and clear the in-flight registration ─────
 
     [Fact]
-    public void ThrowingContinuation_ResolvesAllWaitersMustRetry_AndClearsPendingRegistration()
+    public async Task ThrowingContinuation_ResolvesAllWaitersMustRetry_AndClearsPendingRegistration()
     {
         (ResumeReadHandler handler, KeyValueContext context, _) = CreateHandler();
 
@@ -352,7 +352,7 @@ public sealed class TestResumeReadHandler
         foreach (TaskCompletionSource<KeyValueResponse?> w in new[] { primary, waiter2, waiter3 })
         {
             Assert.True(w.Task.IsCompleted, "every coalesced waiter must be resolved, never stranded");
-            Assert.Equal(KeyValueResponseType.MustRetry, w.Task.Result!.Type);
+            Assert.Equal(KeyValueResponseType.MustRetry, (await w.Task)!.Type);
         }
 
         // The dead continuation must be gone from the map, so the next miss starts a fresh read
@@ -363,7 +363,7 @@ public sealed class TestResumeReadHandler
     // ── Range snapshot: in-memory entries are projected to their as-of revision ────────────
 
     [Fact]
-    public void RangeSnapshotScan_ProjectsInMemoryEntriesToRevisionAtOrBeforeSnapshot()
+    public async Task RangeSnapshotScan_ProjectsInMemoryEntriesToRevisionAtOrBeforeSnapshot()
     {
         (ResumeReadHandler handler, KeyValueContext context, RaftManager raft) = CreateHandler();
         HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
@@ -429,7 +429,7 @@ public sealed class TestResumeReadHandler
         handler.Execute(MakeResumeMsg(cont));
 
         Assert.True(promise.Task.IsCompleted);
-        KeyValueResponse? resp = promise.Task.Result;
+        KeyValueResponse? resp = await promise.Task;
         Assert.NotNull(resp);
         Assert.Equal(KeyValueResponseType.Get, resp!.Type);
         Assert.NotNull(resp.RangeResult);
@@ -452,7 +452,7 @@ public sealed class TestResumeReadHandler
     // ── Range scan re-queries memory in bounded batches (no O(N) stage-1 copy) ────────────
 
     [Fact]
-    public void RangeScan_ResidentRangeExceedsBatch_ReQueriesRemainingBatchesInOrder()
+    public async Task RangeScan_ResidentRangeExceedsBatch_ReQueriesRemainingBatchesInOrder()
     {
         (ResumeReadHandler handler, KeyValueContext context, RaftManager raft) = CreateHandler();
         HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
@@ -489,7 +489,7 @@ public sealed class TestResumeReadHandler
         handler.Execute(MakeResumeMsg(cont));
 
         Assert.True(promise.Task.IsCompleted);
-        KeyValueResponse? resp = promise.Task.Result;
+        KeyValueResponse? resp = await promise.Task;
         Assert.NotNull(resp);
         Assert.Equal(KeyValueResponseType.Get, resp!.Type);
 

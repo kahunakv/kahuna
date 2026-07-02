@@ -36,6 +36,13 @@ namespace Kahuna.Shared.Communication.Rest;
 [JsonSerializable(typeof(KahunaBackupIncrementalRequest))]
 [JsonSerializable(typeof(KahunaBackupRestoreRequest))]
 [JsonSerializable(typeof(KahunaRestoreResponse))]
+[JsonSerializable(typeof(KahunaAcquireSnapshotHoldRequest))]
+[JsonSerializable(typeof(KahunaAcquireSnapshotHoldResponse))]
+[JsonSerializable(typeof(KahunaRenewSnapshotHoldRequest))]
+[JsonSerializable(typeof(KahunaRenewSnapshotHoldResponse))]
+[JsonSerializable(typeof(KahunaReleaseSnapshotHoldRequest))]
+[JsonSerializable(typeof(KahunaReleaseSnapshotHoldResponse))]
+[JsonSerializable(typeof(KahunaGetSnapshotFloorResponse))]
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 public sealed partial class KahunaJsonContext : JsonSerializerContext
 {

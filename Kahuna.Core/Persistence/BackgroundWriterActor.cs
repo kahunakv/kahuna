@@ -3,6 +3,7 @@ using Nixie;
 using Kommander;
 using System.Diagnostics;
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Persistence.Logging;
 using Kahuna.Server.Persistence.Pitr;
@@ -50,6 +51,8 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     private readonly IRaft raft;
 
     private readonly IPersistenceBackend persistenceBackend;
+
+    private readonly SnapshotFloorStore? snapshotFloorStore;
 
     private readonly KahunaConfiguration configuration;
 
@@ -114,17 +117,26 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// first tick fires immediately on startup (re-asserting the floor after a restart).
     /// </summary>
     private DateTime lastPitrTickUtc = DateTime.MinValue;
+
+    /// <summary>
+    /// Called on the scheduler thread immediately before <c>GetFloorForPrune</c> during both
+    /// targeted cleanup and full sweep. Null in production; set by tests to gate the prune task
+    /// before the floor is sampled so that concurrent hold acquisitions can be observed.
+    /// </summary>
+    internal Action? BeforePruneSampleHook;
     
     public BackgroundWriterActor(
         IActorContext<BackgroundWriterActor, BackgroundWriteRequest> context,
         IRaft raft,
         IPersistenceBackend persistenceBackend,
+        SnapshotFloorStore? snapshotFloorStore,
         KahunaConfiguration configuration,
         ILogger<IKahuna> logger
     )
     {
         this.raft = raft;
         this.persistenceBackend = persistenceBackend;
+        this.snapshotFloorStore = snapshotFloorStore;
         this.configuration = configuration;
         this.logger = logger;
         this.self = context.Self;
@@ -486,15 +498,28 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         stopwatch.Restart();
         RevisionPruneResult pruneResult = default;
 
+        SnapshotFloorStore? capturedFloorStore = snapshotFloorStore;
+        IRaft capturedRaft = raft;
+
         try
         {
+            Action? capturedHook = BeforePruneSampleHook;
             bool success = await raft.ReadScheduler.EnqueueTask(0, () =>
             {
+                capturedHook?.Invoke();
+                // Sample the floor here (inside the task) so any hold acquired while this task
+                // was queued is still observed. A residual window remains: a hold acquired after
+                // GetFloorForPrune returns but before PruneKeyValueRevisions completes is still
+                // invisible. That window is now micro- to low-millisecond; full closure would
+                // require mutual exclusion between acquire and the delete (deferred).
+                HLCTimestamp floor = capturedFloorStore?.GetFloorForPrune(capturedRaft) ?? HLCTimestamp.Zero;
+
                 bool ok = persistenceBackend.PruneKeyValueRevisions(
                     keysToClean,
                     configuration.PersistentRevisionRetentionCount,
                     configuration.PersistentRevisionRetentionAge,
                     configuration.PersistentRevisionCleanupBatchSize,
+                    floor,
                     out RevisionPruneResult r);
                 pruneResult = r;
                 return ok;
@@ -577,15 +602,27 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         stopwatch.Restart();
         RevisionPruneResult pruneResult = default;
 
+        SnapshotFloorStore? capturedSweepFloorStore = snapshotFloorStore;
+        IRaft capturedSweepRaft = raft;
+
+        Action? capturedSweepHook = BeforePruneSampleHook;
         try
         {
             bool success = await raft.ReadScheduler.EnqueueTask(0, () =>
             {
+                capturedSweepHook?.Invoke();
+                // Sample the floor here (inside the task) so any hold acquired while this task
+                // was queued is still observed. Residual window: a hold acquired after
+                // GetFloorForPrune returns but before PruneKeyValueRevisions completes is still
+                // invisible. That window is now micro- to low-millisecond; full closure deferred.
+                HLCTimestamp sweepFloor = capturedSweepFloorStore?.GetFloorForPrune(capturedSweepRaft) ?? HLCTimestamp.Zero;
+
                 bool ok = persistenceBackend.PruneKeyValueRevisions(
                     null,
                     configuration.PersistentRevisionRetentionCount,
                     configuration.PersistentRevisionRetentionAge,
                     configuration.PersistentRevisionCleanupBatchSize,
+                    sweepFloor,
                     out RevisionPruneResult r);
                 pruneResult = r;
                 return ok;

@@ -41,6 +41,12 @@ internal interface IPersistenceBackend
     /// <param name="retentionCount">Maximum revisions to keep per key; <c>0</c> disables count-based pruning.</param>
     /// <param name="retentionAge">Maximum revision age; <see cref="TimeSpan.Zero"/> disables age-based pruning.</param>
     /// <param name="batchSize">Maximum revision records to delete in this pass.</param>
+    /// <param name="floorTimestamp">
+    /// Snapshot floor: the highest-revision entry whose <c>LastModified ≤ floorTimestamp</c>
+    /// (the floor-boundary revision) and every revision newer than it are protected from deletion.
+    /// Pass <see cref="HLCTimestamp.Zero"/> to disable floor protection and use the standard
+    /// retention policy only.
+    /// </param>
     /// <param name="result">Statistics for the prune pass.</param>
     /// <returns><c>true</c> when the pass completed without error.</returns>
     public bool PruneKeyValueRevisions(
@@ -48,6 +54,7 @@ internal interface IPersistenceBackend
         int retentionCount,
         TimeSpan retentionAge,
         int batchSize,
+        HLCTimestamp floorTimestamp,
         out RevisionPruneResult result
     );
 

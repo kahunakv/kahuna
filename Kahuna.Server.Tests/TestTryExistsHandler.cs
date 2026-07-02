@@ -287,7 +287,7 @@ public sealed class TestTryExistsHandler
     /// Used to keep latest-point TryGet and TryExists reads in-flight simultaneously so the
     /// shape-isolation test can verify they occupy separate PendingReads slots.
     /// </summary>
-    private sealed class BlockingLatestBackend : IPersistenceBackend
+    private sealed class BlockingLatestBackend : IPersistenceBackend, IDisposable
     {
         private readonly MemoryPersistenceBackend inner = new();
         private readonly ManualResetEventSlim gate;
@@ -316,13 +316,14 @@ public sealed class TestTryExistsHandler
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => inner.GetKeyValueByPrefix(prefixKeyName);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) =>
             inner.GetKeyValueByRange(prefix, startKey, limit);
-        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, out RevisionPruneResult result) =>
-            inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, out result);
+        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) =>
+            inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
         public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) =>
             inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
+        public void Dispose() => inner.Dispose();
     }
 
-    private sealed class RevisionBackend : IPersistenceBackend
+    private sealed class RevisionBackend : IPersistenceBackend, IDisposable
     {
         private readonly MemoryPersistenceBackend inner = new();
         private readonly long targetRevision;
@@ -351,10 +352,11 @@ public sealed class TestTryExistsHandler
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => inner.GetKeyValueByPrefix(prefixKeyName);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) =>
             inner.GetKeyValueByRange(prefix, startKey, limit);
-        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, out RevisionPruneResult result) =>
-            inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, out result);
+        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) =>
+            inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
         public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) =>
             inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
+        public void Dispose() => inner.Dispose();
     }
 
     private static KeyValueRequest MakeGet(

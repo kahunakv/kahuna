@@ -136,7 +136,7 @@ public sealed class TestTryGetByBucketHandler
             // Wait until the disk read has started, then write a new value for "cfg/k".
             // The key is not in memory before the scan (stage 1 finds nothing), so this
             // write lands between stage 1 and stage 3 — exactly the concurrent-write scenario.
-            entered.Wait(TimeSpan.FromSeconds(5));
+            entered.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             await actorRef.Ask(MakeSet("cfg/k", Encoding.UTF8.GetBytes("in-mem-new"), 0), TimeSpan.FromSeconds(5));
 
             // Ephemeral TryGet as sentinel: drains the actor queue so the set above has
@@ -149,7 +149,7 @@ public sealed class TestTryGetByBucketHandler
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.Get, resp!.Type);
             Assert.NotNull(resp.Items);
-            Assert.Equal(1, resp.Items!.Count);
+            Assert.Single(resp.Items!);
             // Stage 3 must return the resident (in-memory) value: resident.Revision (0) >=
             // disk.Revision (0) means the resident entry wins, so "disk-old" is never served.
             Assert.Equal("in-mem-new", Encoding.UTF8.GetString(resp.Items[0].Item2.Value!));
@@ -185,7 +185,7 @@ public sealed class TestTryGetByBucketHandler
             Assert.Equal(KeyValueResponseType.Get, resp!.Type);
             Assert.NotNull(resp.Items);
             // Tombstone must be excluded.
-            Assert.Equal(1, resp.Items!.Count);
+            Assert.Single(resp.Items!);
             Assert.Equal("data/x", resp.Items[0].Item1);
         }
         finally { scheduler.Stop(); }
@@ -233,7 +233,7 @@ public sealed class TestTryGetByBucketHandler
 
             // Wait for both disk reads to enter the backend — if coalescing occurred only
             // one disk read would start, and this wait would time out.
-            backend.BothEntered.Wait(TimeSpan.FromSeconds(5));
+            backend.BothEntered.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             backend.Gate.Set();
 
             KeyValueResponse? latest = await latestTask;
@@ -242,13 +242,13 @@ public sealed class TestTryGetByBucketHandler
             // Latest scan sees the entry.
             Assert.NotNull(latest);
             Assert.Equal(KeyValueResponseType.Get, latest!.Type);
-            Assert.Equal(1, latest.Items!.Count);
-            Assert.Equal("ord/x", latest.Items[0].Item1);
+            Assert.Single(latest.Items!);
+            Assert.Equal("ord/x", latest.Items![0].Item1);
 
             // Snapshot scan excludes the entry (LastModified > readTs, no on-disk revision history).
             Assert.NotNull(snapshot);
             Assert.Equal(KeyValueResponseType.Get, snapshot!.Type);
-            Assert.Equal(0, snapshot.Items!.Count);
+            Assert.Empty(snapshot.Items!);
         }
         finally { scheduler.Stop(); }
     }
@@ -287,7 +287,7 @@ public sealed class TestTryGetByBucketHandler
             Task<KeyValueResponse?> txnTask = actorRef.Ask(MakeTransactionalBucketScan("inv", txId), TimeSpan.FromSeconds(10));
 
             // Two independent disk reads must start — coalescing would prevent the second.
-            backend.BothEntered.Wait(TimeSpan.FromSeconds(5));
+            backend.BothEntered.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             backend.Gate.Set();
 
             KeyValueResponse? plain = await plainTask;
@@ -296,11 +296,11 @@ public sealed class TestTryGetByBucketHandler
             // Both scans must complete successfully and return the entry independently.
             Assert.NotNull(plain);
             Assert.Equal(KeyValueResponseType.Get, plain!.Type);
-            Assert.Equal(1, plain.Items!.Count);
+            Assert.Single(plain.Items!);
 
             Assert.NotNull(txn);
             Assert.Equal(KeyValueResponseType.Get, txn!.Type);
-            Assert.Equal(1, txn.Items!.Count);
+            Assert.Single(txn.Items!);
         }
         finally { scheduler.Stop(); }
     }
@@ -465,7 +465,7 @@ public sealed class TestTryGetByBucketHandler
     // ── inner backends ───────────────────────────────────────────────────────────────────
 
     /// <summary>Backend that throws if any disk read is attempted — proves stage-1 sufficiency.</summary>
-    private sealed class NeverReadBackend : IPersistenceBackend
+    private sealed class NeverReadBackend : IPersistenceBackend, IDisposable
     {
         private readonly MemoryPersistenceBackend inner = new();
 
@@ -477,12 +477,13 @@ public sealed class TestTryGetByBucketHandler
         public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) => inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => throw new InvalidOperationException("disk read not expected");
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) => inner.GetKeyValueByRange(prefix, startKey, limit);
-        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, out result);
+        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
         public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) => inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
+        public void Dispose() => inner.Dispose();
     }
 
     /// <summary>Backend that returns a fixed list of prefix entries from "disk".</summary>
-    private sealed class PrefixBackend : IPersistenceBackend
+    private sealed class PrefixBackend : IPersistenceBackend, IDisposable
     {
         private readonly MemoryPersistenceBackend inner = new();
         private readonly List<(string Key, ReadOnlyKeyValueEntry Entry)> diskEntries;
@@ -502,8 +503,9 @@ public sealed class TestTryGetByBucketHandler
         public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) => inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => diskEntries.Where(e => e.Key.StartsWith(prefixKeyName, StringComparison.Ordinal)).Select(e => (e.Key, e.Entry)).ToList();
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) => inner.GetKeyValueByRange(prefix, startKey, limit);
-        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, out result);
+        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
         public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) => inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
+        public void Dispose() => inner.Dispose();
     }
 
     /// <summary>
@@ -511,7 +513,7 @@ public sealed class TestTryGetByBucketHandler
     /// then releases both. Used to verify that two independent disk reads were dispatched
     /// instead of one coalesced read.
     /// </summary>
-    private sealed class TwoReadBlockingPrefixBackend : IPersistenceBackend
+    private sealed class TwoReadBlockingPrefixBackend : IPersistenceBackend, IDisposable
     {
         private readonly MemoryPersistenceBackend inner = new();
         private readonly List<(string Key, ReadOnlyKeyValueEntry Entry)> diskEntries;
@@ -546,15 +548,21 @@ public sealed class TestTryGetByBucketHandler
         }
 
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) => inner.GetKeyValueByRange(prefix, startKey, limit);
-        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, out result);
+        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
         public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) => inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
+        public void Dispose()
+        {
+            inner.Dispose();
+            BothEntered.Dispose();
+            Gate.Dispose();
+        }
     }
 
     /// <summary>
     /// Backend that blocks GetKeyValueByPrefix on a gate, allowing a concurrent write to land
     /// before stage 3 runs, so the merge-by-revision path can be exercised.
     /// </summary>
-    private sealed class BlockingPrefixBackend : IPersistenceBackend
+    private sealed class BlockingPrefixBackend : IPersistenceBackend, IDisposable
     {
         private readonly MemoryPersistenceBackend inner = new();
         private readonly ManualResetEventSlim gate;
@@ -590,7 +598,8 @@ public sealed class TestTryGetByBucketHandler
         }
 
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) => inner.GetKeyValueByRange(prefix, startKey, limit);
-        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, out result);
+        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
         public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) => inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
+        public void Dispose() => inner.Dispose();
     }
 }

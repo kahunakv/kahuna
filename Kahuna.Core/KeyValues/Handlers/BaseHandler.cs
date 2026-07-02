@@ -225,18 +225,73 @@ internal abstract class BaseHandler
     /// Removes expired revisions from the KeyValueEntry dictionary, keeping at most
     /// RevisionRetention entries. Called at archive time so the collector never needs a
     /// separate metadata pass to enforce the bound.
+    ///
+    /// <para>When an effective snapshot floor is set, the single highest revision whose
+    /// <see cref="KeyValueRevisionEntry.LastModified"/> is at-or-before the floor is pinned as
+    /// the floor-boundary revision and exempted from removal. This ensures the as-of version
+    /// that snapshot readers need survives in memory beyond the normal retention window; the full
+    /// run of revisions between the boundary and now is left to disk (F4) and reached by the
+    /// disk-fallback read paths (F1a/F1b). At most RevisionRetention + 1 revisions are kept per
+    /// key when a floor is active.</para>
     /// </summary>
+    /// <summary>
+    /// True when the trim removal set contains the floor-boundary revision — i.e. a floor-protected
+    /// in-memory version would be dropped. Correct trim logic never produces this; it is the
+    /// detection seam for the <c>MissingProtectedVersion</c> fail-loud counter and is unit-tested
+    /// directly since a real occurrence requires a regression in the boundary computation.
+    /// </summary>
+    internal static bool RemovalSetDropsFloorBoundary(ISet<long> revisionsToRemove, long floorBoundaryRevision) =>
+        floorBoundaryRevision >= 0 && revisionsToRemove.Contains(floorBoundaryRevision);
+
     protected void RemoveExpiredRevisions(KeyValueEntry entry, long refRevision)
     {
         if (entry.Revisions is null)
             return;
 
         int toBeKept = context.Configuration.RevisionRetention;
+        long cutoff = refRevision - toBeKept;
+
+        // Determine the floor-boundary revision: the highest revision that would normally
+        // be trimmed (< cutoff) but whose timestamp is at-or-before the effective floor.
+        // We protect exactly this one revision so snapshot reads at floor-timestamp still
+        // hit memory without disk I/O for the boundary version itself.
+        long floorBoundaryRevision = -1;
+        SnapshotFloorStore? floorStore = context.SnapshotFloorStore;
+        if (floorStore is not null && floorStore.Holds.Count > 0)
+        {
+            HLCTimestamp now = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
+            HLCTimestamp effectiveFloor = floorStore.GetEffectiveFloor(now);
+            if (effectiveFloor != HLCTimestamp.Zero)
+            {
+                foreach (KeyValuePair<long, KeyValueRevisionEntry> kv in entry.Revisions)
+                {
+                    if (kv.Key < cutoff && kv.Value.LastModified.CompareTo(effectiveFloor) <= 0)
+                    {
+                        if (kv.Key > floorBoundaryRevision)
+                            floorBoundaryRevision = kv.Key;
+                    }
+                }
+            }
+        }
 
         foreach (KeyValuePair<long, KeyValueRevisionEntry> kv in entry.Revisions)
         {
-            if (kv.Key < (refRevision - toBeKept))
+            if (kv.Key < cutoff && kv.Key != floorBoundaryRevision)
                 revisionsToRemove.Add(kv.Key);
+        }
+
+        // Fail-loud floor guard. Under Decision 2a the only in-memory revision the floor protects
+        // is the boundary (newest at-or-before the floor); the loop above exempts it, so a correct
+        // trim never schedules it for removal. If it ever appears in the removal set the boundary
+        // computation has regressed and a floor-protected version would be dropped from memory —
+        // count it (this counter must stay 0 in normal operation) and retain the revision.
+        if (RemovalSetDropsFloorBoundary(revisionsToRemove, floorBoundaryRevision))
+        {
+            SnapshotFloorMetrics.MissingProtectedVersion.Add(1);
+            context.Logger.LogError(
+                "Floor-boundary revision {Revision} was scheduled for trimming while a snapshot hold protects it; retaining it instead",
+                floorBoundaryRevision);
+            revisionsToRemove.Remove(floorBoundaryRevision);
         }
 
         if (revisionsToRemove.Count > 0)

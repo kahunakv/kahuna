@@ -1917,4 +1917,68 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         await keyValues.ImportRangeLocks(request.KeySpace, locks);
         return new GrpcImportRangeLocksResponse { Success = true };
     }
+
+    public override async Task<GrpcAcquireSnapshotHoldResponse> AcquireSnapshotHold(
+        GrpcAcquireSnapshotHoldRequest request, ServerCallContext context)
+    {
+        (KeyValueResponseType type, string holdId, HLCTimestamp leaseExpiry) =
+            await keyValues.LocateAndAcquireSnapshotHold(
+                request.HolderId,
+                new(request.TimestampNode, request.TimestampPhysical, request.TimestampCounter),
+                request.LeaseMs,
+                context.CancellationToken).ConfigureAwait(false);
+
+        return new()
+        {
+            Type               = (GrpcKeyValueResponseType)type,
+            HoldId             = holdId,
+            LeaseExpiryNode     = leaseExpiry.N,
+            LeaseExpiryPhysical = leaseExpiry.L,
+            LeaseExpiryCounter  = leaseExpiry.C
+        };
+    }
+
+    public override async Task<GrpcRenewSnapshotHoldResponse> RenewSnapshotHold(
+        GrpcRenewSnapshotHoldRequest request, ServerCallContext context)
+    {
+        (KeyValueResponseType type, HLCTimestamp leaseExpiry) =
+            await keyValues.LocateAndRenewSnapshotHold(
+                request.HoldId,
+                request.LeaseMs,
+                context.CancellationToken).ConfigureAwait(false);
+
+        return new()
+        {
+            Type               = (GrpcKeyValueResponseType)type,
+            LeaseExpiryNode     = leaseExpiry.N,
+            LeaseExpiryPhysical = leaseExpiry.L,
+            LeaseExpiryCounter  = leaseExpiry.C
+        };
+    }
+
+    public override async Task<GrpcReleaseSnapshotHoldResponse> ReleaseSnapshotHold(
+        GrpcReleaseSnapshotHoldRequest request, ServerCallContext context)
+    {
+        KeyValueResponseType type =
+            await keyValues.LocateAndReleaseSnapshotHold(
+                request.HoldId,
+                context.CancellationToken).ConfigureAwait(false);
+
+        return new() { Type = (GrpcKeyValueResponseType)type };
+    }
+
+    public override async Task<GrpcGetSnapshotFloorResponse> GetSnapshotFloor(
+        GrpcGetSnapshotFloorRequest request, ServerCallContext context)
+    {
+        (HLCTimestamp floor, int liveHolds) =
+            await keyValues.GetSnapshotFloor(context.CancellationToken).ConfigureAwait(false);
+
+        return new()
+        {
+            EffectiveFloorNode     = floor.N,
+            EffectiveFloorPhysical = floor.L,
+            EffectiveFloorCounter  = floor.C,
+            LiveHolds              = liveHolds
+        };
+    }
 }

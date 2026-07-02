@@ -56,10 +56,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// </remarks>
     private static readonly WriteOptions DefaultWriteOptions = new WriteOptions().SetSync(true);
 
-    private static readonly Comparison<(long Revision, long LastModifiedPhysical, byte[] RawKeyBytes)> RevisionDescComparer =
-        static (a, b) => b.Revision.CompareTo(a.Revision);
-
-    /// <summary>
+/// <summary>
     /// Shared block cache for the table reader. Sized once and reused across both column families so
     /// hot index/filter/data blocks stay resident instead of being re-read from disk on every point
     /// lookup. Held in a static field to keep it alive for the lifetime of the process.
@@ -733,6 +730,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         int retentionCount,
         TimeSpan retentionAge,
         int batchSize,
+        HLCTimestamp floorTimestamp,
         out RevisionPruneResult result)
     {
         int keysVisited = 0;
@@ -756,7 +754,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 }
 
                 string key = keyList[i];
-                PruneRevisionsForKey(key, retentionCount, retentionAge, batchSize, ref deleted, out bool keyLimitReached);
+                PruneRevisionsForKey(key, retentionCount, retentionAge, batchSize, floorTimestamp, ref deleted, out bool keyLimitReached);
                 keysVisited++;
 
                 if (keyLimitReached)
@@ -803,7 +801,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 if (rawKeySpan.EndsWith(CurrentMarkerUtf8))
                 {
                     string logicalKey = Encoding.UTF8.GetString(rawKeySpan[..^CurrentMarkerUtf8.Length]);
-                    PruneRevisionsForKey(logicalKey, retentionCount, retentionAge, batchSize, ref deleted, out bool keyLimitReached);
+                    PruneRevisionsForKey(logicalKey, retentionCount, retentionAge, batchSize, floorTimestamp, ref deleted, out bool keyLimitReached);
                     keysVisited++;
 
                     if (keyLimitReached)
@@ -831,12 +829,16 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// <summary>
     /// Prunes old revision records for a single logical key, keeping the current revision
     /// and any revisions within the configured count/age retention window.
+    /// When <paramref name="floorTimestamp"/> is non-zero the floor-boundary revision
+    /// (the highest revision whose LastModified ≤ floorTimestamp) and everything newer
+    /// are also protected from deletion.
     /// </summary>
     private void PruneRevisionsForKey(
         string key,
         int retentionCount,
         TimeSpan retentionAge,
         int batchSize,
+        HLCTimestamp floorTimestamp,
         ref int deleted,
         out bool batchLimitReached)
     {
@@ -871,11 +873,12 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             ReadOnlySpan<byte> prefixBytes = keyBuffer[..(keyLen + 1)];
 
             bool needAge = retentionAge > TimeSpan.Zero;
+            bool needFloor = floorTimestamp != HLCTimestamp.Zero;
             long cutoffPhysical = needAge
                 ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - (long)retentionAge.TotalMilliseconds
                 : long.MinValue;
 
-            List<(long Revision, long LastModifiedPhysical, byte[] RawKeyBytes)> revisions = [];
+            List<(long Revision, long LastModifiedPhysical, HLCTimestamp LastModified, byte[] RawKeyBytes)> revisions = [];
 
             using (Iterator iterator = db.NewIterator(cf: columnFamilyKeys))
             {
@@ -907,14 +910,17 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                     }
 
                     long lastModifiedPhysical = 0;
-                    if (needAge)
+                    HLCTimestamp lastModified = HLCTimestamp.Zero;
+                    if (needAge || needFloor)
                     {
                         RocksDbKeyValueMessage msg = UnserializeKeyValueMessage(iterator.GetValueSpan());
                         lastModifiedPhysical = msg.LastModifiedPhysical;
+                        if (needFloor)
+                            lastModified = new HLCTimestamp(msg.LastModifiedNode, msg.LastModifiedPhysical, (uint)msg.LastModifiedCounter);
                     }
 
                     // Copy the key out of native memory: it must outlive the iterator for batch.Delete.
-                    revisions.Add((revisionNum, lastModifiedPhysical, entryKey.ToArray()));
+                    revisions.Add((revisionNum, lastModifiedPhysical, lastModified, entryKey.ToArray()));
                     iterator.Next();
                 }
             }
@@ -923,17 +929,36 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 return;
 
             // Sort descending so index 0 is the newest revision.
-            revisions.Sort(RevisionDescComparer);
+            revisions.Sort(static (a, b) => b.Revision.CompareTo(a.Revision));
+
+            // Compute the floor revision: the highest revision whose LastModified ≤ floorTimestamp.
+            // Revisions >= floorRevision are protected from deletion.
+            long floorRevision = -1;
+            if (needFloor)
+            {
+                foreach ((long rev, _, HLCTimestamp lm, _) in revisions)
+                {
+                    if (lm <= floorTimestamp && rev > floorRevision)
+                        floorRevision = rev;
+                }
+            }
 
             using WriteBatch batch = new();
             int deletedInBatch = 0;
 
             for (int i = 0; i < revisions.Count; i++)
             {
-                (long revNum, long lastModifiedPhysical, byte[] rawKeyBytes) = revisions[i];
+                (long revNum, long lastModifiedPhysical, _, byte[] rawKeyBytes) = revisions[i];
 
                 // Always protect the current revision's historical record.
                 if (revNum == currentRevision)
+                    continue;
+
+                // Floor protection: when a floor is active, protect the boundary revision and
+                // everything newer.  When no revision exists at-or-before the floor (floorRevision
+                // < 0), the key was created entirely after the floor — all its revisions are
+                // protected by skipping this key entirely.
+                if (needFloor && (floorRevision < 0 || revNum >= floorRevision))
                     continue;
 
                 bool deleteByCount = retentionCount > 0 && i >= retentionCount;

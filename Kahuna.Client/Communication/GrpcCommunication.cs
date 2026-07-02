@@ -1948,6 +1948,69 @@ public class GrpcCommunication : IKahunaCommunication
         return new(() => new(url, timeout, options, logger));
     }
 
+    // Snapshot hold operations are intentionally unary: they are infrequent control-plane calls.
+    public async Task<(KeyValueResponseType type, string holdId, HLCTimestamp leaseExpiry)> AcquireSnapshotHold(
+        string url, string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken cancellationToken)
+    {
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+        KeyValuer.KeyValuerClient client = new(channel);
+
+        GrpcAcquireSnapshotHoldResponse response = await client.AcquireSnapshotHoldAsync(
+            new GrpcAcquireSnapshotHoldRequest
+            {
+                HolderId          = holderId,
+                TimestampNode     = timestamp.N,
+                TimestampPhysical = timestamp.L,
+                TimestampCounter  = timestamp.C,
+                LeaseMs           = leaseMs
+            },
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        HLCTimestamp expiry = new(response.LeaseExpiryNode, response.LeaseExpiryPhysical, response.LeaseExpiryCounter);
+        return ((KeyValueResponseType)response.Type, response.HoldId, expiry);
+    }
+
+    public async Task<(KeyValueResponseType type, HLCTimestamp leaseExpiry)> RenewSnapshotHold(
+        string url, string holdId, int leaseMs, CancellationToken cancellationToken)
+    {
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+        KeyValuer.KeyValuerClient client = new(channel);
+
+        GrpcRenewSnapshotHoldResponse response = await client.RenewSnapshotHoldAsync(
+            new GrpcRenewSnapshotHoldRequest { HoldId = holdId, LeaseMs = leaseMs },
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        HLCTimestamp expiry = new(response.LeaseExpiryNode, response.LeaseExpiryPhysical, response.LeaseExpiryCounter);
+        return ((KeyValueResponseType)response.Type, expiry);
+    }
+
+    public async Task<KeyValueResponseType> ReleaseSnapshotHold(
+        string url, string holdId, CancellationToken cancellationToken)
+    {
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+        KeyValuer.KeyValuerClient client = new(channel);
+
+        GrpcReleaseSnapshotHoldResponse response = await client.ReleaseSnapshotHoldAsync(
+            new GrpcReleaseSnapshotHoldRequest { HoldId = holdId },
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        return (KeyValueResponseType)response.Type;
+    }
+
+    public async Task<(HLCTimestamp effectiveFloor, int liveHolds)> GetSnapshotFloor(
+        string url, CancellationToken cancellationToken)
+    {
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+        KeyValuer.KeyValuerClient client = new(channel);
+
+        GrpcGetSnapshotFloorResponse response = await client.GetSnapshotFloorAsync(
+            new GrpcGetSnapshotFloorRequest(),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        HLCTimestamp floor = new(response.EffectiveFloorNode, response.EffectiveFloorPhysical, response.EffectiveFloorCounter);
+        return (floor, response.LiveHolds);
+    }
+
     // Intentionally unary: key-range registration is a one-shot control-plane operation performed
     // at startup or on topology changes; it is not a hot-path call suitable for batcher coalescing.
     public async Task<bool> RegisterKeyRange(string url, string keySpace, CancellationToken cancellationToken)

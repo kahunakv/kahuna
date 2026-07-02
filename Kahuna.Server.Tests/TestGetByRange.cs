@@ -719,6 +719,140 @@ public sealed class TestGetByRange
                 Assert.True(string.CompareOrdinal(item.Item1, endKey) <= 0));
     }
 
+    // ── Snapshot range scan disk fallback (F1b) ──────────────────────────────
+
+    /// <summary>
+    /// When a key is superseded more than RevisionRetention times after the snapshot timestamp,
+    /// its as-of revision is trimmed from the in-memory archive. A snapshot GetByRange must
+    /// recover it from the persisted revision history (GetKeyValueRevisionAtOrBefore) rather
+    /// than silently omitting the key.
+    /// </summary>
+    [Fact]
+    public async Task GetByRange_SnapshotScan_ResidentTrimmedKey_FallsBackToDiskHistory()
+    {
+        const int retention = 2;
+        EmbeddedKahunaOptions opts = new()
+        {
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 1,
+            RevisionRetention = retention,
+            DirtyObjectsWriterDelay = 100  // fast flush — 100 ms
+        };
+
+        await using EmbeddedKahunaNode node = new(opts, loggerFactory);
+        await node.StartAsync(TestContext.Current.CancellationToken);
+
+        const string prefix = "snap/disk/range/";
+        const string key    = prefix + "key1";
+        byte[] v1 = Encoding.UTF8.GetBytes("v1");
+
+        // Write V1.
+        (KeyValueResponseType t, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, key, v1,
+            null, -1, KeyValueFlags.Set, 0,
+            KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+        Assert.Equal(KeyValueResponseType.Set, t);
+
+        // Read it back to capture V1's exact LastModified and revision.
+        (_, ReadOnlyKeyValueEntry? e1) = await node.Kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero,
+            KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+        Assert.NotNull(e1);
+        HLCTimestamp snapshotTs = e1!.LastModified;
+        long v1Revision = e1.Revision;
+
+        // Write RevisionRetention+2 more versions — enough to push V1 out of the in-memory archive.
+        for (int i = 2; i <= retention + 2; i++)
+        {
+            await Task.Delay(2, TestContext.Current.CancellationToken);
+            (t, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, key, Encoding.UTF8.GetBytes($"v{i}"),
+                null, -1, KeyValueFlags.Set, 0,
+                KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+            Assert.Equal(KeyValueResponseType.Set, t);
+        }
+
+        // Wait for the background writer to flush all revisions to disk.
+        await Task.Delay(300, TestContext.Current.CancellationToken);
+
+        // Snapshot range scan at snapshotTs: in-memory archive misses V1, disk fallback
+        // must find it via GetKeyValueRevisionAtOrBefore and include it in the result.
+        KeyValueGetByRangeResult result = await node.Kahuna.LocateAndGetByRange(
+            HLCTimestamp.Zero, prefix,
+            null, true, null, false,
+            10, snapshotTs,
+            KeyValueDurability.Persistent,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(KeyValueResponseType.Get, result.Type);
+        Assert.Single(result.Items);
+        Assert.Equal(key, result.Items[0].Item1);
+        Assert.Equal("v1", Encoding.UTF8.GetString(result.Items[0].Item2.Value!));
+        Assert.Equal(v1Revision, result.Items[0].Item2.Revision);
+    }
+
+    /// <summary>
+    /// Snapshot range scan at a timestamp before the key existed must exclude the key.
+    /// </summary>
+    [Fact]
+    public async Task GetByRange_SnapshotScan_BeforeKeyCreated_ExcludesKey()
+    {
+        const int retention = 2;
+        EmbeddedKahunaOptions opts = new()
+        {
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 1,
+            RevisionRetention = retention,
+            DirtyObjectsWriterDelay = 100
+        };
+
+        await using EmbeddedKahunaNode node = new(opts, loggerFactory);
+        await node.StartAsync(TestContext.Current.CancellationToken);
+
+        const string prefix = "snap/disk/before/";
+        const string key    = prefix + "key1";
+
+        // Write V1 then read it back to derive a timestamp strictly before its creation.
+        (KeyValueResponseType t, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, key, Encoding.UTF8.GetBytes("v1"),
+            null, -1, KeyValueFlags.Set, 0,
+            KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+        Assert.Equal(KeyValueResponseType.Set, t);
+
+        (_, ReadOnlyKeyValueEntry? firstEntry) = await node.Kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero,
+            KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+        Assert.NotNull(firstEntry);
+        // A timestamp one logical tick before V1 = the key did not yet exist.
+        HLCTimestamp beforeCreate = new(firstEntry!.LastModified.N, firstEntry.LastModified.L - 1, firstEntry.LastModified.C);
+
+        // Supersede V1 beyond retention to push it out of memory.
+        for (int i = 2; i <= retention + 2; i++)
+        {
+            await Task.Delay(2, TestContext.Current.CancellationToken);
+            (t, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, key, Encoding.UTF8.GetBytes($"v{i}"),
+                null, -1, KeyValueFlags.Set, 0,
+                KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+            Assert.Equal(KeyValueResponseType.Set, t);
+        }
+
+        await Task.Delay(300, TestContext.Current.CancellationToken);
+
+        // Snapshot at beforeCreate: the key did not exist — must not appear.
+        KeyValueGetByRangeResult result = await node.Kahuna.LocateAndGetByRange(
+            HLCTimestamp.Zero, prefix,
+            null, true, null, false,
+            10, beforeCreate,
+            KeyValueDurability.Persistent,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(KeyValueResponseType.Get, result.Type);
+        Assert.Empty(result.Items);
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private static string DecodeLastKey(string cursor)

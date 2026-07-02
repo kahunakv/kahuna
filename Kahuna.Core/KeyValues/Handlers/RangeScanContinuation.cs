@@ -72,6 +72,13 @@ internal sealed class RangeScanContinuation : ReadContinuation
     /// <summary>Disk cursor for the next GetKeyValueByRange call (key to start the next page at).</summary>
     private string diskCursor;
 
+    /// <summary>
+    /// The combined stage-2 result: snapshot-projected entries plus raw pagination facts.
+    /// Set by the stage-2 callback (off-actor) before the ResumeRead message is dispatched;
+    /// consumed and cleared by Execute (actor thread, stage 3).
+    /// </summary>
+    internal RangeDiskPage? RangeScanPage { get; set; }
+
     /// <summary>Items accumulated across all pages so far. Cleared only when the scan is resolved.</summary>
     private readonly List<(string, ReadOnlyKeyValueEntry)> accumulated;
 
@@ -127,10 +134,26 @@ internal sealed class RangeScanContinuation : ReadContinuation
             return;
         }
 
-        List<(string, ReadOnlyKeyValueEntry)> diskPage = ScanDiskResult ?? [];
-        bool diskHasMore = diskPage.Count > limit;
-        int diskAvailable = diskHasMore ? diskPage.Count - 1 : diskPage.Count;
+        // RawHasMore and RawNextCursor come from the raw (unprojected) disk page; the
+        // projected list may be smaller or empty if rows were filtered by snapshot projection.
+        // Using projected.Count for diskHasMore would prematurely terminate the scan when
+        // all limit+1 raw rows are post-snapshot and dropped by projection.
+        List<(string, ReadOnlyKeyValueEntry)> diskPage = RangeScanPage?.Projected ?? [];
+        bool diskHasMore = RangeScanPage?.RawHasMore ?? false;
+        int diskAvailable = diskPage.Count;
         int diskIdx = 0;
+
+        // For snapshot scans, build a key→projected-entry map from the current disk page so
+        // EvaluateKeySync can fall back to it when the in-memory revision archive misses.
+        // The disk page has already been snapshot-projected by the stage-2 task (off-actor),
+        // so every entry in this map is already at-or-before snapshotTs.
+        Dictionary<string, ReadOnlyKeyValueEntry>? diskProjections = null;
+        if (isSnapshotRead && diskAvailable > 0)
+        {
+            diskProjections = new(diskAvailable);
+            for (int i = 0; i < diskAvailable; i++)
+                diskProjections[diskPage[i].Item1] = diskPage[i].Item2;
+        }
 
         while (accumulated.Count <= limit)
         {
@@ -215,7 +238,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
                     goto Done;
             }
 
-            KeyValueResponse? response = EvaluateKeySync(context, keyToProcess, entry, isResident);
+            KeyValueResponse? response = EvaluateKeySync(context, keyToProcess, entry, isResident, diskProjections);
 
             if (response is null || response.Type == KeyValueResponseType.DoesNotExist)
                 continue;
@@ -235,16 +258,24 @@ internal sealed class RangeScanContinuation : ReadContinuation
         // been reached, dispatch the next disk page and defer resolution to the next Execute.
         if (diskIdx >= diskAvailable && diskHasMore && accumulated.Count <= limit)
         {
-            diskCursor = diskPage[diskAvailable].Item1; // the (limit+1)-th item is the next start
-            ScanDiskResult = null;
+            // RawNextCursor is the (limit+1)-th key of the raw page; guaranteed non-null when RawHasMore.
+            diskCursor = RangeScanPage!.RawNextCursor!;
+            RangeScanPage = null;
 
-            Task<List<(string, ReadOnlyKeyValueEntry)>> nextTask;
+            Task<RangeDiskPage> nextTask;
             try
             {
                 string capturedCursor = diskCursor;
+                bool capturedSnapshotRead = isSnapshotRead;
+                HLCTimestamp capturedSnapshotTs = snapshotTs;
+                HLCTimestamp capturedCurrentTime = currentTime;
+                int capturedLimit = limit;
                 nextTask = context.Raft.ReadScheduler.EnqueueTask(
                     partitionId,
-                    () => context.PersistenceBackend.GetKeyValueByRange(prefix, capturedCursor, limit + 1));
+                    () => TryGetByRangeHandler.ProjectSnapshotPage(
+                        context.PersistenceBackend.GetKeyValueByRange(prefix, capturedCursor, capturedLimit + 1),
+                        capturedLimit, capturedSnapshotRead, capturedSnapshotTs, capturedCurrentTime,
+                        context.PersistenceBackend));
             }
             catch (Exception ex)
             {
@@ -259,7 +290,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
             _ = nextTask.ContinueWith(t =>
             {
                 if (!t.IsCompletedSuccessfully) SetFaulted();
-                else ScanDiskResult = t.Result;
+                else RangeScanPage = t.Result;
                 self.Send(new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = this });
             }, TaskScheduler.Default);
 
@@ -309,7 +340,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
         memMaybeMore = next.Count == memBatch;
     }
 
-    private KeyValueResponse? EvaluateKeySync(KeyValueContext context, string key, KeyValueEntry? entry, bool isResident)
+    private KeyValueResponse? EvaluateKeySync(KeyValueContext context, string key, KeyValueEntry? entry, bool isResident, Dictionary<string, ReadOnlyKeyValueEntry>? diskProjections)
     {
         // Replication intent: a pending replication on this key means the entry is not yet
         // fully committed. Clear expired intents as housekeeping; block if still live.
@@ -413,7 +444,19 @@ internal sealed class RangeScanContinuation : ReadContinuation
         if (!snapshotTs.IsNull() && entry is not null && entry.LastModified > snapshotTs)
         {
             if (!entry.TryGetRevisionAtOrBefore(snapshotTs, out long snapRevision, out KeyValueRevisionEntry snapshot))
+            {
+                // In-memory revision archive does not reach as far back as snapshotTs.
+                // Fall back to the stage-2 disk projection carried in from the off-actor task.
+                // Purely memory-only keys (never flushed) have no disk projection and are omitted.
+                if (diskProjections is not null && diskProjections.TryGetValue(key, out ReadOnlyKeyValueEntry? diskSnap) && diskSnap is not null)
+                {
+                    if (diskSnap.State is KeyValueState.Deleted or KeyValueState.Undefined ||
+                        (diskSnap.Expires != HLCTimestamp.Zero && diskSnap.Expires - currentTime < TimeSpan.Zero))
+                        return null;
+                    return new(KeyValueResponseType.Get, diskSnap);
+                }
                 return null;
+            }
 
             if (snapshot.State is KeyValueState.Deleted or KeyValueState.Undefined ||
                 (snapshot.Expires != HLCTimestamp.Zero && snapshot.Expires - currentTime < TimeSpan.Zero))

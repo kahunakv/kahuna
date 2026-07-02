@@ -73,6 +73,8 @@ internal sealed class KeyValuesManager : IDisposable
 
     private readonly RangeMapStore rangeMapStore;
 
+    private readonly SnapshotFloorStore snapshotFloorStore;
+
     private readonly RangeQuiesceStore rangeQuiesceStore = new();
 
     private readonly KvStateMachineTransfer kvStateMachineTransfer;
@@ -99,13 +101,14 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="configuration"></param>
     /// <param name="logger"></param>
     public KeyValuesManager(
-        ActorSystem actorSystem, 
-        IRaft raft, 
+        ActorSystem actorSystem,
+        IRaft raft,
         IInterNodeCommunication interNodeCommunication,
-        IPersistenceBackend persistenceBackend, 
+        IPersistenceBackend persistenceBackend,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        KahunaConfiguration configuration, 
-        ILogger<IKahuna> logger
+        KahunaConfiguration configuration,
+        ILogger<IKahuna> logger,
+        SnapshotFloorStore? externalFloorStore = null
     )
     {
         this.actorSystem = actorSystem;
@@ -115,12 +118,17 @@ internal sealed class KeyValuesManager : IDisposable
         this.logger = logger;
 
         this.persistenceBackend = persistenceBackend;
-        
+
         scriptParserEvicter = actorSystem.Spawn<ScriptParserEvicterActor, ScriptParserEvicterRequest>("script-parser-evicter", logger);
 
         // Construct the range-descriptor map before the proposal router — the proposal actors carry it
         // for the generation fence.
         rangeMapStore = new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
+
+        // Snapshot-floor registry: replicated on the same meta partition as the range map.
+        // When an external store is provided (shared with BackgroundWriterActor) use it directly;
+        // otherwise create a new instance owned by this manager.
+        snapshotFloorStore = externalFloorStore ?? new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
 
         // Sync the per-node key-space registry with any descriptors loaded from the durable snapshot.
         // RangeMapStore.LoadFromDisk (called above) restores the range map but does not touch the
@@ -147,6 +155,14 @@ internal sealed class KeyValuesManager : IDisposable
         actorSystem.Spawn<TransactionReaperActor, TransactionReaperRequest>(
             "transaction-reaper",
             txCoordinator,
+            configuration,
+            logger
+        );
+
+        // Periodic reaper for snapshot holds whose lease expired without an explicit release.
+        actorSystem.Spawn<SnapshotFloorReaperActor, SnapshotFloorReaperRequest>(
+            "snapshot-floor-reaper",
+            snapshotFloorStore,
             configuration,
             logger
         );
@@ -208,6 +224,55 @@ internal sealed class KeyValuesManager : IDisposable
     /// <see cref="RangeMapStore.MutateAsync"/>; routing (Tasks 3+) reads <see cref="RangeMapStore.Current"/>.
     /// </summary>
     internal RangeMapStore RangeMapStore => rangeMapStore;
+
+    /// <summary>
+    /// The replicated, refcounted, leased MVCC snapshot-floor registry.
+    /// </summary>
+    internal SnapshotFloorStore SnapshotFloorStore => snapshotFloorStore;
+
+    /// <summary>
+    /// Acquires or renews a refcounted hold protecting all revisions at/after
+    /// <paramref name="timestamp"/>. Idempotent by (holderId, timestamp).
+    /// </summary>
+    public Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)> AcquireSnapshotHold(
+        string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken ct) =>
+        snapshotFloorStore.AcquireAsync(holderId, timestamp, leaseMs, ct);
+
+    /// <summary>
+    /// Renews the lease on an existing hold. Fails when the hold has already expired or was never
+    /// registered.
+    /// </summary>
+    public Task<(KeyValueResponseType Type, HLCTimestamp LeaseExpiry)> RenewSnapshotHold(
+        string holdId, int leaseMs, CancellationToken ct) =>
+        snapshotFloorStore.RenewAsync(holdId, leaseMs, ct);
+
+    /// <summary>
+    /// Releases a hold. The effective floor rises when the lowest hold is released.
+    /// </summary>
+    public Task<KeyValueResponseType> ReleaseSnapshotHold(string holdId, CancellationToken ct) =>
+        snapshotFloorStore.ReleaseAsync(holdId, ct);
+
+    /// <summary>
+    /// Removes all holds whose lease has expired. Normally called by the background reaper;
+    /// exposed here so tests can trigger a purge cycle without waiting for the timer.
+    /// </summary>
+    internal Task<int> PurgeExpiredSnapshotHoldsAsync(CancellationToken ct = default) =>
+        snapshotFloorStore.PurgeExpiredHoldsAsync(ct);
+
+    /// <summary>
+    /// Returns the current effective floor (minimum live held timestamp, or
+    /// <see cref="HLCTimestamp.Zero"/> when no hold is live) and the count of live holds.
+    /// </summary>
+    public (HLCTimestamp EffectiveFloor, int LiveHolds) GetSnapshotFloor()
+    {
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        IReadOnlyDictionary<string, SnapshotHold> snapshot = snapshotFloorStore.Holds;
+        int live = 0;
+        foreach (SnapshotHold hold in snapshot.Values)
+            if (hold.IsLive(now))
+                live++;
+        return (snapshotFloorStore.GetEffectiveFloor(now), live);
+    }
 
     /// <summary>
     /// The key-range data-movement primitive. Registered with Kommander via
@@ -483,7 +548,8 @@ internal sealed class KeyValuesManager : IDisposable
                 keySpaceRegistry,
                 rangeMapStore,
                 configuration,
-                logger
+                logger,
+                snapshotFloorStore
             ));
 
         return actorSystem.CreateConsistentHashRouter(ephemeralInstances);
@@ -512,7 +578,8 @@ internal sealed class KeyValuesManager : IDisposable
                 keySpaceRegistry,
                 rangeMapStore,
                 configuration,
-                logger
+                logger,
+                snapshotFloorStore
             ));
         
         return actorSystem.CreateConsistentHashRouter(persistentInstances);
@@ -536,6 +603,9 @@ internal sealed class KeyValuesManager : IDisposable
             return Task.FromResult(result);
         }
 
+        if (log.LogType == ReplicationTypes.SnapshotFloor)
+            return Task.FromResult(snapshotFloorStore.Restore(partitionId, log));
+
         return Task.FromResult(log.LogType != ReplicationTypes.KeyValues || restorer.Restore(partitionId, log));
     }
 
@@ -558,6 +628,9 @@ internal sealed class KeyValuesManager : IDisposable
                 SyncKeySpaceRegistryFromRangeMap();
             return Task.FromResult(result);
         }
+
+        if (log.LogType == ReplicationTypes.SnapshotFloor)
+            return Task.FromResult(snapshotFloorStore.Replicate(partitionId, log));
 
         return Task.FromResult(log.LogType != ReplicationTypes.KeyValues || replicator.Replicate(partitionId, log));
     }
@@ -3075,6 +3148,7 @@ internal sealed class KeyValuesManager : IDisposable
     public void Dispose()
     {
         rangeMapStore.Dispose();
+        snapshotFloorStore.Dispose();
         rangeSplitTrigger?.Dispose();
     }
 }

@@ -272,6 +272,7 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
         int retentionCount,
         TimeSpan retentionAge,
         int batchSize,
+        HLCTimestamp floorTimestamp,
         out RevisionPruneResult result)
     {
         result = new(0, 0, BatchLimitReached: false);

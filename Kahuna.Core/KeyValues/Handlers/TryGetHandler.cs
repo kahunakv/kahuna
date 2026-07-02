@@ -2,6 +2,7 @@
 using Nixie;
 using Kommander.Time;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Server.KeyValues.Ranges;
 
 namespace Kahuna.Server.KeyValues.Handlers;
 

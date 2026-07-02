@@ -17,4 +17,10 @@ public static class ReplicationTypes
     /// (<see cref="Kahuna.Server.KeyValues.Ranges.RangeMapStore.MetaPartitionId"/>).
     /// </summary>
     public const string RangeMap = "rangemap";
+
+    /// <summary>
+    /// The snapshot-floor hold registry, replicated on the meta partition
+    /// (<see cref="Kahuna.Server.KeyValues.Ranges.RangeMapStore.MetaPartitionId"/>).
+    /// </summary>
+    public const string SnapshotFloor = "snapshotfloor";
 }

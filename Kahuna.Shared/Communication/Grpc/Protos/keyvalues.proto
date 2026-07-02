@@ -36,6 +36,10 @@ service KeyValuer {
   rpc BatchClientKeyValueRequests (stream GrpcBatchClientKeyValueRequest) returns (stream GrpcBatchClientKeyValueResponse);
   rpc BatchServerKeyValueRequests (stream GrpcBatchServerKeyValueRequest) returns (stream GrpcBatchServerKeyValueResponse);
   rpc RegisterKeyRange (GrpcRegisterKeyRangeRequest) returns (GrpcRegisterKeyRangeResponse);
+  rpc AcquireSnapshotHold (GrpcAcquireSnapshotHoldRequest) returns (GrpcAcquireSnapshotHoldResponse);
+  rpc RenewSnapshotHold   (GrpcRenewSnapshotHoldRequest)   returns (GrpcRenewSnapshotHoldResponse);
+  rpc ReleaseSnapshotHold (GrpcReleaseSnapshotHoldRequest)  returns (GrpcReleaseSnapshotHoldResponse);
+  rpc GetSnapshotFloor    (GrpcGetSnapshotFloorRequest)     returns (GrpcGetSnapshotFloorResponse);
 }
 
 message GrpcTrySetKeyValueRequest {
@@ -1050,4 +1054,49 @@ enum GrpcKeyValueState {
 enum GrpcLockingType {
   LOCKING_TYPE_PESSIMISTIC = 0;
   LOCKING_TYPE_OPTIMISTIC = 1;
+}
+message GrpcAcquireSnapshotHoldRequest {
+  string HolderId          = 1;
+  int32  TimestampNode     = 2;
+  int64  TimestampPhysical = 3;
+  uint32 TimestampCounter  = 4;
+  int32  LeaseMs           = 5;
+}
+
+message GrpcAcquireSnapshotHoldResponse {
+  GrpcKeyValueResponseType Type             = 1;
+  string                   HoldId           = 2;
+  int32                    LeaseExpiryNode     = 3;
+  int64                    LeaseExpiryPhysical = 4;
+  uint32                   LeaseExpiryCounter  = 5;
+}
+
+message GrpcRenewSnapshotHoldRequest {
+  string HoldId  = 1;
+  int32  LeaseMs = 2;
+}
+
+message GrpcRenewSnapshotHoldResponse {
+  GrpcKeyValueResponseType Type               = 1;
+  int32                    LeaseExpiryNode     = 2;
+  int64                    LeaseExpiryPhysical = 3;
+  uint32                   LeaseExpiryCounter  = 4;
+}
+
+message GrpcReleaseSnapshotHoldRequest {
+  string HoldId = 1;
+}
+
+message GrpcReleaseSnapshotHoldResponse {
+  GrpcKeyValueResponseType Type = 1;
+}
+
+message GrpcGetSnapshotFloorRequest {
+}
+
+message GrpcGetSnapshotFloorResponse {
+  int32  EffectiveFloorNode     = 1;
+  int64  EffectiveFloorPhysical = 2;
+  uint32 EffectiveFloorCounter  = 3;
+  int32  LiveHolds              = 4;
 }

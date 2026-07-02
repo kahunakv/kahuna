@@ -1,6 +1,7 @@
 
 using Nixie;
 using Kommander;
+using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;

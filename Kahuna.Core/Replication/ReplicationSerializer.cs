@@ -45,4 +45,16 @@ public static class ReplicationSerializer
 
     public static RangeMapMessage UnserializeRangeMapMessage(ReadOnlySpan<byte> serializedData) =>
         RangeMapMessage.Parser.ParseFrom(serializedData);
+
+    public static byte[] Serialize(SnapshotFloorMessage message)
+    {
+        int size = message.CalculateSize();
+        byte[] buf = new byte[size];
+        using CodedOutputStream cos = new(buf);
+        message.WriteTo(cos);
+        return buf;
+    }
+
+    public static SnapshotFloorMessage UnserializeSnapshotFloorMessage(ReadOnlySpan<byte> serializedData) =>
+        SnapshotFloorMessage.Parser.ParseFrom(serializedData);
 }

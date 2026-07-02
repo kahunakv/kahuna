@@ -221,7 +221,7 @@ public class TestSnapshotPointReadFromDiskHistory
     /// as-of LastModified, and null for any readTimestamp before it (simulating no history at
     /// that point in time).
     /// </summary>
-    private sealed class PointReadHistoryBackend : IPersistenceBackend
+    private sealed class PointReadHistoryBackend : IPersistenceBackend, IDisposable
     {
         private readonly MemoryPersistenceBackend inner = new();
         private readonly string key;
@@ -281,10 +281,11 @@ public class TestSnapshotPointReadFromDiskHistory
             inner.GetKeyValueByPrefix(prefixKeyName);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) =>
             inner.GetKeyValueByRange(prefix, startKey, limit);
-        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, out RevisionPruneResult result) =>
-            inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, out result);
+        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) =>
+            inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
         public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) =>
             inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
+        public void Dispose() => inner.Dispose();
     }
 }
 
@@ -351,12 +352,13 @@ public class TestSnapshotPointReadDiskFallbackIntegration : BaseCluster
                 KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
             Assert.Equal(KeyValueResponseType.Set, t);
 
-            // Read back V1 so we can capture its exact LastModified timestamp.
+            // Read back V1 so we can capture its exact LastModified timestamp and revision.
             (_, ReadOnlyKeyValueEntry? entry1) = await kahuna2.LocateAndTryGetValue(
                 HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero,
                 KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
             Assert.NotNull(entry1);
-            HLCTimestamp snapshotT = entry1!.LastModified;
+            HLCTimestamp snapshotT     = entry1!.LastModified;
+            long         v1Revision    = entry1.Revision;
 
             // Capture a timestamp strictly before V1 to test the "key did not exist" case.
             HLCTimestamp beforeCreate = new(snapshotT.N, snapshotT.L - 1, snapshotT.C);
@@ -387,7 +389,7 @@ public class TestSnapshotPointReadDiskFallbackIntegration : BaseCluster
             Assert.Equal(KeyValueResponseType.Get, rt);
             Assert.NotNull(snapEntry);
             Assert.Equal("v1", S(snapEntry!.Value));
-            Assert.Equal(1L, snapEntry.Revision);
+            Assert.Equal(v1Revision, snapEntry.Revision);
 
             // ── Snapshot read before the key existed — disk fallback must return DoesNotExist ───
             (KeyValueResponseType nrt, _) =
@@ -435,7 +437,8 @@ public class TestSnapshotPointReadDiskFallbackIntegration : BaseCluster
                 HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero,
                 KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
             Assert.NotNull(entry1);
-            HLCTimestamp snapshotT = entry1!.LastModified;
+            HLCTimestamp snapshotT  = entry1!.LastModified;
+            long         v1Revision = entry1.Revision;
             HLCTimestamp beforeCreate = new(snapshotT.N, snapshotT.L - 1, snapshotT.C);
 
             for (int i = 2; i <= retention + 2; i++)
@@ -457,7 +460,7 @@ public class TestSnapshotPointReadDiskFallbackIntegration : BaseCluster
 
             Assert.Equal(KeyValueResponseType.Exists, et);
             Assert.NotNull(existsEntry);
-            Assert.Equal(1L, existsEntry!.Revision);
+            Assert.Equal(v1Revision, existsEntry!.Revision);
 
             (KeyValueResponseType net, _) =
                 await kahuna1.LocateAndTryExistsValue(
@@ -465,6 +468,85 @@ public class TestSnapshotPointReadDiskFallbackIntegration : BaseCluster
                     KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
 
             Assert.Equal(KeyValueResponseType.DoesNotExist, net);
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+
+    /// <summary>
+    /// When the as-of revision on disk has State = Deleted (a delete landed between two writes),
+    /// the disk fallback must return DoesNotExist — the key was tombstoned at that point in time.
+    ///
+    /// Sequence:
+    ///   Write V1 (Set, T1)  →  Delete (Deleted, T2)  →  Write V3..Vn (Set, T3..Tn)
+    ///
+    /// After enough writes to push the Deleted revision out of the in-memory archive, a snapshot
+    /// read at T2 should find the Deleted revision on disk and return DoesNotExist.
+    /// </summary>
+    [Theory, CombinatorialData]
+    public async Task PointGet_AtDeletedRevision_FallsBackToDiskAndReturnsDoesNotExist(
+        [CombinatorialValues("memory")] string storage,
+        [CombinatorialValues(4)] int partitions)
+    {
+        const int retention = 2;
+
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna _) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger, cfg =>
+            {
+                cfg.RevisionRetention = retention;
+                cfg.DirtyObjectsWriterDelay = 100;
+            });
+
+        try
+        {
+            string key = "snapDiskTombstone/" + Guid.NewGuid().ToString("N")[..8];
+
+            // Write V1.
+            (KeyValueResponseType t, _, _) = await kahuna1.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, key, B("v1"),
+                null, -1, KeyValueFlags.Set, 0,
+                KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+            Assert.Equal(KeyValueResponseType.Set, t);
+
+            await Task.Delay(2, TestContext.Current.CancellationToken);
+
+            // Delete — creates a Deleted revision at deleteT.
+            (KeyValueResponseType dt, _, _) = await kahuna1.LocateAndTryDeleteKeyValue(
+                HLCTimestamp.Zero, key, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+            Assert.Equal(KeyValueResponseType.Deleted, dt);
+
+            // Capture the delete revision's timestamp via a non-snapshot read (returns null because
+            // the key is now deleted, but we can obtain the timestamp from the Deleted entry via
+            // a second Set). We'll derive deleteT from a new write's LastModified minus an offset —
+            // instead, just capture a timestamp slightly before the next write.
+            (_, ReadOnlyKeyValueEntry? afterDel) = await kahuna2.LocateAndTryGetValue(
+                HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero,
+                KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+            // afterDel is null (key deleted) — use the HLC from node1 as a proxy for "at delete time".
+            HLCTimestamp deleteT = node1.HybridLogicalClock.TrySendOrLocalEvent(node1.GetLocalNodeId());
+
+            // Write V3..Vn to push the Deleted revision out of the in-memory archive.
+            for (int i = 3; i <= retention + 3; i++)
+            {
+                await Task.Delay(2, TestContext.Current.CancellationToken);
+                (t, _, _) = await kahuna1.LocateAndTrySetKeyValue(
+                    HLCTimestamp.Zero, key, B($"v{i}"),
+                    null, -1, KeyValueFlags.Set, 0,
+                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+                Assert.Equal(KeyValueResponseType.Set, t);
+            }
+
+            await Task.Delay(300, TestContext.Current.CancellationToken);
+
+            // Snapshot read at deleteT: the Deleted revision has been trimmed from memory,
+            // the disk fallback finds it, sees State=Deleted, and returns DoesNotExist.
+            (KeyValueResponseType rt, _) = await kahuna1.LocateAndTryGetValue(
+                HLCTimestamp.Zero, key, -1, deleteT,
+                KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+
+            Assert.Equal(KeyValueResponseType.DoesNotExist, rt);
         }
         finally
         {

@@ -91,16 +91,19 @@ public sealed class KahunaManager : IKahuna, IDisposable
 
         persistenceBackend = preSeededBackend;
 
+        SnapshotFloorStore snapshotFloorStore = new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
+
         backgroundWriter = actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
             "background-writer",
             raft,
             persistenceBackend,
+            snapshotFloorStore,
             configuration,
             logger
         );
 
         this.locks = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);
-        this.keyValues = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);
+        this.keyValues = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger, snapshotFloorStore);
         this.sequencer = new(keyValues, logger);
 
         // Register the key-range data-movement hook once, here, so every host (embedded,
@@ -1210,6 +1213,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
         {
             ReplicationTypes.KeyValues => await keyValues.OnLogRestored(partitionId, log),
             ReplicationTypes.RangeMap => await keyValues.OnLogRestored(partitionId, log),
+            ReplicationTypes.SnapshotFloor => await keyValues.OnLogRestored(partitionId, log),
             ReplicationTypes.Locks => await locks.OnLogRestored(partitionId, log),
             _ => true
         };
@@ -1221,6 +1225,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
         {
             ReplicationTypes.KeyValues => await keyValues.OnReplicationReceived(partitionId, log),
             ReplicationTypes.RangeMap => await keyValues.OnReplicationReceived(partitionId, log),
+            ReplicationTypes.SnapshotFloor => await keyValues.OnReplicationReceived(partitionId, log),
             ReplicationTypes.Locks => await locks.OnReplicationReceived(partitionId, log),
             _ => true
         };
@@ -1234,8 +1239,26 @@ public sealed class KahunaManager : IKahuna, IDisposable
 
     internal Task RunCollectOnAllInstancesAsync() => keyValues.RunCollectOnAllInstancesAsync();
 
+    /// <summary>
+    /// Removes all snapshot holds whose lease has expired. Exposed for tests so they can trigger
+    /// a purge cycle without waiting for the periodic <see cref="SnapshotFloorReaperActor"/> timer.
+    /// </summary>
+    internal Task<int> PurgeExpiredSnapshotHoldsAsync(CancellationToken ct = default) =>
+        keyValues.PurgeExpiredSnapshotHoldsAsync(ct);
+
     /// <summary>The replicated range-descriptor map.</summary>
     internal RangeMapStore RangeMapStore => keyValues.RangeMapStore;
+
+    /// <summary>The replicated, refcounted, leased MVCC snapshot-floor registry.</summary>
+    internal SnapshotFloorStore SnapshotFloorStore => keyValues.SnapshotFloorStore;
+
+    /// <summary>
+    /// Direct access to the <see cref="BackgroundWriterActor"/> instance for test injection
+    /// (e.g., setting <see cref="BackgroundWriterActor.BeforePruneSampleHook"/>). Null until
+    /// the first message is processed by the actor.
+    /// </summary>
+    internal BackgroundWriterActor? BackgroundWriterActor =>
+        backgroundWriter.Runner.Actor as BackgroundWriterActor;
 
     /// <summary>The per-node key-space routing registry.</summary>
     internal KeySpaceRegistry KeySpaceRegistry => keyValues.KeySpaceRegistry;
@@ -1408,4 +1431,22 @@ public sealed class KahunaManager : IKahuna, IDisposable
     private BackupService RequireBackupService() =>
         backupService ?? throw new InvalidOperationException(
             "Backup is not configured on this node. Set BackupDir in configuration or --pitr-backup-dir.");
+
+    // ── MVCC snapshot floor ─────────────────────────────────────────────────────────────────
+
+    public Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)>
+        LocateAndAcquireSnapshotHold(string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken ct) =>
+        keyValues.AcquireSnapshotHold(holderId, timestamp, leaseMs, ct);
+
+    public Task<(KeyValueResponseType Type, HLCTimestamp LeaseExpiry)>
+        LocateAndRenewSnapshotHold(string holdId, int leaseMs, CancellationToken ct) =>
+        keyValues.RenewSnapshotHold(holdId, leaseMs, ct);
+
+    public Task<KeyValueResponseType>
+        LocateAndReleaseSnapshotHold(string holdId, CancellationToken ct) =>
+        keyValues.ReleaseSnapshotHold(holdId, ct);
+
+    public Task<(HLCTimestamp EffectiveFloor, int LiveHolds)>
+        GetSnapshotFloor(CancellationToken ct) =>
+        Task.FromResult(keyValues.GetSnapshotFloor());
 }

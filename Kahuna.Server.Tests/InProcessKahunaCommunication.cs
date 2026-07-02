@@ -258,4 +258,20 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
 
     public Task<KahunaRestoreResponse> Restore(string url, Guid leafBackupId, string targetDir, long targetTimeMs, CancellationToken cancellationToken) =>
         kahuna.RestoreToAsync(leafBackupId, targetDir, targetTimeMs, cancellationToken);
+
+    public Task<(KeyValueResponseType type, string holdId, HLCTimestamp leaseExpiry)> AcquireSnapshotHold(
+        string url, string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken cancellationToken) =>
+        kahuna.LocateAndAcquireSnapshotHold(holderId, timestamp, leaseMs, cancellationToken);
+
+    public Task<(KeyValueResponseType type, HLCTimestamp leaseExpiry)> RenewSnapshotHold(
+        string url, string holdId, int leaseMs, CancellationToken cancellationToken) =>
+        kahuna.LocateAndRenewSnapshotHold(holdId, leaseMs, cancellationToken);
+
+    public Task<KeyValueResponseType> ReleaseSnapshotHold(
+        string url, string holdId, CancellationToken cancellationToken) =>
+        kahuna.LocateAndReleaseSnapshotHold(holdId, cancellationToken);
+
+    public Task<(HLCTimestamp effectiveFloor, int liveHolds)> GetSnapshotFloor(
+        string url, CancellationToken cancellationToken) =>
+        kahuna.GetSnapshotFloor(cancellationToken);
 }
