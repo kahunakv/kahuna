@@ -79,6 +79,7 @@ public sealed class TestSnapshotFloorPersistentPrune
                 out RevisionPruneResult result));
 
             Assert.False(result.BatchLimitReached);
+            Assert.Equal(0, result.FloorViolations); // rev 1 is below the boundary; deleting it is not a violation
 
             Assert.False(RevisionExists(backend, key, 1), "revision 1 (below boundary, outside retention) should be pruned");
             Assert.True(RevisionExists(backend, key, 2),  "revision 2 (floor boundary) must be kept");
@@ -109,6 +110,7 @@ public sealed class TestSnapshotFloorPersistentPrune
                 out RevisionPruneResult result));
 
             Assert.False(result.BatchLimitReached);
+            Assert.Equal(0, result.FloorViolations); // no floor active → the audit never counts
 
             // No floor → the three oldest history revisions are pruned by the count policy.
             Assert.False(RevisionExists(backend, key, 1), "revision 1 should be pruned");
@@ -142,6 +144,7 @@ public sealed class TestSnapshotFloorPersistentPrune
 
             Assert.False(result.BatchLimitReached);
             Assert.Equal(0, result.RevisionsDeleted);
+            Assert.Equal(0, result.FloorViolations); // nothing prunable → no protected revision deleted
 
             for (long i = 1; i <= 5; i++)
                 Assert.True(RevisionExists(backend, key, i), $"revision {i} must still exist");
@@ -174,6 +177,7 @@ public sealed class TestSnapshotFloorPersistentPrune
 
             Assert.False(result.BatchLimitReached);
             Assert.Equal(0, result.RevisionsDeleted);
+            Assert.Equal(0, result.FloorViolations); // floorRevision = -1 (all protected) → audit stays 0
 
             for (long i = 1; i <= 5; i++)
                 Assert.True(RevisionExists(backend, key, i), $"revision {i} must be kept (after floor, all protected)");

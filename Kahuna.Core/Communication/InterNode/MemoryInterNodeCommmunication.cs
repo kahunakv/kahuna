@@ -1050,4 +1050,31 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
+
+    public async Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)>
+        AcquireSnapshotHold(string node, string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken cancellationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+            return await kahunaNode.LocateAndAcquireSnapshotHold(holderId, timestamp, leaseMs, cancellationToken);
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public async Task<(KeyValueResponseType Type, HLCTimestamp LeaseExpiry)>
+        RenewSnapshotHold(string node, string holdId, int leaseMs, CancellationToken cancellationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+            return await kahunaNode.LocateAndRenewSnapshotHold(holdId, leaseMs, cancellationToken);
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public async Task<KeyValueResponseType>
+        ReleaseSnapshotHold(string node, string holdId, CancellationToken cancellationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+            return await kahunaNode.LocateAndReleaseSnapshotHold(holdId, cancellationToken);
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
 }

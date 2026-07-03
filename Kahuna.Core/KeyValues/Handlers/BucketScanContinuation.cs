@@ -27,6 +27,22 @@ internal sealed class BucketScanContinuation : ReadContinuation
     private readonly HLCTimestamp currentTime;
     private readonly (string, long, bool)? scanKey;
 
+    /// <summary>
+    /// Snapshot-projected disk rows resolved in stage 2. Populated only for snapshot scans
+    /// (readTimestamp non-null); null for latest and transactional scans.
+    ///
+    /// For each key from the disk prefix page whose current revision was written after the
+    /// snapshot timestamp, this holds the highest revision at-or-before the snapshot — the
+    /// same projection <c>TryScanByPrefixFromDiskHandler</c> and the range-scan path compute.
+    /// Disk rows already at-or-before the snapshot are stored here too (as-is, without a
+    /// separate lookup) so the fallback can serve them when a resident entry supersedes the
+    /// disk version and the in-memory revision archive has been trimmed past the snapshot.
+    ///
+    /// Read on the actor thread (stage 3). Written in stage 2 (off-actor) before the
+    /// ResumeRead message is sent, so the Send establishes the happens-before edge.
+    /// </summary>
+    internal Dictionary<string, ReadOnlyKeyValueEntry>? SnapshotProjections { get; set; }
+
     internal BucketScanContinuation(
         string prefix,
         HLCTimestamp transactionId,
@@ -92,7 +108,7 @@ internal sealed class BucketScanContinuation : ReadContinuation
                 }
 
                 KeyValueResponse? result = EvaluateEntry(
-                    context, currentTime, transactionId, readTimestamp, key, entry);
+                    context, currentTime, transactionId, readTimestamp, key, entry, SnapshotProjections);
 
                 if (result is null || result.Type == KeyValueResponseType.DoesNotExist)
                     continue;
@@ -137,8 +153,13 @@ internal sealed class BucketScanContinuation : ReadContinuation
     /// context), a scan-abort response (WaitingForReplication, Aborted) to terminate the whole
     /// scan, or a Get response to include the entry.
     ///
-    /// Called from both stage 1 (in-memory rows) and stage 3 (reconciled disk rows), so it
-    /// must run on the actor thread in both cases.
+    /// Called from both stage 1 (in-memory rows, <paramref name="diskProjections"/> = null) and
+    /// stage 3 (reconciled disk rows, <paramref name="diskProjections"/> carries the stage-2
+    /// snapshot projections). Must run on the actor thread in both cases.
+    ///
+    /// For snapshot scans: when the in-memory revision archive misses
+    /// (<c>TryGetRevisionAtOrBefore</c> returns false), the method falls back to the stage-2
+    /// disk projection for the key. Purely memory-only keys with no disk history remain omitted.
     /// </summary>
     internal static KeyValueResponse? EvaluateEntry(
         KeyValueContext context,
@@ -146,7 +167,8 @@ internal sealed class BucketScanContinuation : ReadContinuation
         HLCTimestamp transactionId,
         HLCTimestamp readTimestamp,
         string key,
-        KeyValueEntry entry)
+        KeyValueEntry entry,
+        Dictionary<string, ReadOnlyKeyValueEntry>? diskProjections = null)
     {
         if (entry.ReplicationIntent is not null)
         {
@@ -204,7 +226,19 @@ internal sealed class BucketScanContinuation : ReadContinuation
         {
             if (!entry.TryGetRevisionAtOrBefore(
                     readTimestamp, out long snapRevision, out KeyValueRevisionEntry snapshot))
+            {
+                // In-memory revision archive does not reach as far back as readTimestamp.
+                // Fall back to the stage-2 disk projection when available.
+                // Purely memory-only keys (never flushed to disk) have no projection and remain omitted.
+                if (diskProjections is not null && diskProjections.TryGetValue(key, out ReadOnlyKeyValueEntry? diskSnap))
+                {
+                    if (diskSnap.State is KeyValueState.Deleted or KeyValueState.Undefined ||
+                        (diskSnap.Expires != HLCTimestamp.Zero && diskSnap.Expires - currentTime < TimeSpan.Zero))
+                        return null;
+                    return new(KeyValueResponseType.Get, diskSnap);
+                }
                 return null;
+            }
 
             if (snapshot.State is KeyValueState.Deleted or KeyValueState.Undefined ||
                 (snapshot.Expires != HLCTimestamp.Zero && snapshot.Expires - currentTime < TimeSpan.Zero))

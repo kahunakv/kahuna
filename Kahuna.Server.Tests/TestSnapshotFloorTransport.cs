@@ -102,6 +102,57 @@ public sealed class TestSnapshotFloorTransport
     }
 
     /// <summary>
+    /// AcquireSnapshotHold with leaseMs &lt;= 0 must return InvalidInput.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(int.MinValue)]
+    public async Task AcquireSnapshotHold_ZeroOrNegativeLeaseMs_ReturnsInvalidInput(int leaseMs)
+    {
+        await using EmbeddedKahunaNode node = CreateNode(loggerFactory);
+        await node.StartAsync(TestContext.Current.CancellationToken);
+
+        KahunaClient client = new("http://localhost", communication: new InProcessKahunaCommunication(node.Kahuna));
+
+        HLCTimestamp timestamp = new(1, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), 0u);
+
+        (KeyValueResponseType type, string holdId, _) =
+            await client.AcquireSnapshotHold("holder-bad-lease", timestamp, leaseMs, TestContext.Current.CancellationToken);
+
+        Assert.Equal(KeyValueResponseType.InvalidInput, type);
+        Assert.True(string.IsNullOrEmpty(holdId));
+    }
+
+    /// <summary>
+    /// RenewSnapshotHold with leaseMs &lt;= 0 must return InvalidInput — even when the hold ID is valid.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(int.MinValue)]
+    public async Task RenewSnapshotHold_ZeroOrNegativeLeaseMs_ReturnsInvalidInput(int leaseMs)
+    {
+        await using EmbeddedKahunaNode node = CreateNode(loggerFactory);
+        await node.StartAsync(TestContext.Current.CancellationToken);
+
+        KahunaClient client = new("http://localhost", communication: new InProcessKahunaCommunication(node.Kahuna));
+
+        HLCTimestamp timestamp = new(1, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), 0u);
+
+        // First acquire a valid hold so we have a real holdId to renew.
+        (KeyValueResponseType acquireType, string holdId, _) =
+            await client.AcquireSnapshotHold("holder-renew-bad-lease", timestamp, 60_000, TestContext.Current.CancellationToken);
+        Assert.Equal(KeyValueResponseType.Set, acquireType);
+
+        // Renew with an invalid lease must be rejected.
+        (KeyValueResponseType renewType, _) =
+            await client.RenewSnapshotHold(holdId, leaseMs, TestContext.Current.CancellationToken);
+
+        Assert.Equal(KeyValueResponseType.InvalidInput, renewType);
+    }
+
+    /// <summary>
     /// Verifies that acquiring the same (holderId, timestamp) pair a second time is idempotent:
     /// the same holdId is returned and the response type is Set.
     /// </summary>

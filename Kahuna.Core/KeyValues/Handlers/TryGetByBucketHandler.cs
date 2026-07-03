@@ -132,7 +132,10 @@ internal sealed class TryGetByBucketHandler : BaseHandler
         if (scanKey.HasValue)
             context.PendingReads[scanKey.Value] = cont;
 
-        Task<List<(string, ReadOnlyKeyValueEntry)>> readTask;
+        bool isSnapshotScan = !message.ReadTimestamp.IsNull();
+        HLCTimestamp capturedReadTs = message.ReadTimestamp;
+
+        Task<(List<(string, ReadOnlyKeyValueEntry)>, Dictionary<string, ReadOnlyKeyValueEntry>?)> readTask;
         try
         {
             // Route the disk scan to the FairReadScheduler partition that owns this data range,
@@ -142,7 +145,8 @@ internal sealed class TryGetByBucketHandler : BaseHandler
             // the partition the same way.
             readTask = context.Raft.ReadScheduler.EnqueueTask(
                 ResolvePartition(message.Key),
-                () => context.PersistenceBackend.GetKeyValueByPrefix(message.Key));
+                () => ProjectBucketPage(context.PersistenceBackend.GetKeyValueByPrefix(message.Key),
+                    isSnapshotScan, capturedReadTs, currentTime, context.PersistenceBackend));
         }
         catch (Exception ex)
         {
@@ -159,13 +163,62 @@ internal sealed class TryGetByBucketHandler : BaseHandler
         _ = readTask.ContinueWith(t =>
         {
             if (!t.IsCompletedSuccessfully) cont.SetFaulted();
-            else cont.ScanDiskResult = t.Result;
+            else (cont.ScanDiskResult, cont.SnapshotProjections) = t.Result;
             actorContext.Self.Send(
                 new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont });
         }, TaskScheduler.Default);
 
         actorContext.ByPassReply = true;
         return KeyValueStaticResponses.WaitingForReplicationResponse;
+    }
+
+    /// <summary>
+    /// Builds the raw disk-prefix page and, for snapshot scans, resolves per-key snapshot
+    /// projections in the same scheduler task. Must run on the off-actor scheduler thread —
+    /// <c>GetKeyValueRevisionAtOrBefore</c> does I/O and must not block the actor mailbox.
+    ///
+    /// For each disk row:
+    /// <list type="bullet">
+    ///   <item>If <c>LastModified ≤ readTimestamp</c>, the row is already the at-or-before
+    ///   version — stored in the projections dict as-is so <c>EvaluateEntry</c> can serve it
+    ///   if the in-memory archive has been trimmed beyond the snapshot.</item>
+    ///   <item>If <c>LastModified > readTimestamp</c>, look up the highest revision
+    ///   at-or-before the snapshot via <c>GetKeyValueRevisionAtOrBefore</c>; drop the key
+    ///   from projections if null, Deleted, Undefined, or expired.</item>
+    /// </list>
+    /// </summary>
+    internal static (List<(string, ReadOnlyKeyValueEntry)> Raw, Dictionary<string, ReadOnlyKeyValueEntry>? Projections)
+        ProjectBucketPage(
+            List<(string, ReadOnlyKeyValueEntry)> raw,
+            bool isSnapshotScan,
+            HLCTimestamp readTimestamp,
+            HLCTimestamp currentTime,
+            IPersistenceBackend backend)
+    {
+        if (!isSnapshotScan)
+            return (raw, null);
+
+        Dictionary<string, ReadOnlyKeyValueEntry> projections = new(raw.Count);
+        foreach ((string k, ReadOnlyKeyValueEntry e) in raw)
+        {
+            if (e.LastModified.CompareTo(readTimestamp) <= 0)
+            {
+                // Row is already at-or-before the snapshot; store it directly so the fallback
+                // can serve it when a resident entry supersedes it and the archive is trimmed.
+                projections[k] = e;
+                continue;
+            }
+
+            // Current disk row was written after the snapshot; resolve the at-or-before revision.
+            KeyValueEntry? snap = backend.GetKeyValueRevisionAtOrBefore(k, e.Revision - 1, readTimestamp);
+            if (snap is null || snap.State is KeyValueState.Deleted or KeyValueState.Undefined)
+                continue;
+            if (snap.Expires != HLCTimestamp.Zero && snap.Expires.CompareTo(currentTime) < 0)
+                continue;
+            projections[k] = new ReadOnlyKeyValueEntry(
+                snap.Value, snap.Revision, snap.Expires, snap.LastUsed, snap.LastModified, snap.State);
+        }
+        return (raw, projections);
     }
 
     private static int EnsureLexicographicalOrder((string, ReadOnlyKeyValueEntry) x, (string, ReadOnlyKeyValueEntry) y)

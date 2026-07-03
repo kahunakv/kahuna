@@ -326,6 +326,9 @@ public static class KeyValuesHandlers
             if (string.IsNullOrEmpty(request.HolderId))
                 return new KahunaAcquireSnapshotHoldResponse { Type = KeyValueResponseType.InvalidInput };
 
+            if (request.LeaseMs <= 0)
+                return new KahunaAcquireSnapshotHoldResponse { Type = KeyValueResponseType.InvalidInput };
+
             (KeyValueResponseType type, string holdId, HLCTimestamp leaseExpiry) =
                 await keyValues.LocateAndAcquireSnapshotHold(request.HolderId, request.Timestamp, request.LeaseMs, cancellationToken);
 
@@ -335,6 +338,9 @@ public static class KeyValuesHandlers
         app.MapPost("/v1/kv/snapshot-hold/renew", async (KahunaRenewSnapshotHoldRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
             if (string.IsNullOrEmpty(request.HoldId))
+                return new KahunaRenewSnapshotHoldResponse { Type = KeyValueResponseType.InvalidInput };
+
+            if (request.LeaseMs <= 0)
                 return new KahunaRenewSnapshotHoldResponse { Type = KeyValueResponseType.InvalidInput };
 
             (KeyValueResponseType type, HLCTimestamp leaseExpiry) =

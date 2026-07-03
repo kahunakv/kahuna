@@ -234,23 +234,59 @@ internal sealed class KeyValuesManager : IDisposable
     /// Acquires or renews a refcounted hold protecting all revisions at/after
     /// <paramref name="timestamp"/>. Idempotent by (holderId, timestamp).
     /// </summary>
-    public Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)> AcquireSnapshotHold(
-        string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken ct) =>
-        snapshotFloorStore.AcquireAsync(holderId, timestamp, leaseMs, ct);
+    public async Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)> AcquireSnapshotHold(
+        string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken ct)
+    {
+        if (!raft.Joined)
+            return (KeyValueResponseType.MustRetry, string.Empty, HLCTimestamp.Zero);
+
+        if (await raft.AmILeader(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
+            return await snapshotFloorStore.AcquireAsync(holderId, timestamp, leaseMs, ct).ConfigureAwait(false);
+
+        string leader = await raft.WaitForLeader(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false);
+        if (leader == raft.GetLocalEndpoint())
+            return await snapshotFloorStore.AcquireAsync(holderId, timestamp, leaseMs, ct).ConfigureAwait(false);
+
+        return await interNodeCommunication.AcquireSnapshotHold(leader, holderId, timestamp, leaseMs, ct).ConfigureAwait(false);
+    }
 
     /// <summary>
     /// Renews the lease on an existing hold. Fails when the hold has already expired or was never
     /// registered.
     /// </summary>
-    public Task<(KeyValueResponseType Type, HLCTimestamp LeaseExpiry)> RenewSnapshotHold(
-        string holdId, int leaseMs, CancellationToken ct) =>
-        snapshotFloorStore.RenewAsync(holdId, leaseMs, ct);
+    public async Task<(KeyValueResponseType Type, HLCTimestamp LeaseExpiry)> RenewSnapshotHold(
+        string holdId, int leaseMs, CancellationToken ct)
+    {
+        if (!raft.Joined)
+            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
+
+        if (await raft.AmILeader(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
+            return await snapshotFloorStore.RenewAsync(holdId, leaseMs, ct).ConfigureAwait(false);
+
+        string leader = await raft.WaitForLeader(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false);
+        if (leader == raft.GetLocalEndpoint())
+            return await snapshotFloorStore.RenewAsync(holdId, leaseMs, ct).ConfigureAwait(false);
+
+        return await interNodeCommunication.RenewSnapshotHold(leader, holdId, leaseMs, ct).ConfigureAwait(false);
+    }
 
     /// <summary>
     /// Releases a hold. The effective floor rises when the lowest hold is released.
     /// </summary>
-    public Task<KeyValueResponseType> ReleaseSnapshotHold(string holdId, CancellationToken ct) =>
-        snapshotFloorStore.ReleaseAsync(holdId, ct);
+    public async Task<KeyValueResponseType> ReleaseSnapshotHold(string holdId, CancellationToken ct)
+    {
+        if (!raft.Joined)
+            return KeyValueResponseType.MustRetry;
+
+        if (await raft.AmILeader(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
+            return await snapshotFloorStore.ReleaseAsync(holdId, ct).ConfigureAwait(false);
+
+        string leader = await raft.WaitForLeader(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false);
+        if (leader == raft.GetLocalEndpoint())
+            return await snapshotFloorStore.ReleaseAsync(holdId, ct).ConfigureAwait(false);
+
+        return await interNodeCommunication.ReleaseSnapshotHold(leader, holdId, ct).ConfigureAwait(false);
+    }
 
     /// <summary>
     /// Removes all holds whose lease has expired. Normally called by the background reaper;
@@ -266,12 +302,8 @@ internal sealed class KeyValuesManager : IDisposable
     public (HLCTimestamp EffectiveFloor, int LiveHolds) GetSnapshotFloor()
     {
         HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
-        IReadOnlyDictionary<string, SnapshotHold> snapshot = snapshotFloorStore.Holds;
-        int live = 0;
-        foreach (SnapshotHold hold in snapshot.Values)
-            if (hold.IsLive(now))
-                live++;
-        return (snapshotFloorStore.GetEffectiveFloor(now), live);
+        (HLCTimestamp floor, int live) = snapshotFloorStore.GetEffectiveFloorAndCount(now);
+        return (floor, live);
     }
 
     /// <summary>

@@ -91,4 +91,13 @@ public interface IInterNodeCommunication
 
     /// <summary>Injects clamped lock entries into the actor pool for <paramref name="keySpace"/> on <paramref name="node"/>.</summary>
     public Task ImportRangeLocks(string node, string keySpace, List<KeyValueRangeLock> locks, CancellationToken cancellationToken);
+
+    /// <summary>Forwards a snapshot-hold acquire to the meta-partition leader on <paramref name="node"/>.</summary>
+    public Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)> AcquireSnapshotHold(string node, string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken cancellationToken);
+
+    /// <summary>Forwards a snapshot-hold renew to the meta-partition leader on <paramref name="node"/>.</summary>
+    public Task<(KeyValueResponseType Type, HLCTimestamp LeaseExpiry)> RenewSnapshotHold(string node, string holdId, int leaseMs, CancellationToken cancellationToken);
+
+    /// <summary>Forwards a snapshot-hold release to the meta-partition leader on <paramref name="node"/>.</summary>
+    public Task<KeyValueResponseType> ReleaseSnapshotHold(string node, string holdId, CancellationToken cancellationToken);
 }

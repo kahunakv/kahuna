@@ -23,7 +23,8 @@ using Nixie;
 namespace Kahuna.Server.Tests;
 
 /// <summary>
-/// End-to-end integration test for the F3 snapshot-floor memory pin.
+/// End-to-end integration test verifying that the snapshot-floor boundary-only in-memory retention
+/// keeps the floor-boundary revision pinned in the actor's in-memory archive.
 ///
 /// <para>The unit tests in <see cref="TestSnapshotFloorBoundaryTrim"/> prove that
 /// <c>RemoveExpiredRevisions</c> pins the floor-boundary revision in the in-memory
@@ -32,9 +33,9 @@ namespace Kahuna.Server.Tests;
 /// is never called for the boundary revision while a hold is active.</para>
 ///
 /// <para>The discriminating fixture: a counting backend records every call to
-/// <c>GetKeyValueRevisionAtOrBefore</c>. If F3 is broken (the boundary is trimmed
+/// <c>GetKeyValueRevisionAtOrBefore</c>. If the boundary pin is broken (the boundary is trimmed
 /// from memory), the snapshot read falls back to disk and the counter goes to 1.
-/// If F3 is working, the boundary is found in memory and the counter stays at 0.</para>
+/// If the pin is working, the boundary is found in memory and the counter stays at 0.</para>
 /// </summary>
 [Collection("ClusterTests")]
 public sealed class TestSnapshotFloorPinEndToEnd
@@ -188,7 +189,7 @@ public sealed class TestSnapshotFloorPinEndToEnd
 
             // ── revs 2, 3, 4: push rev 1 below the retention window ───────────────────
             // With RevisionRetention=2, each write trims the in-memory archive.
-            // F3 must keep rev 1 (the floor-boundary) despite falling below the cutoff.
+            // The boundary-only retention must keep rev 1 (the floor-boundary) despite falling below the cutoff.
             for (int i = 2; i <= 4; i++)
             {
                 (KeyValueResponseType setTypeN, _, _) =
@@ -216,8 +217,8 @@ public sealed class TestSnapshotFloorPinEndToEnd
             Assert.NotNull(snap);
             Assert.Equal("value-at-T1", System.Text.Encoding.UTF8.GetString(snap.Value ?? []));
 
-            // This is the F3 falsification condition: if the pin is broken, the boundary
-            // revision is trimmed and the read falls back to GetKeyValueRevisionAtOrBefore.
+            // If the boundary pin is broken, the revision is trimmed and the read falls back
+            // to GetKeyValueRevisionAtOrBefore — that fallback call would make this non-zero.
             Assert.Equal(0, callsAfter - callsBefore);
         }
         finally

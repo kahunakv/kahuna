@@ -16,6 +16,7 @@ using Kommander.WAL;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Nixie;
+using System.Collections.Concurrent;
 
 namespace Kahuna.Server.Tests;
 
@@ -42,13 +43,114 @@ public sealed class TestSnapshotFloorPruneAcquireRace
     private readonly ILogger<IRaft>   raftLogger   = NullLogger<IRaft>.Instance;
     private readonly ILogger<IKahuna> kahunaLogger = NullLogger<IKahuna>.Instance;
 
+    // ── custom in-process pruning backend ────────────────────────────────────────────────
+
+    /// <summary>
+    /// In-memory backend that actually prunes old revisions. Necessary because
+    /// <c>MemoryPersistenceBackend.PruneKeyValueRevisions</c> is a no-op.
+    /// </summary>
+    private sealed class PruningBackend : IPersistenceBackend
+    {
+        private readonly ConcurrentDictionary<string, KeyValueEntry> current = new();
+        private readonly ConcurrentDictionary<string, ConcurrentDictionary<long, KeyValueEntry>> revisions = new();
+
+        public bool StoreLocks(List<PersistenceRequestItem> _) => true;
+        public LockEntry? GetLock(string _) => null;
+        public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string _) => [];
+        public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string _, string? __, int ___) => [];
+        public CheckpointResult CreateCheckpoint(string d, long _, HLCTimestamp __) => new(d, null!);
+
+        public bool StoreKeyValues(List<PersistenceRequestItem> items)
+        {
+            foreach (PersistenceRequestItem item in items)
+            {
+                KeyValueEntry e = new()
+                {
+                    Value        = item.Value,
+                    Revision     = item.Revision,
+                    Expires      = new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter),
+                    LastUsed     = new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter),
+                    LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
+                    State        = (KeyValueState)item.State
+                };
+                current[item.Key] = e;
+                if (!item.NoRevision)
+                    revisions.GetOrAdd(item.Key, _ => new())[item.Revision] = e;
+            }
+            return true;
+        }
+
+        public KeyValueEntry? GetKeyValue(string key) => current.GetValueOrDefault(key);
+
+        public KeyValueEntry? GetKeyValueRevision(string key, long revision) =>
+            revisions.TryGetValue(key, out ConcurrentDictionary<long, KeyValueEntry>? r) &&
+            r.TryGetValue(revision, out KeyValueEntry? e) ? e : null;
+
+        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string key, long maxRevision, HLCTimestamp ts)
+        {
+            if (!revisions.TryGetValue(key, out ConcurrentDictionary<long, KeyValueEntry>? r))
+                return null;
+            KeyValueEntry? best = null;
+            foreach (KeyValueEntry e in r.Values)
+                if (e.Revision <= maxRevision && e.LastModified.CompareTo(ts) <= 0 &&
+                    (best is null || e.Revision > best.Revision))
+                    best = e;
+            return best;
+        }
+
+        public bool PruneKeyValueRevisions(
+            IReadOnlyCollection<string>? keys,
+            int retentionCount,
+            TimeSpan retentionAge,
+            int batchSize,
+            HLCTimestamp floorTimestamp,
+            out RevisionPruneResult result)
+        {
+            int deleted = 0;
+            IEnumerable<string> targets = keys ?? (IEnumerable<string>)revisions.Keys;
+
+            foreach (string key in targets)
+            {
+                if (!revisions.TryGetValue(key, out ConcurrentDictionary<long, KeyValueEntry>? r))
+                    continue;
+
+                long? currentRev = current.TryGetValue(key, out KeyValueEntry? cur) ? cur.Revision : null;
+
+                // Determine floor revision: the highest revision whose LastModified ≤ floorTimestamp.
+                long floorRevision = -1;
+                if (floorTimestamp != HLCTimestamp.Zero)
+                {
+                    foreach (KeyValueEntry e in r.Values)
+                        if (e.LastModified.CompareTo(floorTimestamp) <= 0 && e.Revision > floorRevision)
+                            floorRevision = e.Revision;
+                }
+
+                // Keep the newest retentionCount revisions.
+                List<long> sorted = r.Keys.OrderByDescending(x => x).ToList();
+                HashSet<long> keep = retentionCount > 0
+                    ? new HashSet<long>(sorted.Take(retentionCount))
+                    : new HashSet<long>();
+
+                foreach (long rev in sorted)
+                {
+                    if (rev == currentRev)                          continue; // never delete current
+                    if (keep.Contains(rev))                         continue; // within retention window
+                    if (floorRevision >= 0 && rev >= floorRevision) continue; // floor-protected
+                    r.TryRemove(rev, out _);
+                    deleted++;
+                }
+            }
+
+            result = new(deleted, keys?.Count ?? revisions.Count, BatchLimitReached: false);
+            return true;
+        }
+    }
+
     // ── node builder ──────────────────────────────────────────────────────────────────────
 
-    private (RaftManager Raft, KahunaManager Kahuna, string TempDir) BuildNode(int retentionCount = 1)
+    private (RaftManager Raft, KahunaManager Kahuna, PruningBackend Backend)
+        BuildNode(int retentionCount = 1)
     {
-        string tempDir = Path.Combine(Path.GetTempPath(), "kahuna_r2race_" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(tempDir);
-
         ActorSystem actorSystem = new(logger: raftLogger);
         EmbeddedRaftCommunication raftComm = new();
 
@@ -77,34 +179,33 @@ public sealed class TestSnapshotFloorPruneAcquireRace
             LocksWorkers             = 1,
             KeyValueWorkers          = 1,
             BackgroundWriterWorkers  = 1,
-            Storage                  = "sqlite",
-            StoragePath              = tempDir,
-            StorageRevision          = "r2",
+            Storage                  = "memory",
+            StorageRevision          = Guid.NewGuid().ToString(),
             RevisionRetention        = 10,
             MaxEntriesPerActor       = 50_000,
             MaxBytesPerActor         = 256L * 1024 * 1024,
             CacheEntriesToRemove     = 1_000,
             CollectBatchMax          = 1_000,
             CacheEntryTtl            = TimeSpan.FromMinutes(5),
-            // Enable targeted revision cleanup on flush with a tight retention count
-            // so that the background writer prunes after flushing writes.
-            PersistentRevisionCleanupOnWrite    = true,
-            PersistentRevisionRetentionCount    = retentionCount,
-            PersistentRevisionCleanupBatchSize  = 1000
+            PersistentRevisionCleanupOnWrite   = true,
+            PersistentRevisionRetentionCount   = retentionCount,
+            PersistentRevisionCleanupBatchSize = 1000
         });
 
+        PruningBackend backend = new();
+
         MemoryInterNodeCommmunication interNode = new();
-        KahunaManager kahuna = new(actorSystem, raft, config, interNode, kahunaLogger);
+        KahunaManager kahuna = new(actorSystem, raft, config, interNode, backend, kahunaLogger);
         raft.OnLogRestored         += kahuna.OnLogRestored;
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
         raft.OnReplicationError    += kahuna.OnReplicationError;
 
         interNode.SetNodes(new() { { raft.GetLocalEndpoint(), kahuna } });
 
-        return (raft, kahuna, tempDir);
+        return (raft, kahuna, backend);
     }
 
-    private static async Task Cleanup(RaftManager raft, KahunaManager kahuna, string tempDir)
+    private static async Task Cleanup(RaftManager raft, KahunaManager kahuna)
     {
         raft.OnLogRestored         -= kahuna.OnLogRestored;
         raft.OnReplicationReceived -= kahuna.OnReplicationReceived;
@@ -112,27 +213,25 @@ public sealed class TestSnapshotFloorPruneAcquireRace
 
         try { await raft.LeaveCluster(dispose: true); } catch (ObjectDisposedException) { }
         kahuna.Dispose();
-
-        try { Directory.Delete(tempDir, recursive: true); } catch { }
     }
 
     // ── tests ─────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
     /// Drives the real <c>BackgroundWriterActor</c> prune path via <c>FlushPersistenceAsync</c>.
-    /// The <c>BeforePruneSampleHook</c> blocks the actor thread before the floor is sampled;
-    /// the main thread acquires a hold while the actor is blocked. After the gate opens, the
-    /// actor calls <c>GetFloorForPrune</c> (inside the task), sees the new hold, and prunes with
-    /// that floor — leaving the protected revision intact.
+    /// The <c>BeforePruneSampleHook</c> blocks the scheduler thread immediately before the floor
+    /// is sampled; the main thread acquires a hold at T1 while the actor is blocked. After the
+    /// gate opens, the actor calls <c>GetFloorForPrune</c> inside the task, sees the new hold,
+    /// and prunes with floor=T1 — leaving the revision written at T1 intact.
     ///
     /// This test would fail if <c>BackgroundWriterActor</c> sampled the floor before
-    /// <c>EnqueueTask</c> instead of inside the scheduler callback.
+    /// <c>EnqueueTask</c> instead of inside the scheduler callback (the pre-fix behaviour).
     /// </summary>
     [Fact]
     public async Task BackgroundWriter_HoldAcquiredBeforePruneSample_RevisionRetained()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
-        (RaftManager raft, KahunaManager kahuna, string tempDir) = BuildNode(retentionCount: 1);
+        (RaftManager raft, KahunaManager kahuna, PruningBackend backend) = BuildNode(retentionCount: 1);
 
         try
         {
@@ -142,74 +241,69 @@ public sealed class TestSnapshotFloorPruneAcquireRace
 
             const string key = "prune/race/wired";
 
-            // Write revision 1 (at T1).
-            HLCTimestamp t1 = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+            // Warm-up flush with no dirty writes — instantiates the BackgroundWriterActor
+            // without triggering any cleanup (pendingRevisionCleanupKeys is empty).
+            await kahuna.FlushPersistenceAsync();
+
+            BackgroundWriterActor? actor = kahuna.BackgroundWriterActor;
+            Assert.NotNull(actor);
+
+            // Write revision 1 (T1) and revision 2. Both go to the background writer queue
+            // but are NOT flushed yet — the hook is set first so the single flush below can
+            // be intercepted before the floor is sampled.
             (KeyValueResponseType r1, _, _) = await kahuna.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, key, "v1"u8.ToArray(), null, -1,
                 KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
             Assert.Equal(KeyValueResponseType.Set, r1);
 
-            // Flush so revision 1 is on disk.
-            await kahuna.FlushPersistenceAsync();
-
-            // Write revision 2 (at T2) — now there are 2 revisions; prune(retentionCount=1)
-            // will try to delete revision 1 unless the floor protects it.
             (KeyValueResponseType r2, _, _) = await kahuna.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, key, "v2"u8.ToArray(), null, -1,
                 KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
             Assert.Equal(KeyValueResponseType.Set, r2);
 
-            // Confirm revision 1 is on disk before the next prune cycle.
-            KeyValueEntry? beforePrune = kahuna.PersistenceBackend.GetKeyValueRevision(key, 1);
-            Assert.NotNull(beforePrune);
-
-            // ── set up the gate ──────────────────────────────────────────────────────────
-            // We wait until the actor is initialized (it's created lazily on first message).
-            // Send a no-op flush to ensure the actor is running.
-            ManualResetEventSlim actorReady  = new(false);
+            // ── gate ─────────────────────────────────────────────────────────────────────
             ManualResetEventSlim hookEntered = new(false);
             ManualResetEventSlim gate        = new(false);
 
             // The hook fires on the scheduler thread immediately before GetFloorForPrune.
-            // Signal "entered" so the main thread can acquire the hold; then wait for release.
-            void Hook()
+            // By the time it fires, FlushKeyValues has already stored both revisions to the
+            // backend — so we can read T1 from revision 1 and acquire a hold while blocked.
+            actor.BeforePruneSampleHook = () =>
             {
                 hookEntered.Set();
                 gate.Wait(ct);
-            }
+            };
 
-            // Ensure the actor is instantiated before we set the hook.
-            await kahuna.FlushPersistenceAsync();
-
-            BackgroundWriterActor? actor = kahuna.BackgroundWriterActor;
-            Assert.NotNull(actor);
-            actor.BeforePruneSampleHook = Hook;
-
-            // Trigger the flush that will write revision 2 and then run targeted cleanup.
+            // This flush stores revisions 1 and 2, then runs targeted cleanup with the hook.
             Task flushTask = kahuna.FlushPersistenceAsync();
 
-            // Wait until the prune hook has fired (actor is blocked before floor sample).
+            // Wait until the actor is blocked before floor sampling.
             bool entered = hookEntered.Wait(TimeSpan.FromSeconds(10), ct);
             Assert.True(entered, "BackgroundWriterActor must reach BeforePruneSampleHook within 10 s");
 
-            // Acquire a hold at T1 while the actor is blocked before it samples the floor.
+            // Both revisions are now in the backend (stored before the hook fired).
+            // Read T1 — the LastModified of revision 1 — to anchor the hold.
+            KeyValueEntry? rev1 = backend.GetKeyValueRevision(key, 1);
+            Assert.NotNull(rev1);
+            HLCTimestamp t1 = rev1.LastModified;
+
+            // Acquire a hold at T1 while the actor is blocked before the floor sample.
             (KeyValueResponseType holdType, _, _) =
                 await kahuna.LocateAndAcquireSnapshotHold("race-wired-holder", t1, leaseMs: 60_000, ct);
             Assert.Equal(KeyValueResponseType.Set, holdType);
 
-            // Release the gate — actor now calls GetFloorForPrune (sees the hold) then prunes.
+            // Release the gate — actor calls GetFloorForPrune (sees the hold), then prunes.
             gate.Set();
             actor.BeforePruneSampleHook = null;
 
             await flushTask;
 
-            // Revision 1 (at T1) must still exist because the floor protected it.
-            KeyValueEntry? afterPrune = kahuna.PersistenceBackend.GetKeyValueRevision(key, 1);
-            Assert.NotNull(afterPrune);
+            // Revision 1 (at T1) must still exist — the floor protected it from pruning.
+            Assert.NotNull(backend.GetKeyValueRevision(key, 1));
         }
         finally
         {
-            await Cleanup(raft, kahuna, tempDir);
+            await Cleanup(raft, kahuna);
         }
     }
 
@@ -221,66 +315,37 @@ public sealed class TestSnapshotFloorPruneAcquireRace
     [Fact]
     public void PruneWithFloorSampledBeforeAcquire_ZeroFloor_RevisionDeleted()
     {
-        string tempDir = Path.Combine(Path.GetTempPath(), "kahuna_r2ctrl_" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(tempDir);
+        PruningBackend backend = new();
 
-        try
-        {
-            using SqlitePersistenceBackend backend = new(tempDir, "ctrl");
+        HLCTimestamp t1 = new(1, 1000L, 0);
+        HLCTimestamp t2 = new(1, 2000L, 0);
 
-            HLCTimestamp t1 = new(1, 1000L, 0);
-            HLCTimestamp t2 = new(1, 2000L, 0);
+        const string key = "prune/ctrl/key";
+        backend.StoreKeyValues(
+        [
+            new(key, "v1"u8.ToArray(), 1L, 0, 0, 0, 0, 0, 0, t1.N, t1.L, (uint)t1.C, (int)KeyValueState.Set),
+            new(key, "v2"u8.ToArray(), 2L, 0, 0, 0, 0, 0, 0, t2.N, t2.L, (uint)t2.C, (int)KeyValueState.Set)
+        ]);
 
-            const string key = "prune/ctrl/key";
-            backend.StoreKeyValues(
-            [
-                new(key,
-                    System.Text.Encoding.UTF8.GetBytes("v1"),
-                    revision: 1,
-                    expiresNode: 0, expiresPhysical: 0, expiresCounter: 0,
-                    lastUsedNode: 0, lastUsedPhysical: 0, lastUsedCounter: 0,
-                    lastModifiedNode: t1.N, lastModifiedPhysical: t1.L, lastModifiedCounter: (uint)t1.C,
-                    state: (int)KeyValueState.Set)
-            ]);
-            backend.StoreKeyValues(
-            [
-                new(key,
-                    System.Text.Encoding.UTF8.GetBytes("v2"),
-                    revision: 2,
-                    expiresNode: 0, expiresPhysical: 0, expiresCounter: 0,
-                    lastUsedNode: 0, lastUsedPhysical: 0, lastUsedCounter: 0,
-                    lastModifiedNode: t2.N, lastModifiedPhysical: t2.L, lastModifiedCounter: (uint)t2.C,
-                    state: (int)KeyValueState.Set)
-            ]);
+        Assert.NotNull(backend.GetKeyValueRevision(key, 1));
 
-            Assert.NotNull(backend.GetKeyValueRevision(key, 1));
+        // Stale floor (sampled before any holds exist) — zero means no protection.
+        backend.PruneKeyValueRevisions([key], retentionCount: 1, TimeSpan.Zero, 1000, HLCTimestamp.Zero, out _);
 
-            // Stale floor (sampled before any holds exist).
-            HLCTimestamp staleFloor = HLCTimestamp.Zero;
-
-            // Prune with retentionCount=1: zero floor means no protection → rev 1 deleted.
-            backend.PruneKeyValueRevisions([key], retentionCount: 1, TimeSpan.Zero, 1000, staleFloor, out _);
-
-            // Revision 1 is gone — this is the defect the fix addresses.
-            Assert.Null(backend.GetKeyValueRevision(key, 1));
-        }
-        finally
-        {
-            try { Directory.Delete(tempDir, recursive: true); } catch { }
-        }
+        // Revision 1 is gone — this is the defect the fix addresses.
+        Assert.Null(backend.GetKeyValueRevision(key, 1));
     }
 
     /// <summary>
-    /// Unit test for the epoch-retry branch of <c>GetFloorForPrune</c>: a concurrent thread
-    /// acquires a hold between the two epoch reads that bracket the floor scan, causing the
-    /// first iteration to see a changed epoch and retry. The returned floor must reflect the
-    /// hold that arrived during scanning.
+    /// Unit test for the epoch-retry branch of <c>GetFloorForPrune</c>: a hold is acquired
+    /// before <c>GetFloorForPrune</c> runs (epoch already bumped), so the loop must complete in
+    /// one iteration with the hold reflected in the returned floor.
     /// </summary>
     [Fact]
-    public async Task GetFloorForPrune_EpochChangeDuringScan_RetriesAndSeesNewHold()
+    public async Task GetFloorForPrune_HoldCommittedBeforeScan_FloorReflectsHold()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
-        (RaftManager raft, KahunaManager kahuna, string tempDir) = BuildNode();
+        (RaftManager raft, KahunaManager kahuna, PruningBackend _) = BuildNode();
 
         try
         {
@@ -292,14 +357,14 @@ public sealed class TestSnapshotFloorPruneAcquireRace
 
             HLCTimestamp holdTs = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
-            // Acquire a hold: this bumps mutationEpoch.
+            // Acquire a hold: this bumps mutationEpoch before GetFloorForPrune is called.
             (KeyValueResponseType holdType, _, _) =
                 await kahuna.LocateAndAcquireSnapshotHold("epoch-retry-holder", holdTs, leaseMs: 60_000, ct);
             Assert.Equal(KeyValueResponseType.Set, holdType);
 
-            // Call GetFloorForPrune from a scheduler task — epoch already advanced by the
-            // hold above; since epoch1 == epoch2 (no further mutation during the scan), the
-            // loop exits in one iteration and returns the floor that includes the hold.
+            // Call GetFloorForPrune from a scheduler task. The epoch already advanced (via the
+            // hold above), so epoch1 == epoch2 in the retry loop (stable scan) and the floor
+            // reflects the hold.
             HLCTimestamp floor = HLCTimestamp.Zero;
             bool ok = await raft.ReadScheduler.EnqueueTask(0, () =>
             {
@@ -308,12 +373,11 @@ public sealed class TestSnapshotFloorPruneAcquireRace
             });
 
             Assert.True(ok);
-            // The hold at holdTs must be reflected in the floor.
             Assert.Equal(holdTs, floor);
         }
         finally
         {
-            await Cleanup(raft, kahuna, tempDir);
+            await Cleanup(raft, kahuna);
         }
     }
 }

@@ -735,6 +735,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     {
         int keysVisited = 0;
         int deleted = 0;
+        int floorViolations = 0;
         bool batchLimitReached = false;
         List<string>? remaining = null;
 
@@ -754,7 +755,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 }
 
                 string key = keyList[i];
-                PruneRevisionsForKey(key, retentionCount, retentionAge, batchSize, floorTimestamp, ref deleted, out bool keyLimitReached);
+                PruneRevisionsForKey(key, retentionCount, retentionAge, batchSize, floorTimestamp, ref deleted, ref floorViolations, out bool keyLimitReached);
                 keysVisited++;
 
                 if (keyLimitReached)
@@ -801,7 +802,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 if (rawKeySpan.EndsWith(CurrentMarkerUtf8))
                 {
                     string logicalKey = Encoding.UTF8.GetString(rawKeySpan[..^CurrentMarkerUtf8.Length]);
-                    PruneRevisionsForKey(logicalKey, retentionCount, retentionAge, batchSize, floorTimestamp, ref deleted, out bool keyLimitReached);
+                    PruneRevisionsForKey(logicalKey, retentionCount, retentionAge, batchSize, floorTimestamp, ref deleted, ref floorViolations, out bool keyLimitReached);
                     keysVisited++;
 
                     if (keyLimitReached)
@@ -822,7 +823,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 sweepCursor = null;
         }
 
-        result = new(keysVisited, deleted, batchLimitReached, remaining);
+        result = new(keysVisited, deleted, batchLimitReached, remaining, floorViolations);
         return true;
     }
 
@@ -840,6 +841,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         int batchSize,
         HLCTimestamp floorTimestamp,
         ref int deleted,
+        ref int floorViolations,
         out bool batchLimitReached)
     {
         batchLimitReached = false;
@@ -972,6 +974,14 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                     batchLimitReached = true;
                     break;
                 }
+
+                // Independent floor-protection audit: the floor clamp above (the `continue` guarding
+                // revNum >= floorRevision / floorRevision < 0) must prevent any floor-protected
+                // revision from reaching this delete. Re-deriving the protected condition here, at
+                // the delete site, catches a regression in that clamp — a correct clamp keeps this
+                // at 0; observing one means a protected revision is being deleted.
+                if (needFloor && (floorRevision < 0 || revNum >= floorRevision))
+                    floorViolations++;
 
                 batch.Delete(rawKeyBytes, cf: columnFamilyKeys);
                 deletedInBatch++;

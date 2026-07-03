@@ -47,8 +47,10 @@ internal sealed class SnapshotFloorStore : IDisposable
 
     private readonly object fileLock = new();
 
-    // ObservableGauge instruments — registered once per instance, captured via lambda.
-    // The Meter holds a strong reference to the callbacks so they live as long as the meter.
+    // Per-instance Meter owns the observable gauges. Disposing it removes the gauge callbacks
+    // and breaks the strong reference from the meter to the capturing lambdas, so a disposed
+    // store can be garbage-collected even though SnapshotFloorMetrics.Meter is static.
+    private readonly Meter _instanceMeter;
     private readonly ObservableGauge<int>  liveHoldsGauge;
     private readonly ObservableGauge<long> effectiveFloorMsGauge;
 
@@ -67,6 +69,37 @@ internal sealed class SnapshotFloorStore : IDisposable
     /// </summary>
     private int mutationEpoch;
 
+    /// <summary>
+    /// Cached result of the last O(N) floor scan. Updated on every mutation and valid until
+    /// <see cref="FloorCacheState.NextExpiry"/> is reached (at which point a hold may have
+    /// expired and the slow scan is needed again). Between mutations the cache is conservative:
+    /// it may report a floor lower than the true floor (if a hold expired but was not yet purged),
+    /// which is safe for reclamation decisions (keeps more revisions, never fewer).
+    /// </summary>
+    private volatile FloorCacheState _floorCache = FloorCacheState.Empty;
+
+    private sealed class FloorCacheState
+    {
+        public static readonly FloorCacheState Empty = new(HLCTimestamp.Zero, 0, HLCTimestamp.Zero);
+
+        public readonly HLCTimestamp Floor;
+        public readonly int LiveCount;
+
+        /// <summary>
+        /// The minimum <see cref="SnapshotHold.LeaseExpiry"/> of all live holds at cache-fill
+        /// time. The cache is definitely valid while <c>currentTime &lt; NextExpiry</c>. Zero
+        /// means no live holds were present (cache always valid in that case).
+        /// </summary>
+        public readonly HLCTimestamp NextExpiry;
+
+        public FloorCacheState(HLCTimestamp floor, int liveCount, HLCTimestamp nextExpiry)
+        {
+            Floor = floor;
+            LiveCount = liveCount;
+            NextExpiry = nextExpiry;
+        }
+    }
+
     public SnapshotFloorStore(
         IRaft raft,
         string? storagePath,
@@ -82,13 +115,19 @@ internal sealed class SnapshotFloorStore : IDisposable
 
         LoadFromDisk();
 
-        // Register per-instance observable gauges so live state is always reflected.
-        liveHoldsGauge = SnapshotFloorMetrics.Meter.CreateObservableGauge(
+        // Per-instance Meter: disposing the store disposes this meter, which removes the
+        // observable instrument callbacks and releases the closures capturing `this`.
+        // Named "Kahuna" (same scope as the static counter meter) so the instrumentation scope
+        // is unchanged — multiple Meters may share a name, and a consumer subscribing to the
+        // "Kahuna" scope still collects these gauges; only per-instance disposal differs.
+        _instanceMeter = new Meter("Kahuna", "1.0");
+
+        liveHoldsGauge = _instanceMeter.CreateObservableGauge(
             "kahuna.snapshot_floor.live_holds",
             () => CountLiveHolds(),
             description: "Number of currently live (non-expired) snapshot holds.");
 
-        effectiveFloorMsGauge = SnapshotFloorMetrics.Meter.CreateObservableGauge(
+        effectiveFloorMsGauge = _instanceMeter.CreateObservableGauge(
             "kahuna.snapshot_floor.effective_floor_ms",
             () => ComputeEffectiveFloorMs(),
             description: "Physical (millisecond) component of the effective snapshot floor, or 0 when no hold is active.");
@@ -98,20 +137,64 @@ internal sealed class SnapshotFloorStore : IDisposable
     public IReadOnlyDictionary<string, SnapshotHold> Holds => holds;
 
     /// <summary>
-    /// Computes the effective floor: the minimum <see cref="SnapshotHold.Timestamp"/> among all
-    /// currently live holds. Returns <see cref="HLCTimestamp.Zero"/> when no hold is live.
+    /// Returns the effective floor (minimum held timestamp among live holds) and the live hold
+    /// count. O(1) fast path when no hold has expired since the last mutation; O(N) slow path
+    /// otherwise. Returns <see cref="HLCTimestamp.Zero"/> / 0 when no hold is live.
     /// </summary>
-    public HLCTimestamp GetEffectiveFloor(HLCTimestamp currentTime)
+    public (HLCTimestamp Floor, int LiveCount) GetEffectiveFloorAndCount(HLCTimestamp currentTime)
+    {
+        FloorCacheState cache = _floorCache;
+        if (cache.LiveCount == 0)
+            return (HLCTimestamp.Zero, 0);
+        // Fast path: no hold has expired since the cache was filled.
+        if (currentTime.CompareTo(cache.NextExpiry) < 0)
+            return (cache.Floor, cache.LiveCount);
+        // Slow path: at least one hold may have expired; recompute without updating the cache
+        // (the cache is authoritatively updated only by mutations so we avoid the race).
+        return ScanFloorAndCount(holds, currentTime);
+    }
+
+    /// <summary>
+    /// Returns the effective floor: the minimum <see cref="SnapshotHold.Timestamp"/> among all
+    /// currently live holds. O(1) fast path when no hold has expired since the last mutation.
+    /// Returns <see cref="HLCTimestamp.Zero"/> when no hold is live.
+    /// </summary>
+    public HLCTimestamp GetEffectiveFloor(HLCTimestamp currentTime) =>
+        GetEffectiveFloorAndCount(currentTime).Floor;
+
+    private static (HLCTimestamp Floor, int LiveCount) ScanFloorAndCount(
+        IReadOnlyDictionary<string, SnapshotHold> snapshot, HLCTimestamp currentTime)
     {
         HLCTimestamp floor = HLCTimestamp.Zero;
-        foreach (SnapshotHold hold in holds.Values)
+        int liveCount = 0;
+        foreach (SnapshotHold hold in snapshot.Values)
         {
             if (!hold.IsLive(currentTime))
                 continue;
+            liveCount++;
             if (floor == HLCTimestamp.Zero || hold.Timestamp.CompareTo(floor) < 0)
                 floor = hold.Timestamp;
         }
-        return floor;
+        return (floor, liveCount);
+    }
+
+    private static FloorCacheState BuildCache(
+        IReadOnlyDictionary<string, SnapshotHold> snapshot, HLCTimestamp currentTime)
+    {
+        HLCTimestamp floor = HLCTimestamp.Zero;
+        HLCTimestamp nextExpiry = HLCTimestamp.Zero;
+        int liveCount = 0;
+        foreach (SnapshotHold hold in snapshot.Values)
+        {
+            if (!hold.IsLive(currentTime))
+                continue;
+            liveCount++;
+            if (floor == HLCTimestamp.Zero || hold.Timestamp.CompareTo(floor) < 0)
+                floor = hold.Timestamp;
+            if (nextExpiry == HLCTimestamp.Zero || hold.LeaseExpiry.CompareTo(nextExpiry) < 0)
+                nextExpiry = hold.LeaseExpiry;
+        }
+        return liveCount == 0 ? FloorCacheState.Empty : new(floor, liveCount, nextExpiry);
     }
 
     /// <summary>
@@ -169,6 +252,9 @@ internal sealed class SnapshotFloorStore : IDisposable
         if (string.IsNullOrEmpty(holderId))
             return (KeyValueResponseType.Errored, string.Empty, HLCTimestamp.Zero);
 
+        if (leaseMs <= 0)
+            return (KeyValueResponseType.InvalidInput, string.Empty, HLCTimestamp.Zero);
+
         await mutateGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -214,6 +300,9 @@ internal sealed class SnapshotFloorStore : IDisposable
     {
         if (string.IsNullOrEmpty(holdId))
             return (KeyValueResponseType.Errored, HLCTimestamp.Zero);
+
+        if (leaseMs <= 0)
+            return (KeyValueResponseType.InvalidInput, HLCTimestamp.Zero);
 
         await mutateGate.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -289,6 +378,8 @@ internal sealed class SnapshotFloorStore : IDisposable
             SnapshotFloorMessage message = ReplicationSerializer.UnserializeSnapshotFloorMessage(log.LogData);
             Dictionary<string, SnapshotHold> rebuilt = FromMessage(message);
             holds = rebuilt;
+            HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+            _floorCache = BuildCache(rebuilt, now);
             Interlocked.Increment(ref mutationEpoch);
             PersistToDisk(message);
             return true;
@@ -322,6 +413,8 @@ internal sealed class SnapshotFloorStore : IDisposable
         }
 
         holds = next;
+        HLCTimestamp cacheNow = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        _floorCache = BuildCache(next, cacheNow);
         Interlocked.Increment(ref mutationEpoch);
         PersistToDisk(message);
         return true;
@@ -444,7 +537,7 @@ internal sealed class SnapshotFloorStore : IDisposable
                 return 0;
             }
 
-            logger.LogInformation("Purged {Count} expired snapshot hold(s)", expired.Count);
+            logger.LogInformation("Purged {Count} expired snapshot hold(s)", (object)expired.Count);
             return expired.Count;
         }
         finally
@@ -456,13 +549,7 @@ internal sealed class SnapshotFloorStore : IDisposable
     private int CountLiveHolds()
     {
         HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
-        int count = 0;
-        foreach (SnapshotHold hold in holds.Values)
-        {
-            if (hold.IsLive(now))
-                count++;
-        }
-        return count;
+        return GetEffectiveFloorAndCount(now).LiveCount;
     }
 
     private long ComputeEffectiveFloorMs()
@@ -480,7 +567,9 @@ internal sealed class SnapshotFloorStore : IDisposable
 
     public void Dispose()
     {
-        // The observable gauges are owned by their Meter and do not implement IDisposable.
+        // Disposing the per-instance Meter removes the observable gauge callbacks and releases
+        // the closures capturing `this`, allowing the store to be garbage-collected.
+        _instanceMeter.Dispose();
         mutateGate.Dispose();
     }
 }

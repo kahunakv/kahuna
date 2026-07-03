@@ -1627,6 +1627,74 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         _ = batchResponse.ImportRangeLocks;
     }
 
+    public async Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)>
+        AcquireSnapshotHold(string node, string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken cancellationToken)
+    {
+        GrpcAcquireSnapshotHoldRequest request = new()
+        {
+            HolderId          = holderId,
+            TimestampNode     = timestamp.N,
+            TimestampPhysical = timestamp.L,
+            TimestampCounter  = (uint)timestamp.C,
+            LeaseMs           = leaseMs
+        };
+
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcServerBatcherResponse batchResponse;
+        if (cancellationToken == CancellationToken.None)
+            batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+        else
+            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        GrpcAcquireSnapshotHoldResponse r = batchResponse.AcquireSnapshotHold!;
+        return (
+            (KeyValueResponseType)r.Type,
+            r.HoldId,
+            new HLCTimestamp(r.LeaseExpiryNode, r.LeaseExpiryPhysical, r.LeaseExpiryCounter)
+        );
+    }
+
+    public async Task<(KeyValueResponseType Type, HLCTimestamp LeaseExpiry)>
+        RenewSnapshotHold(string node, string holdId, int leaseMs, CancellationToken cancellationToken)
+    {
+        GrpcRenewSnapshotHoldRequest request = new()
+        {
+            HoldId  = holdId,
+            LeaseMs = leaseMs
+        };
+
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcServerBatcherResponse batchResponse;
+        if (cancellationToken == CancellationToken.None)
+            batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+        else
+            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        GrpcRenewSnapshotHoldResponse r = batchResponse.RenewSnapshotHold!;
+        return (
+            (KeyValueResponseType)r.Type,
+            new HLCTimestamp(r.LeaseExpiryNode, r.LeaseExpiryPhysical, r.LeaseExpiryCounter)
+        );
+    }
+
+    public async Task<KeyValueResponseType>
+        ReleaseSnapshotHold(string node, string holdId, CancellationToken cancellationToken)
+    {
+        GrpcReleaseSnapshotHoldRequest request = new() { HoldId = holdId };
+
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcServerBatcherResponse batchResponse;
+        if (cancellationToken == CancellationToken.None)
+            batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+        else
+            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        return (KeyValueResponseType)batchResponse.ReleaseSnapshotHold!.Type;
+    }
+
     private GrpcServerBatcher GetSharedBatcher(string url)
     {
         Lazy<GrpcServerBatcher> lazyBatcher = batchers.GetOrAdd(url, static (u, self) => self.GetSharedBatchers(u), this);

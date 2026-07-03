@@ -333,6 +333,27 @@ internal sealed class KeyValueServerBatcher
                     }
                     break;
 
+                    case GrpcServerBatchType.ServerTryAcquireSnapshotHold:
+                    {
+                        GrpcAcquireSnapshotHoldRequest? req = request.AcquireSnapshotHold;
+                        Track(AcquireSnapshotHoldDelayed(semaphore, request.RequestId, req, responseStream, context));
+                    }
+                    break;
+
+                    case GrpcServerBatchType.ServerTryRenewSnapshotHold:
+                    {
+                        GrpcRenewSnapshotHoldRequest? req = request.RenewSnapshotHold;
+                        Track(RenewSnapshotHoldDelayed(semaphore, request.RequestId, req, responseStream, context));
+                    }
+                    break;
+
+                    case GrpcServerBatchType.ServerTryReleaseSnapshotHold:
+                    {
+                        GrpcReleaseSnapshotHoldRequest? req = request.ReleaseSnapshotHold;
+                        Track(ReleaseSnapshotHoldDelayed(semaphore, request.RequestId, req, responseStream, context));
+                    }
+                    break;
+
                     case GrpcServerBatchType.ServerTypeNone:
                     default:
                         logger.LogError("Unknown batch Server request type: {Type}", request.Type);
@@ -1043,6 +1064,66 @@ internal sealed class KeyValueServerBatcher
         await WriteResponseToStream(semaphore, responseStream, response, context);
     }
     
+    private async Task AcquireSnapshotHoldDelayed(
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcAcquireSnapshotHoldRequest request,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcAcquireSnapshotHoldResponse holdResponse = await service.AcquireSnapshotHoldInternal(request, context);
+
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type                = GrpcServerBatchType.ServerTryAcquireSnapshotHold,
+            RequestId           = requestId,
+            AcquireSnapshotHold = holdResponse
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+
+    private async Task RenewSnapshotHoldDelayed(
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcRenewSnapshotHoldRequest request,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcRenewSnapshotHoldResponse holdResponse = await service.RenewSnapshotHoldInternal(request, context);
+
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type              = GrpcServerBatchType.ServerTryRenewSnapshotHold,
+            RequestId         = requestId,
+            RenewSnapshotHold = holdResponse
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+
+    private async Task ReleaseSnapshotHoldDelayed(
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcReleaseSnapshotHoldRequest request,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcReleaseSnapshotHoldResponse holdResponse = await service.ReleaseSnapshotHoldInternal(request, context);
+
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type                = GrpcServerBatchType.ServerTryReleaseSnapshotHold,
+            RequestId           = requestId,
+            ReleaseSnapshotHold = holdResponse
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+
     private static async Task WriteResponseToStream(
         SemaphoreSlim semaphore, 
         IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream, 

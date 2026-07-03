@@ -14,9 +14,19 @@ namespace Kahuna.Server.Persistence.Backend;
 /// never visited because the batch filled. <c>null</c> when nothing remains or the backend does not
 /// report per-key backlog. Lets the caller requeue only keys with real work instead of all of them.
 /// </param>
+/// <param name="FloorViolations">
+/// Number of floor-protected revisions (revision ≥ the floor-boundary revision) that were deleted
+/// despite a non-zero snapshot floor being passed to <c>PruneKeyValueRevisions</c>. The built-in
+/// backends compute this by auditing the actual deletions independently of their own floor clamp —
+/// SQLite via a before/after count of the protected set, RocksDB by observing the delete site — so a
+/// correct clamp always yields 0 and a regression in the clamp yields a positive count. A non-zero
+/// value triggers the <c>kahuna.snapshot_floor.missing_protected_version_total</c> metric in
+/// <c>BackgroundWriterActor</c> and must never occur in normal operation.
+/// </param>
 public readonly record struct RevisionPruneResult(
     int KeysVisited,
     int RevisionsDeleted,
     bool BatchLimitReached,
-    IReadOnlyCollection<string>? RemainingKeys = null
+    IReadOnlyCollection<string>? RemainingKeys = null,
+    int FloorViolations = 0
 );

@@ -929,6 +929,7 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
 
         int keysVisited = 0;
         int deleted = 0;
+        int floorViolations = 0;
         bool batchLimitReached = false;
         List<string>? remaining = null;
 
@@ -975,9 +976,11 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                             ageEnabled,
                             cutoffPhysical,
                             budget,
-                            floorTimestamp);
+                            floorTimestamp,
+                            out int violationsForKey);
 
                         deleted += deletedForKey;
+                        floorViolations += violationsForKey;
 
                         // Only a delete that consumed the whole per-key budget can have left more
                         // work behind; a short delete removed every matching row for this key.
@@ -1051,9 +1054,11 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                             ageEnabled,
                             cutoffPhysical,
                             budget,
-                            floorTimestamp);
+                            floorTimestamp,
+                            out int violationsForKey);
 
                         deleted += deletedForKey;
+                        floorViolations += violationsForKey;
 
                         if (deletedForKey == budget)
                         {
@@ -1095,7 +1100,7 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
             }
         }
 
-        result = new(keysVisited, deleted, batchLimitReached, remaining);
+        result = new(keysVisited, deleted, batchLimitReached, remaining, floorViolations);
         return true;
     }
 
@@ -1170,8 +1175,11 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         bool ageEnabled,
         long cutoffPhysical,
         int limit,
-        HLCTimestamp floorTimestamp)
+        HLCTimestamp floorTimestamp,
+        out int floorViolations)
     {
+        floorViolations = 0;
+
         if (limit <= 0)
             return 0;
 
@@ -1264,7 +1272,44 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
 
         command.Parameters.AddWithValue("@limit", limit);
 
-        return command.ExecuteNonQuery();
+        // Independent floor-protection audit. The DELETE above must never remove a revision at or
+        // above the floor boundary (revision >= floorRevision), which the floorFilter enforces.
+        // To catch a regression in that filter, count protected rows before and after the delete
+        // using only the floor boundary (not the same clamp predicate); a correct delete leaves
+        // this delta at 0, and any positive value is a real protected-version deletion.
+        long protectedBefore = floorActive ? CountRevisionsAtOrAbove(connection, key, floorRevision) : 0;
+
+        int deletedForKey = command.ExecuteNonQuery();
+
+        if (floorActive)
+        {
+            long protectedAfter = CountRevisionsAtOrAbove(connection, key, floorRevision);
+            long delta = protectedBefore - protectedAfter;
+            if (delta > 0)
+                floorViolations = (int)delta;
+        }
+
+        return deletedForKey;
+    }
+
+    /// <summary>
+    /// Counts revision rows for <paramref name="key"/> whose revision number is at or above
+    /// <paramref name="floorRevision"/> — the floor-protected set. Used to audit that a prune did
+    /// not delete any floor-protected revision, independent of the prune's own clamp predicate.
+    /// </summary>
+    private static long CountRevisionsAtOrAbove(SqliteConnection connection, string key, long floorRevision)
+    {
+        const string countQuery = """
+            SELECT COUNT(*) FROM keys_revisions
+            WHERE key = @key AND revision >= @floorRevision
+            """;
+
+        using SqliteCommand command = new(countQuery, connection);
+        command.Parameters.AddWithValue("@key", key);
+        command.Parameters.AddWithValue("@floorRevision", floorRevision);
+
+        object? scalar = command.ExecuteScalar();
+        return scalar is null or DBNull ? 0 : Convert.ToInt64(scalar);
     }
 
     private static bool KeyHasMorePrunableRevisions(

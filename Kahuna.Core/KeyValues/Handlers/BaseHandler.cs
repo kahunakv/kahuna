@@ -230,8 +230,8 @@ internal abstract class BaseHandler
     /// <see cref="KeyValueRevisionEntry.LastModified"/> is at-or-before the floor is pinned as
     /// the floor-boundary revision and exempted from removal. This ensures the as-of version
     /// that snapshot readers need survives in memory beyond the normal retention window; the full
-    /// run of revisions between the boundary and now is left to disk (F4) and reached by the
-    /// disk-fallback read paths (F1a/F1b). At most RevisionRetention + 1 revisions are kept per
+    /// run of revisions between the boundary and now is left to disk and reached by the
+    /// disk-fallback read paths on point and range reads. At most RevisionRetention + 1 revisions are kept per
     /// key when a floor is active.</para>
     /// </summary>
     /// <summary>
@@ -280,11 +280,11 @@ internal abstract class BaseHandler
                 revisionsToRemove.Add(kv.Key);
         }
 
-        // Fail-loud floor guard. Under Decision 2a the only in-memory revision the floor protects
-        // is the boundary (newest at-or-before the floor); the loop above exempts it, so a correct
-        // trim never schedules it for removal. If it ever appears in the removal set the boundary
-        // computation has regressed and a floor-protected version would be dropped from memory —
-        // count it (this counter must stay 0 in normal operation) and retain the revision.
+        // Fail-loud floor guard. The floor pins exactly one in-memory revision: the boundary
+        // (newest revision whose LastModified is at-or-before the floor). The loop above exempts
+        // it, so a correct trim never schedules it for removal. If it ever appears in the removal
+        // set the boundary computation has regressed and a floor-protected version would be dropped
+        // from memory — count it (this counter must stay 0 in normal operation) and retain the revision.
         if (RemovalSetDropsFloorBoundary(revisionsToRemove, floorBoundaryRevision))
         {
             SnapshotFloorMetrics.MissingProtectedVersion.Add(1);

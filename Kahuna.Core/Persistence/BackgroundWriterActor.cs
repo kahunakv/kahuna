@@ -538,6 +538,15 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                         configuration.PersistentRevisionRetentionAge
                     );
 
+                if (pruneResult.FloorViolations > 0)
+                {
+                    SnapshotFloorMetrics.MissingProtectedVersion.Add(pruneResult.FloorViolations);
+                    logger.LogError(
+                        "Persistent prune deleted {Count} floor-protected boundary revision(s) — floor enforcement has a gap; this counter must stay 0. backend={Backend}",
+                        pruneResult.FloorViolations,
+                        configuration.Storage);
+                }
+
                 if (pruneResult.BatchLimitReached)
                 {
                     // Requeue only keys that still have prunable revisions (or were never visited
@@ -640,6 +649,15 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                         configuration.PersistentRevisionRetentionCount,
                         configuration.PersistentRevisionRetentionAge
                     );
+
+                if (pruneResult.FloorViolations > 0)
+                {
+                    SnapshotFloorMetrics.MissingProtectedVersion.Add(pruneResult.FloorViolations);
+                    logger.LogError(
+                        "Persistent prune (sweep) deleted {Count} floor-protected boundary revision(s) — floor enforcement has a gap; this counter must stay 0. backend={Backend}",
+                        pruneResult.FloorViolations,
+                        configuration.Storage);
+                }
 
                 fullSweepBacklogPending = pruneResult.BatchLimitReached;
             }

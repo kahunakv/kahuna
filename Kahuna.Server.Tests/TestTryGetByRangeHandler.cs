@@ -582,7 +582,7 @@ public sealed class TestTryGetByRangeHandler
         public void Dispose() => inner.Dispose();
     }
 
-    // ── Snapshot disk projection (F1b unit tests) ─────────────────────────────────────────
+    // ── Snapshot disk projection unit tests ───────────────────────────────────────────────
 
     /// <summary>
     /// Disk-only key whose current revision was committed after the snapshot timestamp. The

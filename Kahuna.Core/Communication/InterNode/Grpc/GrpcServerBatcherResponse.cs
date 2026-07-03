@@ -80,6 +80,12 @@ internal sealed class GrpcServerBatcherResponse
 
     public GrpcImportRangeLocksResponse? ImportRangeLocks { get; }
 
+    public GrpcAcquireSnapshotHoldResponse? AcquireSnapshotHold { get; }
+
+    public GrpcRenewSnapshotHoldResponse? RenewSnapshotHold { get; }
+
+    public GrpcReleaseSnapshotHoldResponse? ReleaseSnapshotHold { get; }
+
     public GrpcServerBatcherResponse(GrpcTryLockResponse tryLock)
     {
         TryLock = tryLock;
@@ -268,5 +274,20 @@ internal sealed class GrpcServerBatcherResponse
     public GrpcServerBatcherResponse(GrpcImportRangeLocksResponse importRangeLocks)
     {
         ImportRangeLocks = importRangeLocks;
+    }
+
+    public GrpcServerBatcherResponse(GrpcAcquireSnapshotHoldResponse acquireSnapshotHold)
+    {
+        AcquireSnapshotHold = acquireSnapshotHold;
+    }
+
+    public GrpcServerBatcherResponse(GrpcRenewSnapshotHoldResponse renewSnapshotHold)
+    {
+        RenewSnapshotHold = renewSnapshotHold;
+    }
+
+    public GrpcServerBatcherResponse(GrpcReleaseSnapshotHoldResponse releaseSnapshotHold)
+    {
+        ReleaseSnapshotHold = releaseSnapshotHold;
     }
 }

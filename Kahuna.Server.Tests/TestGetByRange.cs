@@ -719,7 +719,7 @@ public sealed class TestGetByRange
                 Assert.True(string.CompareOrdinal(item.Item1, endKey) <= 0));
     }
 
-    // ── Snapshot range scan disk fallback (F1b) ──────────────────────────────
+    // ── Snapshot range scan disk fallback ────────────────────────────────────
 
     /// <summary>
     /// When a key is superseded more than RevisionRetention times after the snapshot timestamp,

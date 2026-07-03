@@ -856,6 +856,9 @@ message GrpcBatchServerKeyValueRequest {
     GrpcEnsureKeyRangeSeededRequest EnsureKeyRangeSeeded = 35;
     GrpcGetRangeLocksRequest GetRangeLocks = 36;
     GrpcImportRangeLocksRequest ImportRangeLocks = 37;
+    GrpcAcquireSnapshotHoldRequest AcquireSnapshotHold = 38;
+    GrpcRenewSnapshotHoldRequest   RenewSnapshotHold   = 39;
+    GrpcReleaseSnapshotHoldRequest ReleaseSnapshotHold = 40;
   }
 }
 
@@ -898,6 +901,9 @@ message GrpcBatchServerKeyValueResponse
     GrpcEnsureKeyRangeSeededResponse EnsureKeyRangeSeeded = 34;
     GrpcGetRangeLocksResponse GetRangeLocks = 35;
     GrpcImportRangeLocksResponse ImportRangeLocks = 36;
+    GrpcAcquireSnapshotHoldResponse AcquireSnapshotHold = 37;
+    GrpcRenewSnapshotHoldResponse   RenewSnapshotHold   = 38;
+    GrpcReleaseSnapshotHoldResponse ReleaseSnapshotHold = 39;
   }
 }
 
@@ -1002,6 +1008,9 @@ enum GrpcServerBatchType {
   SERVER_TRY_ENSURE_KEY_RANGE_SEEDED = 33;
   SERVER_TRY_GET_RANGE_LOCKS = 34;
   SERVER_TRY_IMPORT_RANGE_LOCKS = 35;
+  SERVER_TRY_ACQUIRE_SNAPSHOT_HOLD = 36;
+  SERVER_TRY_RENEW_SNAPSHOT_HOLD   = 37;
+  SERVER_TRY_RELEASE_SNAPSHOT_HOLD = 38;
 }
 
 enum GrpcRangeLockMode {

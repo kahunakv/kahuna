@@ -305,6 +305,131 @@ public sealed class TestTryGetByBucketHandler
         finally { scheduler.Stop(); }
     }
 
+    // ── Snapshot bucket scan: disk-fallback when in-memory archive is trimmed ────────────
+
+    /// <summary>
+    /// A snapshot <c>GetByBucket</c> at timestamp T returns a key whose current disk revision
+    /// was created after T, but whose revision at T is found via
+    /// <c>GetKeyValueRevisionAtOrBefore</c> in the off-actor stage-2 task.
+    ///
+    /// Also verifies that a key created after T (no history at T) is correctly excluded.
+    /// </summary>
+    [Fact]
+    public async Task SnapshotBucketScan_DiskHistoryFallback_ReturnsAsOfRevisionAndExcludesPostSnapshotKey()
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("bucket-snapshot-disk-fallback");
+
+        scheduler.Start();
+        try
+        {
+            HLCTimestamp readTs = new(0, 500, 0);
+
+            // k1: current disk revision has LastModified = 1000 > readTs.
+            //     GetKeyValueRevisionAtOrBefore should find the revision at T=100 <= readTs.
+            HLCTimestamp k1CurrentTs = new(0, 1000, 0);
+            HLCTimestamp k1AsOfTs    = new(0, 100, 0);
+
+            // k2: current disk revision has LastModified = 2000 > readTs, and no history at T.
+            //     Should be excluded.
+            HLCTimestamp k2CurrentTs = new(0, 2000, 0);
+
+            SnapshotRevisionBackend backend = new(
+                prefix: "db",
+                currentRows:
+                [
+                    ("db/k1", "v1-current"u8.ToArray(), 5L, k1CurrentTs, KeyValueState.Set),
+                    ("db/k2", "v2-current"u8.ToArray(), 3L, k2CurrentTs, KeyValueState.Set),
+                ],
+                revisionAtOrBefore: new Dictionary<string, (long Revision, HLCTimestamp Ts, byte[] Value)>
+                {
+                    ["db/k1"] = (1L, k1AsOfTs, "v1-asat"u8.ToArray())
+                    // db/k2 has no history at readTs
+                });
+
+            using ActorSystem actorSystem = new();
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                    "bucket-snap-disk-actor", null!, null!, backend, raft,
+                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+
+            KeyValueResponse? resp = await actorRef.Ask(
+                MakeSnapshotBucketScan("db", readTs), TimeSpan.FromSeconds(5));
+
+            Assert.NotNull(resp);
+            Assert.Equal(KeyValueResponseType.Get, resp!.Type);
+            Assert.NotNull(resp.Items);
+
+            // Only db/k1 at revision 1 (as-of T) should be returned.
+            Assert.Single(resp.Items!);
+            Assert.Equal("db/k1", resp.Items[0].Item1);
+            Assert.Equal(1L, resp.Items[0].Item2.Revision);
+            Assert.Equal("v1-asat", Encoding.UTF8.GetString(resp.Items[0].Item2.Value!));
+        }
+        finally { scheduler.Stop(); }
+    }
+
+    /// <summary>
+    /// A snapshot bucket scan does not block the actor mailbox during the off-actor stage-2
+    /// disk read. An ephemeral get dispatched while stage 2 is in flight is processed before
+    /// stage 3 runs, proving the mailbox remained free.
+    /// </summary>
+    [Fact]
+    public async Task SnapshotBucketScan_Stage2RunsOffActor_MailboxFreeForOtherMessages()
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("bucket-snapshot-mailbox");
+
+        scheduler.Start();
+        try
+        {
+            HLCTimestamp readTs      = new(0, 500, 0);
+            HLCTimestamp currentTs   = new(0, 1000, 0);
+
+            ManualResetEventSlim gate    = new(false);
+            ManualResetEventSlim entered = new(false);
+
+            SnapshotRevisionBackend backend = new(
+                prefix: "mail",
+                currentRows: [("mail/a", "val"u8.ToArray(), 2L, currentTs, KeyValueState.Set)],
+                revisionAtOrBefore: new Dictionary<string, (long, HLCTimestamp, byte[])>
+                {
+                    ["mail/a"] = (1L, new HLCTimestamp(0, 100, 0), "val-old"u8.ToArray())
+                },
+                gate: gate,
+                gateEntered: entered);
+
+            using ActorSystem actorSystem = new();
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                    "bucket-mailbox-actor", null!, null!, backend, raft,
+                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+
+            // Dispatch the snapshot scan — stage 2 will block in GetKeyValueByPrefix.
+            Task<KeyValueResponse?> scanTask = actorRef.Ask(
+                MakeSnapshotBucketScan("mail", readTs), TimeSpan.FromSeconds(10));
+
+            // Wait until stage 2 has started its disk read.
+            entered.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            // Send an unrelated ephemeral get and drain it — proves the mailbox is not blocked.
+            KeyValueResponse? sentinel = await actorRef.Ask(
+                MakeEphemeralGet("sentinel"), TimeSpan.FromSeconds(5));
+            Assert.NotNull(sentinel);
+
+            // Release stage 2.
+            gate.Set();
+
+            KeyValueResponse? resp = await scanTask;
+
+            Assert.NotNull(resp);
+            Assert.Equal(KeyValueResponseType.Get, resp!.Type);
+            Assert.Single(resp.Items!);
+            Assert.Equal("mail/a", resp.Items![0].Item1);
+        }
+        finally { scheduler.Stop(); }
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────────────────
 
     private static KeyValueRequest MakeEphemeralGet(string key)
@@ -556,6 +681,69 @@ public sealed class TestTryGetByBucketHandler
             BothEntered.Dispose();
             Gate.Dispose();
         }
+    }
+
+    /// <summary>
+    /// Backend with fixed current disk rows and a per-key revision-at-or-before lookup table.
+    /// Supports a gate to block the prefix read and verify the actor mailbox stays free.
+    /// </summary>
+    private sealed class SnapshotRevisionBackend : IPersistenceBackend, IDisposable
+    {
+        private readonly MemoryPersistenceBackend inner = new();
+        private readonly string prefix;
+        private readonly List<(string Key, ReadOnlyKeyValueEntry Entry)> currentRows;
+        private readonly Dictionary<string, (long Revision, HLCTimestamp Ts, byte[] Value)> revisionAtOrBefore;
+        private readonly ManualResetEventSlim? gate;
+        private readonly ManualResetEventSlim? gateEntered;
+
+        internal SnapshotRevisionBackend(
+            string prefix,
+            IEnumerable<(string Key, byte[] Value, long Revision, HLCTimestamp LastModified, KeyValueState State)> currentRows,
+            Dictionary<string, (long Revision, HLCTimestamp Ts, byte[] Value)> revisionAtOrBefore,
+            ManualResetEventSlim? gate = null,
+            ManualResetEventSlim? gateEntered = null)
+        {
+            this.prefix = prefix;
+            this.currentRows = currentRows.Select(e => (e.Key, new ReadOnlyKeyValueEntry(
+                e.Value, e.Revision, HLCTimestamp.Zero, HLCTimestamp.Zero, e.LastModified, e.State))).ToList();
+            this.revisionAtOrBefore = revisionAtOrBefore;
+            this.gate = gate;
+            this.gateEntered = gateEntered;
+        }
+
+        public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
+        public bool StoreKeyValues(List<PersistenceRequestItem> items) => inner.StoreKeyValues(items);
+        public LockEntry? GetLock(string resource) => inner.GetLock(resource);
+        public KeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
+        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
+        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
+        public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string dest, long idx, HLCTimestamp ts) => inner.CreateCheckpoint(dest, idx, ts);
+        public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string p, string? s, int l) => inner.GetKeyValueByRange(p, s, l);
+
+        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp)
+        {
+            if (!revisionAtOrBefore.TryGetValue(keyName, out (long Revision, HLCTimestamp Ts, byte[] Value) hit))
+                return null;
+            if (hit.Revision > maxRevision || hit.Ts.CompareTo(readTimestamp) > 0)
+                return null;
+            return new KeyValueEntry
+            {
+                Value        = hit.Value,
+                Revision     = hit.Revision,
+                LastModified = hit.Ts,
+                State        = KeyValueState.Set
+            };
+        }
+
+        public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName)
+        {
+            gateEntered?.Set();
+            gate?.Wait();
+            return currentRows.Where(e => e.Key.StartsWith(prefixKeyName, StringComparison.Ordinal))
+                              .Select(e => (e.Key, e.Entry)).ToList();
+        }
+
+        public void Dispose() => inner.Dispose();
     }
 
     /// <summary>

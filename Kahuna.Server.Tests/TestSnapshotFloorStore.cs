@@ -1,4 +1,5 @@
 
+using System.Diagnostics.Metrics;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Ranges;
@@ -679,6 +680,314 @@ public sealed class TestSnapshotFloorStore
         finally
         {
             await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// Verifies that snapshot-hold mutations routed through a follower node still reach the
+    /// meta-partition leader via <see cref="IInterNodeCommunication"/>. A full
+    /// acquire → get-floor → renew → release cycle is performed through a node that is
+    /// explicitly confirmed NOT to be the meta leader, exercising the routing path.
+    /// </summary>
+    [Fact]
+    public async Task AcquireRenewRelease_ViaFollowerNode_RoutesToLeaderSuccessfully()
+    {
+        Node[] nodes = await Assemble("memory",
+            [Guid.NewGuid().ToString(), Guid.NewGuid().ToString(), Guid.NewGuid().ToString()]);
+        try
+        {
+            CancellationToken ct = TestContext.Current.CancellationToken;
+
+            Node leader = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+
+            // Pick a follower — a node that is definitely not the meta leader.
+            Node follower = nodes.First(n => n.Raft.GetLocalEndpoint() != leader.Raft.GetLocalEndpoint());
+
+            HLCTimestamp forkT = leader.Raft.HybridLogicalClock.TrySendOrLocalEvent(leader.Raft.GetLocalNodeId());
+
+            // Acquire through the follower — must be routed to the leader and succeed.
+            (KeyValueResponseType acquireType, string holdId, HLCTimestamp origExpiry) =
+                await follower.Kahuna.LocateAndAcquireSnapshotHold("r4-test", forkT, leaseMs: 60_000, ct);
+            Assert.Equal(KeyValueResponseType.Set, acquireType);
+            Assert.NotEmpty(holdId);
+            Assert.NotEqual(HLCTimestamp.Zero, origExpiry);
+
+            // The floor should now be visible on the leader after replication.
+            await WaitUntil(leader, state => state.Live >= 1);
+            (HLCTimestamp floor, int live) = await leader.Kahuna.GetSnapshotFloor(ct);
+            Assert.Equal(forkT, floor);
+            Assert.Equal(1, live);
+
+            // Renew through the follower.
+            (KeyValueResponseType renewType, HLCTimestamp newExpiry) =
+                await follower.Kahuna.LocateAndRenewSnapshotHold(holdId, leaseMs: 60_000, ct);
+            Assert.Equal(KeyValueResponseType.Set, renewType);
+            Assert.NotEqual(HLCTimestamp.Zero, newExpiry);
+
+            // Release through the follower.
+            KeyValueResponseType releaseType =
+                await follower.Kahuna.LocateAndReleaseSnapshotHold(holdId, ct);
+            Assert.Equal(KeyValueResponseType.Deleted, releaseType);
+
+            // Floor must drop back to zero once the only hold is released.
+            await WaitUntil(leader, state => state.Live == 0);
+            (HLCTimestamp floorAfter, int liveAfter) = await leader.Kahuna.GetSnapshotFloor(ct);
+            Assert.Equal(HLCTimestamp.Zero, floorAfter);
+            Assert.Equal(0, liveAfter);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    // ── Floor-cache correctness (R8) ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Floor cache is populated after InjectHolds (Restore path). O(1) fast path returns the
+    /// correct floor and live count without rescanning the hold dict.
+    /// </summary>
+    [Fact]
+    public void FloorCache_AfterRestore_ReturnsCorrectFloorAndCount()
+    {
+        (RaftManager raft, SnapshotFloorStore store) = CreateSingleNodeStore();
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        HLCTimestamp t1 = new(1, 1000, 0);
+        HLCTimestamp t2 = new(1, 2000, 0);
+        HLCTimestamp farExpiry = new(1, now.L + 600_000, 0); // 10 min away
+
+        bool ok = InjectHolds(store, [
+            new SnapshotHold("h1", "c1", t1, farExpiry),
+            new SnapshotHold("h2", "c2", t2, farExpiry)
+        ]);
+        Assert.True(ok);
+
+        (HLCTimestamp floor, int live) = store.GetEffectiveFloorAndCount(now);
+        Assert.Equal(t1, floor);       // min(t1, t2)
+        Assert.Equal(2, live);
+    }
+
+    /// <summary>
+    /// Replacing the hold set via a second Restore call invalidates the cache: the updated cache
+    /// must reflect the new hold (restore/failover parity for the O(1) path).
+    /// </summary>
+    [Fact]
+    public void FloorCache_AfterSecondRestore_ReflectsNewHoldSet()
+    {
+        (RaftManager raft, SnapshotFloorStore store) = CreateSingleNodeStore();
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        HLCTimestamp t1 = new(1, 1000, 0);
+        HLCTimestamp t3 = new(1, 500, 0);  // earlier than t1 — will become the new floor
+        HLCTimestamp farExpiry = new(1, now.L + 600_000, 0);
+
+        InjectHolds(store, [new SnapshotHold("h1", "c1", t1, farExpiry)]);
+        Assert.Equal(t1, store.GetEffectiveFloor(now));
+
+        // Replace the registry entirely (simulates leader-change WAL replay catching up).
+        InjectHolds(store, [
+            new SnapshotHold("h1", "c1", t1, farExpiry),
+            new SnapshotHold("h3", "c3", t3, farExpiry)
+        ]);
+
+        (HLCTimestamp floor, int live) = store.GetEffectiveFloorAndCount(now);
+        Assert.Equal(t3, floor);
+        Assert.Equal(2, live);
+    }
+
+    /// <summary>
+    /// When <c>NextExpiry</c> passes, the fast path must fall through to the slow scan.
+    /// Injects a hold that expires shortly, advances time past the expiry, and verifies
+    /// the floor drops to the surviving hold only.
+    /// </summary>
+    [Fact]
+    public void FloorCache_ExpiredHold_SlowPathRecomputesCorrectly()
+    {
+        (RaftManager raft, SnapshotFloorStore store) = CreateSingleNodeStore();
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        HLCTimestamp t1 = new(1, 1000, 0);  // floor (smallest)
+        HLCTimestamp t2 = new(1, 2000, 0);
+
+        // h1 expires in 100 ms, h2 survives.
+        HLCTimestamp shortExpiry = new(1, now.L + 100, 0);
+        HLCTimestamp farExpiry   = new(1, now.L + 600_000, 0);
+
+        InjectHolds(store, [
+            new SnapshotHold("h1", "c1", t1, shortExpiry),
+            new SnapshotHold("h2", "c2", t2, farExpiry)
+        ]);
+
+        // Fast path: cache valid (now < shortExpiry).
+        Assert.Equal(t1, store.GetEffectiveFloor(now));
+
+        // Advance time past h1's expiry — cache is now stale, slow path must kick in.
+        HLCTimestamp later = new(1, now.L + 200, 0); // 200 ms after now → past shortExpiry
+        (HLCTimestamp floor, int live) = store.GetEffectiveFloorAndCount(later);
+
+        Assert.Equal(t2, floor);   // h1 expired; h2 is the only live hold
+        Assert.Equal(1, live);
+    }
+
+    /// <summary>
+    /// Many holds: verifies the cache fast path returns the same result as a direct scan,
+    /// demonstrating both correctness and that GetEffectiveFloor does not regress under load.
+    /// </summary>
+    [Fact]
+    public void FloorCache_ManyHolds_FastPathMatchesDirectScan()
+    {
+        (RaftManager raft, SnapshotFloorStore store) = CreateSingleNodeStore();
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        HLCTimestamp farExpiry = new(1, now.L + 600_000, 0);
+
+        const int holdCount = 500;
+        SnapshotHold[] holdSet = new SnapshotHold[holdCount];
+        HLCTimestamp expectedFloor = new(1, holdCount * 1000L, 0); // will be set to the smallest ts
+        for (int i = holdCount; i >= 1; i--)
+        {
+            HLCTimestamp ts = new(1, i * 1000L, 0);
+            if (i == 1) expectedFloor = ts; // smallest
+            holdSet[holdCount - i] = new SnapshotHold($"h{i}", $"c{i}", ts, farExpiry);
+        }
+
+        InjectHolds(store, holdSet);
+
+        (HLCTimestamp floor, int live) = store.GetEffectiveFloorAndCount(now);
+
+        Assert.Equal(expectedFloor, floor);
+        Assert.Equal(holdCount, live);
+    }
+
+    /// <summary>
+    /// AcquireAsync with leaseMs &lt;= 0 must return InvalidInput at the store level.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(-1000)]
+    public async Task AcquireAsync_ZeroOrNegativeLeaseMs_ReturnsInvalidInput(int leaseMs)
+    {
+        Node[] nodes = await Assemble("memory",
+            [Guid.NewGuid().ToString(), Guid.NewGuid().ToString(), Guid.NewGuid().ToString()]);
+        try
+        {
+            CancellationToken ct = TestContext.Current.CancellationToken;
+            Node leader = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+            HLCTimestamp forkT = leader.Raft.HybridLogicalClock.TrySendOrLocalEvent(leader.Raft.GetLocalNodeId());
+
+            (KeyValueResponseType type, string holdId, HLCTimestamp leaseExpiry) =
+                await leader.Kahuna.LocateAndAcquireSnapshotHold("r6-acquire", forkT, leaseMs, ct);
+
+            Assert.Equal(KeyValueResponseType.InvalidInput, type);
+            Assert.True(string.IsNullOrEmpty(holdId));
+            Assert.Equal(HLCTimestamp.Zero, leaseExpiry);
+
+            // No hold registered — floor stays at Zero.
+            (HLCTimestamp floor, int live) = await leader.Kahuna.GetSnapshotFloor(ct);
+            Assert.Equal(HLCTimestamp.Zero, floor);
+            Assert.Equal(0, live);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// RenewAsync with leaseMs &lt;= 0 must return InvalidInput — even when the hold ID is valid.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(-1000)]
+    public async Task RenewAsync_ZeroOrNegativeLeaseMs_ReturnsInvalidInput(int leaseMs)
+    {
+        Node[] nodes = await Assemble("memory",
+            [Guid.NewGuid().ToString(), Guid.NewGuid().ToString(), Guid.NewGuid().ToString()]);
+        try
+        {
+            CancellationToken ct = TestContext.Current.CancellationToken;
+            Node leader = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+            HLCTimestamp forkT = leader.Raft.HybridLogicalClock.TrySendOrLocalEvent(leader.Raft.GetLocalNodeId());
+
+            (KeyValueResponseType acquireType, string holdId, _) =
+                await leader.Kahuna.LocateAndAcquireSnapshotHold("r6-renew", forkT, 60_000, ct);
+            Assert.Equal(KeyValueResponseType.Set, acquireType);
+
+            (KeyValueResponseType renewType, HLCTimestamp renewExpiry) =
+                await leader.Kahuna.LocateAndRenewSnapshotHold(holdId, leaseMs, ct);
+
+            Assert.Equal(KeyValueResponseType.InvalidInput, renewType);
+            Assert.Equal(HLCTimestamp.Zero, renewExpiry);
+
+            // The existing hold was not removed — floor is still set.
+            (HLCTimestamp floor, int live) = await leader.Kahuna.GetSnapshotFloor(ct);
+            Assert.Equal(forkT, floor);
+            Assert.Equal(1, live);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    // ── Gauge dispose-loop test (R9) ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Verifies that disposing a store removes its observable gauge callbacks. A store with a
+    /// sentinel hold count (997) is created, confirmed to fire its callback, then disposed.
+    /// After dispose, the sentinel value must no longer appear — the per-instance Meter was
+    /// disposed, removing the instrument.
+    /// </summary>
+    [Fact]
+    public void DisposeLoop_OldStoreGaugesStop_SentinelDisappearsAfterDispose()
+    {
+        const int sentinel = 997; // unlikely to collide with any other test's hold count
+
+        List<int> observations = [];
+        using MeterListener listener = new();
+        listener.InstrumentPublished = (instrument, l) =>
+        {
+            if (instrument.Name == "kahuna.snapshot_floor.live_holds")
+                l.EnableMeasurementEvents(instrument);
+        };
+        listener.SetMeasurementEventCallback<int>((_, value, _, _) =>
+        {
+            lock (observations) observations.Add(value);
+        });
+        listener.Start();
+
+        // Build a store and inject `sentinel` holds with long leases.
+        (RaftManager raft, SnapshotFloorStore store) = CreateSingleNodeStore();
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        HLCTimestamp farExpiry = new(1, now.L + 600_000, 0);
+
+        SnapshotHold[] manyHolds = Enumerable.Range(0, sentinel)
+            .Select(i => new SnapshotHold($"h{i}", $"c{i}", new(1, 1000L * (i + 1), 0), farExpiry))
+            .ToArray();
+        InjectHolds(store, manyHolds);
+
+        // Confirm the gauge fires with the sentinel value before dispose.
+        listener.RecordObservableInstruments();
+        lock (observations)
+        {
+            Assert.Contains(sentinel, observations);
+        }
+
+        // Dispose the store — its per-instance Meter is disposed, removing the gauge callback.
+        store.Dispose();
+
+        // Collect again: the sentinel must not appear in any new observation.
+        int countBefore;
+        lock (observations) countBefore = observations.Count;
+
+        listener.RecordObservableInstruments();
+
+        lock (observations)
+        {
+            IEnumerable<int> newObservations = observations.Skip(countBefore);
+            Assert.DoesNotContain(sentinel, newObservations);
         }
     }
 }

@@ -1918,9 +1918,24 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return new GrpcImportRangeLocksResponse { Success = true };
     }
 
+    internal Task<GrpcAcquireSnapshotHoldResponse> AcquireSnapshotHoldInternal(
+        GrpcAcquireSnapshotHoldRequest request, ServerCallContext context) =>
+        AcquireSnapshotHold(request, context);
+
+    internal Task<GrpcRenewSnapshotHoldResponse> RenewSnapshotHoldInternal(
+        GrpcRenewSnapshotHoldRequest request, ServerCallContext context) =>
+        RenewSnapshotHold(request, context);
+
+    internal Task<GrpcReleaseSnapshotHoldResponse> ReleaseSnapshotHoldInternal(
+        GrpcReleaseSnapshotHoldRequest request, ServerCallContext context) =>
+        ReleaseSnapshotHold(request, context);
+
     public override async Task<GrpcAcquireSnapshotHoldResponse> AcquireSnapshotHold(
         GrpcAcquireSnapshotHoldRequest request, ServerCallContext context)
     {
+        if (request.LeaseMs <= 0)
+            return new() { Type = GrpcKeyValueResponseType.TypeInvalidInput };
+
         (KeyValueResponseType type, string holdId, HLCTimestamp leaseExpiry) =
             await keyValues.LocateAndAcquireSnapshotHold(
                 request.HolderId,
@@ -1941,6 +1956,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     public override async Task<GrpcRenewSnapshotHoldResponse> RenewSnapshotHold(
         GrpcRenewSnapshotHoldRequest request, ServerCallContext context)
     {
+        if (request.LeaseMs <= 0)
+            return new() { Type = GrpcKeyValueResponseType.TypeInvalidInput };
+
         (KeyValueResponseType type, HLCTimestamp leaseExpiry) =
             await keyValues.LocateAndRenewSnapshotHold(
                 request.HoldId,
