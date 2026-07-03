@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package Kahuna.Server.Replication.Protos;
+
+// The complete application state of the meta partition (id 0), used by the
+// whole-partition state transfer that repairs a node which has fallen below the WAL
+// compaction floor. The meta partition hosts two independent state machines — the
+// range-descriptor map and the snapshot-floor hold registry — so a repair must carry
+// and install BOTH atomically; installing only one would wipe the other on the
+// recovering node. Each field holds an already-serialized sub-message (an opaque blob)
+// so each store keeps sole ownership of its own wire format.
+message MetaSystemStateMessage {
+  bytes rangeMap = 1;       // serialized RangeMapMessage
+  bytes snapshotFloor = 2;  // serialized SnapshotFloorMessage (full hold set)
+}

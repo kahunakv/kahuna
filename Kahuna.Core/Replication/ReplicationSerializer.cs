@@ -57,4 +57,28 @@ public static class ReplicationSerializer
 
     public static SnapshotFloorMessage UnserializeSnapshotFloorMessage(ReadOnlySpan<byte> serializedData) =>
         SnapshotFloorMessage.Parser.ParseFrom(serializedData);
+
+    public static byte[] Serialize(SnapshotFloorDeltaMessage message)
+    {
+        int size = message.CalculateSize();
+        byte[] buf = new byte[size];
+        using CodedOutputStream cos = new(buf);
+        message.WriteTo(cos);
+        return buf;
+    }
+
+    public static SnapshotFloorDeltaMessage UnserializeSnapshotFloorDeltaMessage(ReadOnlySpan<byte> serializedData) =>
+        SnapshotFloorDeltaMessage.Parser.ParseFrom(serializedData);
+
+    public static byte[] Serialize(MetaSystemStateMessage message)
+    {
+        int size = message.CalculateSize();
+        byte[] buf = new byte[size];
+        using CodedOutputStream cos = new(buf);
+        message.WriteTo(cos);
+        return buf;
+    }
+
+    public static MetaSystemStateMessage UnserializeMetaSystemStateMessage(ReadOnlySpan<byte> serializedData) =>
+        MetaSystemStateMessage.Parser.ParseFrom(serializedData);
 }

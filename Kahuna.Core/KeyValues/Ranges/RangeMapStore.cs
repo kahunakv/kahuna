@@ -313,6 +313,40 @@ internal sealed class RangeMapStore : IDisposable
         }
     }
 
+    /// <summary>
+    /// Serializes the current map for the P0 whole-partition state transfer that repairs a node
+    /// below the WAL compaction floor. Lock-free read of the volatile map.
+    /// </summary>
+    public byte[] SerializeState() => ReplicationSerializer.Serialize(ToMessage(current.Descriptors));
+
+    /// <summary>
+    /// Parses and validates (does not install) a map from a transfer blob. Validates invariant G1
+    /// and throws on failure, before <see cref="CommitState"/> mutates anything, so the unified P0
+    /// transfer can validate both meta state machines before swapping either.
+    /// </summary>
+    public RangeMap ParseState(ReadOnlySpan<byte> data)
+    {
+        RangeMapMessage message = ReplicationSerializer.UnserializeRangeMapMessage(data);
+        RangeMap loaded = new(FromMessage(message));
+
+        if (!loaded.Validate(out string? error))
+            throw new InvalidOperationException(
+                $"Range-map state transfer failed validation (invariant G1): {error}");
+
+        return loaded;
+    }
+
+    /// <summary>
+    /// Atomically installs a parsed map (from <see cref="ParseState"/>) and persists it to disk.
+    /// Called on a follower being repaired below the compaction floor, where no local mutation is
+    /// in flight (only the meta-partition leader mutates); the volatile swap is itself atomic.
+    /// </summary>
+    public void CommitState(RangeMap parsed)
+    {
+        current = parsed;
+        PersistToDisk(parsed);
+    }
+
     private static RangeMapMessage ToMessage(IReadOnlyList<RangeDescriptor> descriptors)
     {
         RangeMapMessage message = new();

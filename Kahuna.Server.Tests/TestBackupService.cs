@@ -350,6 +350,8 @@ public sealed class TestBackupService : IDisposable
         public int GetLocalNodeId() => 99;
         public string GetLocalNodeName() => "stub";
         public void RegisterStateMachineTransfer(IRaftStateMachineTransfer? transfer) { }
+
+        public void RegisterSystemStateTransfer(IRaftSystemStateTransfer? transfer) { }
         public Task<RaftReplicationResult> ReplicateLogs(int partitionId, string type, byte[] data, bool autoCommit = true, long expectedGeneration = 0, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task<RaftReplicationResult> ReplicateLogs(int partitionId, string type, IEnumerable<byte[]> logs, bool autoCommit = true, long expectedGeneration = 0, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task<RaftReplicationResult> ReplicateCheckpoint(int partitionId, CancellationToken cancellationToken = default) => throw new NotImplementedException();

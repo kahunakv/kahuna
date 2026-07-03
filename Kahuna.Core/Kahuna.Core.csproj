@@ -40,7 +40,7 @@
     </PackageReference>
     <PackageReference Include="Microsoft.IO.RecyclableMemoryStream" Version="3.0.1" />
     <PackageReference Include="Nixie" Version="1.1.7" />
-    <PackageReference Include="Kommander" Version="0.17.24" />
+    <PackageReference Include="Kommander" Version="0.18.0" />
     <PackageReference Include="Polly.Contrib.WaitAndRetry" Version="1.1.1" />
     <PackageReference Include="YaccLexTools" Version="1.2.3" />
   </ItemGroup>
@@ -71,6 +71,9 @@
       <Generator>MSBuild:Compile</Generator>
     </Protobuf>
     <Protobuf Include="Replication\Protos\snapshotfloor_message.proto">
+      <Generator>MSBuild:Compile</Generator>
+    </Protobuf>
+    <Protobuf Include="Replication\Protos\meta_system_state_message.proto">
       <Generator>MSBuild:Compile</Generator>
     </Protobuf>
     <Protobuf Include="Persistence\Protos\rocksdb.proto">

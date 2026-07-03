@@ -72,25 +72,40 @@ public sealed class TestSnapshotFloorStore
         return (raft, store);
     }
 
-    /// <summary>Builds a proto log entry for the given hold set and injects it as a restore.</summary>
+    /// <summary>Builds a delta log entry (one upsert per hold) and injects it as a restore.</summary>
     private static bool InjectHolds(SnapshotFloorStore store, IEnumerable<SnapshotHold> h)
     {
-        SnapshotFloorMessage msg = new();
+        SnapshotFloorDeltaMessage delta = new();
         foreach (SnapshotHold hold in h)
         {
-            msg.Holds.Add(new SnapshotHoldMessage
+            delta.Entries.Add(new SnapshotFloorDeltaEntry
             {
-                HoldId = hold.HoldId,
-                HolderId = hold.HolderId,
-                TimestampNode     = hold.Timestamp.N,
-                TimestampPhysical = hold.Timestamp.L,
-                TimestampCounter  = hold.Timestamp.C,
-                LeaseExpiryNode     = hold.LeaseExpiry.N,
-                LeaseExpiryPhysical = hold.LeaseExpiry.L,
-                LeaseExpiryCounter  = hold.LeaseExpiry.C,
+                Remove = false,
+                Hold = new SnapshotHoldMessage
+                {
+                    HoldId = hold.HoldId,
+                    HolderId = hold.HolderId,
+                    TimestampNode     = hold.Timestamp.N,
+                    TimestampPhysical = hold.Timestamp.L,
+                    TimestampCounter  = hold.Timestamp.C,
+                    LeaseExpiryNode     = hold.LeaseExpiry.N,
+                    LeaseExpiryPhysical = hold.LeaseExpiry.L,
+                    LeaseExpiryCounter  = hold.LeaseExpiry.C,
+                },
             });
         }
-        byte[] data = ReplicationSerializer.Serialize(msg);
+        byte[] data = ReplicationSerializer.Serialize(delta);
+        RaftLog log = new() { LogType = ReplicationTypes.SnapshotFloor, LogData = data };
+        return store.Restore(RangeMapStore.MetaPartitionId, log);
+    }
+
+    /// <summary>Builds a delta log entry that removes the given holdIds and injects it as a restore.</summary>
+    private static bool InjectRemove(SnapshotFloorStore store, params string[] holdIds)
+    {
+        SnapshotFloorDeltaMessage delta = new();
+        foreach (string id in holdIds)
+            delta.Entries.Add(new SnapshotFloorDeltaEntry { Remove = true, Hold = new SnapshotHoldMessage { HoldId = id } });
+        byte[] data = ReplicationSerializer.Serialize(delta);
         RaftLog log = new() { LogType = ReplicationTypes.SnapshotFloor, LogData = data };
         return store.Restore(RangeMapStore.MetaPartitionId, log);
     }
@@ -218,7 +233,7 @@ public sealed class TestSnapshotFloorStore
     }
 
     [Fact]
-    public void EmptyProtoPayload_ClearsHolds()
+    public void RemoveDelta_ClearsHold()
     {
         (RaftManager raft, SnapshotFloorStore store) = CreateSingleNodeStore();
         HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
@@ -227,10 +242,66 @@ public sealed class TestSnapshotFloorStore
         HLCTimestamp expiry = new(1, now.L + 60_000, 0);
         InjectHolds(store, [new SnapshotHold("h1", "c1", ts, expiry)]);
 
-        // An empty snapshot (all holds released — same as RangeMap all-clear).
+        // A remove delta for the only hold clears the registry and lifts the floor.
+        bool ok = InjectRemove(store, "h1");
+
+        Assert.True(ok);
+        Assert.Empty(store.Holds);
+        Assert.Equal(HLCTimestamp.Zero, store.GetEffectiveFloor(now));
+    }
+
+    [Fact]
+    public void EmptyDelta_IsNoOp()
+    {
+        (RaftManager raft, SnapshotFloorStore store) = CreateSingleNodeStore();
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        HLCTimestamp ts = new(1, 1000, 0);
+        HLCTimestamp expiry = new(1, now.L + 60_000, 0);
+        InjectHolds(store, [new SnapshotHold("h1", "c1", ts, expiry)]);
+
+        // Unlike the old full-snapshot format, an empty delta carries no ops and changes nothing.
         bool ok = InjectHolds(store, []);
 
         Assert.True(ok);
+        Assert.Single(store.Holds);
+    }
+
+    [Fact]
+    public void UpsertDelta_IsIdempotentUnderReapply()
+    {
+        (RaftManager raft, SnapshotFloorStore store) = CreateSingleNodeStore();
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        HLCTimestamp ts = new(1, 1000, 0);
+        HLCTimestamp expiry = new(1, now.L + 60_000, 0);
+        SnapshotHold hold = new("h1", "c1", ts, expiry);
+
+        // Re-delivering the same upsert (Raft re-delivery / tail replay above an installed snapshot)
+        // converges to the same single hold rather than duplicating or corrupting it.
+        InjectHolds(store, [hold]);
+        InjectHolds(store, [hold]);
+
+        Assert.Single(store.Holds);
+        Assert.Equal(ts, store.GetEffectiveFloor(now));
+    }
+
+    [Fact]
+    public void RemoveDelta_IsIdempotentAndDoesNotResurrect()
+    {
+        (RaftManager raft, SnapshotFloorStore store) = CreateSingleNodeStore();
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        HLCTimestamp ts = new(1, 1000, 0);
+        HLCTimestamp expiry = new(1, now.L + 60_000, 0);
+        SnapshotHold hold = new("h1", "c1", ts, expiry);
+
+        InjectHolds(store, [hold]);
+        InjectRemove(store, "h1");
+        // A duplicate remove is a harmless no-op; a stale upsert re-delivered out of the leader's
+        // commit order cannot happen (Raft applies in order), so the hold stays gone.
+        InjectRemove(store, "h1");
+
         Assert.Empty(store.Holds);
         Assert.Equal(HLCTimestamp.Zero, store.GetEffectiveFloor(now));
     }
@@ -252,8 +323,8 @@ public sealed class TestSnapshotFloorStore
         ]);
         Assert.Equal(t1, store.GetEffectiveFloor(now));
 
-        // Release the lower hold (inject only h2).
-        InjectHolds(store, [new SnapshotHold("h2", "c2", t2, expiry)]);
+        // Release the lower hold via a remove delta; the floor rises to the next-lowest.
+        InjectRemove(store, "h1");
         Assert.Equal(t2, store.GetEffectiveFloor(now));
     }
 
@@ -785,9 +856,8 @@ public sealed class TestSnapshotFloorStore
         InjectHolds(store, [new SnapshotHold("h1", "c1", t1, farExpiry)]);
         Assert.Equal(t1, store.GetEffectiveFloor(now));
 
-        // Replace the registry entirely (simulates leader-change WAL replay catching up).
+        // A later delta adds h3 (simulates leader-change WAL replay catching up on the tail).
         InjectHolds(store, [
-            new SnapshotHold("h1", "c1", t1, farExpiry),
             new SnapshotHold("h3", "c3", t3, farExpiry)
         ]);
 

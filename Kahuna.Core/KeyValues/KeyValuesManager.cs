@@ -79,6 +79,8 @@ internal sealed class KeyValuesManager : IDisposable
 
     private readonly KvStateMachineTransfer kvStateMachineTransfer;
 
+    private readonly MetaSystemStateTransfer metaSystemStateTransfer;
+
     private readonly KeySpaceRegistry keySpaceRegistry = new();
 
     private RangeSplitter? rangeSplitter;
@@ -172,6 +174,12 @@ internal sealed class KeyValuesManager : IDisposable
         restorer = new(backgroundWriter, raft, logger);
         replicator = new(backgroundWriter, raft, writeFrequencyRegistry, keySpaceRegistry, logger);
         kvStateMachineTransfer = new(this, persistenceBackend, logger);
+
+        // Whole-partition state transfer for the meta partition (id 0). Repairs a node below the
+        // meta WAL compaction floor by shipping the range map + snapshot-floor holds together —
+        // required because the hold registry now replicates deltas that cannot be rebuilt from
+        // surviving log entries once compacted.
+        metaSystemStateTransfer = new(rangeMapStore, snapshotFloorStore);
 
         // RangeSplitter and RangeSplitTrigger both depend on this (KeyValuesManager) being fully
         // constructed, so we assign after all other fields are set.
@@ -311,6 +319,13 @@ internal sealed class KeyValuesManager : IDisposable
     /// <c>RegisterStateMachineTransfer</c>; the split transaction calls its native export/import directly.
     /// </summary>
     internal KvStateMachineTransfer KvStateMachineTransfer => kvStateMachineTransfer;
+
+    /// <summary>
+    /// The meta-partition whole-state transfer. Registered with Kommander via
+    /// <c>RegisterSystemStateTransfer</c> so a node below the meta WAL compaction floor is repaired
+    /// with both the range map and the snapshot-floor holds.
+    /// </summary>
+    internal MetaSystemStateTransfer MetaSystemStateTransfer => metaSystemStateTransfer;
 
     /// <summary>
     /// The per-node key-space routing registry. Row/index spaces are registered as

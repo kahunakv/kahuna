@@ -110,6 +110,12 @@ public sealed class KahunaManager : IKahuna, IDisposable
         // server, tests) gets it uniformly without reaching across the internal API boundary.
         raft.RegisterStateMachineTransfer(keyValues.KvStateMachineTransfer);
 
+        // Register the meta-partition (id 0) whole-state hook so a node that falls below the meta
+        // WAL compaction floor is repaired with both the range map and the snapshot-floor holds.
+        // Required now that the hold registry replicates deltas, which cannot be reconstructed from
+        // surviving log entries once compacted.
+        raft.RegisterSystemStateTransfer(keyValues.MetaSystemStateTransfer);
+
         if (!string.IsNullOrWhiteSpace(configuration.BackupDir))
         {
             backupService = new BackupService(

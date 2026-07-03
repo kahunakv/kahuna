@@ -121,4 +121,6 @@ internal sealed class SchedulerOverridingRaft(IRaft inner, IRaftReadScheduler sc
     public int GetPartitionKey(string partitionKey) => inner.GetPartitionKey(partitionKey);
     public int GetPrefixPartitionKey(string prefixPartitionKey) => inner.GetPrefixPartitionKey(prefixPartitionKey);
     public void RegisterStateMachineTransfer(IRaftStateMachineTransfer? transfer) => inner.RegisterStateMachineTransfer(transfer);
+
+    public void RegisterSystemStateTransfer(IRaftSystemStateTransfer? transfer) => inner.RegisterSystemStateTransfer(transfer);
 }

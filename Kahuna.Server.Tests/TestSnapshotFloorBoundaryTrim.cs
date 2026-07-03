@@ -87,19 +87,23 @@ public sealed class TestSnapshotFloorBoundaryTrim
 
     private static bool InjectHold(SnapshotFloorStore store, SnapshotHold hold)
     {
-        SnapshotFloorMessage msg = new();
-        msg.Holds.Add(new SnapshotHoldMessage
+        SnapshotFloorDeltaMessage delta = new();
+        delta.Entries.Add(new SnapshotFloorDeltaEntry
         {
-            HoldId            = hold.HoldId,
-            HolderId          = hold.HolderId,
-            TimestampNode     = hold.Timestamp.N,
-            TimestampPhysical = hold.Timestamp.L,
-            TimestampCounter  = hold.Timestamp.C,
-            LeaseExpiryNode     = hold.LeaseExpiry.N,
-            LeaseExpiryPhysical = hold.LeaseExpiry.L,
-            LeaseExpiryCounter  = hold.LeaseExpiry.C,
+            Remove = false,
+            Hold = new SnapshotHoldMessage
+            {
+                HoldId            = hold.HoldId,
+                HolderId          = hold.HolderId,
+                TimestampNode     = hold.Timestamp.N,
+                TimestampPhysical = hold.Timestamp.L,
+                TimestampCounter  = hold.Timestamp.C,
+                LeaseExpiryNode     = hold.LeaseExpiry.N,
+                LeaseExpiryPhysical = hold.LeaseExpiry.L,
+                LeaseExpiryCounter  = hold.LeaseExpiry.C,
+            },
         });
-        byte[]  data = ReplicationSerializer.Serialize(msg);
+        byte[]  data = ReplicationSerializer.Serialize(delta);
         RaftLog log  = new() { LogType = ReplicationTypes.SnapshotFloor, LogData = data };
         return store.Restore(RangeMapStore.MetaPartitionId, log);
     }

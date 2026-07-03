@@ -14,9 +14,23 @@ message SnapshotHoldMessage {
   uint32 leaseExpiryCounter  = 8;
 }
 
-// Full snapshot of all live holds, replicated on the meta partition.
-// Snapshot (not delta) semantics: each committed entry fully replaces the registry,
-// so replaying the meta log on restore/failover converges on the latest hold set.
+// Full snapshot of all live holds. Used for the durable on-disk snapshot and for the
+// whole-partition state transfer that repairs a node below the WAL compaction floor;
+// each such blob fully replaces the registry.
 message SnapshotFloorMessage {
   repeated SnapshotHoldMessage holds = 1;
+}
+
+// A single change to the hold registry, keyed by holdId. Upsert installs or overwrites
+// the hold; Remove deletes it. Both are idempotent, so re-applying a delta (Raft in-order
+// re-delivery, or replay of the tail above an installed snapshot) converges to the same set.
+message SnapshotFloorDeltaEntry {
+  bool remove = 1;                 // false = upsert the hold, true = remove it
+  SnapshotHoldMessage hold = 2;    // upsert: the full hold; remove: only holdId is read
+}
+
+// One replicated hold mutation. Carries a batch so a multi-hold change (e.g. purging
+// several expired holds) commits as a single atomic meta-partition log entry.
+message SnapshotFloorDeltaMessage {
+  repeated SnapshotFloorDeltaEntry entries = 1;
 }
