@@ -66,7 +66,23 @@ internal sealed class LockLocator
         if (await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryLock(resource, owner, expiresMs, durability);
 
-        string leader = await raft.WaitForLeader(partitionId, cancellationToken);
+        string leader;
+
+        try
+        {
+            leader = await raft.WaitForLeader(partitionId, cancellationToken);
+        }
+        catch (RaftException ex)
+        {
+            // The leader for this partition is not decided yet (e.g. right after cluster
+            // startup or during a failover). Tell the caller to retry instead of surfacing
+            // the leader-election exception as a server error. Log the reason so a leader
+            // resolution failure other than a routine election delay is still visible.
+            logger.LogLockLeaderNotResolved(partitionId, resource, ex.Message);
+
+            return (LockResponseType.MustRetry, 0);
+        }
+
         if (leader == raft.GetLocalEndpoint())
             return await manager.TryLock(resource, owner, expiresMs, durability);
 
@@ -97,7 +113,23 @@ internal sealed class LockLocator
         if (await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryExtendLock(resource, owner, expiresMs, durability);
 
-        string leader = await raft.WaitForLeader(partitionId, cancellationToken);
+        string leader;
+
+        try
+        {
+            leader = await raft.WaitForLeader(partitionId, cancellationToken);
+        }
+        catch (RaftException ex)
+        {
+            // The leader for this partition is not decided yet (e.g. right after cluster
+            // startup or during a failover). Tell the caller to retry instead of surfacing
+            // the leader-election exception as a server error. Log the reason so a leader
+            // resolution failure other than a routine election delay is still visible.
+            logger.LogLockLeaderNotResolved(partitionId, resource, ex.Message);
+
+            return (LockResponseType.MustRetry, 0);
+        }
+
         if (leader == raft.GetLocalEndpoint())
             return await manager.TryExtendLock(resource, owner, expiresMs, durability);
 
@@ -128,7 +160,23 @@ internal sealed class LockLocator
         if (await raft.AmILeader(partitionId, cancellationToken))
             return await manager.TryUnlock(resource, owner, durability);
 
-        string leader = await raft.WaitForLeader(partitionId, cancellationToken);
+        string leader;
+
+        try
+        {
+            leader = await raft.WaitForLeader(partitionId, cancellationToken);
+        }
+        catch (RaftException ex)
+        {
+            // The leader for this partition is not decided yet (e.g. right after cluster
+            // startup or during a failover). Tell the caller to retry instead of surfacing
+            // the leader-election exception as a server error. Log the reason so a leader
+            // resolution failure other than a routine election delay is still visible.
+            logger.LogLockLeaderNotResolved(partitionId, resource, ex.Message);
+
+            return LockResponseType.MustRetry;
+        }
+
         if (leader == raft.GetLocalEndpoint())
             return await manager.TryUnlock(resource, owner, durability);
 
@@ -157,7 +205,23 @@ internal sealed class LockLocator
         if (await raft.AmILeader(partitionId, cancellationToken))
             return await manager.GetLock(resource, durability);
 
-        string leader = await raft.WaitForLeader(partitionId, cancellationToken);
+        string leader;
+
+        try
+        {
+            leader = await raft.WaitForLeader(partitionId, cancellationToken);
+        }
+        catch (RaftException ex)
+        {
+            // The leader for this partition is not decided yet (e.g. right after cluster
+            // startup or during a failover). Tell the caller to retry instead of surfacing
+            // the leader-election exception as a server error. Log the reason so a leader
+            // resolution failure other than a routine election delay is still visible.
+            logger.LogLockLeaderNotResolved(partitionId, resource, ex.Message);
+
+            return (LockResponseType.MustRetry, null);
+        }
+
         if (leader == raft.GetLocalEndpoint())
             return await manager.GetLock(resource, durability);
 

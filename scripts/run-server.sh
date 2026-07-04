@@ -30,3 +30,34 @@ for port in 8082 8084 8086; do
     exit 1
   fi
 done
+
+# HTTP liveness above only proves each listener accepts connections; it does not prove that
+# Raft has elected a leader for every partition. A request that lands on a follower before its
+# partition leader is decided is answered with a retry signal (type 101 = MustRetry). Starting
+# the client suite in that window causes spurious failures, so wait until each node returns a
+# *decided* answer for a real lock request (leaders elected and follower->leader forwarding works).
+for port in 8082 8084 8086; do
+  converged=0
+
+  for attempt in {1..60}; do
+    body=$(curl -k -sS --connect-timeout 2 -X POST "https://localhost:${port}/v1/locks/try-lock" \
+      -H "Content-Type: application/json" \
+      -d '{"resource":"__cluster_ready_probe__","lockId":"cHJvYmU=","expiresMs":1000,"durability":0}' || true)
+
+    # Any decided lock outcome (Locked/Busy/...) means the partition leader is up. Keep waiting
+    # only while the node is still electing (MustRetry) or the request could not be served.
+    case "$body" in
+      *'"type":101'*|"") ;;
+      *'"type":'*) converged=1; break ;;
+    esac
+
+    sleep 1
+  done
+
+  if [ "$converged" -ne 1 ]; then
+    echo "Kahuna cluster did not elect leaders (still electing) on port ${port}"
+    docker compose ps
+    docker compose logs --tail=200
+    exit 1
+  fi
+done

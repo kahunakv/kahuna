@@ -22,6 +22,9 @@ public static partial class KahunaLoggerLocksExtensions
     [LoggerMessage(Level = LogLevel.Debug, Message = "GET-LOCK Redirect {LockName} to leader partition {Partition} at {Leader}")]
     public static partial void LogGetLockRedirect(this ILogger<IKahuna> logger, string lockName, int partition, string leader);
 
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Leader for partition {Partition} could not be resolved for {LockName}, returning MustRetry: {Reason}")]
+    public static partial void LogLockLeaderNotResolved(this ILogger<IKahuna> logger, int partition, string lockName, string reason);
+
     // ── LockActor eviction log ─────────────────────────────────────────────
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "Evicted {Count} key/value pairs")]
