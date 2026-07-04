@@ -8,6 +8,7 @@ using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
 using Kahuna.Shared.KeyValue;
+using Kommander.Data;
 using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues;
@@ -129,6 +130,13 @@ internal sealed class KeyValueProposalActor : IActor<KeyValueProposalRequest>
         {
             logger.LogWarning("Failed to replicate key/value {Key} Partition={Partition} Status={Status} Ticket={Ticket}", proposal.Key, partitionId, result.Status, result.TicketId);
 
+            // A transient replication failure (leadership moved mid-propose, proposal timed out,
+            // queue full, restore in progress, …) is retryable: release as MustRetry so the caller
+            // retries once the partition settles, rather than surfacing it as terminal Errored.
+            KeyValueFlags releaseFlags = IsTransientReplicationStatus(result.Status)
+                ? KeyValueFlags.ReplicationRetry
+                : KeyValueFlags.None;
+
             keyValueActor.Send(new(
                 KeyValueRequestType.ReleaseProposal,
                 HLCTimestamp.Zero,
@@ -137,7 +145,7 @@ internal sealed class KeyValueProposalActor : IActor<KeyValueProposalRequest>
                 null,
                 null,
                 -1,
-                KeyValueFlags.None,
+                releaseFlags,
                 0,
                 HLCTimestamp.Zero,
                 proposal.Durability,
@@ -166,4 +174,28 @@ internal sealed class KeyValueProposalActor : IActor<KeyValueProposalRequest>
             message.Promise
         ));
     }
+
+    /// <summary>
+    /// True when a failed replication attempt is transient and the write should be retried rather
+    /// than reported as a terminal error. These cover leadership churn and back-off-and-retry
+    /// conditions that resolve on their own once the partition settles: a follower that just lost
+    /// (or has not yet won) leadership, a proposal that timed out or is still pending, a full
+    /// proposal queue, a partition still restoring from the WAL, or a partition that moved
+    /// generation (the caller re-resolves and retries). A generic <see cref="RaftOperationStatus.Errored"/>
+    /// or a structural Raft/membership fault is left terminal — retrying it would not help.
+    /// </summary>
+    private static bool IsTransientReplicationStatus(RaftOperationStatus status) => status switch
+    {
+        RaftOperationStatus.NodeIsNotLeader
+            or RaftOperationStatus.LeaderInOldTerm
+            or RaftOperationStatus.LeaderAlreadyElected
+            or RaftOperationStatus.ActiveProposal
+            or RaftOperationStatus.ProposalTimeout
+            or RaftOperationStatus.ReplicationFailed
+            or RaftOperationStatus.Pending
+            or RaftOperationStatus.ProposalQueueFull
+            or RaftOperationStatus.RestoreInProgress
+            or RaftOperationStatus.PartitionMoved => true,
+        _ => false
+    };
 }

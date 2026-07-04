@@ -222,9 +222,9 @@ internal abstract class BaseHandler
     }
 
     /// <summary>
-    /// Removes expired revisions from the KeyValueEntry dictionary, keeping at most
-    /// RevisionRetention entries. Called at archive time so the collector never needs a
-    /// separate metadata pass to enforce the bound.
+    /// Removes expired revisions from the KeyValueEntry dictionary, keeping exactly the newest
+    /// RevisionRetention entries when no snapshot floor is active. Called at archive time so the
+    /// collector never needs a separate metadata pass to enforce the bound.
     ///
     /// <para>When an effective snapshot floor is set, the single highest revision whose
     /// <see cref="KeyValueRevisionEntry.LastModified"/> is at-or-before the floor is pinned as
@@ -249,7 +249,9 @@ internal abstract class BaseHandler
             return;
 
         int toBeKept = context.Configuration.RevisionRetention;
-        long cutoff = refRevision - toBeKept;
+        // Keep the newest RevisionRetention revisions (refRevision down to refRevision-toBeKept+1);
+        // anything strictly below the cutoff is trimmed unless the floor pins it as the boundary.
+        long cutoff = refRevision - toBeKept + 1;
 
         // Determine the floor-boundary revision: the highest revision that would normally
         // be trimmed (< cutoff) but whose timestamp is at-or-before the effective floor.

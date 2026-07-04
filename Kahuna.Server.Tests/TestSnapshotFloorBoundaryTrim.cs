@@ -164,11 +164,12 @@ public sealed class TestSnapshotFloorBoundaryTrim
 
     /// <summary>
     /// With a live hold at T (matching revision 2's LastModified) and RevisionRetention = 3,
-    /// trimming entry with 6 revisions (cutoff = 6-3 = 3) should:
+    /// trimming entry with 6 revisions (cutoff = 6-3+1 = 4) should:
     /// <list type="bullet">
     ///   <item>Remove revision 1 (below cutoff, older than boundary)</item>
     ///   <item>Pin revision 2 (floor-boundary: highest revision ≤ T below cutoff)</item>
-    ///   <item>Keep revisions 3-6 (within normal retention window)</item>
+    ///   <item>Remove revision 3 (below cutoff, newer than boundary → left to disk)</item>
+    ///   <item>Keep revisions 4-6 (within normal retention window)</item>
     /// </list>
     /// </summary>
     [Fact]
@@ -199,11 +200,11 @@ public sealed class TestSnapshotFloorBoundaryTrim
         Assert.NotNull(entry.Revisions);
         Assert.False(entry.Revisions!.ContainsKey(1),  "revision 1 must be trimmed (below boundary)");
         Assert.True(entry.Revisions.ContainsKey(2),    "revision 2 must be pinned (floor-boundary)");
-        Assert.True(entry.Revisions.ContainsKey(3),    "revision 3 must be kept (retention window)");
+        Assert.False(entry.Revisions.ContainsKey(3),   "revision 3 must be trimmed (below cutoff, newer than boundary)");
         Assert.True(entry.Revisions.ContainsKey(4),    "revision 4 must be kept (retention window)");
         Assert.True(entry.Revisions.ContainsKey(5),    "revision 5 must be kept (retention window)");
         Assert.True(entry.Revisions.ContainsKey(6),    "revision 6 must be kept (current)");
-        Assert.Equal(5, entry.Revisions.Count);
+        Assert.Equal(4, entry.Revisions.Count); // boundary (2) + retention window (4,5,6)
     }
 
     /// <summary>
@@ -231,11 +232,11 @@ public sealed class TestSnapshotFloorBoundaryTrim
         Assert.NotNull(entry.Revisions);
         Assert.False(entry.Revisions!.ContainsKey(1), "revision 1 must be trimmed (beyond retention)");
         Assert.False(entry.Revisions.ContainsKey(2),  "revision 2 must be trimmed (beyond retention)");
-        Assert.True(entry.Revisions.ContainsKey(3),   "revision 3 must be kept");
+        Assert.False(entry.Revisions.ContainsKey(3),  "revision 3 must be trimmed (beyond retention)");
         Assert.True(entry.Revisions.ContainsKey(4),   "revision 4 must be kept");
         Assert.True(entry.Revisions.ContainsKey(5),   "revision 5 must be kept");
         Assert.True(entry.Revisions.ContainsKey(6),   "revision 6 must be kept");
-        Assert.Equal(retention + 1, entry.Revisions.Count); // refRevision itself counts as one of the kept revisions
+        Assert.Equal(retention, entry.Revisions.Count); // exactly RevisionRetention newest revisions, nothing more
     }
 
     /// <summary>
@@ -262,8 +263,8 @@ public sealed class TestSnapshotFloorBoundaryTrim
         Assert.NotNull(entry.Revisions);
         Assert.False(entry.Revisions!.ContainsKey(1), "revision 1 must be trimmed");
         Assert.False(entry.Revisions.ContainsKey(2),  "revision 2 must be trimmed");
-        // Revisions 3-6 kept: cutoff = 6-3 = 3 → keys 4,5,6 but 3 is the boundary (3 >= 3, kept)
-        Assert.True(entry.Revisions.ContainsKey(3), "revision 3 must be kept (at cutoff boundary)");
+        Assert.False(entry.Revisions.ContainsKey(3),  "revision 3 must be trimmed");
+        // Revisions 4-6 kept: cutoff = 6-3+1 = 4 → keys 4,5,6 (exactly RevisionRetention newest)
         Assert.True(entry.Revisions.ContainsKey(4), "revision 4 must be kept");
         Assert.True(entry.Revisions.ContainsKey(5), "revision 5 must be kept");
         Assert.True(entry.Revisions.ContainsKey(6), "revision 6 must be kept");
@@ -300,7 +301,7 @@ public sealed class TestSnapshotFloorBoundaryTrim
         Assert.NotNull(entry.Revisions);
         Assert.False(entry.Revisions!.ContainsKey(1), "revision 1 must be trimmed (no boundary)");
         Assert.False(entry.Revisions.ContainsKey(2),  "revision 2 must be trimmed (no boundary)");
-        Assert.True(entry.Revisions.ContainsKey(3), "revision 3 kept");
+        Assert.False(entry.Revisions.ContainsKey(3), "revision 3 must be trimmed (no boundary)");
         Assert.True(entry.Revisions.ContainsKey(4), "revision 4 kept");
         Assert.True(entry.Revisions.ContainsKey(5), "revision 5 kept");
         Assert.True(entry.Revisions.ContainsKey(6), "revision 6 kept");
@@ -311,16 +312,17 @@ public sealed class TestSnapshotFloorBoundaryTrim
     /// pin selects the highest revision whose LastModified ≤ effectiveFloor. Revisions below
     /// the boundary (including those below cutoff with LastModified > floor) are still removed.
     ///
-    /// <para>Setup: RetentionCount = 3, 8 revisions, refRevision = 8 → cutoff = 5.
-    /// Revisions 1-4 are candidates. Hold at T = revision 3's timestamp (3000).</para>
+    /// <para>Setup: RetentionCount = 3, 8 revisions, refRevision = 8 → cutoff = 6.
+    /// Revisions 1-5 are candidates. Hold at T = revision 3's timestamp (3000).</para>
     /// <list type="bullet">
     ///   <item>Revision 1 (ts=1000 ≤ T): candidate for boundary</item>
     ///   <item>Revision 2 (ts=2000 ≤ T): candidate for boundary</item>
     ///   <item>Revision 3 (ts=3000 ≤ T): candidate → selected as floor-boundary (highest)</item>
     ///   <item>Revision 4 (ts=4000 > T): NOT a boundary candidate → removed</item>
-    ///   <item>Revisions 5-8: ≥ cutoff → kept by normal retention</item>
+    ///   <item>Revision 5 (ts=5000 > T): NOT a boundary candidate → removed</item>
+    ///   <item>Revisions 6-8: ≥ cutoff → kept by normal retention</item>
     /// </list>
-    /// Final set: {3, 5, 6, 7, 8}.
+    /// Final set: {3, 6, 7, 8}.
     /// </summary>
     [Fact]
     public void WithHold_HighestQualifyingBelowCutoff_SelectedAsBoundary()
@@ -328,7 +330,7 @@ public sealed class TestSnapshotFloorBoundaryTrim
         const int count     = 8;
         const int retention = 3;
         const long refRevision = count;
-        // cutoff = 8 - 3 = 5; candidates below cutoff: 1, 2, 3, 4
+        // cutoff = 8 - 3 + 1 = 6; candidates below cutoff: 1, 2, 3, 4, 5
 
         RaftManager         raft   = BuildRaft();
         KahunaConfiguration config = BuildConfig(retention);
@@ -352,11 +354,11 @@ public sealed class TestSnapshotFloorBoundaryTrim
         Assert.False(entry.Revisions.ContainsKey(2),  "revision 2 trimmed (older than boundary)");
         Assert.True(entry.Revisions.ContainsKey(3),   "revision 3 pinned (floor-boundary)");
         Assert.False(entry.Revisions.ContainsKey(4),  "revision 4 trimmed (ts=4000 > floor=3000)");
-        Assert.True(entry.Revisions.ContainsKey(5),   "revision 5 kept (≥ cutoff)");
-        Assert.True(entry.Revisions.ContainsKey(6),   "revision 6 kept");
+        Assert.False(entry.Revisions.ContainsKey(5),  "revision 5 trimmed (below cutoff, ts=5000 > floor=3000)");
+        Assert.True(entry.Revisions.ContainsKey(6),   "revision 6 kept (≥ cutoff)");
         Assert.True(entry.Revisions.ContainsKey(7),   "revision 7 kept");
         Assert.True(entry.Revisions.ContainsKey(8),   "revision 8 kept");
-        Assert.Equal(5, entry.Revisions.Count); // boundary + 4 normal (5,6,7,8)
+        Assert.Equal(4, entry.Revisions.Count); // boundary (3) + normal (6,7,8)
     }
 
     /// <summary>
@@ -391,7 +393,7 @@ public sealed class TestSnapshotFloorBoundaryTrim
         // Expired hold → floor = Zero → normal trim
         Assert.False(entry.Revisions!.ContainsKey(1), "revision 1 must be trimmed (hold expired)");
         Assert.False(entry.Revisions.ContainsKey(2),  "revision 2 must be trimmed (hold expired)");
-        Assert.True(entry.Revisions.ContainsKey(3), "revision 3 kept");
+        Assert.False(entry.Revisions.ContainsKey(3), "revision 3 must be trimmed (hold expired)");
         Assert.True(entry.Revisions.ContainsKey(4), "revision 4 kept");
         Assert.True(entry.Revisions.ContainsKey(5), "revision 5 kept");
         Assert.True(entry.Revisions.ContainsKey(6), "revision 6 kept");

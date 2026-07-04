@@ -2,6 +2,7 @@
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.Persistence.Backend;
+using Kahuna.Shared.KeyValue;
 using Kommander;
 using Kommander.Communication.Memory;
 using Kommander.Discovery;
@@ -642,6 +643,31 @@ public abstract class BaseCluster
             catch { /* swallow transient cluster errors — next attempt */ }
         }
         await body(); // final attempt: let all exceptions propagate
+    }
+
+    /// <summary>
+    /// Runs a key/value operation and re-runs it while it resolves to
+    /// <see cref="KeyValueResponseType.MustRetry"/>, up to a deadline (scaled by
+    /// <c>KAHUNA_TEST_TIMING_SCALE</c>). MustRetry is the retryable signal the write path returns
+    /// when a proposal races a leadership change (NodeIsNotLeader) or another transient replication
+    /// condition; retrying lets the operation land once the partition settles instead of failing the
+    /// test on a transient blip. The final result is returned so the caller asserts on it — a genuine
+    /// non-retryable outcome (or a persistent MustRetry past the deadline) still surfaces normally.
+    /// </summary>
+    protected static async Task<T> RetryOnMustRetryAsync<T>(
+        Func<Task<T>> operation, Func<T, KeyValueResponseType> statusSelector, int timeoutMs = 10_000)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        long deadline = Environment.TickCount64 + (long)(timeoutMs * TimingScale);
+
+        T result = await operation();
+        while (statusSelector(result) == KeyValueResponseType.MustRetry && Environment.TickCount64 < deadline)
+        {
+            await Task.Delay(50, ct);
+            result = await operation();
+        }
+
+        return result;
     }
 
     private static readonly double TimingScale = GetTimingScale();

@@ -1,7 +1,8 @@
 
+using System.IO.Hashing;
+using System.Text;
 using Kahuna.Shared.Locks;
 using Nixie.Routers;
-using Standart.Hash.xxHash;
 
 namespace Kahuna.Server.Locks.Data;
 
@@ -124,6 +125,6 @@ internal sealed class LockRequest : IConsistentHashable
     /// <returns>An integer representing the hash value of the resource.</returns>
     public int GetHash()
     {
-        return (int)xxHash64.ComputeHash(Resource);
+        return (int)XxHash64.HashToUInt64(Encoding.UTF8.GetBytes(Resource));
     }
 }

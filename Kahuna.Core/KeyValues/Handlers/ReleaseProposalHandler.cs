@@ -51,9 +51,12 @@ internal sealed class ReleaseProposalHandler : BaseHandler
         entry.ReplicationIntent = null;
         context.Proposals.Remove(message.ProposalId);
 
-        // A fence-rejected proposal (key-range generation moved) resolves as MustRetry so the client
-        // re-resolves LocateRange and retries on the correct partition; otherwise Errored.
-        KeyValueResponse response = (message.Flags & KeyValueFlags.FenceRetry) != 0
+        // A proposal released for a retryable reason resolves as MustRetry so the caller retries
+        // rather than treating a transient failure as terminal: a fence rejection (key-range
+        // generation moved → re-resolve LocateRange on the correct partition) or a transient
+        // replication failure (leadership change, timeout, queue full → retry once the partition
+        // settles). Any other release is a genuine error.
+        KeyValueResponse response = (message.Flags & (KeyValueFlags.FenceRetry | KeyValueFlags.ReplicationRetry)) != 0
             ? new KeyValueResponse(KeyValueResponseType.MustRetry, 0)
             : KeyValueStaticResponses.ErroredResponse;
 

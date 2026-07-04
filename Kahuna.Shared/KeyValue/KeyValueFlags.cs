@@ -20,5 +20,13 @@ public enum KeyValueFlags
     /// fence, so the release resolves the client promise as <c>MustRetry</c> (re-resolve
     /// LocateRange and retry), not <c>Errored</c>.
     /// </summary>
-    FenceRetry = 1 << 6              // 64
+    FenceRetry = 1 << 6,             // 64
+
+    /// <summary>
+    /// Internal signal on a ReleaseProposal: replication failed with a transient status (leadership
+    /// change, proposal timeout, queue full, restore in progress, …), so the release resolves the
+    /// client promise as <c>MustRetry</c> — the caller retries and the write succeeds once the
+    /// partition settles — rather than surfacing the retryable failure as terminal <c>Errored</c>.
+    /// </summary>
+    ReplicationRetry = 1 << 7        // 128
 }

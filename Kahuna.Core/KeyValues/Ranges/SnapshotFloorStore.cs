@@ -611,8 +611,10 @@ internal sealed class SnapshotFloorStore : IDisposable
                 return 0;
             }
 
-            logger.LogInformation("Purged {Count} expired snapshot hold(s)", expired.Count);
-            return expired.Count;
+            int purgedCount = expired.Count;
+            if (logger.IsEnabled(LogLevel.Information))
+                logger.LogInformation("Purged {Count} expired snapshot hold(s)", purgedCount);
+            return purgedCount;
         }
         finally
         {

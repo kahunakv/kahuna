@@ -40,25 +40,25 @@ public class TestScriptAsOfReads : BaseCluster
             string key = GetRandomKey();
 
             // Write v1.
-            (KeyValueResponseType setType, _, _) = await kahuna1.LocateAndTrySetKeyValue(
+            (KeyValueResponseType setType, _, _) = await RetryOnMustRetryAsync(() => kahuna1.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, key, Encoding.UTF8.GetBytes("v1"), null, -1,
                 KeyValueFlags.Set, 0, KeyValueDurability.Persistent,
-                TestContext.Current.CancellationToken);
+                TestContext.Current.CancellationToken), r => r.Item1);
             Assert.Equal(KeyValueResponseType.Set, setType);
 
             // Capture T1 from v1's LastModified.
             (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entryV1) =
-                await kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero,
-                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+                await RetryOnMustRetryAsync(() => kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero,
+                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken), r => r.Item1);
             Assert.Equal(KeyValueResponseType.Get, getType);
             Assert.NotNull(entryV1);
             long snapshotMs = entryV1.LastModified.L;
 
             // Write v2 — will have LastModified > snapshotMs.
-            (setType, _, _) = await kahuna1.LocateAndTrySetKeyValue(
+            (setType, _, _) = await RetryOnMustRetryAsync(() => kahuna1.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, key, Encoding.UTF8.GetBytes("v2"), null, -1,
                 KeyValueFlags.Set, 0, KeyValueDurability.Persistent,
-                TestContext.Current.CancellationToken);
+                TestContext.Current.CancellationToken), r => r.Item1);
             Assert.Equal(KeyValueResponseType.Set, setType);
 
             // Script: GET key AS OF T1 → v1.
@@ -67,8 +67,8 @@ public class TestScriptAsOfReads : BaseCluster
                 RETURN a
                 """;
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(
-                Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetryAsync(() => kahuna1.TryExecuteTransactionScript(
+                Encoding.UTF8.GetBytes(script), null, null), r => r.Type);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal("v1", Encoding.UTF8.GetString(resp.Value ?? []));
 
@@ -77,8 +77,8 @@ public class TestScriptAsOfReads : BaseCluster
                 LET b = GET "{key}"
                 RETURN b
                 """;
-            resp = await kahuna1.TryExecuteTransactionScript(
-                Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetryAsync(() => kahuna1.TryExecuteTransactionScript(
+                Encoding.UTF8.GetBytes(script), null, null), r => r.Type);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal("v2", Encoding.UTF8.GetString(resp.Value ?? []));
         }
@@ -109,17 +109,17 @@ public class TestScriptAsOfReads : BaseCluster
             await Task.Delay(10, TestContext.Current.CancellationToken);
 
             // Write after the captured time.
-            (KeyValueResponseType setType, _, _) = await kahuna1.LocateAndTrySetKeyValue(
+            (KeyValueResponseType setType, _, _) = await RetryOnMustRetryAsync(() => kahuna1.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, key, Encoding.UTF8.GetBytes("value"), null, -1,
                 KeyValueFlags.Set, 0, KeyValueDurability.Persistent,
-                TestContext.Current.CancellationToken);
+                TestContext.Current.CancellationToken), r => r.Item1);
             Assert.Equal(KeyValueResponseType.Set, setType);
 
             // Bare GET AS OF (no LET/RETURN): context.Result is set directly to DoesNotExist.
             string script = $"""GET "{key}" AS OF {earlyMs}""";
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(
-                Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetryAsync(() => kahuna1.TryExecuteTransactionScript(
+                Encoding.UTF8.GetBytes(script), null, null), r => r.Type);
             Assert.Equal(KeyValueResponseType.DoesNotExist, resp.Type);
         }
         finally
@@ -145,31 +145,31 @@ public class TestScriptAsOfReads : BaseCluster
             string key2 = GetRandomKey();
 
             // Write initial values for both keys.
-            (KeyValueResponseType setType, _, _) = await kahuna1.LocateAndTrySetKeyValue(
+            (KeyValueResponseType setType, _, _) = await RetryOnMustRetryAsync(() => kahuna1.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, key1, Encoding.UTF8.GetBytes("k1v1"), null, -1,
                 KeyValueFlags.Set, 0, KeyValueDurability.Persistent,
-                TestContext.Current.CancellationToken);
+                TestContext.Current.CancellationToken), r => r.Item1);
             Assert.Equal(KeyValueResponseType.Set, setType);
 
-            (setType, _, _) = await kahuna1.LocateAndTrySetKeyValue(
+            (setType, _, _) = await RetryOnMustRetryAsync(() => kahuna1.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, key2, Encoding.UTF8.GetBytes("k2v1"), null, -1,
                 KeyValueFlags.Set, 0, KeyValueDurability.Persistent,
-                TestContext.Current.CancellationToken);
+                TestContext.Current.CancellationToken), r => r.Item1);
             Assert.Equal(KeyValueResponseType.Set, setType);
 
             // Capture T from key2's LastModified (written last, so >= key1's).
             (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry2) =
-                await kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, key2, -1, HLCTimestamp.Zero,
-                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+                await RetryOnMustRetryAsync(() => kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, key2, -1, HLCTimestamp.Zero,
+                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken), r => r.Item1);
             Assert.Equal(KeyValueResponseType.Get, getType);
             Assert.NotNull(entry2);
             long snapshotMs = entry2.LastModified.L;
 
             // Overwrite key1 after T.
-            (setType, _, _) = await kahuna1.LocateAndTrySetKeyValue(
+            (setType, _, _) = await RetryOnMustRetryAsync(() => kahuna1.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, key1, Encoding.UTF8.GetBytes("k1v2"), null, -1,
                 KeyValueFlags.Set, 0, KeyValueDurability.Persistent,
-                TestContext.Current.CancellationToken);
+                TestContext.Current.CancellationToken), r => r.Item1);
             Assert.Equal(KeyValueResponseType.Set, setType);
 
             // A snapshot transaction at T must see k1v1 (not k1v2) for key1.
@@ -181,8 +181,8 @@ public class TestScriptAsOfReads : BaseCluster
                 END
                 """;
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(
-                Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetryAsync(() => kahuna1.TryExecuteTransactionScript(
+                Encoding.UTF8.GetBytes(script), null, null), r => r.Type);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal("k1v1", Encoding.UTF8.GetString(resp.Value ?? []));
 
@@ -193,8 +193,8 @@ public class TestScriptAsOfReads : BaseCluster
                   COMMIT
                 END
                 """;
-            resp = await kahuna1.TryExecuteTransactionScript(
-                Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetryAsync(() => kahuna1.TryExecuteTransactionScript(
+                Encoding.UTF8.GetBytes(script), null, null), r => r.Type);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal("k2v1", Encoding.UTF8.GetString(resp.Value ?? []));
         }
@@ -224,22 +224,22 @@ public class TestScriptAsOfReads : BaseCluster
             await Task.Delay(10, TestContext.Current.CancellationToken);
 
             // Write the key.
-            (KeyValueResponseType setType, _, _) = await kahuna1.LocateAndTrySetKeyValue(
+            (KeyValueResponseType setType, _, _) = await RetryOnMustRetryAsync(() => kahuna1.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, key, Encoding.UTF8.GetBytes("x"), null, -1,
                 KeyValueFlags.Set, 0, KeyValueDurability.Persistent,
-                TestContext.Current.CancellationToken);
+                TestContext.Current.CancellationToken), r => r.Item1);
             Assert.Equal(KeyValueResponseType.Set, setType);
 
             // Bare EXISTS AS OF (no LET/RETURN) → DoesNotExist.
             string script = $"""EXISTS "{key}" AS OF {earlyMs}""";
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(
-                Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetryAsync(() => kahuna1.TryExecuteTransactionScript(
+                Encoding.UTF8.GetBytes(script), null, null), r => r.Type);
             Assert.Equal(KeyValueResponseType.DoesNotExist, resp.Type);
 
             // Bare EXISTS now → Exists.
             script = $"EXISTS \"{key}\"";
-            resp = await kahuna1.TryExecuteTransactionScript(
-                Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetryAsync(() => kahuna1.TryExecuteTransactionScript(
+                Encoding.UTF8.GetBytes(script), null, null), r => r.Type);
             Assert.Equal(KeyValueResponseType.Exists, resp.Type);
         }
         finally
@@ -269,35 +269,35 @@ public class TestScriptAsOfReads : BaseCluster
             // Write key1 and key2.
             foreach (string k in new[] { key1, key2 })
             {
-                (KeyValueResponseType st, _, _) = await kahuna1.LocateAndTrySetKeyValue(
+                (KeyValueResponseType st, _, _) = await RetryOnMustRetryAsync(() => kahuna1.LocateAndTrySetKeyValue(
                     HLCTimestamp.Zero, k, Encoding.UTF8.GetBytes("v"), null, -1,
                     KeyValueFlags.Set, 0, KeyValueDurability.Persistent,
-                    TestContext.Current.CancellationToken);
+                    TestContext.Current.CancellationToken), r => r.Item1);
                 Assert.Equal(KeyValueResponseType.Set, st);
             }
 
             // Capture T from key2's LastModified.
             (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry2) =
-                await kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, key2, -1, HLCTimestamp.Zero,
-                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+                await RetryOnMustRetryAsync(() => kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, key2, -1, HLCTimestamp.Zero,
+                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken), r => r.Item1);
             Assert.Equal(KeyValueResponseType.Get, getType);
             Assert.NotNull(entry2);
             long snapshotMs = entry2.LastModified.L;
 
             // Write key3 after T — delay ensures a different HLC millisecond so it falls outside snapshot.
             await Task.Delay(10, TestContext.Current.CancellationToken);
-            (KeyValueResponseType setType, _, _) = await kahuna1.LocateAndTrySetKeyValue(
+            (KeyValueResponseType setType, _, _) = await RetryOnMustRetryAsync(() => kahuna1.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, key3, Encoding.UTF8.GetBytes("v"), null, -1,
                 KeyValueFlags.Set, 0, KeyValueDurability.Persistent,
-                TestContext.Current.CancellationToken);
+                TestContext.Current.CancellationToken), r => r.Item1);
             Assert.Equal(KeyValueResponseType.Set, setType);
 
             // GET BY BUCKET at T → should return key1 and key2 only (key3 not yet present).
             // Use a bare statement so the result carries (key, value) pairs with Key populated.
             string script = $"""GET BY BUCKET "{prefix}" AS OF {snapshotMs}""";
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(
-                Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetryAsync(() => kahuna1.TryExecuteTransactionScript(
+                Encoding.UTF8.GetBytes(script), null, null), r => r.Type);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.NotNull(resp.Values);
             Assert.Equal(2, resp.Values.Count);
@@ -326,38 +326,38 @@ public class TestScriptAsOfReads : BaseCluster
             string key = GetRandomKey();
 
             // Write v1.
-            (KeyValueResponseType setType, _, _) = await kahuna1.LocateAndTrySetKeyValue(
+            (KeyValueResponseType setType, _, _) = await RetryOnMustRetryAsync(() => kahuna1.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, key, Encoding.UTF8.GetBytes("v1"), null, -1,
                 KeyValueFlags.Set, 0, KeyValueDurability.Persistent,
-                TestContext.Current.CancellationToken);
+                TestContext.Current.CancellationToken), r => r.Item1);
             Assert.Equal(KeyValueResponseType.Set, setType);
 
             (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entryV1) =
-                await kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero,
-                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+                await RetryOnMustRetryAsync(() => kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero,
+                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken), r => r.Item1);
             Assert.Equal(KeyValueResponseType.Get, getType);
             Assert.NotNull(entryV1);
             long t1Ms = entryV1.LastModified.L;
 
             // Write v2 (T2 > T1).
-            (setType, _, _) = await kahuna1.LocateAndTrySetKeyValue(
+            (setType, _, _) = await RetryOnMustRetryAsync(() => kahuna1.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, key, Encoding.UTF8.GetBytes("v2"), null, -1,
                 KeyValueFlags.Set, 0, KeyValueDurability.Persistent,
-                TestContext.Current.CancellationToken);
+                TestContext.Current.CancellationToken), r => r.Item1);
             Assert.Equal(KeyValueResponseType.Set, setType);
 
             (getType, ReadOnlyKeyValueEntry? entryV2) =
-                await kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero,
-                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+                await RetryOnMustRetryAsync(() => kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero,
+                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken), r => r.Item1);
             Assert.Equal(KeyValueResponseType.Get, getType);
             Assert.NotNull(entryV2);
             long t2Ms = entryV2.LastModified.L;
 
             // Write v3 (after t2Ms).
-            (setType, _, _) = await kahuna1.LocateAndTrySetKeyValue(
+            (setType, _, _) = await RetryOnMustRetryAsync(() => kahuna1.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, key, Encoding.UTF8.GetBytes("v3"), null, -1,
                 KeyValueFlags.Set, 0, KeyValueDurability.Persistent,
-                TestContext.Current.CancellationToken);
+                TestContext.Current.CancellationToken), r => r.Item1);
             Assert.Equal(KeyValueResponseType.Set, setType);
 
             // Inside a snapshot=T1 transaction, an explicit AS OF T2 should return v2 (not v1).
@@ -369,8 +369,8 @@ public class TestScriptAsOfReads : BaseCluster
                 END
                 """;
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(
-                Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetryAsync(() => kahuna1.TryExecuteTransactionScript(
+                Encoding.UTF8.GetBytes(script), null, null), r => r.Type);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal("v2", Encoding.UTF8.GetString(resp.Value ?? []));
         }
@@ -405,14 +405,14 @@ public class TestScriptAsOfReads : BaseCluster
                 END
                 """;
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(
-                Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetryAsync(() => kahuna1.TryExecuteTransactionScript(
+                Encoding.UTF8.GetBytes(script), null, null), r => r.Type);
             Assert.Equal(KeyValueResponseType.Aborted, resp.Type);
 
             // Key must not exist.
-            (KeyValueResponseType getType, _) = await kahuna2.LocateAndTryGetValue(
+            (KeyValueResponseType getType, _) = await RetryOnMustRetryAsync(() => kahuna2.LocateAndTryGetValue(
                 HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero,
-                KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+                KeyValueDurability.Persistent, TestContext.Current.CancellationToken), r => r.Item1);
             Assert.Equal(KeyValueResponseType.DoesNotExist, getType);
         }
         finally
@@ -441,8 +441,8 @@ public class TestScriptAsOfReads : BaseCluster
                 RETURN x
                 """;
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(
-                Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetryAsync(() => kahuna1.TryExecuteTransactionScript(
+                Encoding.UTF8.GetBytes(script), null, null), r => r.Type);
             Assert.Equal(KeyValueResponseType.Errored, resp.Type);
         }
         finally
@@ -472,34 +472,34 @@ public class TestScriptAsOfReads : BaseCluster
             // Write key1 and key2.
             foreach (string k in new[] { key1, key2 })
             {
-                (KeyValueResponseType st, _, _) = await kahuna1.LocateAndTrySetKeyValue(
+                (KeyValueResponseType st, _, _) = await RetryOnMustRetryAsync(() => kahuna1.LocateAndTrySetKeyValue(
                     HLCTimestamp.Zero, k, Encoding.UTF8.GetBytes("v"), null, -1,
                     KeyValueFlags.Set, 0, KeyValueDurability.Persistent,
-                    TestContext.Current.CancellationToken);
+                    TestContext.Current.CancellationToken), r => r.Item1);
                 Assert.Equal(KeyValueResponseType.Set, st);
             }
 
             // Capture T from key2's LastModified.
             (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry2) =
-                await kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, key2, -1, HLCTimestamp.Zero,
-                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+                await RetryOnMustRetryAsync(() => kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, key2, -1, HLCTimestamp.Zero,
+                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken), r => r.Item1);
             Assert.Equal(KeyValueResponseType.Get, getType);
             Assert.NotNull(entry2);
             long snapshotMs = entry2.LastModified.L;
 
             // Write key3 after T — delay ensures a later HLC millisecond so it falls outside snapshot.
             await Task.Delay(10, TestContext.Current.CancellationToken);
-            (KeyValueResponseType setType, _, _) = await kahuna1.LocateAndTrySetKeyValue(
+            (KeyValueResponseType setType, _, _) = await RetryOnMustRetryAsync(() => kahuna1.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, key3, Encoding.UTF8.GetBytes("v"), null, -1,
                 KeyValueFlags.Set, 0, KeyValueDurability.Persistent,
-                TestContext.Current.CancellationToken);
+                TestContext.Current.CancellationToken), r => r.Item1);
             Assert.Equal(KeyValueResponseType.Set, setType);
 
             // SCAN BY PREFIX at T → key1 and key2 only (key3 not yet present).
             string script = $"""SCAN BY PREFIX "{prefix}" AS OF {snapshotMs}""";
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(
-                Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetryAsync(() => kahuna1.TryExecuteTransactionScript(
+                Encoding.UTF8.GetBytes(script), null, null), r => r.Type);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.NotNull(resp.Values);
             Assert.Equal(2, resp.Values.Count);
@@ -533,8 +533,8 @@ public class TestScriptAsOfReads : BaseCluster
                 RETURN x
                 """;
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(
-                Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetryAsync(() => kahuna1.TryExecuteTransactionScript(
+                Encoding.UTF8.GetBytes(script), null, null), r => r.Type);
             Assert.Equal(KeyValueResponseType.Errored, resp.Type);
         }
         finally
@@ -570,9 +570,9 @@ public class TestScriptAsOfReads : BaseCluster
             KeyValueResponseType setA = KeyValueResponseType.Errored;
             await WaitUntilAsync(async () =>
             {
-                (setA, _, _) = await kahuna1.LocateAndTrySetKeyValue(
+                (setA, _, _) = await RetryOnMustRetryAsync(() => kahuna1.LocateAndTrySetKeyValue(
                     HLCTimestamp.Zero, key, valA, null, -1, KeyValueFlags.Set, 0,
-                    KeyValueDurability.Persistent, ct);
+                    KeyValueDurability.Persistent, ct), r => r.Item1);
                 return setA == KeyValueResponseType.Set;
             });
             Assert.Equal(KeyValueResponseType.Set, setA);
@@ -582,9 +582,9 @@ public class TestScriptAsOfReads : BaseCluster
                 new() { UniqueId = Guid.NewGuid().ToString(), Locking = KeyValueTransactionLocking.Pessimistic }, ct);
             Assert.Equal(KeyValueResponseType.Set, startType);
 
-            (KeyValueResponseType setB, _, _) = await kahuna2.LocateAndTrySetKeyValue(
+            (KeyValueResponseType setB, _, _) = await RetryOnMustRetryAsync(() => kahuna2.LocateAndTrySetKeyValue(
                 txId, key, valB, null, -1, KeyValueFlags.Set, 0,
-                KeyValueDurability.Persistent, ct);
+                KeyValueDurability.Persistent, ct), r => r.Item1);
             Assert.Equal(KeyValueResponseType.Set, setB);
 
             // Prepare: parks the write intent with CommitTimestamp = mvccEntry.LastModified.
@@ -610,8 +610,8 @@ public class TestScriptAsOfReads : BaseCluster
                 LET a = GET "{key}" AS OF {T.L}
                 RETURN a
                 """;
-            KeyValueTransactionResult resp = await kahuna2.TryExecuteTransactionScript(
-                Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetryAsync(() => kahuna2.TryExecuteTransactionScript(
+                Encoding.UTF8.GetBytes(script), null, null), r => r.Type);
 
             await commitTask;
 
