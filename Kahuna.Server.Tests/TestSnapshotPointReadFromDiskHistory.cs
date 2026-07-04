@@ -376,15 +376,21 @@ public class TestSnapshotPointReadDiskFallbackIntegration : BaseCluster
                 Assert.Equal(KeyValueResponseType.Set, t);
             }
 
-            // ── Wait for the background writer to flush all revisions to the persistence backend ─
-            // DirtyObjectsWriterDelay=100 ms → two timer ticks (200 ms) is a comfortable margin.
-            await Task.Delay(300, TestContext.Current.CancellationToken);
-
             // ── Snapshot read at snapshotT — in-memory archive misses, must serve V1 from disk ──
-            (KeyValueResponseType rt, ReadOnlyKeyValueEntry? snapEntry) =
-                await kahuna1.LocateAndTryGetValue(
+            // V1 was trimmed from the in-memory archive, so this read returns DoesNotExist until the
+            // background writer flushes V1 to disk, then flips to Get. Poll for that transition rather
+            // than a fixed sleep: under CI load the writer's timer ticks are delayed and a fixed wall-
+            // clock wait races the flush. The transition is monotonic (DoesNotExist → Get), so the
+            // first Get is the correct disk-fallback result.
+            KeyValueResponseType    rt        = default;
+            ReadOnlyKeyValueEntry?  snapEntry = null;
+            await WaitUntilAsync(async () =>
+            {
+                (rt, snapEntry) = await kahuna1.LocateAndTryGetValue(
                     HLCTimestamp.Zero, key, -1, snapshotT,
                     KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+                return rt == KeyValueResponseType.Get;
+            });
 
             Assert.Equal(KeyValueResponseType.Get, rt);
             Assert.NotNull(snapEntry);
@@ -451,12 +457,18 @@ public class TestSnapshotPointReadDiskFallbackIntegration : BaseCluster
                 Assert.Equal(KeyValueResponseType.Set, t);
             }
 
-            await Task.Delay(300, TestContext.Current.CancellationToken);
-
-            (KeyValueResponseType et, ReadOnlyKeyValueEntry? existsEntry) =
-                await kahuna1.LocateAndTryExistsValue(
+            // Poll until the background writer flushes V1 to disk (DoesNotExist → Exists) instead of a
+            // fixed sleep — under CI load the writer's timer ticks are delayed and a fixed wait races
+            // the flush. The transition is monotonic, so the first Exists is the disk-fallback result.
+            KeyValueResponseType    et          = default;
+            ReadOnlyKeyValueEntry?  existsEntry = null;
+            await WaitUntilAsync(async () =>
+            {
+                (et, existsEntry) = await kahuna1.LocateAndTryExistsValue(
                     HLCTimestamp.Zero, key, -1, snapshotT,
                     KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+                return et == KeyValueResponseType.Exists;
+            });
 
             Assert.Equal(KeyValueResponseType.Exists, et);
             Assert.NotNull(existsEntry);
@@ -492,7 +504,7 @@ public class TestSnapshotPointReadDiskFallbackIntegration : BaseCluster
     {
         const int retention = 2;
 
-        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna _) =
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
             await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger, cfg =>
             {
                 cfg.RevisionRetention = retention;
@@ -538,7 +550,17 @@ public class TestSnapshotPointReadDiskFallbackIntegration : BaseCluster
                 Assert.Equal(KeyValueResponseType.Set, t);
             }
 
-            await Task.Delay(300, TestContext.Current.CancellationToken);
+            // Deterministically flush every node's background writer instead of a fixed sleep that
+            // races it under CI load. FlushAndNotify drains the dirty queue fully and completes only
+            // once every queued write — including the Deleted revision — has landed in storage, so the
+            // deleteT read below genuinely exercises the on-disk tombstone rather than vacuously
+            // passing against a not-yet-flushed (empty) disk. All three nodes are flushed because the
+            // partition leader (whichever node persists this key) must be the one drained. Were the
+            // tombstone not persisted, the read would fall back to V1 and return Get, failing the test.
+            await Task.WhenAll(
+                kahuna1.FlushPersistenceAsync(),
+                kahuna2.FlushPersistenceAsync(),
+                kahuna3.FlushPersistenceAsync());
 
             // Snapshot read at deleteT: the Deleted revision has been trimmed from memory,
             // the disk fallback finds it, sees State=Deleted, and returns DoesNotExist.

@@ -163,6 +163,12 @@ public sealed class TestClientRangeScan
 
         long snapshotMs = before.Max(kv => kv.LastModified);
 
+        // snapshotMs is a millisecond value, so a "late" write landing in the same physical
+        // millisecond as the snapshot would compare as at-or-before it and leak into the as-of scan.
+        // Advance the HLC physical clock past snapshotMs before the later writes so they are strictly
+        // after the snapshot regardless of how fast the writes are issued under load.
+        await Task.Delay(10, TestContext.Current.CancellationToken);
+
         await client.SetKeyValue($"{prefix}/0002", "late", 0, KeyValueFlags.Set, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
         await client.SetKeyValue($"{prefix}/0003", "late", 0, KeyValueFlags.Set, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
 
