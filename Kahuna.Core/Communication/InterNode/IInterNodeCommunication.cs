@@ -100,4 +100,7 @@ public interface IInterNodeCommunication
 
     /// <summary>Forwards a snapshot-hold release to the meta-partition leader on <paramref name="node"/>.</summary>
     public Task<KeyValueResponseType> ReleaseSnapshotHold(string node, string holdId, CancellationToken cancellationToken);
+
+    /// <summary>Reads the authoritative snapshot floor from the meta-partition leader on <paramref name="node"/>.</summary>
+    public Task<(HLCTimestamp Floor, int LiveHolds)> GetSnapshotFloor(string node, CancellationToken cancellationToken);
 }

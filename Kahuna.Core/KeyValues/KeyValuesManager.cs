@@ -307,11 +307,22 @@ internal sealed class KeyValuesManager : IDisposable
     /// Returns the current effective floor (minimum live held timestamp, or
     /// <see cref="HLCTimestamp.Zero"/> when no hold is live) and the count of live holds.
     /// </summary>
-    public (HLCTimestamp EffectiveFloor, int LiveHolds) GetSnapshotFloor()
+    public async Task<(HLCTimestamp EffectiveFloor, int LiveHolds)> GetSnapshotFloor(CancellationToken ct)
+    {
+        if (await raft.AmILeader(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
+            return ReadLocalSnapshotFloor();
+
+        string leader = await raft.WaitForLeader(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false);
+        if (leader == raft.GetLocalEndpoint())
+            return ReadLocalSnapshotFloor();
+
+        return await interNodeCommunication.GetSnapshotFloor(leader, ct).ConfigureAwait(false);
+    }
+
+    private (HLCTimestamp EffectiveFloor, int LiveHolds) ReadLocalSnapshotFloor()
     {
         HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
-        (HLCTimestamp floor, int live) = snapshotFloorStore.GetEffectiveFloorAndCount(now);
-        return (floor, live);
+        return snapshotFloorStore.GetEffectiveFloorAndCount(now);
     }
 
     /// <summary>

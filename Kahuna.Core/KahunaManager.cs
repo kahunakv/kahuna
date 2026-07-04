@@ -1454,5 +1454,5 @@ public sealed class KahunaManager : IKahuna, IDisposable
 
     public Task<(HLCTimestamp EffectiveFloor, int LiveHolds)>
         GetSnapshotFloor(CancellationToken ct) =>
-        Task.FromResult(keyValues.GetSnapshotFloor());
+        keyValues.GetSnapshotFloor(ct);
 }

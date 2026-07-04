@@ -1695,6 +1695,26 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         return (KeyValueResponseType)batchResponse.ReleaseSnapshotHold!.Type;
     }
 
+    public async Task<(HLCTimestamp Floor, int LiveHolds)>
+        GetSnapshotFloor(string node, CancellationToken cancellationToken)
+    {
+        GrpcGetSnapshotFloorRequest request = new();
+
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcServerBatcherResponse batchResponse;
+        if (cancellationToken == CancellationToken.None)
+            batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+        else
+            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        GrpcGetSnapshotFloorResponse r = batchResponse.GetSnapshotFloor!;
+        return (
+            new HLCTimestamp(r.EffectiveFloorNode, r.EffectiveFloorPhysical, r.EffectiveFloorCounter),
+            r.LiveHolds
+        );
+    }
+
     private GrpcServerBatcher GetSharedBatcher(string url)
     {
         Lazy<GrpcServerBatcher> lazyBatcher = batchers.GetOrAdd(url, static (u, self) => self.GetSharedBatchers(u), this);

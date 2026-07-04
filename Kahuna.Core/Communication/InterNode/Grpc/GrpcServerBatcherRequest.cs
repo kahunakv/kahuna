@@ -85,6 +85,8 @@ internal sealed class GrpcServerBatcherRequest
 
     public GrpcReleaseSnapshotHoldRequest? ReleaseSnapshotHold { get; }
 
+    public GrpcGetSnapshotFloorRequest? GetSnapshotFloor { get; }
+
     public GrpcServerBatcherRequest(GrpcTryLockRequest tryLock)
     {
         TryLock = tryLock;
@@ -288,5 +290,10 @@ internal sealed class GrpcServerBatcherRequest
     public GrpcServerBatcherRequest(GrpcReleaseSnapshotHoldRequest releaseSnapshotHold)
     {
         ReleaseSnapshotHold = releaseSnapshotHold;
+    }
+
+    public GrpcServerBatcherRequest(GrpcGetSnapshotFloorRequest getSnapshotFloor)
+    {
+        GetSnapshotFloor = getSnapshotFloor;
     }
 }

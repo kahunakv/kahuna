@@ -1930,6 +1930,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         GrpcReleaseSnapshotHoldRequest request, ServerCallContext context) =>
         ReleaseSnapshotHold(request, context);
 
+    internal Task<GrpcGetSnapshotFloorResponse> GetSnapshotFloorInternal(
+        GrpcGetSnapshotFloorRequest request, ServerCallContext context) =>
+        GetSnapshotFloor(request, context);
+
     public override async Task<GrpcAcquireSnapshotHoldResponse> AcquireSnapshotHold(
         GrpcAcquireSnapshotHoldRequest request, ServerCallContext context)
     {

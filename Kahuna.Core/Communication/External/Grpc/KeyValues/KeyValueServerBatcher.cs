@@ -354,6 +354,13 @@ internal sealed class KeyValueServerBatcher
                     }
                     break;
 
+                    case GrpcServerBatchType.ServerTryGetSnapshotFloor:
+                    {
+                        GrpcGetSnapshotFloorRequest? req = request.GetSnapshotFloor;
+                        Track(GetSnapshotFloorDelayed(semaphore, request.RequestId, req, responseStream, context));
+                    }
+                    break;
+
                     case GrpcServerBatchType.ServerTypeNone:
                     default:
                         logger.LogError("Unknown batch Server request type: {Type}", request.Type);
@@ -1119,6 +1126,26 @@ internal sealed class KeyValueServerBatcher
             Type                = GrpcServerBatchType.ServerTryReleaseSnapshotHold,
             RequestId           = requestId,
             ReleaseSnapshotHold = holdResponse
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+
+    private async Task GetSnapshotFloorDelayed(
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcGetSnapshotFloorRequest request,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcGetSnapshotFloorResponse floorResponse = await service.GetSnapshotFloorInternal(request, context);
+
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type             = GrpcServerBatchType.ServerTryGetSnapshotFloor,
+            RequestId        = requestId,
+            GetSnapshotFloor = floorResponse
         };
 
         await WriteResponseToStream(semaphore, responseStream, response, context);

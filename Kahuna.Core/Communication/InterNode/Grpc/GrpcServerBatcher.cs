@@ -408,6 +408,15 @@ internal sealed class GrpcServerBatcher
         return TryProcessQueue(grpcBatcherItem, promise);
     }
 
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcGetSnapshotFloorRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
     private Task<GrpcServerBatcherResponse> TryProcessQueue(GrpcServerBatcherItem grpcBatcherItem, TaskCompletionSource<GrpcServerBatcherResponse> promise)
     {
         inbox.Enqueue(grpcBatcherItem);
@@ -749,6 +758,11 @@ internal sealed class GrpcServerBatcher
             batchRequest.Type = GrpcServerBatchType.ServerTryReleaseSnapshotHold;
             batchRequest.ReleaseSnapshotHold = itemRequest.ReleaseSnapshotHold;
         }
+        else if (itemRequest.GetSnapshotFloor is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryGetSnapshotFloor;
+            batchRequest.GetSnapshotFloor = itemRequest.GetSnapshotFloor;
+        }
         else
             throw new KahunaServerException("Unknown request type");
 
@@ -980,6 +994,10 @@ internal sealed class GrpcServerBatcher
 
                     case GrpcServerBatchType.ServerTryReleaseSnapshotHold:
                         item.Promise.TrySetResult(new(response.ReleaseSnapshotHold));
+                        break;
+
+                    case GrpcServerBatchType.ServerTryGetSnapshotFloor:
+                        item.Promise.TrySetResult(new(response.GetSnapshotFloor));
                         break;
 
                     case GrpcServerBatchType.ServerTypeNone:

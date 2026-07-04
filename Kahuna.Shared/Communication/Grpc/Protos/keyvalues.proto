@@ -859,6 +859,7 @@ message GrpcBatchServerKeyValueRequest {
     GrpcAcquireSnapshotHoldRequest AcquireSnapshotHold = 38;
     GrpcRenewSnapshotHoldRequest   RenewSnapshotHold   = 39;
     GrpcReleaseSnapshotHoldRequest ReleaseSnapshotHold = 40;
+    GrpcGetSnapshotFloorRequest GetSnapshotFloor = 41;
   }
 }
 
@@ -904,6 +905,7 @@ message GrpcBatchServerKeyValueResponse
     GrpcAcquireSnapshotHoldResponse AcquireSnapshotHold = 37;
     GrpcRenewSnapshotHoldResponse   RenewSnapshotHold   = 38;
     GrpcReleaseSnapshotHoldResponse ReleaseSnapshotHold = 39;
+    GrpcGetSnapshotFloorResponse GetSnapshotFloor = 40;
   }
 }
 
@@ -1011,6 +1013,7 @@ enum GrpcServerBatchType {
   SERVER_TRY_ACQUIRE_SNAPSHOT_HOLD = 36;
   SERVER_TRY_RENEW_SNAPSHOT_HOLD   = 37;
   SERVER_TRY_RELEASE_SNAPSHOT_HOLD = 38;
+  SERVER_TRY_GET_SNAPSHOT_FLOOR = 39;
 }
 
 enum GrpcRangeLockMode {
