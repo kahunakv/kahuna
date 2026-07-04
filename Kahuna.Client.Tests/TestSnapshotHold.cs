@@ -13,6 +13,7 @@ namespace Kahuna.Client.Tests;
 /// dropped component in the proto/JSON serialization path is caught by the exact-equality
 /// assertions on the returned floor and lease-expiry values.
 /// </summary>
+[Collection("SnapshotFloorTests")]
 public class TestSnapshotHold
 {
     private const string url = "https://localhost:8082";
