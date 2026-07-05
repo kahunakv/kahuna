@@ -54,6 +54,11 @@ public class TestScriptAsOfReads : BaseCluster
             Assert.NotNull(entryV1);
             long snapshotMs = entryV1.LastModified.L;
 
+            // Advance the HLC physical clock past T1 so v2 lands in a strictly later millisecond.
+            // snapshotMs is a millisecond value; without this, v2 could share T1's millisecond under
+            // load and the AS OF T1 read would wrongly observe v2.
+            await Task.Delay(10, TestContext.Current.CancellationToken);
+
             // Write v2 — will have LastModified > snapshotMs.
             (setType, _, _) = await RetryOnMustRetryAsync(() => kahuna1.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, key, Encoding.UTF8.GetBytes("v2"), null, -1,
@@ -164,6 +169,11 @@ public class TestScriptAsOfReads : BaseCluster
             Assert.Equal(KeyValueResponseType.Get, getType);
             Assert.NotNull(entry2);
             long snapshotMs = entry2.LastModified.L;
+
+            // Advance the HLC physical clock past the snapshot before overwriting key1: snapshotMs is
+            // a millisecond value, so an overwrite landing in the same millisecond would compare as
+            // at-or-before the snapshot and the snapshot read would wrongly observe k1v2.
+            await Task.Delay(10, TestContext.Current.CancellationToken);
 
             // Overwrite key1 after T.
             (setType, _, _) = await RetryOnMustRetryAsync(() => kahuna1.LocateAndTrySetKeyValue(
@@ -339,6 +349,10 @@ public class TestScriptAsOfReads : BaseCluster
             Assert.NotNull(entryV1);
             long t1Ms = entryV1.LastModified.L;
 
+            // Advance the HLC physical clock so v2 lands in a strictly later millisecond than T1
+            // (t1Ms/t2Ms are millisecond values; same-millisecond writes would blur the boundaries).
+            await Task.Delay(10, TestContext.Current.CancellationToken);
+
             // Write v2 (T2 > T1).
             (setType, _, _) = await RetryOnMustRetryAsync(() => kahuna1.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, key, Encoding.UTF8.GetBytes("v2"), null, -1,
@@ -352,6 +366,10 @@ public class TestScriptAsOfReads : BaseCluster
             Assert.Equal(KeyValueResponseType.Get, getType);
             Assert.NotNull(entryV2);
             long t2Ms = entryV2.LastModified.L;
+
+            // Advance past T2 so v3 lands in a strictly later millisecond — otherwise the per-statement
+            // AS OF T2 read could observe v3 instead of v2 when both share T2's millisecond.
+            await Task.Delay(10, TestContext.Current.CancellationToken);
 
             // Write v3 (after t2Ms).
             (setType, _, _) = await RetryOnMustRetryAsync(() => kahuna1.LocateAndTrySetKeyValue(
