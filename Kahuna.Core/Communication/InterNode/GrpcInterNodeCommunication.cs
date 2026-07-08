@@ -564,6 +564,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     public async Task TryGetManyNodeValues(
         string node,
         HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
         List<(string key, long revision, KeyValueDurability durability)> keys,
         Lock lockSync,
         List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> responses,
@@ -576,7 +577,10 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         {
             TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
-            TransactionIdCounter = transactionId.C
+            TransactionIdCounter = transactionId.C,
+            ReadTimestampNode = readTimestamp.N,
+            ReadTimestampPhysical = readTimestamp.L,
+            ReadTimestampCounter = readTimestamp.C
         };
 
         request.Items.Add(GetTryManyValuesRequestItems(keys));
@@ -594,6 +598,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     public async Task TryExistsManyNodeValues(
         string node,
         HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
         List<(string key, long revision, KeyValueDurability durability)> keys,
         Lock lockSync,
         List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> responses,
@@ -606,7 +611,10 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         {
             TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
-            TransactionIdCounter = transactionId.C
+            TransactionIdCounter = transactionId.C,
+            ReadTimestampNode = readTimestamp.N,
+            ReadTimestampPhysical = readTimestamp.L,
+            ReadTimestampCounter = readTimestamp.C
         };
 
         request.Items.Add(GetTryManyValuesRequestItems(keys));

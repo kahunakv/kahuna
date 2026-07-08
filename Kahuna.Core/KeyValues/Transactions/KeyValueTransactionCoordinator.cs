@@ -963,7 +963,7 @@ internal sealed class KeyValueTransactionCoordinator
             probes.Add((toValidate[i].Key!, -1, toValidate[i].Durability));
 
         List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> results =
-            await manager.LocateAndTryExistsManyValues(HLCTimestamp.Zero, probes, cancellationToken);
+            await manager.LocateAndTryExistsManyValues(HLCTimestamp.Zero, HLCTimestamp.Zero, probes, cancellationToken);
 
         Dictionary<(string key, KeyValueDurability durability), (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry)> currentByKey = new(results.Count);
 

@@ -426,6 +426,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     {
         List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.TryGetManyValues(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
+            new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
             GetRequestManyValuesItems(request.Items)
         );
 
@@ -502,6 +503,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     {
         List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.TryExistsManyValues(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
+            new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
             GetRequestManyValuesItems(request.Items)
         );
 

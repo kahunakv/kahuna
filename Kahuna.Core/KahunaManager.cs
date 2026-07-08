@@ -373,11 +373,12 @@ public sealed class KahunaManager : IKahuna, IDisposable
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(
         HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
         List<(string key, long revision, KeyValueDurability durability)> keys,
         CancellationToken cancellationToken
     )
     {
-        return keyValues.LocateAndTryGetManyValues(transactionId, keys, cancellationToken);
+        return keyValues.LocateAndTryGetManyValues(transactionId, readTimestamp, keys, cancellationToken);
     }
     
     /// <summary>
@@ -403,11 +404,12 @@ public sealed class KahunaManager : IKahuna, IDisposable
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryExistsManyValues(
         HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
         List<(string key, long revision, KeyValueDurability durability)> keys,
         CancellationToken cancellationToken
     )
     {
-        return keyValues.LocateAndTryExistsManyValues(transactionId, keys, cancellationToken);
+        return keyValues.LocateAndTryExistsManyValues(transactionId, readTimestamp, keys, cancellationToken);
     }
 
     public Task<KeyValueResponseType> LocateAndTryCheckWriteIntent(
@@ -906,10 +908,11 @@ public sealed class KahunaManager : IKahuna, IDisposable
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryGetManyValues(
         HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
         List<(string key, long revision, KeyValueDurability durability)> keys
     )
     {
-        return keyValues.TryGetManyValues(transactionId, keys);
+        return keyValues.TryGetManyValues(transactionId, readTimestamp, keys);
     }
     
     /// <summary>
@@ -933,10 +936,11 @@ public sealed class KahunaManager : IKahuna, IDisposable
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryExistsManyValues(
         HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
         List<(string key, long revision, KeyValueDurability durability)> keys
     )
     {
-        return keyValues.TryExistsManyValues(transactionId, keys);
+        return keyValues.TryExistsManyValues(transactionId, readTimestamp, keys);
     }
 
     public Task<KeyValueResponseType> TryCheckWriteIntentValue(

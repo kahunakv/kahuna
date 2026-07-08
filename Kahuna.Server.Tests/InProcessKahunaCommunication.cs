@@ -95,7 +95,7 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
             requestItems.Select(i => (i.Key ?? "", i.Revision, i.Durability)).ToList();
 
         List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> results =
-            await kahuna.LocateAndTryGetManyValues(transactionId, keys, cancellationToken);
+            await kahuna.LocateAndTryGetManyValues(transactionId, HLCTimestamp.Zero, keys, cancellationToken);
 
         return (results.Select(r => new KahunaGetManyKeyValuesResponseItem
         {
@@ -116,7 +116,7 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
             requestItems.Select(i => (i.Key ?? "", i.Revision, i.Durability)).ToList();
 
         List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> results =
-            await kahuna.LocateAndTryExistsManyValues(transactionId, keys, cancellationToken);
+            await kahuna.LocateAndTryExistsManyValues(transactionId, HLCTimestamp.Zero, keys, cancellationToken);
 
         return (results.Select(r => new KahunaGetManyKeyValuesResponseItem
         {

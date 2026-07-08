@@ -822,20 +822,22 @@ internal sealed class KeyValuesManager : IDisposable
 
     public async Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryExistsManyValues(
         HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
         List<(string key, long revision, KeyValueDurability durability)> keys,
         CancellationToken cancellationToken
     )
     {
-        return await locator.LocateAndTryExistsManyValues(transactionId, keys, cancellationToken);
+        return await locator.LocateAndTryExistsManyValues(transactionId, readTimestamp, keys, cancellationToken);
     }
 
     public async Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(
         HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
         List<(string key, long revision, KeyValueDurability durability)> keys,
         CancellationToken cancellationToken
     )
     {
-        return await locator.LocateAndTryGetManyValues(transactionId, keys, cancellationToken);
+        return await locator.LocateAndTryGetManyValues(transactionId, readTimestamp, keys, cancellationToken);
     }
     
     /// <summary>
@@ -1761,6 +1763,7 @@ internal sealed class KeyValuesManager : IDisposable
 
     public async Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryGetManyValues(
         HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
         List<(string key, long revision, KeyValueDurability durability)> keys
     )
     {
@@ -1782,7 +1785,7 @@ internal sealed class KeyValuesManager : IDisposable
                 transactionId,
                 item.key,
                 item.revision,
-                HLCTimestamp.Zero,
+                readTimestamp,
                 item.durability
             );
 
@@ -1792,6 +1795,7 @@ internal sealed class KeyValuesManager : IDisposable
 
     public async Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryExistsManyValues(
         HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
         List<(string key, long revision, KeyValueDurability durability)> keys
     )
     {
@@ -1813,7 +1817,7 @@ internal sealed class KeyValuesManager : IDisposable
                 transactionId,
                 item.key,
                 item.revision,
-                HLCTimestamp.Zero,
+                readTimestamp,
                 item.durability
             );
 

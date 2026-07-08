@@ -387,6 +387,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     public async Task TryGetManyNodeValues(
         string node,
         HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
         List<(string key, long revision, KeyValueDurability durability)> keys,
         Lock lockSync,
         List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> responses,
@@ -396,7 +397,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
         {
             List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> readResponses =
-                await kahunaNode.TryGetManyValues(transactionId, keys);
+                await kahunaNode.TryGetManyValues(transactionId, readTimestamp, keys);
 
             AddToReadManyResponses(readResponses, lockSync, responses);
             return;
@@ -408,6 +409,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     public async Task TryExistsManyNodeValues(
         string node,
         HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
         List<(string key, long revision, KeyValueDurability durability)> keys,
         Lock lockSync,
         List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> responses,
@@ -417,7 +419,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
         {
             List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> readResponses =
-                await kahunaNode.TryExistsManyValues(transactionId, keys);
+                await kahunaNode.TryExistsManyValues(transactionId, readTimestamp, keys);
 
             AddToReadManyResponses(readResponses, lockSync, responses);
             return;

@@ -469,6 +469,7 @@ internal sealed class KeyValueLocator
 
     public async Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryExistsManyValues(
         HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
         List<(string key, long revision, KeyValueDurability durability)> keys,
         CancellationToken cancellationToken
     )
@@ -498,7 +499,7 @@ internal sealed class KeyValueLocator
         List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = new(keys.Count);
 
         foreach ((string leader, List<(string key, long revision, KeyValueDurability durability)> xkeys) in acquisitionPlan)
-            tasks.Add(TryExistsManyNodeValues(transactionId, leader, localNode, xkeys, lockSync, responses, cancellationToken));
+            tasks.Add(TryExistsManyNodeValues(transactionId, readTimestamp, leader, localNode, xkeys, lockSync, responses, cancellationToken));
 
         await Task.WhenAll(tasks);
 
@@ -507,6 +508,7 @@ internal sealed class KeyValueLocator
 
     public async Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(
         HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
         List<(string key, long revision, KeyValueDurability durability)> keys,
         CancellationToken cancellationToken
     )
@@ -536,7 +538,7 @@ internal sealed class KeyValueLocator
         List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = new(keys.Count);
 
         foreach ((string leader, List<(string key, long revision, KeyValueDurability durability)> xkeys) in acquisitionPlan)
-            tasks.Add(TryGetManyNodeValues(transactionId, leader, localNode, xkeys, lockSync, responses, cancellationToken));
+            tasks.Add(TryGetManyNodeValues(transactionId, readTimestamp, leader, localNode, xkeys, lockSync, responses, cancellationToken));
 
         await Task.WhenAll(tasks);
 
@@ -545,6 +547,7 @@ internal sealed class KeyValueLocator
 
     private async Task TryExistsManyNodeValues(
         HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
         string leader,
         string localNode,
         List<(string key, long revision, KeyValueDurability durability)> xkeys,
@@ -558,7 +561,7 @@ internal sealed class KeyValueLocator
         if (leader == localNode)
         {
             List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> readResponses =
-                await manager.TryExistsManyValues(transactionId, xkeys);
+                await manager.TryExistsManyValues(transactionId, readTimestamp, xkeys);
 
             lock (lockSync)
             {
@@ -569,11 +572,12 @@ internal sealed class KeyValueLocator
             return;
         }
 
-        await interNodeCommunication.TryExistsManyNodeValues(leader, transactionId, xkeys, lockSync, responses, cancellationToken);
+        await interNodeCommunication.TryExistsManyNodeValues(leader, transactionId, readTimestamp, xkeys, lockSync, responses, cancellationToken);
     }
 
     private async Task TryGetManyNodeValues(
         HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
         string leader,
         string localNode,
         List<(string key, long revision, KeyValueDurability durability)> xkeys,
@@ -587,7 +591,7 @@ internal sealed class KeyValueLocator
         if (leader == localNode)
         {
             List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> readResponses =
-                await manager.TryGetManyValues(transactionId, xkeys);
+                await manager.TryGetManyValues(transactionId, readTimestamp, xkeys);
 
             lock (lockSync)
             {
@@ -598,7 +602,7 @@ internal sealed class KeyValueLocator
             return;
         }
 
-        await interNodeCommunication.TryGetManyNodeValues(leader, transactionId, xkeys, lockSync, responses, cancellationToken);
+        await interNodeCommunication.TryGetManyNodeValues(leader, transactionId, readTimestamp, xkeys, lockSync, responses, cancellationToken);
     }
     
     /// <summary>

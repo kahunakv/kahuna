@@ -235,6 +235,9 @@ message GrpcTryGetManyValuesRequest {
   int64 TransactionIdPhysical = 2;
   uint32 TransactionIdCounter = 3;
   repeated GrpcTryManyValuesRequestItem Items = 4;
+  int32 ReadTimestampNode = 5;
+  int64 ReadTimestampPhysical = 6;
+  uint32 ReadTimestampCounter = 7;
 }
 
 message GrpcTryGetManyValuesResponse {
@@ -265,6 +268,9 @@ message GrpcTryExistsManyValuesRequest {
   int64 TransactionIdPhysical = 2;
   uint32 TransactionIdCounter = 3;
   repeated GrpcTryManyValuesRequestItem Items = 4;
+  int32 ReadTimestampNode = 5;
+  int64 ReadTimestampPhysical = 6;
+  uint32 ReadTimestampCounter = 7;
 }
 
 message GrpcTryExistsManyValuesResponse {
