@@ -7,6 +7,7 @@ using Kahuna.Server.Locks;
 using Kahuna.Persistence.Protos;
 using Kahuna.Server.Persistence.Pitr;
 using Kommander.Time;
+using Kommander.WAL;
 using RocksDbSharp;
 using Google.Protobuf;
 using Kahuna.Server.KeyValues;
@@ -57,9 +58,11 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     private static readonly WriteOptions DefaultWriteOptions = new WriteOptions().SetSync(true);
 
 /// <summary>
-    /// Shared block cache for the table reader. Sized once and reused across both column families so
-    /// hot index/filter/data blocks stay resident instead of being re-read from disk on every point
-    /// lookup. Held in a static field to keep it alive for the lifetime of the process.
+    /// Process-wide fallback block cache for the table reader, used when no shared bundle is injected.
+    /// Sized once and reused across both column families so hot index/filter/data blocks stay resident
+    /// instead of being re-read from disk on every point lookup. Held in a static field to keep it alive
+    /// for the lifetime of the process. When a <see cref="RocksDbSharedResources"/> bundle is supplied,
+    /// its cache is used instead so this backend and the Raft WAL draw from one unified memory budget.
     /// </summary>
     private static readonly Cache BlockCache = Cache.CreateLru(256 * 1024 * 1024);
 
@@ -90,7 +93,15 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// operations, prefix-based queries, and version-specific retrievals. It integrates
     /// RocksDB's advanced features, ensuring high-performance persistent storage.
     /// </remarks>
-    public RocksDbPersistenceBackend(string path = ".", string dbRevision = "v1")
+    /// <param name="sharedResources">
+    /// Optional shared-memory bundle (one block cache + one WriteBufferManager) created and owned by the
+    /// composition root and shared with Kommander's Raft WAL so both RocksDB instances draw from a single
+    /// unified memory budget. When non-null, its block cache replaces the static fallback and its WBM is
+    /// attached to this backend's <see cref="DbOptions"/>. This backend <b>borrows</b> the bundle and must
+    /// never dispose it — the composition root disposes it after both databases are closed. When null,
+    /// behavior is byte-for-byte identical to the prior default (static 256 MB cache, no WBM).
+    /// </param>
+    public RocksDbPersistenceBackend(string path = ".", string dbRevision = "v1", RocksDbSharedResources? sharedResources = null)
     {
         this.path = path;
         this.dbRevision = dbRevision;
@@ -111,10 +122,19 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             .SetMaxWriteBufferNumber(3)
             .SetMinWriteBufferNumberToMerge(1);
 
-        // Bloom filters + a shared block cache make point lookups (GetKeyValue/GetLock, the read hot
-        // path) avoid touching SSTs on a miss and keep hot blocks resident across reads.
+        // When sharing resources, attach the WriteBufferManager to the DbOptions before opening so this
+        // backend's memtables count against the same unified budget as the WAL's. Must be set before
+        // RocksDb.Open — it cannot be changed afterward.
+        if (sharedResources is not null)
+            Native.Instance.rocksdb_options_set_write_buffer_manager(
+                dbOptions.Handle, sharedResources.WriteBufferManagerHandle);
+
+        // Bloom filters + a block cache make point lookups (GetKeyValue/GetLock, the read hot path)
+        // avoid touching SSTs on a miss and keep hot blocks resident across reads. Use the injected
+        // shared cache when present so both column families here — and the WAL's — share one budget;
+        // otherwise fall back to the process-wide static cache.
         BlockBasedTableOptions tableOptions = new BlockBasedTableOptions()
-            .SetBlockCache(BlockCache)
+            .SetBlockCache(sharedResources?.BlockCache ?? BlockCache)
             .SetFilterPolicy(BloomFilterPolicy.Create(10, false))
             .SetCacheIndexAndFilterBlocks(true)
             .SetWholeKeyFiltering(true);

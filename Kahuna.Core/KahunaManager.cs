@@ -4,6 +4,7 @@ using Nixie;
 using Kommander;
 using Kommander.Data;
 using Kommander.Time;
+using Kommander.WAL;
 
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
@@ -76,7 +77,20 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="configuration"></param>
     /// <param name="logger"></param>
     public KahunaManager(ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, IInterNodeCommunication interNodeCommunication, ILogger<IKahuna> logger)
-        : this(actorSystem, raft, configuration, interNodeCommunication, GetPersistence(configuration, logger), logger)
+        : this(actorSystem, raft, configuration, interNodeCommunication, GetPersistence(configuration, logger, null), logger)
+    {
+    }
+
+    /// <summary>
+    /// Constructor variant that shares a RocksDB memory bundle (block cache + WriteBufferManager) with the
+    /// Raft WAL. The composition root creates one <paramref name="sharedResources"/> and injects the same
+    /// instance here and into the WAL so both RocksDB databases draw from a single unified budget. The
+    /// bundle is <b>borrowed</b>: this manager (and the backend it creates) never dispose it — the
+    /// composition root disposes it after both databases are closed. A null bundle behaves exactly as the
+    /// primary constructor.
+    /// </summary>
+    public KahunaManager(ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, IInterNodeCommunication interNodeCommunication, RocksDbSharedResources? sharedResources, ILogger<IKahuna> logger)
+        : this(actorSystem, raft, configuration, interNodeCommunication, GetPersistence(configuration, logger, sharedResources), logger)
     {
     }
 
@@ -180,11 +194,11 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="configuration"></param>
     /// <returns></returns>
     /// <exception cref="KahunaServerException"></exception>
-    private static IPersistenceBackend GetPersistence(KahunaConfiguration configuration, ILogger<IKahuna> logger)
+    private static IPersistenceBackend GetPersistence(KahunaConfiguration configuration, ILogger<IKahuna> logger, RocksDbSharedResources? sharedResources)
     {
         return configuration.Storage switch
         {
-            "rocksdb" => new RocksDbPersistenceBackend(configuration.StoragePath, configuration.StorageRevision),
+            "rocksdb" => new RocksDbPersistenceBackend(configuration.StoragePath, configuration.StorageRevision, sharedResources),
             "sqlite" => new SqlitePersistenceBackend(configuration.StoragePath, configuration.StorageRevision, logger),
             "memory" => new MemoryPersistenceBackend(),
             _ => throw new KahunaServerException("Invalid storage type: " + configuration.Storage)

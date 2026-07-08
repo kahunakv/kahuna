@@ -19,6 +19,14 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
     private readonly MemoryInterNodeCommmunication? standaloneComm;
 
+    /// <summary>
+    /// Shared RocksDB memory bundle (block cache + WriteBufferManager) when both the backend and WAL are
+    /// RocksDB and sharing is enabled; otherwise null. This node <b>owns</b> it: it is injected into both
+    /// the WAL and the persistence backend and disposed last in <see cref="DisposeAsync"/>, after both
+    /// databases are closed.
+    /// </summary>
+    private readonly RocksDbSharedResources? sharedResources;
+
     private bool started;
 
     private bool disposed;
@@ -42,12 +50,14 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         actorSystem = new(logger: raftLogger);
         EmbeddedRaftCommunication raftCommunication = new();
 
+        this.sharedResources = CreateSharedResources(options);
+
         RaftConfiguration raftConfiguration = CreateRaftConfiguration(options);
 
         this.Raft = new RaftManager(
             raftConfiguration,
             new StaticDiscovery(EmbeddedRaftCommunication.Witnesses),
-            CreateWal(options, raftLogger),
+            CreateWal(options, raftLogger, sharedResources),
             raftCommunication,
             new HybridLogicalClock(),
             raftLogger
@@ -95,7 +105,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         }, options.WalPath);
 
         this.standaloneComm = new();
-        this.Kahuna = new KahunaManager(actorSystem, Raft, kahunaConfiguration, standaloneComm, kahunaLogger);
+        this.Kahuna = new KahunaManager(actorSystem, Raft, kahunaConfiguration, standaloneComm, sharedResources, kahunaLogger);
     }
 
     /// <summary>
@@ -125,12 +135,14 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
         actorSystem = new(logger: raftLogger);
 
+        this.sharedResources = CreateSharedResources(options);
+
         RaftConfiguration raftConfiguration = CreateRaftConfiguration(options);
 
         this.Raft = new RaftManager(
             raftConfiguration,
             discovery,
-            CreateWal(options, raftLogger),
+            CreateWal(options, raftLogger, sharedResources),
             raftComm,
             new HybridLogicalClock(),
             raftLogger
@@ -178,7 +190,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         }, options.WalPath);
 
         this.standaloneComm = null;
-        this.Kahuna = new KahunaManager(actorSystem, Raft, kahunaConfiguration, interNode, kahunaLogger);
+        this.Kahuna = new KahunaManager(actorSystem, Raft, kahunaConfiguration, interNode, sharedResources, kahunaLogger);
     }
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
@@ -262,9 +274,13 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
         if (Kahuna is IDisposable disposable)
             disposable.Dispose();
+
+        // Dispose the shared bundle LAST — only after both the Raft/WAL and the Kahuna backend above are
+        // closed. This node owns it; the WAL and backend only borrow it.
+        sharedResources?.Dispose();
     }
 
-    private static IWAL CreateWal(EmbeddedKahunaOptions options, ILogger<IRaft> logger)
+    private static IWAL CreateWal(EmbeddedKahunaOptions options, ILogger<IRaft> logger, RocksDbSharedResources? sharedResources)
     {
         string revision = string.IsNullOrWhiteSpace(options.WalRevision) ? Guid.NewGuid().ToString() : options.WalRevision;
 
@@ -272,9 +288,28 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         {
             "memory" => new InMemoryWAL(logger),
             "sqlite" => new SqliteWAL(options.WalPath, revision, logger, syncWrites: options.WalSyncWrites),
-            "rocksdb" => new RocksDbWAL(options.WalPath, revision, logger, syncWrites: options.WalSyncWrites),
+            "rocksdb" => new RocksDbWAL(options.WalPath, revision, logger, syncWrites: options.WalSyncWrites, sharedResources: sharedResources),
             _ => throw new KahunaServerException("Invalid WAL storage type: " + options.WalStorage)
         };
+    }
+
+    /// <summary>
+    /// Builds the shared RocksDB memory bundle when sharing is enabled and both the backend and WAL are
+    /// RocksDB (the only case where there is anything to share). Returns null otherwise, which routes both
+    /// databases down their byte-for-byte default paths.
+    /// </summary>
+    private static RocksDbSharedResources? CreateSharedResources(EmbeddedKahunaOptions options)
+    {
+        if (!options.RocksDbSharedMemoryEnabled)
+            return null;
+
+        if (options.Storage != "rocksdb" || options.WalStorage != "rocksdb")
+            return null;
+
+        long totalBytes = (long)options.RocksDbSharedMemoryBudgetMb * 1024 * 1024;
+        long memtableBytes = (long)options.RocksDbSharedMemtableBudgetMb * 1024 * 1024;
+
+        return RocksDbSharedResources.CreateWithUnifiedBudget(totalBytes, memtableBytes);
     }
 
     private static RaftConfiguration CreateRaftConfiguration(EmbeddedKahunaOptions options)

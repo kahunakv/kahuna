@@ -35,6 +35,28 @@ public sealed class EmbeddedKahunaOptions
 
     public bool WalSyncWrites { get; set; } = true;
 
+    /// <summary>
+    /// When true — and both <see cref="Storage"/> and <see cref="WalStorage"/> are "rocksdb" — the KV/locks
+    /// backend and the Raft WAL share one block cache and one WriteBufferManager sized by
+    /// <see cref="RocksDbSharedMemoryBudgetMb"/> / <see cref="RocksDbSharedMemtableBudgetMb"/>, bounding
+    /// total RocksDB cache+memtable memory to one budget instead of two independent ones. Default false:
+    /// each database keeps its own resources, byte-for-byte the prior behavior.
+    /// </summary>
+    public bool RocksDbSharedMemoryEnabled { get; set; }
+
+    /// <summary>
+    /// Total shared block-cache budget in MiB (the memtable sub-budget lives inside it). Only used when
+    /// <see cref="RocksDbSharedMemoryEnabled"/> is set. Size conservatively — at least the prior 256 MB
+    /// backend cache plus headroom for combined memtables.
+    /// </summary>
+    public int RocksDbSharedMemoryBudgetMb { get; set; } = 320;
+
+    /// <summary>
+    /// Memtable sub-budget in MiB, cost-charged into the shared cache; must be &lt;=
+    /// <see cref="RocksDbSharedMemoryBudgetMb"/>. Bounds total memtable memory across both databases.
+    /// </summary>
+    public int RocksDbSharedMemtableBudgetMb { get; set; } = 128;
+
     public int LocksWorkers { get; set; } = Environment.ProcessorCount;
 
     public int KeyValueWorkers { get; set; } = Environment.ProcessorCount;

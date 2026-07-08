@@ -60,7 +60,24 @@ if (standalone)
 }
 else
 {
-    // Assemble a Kahuna cluster from static discovery
+    // Assemble a Kahuna cluster from static discovery.
+    //
+    // When RocksDB shared memory is enabled and both the WAL and the KV/locks backend are RocksDB, create
+    // one shared bundle (block cache + WriteBufferManager) so both databases draw from a single unified
+    // budget. Registered as a singleton FIRST in this branch so the DI container disposes it LAST — after
+    // the Raft/WAL and Kahuna singletons that borrow it. (Early disposal is safe anyway: each open DB holds
+    // its own native refcount, so this only affects budget accounting, not crash-safety.)
+    RocksDbSharedResources? sharedResources = null;
+
+    if (opts.RocksDbSharedMemory && opts.Storage == "rocksdb" && opts.WalStorage == "rocksdb")
+    {
+        sharedResources = RocksDbSharedResources.CreateWithUnifiedBudget(
+            (long)opts.RocksDbSharedMemoryBudgetMb * 1024 * 1024,
+            (long)opts.RocksDbSharedMemtableBudgetMb * 1024 * 1024);
+
+        builder.Services.AddSingleton(sharedResources);
+    }
+
     builder.Services.AddSingleton<IRaft>(services =>
     {
         ILogger<IRaft> logger = services.GetRequiredService<ILogger<IRaft>>();
@@ -71,7 +88,7 @@ else
 
         IWAL walAdapter = opts.WalStorage switch
         {
-            "rocksdb" => new RocksDbWAL(path: opts.WalPath, revision: opts.WalRevision, logger, syncWrites: walSyncWrites),
+            "rocksdb" => new RocksDbWAL(path: opts.WalPath, revision: opts.WalRevision, logger, syncWrites: walSyncWrites, sharedResources: sharedResources),
             "sqlite" => new SqliteWAL(path: opts.WalPath, revision: opts.WalRevision, logger, syncWrites: walSyncWrites),
             "memory" => new InMemoryWAL(logger),
             _ => throw new KahunaServerException("Invalid WAL storage")
@@ -88,7 +105,15 @@ else
     });
 
     builder.Services.AddSingleton<ActorSystem>(services => new(services, services.GetRequiredService<ILogger<IRaft>>()));
-    builder.Services.AddSingleton<IKahuna, KahunaManager>();
+    // Resolve KahunaManager through a factory so the (optional) shared bundle is injected when registered
+    // and null otherwise — GetService returns null for an unregistered service, preserving the default path.
+    builder.Services.AddSingleton<IKahuna>(services => new KahunaManager(
+        services.GetRequiredService<ActorSystem>(),
+        services.GetRequiredService<IRaft>(),
+        services.GetRequiredService<KahunaConfiguration>(),
+        services.GetRequiredService<IInterNodeCommunication>(),
+        services.GetService<RocksDbSharedResources>(),
+        services.GetRequiredService<ILogger<IKahuna>>()));
     builder.Services.AddSingleton<IInterNodeCommunication, GrpcInterNodeCommunication>();
     builder.Services.AddSingleton(opts);
     builder.Services.AddHostedService<ReplicationService>();
@@ -246,6 +271,9 @@ static EmbeddedKahunaOptions CreateEmbeddedOptions(KahunaCommandLineOptions opts
     WalPath = opts.WalPath,
     WalRevision = opts.WalRevision,
     WalSyncWrites = opts.GetWalSyncWrites(),
+    RocksDbSharedMemoryEnabled = opts.RocksDbSharedMemory,
+    RocksDbSharedMemoryBudgetMb = opts.RocksDbSharedMemoryBudgetMb,
+    RocksDbSharedMemtableBudgetMb = opts.RocksDbSharedMemtableBudgetMb,
     LocksWorkers = opts.LocksWorkers,
     KeyValueWorkers = opts.KeyValueWorkers,
     BackgroundWriterWorkers = opts.BackgroundWritersWorkers,

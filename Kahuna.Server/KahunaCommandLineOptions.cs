@@ -49,6 +49,15 @@ public sealed class KahunaCommandLineOptions
     [Option("disable-wal-sync-writes", Required = false, HelpText = "Disable synchronous durable WAL writes for faster non-critical test/local runs")]
     public bool DisableWalSyncWrites { get; set; }
 
+    [Option("rocksdb-shared-memory", Required = false, HelpText = "Share one RocksDB block cache + write-buffer manager between the KV/locks backend and the Raft WAL (requires both storage and wal-storage = rocksdb). Default: disabled")]
+    public bool RocksDbSharedMemory { get; set; }
+
+    [Option("rocksdb-shared-memory-budget-mb", Required = false, HelpText = "Total shared RocksDB block-cache budget in MiB (memtable sub-budget lives inside it)", Default = 320)]
+    public int RocksDbSharedMemoryBudgetMb { get; set; } = 320;
+
+    [Option("rocksdb-shared-memtable-budget-mb", Required = false, HelpText = "Shared RocksDB memtable sub-budget in MiB, cost-charged into the shared cache (must be <= budget)", Default = 128)]
+    public int RocksDbSharedMemtableBudgetMb { get; set; } = 128;
+
     [Option("initial-cluster", Required = false, HelpText = "Initial cluster configuration for static discovery")]
     public IEnumerable<string>? InitialCluster { get; set; }
 
