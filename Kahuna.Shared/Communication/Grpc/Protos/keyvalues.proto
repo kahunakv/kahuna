@@ -866,6 +866,7 @@ message GrpcBatchServerKeyValueRequest {
     GrpcRenewSnapshotHoldRequest   RenewSnapshotHold   = 39;
     GrpcReleaseSnapshotHoldRequest ReleaseSnapshotHold = 40;
     GrpcGetSnapshotFloorRequest GetSnapshotFloor = 41;
+    GrpcEnsureKeyRangeRemovedRequest EnsureKeyRangeRemoved = 42;
   }
 }
 
@@ -912,6 +913,7 @@ message GrpcBatchServerKeyValueResponse
     GrpcRenewSnapshotHoldResponse   RenewSnapshotHold   = 38;
     GrpcReleaseSnapshotHoldResponse ReleaseSnapshotHold = 39;
     GrpcGetSnapshotFloorResponse GetSnapshotFloor = 40;
+    GrpcEnsureKeyRangeRemovedResponse EnsureKeyRangeRemoved = 41;
   }
 }
 
@@ -928,6 +930,14 @@ message GrpcEnsureKeyRangeSeededRequest {
 }
 
 message GrpcEnsureKeyRangeSeededResponse {
+  bool Success = 1;
+}
+
+message GrpcEnsureKeyRangeRemovedRequest {
+  string KeySpace = 1;
+}
+
+message GrpcEnsureKeyRangeRemovedResponse {
   bool Success = 1;
 }
 
@@ -1020,6 +1030,7 @@ enum GrpcServerBatchType {
   SERVER_TRY_RENEW_SNAPSHOT_HOLD   = 37;
   SERVER_TRY_RELEASE_SNAPSHOT_HOLD = 38;
   SERVER_TRY_GET_SNAPSHOT_FLOOR = 39;
+  SERVER_TRY_ENSURE_KEY_RANGE_REMOVED = 40;
 }
 
 enum GrpcRangeLockMode {

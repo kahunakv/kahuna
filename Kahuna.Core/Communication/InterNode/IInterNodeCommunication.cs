@@ -86,6 +86,8 @@ public interface IInterNodeCommunication
 
     public Task<bool> EnsureKeyRangeSeeded(string node, string keySpace, CancellationToken cancellationToken);
 
+    public Task<bool> EnsureKeyRangeRemoved(string node, string keySpace, CancellationToken cancellationToken);
+
     /// <summary>Reads live range locks for <paramref name="keySpace"/> from the actor pool on <paramref name="node"/>.</summary>
     public Task<List<KeyValueRangeLock>> GetRangeLocks(string node, string keySpace, CancellationToken cancellationToken);
 

@@ -35,6 +35,27 @@ internal sealed class KeySpaceRegistry
         modes[keySpace] = RoutingMode.KeyRange;
     }
 
+    /// <summary>
+    /// Reconciles the registry to exactly the set of key spaces in <paramref name="live"/>.
+    /// Spaces in <paramref name="live"/> are registered (idempotent); spaces currently registered
+    /// that are absent from <paramref name="live"/> are removed. This keeps the registry as a
+    /// projection of the replicated range map: <c>registry == {range-map key spaces}</c>.
+    /// </summary>
+    public void ReconcileTo(IReadOnlySet<string> live)
+    {
+        foreach (string ks in live)
+        {
+            if (!string.IsNullOrEmpty(ks))
+                modes[ks] = RoutingMode.KeyRange;
+        }
+
+        foreach (string ks in modes.Keys)
+        {
+            if (!live.Contains(ks))
+                modes.TryRemove(ks, out _);
+        }
+    }
+
     /// <summary>The routing mode for a key space, or <see cref="RoutingMode.Hash"/> if unregistered.</summary>
     public RoutingMode GetMode(string keySpace) =>
         modes.TryGetValue(keySpace, out RoutingMode mode) ? mode : RoutingMode.Hash;

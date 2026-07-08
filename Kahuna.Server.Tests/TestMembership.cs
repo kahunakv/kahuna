@@ -702,6 +702,7 @@ public sealed class TestMembership : BaseCluster
         public Task BootstrapFromPitrBackupAsync(string backupDir, Guid leafBackupId, HLCTimestamp targetTime, Kommander.WAL.IWAL walAdapter, TimeSpan pitrWindow, TimeSpan baseSnapshotInterval) => throw new NotImplementedException();
         public void RegisterKeyRange(string keySpace) { }
         public Task<bool> RegisterKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<bool> RemoveKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default) => Task.FromResult(false);
         public Task<int> TriggerAutoSplitAsync(CancellationToken ct = default) => Task.FromResult(0);
         public Task<int> TriggerAutoMergeAsync(CancellationToken ct = default) => Task.FromResult(0);
 

@@ -215,6 +215,13 @@ internal sealed class KeyValueServerBatcher
                     }
                     break;
 
+                    case GrpcServerBatchType.ServerTryEnsureKeyRangeRemoved:
+                    {
+                        GrpcEnsureKeyRangeRemovedRequest? req = request.EnsureKeyRangeRemoved;
+                        Track(EnsureKeyRangeRemovedDelayed(semaphore, request.RequestId, req, responseStream, context));
+                    }
+                    break;
+
                     case GrpcServerBatchType.ServerTryGetRangeLocks:
                     {
                         GrpcGetRangeLocksRequest? req = request.GetRangeLocks;
@@ -755,6 +762,30 @@ internal sealed class KeyValueServerBatcher
                 Type = GrpcServerBatchType.ServerTryEnsureKeyRangeSeeded,
                 RequestId = requestId,
                 EnsureKeyRangeSeeded = resp
+            });
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+
+    private async Task EnsureKeyRangeRemovedDelayed(
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcEnsureKeyRangeRemovedRequest request,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context)
+    {
+        await semaphore.WaitAsync(context.CancellationToken);
+        try
+        {
+            GrpcEnsureKeyRangeRemovedResponse resp = await service.EnsureKeyRangeRemovedInternal(request, context);
+            await responseStream.WriteAsync(new GrpcBatchServerKeyValueResponse
+            {
+                Type = GrpcServerBatchType.ServerTryEnsureKeyRangeRemoved,
+                RequestId = requestId,
+                EnsureKeyRangeRemoved = resp
             });
         }
         finally

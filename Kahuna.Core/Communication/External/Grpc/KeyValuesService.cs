@@ -1869,6 +1869,12 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return new GrpcEnsureKeyRangeSeededResponse { Success = success };
     }
 
+    internal async Task<GrpcEnsureKeyRangeRemovedResponse> EnsureKeyRangeRemovedInternal(GrpcEnsureKeyRangeRemovedRequest request, ServerCallContext context)
+    {
+        bool success = await keyValues.RemoveKeyRangeAsync(request.KeySpace, context.CancellationToken);
+        return new GrpcEnsureKeyRangeRemovedResponse { Success = success };
+    }
+
     internal async Task<GrpcGetRangeLocksResponse> GetRangeLocksInternal(GrpcGetRangeLocksRequest request, ServerCallContext context)
     {
         List<KeyValueRangeLock> locks = await keyValues.GetRangeLocks(request.KeySpace);

@@ -1560,6 +1560,26 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         return remoteResponse.Success;
     }
 
+    public async Task<bool> EnsureKeyRangeRemoved(string node, string keySpace, CancellationToken cancellationToken)
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcEnsureKeyRangeRemovedRequest request = new()
+        {
+            KeySpace = keySpace,
+        };
+
+        GrpcServerBatcherResponse batchResponse;
+
+        if (cancellationToken == CancellationToken.None)
+            batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+        else
+            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        GrpcEnsureKeyRangeRemovedResponse remoteResponse = batchResponse.EnsureKeyRangeRemoved!;
+        return remoteResponse.Success;
+    }
+
     public async Task<List<KeyValueRangeLock>> GetRangeLocks(string node, string keySpace, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);

@@ -451,6 +451,49 @@ internal sealed class KeyValuesManager : IDisposable
         return ok && committed;
     }
 
+    internal async Task<bool> RemoveKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default)
+    {
+        if (raft.Configuration.InitialPartitions < RangeMapStore.FirstDataPartitionId)
+            return false;
+
+        if (keySpace.EndsWith("/meta", StringComparison.Ordinal))
+            return false;
+
+        // Reject removal while any range is quiesced — a split window is in progress and the
+        // descriptor set is mid-flight. The caller should retry after the window closes.
+        if (!rangeQuiesceStore.IsEmpty)
+            return false;
+
+        if (!await raft.AmILeader(RangeMapStore.MetaPartitionId, cancellationToken).ConfigureAwait(false))
+        {
+            string leader = await raft.WaitForLeader(RangeMapStore.MetaPartitionId, cancellationToken).ConfigureAwait(false);
+            if (leader != raft.GetLocalEndpoint())
+            {
+                bool forwarded = await interNodeCommunication.EnsureKeyRangeRemoved(leader, keySpace, cancellationToken).ConfigureAwait(false);
+                // Wait for the removal to replicate to this node.
+                long deadline = Environment.TickCount64 + 10_000;
+                while (Environment.TickCount64 < deadline && rangeMapStore.Current.FindAll(keySpace).Count > 0)
+                    await Task.Delay(25, cancellationToken).ConfigureAwait(false);
+                return forwarded;
+            }
+        }
+
+        bool ok = await rangeMapStore.MutateAsync(current =>
+        {
+            int before = current.Count;
+            IReadOnlyList<RangeDescriptor> next = current
+                .Where(d => !string.Equals(d.KeySpace, keySpace, StringComparison.Ordinal))
+                .ToArray();
+
+            if (next.Count == before)
+                return current; // nothing to remove
+
+            return next;
+        }, cancellationToken).ConfigureAwait(false);
+
+        return ok;
+    }
+
     /// <summary>
     /// Picks the data partition for a key space's initial descriptor: a deterministic hash over the
     /// data-partition pool <c>[<see cref="RangeMapStore.FirstDataPartitionId"/>, InitialPartitions]</c>
@@ -709,13 +752,15 @@ internal sealed class KeyValuesManager : IDisposable
     /// </summary>
     private void SyncKeySpaceRegistryFromRangeMap()
     {
+        HashSet<string> live = [];
+
         foreach (RangeDescriptor descriptor in rangeMapStore.Current.Descriptors)
         {
-            if (string.IsNullOrEmpty(descriptor.KeySpace))
-                continue;
-
-            keySpaceRegistry.RegisterKeyRange(descriptor.KeySpace);
+            if (!string.IsNullOrEmpty(descriptor.KeySpace))
+                live.Add(descriptor.KeySpace);
         }
+
+        keySpaceRegistry.ReconcileTo(live);
     }
 
     /// <summary>

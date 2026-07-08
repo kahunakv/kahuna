@@ -363,6 +363,15 @@ internal sealed class GrpcServerBatcher
         return TryProcessQueue(grpcBatcherItem, promise);
     }
 
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcEnsureKeyRangeRemovedRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
     public Task<GrpcServerBatcherResponse> Enqueue(GrpcGetRangeLocksRequest message)
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -733,6 +742,11 @@ internal sealed class GrpcServerBatcher
             batchRequest.Type = GrpcServerBatchType.ServerTryEnsureKeyRangeSeeded;
             batchRequest.EnsureKeyRangeSeeded = itemRequest.EnsureKeyRangeSeeded;
         }
+        else if (itemRequest.EnsureKeyRangeRemoved is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryEnsureKeyRangeRemoved;
+            batchRequest.EnsureKeyRangeRemoved = itemRequest.EnsureKeyRangeRemoved;
+        }
         else if (itemRequest.GetRangeLocks is not null)
         {
             batchRequest.Type = GrpcServerBatchType.ServerTryGetRangeLocks;
@@ -974,6 +988,10 @@ internal sealed class GrpcServerBatcher
 
                     case GrpcServerBatchType.ServerTryEnsureKeyRangeSeeded:
                         item.Promise.TrySetResult(new(response.EnsureKeyRangeSeeded));
+                        break;
+
+                    case GrpcServerBatchType.ServerTryEnsureKeyRangeRemoved:
+                        item.Promise.TrySetResult(new(response.EnsureKeyRangeRemoved));
                         break;
 
                     case GrpcServerBatchType.ServerTryGetRangeLocks:

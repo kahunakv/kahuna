@@ -233,6 +233,16 @@ public interface IKahuna
     public Task<bool> RegisterKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Removes all descriptors for <paramref name="keySpace"/> from the replicated range map and
+    /// clears its routing mode on every node. This is the inverse of <see cref="RegisterKeyRangeAsync"/>.
+    /// Idempotent: removing a space with no descriptors is a no-op success. Returns <c>false</c> if
+    /// a quiesce window is active — the caller should retry after a short delay.
+    /// </summary>
+    /// <returns><c>true</c> iff the removal was committed (or the space was already absent); <c>false</c>
+    /// if the caller should retry (e.g. a split quiesce is in progress).</returns>
+    public Task<bool> RemoveKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Checks every KeyRange descriptor and splits any that exceed the configured size threshold.
     /// Returns the number of splits performed. Only executes on the node holding leadership of
     /// both the system partition (0) and meta partition (1); returns 0 on other nodes.
