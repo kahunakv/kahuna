@@ -408,4 +408,50 @@ public sealed class TestRemoveKeyRange
             await LeaveAll(nodes);
         }
     }
+
+    // ── T3: RemoveKeyRangeAsync_WhileQuiesced_ReturnsFalse ───────────────────────
+
+    [Fact]
+    public async Task RemoveKeyRangeAsync_WhileQuiesced_ReturnsFalse()
+    {
+        Node[] nodes = await Assemble();
+        try
+        {
+            CancellationToken ct = TestContext.Current.CancellationToken;
+            Node leader = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+
+            await leader.Kahuna.RegisterKeyRangeAsync("t:r", ct);
+
+            foreach (Node node in nodes)
+                await WaitUntilDescriptorPresent(node, "t:r");
+
+            // Simulate a split window by quiescing the space on the leader.
+            leader.Kahuna.RangeQuiesceStore.Quiesce("t:r", null, null);
+            try
+            {
+                bool result = await leader.Kahuna.RemoveKeyRangeAsync("t:r", ct);
+
+                // Must be rejected while the quiesce is active.
+                Assert.False(result);
+
+                // Descriptor is still present — nothing was removed.
+                Assert.NotEmpty(leader.Kahuna.RangeMapStore.Current.FindAll("t:r"));
+            }
+            finally
+            {
+                leader.Kahuna.RangeQuiesceStore.Release("t:r", null, null);
+            }
+
+            // After the quiesce is released the removal must succeed.
+            bool removed = await leader.Kahuna.RemoveKeyRangeAsync("t:r", ct);
+            Assert.True(removed);
+
+            foreach (Node node in nodes)
+                await WaitUntilDescriptorGone(node, "t:r");
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
 }

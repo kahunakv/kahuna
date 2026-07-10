@@ -67,7 +67,9 @@ internal sealed class TryExistsHandler : BaseHandler
             }
         }
 
-        // ── Transactional MVCC path (never detaches per spec) ────────────────────────────────
+        // ── Transactional MVCC path (never detaches) ────────────────────────────────
+        // Own-write visibility and read-your-writes are served from in-memory MVCC state,
+        // so this path resolves on the actor without dispatching an off-actor read.
         if (message.TransactionId != HLCTimestamp.Zero && message.ReadTimestamp.IsNull())
         {
             if (!inCache && message.Durability == KeyValueDurability.Persistent)

@@ -69,7 +69,7 @@ internal sealed class TryGetHandler : BaseHandler
             }
         }
 
-        // ── Transactional MVCC path (never detaches per spec) ────────────────────────────
+        // ── Transactional MVCC path (never detaches) ────────────────────────────
         // Own-write visibility and read-your-writes are served from in-memory MVCC state.
         if (message.TransactionId != HLCTimestamp.Zero && message.ReadTimestamp.IsNull())
         {

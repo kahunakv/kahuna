@@ -234,12 +234,35 @@ public interface IKahuna
 
     /// <summary>
     /// Removes all descriptors for <paramref name="keySpace"/> from the replicated range map and
-    /// clears its routing mode on every node. This is the inverse of <see cref="RegisterKeyRangeAsync"/>.
-    /// Idempotent: removing a space with no descriptors is a no-op success. Returns <c>false</c> if
-    /// a quiesce window is active — the caller should retry after a short delay.
+    /// clears its routing mode on every node via the normal replication path. Inverse of
+    /// <see cref="RegisterKeyRangeAsync"/>. Idempotent: if no descriptors exist the map is
+    /// unchanged, but the call still succeeds.
     /// </summary>
-    /// <returns><c>true</c> iff the removal was committed (or the space was already absent); <c>false</c>
-    /// if the caller should retry (e.g. a split quiesce is in progress).</returns>
+    /// <returns>
+    /// The return value has three distinct meanings:
+    /// <list type="bullet">
+    ///   <item><description>
+    ///     <b><c>true</c> — committed (including idempotent no-op).</b>
+    ///     Either the descriptors were removed and replicated, or none existed and the
+    ///     (unchanged) map was re-replicated by <c>MutateAsync</c>. Either way the space is
+    ///     absent from the range map after this call.
+    ///   </description></item>
+    ///   <item><description>
+    ///     <b><c>false</c> — transient; retry after a short delay.</b>
+    ///     A split quiesce window is open. The window is short (milliseconds); the caller
+    ///     should wait and retry.
+    ///   </description></item>
+    ///   <item><description>
+    ///     <b><c>false</c> — permanent; do not retry.</b>
+    ///     Either <c>InitialPartitions &lt; 1</c> (key-range sharding is disabled for this
+    ///     cluster — the space was never registered) or <paramref name="keySpace"/> ends with
+    ///     <c>/meta</c> (schema-log spaces are never key-range-routed). In both cases the space
+    ///     was never registered, so there is nothing to remove.
+    ///   </description></item>
+    /// </list>
+    /// Callers that need to distinguish "retry" from "permanent no-op" can inspect cluster
+    /// configuration (<c>InitialPartitions</c>) or key-space name before calling.
+    /// </returns>
     public Task<bool> RemoveKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default);
 
     /// <summary>

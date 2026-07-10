@@ -58,8 +58,8 @@ internal sealed class TryCollectHandler : BaseHandler
         // worst-case flush path: DirtyObjectsWriterDelay tick + up to 5 retry rounds of
         // DecorrelatedJitterBackoffV2(median 1000 ms) ≈ DirtyObjectsWriterDelay + ~10 000 ms.
         // Without the floor, the standalone default (200 ms × 2 = 400 ms) would not cover a
-        // single retry cycle.  If FlushedRevision is eventually advanced by a flush-ack signal
-        // (the spec's primary approach) the window can be tightened or removed.
+        // single retry cycle.  If FlushedRevision is eventually advanced by a per-key flush
+        // acknowledgement, this time window can be tightened or removed.
         long rawDelayMs = config.DirtyObjectsWriterDelay > 0 ? config.DirtyObjectsWriterDelay : 5000L;
         long safetyWindowMs = Math.Max(rawDelayMs * 2, 10_000L);
 

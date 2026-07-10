@@ -68,8 +68,6 @@ internal sealed class TrySetHandler : BaseHandler
 
             entry = newEntry;
 
-            // logger.LogDebug("{0} {1}", context.State, context.Revision);
-
             context.InsertStoreEntry(message.Key, newEntry);
         }
         else
@@ -171,23 +169,6 @@ internal sealed class TrySetHandler : BaseHandler
                 }
             }
             
-            // logger.LogDebug("Key={0} Flags={1} Rev={2} CmpRev={3}", message.Key, message.Flags, entry.Revision, message.CompareRevision);
-            
-            /*switch (message.Flags)
-            {
-                case KeyValueFlags.SetIfExists when !exists:
-                case KeyValueFlags.SetIfNotExists when exists:
-                case KeyValueFlags.SetIfEqualToValue when !((ReadOnlySpan<byte>)entry.Value).SequenceEqual(message.CompareValue): // exists &&
-                case KeyValueFlags.SetIfEqualToRevision when entry.Revision != message.CompareRevision: // exists && 
-                    return new(KeyValueResponseType.NotSet, entry.Revision, entry.LastModified);
-
-                case KeyValueFlags.None:
-                case KeyValueFlags.Set:
-                case KeyValueFlags.SetNoRevision:
-                default:
-                    break;
-            }*/ 
-            
             // Check if the value must not be changed according to flags
             if (
                 (message.Flags & KeyValueFlags.SetIfExists) != 0 && !exists ||
@@ -217,31 +198,6 @@ internal sealed class TrySetHandler : BaseHandler
 
             return new(KeyValueResponseType.Set, mvccEntry.Revision, currentTime);
         }
-        
-        /*if (message.CompareValue is not null)
-            Console.WriteLine(
-                "{0} {1} {2} {3} {4} {5}", 
-                exists, 
-                Encoding.UTF8.GetString(context.Value ?? []), 
-                Encoding.UTF8.GetString(message.Value ?? []), 
-                Encoding.UTF8.GetString(message.CompareValue ?? []),
-                context.Revision,
-                message.CompareRevision
-            );*/
-        
-        /*switch (message.Flags)
-        {
-            case KeyValueFlags.SetIfExists when !exists:
-            case KeyValueFlags.SetIfNotExists when exists:
-            case KeyValueFlags.SetIfEqualToValue when !((ReadOnlySpan<byte>)context.Value).SequenceEqual(message.CompareValue): // exists && 
-            case KeyValueFlags.SetIfEqualToRevision when context.Revision != message.CompareRevision: // exists && 
-                return new(KeyValueResponseType.NotSet, context.Revision);
-
-            case KeyValueFlags.None:
-            case KeyValueFlags.Set:
-            default:
-                break;
-        }*/
         
         // Check if the value must not be changed according to flags
         if (

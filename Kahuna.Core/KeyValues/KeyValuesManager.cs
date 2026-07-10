@@ -344,6 +344,8 @@ internal sealed class KeyValuesManager : IDisposable
     /// </summary>
     internal KeySpaceRegistry KeySpaceRegistry => keySpaceRegistry;
 
+    internal RangeQuiesceStore RangeQuiesceStore => rangeQuiesceStore;
+
     /// <summary>
     /// Generation stamped on an auto-seeded initial descriptor. Must be &gt;= 1 so it acts as a real
     /// routing fence (0 is the hash-mode "no fence" sentinel); splits/merges bump it from here.
@@ -382,7 +384,14 @@ internal sealed class KeyValuesManager : IDisposable
             return false;
 
         keySpaceRegistry.RegisterKeyRange(keySpace);
-        return await EnsureKeyRangeSeededAsync(keySpace, cancellationToken).ConfigureAwait(false);
+        bool seeded = await EnsureKeyRangeSeededAsync(keySpace, cancellationToken).ConfigureAwait(false);
+        // Re-affirm after the descriptor is committed and locally visible. A ReconcileTo triggered
+        // by an unrelated replication event between the pre-flip above and the seed commit can prune
+        // this space (descriptor not yet in the map on this node). Re-asserting here closes that
+        // window: the descriptor is now visible, so any subsequent ReconcileTo will find it in the
+        // live set and keep the mode.
+        keySpaceRegistry.RegisterKeyRange(keySpace);
+        return seeded;
     }
 
     private async Task<bool> EnsureKeyRangeSeededAsync(string keySpace, CancellationToken cancellationToken)
@@ -451,16 +460,22 @@ internal sealed class KeyValuesManager : IDisposable
         return ok && committed;
     }
 
+    // Return-value contract (mirrors IKahuna.RemoveKeyRangeAsync doc):
+    //   true  — committed or idempotent no-op (MutateAsync re-replicates even an unchanged map).
+    //   false (transient)  — quiesce window active; caller should retry after a short delay.
+    //   false (permanent)  — InitialPartitions < 1 or /meta suffix; space was never registered.
     internal async Task<bool> RemoveKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default)
     {
+        // Permanent no-ops: key-range sharding is disabled or the space is a schema-log space.
         if (raft.Configuration.InitialPartitions < RangeMapStore.FirstDataPartitionId)
             return false;
 
         if (keySpace.EndsWith("/meta", StringComparison.Ordinal))
             return false;
 
-        // Reject removal while any range is quiesced — a split window is in progress and the
-        // descriptor set is mid-flight. The caller should retry after the window closes.
+        // Transient rejection: a split quiesce window is open. The window is short; the caller
+        // should wait and retry. We prefer a coarse IsEmpty check over a per-key lookup because
+        // the quiesce store has no space-scoped query — only per-key IsQuiesced and IsEmpty.
         if (!rangeQuiesceStore.IsEmpty)
             return false;
 
@@ -469,8 +484,8 @@ internal sealed class KeyValuesManager : IDisposable
             string leader = await raft.WaitForLeader(RangeMapStore.MetaPartitionId, cancellationToken).ConfigureAwait(false);
             if (leader != raft.GetLocalEndpoint())
             {
+                // Forward to the meta-partition leader and wait for the removal to replicate here.
                 bool forwarded = await interNodeCommunication.EnsureKeyRangeRemoved(leader, keySpace, cancellationToken).ConfigureAwait(false);
-                // Wait for the removal to replicate to this node.
                 long deadline = Environment.TickCount64 + 10_000;
                 while (Environment.TickCount64 < deadline && rangeMapStore.Current.FindAll(keySpace).Count > 0)
                     await Task.Delay(25, cancellationToken).ConfigureAwait(false);
@@ -478,6 +493,9 @@ internal sealed class KeyValuesManager : IDisposable
             }
         }
 
+        // Leader path: filter out all descriptors for the space in one atomic map commit.
+        // MutateAsync re-replicates even an unchanged map and returns true, so both the
+        // "removed" and "was already absent" cases return true — matching the contract above.
         bool ok = await rangeMapStore.MutateAsync(current =>
         {
             int before = current.Count;
@@ -485,10 +503,7 @@ internal sealed class KeyValuesManager : IDisposable
                 .Where(d => !string.Equals(d.KeySpace, keySpace, StringComparison.Ordinal))
                 .ToArray();
 
-            if (next.Count == before)
-                return current; // nothing to remove
-
-            return next;
+            return next.Count == before ? current : next;
         }, cancellationToken).ConfigureAwait(false);
 
         return ok;
