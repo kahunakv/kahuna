@@ -22,6 +22,20 @@ internal sealed class KeyValueContext
     private KeyValueEntry? lruHead;
     private KeyValueEntry? lruTail;
 
+    // Bounded FIFO of transaction IDs for which this actor made a confirmed terminal decision
+    // (Committed or RolledBack). Used by TryCommitMutationsHandler / TryRollbackMutationsHandler
+    // to tell "ack-loss re-commit on the same node" from "never prepared here (leader changed
+    // between prepare and commit)":
+    //   - WriteIntent == null && MVCC gone && WasCommittedHere  → safe Committed (ack-loss)
+    //   - WriteIntent == null && MVCC gone && !WasCommittedHere → MustRetry (never prepared here)
+    // Prepare state (WriteIntent + MVCC) is set only on the preparing leader's actor and is NOT
+    // Raft-replicated, so a new leader genuinely cannot have seen the prepare.
+    private const int RecentDecisionCap = 1024;
+    private readonly Queue<HLCTimestamp>    recentCommittedOrder    = new();
+    private readonly HashSet<HLCTimestamp>  recentCommittedTxns     = new();
+    private readonly Queue<HLCTimestamp>    recentRolledBackOrder   = new();
+    private readonly HashSet<HLCTimestamp>  recentRolledBackTxns    = new();
+
     // Min-heap keyed by (Expires, key): yields earliest-expiring entries first.
     // Lazy-deletion: pop and re-validate (key present in Store and Expires matches) before acting.
     private readonly PriorityQueue<string, HLCTimestamp> expiryHeap = new();
@@ -275,4 +289,26 @@ internal sealed class KeyValueContext
 
         ActorContext.Self.Send(new KeyValueRequest(KeyValueRequestType.Collect));
     }
+
+    public void RecordCommitted(HLCTimestamp txId)
+    {
+        if (!recentCommittedTxns.Add(txId))
+            return;
+        recentCommittedOrder.Enqueue(txId);
+        if (recentCommittedOrder.Count > RecentDecisionCap)
+            recentCommittedTxns.Remove(recentCommittedOrder.Dequeue());
+    }
+
+    public bool WasCommittedHere(HLCTimestamp txId) => recentCommittedTxns.Contains(txId);
+
+    public void RecordRolledBack(HLCTimestamp txId)
+    {
+        if (!recentRolledBackTxns.Add(txId))
+            return;
+        recentRolledBackOrder.Enqueue(txId);
+        if (recentRolledBackOrder.Count > RecentDecisionCap)
+            recentRolledBackTxns.Remove(recentRolledBackOrder.Dequeue());
+    }
+
+    public bool WasRolledBackHere(HLCTimestamp txId) => recentRolledBackTxns.Contains(txId);
 }

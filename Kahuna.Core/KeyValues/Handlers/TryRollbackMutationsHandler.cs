@@ -23,13 +23,13 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// </remarks>
 /// <example>
 /// This class is typically invoked as part of the Two Phase Commit (2PC) workflow when a rollback request
-/// is received. 
+/// is received.
 /// </example>
 internal sealed class TryRollbackMutationsHandler : BaseHandler
 {
     public TryRollbackMutationsHandler(KeyValueContext context) : base(context)
     {
-        
+
     }
 
     public async Task<KeyValueResponse> Execute(KeyValueRequest message)
@@ -48,7 +48,7 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
         if (entry is null)
         {
             context.Logger.LogWarning("Key/Value context is missing for {TransactionId}", message.TransactionId);
-            
+
             return KeyValueStaticResponses.ErroredResponse;
         }
 
@@ -61,29 +61,46 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
 
         if (entry.WriteIntent is null)
         {
+            bool mvccGone = entry.MvccEntries is null || !entry.MvccEntries.ContainsKey(message.TransactionId);
+            if (mvccGone)
+            {
+                // Distinguish ack-loss re-rollback (this actor made the terminal decision) from a
+                // request arriving at a node that never prepared the transaction. Prepare state
+                // (WriteIntent + MVCC) lives only in the preparing leader's actor memory and is not
+                // Raft-replicated, so after a leader change the new leader has neither — same surface
+                // as a true re-rollback. Without an explicit record, returning RolledBack here would
+                // silently succeed on a node that holds no state to roll back.
+                if (context.WasRolledBackHere(message.TransactionId))
+                    return new(KeyValueResponseType.RolledBack, 0);
+
+                // Never prepared here: return MustRetry so the coordinator can re-route to the node
+                // that still holds the write intent.
+                return KeyValueStaticResponses.MustRetryResponse;
+            }
+
             context.Logger.LogWarning("Write intent is missing for {TransactionId}", message.TransactionId);
-            
+
             return KeyValueStaticResponses.ErroredResponse;
         }
 
         if (entry.WriteIntent.TransactionId != message.TransactionId)
         {
             context.Logger.LogWarning("Write intent conflict between {CurrentTransactionId} and {TransactionId}", entry.WriteIntent.TransactionId, message.TransactionId);
-            
+
             return KeyValueStaticResponses.ErroredResponse;
         }
 
         if (entry.MvccEntries is null)
         {
             context.Logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [1]", message.TransactionId);
-            
+
             return KeyValueStaticResponses.ErroredResponse;
         }
 
         if (!entry.MvccEntries.ContainsKey(message.TransactionId))
         {
             context.Logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [2]", message.TransactionId);
-            
+
             return KeyValueStaticResponses.ErroredResponse;
         }
 
@@ -94,32 +111,58 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
             TrimExpiredMvccEntries(entry, currentTime);
             entry.WriteIntent = null;
 
+            context.RecordRolledBack(message.TransactionId);
             return new(KeyValueResponseType.RolledBack);
         }
 
-        (bool success, long rollbackIndex) = await RollbackKeyValueMessage(message.Key, message.ProposalTicketId);
+        (bool success, long rollbackIndex, RaftOperationStatus raftStatus) = await RollbackKeyValueMessage(message.Key, message.ProposalTicketId);
 
+        // Transient Raft failure (e.g. NodeIsNotLeader): preserve MVCC + write intent so the
+        // coordinator can retry the rollback against the newly elected leader.
+        if (!success && IsTransientRaftStatus(raftStatus))
+            return KeyValueStaticResponses.MustRetryResponse;
+
+        // Post-await: write intent may have been cleared by a concurrent idempotent rollback.
+        if (entry.WriteIntent is null)
+        {
+            return success
+                ? new(KeyValueResponseType.RolledBack, rollbackIndex)
+                : KeyValueStaticResponses.ErroredResponse;
+        }
+
+        // Permanent Raft failure: preserve state so the coordinator can retry later. Propagate error.
+        if (!success)
+            return KeyValueStaticResponses.ErroredResponse;
+
+        // Confirmed terminal rollback: clear MVCC + write intent.
         if (entry.MvccEntries.Remove(message.TransactionId, out KeyValueMvccEntry? removedMvccP))
             context.AdjustEstimatedEntryBytes(entry, -KeyValueStoreAccounting.MvccEntryRemovedBytes(entry.MvccEntries.Count == 0, removedMvccP.Value));
         TrimExpiredMvccEntries(entry, currentTime);
         entry.WriteIntent = null;
 
-        if (!success)
-            return KeyValueStaticResponses.ErroredResponse;                
-        
+        context.RecordRolledBack(message.TransactionId);
         return new(KeyValueResponseType.RolledBack, rollbackIndex);
     }
-    
+
+    /// <summary>
+    /// Returns true when the Raft status represents a transient condition that warrants preserving
+    /// participant state and returning MustRetry.
+    /// </summary>
+    private static bool IsTransientRaftStatus(RaftOperationStatus status) => status is
+        RaftOperationStatus.NodeIsNotLeader or
+        RaftOperationStatus.ProposalQueueFull or
+        RaftOperationStatus.RestoreInProgress or
+        RaftOperationStatus.ProposalTimeout or
+        RaftOperationStatus.ReplicationFailed or
+        RaftOperationStatus.OperationCancelled;
+
     /// <summary>
     /// Rollbacks a previously proposed key value message
     /// </summary>
-    /// <param name="key"></param>
-    /// <param name="proposalTicketId"></param>
-    /// <returns></returns>
-    private async Task<(bool, long)> RollbackKeyValueMessage(string key, HLCTimestamp proposalTicketId)
+    private async Task<(bool, long, RaftOperationStatus)> RollbackKeyValueMessage(string key, HLCTimestamp proposalTicketId)
     {
         if (!context.Raft.Joined)
-            return (true, 0);
+            return (true, 0, RaftOperationStatus.Success);
 
         int partitionId = ResolvePartition(key);
 
@@ -131,12 +174,12 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
         if (!success)
         {
             context.Logger.LogWarning("Failed to rollback key/value {Key} Partition={Partition} Status={Status}", key, partitionId, status);
-            
-            return (false, 0);
+
+            return (false, 0, status);
         }
-        
+
         context.Logger.LogSuccessfullyRolledBackKeyValue(key, partitionId, logIndex);
 
-        return (success, logIndex);
+        return (success, logIndex, status);
     }
 }

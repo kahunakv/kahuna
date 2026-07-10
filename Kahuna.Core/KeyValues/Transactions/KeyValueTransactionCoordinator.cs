@@ -59,6 +59,16 @@ internal sealed class KeyValueTransactionCoordinator
     /// any commit it could still attempt would already fail on expired intents — making the release safe.
     /// </summary>
     private const int ReapGraceMs = 15_000;
+
+    /// <summary>
+    /// Maximum number of phase-two (commit/rollback) retry attempts when a participant returns
+    /// MustRetry due to a transient Raft condition (e.g. NodeIsNotLeader after a leader election).
+    /// With Phase2RetryDelayMs = 250 this allows up to 5 s for leadership to stabilise.
+    /// </summary>
+    private const int MaxPhase2Retries = 20;
+
+    /// <summary>Delay between phase-two retry attempts, in milliseconds.</summary>
+    private const int Phase2RetryDelayMs = 250;
     
     private readonly KeyValuesManager manager;
 
@@ -904,11 +914,13 @@ internal sealed class KeyValueTransactionCoordinator
 
         if (!success)
         {
-            // Step 4.a: Rollback mutations in the case of failures
+            // Step 4.a: Rollback mutations in the case of failures. A fire-and-forget rollback must
+            // outlive the request to finish clearing write intents, so it is not tied to the request's
+            // cancellation; only the awaited rollback honours the caller's token.
             if (context.AsyncRelease)
-                _ = RollbackMutations(context, mutationsPrepared);
+                _ = RollbackMutations(context, mutationsPrepared, CancellationToken.None);
             else
-                await RollbackMutations(context, mutationsPrepared);
+                await RollbackMutations(context, mutationsPrepared, cancellationToken);
             return;
         }
 
@@ -917,15 +929,15 @@ internal sealed class KeyValueTransactionCoordinator
         if (!await CheckReadSetForConflicts(context, cancellationToken))
         {
             if (context.AsyncRelease)
-                _ = RollbackMutations(context, mutationsPrepared);
+                _ = RollbackMutations(context, mutationsPrepared, CancellationToken.None);
             else
-                await RollbackMutations(context, mutationsPrepared);
+                await RollbackMutations(context, mutationsPrepared, cancellationToken);
             return;
         }
 
         // Step 4.b: Commit prepared mutations. This must be awaited so the client
         // only receives Committed after the mutations are durably applied.
-        await CommitMutations(context, mutationsPrepared);
+        await CommitMutations(context, mutationsPrepared, cancellationToken);
     }
 
     /// <summary>
@@ -1213,12 +1225,33 @@ internal sealed class KeyValueTransactionCoordinator
     }
 
     /// <summary>
-    /// Commits the prepared mutations to the key-value store.
+    /// Waits the inter-retry backoff, honouring cancellation. Returns true when the delay elapsed
+    /// normally and the caller should attempt the next retry; false when cancellation fired, so the
+    /// caller should stop retrying. Only the wait is cancellable — an in-flight commit/rollback RPC
+    /// is never abandoned.
     /// </summary>
-    /// <param name="context">The transaction context containing transaction-specific information.</param>
-    /// <param name="mutationsPrepared">A list of tuples representing the prepared mutations, including the key, timestamp, and durability level.</param>
-    /// <returns>An asynchronous task representing the commit operation.</returns>
-    private async Task CommitMutations(KeyValueTransactionContext context, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> mutationsPrepared)
+    private static async Task<bool> DelayBetweenRetries(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(Phase2RetryDelayMs, cancellationToken);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Commits the prepared mutations to the key-value store.
+    /// Retries participants that return MustRetry (transient Raft failures) rather than aborting:
+    /// once commit is the decision, that decision must reach every participant.
+    /// Cancellation only interrupts the backoff *between* retries — never an in-flight commit RPC,
+    /// which must run to completion to avoid a partial commit. A cancelled backoff drops into the
+    /// same terminal path as retry exhaustion (Aborted if any participant is still pending).
+    /// </summary>
+    private async Task CommitMutations(KeyValueTransactionContext context, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> mutationsPrepared, CancellationToken cancellationToken)
     {
         if (mutationsPrepared.Count == 0)
             return;
@@ -1230,21 +1263,43 @@ internal sealed class KeyValueTransactionCoordinator
         {
             (string key, HLCTimestamp ticketId, KeyValueDurability durability) = mutationsPrepared.First();
 
-            (KeyValueResponseType response, long _) = await manager.LocateAndTryCommitMutations(
-                context.TransactionId,
-                key,
-                ticketId,
-                durability,
-                CancellationToken.None
-            );
-
-            if (response != KeyValueResponseType.Committed)
+            bool committed = false;
+            for (int attempt = 0; attempt <= MaxPhase2Retries; attempt++)
             {
+                if (attempt > 0 && !await DelayBetweenRetries(cancellationToken))
+                    break;
+
+                (KeyValueResponseType response, long _) = await manager.LocateAndTryCommitMutations(
+                    context.TransactionId,
+                    key,
+                    ticketId,
+                    durability,
+                    CancellationToken.None
+                );
+
+                if (response == KeyValueResponseType.Committed)
+                {
+                    committed = true;
+                    break;
+                }
+
+                if (response == KeyValueResponseType.MustRetry)
+                {
+                    logger.LogWarning("CommitMutations: transient failure on {Key} attempt {Attempt}, retrying", key, attempt + 1);
+                    continue;
+                }
+
                 string reason = $"Failed to commit mutation {key}: {response}";
                 context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = reason };
-
                 logger.LogWarning("CommitMutations: {Type} {Key} {TicketId}", response, key, ticketId);
+                throw new KahunaAbortedException(reason);
+            }
 
+            if (!committed)
+            {
+                string reason = $"Exhausted retries committing mutation {key}";
+                context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = reason };
+                logger.LogError("CommitMutations: exhausted {MaxRetries} retries for {Key}", MaxPhase2Retries, key);
                 throw new KahunaAbortedException(reason);
             }
 
@@ -1254,23 +1309,62 @@ internal sealed class KeyValueTransactionCoordinator
             return;
         }
 
-        List<(KeyValueResponseType, string, long, KeyValueDurability)> responses = await manager.LocateAndTryCommitManyMutations(
-            context.TransactionId,
-            mutationsPrepared,
-            CancellationToken.None
-        );
+        // Multi-key path: retry MustRetry participants independently so that a transient failure on
+        // one partition does not abort others that already committed.
+        Dictionary<string, (HLCTimestamp ticketId, KeyValueDurability durability)> pendingCommits =
+            mutationsPrepared.ToDictionary(x => x.key, x => (x.ticketId, x.durability));
 
-        foreach ((KeyValueResponseType response, string key, long commitIndex, KeyValueDurability durability) in responses)
+        for (int attempt = 0; attempt <= MaxPhase2Retries && pendingCommits.Count > 0; attempt++)
         {
-            if (response != KeyValueResponseType.Committed)
+            if (attempt > 0 && !await DelayBetweenRetries(cancellationToken))
+                break;
+
+            List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> batch =
+                [.. pendingCommits.Select(kvp => (kvp.Key, kvp.Value.ticketId, kvp.Value.durability))];
+
+            List<(KeyValueResponseType, string, long, KeyValueDurability)> responses =
+                await manager.LocateAndTryCommitManyMutations(context.TransactionId, batch, CancellationToken.None);
+
+            bool hasTransientFailure = false;
+            foreach ((KeyValueResponseType response, string key, long commitIndex, KeyValueDurability durability) in responses)
             {
-                string reason = $"Failed to commit mutation {key}: {response}";
+                if (response == KeyValueResponseType.Committed)
+                {
+                    pendingCommits.Remove(key);
+                    continue;
+                }
+
+                if (response == KeyValueResponseType.MustRetry)
+                {
+                    hasTransientFailure = true;
+                    logger.LogWarning("CommitMutations: transient failure on {Key} attempt {Attempt}, retrying", key, attempt + 1);
+                    continue;
+                }
+
+                // Permanent failure: retrying will not resolve it, and the outcome — Aborted with
+                // a partial durable commit — is the same whether we fail now or after exhausting
+                // MaxPhase2Retries. Fail fast to avoid burning the full retry window.
+                // The real fix for the partial-commit window is a durable, replicated coordinator
+                // decision record written before phase two begins, so a restarted coordinator can
+                // re-drive the commit to every participant instead of surfacing Aborted.
+                string reason = $"Permanent commit failure on {key}: {response}";
                 context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = reason };
-
-                logger.LogWarning("CommitMutations {Type} {Key} {TicketId} {Durability}", response, key, commitIndex, durability);
-
+                logger.LogError("CommitMutations: permanent failure {Type} on {Key} attempt {Attempt}", response, key, attempt + 1);
                 throw new KahunaAbortedException(reason);
             }
+
+            if (!hasTransientFailure)
+                break;
+        }
+
+        if (pendingCommits.Count > 0)
+        {
+            logger.LogError("CommitMutations: exhausted {MaxRetries} retries, {Count} participants still pending: {Keys}",
+                MaxPhase2Retries, pendingCommits.Count, string.Join(", ", pendingCommits.Keys));
+
+            string reason = $"Coordinator exhausted retries during commit ({pendingCommits.Count} participants still pending)";
+            context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = reason };
+            throw new KahunaAbortedException(reason);
         }
 
         if (!context.SetState(KeyValueTransactionState.Committed, KeyValueTransactionState.Committing))
@@ -1279,11 +1373,13 @@ internal sealed class KeyValueTransactionCoordinator
 
     /// <summary>
     /// Rolls back a collection of mutations associated with a given transaction context.
+    /// Retries MustRetry participants rather than forcing RolledBack while any participant
+    /// has not yet confirmed the rollback.
+    /// Cancellation interrupts the backoff between retries; a cancelled rollback stops retrying
+    /// and returns, leaving any unconfirmed write intent to self-heal via its TTL — the same
+    /// terminal path as retry exhaustion.
     /// </summary>
-    /// <param name="context">The transaction context containing the details of the transaction.</param>
-    /// <param name="mutationsPrepared">The list of mutations prepared for rollback, containing key, ticket identifier, and durability details.</param>
-    /// <returns>A task representing the asynchronous operation.</returns>
-    private async Task RollbackMutations(KeyValueTransactionContext context, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> mutationsPrepared)
+    private async Task RollbackMutations(KeyValueTransactionContext context, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> mutationsPrepared, CancellationToken cancellationToken)
     {
         if (mutationsPrepared.Count == 0)
             return;
@@ -1295,16 +1391,48 @@ internal sealed class KeyValueTransactionCoordinator
         {
             (string key, HLCTimestamp ticketId, KeyValueDurability durability) = mutationsPrepared.First();
 
-            (KeyValueResponseType response, long _) = await manager.LocateAndTryRollbackMutations(
-                context.TransactionId,
-                key,
-                ticketId,
-                durability,
-                CancellationToken.None
-            );
+            bool rolledBackConfirmed = false;
+            for (int attempt = 0; attempt <= MaxPhase2Retries; attempt++)
+            {
+                if (attempt > 0 && !await DelayBetweenRetries(cancellationToken))
+                    break;
 
-            if (response != KeyValueResponseType.RolledBack)
+                (KeyValueResponseType response, long _) = await manager.LocateAndTryRollbackMutations(
+                    context.TransactionId,
+                    key,
+                    ticketId,
+                    durability,
+                    CancellationToken.None
+                );
+
+                if (response == KeyValueResponseType.RolledBack)
+                {
+                    rolledBackConfirmed = true;
+                    break;
+                }
+
+                if (response == KeyValueResponseType.MustRetry)
+                {
+                    logger.LogWarning("RollbackMutations: transient failure on {Key} attempt {Attempt}, retrying", key, attempt + 1);
+                    continue;
+                }
+
+                // Non-retryable: participant was never prepared or is already cleaned up.
+                // Treat as resolved; write intent is absent, so TTL has nothing to clean up.
                 logger.LogWarning("RollbackMutations: {Type} {Key} {TicketId}", response, key, ticketId);
+                rolledBackConfirmed = true;
+                break;
+            }
+
+            if (!rolledBackConfirmed)
+            {
+                // Exhausted retries while the participant still holds a live write intent.
+                // Do not force RolledBack — the intent will self-heal via TTL.
+                // Locks are released by the finally block in CommitTransaction.
+                logger.LogError("RollbackMutations: exhausted {MaxRetries} retries for {Key}; participant retains write intent",
+                    MaxPhase2Retries, key);
+                return;
+            }
 
             if (!context.SetState(KeyValueTransactionState.RolledBack, KeyValueTransactionState.RollingBack))
                 throw new KahunaAbortedException("Failed to set transaction state to RolledBack");
@@ -1312,16 +1440,54 @@ internal sealed class KeyValueTransactionCoordinator
             return;
         }
 
-        List<(KeyValueResponseType, string, long, KeyValueDurability)> responses = await manager.LocateAndTryRollbackManyMutations(
-            context.TransactionId,
-            mutationsPrepared,
-            CancellationToken.None
-        );
+        Dictionary<string, (HLCTimestamp ticketId, KeyValueDurability durability)> pendingRollbacks =
+            mutationsPrepared.ToDictionary(x => x.key, x => (x.ticketId, x.durability));
 
-        foreach ((KeyValueResponseType response, string key, long commitIndex, KeyValueDurability durability) in responses)
+        for (int attempt = 0; attempt <= MaxPhase2Retries && pendingRollbacks.Count > 0; attempt++)
         {
-            if (response != KeyValueResponseType.RolledBack)
+            if (attempt > 0 && !await DelayBetweenRetries(cancellationToken))
+                break;
+
+            List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> batch =
+                [.. pendingRollbacks.Select(kvp => (kvp.Key, kvp.Value.ticketId, kvp.Value.durability))];
+
+            List<(KeyValueResponseType, string, long, KeyValueDurability)> responses =
+                await manager.LocateAndTryRollbackManyMutations(context.TransactionId, batch, CancellationToken.None);
+
+            bool hasTransientFailure = false;
+            foreach ((KeyValueResponseType response, string key, long commitIndex, KeyValueDurability durability) in responses)
+            {
+                if (response == KeyValueResponseType.RolledBack)
+                {
+                    pendingRollbacks.Remove(key);
+                    continue;
+                }
+
+                if (response == KeyValueResponseType.MustRetry)
+                {
+                    hasTransientFailure = true;
+                    logger.LogWarning("RollbackMutations: transient failure on {Key} attempt {Attempt}, retrying", key, attempt + 1);
+                    continue;
+                }
+
+                // Non-retryable failure: the participant can't be rolled back (e.g. never prepared).
+                // Remove from pending and log; the write intent will expire naturally.
                 logger.LogWarning("RollbackMutations {Type} {Key} {TicketId} {Durability}", response, key, commitIndex, durability);
+                pendingRollbacks.Remove(key);
+            }
+
+            if (!hasTransientFailure)
+                break;
+        }
+
+        if (pendingRollbacks.Count > 0)
+        {
+            // Exhausted retries while participants still hold live write intents.
+            // Do not force RolledBack — the intents will self-heal via TTL.
+            // Locks are released by the finally block in CommitTransaction.
+            logger.LogError("RollbackMutations: exhausted {MaxRetries} retries, {Count} participants still pending: {Keys}",
+                MaxPhase2Retries, pendingRollbacks.Count, string.Join(", ", pendingRollbacks.Keys));
+            return;
         }
 
         if (!context.SetState(KeyValueTransactionState.RolledBack, KeyValueTransactionState.RollingBack))

@@ -28,7 +28,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
 {
     public TryCommitMutationsHandler(KeyValueContext context) : base(context)
     {
-        
+
     }
 
     public async Task<KeyValueResponse> Execute(KeyValueRequest message)
@@ -53,6 +53,22 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
 
         if (entry.WriteIntent is null)
         {
+            bool mvccGone = entry.MvccEntries is null || !entry.MvccEntries.ContainsKey(message.TransactionId);
+            if (mvccGone)
+            {
+                // Distinguish ack-loss re-commit (this actor made the terminal decision) from a
+                // request arriving at a node that never prepared the transaction. Prepare state
+                // (WriteIntent + MVCC) lives only in the preparing leader's actor memory and is not
+                // Raft-replicated, so after a leader change the new leader has no write intent and
+                // no MVCC entry — indistinguishable from the ack-loss case without an explicit record.
+                if (context.WasCommittedHere(message.TransactionId))
+                    return new(KeyValueResponseType.Committed, 0);
+
+                // Never prepared here: return MustRetry so the coordinator can re-route to the
+                // node (original leader, if it recovered) that still holds the write intent.
+                return KeyValueStaticResponses.MustRetryResponse;
+            }
+
             context.Logger.LogWarning("Write intent is missing for {TransactionId}", message.TransactionId);
 
             return KeyValueStaticResponses.ErroredResponse;
@@ -60,14 +76,14 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
 
         if (entry.WriteIntent.TransactionId != message.TransactionId)
         {
-            context.Logger.LogWarning("Write intent conflict between {CurrentTransactionId} and {TransactionId}", entry.WriteIntent.TransactionId, message.TransactionId);                              
+            context.Logger.LogWarning("Write intent conflict between {CurrentTransactionId} and {TransactionId}", entry.WriteIntent.TransactionId, message.TransactionId);
 
             return KeyValueStaticResponses.ErroredResponse;
         }
 
         if (entry.MvccEntries is null)
         {
-            context.Logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [1]", message.TransactionId);                       
+            context.Logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [1]", message.TransactionId);
 
             return KeyValueStaticResponses.ErroredResponse;
         }
@@ -75,7 +91,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         if (!entry.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? mvccEntry))
         {
             context.Logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [2]", message.TransactionId);
-                       
+
             return KeyValueStaticResponses.ErroredResponse;
         }
 
@@ -128,26 +144,37 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             TrimExpiredMvccEntries(entry, currentTime);
             entry.WriteIntent = null;
 
+            context.RecordCommitted(message.TransactionId);
             return new(KeyValueResponseType.Committed, 0);
         }
 
-        (bool success, int partitionId, long commitIndex) = await CommitKeyValueMessage(message.Key, message.ProposalTicketId);
+        (bool success, int partitionId, long commitIndex, RaftOperationStatus raftStatus) = await CommitKeyValueMessage(message.Key, message.ProposalTicketId);
 
-        // Re-check after await: a concurrent commit for the same transaction may have
-        // already committed this entry while we were suspended waiting for Raft.
+        // Transient Raft failure (e.g. NodeIsNotLeader, ProposalQueueFull): preserve MVCC + write intent
+        // so the coordinator can retry the commit against the newly elected leader.
+        if (!success && IsTransientRaftStatus(raftStatus))
+            return KeyValueStaticResponses.MustRetryResponse;
+
+        // Post-await: write intent may have been cleared by an idempotent re-commit that completed
+        // while this handler was suspended at the Raft call. Return Committed for idempotency;
+        // return Errored if success is false (unexpected — Raft returned success=false but no transient).
         if (entry.WriteIntent is null)
         {
-            context.Logger.LogWarning("Write intent already cleared for {TransactionId} — duplicate commit detected, aborting", message.TransactionId);
-            return KeyValueStaticResponses.ErroredResponse;
+            return success
+                ? new(KeyValueResponseType.Committed, commitIndex)
+                : KeyValueStaticResponses.ErroredResponse;
         }
 
+        // Permanent Raft failure: MVCC + write intent are preserved so the coordinator can issue a
+        // rollback to clean up. Propagate the error to abort the transaction.
+        if (!success)
+            return KeyValueStaticResponses.ErroredResponse;
+
+        // Confirmed terminal commit: clear MVCC + write intent, then advance the entry.
         if (entry.MvccEntries.Remove(message.TransactionId, out KeyValueMvccEntry? removedMvccP))
             context.AdjustEstimatedEntryBytes(entry, -KeyValueStoreAccounting.MvccEntryRemovedBytes(entry.MvccEntries.Count == 0, removedMvccP.Value));
         TrimExpiredMvccEntries(entry, currentTime);
         entry.WriteIntent = null;
-
-        if (!success)
-            return KeyValueStaticResponses.ErroredResponse;
 
         if (entry.Revisions is not null)
             RemoveExpiredRevisions(entry, proposal.Revision);
@@ -190,21 +217,32 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             proposal.LastModified,
             (int)proposal.State,
             proposal.NoRevision
-        ));                       
+        ));
 
+        context.RecordCommitted(message.TransactionId);
         return new(KeyValueResponseType.Committed, commitIndex);
     }
 
     /// <summary>
+    /// Returns true when the Raft status represents a transient condition that warrants preserving
+    /// participant state and returning MustRetry so the coordinator can drive the same decision
+    /// against the newly elected leader.
+    /// </summary>
+    private static bool IsTransientRaftStatus(RaftOperationStatus status) => status is
+        RaftOperationStatus.NodeIsNotLeader or
+        RaftOperationStatus.ProposalQueueFull or
+        RaftOperationStatus.RestoreInProgress or
+        RaftOperationStatus.ProposalTimeout or
+        RaftOperationStatus.ReplicationFailed or
+        RaftOperationStatus.OperationCancelled;
+
+    /// <summary>
     /// Commits a previously proposed key value message
     /// </summary>
-    /// <param name="key"></param>
-    /// <param name="proposalTicketId"></param>
-    /// <returns></returns>
-    private async Task<(bool, int, long)> CommitKeyValueMessage(string key, HLCTimestamp proposalTicketId)
+    private async Task<(bool, int, long, RaftOperationStatus)> CommitKeyValueMessage(string key, HLCTimestamp proposalTicketId)
     {
         if (!context.Raft.Joined)
-            return (true, -1, 0);
+            return (true, -1, 0, RaftOperationStatus.Success);
 
         int partitionId = ResolvePartition(key);
 
@@ -217,11 +255,11 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         {
             context.Logger.LogWarning("Failed to commit key/value {Key} Partition={Partition} Status={Status}", key, partitionId, status);
 
-            return (false, -1, 0);
-        }               
+            return (false, -1, 0, status);
+        }
 
         context.Logger.LogSuccessfullyCommittedKeyValue(key, partitionId, commitLogId);
 
-        return (success, partitionId, commitLogId);
+        return (success, partitionId, commitLogId, status);
     }
 }
