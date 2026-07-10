@@ -790,21 +790,15 @@ internal sealed class KeyValuesManager : IDisposable
     /// <summary>
     /// Called by Kommander when partition leadership changes.
     ///
-    /// <para><b>Known gap — promotion-window staleness.</b>
-    /// <c>InvokeLeaderChanged</c> fires inside <c>BecomeLeader()</c>, which runs in the executor's
-    /// control-queue drain cycle. Pending WAL completions that would trigger
-    /// <c>CompleteFollowerAppend → OnReplicationReceived → InvalidateOrApply</c> sit in the
-    /// replication queue and are drained <em>after</em> this callback returns. Entries committed by
-    /// the old leader but not yet applied on this follower at the instant of promotion therefore
-    /// arrive in the actor's in-memory cache after this handler fires, not before.
-    /// The staleness window is bounded (closes as soon as the replication queue drains), but it
-    /// exists and can produce a stale read if the new leader serves a request in the interval.</para>
-    ///
-    /// <para><b>Required Kommander change:</b> <c>InvokeLeaderChanged</c> should fire only after
-    /// all pending WAL completions for the partition have been applied — i.e., after the
-    /// replication queue is drained for that partition, not immediately on quorum.
-    /// Until that guarantee exists in Kommander, a promotion-window stale-read is possible and
-    /// cannot be prevented from Kahuna's side without a workaround shim.</para>
+    /// <para>Intentionally a no-op. The per-key <c>InvalidateOrApply</c> messages from
+    /// <see cref="KeyValueReplicator"/> keep every resident cache entry coherent as committed logs
+    /// are applied on followers. Correctness at promotion depends on a node having applied all
+    /// committed entries up to its commit frontier <em>before</em> it serves as leader — Kommander
+    /// now guarantees exactly that (it drains pending committed applies, and applies entries it
+    /// commits via the leader path, before advertising the node as leader). With that guarantee a
+    /// newly promoted leader's cache is already current, so no additional sweep or serving gate is
+    /// needed here. The promotion-races-apply invariant is exercised by
+    /// <c>PromotedLeader_RacingCommit_ServesLatestRevision</c>.</para>
     /// </summary>
     public Task<bool> OnLeaderChanged(int partitionId, string node)
     {

@@ -276,13 +276,11 @@ public sealed class TestKeyValueFailoverCoherence
     /// applied-before-promotion path is tested. It therefore covers the
     /// "applied-before-promotion" path only.</para>
     ///
-    /// <para><b>Unverified window:</b> a follower that wins a leader election while entries are
-    /// committed-but-not-yet-applied (pending WAL completions in the replication queue) can serve
-    /// a stale revision during the brief interval before those completions drain. Reproducing that
-    /// race requires pausing Kommander's replication queue at a specific point, which is not
-    /// available in the current test API. The correct fix is for Kommander's
-    /// <c>InvokeLeaderChanged</c> to fire only after all pending follower appends for the
-    /// partition have been applied — see <c>KeyValuesManager.OnLeaderChanged</c> for details.</para>
+    /// <para><b>Promotion-races-apply window:</b> the case where a follower is promoted before it has
+    /// applied a just-committed entry is covered separately by
+    /// <see cref="PromotedLeader_RacingCommit_ServesLatestRevision"/>. Kommander now applies all
+    /// committed entries up to the commit frontier before a node serves as leader, so that window is
+    /// closed upstream and <c>KeyValuesManager.OnLeaderChanged</c> can remain a no-op.</para>
     /// </summary>
     [Fact]
     public async Task PromotedLeader_AfterApply_ServesLatestRevision()
@@ -337,6 +335,77 @@ public sealed class TestKeyValueFailoverCoherence
             (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry) = await RetryGet(
                 () => nodes[0].Kahuna.LocateAndTryGetValue(
                     HLCTimestamp.Zero, "coherence-key", -1, HLCTimestamp.Zero,
+                    KeyValueDurability.Persistent, ct));
+
+            Assert.Equal(KeyValueResponseType.Get, getType);
+            Assert.NotNull(entry);
+            Assert.Equal(rev2, entry!.Revision);
+            Assert.Equal(value2, entry.Value);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// The promotion-races-apply window: a follower is promoted immediately after a commit, without
+    /// first waiting for its cache to reflect that commit. The new leader must still serve the latest
+    /// committed revision — never the stale warm-cache value.
+    ///
+    /// <para>This is the window that was previously unclosable from Kahuna's side: Kommander
+    /// advertised leadership (and fired <c>InvokeLeaderChanged</c>) before the partition's pending
+    /// committed-append applies had drained, so a newly promoted leader could serve a stale revision.
+    /// Kommander now applies all committed entries up to the commit frontier before a node serves as
+    /// leader, so <c>KeyValuesManager.OnLeaderChanged</c> can remain a no-op and this invariant holds
+    /// by construction. The test cannot pause the replication queue (no such API exists); it maximises
+    /// the chance of hitting the window by stepping down the leaders immediately after the write
+    /// returns — without the deterministic apply-wait its sibling uses — and asserts the invariant the
+    /// gate guarantees, so it cannot false-fail under the gate.</para>
+    /// </summary>
+    [Fact]
+    public async Task PromotedLeader_RacingCommit_ServesLatestRevision()
+    {
+        Node[] nodes = await Assemble();
+        try
+        {
+            CancellationToken ct = TestContext.Current.CancellationToken;
+
+            // ── phase 1: write rev1 and warm every node's cache, so a stale rev1 is resident
+            //    everywhere and would be served if promotion outran the rev2 apply. ───────────
+            byte[] value1 = "old"u8.ToArray();
+            (KeyValueResponseType t1, long rev1, _) = await RetrySet(() =>
+                nodes[0].Kahuna.LocateAndTrySetKeyValue(
+                    HLCTimestamp.Zero, "race-key", value1,
+                    null, 0, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct));
+            Assert.Equal(KeyValueResponseType.Set, t1);
+
+            foreach (Node node in nodes)
+                await WarmNodeToRevision(node, "race-key", rev1, KeyValueDurability.Persistent);
+
+            // ── phase 2: overwrite to rev2 and IMMEDIATELY force a leadership change — no
+            //    apply-wait, so the promoted follower may not yet have applied rev2. ───────────
+            byte[] value2 = "new"u8.ToArray();
+            (KeyValueResponseType t2, long rev2, _) = await RetrySet(() =>
+                nodes[0].Kahuna.LocateAndTrySetKeyValue(
+                    HLCTimestamp.Zero, "race-key", value2,
+                    null, 0, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct));
+            Assert.Equal(KeyValueResponseType.Set, t2);
+            Assert.True(rev2 > rev1, $"rev2={rev2} must exceed rev1={rev1}");
+
+            for (int p = 1; p <= 2; p++)
+            {
+                Node oldLeader = await LeaderOf(p, nodes);
+                await oldLeader.Raft.StepDownAsync(p, ct);
+            }
+
+            for (int p = 1; p <= 2; p++)
+                await WaitForAnyLeader(p, nodes[0].Raft, nodes[1].Raft, nodes[2].Raft);
+
+            // ── phase 3: the new leader must serve rev2, never the stale rev1. ───────────────
+            (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry) = await RetryGet(
+                () => nodes[0].Kahuna.LocateAndTryGetValue(
+                    HLCTimestamp.Zero, "race-key", -1, HLCTimestamp.Zero,
                     KeyValueDurability.Persistent, ct));
 
             Assert.Equal(KeyValueResponseType.Get, getType);
