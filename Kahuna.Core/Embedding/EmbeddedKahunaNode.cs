@@ -203,6 +203,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         Raft.OnLogRestored += Kahuna.OnLogRestored;
         Raft.OnReplicationReceived += Kahuna.OnReplicationReceived;
         Raft.OnReplicationError += Kahuna.OnReplicationError;
+        Raft.OnLeaderChanged += Kahuna.OnLeaderChanged;
 
         if (standaloneComm is not null)
         {

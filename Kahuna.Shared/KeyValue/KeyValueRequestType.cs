@@ -34,4 +34,5 @@ public enum KeyValueRequestType
     ImportRangeLocks,
     GetSafeTimestamp,
     ResumeRead,
+    InvalidateOrApply,
 }

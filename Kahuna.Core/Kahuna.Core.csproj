@@ -40,8 +40,8 @@
     </PackageReference>
     <PackageReference Include="Microsoft.IO.RecyclableMemoryStream" Version="3.0.1" />
     <PackageReference Include="Nixie" Version="1.2.1" />
-    <PackageReference Include="System.IO.Hashing" Version="9.0.6" />
-    <PackageReference Include="Kommander" Version="0.18.3" />
+    <PackageReference Include="System.IO.Hashing" Version="10.0.9" />
+    <PackageReference Include="Kommander" Version="0.19.0" />
     <PackageReference Include="Polly.Contrib.WaitAndRetry" Version="1.1.1" />
     <PackageReference Include="YaccLexTools" Version="1.2.3" />
   </ItemGroup>

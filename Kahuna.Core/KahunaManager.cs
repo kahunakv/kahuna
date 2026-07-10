@@ -1261,6 +1261,9 @@ public sealed class KahunaManager : IKahuna, IDisposable
         keyValues.OnReplicationError(log);
     }
 
+    public Task<bool> OnLeaderChanged(int partitionId, string node) =>
+        keyValues.OnLeaderChanged(partitionId, node);
+
     internal Task RunCollectOnAllInstancesAsync() => keyValues.RunCollectOnAllInstancesAsync();
 
     /// <summary>

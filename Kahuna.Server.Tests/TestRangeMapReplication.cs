@@ -101,6 +101,7 @@ public sealed class TestRangeMapReplication
         raft.OnLogRestored += kahuna.OnLogRestored;
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
         raft.OnReplicationError += kahuna.OnReplicationError;
+        raft.OnLeaderChanged += kahuna.OnLeaderChanged;
 
         return (raft, kahuna);
     }

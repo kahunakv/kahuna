@@ -185,6 +185,8 @@ public interface IKahuna
 
     public void OnReplicationError(int partitionId, RaftLog log);
 
+    public Task<bool> OnLeaderChanged(int partitionId, string node);
+
     public Task FlushPersistenceAsync();
 
     /// <summary>

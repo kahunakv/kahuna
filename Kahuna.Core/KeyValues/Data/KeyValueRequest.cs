@@ -91,7 +91,40 @@ public sealed class KeyValueRequest : IConsistentHashable
     /// other request types.
     /// </summary>
     internal Handlers.ReadContinuation? Continuation { get; set; }
-    
+
+    /// <summary>
+    /// Structured payload for <c>InvalidateOrApply</c> messages. Non-null only when
+    /// <see cref="Type"/> is <see cref="KeyValueRequestType.InvalidateOrApply"/>.
+    /// </summary>
+    internal InvalidateOrApplyData? InvalidateOrApplyData { get; private set; }
+
+    /// <summary>
+    /// Constructs an <c>InvalidateOrApply</c> message with named fields carried in
+    /// <see cref="InvalidateOrApplyData"/> rather than punned into general-purpose fields.
+    /// </summary>
+    internal static KeyValueRequest ForInvalidateOrApply(
+        string key, long revision, byte[]? value,
+        HLCTimestamp expires, HLCTimestamp lastUsed, HLCTimestamp lastModified, KeyValueState state)
+    {
+        KeyValueRequest req = new(
+            KeyValueRequestType.InvalidateOrApply,
+            HLCTimestamp.Zero,
+            HLCTimestamp.Zero,
+            key,
+            null,
+            null,
+            -1,
+            KeyValueFlags.None,
+            0,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Persistent,
+            0,
+            0,
+            null);
+        req.InvalidateOrApplyData = new(revision, value, expires, lastUsed, lastModified, state);
+        return req;
+    }
+
     /// <summary>
     /// Creates a type-only request (e.g. periodic cache collection).
     /// </summary>
@@ -208,6 +241,7 @@ public sealed class KeyValueRequest : IConsistentHashable
         Limit = 0;
         ReadTimestamp = HLCTimestamp.Zero;
         Continuation = null;
+        InvalidateOrApplyData = null;
     }
 
     public int GetHash()

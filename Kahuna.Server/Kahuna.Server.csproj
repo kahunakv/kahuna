@@ -16,7 +16,6 @@
 <ItemGroup>
   <PackageReference Include="Grpc.AspNetCore" Version="2.67.0" />
   <PackageReference Include="Grpc.AspNetCore.Server.Reflection" Version="2.67.0" />
-  <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.9" />
   <PackageReference Include="CommandLineParser" Version="2.9.1" />
 </ItemGroup>
 

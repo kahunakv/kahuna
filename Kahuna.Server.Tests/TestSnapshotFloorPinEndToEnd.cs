@@ -126,6 +126,7 @@ public sealed class TestSnapshotFloorPinEndToEnd
         raft.OnLogRestored          += kahuna.OnLogRestored;
         raft.OnReplicationReceived  += kahuna.OnReplicationReceived;
         raft.OnReplicationError     += kahuna.OnReplicationError;
+        raft.OnLeaderChanged        += kahuna.OnLeaderChanged;
 
         string localEndpoint = raft.GetLocalEndpoint();
         interNode.SetNodes(new() { { localEndpoint, kahuna } });

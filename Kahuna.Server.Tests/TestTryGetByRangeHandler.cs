@@ -57,7 +57,7 @@ public sealed class TestTryGetByRangeHandler
                     new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             KeyValueResponse? resp = await actorRef.Ask(
-                MakeRangeScan("doc/", limit: 10), TimeSpan.FromSeconds(5));
+                MakeRangeScan("doc/", limit: 10), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.Get, resp!.Type);
@@ -100,7 +100,7 @@ public sealed class TestTryGetByRangeHandler
                     new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             KeyValueResponse? resp = await actorRef.Ask(
-                MakeRangeScan("doc/", limit: 2), TimeSpan.FromSeconds(10));
+                MakeRangeScan("doc/", limit: 2), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.Get, resp!.Type);
@@ -140,13 +140,13 @@ public sealed class TestTryGetByRangeHandler
             // memory snapshot captures them and the K-way merge includes them.
             await actorRef.Ask(
                 MakeSet("doc/b", Encoding.UTF8.GetBytes("b-val")),
-                TimeSpan.FromSeconds(5));
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             await actorRef.Ask(
                 MakeSet("doc/d", Encoding.UTF8.GetBytes("d-val")),
-                TimeSpan.FromSeconds(5));
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             KeyValueResponse? resp = await actorRef.Ask(
-                MakeRangeScan("doc/", limit: 10), TimeSpan.FromSeconds(10));
+                MakeRangeScan("doc/", limit: 10), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.Get, resp!.Type);
@@ -202,7 +202,7 @@ public sealed class TestTryGetByRangeHandler
 
             // Issue the scan; it will detach after stage 1 and block in stage 2.
             Task<KeyValueResponse?> scanTask = actorRef.Ask(
-                MakeRangeScan("rng/", limit: 1), TimeSpan.FromSeconds(10));
+                MakeRangeScan("rng/", limit: 1), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
             // Wait until stage 2 has started (disk read in flight, mailbox free).
             bool entered = pageEntered.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
@@ -213,7 +213,7 @@ public sealed class TestTryGetByRangeHandler
             // no backpressure from the scan.
             Task<KeyValueResponse?> writeTask = actorRef.Ask(
                 MakeSet("rng/late", Encoding.UTF8.GetBytes("late")),
-                TimeSpan.FromSeconds(5));
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             KeyValueResponse? writeResp = await writeTask;
             Assert.NotNull(writeResp);
             Assert.Equal(KeyValueResponseType.Set, writeResp!.Type);
@@ -267,10 +267,10 @@ public sealed class TestTryGetByRangeHandler
             // picks it up and the merge serves the memory value over the disk value.
             await actorRef.Ask(
                 MakeSet("kv/x", Encoding.UTF8.GetBytes("mem-val")),
-                TimeSpan.FromSeconds(5));
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             KeyValueResponse? resp = await actorRef.Ask(
-                MakeRangeScan("kv/", limit: 10), TimeSpan.FromSeconds(10));
+                MakeRangeScan("kv/", limit: 10), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.Get, resp!.Type);
@@ -313,7 +313,7 @@ public sealed class TestTryGetByRangeHandler
                     new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             // Drain one message so the actor is fully initialised before we snapshot bytes.
-            await actorRef.Ask(MakeRangeScan("warmup/", limit: 1), TimeSpan.FromSeconds(5));
+            await actorRef.Ask(MakeRangeScan("warmup/", limit: 1), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             long before = ((KeyValueActor)actorRef.Runner.Actor!).ApproximateStoreBytes;
 
@@ -337,7 +337,7 @@ public sealed class TestTryGetByRangeHandler
             txScan.Limit = 10;
             txScan.StartInclusive = true;
 
-            KeyValueResponse? resp = await actorRef.Ask(txScan, TimeSpan.FromSeconds(5));
+            KeyValueResponse? resp = await actorRef.Ask(txScan, TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             long after = ((KeyValueActor)actorRef.Runner.Actor!).ApproximateStoreBytes;
 
@@ -396,7 +396,7 @@ public sealed class TestTryGetByRangeHandler
             scan.Limit = 2;               // limit 2 over 5 keys → 3 disk pages (first + continuation)
             scan.StartInclusive = true;
 
-            KeyValueResponse? resp = await actorRef.Ask(scan, TimeSpan.FromSeconds(10));
+            KeyValueResponse? resp = await actorRef.Ask(scan, TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
             // The scan still works end to end.
             Assert.NotNull(resp);
@@ -438,7 +438,7 @@ public sealed class TestTryGetByRangeHandler
                     new KeySpaceRegistry(), new RangeMapStore(decoratedRaft, null, null, logger), config, logger);
 
             KeyValueResponse? resp = await actorRef.Ask(
-                MakeRangeScan("doc/", limit: 10), TimeSpan.FromSeconds(5));
+                MakeRangeScan("doc/", limit: 10), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.MustRetry, resp!.Type);
@@ -446,7 +446,7 @@ public sealed class TestTryGetByRangeHandler
             // Range scans do not register in PendingReads, but the actor must remain healthy: a
             // second request still gets a clean retryable response rather than a stuck mailbox.
             KeyValueResponse? resp2 = await actorRef.Ask(
-                MakeRangeScan("doc/", limit: 10), TimeSpan.FromSeconds(5));
+                MakeRangeScan("doc/", limit: 10), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             Assert.Equal(KeyValueResponseType.MustRetry, resp2!.Type);
             Assert.Equal(0, ((KeyValueActor)actorRef.Runner.Actor!).PendingReadsCount);
         }
@@ -621,7 +621,7 @@ public sealed class TestTryGetByRangeHandler
                     new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             KeyValueRequest scan = MakeSnapshotRangeScan("snap/", limit: 10, snapshotTs);
-            KeyValueResponse? resp = await actorRef.Ask(scan, TimeSpan.FromSeconds(5));
+            KeyValueResponse? resp = await actorRef.Ask(scan, TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.Get, resp!.Type);
@@ -669,7 +669,7 @@ public sealed class TestTryGetByRangeHandler
                     new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             KeyValueRequest scan = MakeSnapshotRangeScan("snap/", limit: 10, snapshotTs);
-            KeyValueResponse? resp = await actorRef.Ask(scan, TimeSpan.FromSeconds(5));
+            KeyValueResponse? resp = await actorRef.Ask(scan, TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.Get, resp!.Type);
@@ -710,7 +710,7 @@ public sealed class TestTryGetByRangeHandler
             // away. Without the fix diskHasMore=false (derived from projected.Count) and the scan
             // returns nothing. With the fix RawHasMore=true and a second page is dispatched.
             KeyValueRequest scan = MakeSnapshotRangeScan("snap/", limit: 10, snapshotTs);
-            KeyValueResponse? resp = await actorRef.Ask(scan, TimeSpan.FromSeconds(10));
+            KeyValueResponse? resp = await actorRef.Ask(scan, TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.Get, resp!.Type);
@@ -784,7 +784,7 @@ public sealed class TestTryGetByRangeHandler
             if (n == 1)
             {
                 pageEntered.Set();
-                gate.Wait();
+                gate.Wait(TestContext.Current.CancellationToken);
             }
 
             IEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> candidates =

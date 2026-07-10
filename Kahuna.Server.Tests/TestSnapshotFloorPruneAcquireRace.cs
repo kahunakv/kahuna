@@ -199,6 +199,7 @@ public sealed class TestSnapshotFloorPruneAcquireRace
         raft.OnLogRestored         += kahuna.OnLogRestored;
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
         raft.OnReplicationError    += kahuna.OnReplicationError;
+        raft.OnLeaderChanged       += kahuna.OnLeaderChanged;
 
         interNode.SetNodes(new() { { raft.GetLocalEndpoint(), kahuna } });
 
@@ -210,6 +211,7 @@ public sealed class TestSnapshotFloorPruneAcquireRace
         raft.OnLogRestored         -= kahuna.OnLogRestored;
         raft.OnReplicationReceived -= kahuna.OnReplicationReceived;
         raft.OnReplicationError    -= kahuna.OnReplicationError;
+        raft.OnLeaderChanged       -= kahuna.OnLeaderChanged;
 
         try { await raft.LeaveCluster(dispose: true); } catch (ObjectDisposedException) { }
         kahuna.Dispose();

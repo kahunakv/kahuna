@@ -93,8 +93,8 @@ internal sealed class SchedulerOverridingRaft(IRaft inner, IRaftReadScheduler sc
     public Task<RaftReplicationResult> ReplicateLogs(int partitionId, string type, byte[] data, bool autoCommit = true, long expectedGeneration = 0, CancellationToken cancellationToken = default) => inner.ReplicateLogs(partitionId, type, data, autoCommit, expectedGeneration, cancellationToken);
     public Task<RaftReplicationResult> ReplicateLogs(int partitionId, string type, IEnumerable<byte[]> logs, bool autoCommit = true, long expectedGeneration = 0, CancellationToken cancellationToken = default) => inner.ReplicateLogs(partitionId, type, logs, autoCommit, expectedGeneration, cancellationToken);
     public Task<RaftReplicationResult> ReplicateCheckpoint(int partitionId, CancellationToken cancellationToken = default) => inner.ReplicateCheckpoint(partitionId, cancellationToken);
-    public Task<(bool success, RaftOperationStatus status, long commitLogId)> CommitLogs(int partitionId, HLCTimestamp ticketId) => inner.CommitLogs(partitionId, ticketId);
-    public Task<(bool success, RaftOperationStatus status, long commitLogId)> RollbackLogs(int partitionId, HLCTimestamp ticketId) => inner.RollbackLogs(partitionId, ticketId);
+    public Task<(bool success, RaftOperationStatus status, long commitLogId)> CommitLogs(int partitionId, HLCTimestamp ticketId, CancellationToken cancellationToken = default) => inner.CommitLogs(partitionId, ticketId, cancellationToken);
+    public Task<(bool success, RaftOperationStatus status, long commitLogId)> RollbackLogs(int partitionId, HLCTimestamp ticketId, CancellationToken cancellationToken = default) => inner.RollbackLogs(partitionId, ticketId, cancellationToken);
     public void SetMinRetainIndex(int partitionId, long index) => inner.SetMinRetainIndex(partitionId, index);
     public string GetLocalEndpoint() => inner.GetLocalEndpoint();
     public int GetLocalNodeId() => inner.GetLocalNodeId();

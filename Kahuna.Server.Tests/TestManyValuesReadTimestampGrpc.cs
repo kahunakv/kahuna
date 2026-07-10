@@ -215,6 +215,7 @@ public class TestManyValuesReadTimestampGrpc
         public Task<bool> OnLogRestored(int partitionId, RaftLog log) => throw new NotImplementedException();
         public Task<bool> OnReplicationReceived(int partitionId, RaftLog log) => throw new NotImplementedException();
         public void OnReplicationError(int partitionId, RaftLog log) => throw new NotImplementedException();
+        public Task<bool> OnLeaderChanged(int partitionId, string node) => throw new NotImplementedException();
         public Task FlushPersistenceAsync() => throw new NotImplementedException();
         public Task BootstrapFromPitrBackupAsync(string backupDir, Guid leafBackupId, HLCTimestamp targetTime, IWAL walAdapter, TimeSpan pitrWindow, TimeSpan baseSnapshotInterval) => throw new NotImplementedException();
         public void RegisterKeyRange(string keySpace) => throw new NotImplementedException();

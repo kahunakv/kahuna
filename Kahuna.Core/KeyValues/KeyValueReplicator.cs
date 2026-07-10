@@ -1,9 +1,11 @@
 
 using System.Runtime.InteropServices;
 using Nixie;
+using Nixie.Routers;
 
 using Kommander;
 using Kommander.Data;
+using Kommander.Time;
 
 using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Persistence;
@@ -28,6 +30,8 @@ internal sealed class KeyValueReplicator
 {
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
 
+    private readonly IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> persistentRouter;
+
     private readonly IRaft raft;
 
     private readonly KeyWriteFrequencyRegistry writeFrequencyRegistry;
@@ -38,16 +42,38 @@ internal sealed class KeyValueReplicator
 
     public KeyValueReplicator(
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
+        IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> persistentRouter,
         IRaft raft,
         KeyWriteFrequencyRegistry writeFrequencyRegistry,
         KeySpaceRegistry keySpaceRegistry,
         ILogger<IKahuna> logger)
     {
         this.backgroundWriter       = backgroundWriter;
+        this.persistentRouter       = persistentRouter;
         this.raft                   = raft;
         this.writeFrequencyRegistry = writeFrequencyRegistry;
         this.keySpaceRegistry       = keySpaceRegistry;
         this.logger                 = logger;
+    }
+
+    /// <summary>
+    /// Routes an <c>InvalidateOrApply</c> message to the owning actor in the persistent pool.
+    /// Ephemeral writes are never replicated via Raft (all three write handlers gate
+    /// <c>CreateProposal</c> behind <c>Durability == Persistent</c>), so every entry this
+    /// replicator sees is a persistent commit — sending to the ephemeral pool would be both
+    /// wrong (it could corrupt an ephemeral entry for the same key name) and useless.
+    /// </summary>
+    private void SendInvalidateOrApply(
+        string key,
+        byte[]? value,
+        long revision,
+        HLCTimestamp expires,
+        HLCTimestamp lastUsed,
+        HLCTimestamp lastModified,
+        KeyValueState state)
+    {
+        persistentRouter.Send(
+            KeyValueRequest.ForInvalidateOrApply(key, revision, value, expires, lastUsed, lastModified, state));
     }
 
     /// <summary>
@@ -76,18 +102,25 @@ internal sealed class KeyValueReplicator
                     else
                         messageValue = keyValueMessage.Value.ToByteArray();
 
+                    HLCTimestamp expires      = new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter);
+                    HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
+                    HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
+
                     backgroundWriter.Send(new(
                         BackgroundWriteType.QueueStoreKeyValue,
                         partitionId,
                         keyValueMessage.Key,
                         messageValue,
                         keyValueMessage.Revision,
-                        new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
-                        new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
-                        new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
+                        expires,
+                        lastUsed,
+                        lastModified,
                         (int)KeyValueState.Set,
                         keyValueMessage.NoRevision
                     ));
+
+                    SendInvalidateOrApply(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
+                        expires, lastUsed, lastModified, KeyValueState.Set);
 
                     // Record the committed write into the local histogram.
                     // Running on every node (leader + followers) so the P0/meta leader — which
@@ -110,18 +143,25 @@ internal sealed class KeyValueReplicator
                     else
                         messageValue = keyValueMessage.Value.ToByteArray();
 
+                    HLCTimestamp expires      = new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter);
+                    HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
+                    HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
+
                     backgroundWriter.Send(new(
                         BackgroundWriteType.QueueStoreKeyValue,
                         partitionId,
                         keyValueMessage.Key,
                         messageValue,
                         keyValueMessage.Revision,
-                        new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
-                        new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
-                        new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
+                        expires,
+                        lastUsed,
+                        lastModified,
                         (int)KeyValueState.Deleted,
                         keyValueMessage.NoRevision
                     ));
+
+                    SendInvalidateOrApply(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
+                        expires, lastUsed, lastModified, KeyValueState.Deleted);
 
                     if (RangeRouting.IsKeyRange(keySpaceRegistry, keyValueMessage.Key))
                         writeFrequencyRegistry.GetOrCreate(partitionId).RecordWrite(keyValueMessage.Key);
@@ -138,18 +178,25 @@ internal sealed class KeyValueReplicator
                     else
                         messageValue = keyValueMessage.Value.ToByteArray();
 
+                    HLCTimestamp expires      = new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter);
+                    HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
+                    HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
+
                     backgroundWriter.Send(new(
                         BackgroundWriteType.QueueStoreKeyValue,
                         partitionId,
                         keyValueMessage.Key,
                         messageValue,
                         keyValueMessage.Revision,
-                        new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
-                        new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
-                        new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
+                        expires,
+                        lastUsed,
+                        lastModified,
                         (int)KeyValueState.Set,
                         keyValueMessage.NoRevision
                     ));
+
+                    SendInvalidateOrApply(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
+                        expires, lastUsed, lastModified, KeyValueState.Set);
 
                     if (RangeRouting.IsKeyRange(keySpaceRegistry, keyValueMessage.Key))
                         writeFrequencyRegistry.GetOrCreate(partitionId).RecordWrite(keyValueMessage.Key);

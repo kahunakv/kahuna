@@ -43,6 +43,7 @@ public sealed partial class ReplicationService : BackgroundService //, IDisposab
         raft.OnLogRestored += kahuna.OnLogRestored;
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
         raft.OnReplicationError += kahuna.OnReplicationError;
+        raft.OnLeaderChanged += kahuna.OnLeaderChanged;
         raft.OnMembershipChanged += OnMembershipChanged;
 
         if (options.PitrBootstrapFrom.HasValue)
@@ -113,6 +114,7 @@ public sealed partial class ReplicationService : BackgroundService //, IDisposab
         raft.OnLogRestored -= kahuna.OnLogRestored;
         raft.OnReplicationReceived -= kahuna.OnReplicationReceived;
         raft.OnReplicationError -= kahuna.OnReplicationError;
+        raft.OnLeaderChanged -= kahuna.OnLeaderChanged;
         raft.OnMembershipChanged -= OnMembershipChanged;
 
         if (options.RaftGracefulLeaveOnShutdown)

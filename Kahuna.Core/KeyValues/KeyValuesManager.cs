@@ -172,7 +172,7 @@ internal sealed class KeyValuesManager : IDisposable
         locator = new(this, configuration, raft, interNodeCommunication, keySpaceRegistry, rangeQuiesceStore, logger);
 
         restorer = new(backgroundWriter, raft, logger);
-        replicator = new(backgroundWriter, raft, writeFrequencyRegistry, keySpaceRegistry, logger);
+        replicator = new(backgroundWriter, persistentKeyValuesRouter, raft, writeFrequencyRegistry, keySpaceRegistry, logger);
         kvStateMachineTransfer = new(this, persistenceBackend, logger);
 
         // Whole-partition state transfer for the meta partition (id 0). Repairs a node below the
@@ -785,6 +785,31 @@ internal sealed class KeyValuesManager : IDisposable
     public void OnReplicationError(RaftLog log)
     {
         logger.LogError("Replication error: #{Id} {Type}", log.Id, log.LogType);
+    }
+
+    /// <summary>
+    /// Called by Kommander when partition leadership changes.
+    ///
+    /// <para><b>Known gap — promotion-window staleness.</b>
+    /// <c>InvokeLeaderChanged</c> fires inside <c>BecomeLeader()</c>, which runs in the executor's
+    /// control-queue drain cycle. Pending WAL completions that would trigger
+    /// <c>CompleteFollowerAppend → OnReplicationReceived → InvalidateOrApply</c> sit in the
+    /// replication queue and are drained <em>after</em> this callback returns. Entries committed by
+    /// the old leader but not yet applied on this follower at the instant of promotion therefore
+    /// arrive in the actor's in-memory cache after this handler fires, not before.
+    /// The staleness window is bounded (closes as soon as the replication queue drains), but it
+    /// exists and can produce a stale read if the new leader serves a request in the interval.</para>
+    ///
+    /// <para><b>Required Kommander change:</b> <c>InvokeLeaderChanged</c> should fire only after
+    /// all pending WAL completions for the partition have been applied — i.e., after the
+    /// replication queue is drained for that partition, not immediately on quorum.
+    /// Until that guarantee exists in Kommander, a promotion-window stale-read is possible and
+    /// cannot be prevented from Kahuna's side without a workaround shim.</para>
+    /// </summary>
+    public Task<bool> OnLeaderChanged(int partitionId, string node)
+    {
+        logger.LogDebug("KeyValues: leader for partition {PartitionId} is now {Node}", partitionId, node);
+        return Task.FromResult(true);
     }
 
     /// <summary>

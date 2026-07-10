@@ -233,6 +233,12 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private readonly ResumeReadHandler resumeReadHandler;
 
     /// <summary>
+    /// Applies a committed Raft log entry to a resident cache entry so a follower (or a newly
+    /// promoted leader) never serves a stale revision from memory.
+    /// </summary>
+    private readonly InvalidateOrApplyHandler invalidateOrApplyHandler;
+
+    /// <summary>
     /// A high-resolution timer used to measure the time elapsed during the handling of requests within the actor.
     /// The stopwatch is utilized to record and log the duration of operations, aiding in performance monitoring
     /// and diagnostics for the KeyValueActor.
@@ -331,6 +337,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         completeProposalHandler = new(context);
         releaseProposalHandler = new(context);
         resumeReadHandler = new(context);
+        invalidateOrApplyHandler = new(context);
     }
 
     /// <summary>
@@ -351,12 +358,14 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
 
         KeyValueResponse? response = null;
 
+        // Periodic Collect messages and follower-apply InvalidateOrApply messages are
+        // internal maintenance — suppress per-message tracing to avoid log spam.
+        bool logThis = message.Type != KeyValueRequestType.Collect
+                    && message.Type != KeyValueRequestType.InvalidateOrApply;
+
         try
         {
-            // Periodic Collect messages are fanned out to every actor each cycle; logging
-            // enter/took for them spams the cluster. The collect handler logs its own summary
-            // (LogKeyValueEviction) only when it actually evicts or trims.
-            if (message.Type != KeyValueRequestType.Collect)
+            if (logThis)
                 logger.LogKeyValueActorEnter(
                     actorContext.Self.Runner.Name,
                     message.Type,
@@ -369,7 +378,8 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                     message.Durability
                 );
 
-            if (message.Type != KeyValueRequestType.Collect)
+            if (message.Type != KeyValueRequestType.Collect
+                && message.Type != KeyValueRequestType.InvalidateOrApply)
             {
                 if (--operations == 0)
                 {
@@ -407,6 +417,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.CompleteProposal => CompleteProposal(message),
                 KeyValueRequestType.ReleaseProposal => ReleaseProposal(message),
                 KeyValueRequestType.ResumeRead => ResumeRead(message),
+                KeyValueRequestType.InvalidateOrApply => InvalidateOrApply(message),
                 KeyValueRequestType.Collect => CollectMessage(),
                 _ => KeyValueStaticResponses.ErroredResponse
             };
@@ -419,7 +430,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         }
         finally
         {
-            if (message.Type != KeyValueRequestType.Collect)
+            if (logThis)
                 logger.LogKeyValueActorTook(
                     actorContext.Self.Runner.Name,
                     message.Type,
@@ -643,6 +654,11 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private KeyValueResponse? ResumeRead(KeyValueRequest message)
     {
         return resumeReadHandler.Execute(message);
+    }
+
+    private KeyValueResponse? InvalidateOrApply(KeyValueRequest message)
+    {
+        return invalidateOrApplyHandler.Execute(message);
     }
 
     /// <summary>
