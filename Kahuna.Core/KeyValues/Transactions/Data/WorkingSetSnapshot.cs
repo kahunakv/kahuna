@@ -13,6 +13,7 @@ internal sealed class WorkingSetSnapshot
 {
     public IReadOnlySet<(string Key, KeyValueDurability Durability)>? LocksAcquired { get; init; }
     public IReadOnlySet<(string Key, KeyValueDurability Durability)>? PrefixLocksAcquired { get; init; }
+    public IReadOnlyDictionary<RangeLockKey, RangeLockMode>? RangeLocksAcquired { get; init; }
     public IReadOnlySet<(string Key, KeyValueDurability Durability)>? ModifiedKeys { get; init; }
     public IReadOnlyDictionary<(string Key, KeyValueDurability Durability), KeyValueTransactionReadKey>? ReadKeys { get; init; }
     public int PendingOperationCount { get; init; }

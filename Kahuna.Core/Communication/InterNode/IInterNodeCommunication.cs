@@ -86,7 +86,11 @@ public interface IInterNodeCommunication
 
     public Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp)> BeginOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken);
 
-    public Task CompleteOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, string? modifiedKey, string? pointLockKey, string? readKey, bool readExists, long readRevision, KeyValueDurability durability, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, CancellationToken cancellationToken);
+    public Task CompleteOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken);
+
+    public Task<TransactionWorkingSet?> GetTransactionWorkingSet(string node, string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken);
+
+    public Task<(KeyValueResponseType, TransactionWorkingSet?)> CloseTransaction(string node, string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken);
 
     public Task<bool> EnsureKeyRangeSeeded(string node, string keySpace, CancellationToken cancellationToken);
 

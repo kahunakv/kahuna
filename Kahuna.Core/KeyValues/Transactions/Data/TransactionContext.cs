@@ -67,6 +67,12 @@ internal class TransactionContext
     public HashSet<(string, KeyValueDurability)>? PrefixLocksAcquired { get; set; }
 
     /// <summary>
+    /// Range locks held during execution, keyed by their logical bounds and valued by their current mode
+    /// so an upgrade or renewal replaces the mode of the matching descriptor rather than adding a second.
+    /// </summary>
+    public Dictionary<RangeLockKey, RangeLockMode>? RangeLocksAcquired { get; set; }
+
+    /// <summary>
     /// Keys modified during the transaction along with their durability.
     /// </summary>
     public HashSet<(string, KeyValueDurability)>? ModifiedKeys { get; set; }
@@ -204,10 +210,41 @@ internal class TransactionContext
         if (effect.RemovePointLock is { } removedLock)
             LocksAcquired?.Remove(removedLock);
 
+        if (effect.PrefixLock is { } prefixLock)
+        {
+            PrefixLocksAcquired ??= [];
+            PrefixLocksAcquired.Add(prefixLock);
+        }
+
+        if (effect.RemovePrefixLock is { } removedPrefixLock)
+            PrefixLocksAcquired?.Remove(removedPrefixLock);
+
+        if (effect.RangeLock is { } rangeLock)
+        {
+            RangeLocksAcquired ??= new();
+            // Add on first acquire; replace the mode on a confirmed upgrade or renewal of the same bounds.
+            RangeLocksAcquired[rangeLock.Range] = rangeLock.Mode;
+        }
+
+        if (effect.RemoveRangeLock is { } removedRangeLock)
+            RangeLocksAcquired?.Remove(removedRangeLock);
+
         if (effect.ReadObservation is { } read && !string.IsNullOrEmpty(read.Key))
         {
             ReadKeys ??= [];
             ReadKeys[(read.Key, read.Durability)] = read;
+        }
+
+        if (effect.ReadObservations is { } reads)
+        {
+            foreach (KeyValueTransactionReadKey observed in reads)
+            {
+                if (string.IsNullOrEmpty(observed.Key))
+                    continue;
+
+                ReadKeys ??= [];
+                ReadKeys[(observed.Key, observed.Durability)] = observed;
+            }
         }
     }
 
@@ -323,6 +360,7 @@ internal class TransactionContext
             {
                 LocksAcquired        = LocksAcquired        != null ? new HashSet<(string, KeyValueDurability)>(LocksAcquired)        : null,
                 PrefixLocksAcquired  = PrefixLocksAcquired  != null ? new HashSet<(string, KeyValueDurability)>(PrefixLocksAcquired)  : null,
+                RangeLocksAcquired   = RangeLocksAcquired   != null ? new Dictionary<RangeLockKey, RangeLockMode>(RangeLocksAcquired) : null,
                 ModifiedKeys         = ModifiedKeys          != null ? new HashSet<(string, KeyValueDurability)>(ModifiedKeys)         : null,
                 ReadKeys             = ReadKeys              != null ? new Dictionary<(string, KeyValueDurability), KeyValueTransactionReadKey>(ReadKeys) : null,
                 PendingOperationCount = pendingOperationCount,

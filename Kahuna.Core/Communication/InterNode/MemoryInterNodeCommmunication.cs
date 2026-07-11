@@ -1012,14 +1012,30 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    public async Task CompleteOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, string? modifiedKey, string? pointLockKey, string? readKey, bool readExists, long readRevision, KeyValueDurability durability, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, CancellationToken cancellationToken)
+    public async Task CompleteOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
         {
-            kahunaNode.CompleteOperation(transactionId, operationId, modifiedKey, pointLockKey, readKey, readExists, readRevision, durability, cachedType, cachedRevision, cachedTimestamp);
+            kahunaNode.CompleteOperation(transactionId, operationId, payload);
             await Task.CompletedTask;
             return;
         }
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public async Task<TransactionWorkingSet?> GetTransactionWorkingSet(string node, string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+            return await Task.FromResult(kahunaNode.GetTransactionWorkingSet(transactionId));
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public async Task<(KeyValueResponseType, TransactionWorkingSet?)> CloseTransaction(string node, string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+            return await kahunaNode.CloseTransaction(transactionId, cancellationToken);
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }

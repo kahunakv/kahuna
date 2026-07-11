@@ -944,10 +944,16 @@ internal sealed class KeyValuesManager : IDisposable
 
         await LocateAndCompleteOperation(
             coordinatorKey, transactionId, operationId,
-            modifiedKey: applied ? key : null,
-            pointLockKey: applied ? key : null,
-            readKey: null, readExists: false, readRevision: 0,
-            durability, type, revision, lastModified, cancellationToken);
+            new OperationCompletionPayload
+            {
+                ModifiedKey = applied ? key : null,
+                AcquiredPointLock = applied ? key : null,
+                Durability = durability,
+                CachedType = type,
+                CachedRevision = revision,
+                CachedTimestamp = lastModified
+            },
+            cancellationToken);
 
         return (type, revision, lastModified);
     }
@@ -1038,9 +1044,15 @@ internal sealed class KeyValuesManager : IDisposable
 
         await LocateAndCompleteOperation(
             coordinatorKey, transactionId, operationId,
-            modifiedKey: null, pointLockKey: null,
-            readKey: key, readExists: exists, readRevision: exists ? entry!.Revision : -1,
-            durability, type, exists ? entry!.Revision : 0, exists ? entry!.LastModified : HLCTimestamp.Zero, cancellationToken);
+            new OperationCompletionPayload
+            {
+                Read = new KeyValueTransactionReadKey { Key = key, Durability = durability, Exists = exists, Revision = exists ? entry!.Revision : -1 },
+                Durability = durability,
+                CachedType = type,
+                CachedRevision = exists ? entry!.Revision : 0,
+                CachedTimestamp = exists ? entry!.LastModified : HLCTimestamp.Zero
+            },
+            cancellationToken);
 
         return (type, entry);
     }
@@ -1148,10 +1160,16 @@ internal sealed class KeyValuesManager : IDisposable
 
         await LocateAndCompleteOperation(
             coordinatorKey, transactionId, operationId,
-            modifiedKey: applied ? key : null,
-            pointLockKey: applied ? key : null,
-            readKey: null, readExists: false, readRevision: 0,
-            durability, type, revision, lastModified, cancellationToken);
+            new OperationCompletionPayload
+            {
+                ModifiedKey = applied ? key : null,
+                AcquiredPointLock = applied ? key : null,
+                Durability = durability,
+                CachedType = type,
+                CachedRevision = revision,
+                CachedTimestamp = lastModified
+            },
+            cancellationToken);
 
         return (type, revision, lastModified);
     }
@@ -1200,10 +1218,16 @@ internal sealed class KeyValuesManager : IDisposable
 
         await LocateAndCompleteOperation(
             coordinatorKey, transactionId, operationId,
-            modifiedKey: applied ? key : null,
-            pointLockKey: applied ? key : null,
-            readKey: null, readExists: false, readRevision: 0,
-            durability, type, revision, lastModified, cancellationToken);
+            new OperationCompletionPayload
+            {
+                ModifiedKey = applied ? key : null,
+                AcquiredPointLock = applied ? key : null,
+                Durability = durability,
+                CachedType = type,
+                CachedRevision = revision,
+                CachedTimestamp = lastModified
+            },
+            cancellationToken);
 
         return (type, revision, lastModified);
     }
@@ -1265,10 +1289,13 @@ internal sealed class KeyValuesManager : IDisposable
 
         await LocateAndCompleteOperation(
             coordinatorKey, transactionId, operationId,
-            modifiedKey: null,
-            pointLockKey: acquired ? key : null,
-            readKey: null, readExists: false, readRevision: 0,
-            durability, type, 0, HLCTimestamp.Zero, cancellationToken);
+            new OperationCompletionPayload
+            {
+                AcquiredPointLock = acquired ? key : null,
+                Durability = durability,
+                CachedType = type
+            },
+            cancellationToken);
 
         return (type, resultKey, resultDurability, holder);
     }
@@ -1287,12 +1314,60 @@ internal sealed class KeyValuesManager : IDisposable
         string prefixKey,
         int expiresMs,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
-        return locator.LocateAndTryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability, cancellationToken);
+        if (transactionId.IsNull() || operationId.IsEmpty || string.IsNullOrEmpty(coordinatorKey))
+            return locator.LocateAndTryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability, cancellationToken);
+
+        return RegisterAndAcquireExclusivePrefixLock(transactionId, coordinatorKey, operationId, prefixKey, expiresMs, durability, cancellationToken);
     }
-    
+
+    /// <summary>
+    /// Register-remote wrapper for a transaction-scoped exclusive prefix-lock acquire: registers the
+    /// operation and, on a confirmed lock, records the held prefix lock into the coordinator-owned lock
+    /// set. A retry under the same operation id reports the lock as already held by this transaction.
+    /// </summary>
+    private async Task<KeyValueResponseType> RegisterAndAcquireExclusivePrefixLock(
+        HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string prefixKey,
+        int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        (OperationRegistrationOutcome outcome, _, _, _) =
+            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.PrefixLock, OperationDigest.ForPrefixLockAcquire(prefixKey, expiresMs, durability), cancellationToken);
+
+        switch (outcome)
+        {
+            case OperationRegistrationOutcome.AlreadyCompleted:
+                return KeyValueResponseType.Locked;
+            case OperationRegistrationOutcome.AlreadyPending:
+            case OperationRegistrationOutcome.RejectedCapacity:
+                return KeyValueResponseType.MustRetry;
+            case OperationRegistrationOutcome.RejectedSessionClosed:
+                return KeyValueResponseType.Aborted;
+            case OperationRegistrationOutcome.RejectedDuplicate:
+                return KeyValueResponseType.Errored;
+        }
+
+        KeyValueResponseType type =
+            await locator.LocateAndTryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability, cancellationToken);
+
+        bool acquired = type == KeyValueResponseType.Locked;
+
+        await LocateAndCompleteOperation(
+            coordinatorKey, transactionId, operationId,
+            new OperationCompletionPayload
+            {
+                AcquiredPrefixLock = acquired ? prefixKey : null,
+                Durability = durability,
+                CachedType = type
+            },
+            cancellationToken);
+
+        return type;
+    }
+
     /// <summary>
     /// Locates the leader node for the given keys and executes the TryAcquireManyExclusiveLocks request.
     /// </summary>
@@ -1356,13 +1431,15 @@ internal sealed class KeyValuesManager : IDisposable
 
         bool released = type == KeyValueResponseType.Unlocked;
 
-        // An Unlocked completion is interpreted as a lock removal by the node-local completion below.
         await LocateAndCompleteOperation(
             coordinatorKey, transactionId, operationId,
-            modifiedKey: null,
-            pointLockKey: released ? key : null,
-            readKey: null, readExists: false, readRevision: 0,
-            durability, type, 0, HLCTimestamp.Zero, cancellationToken);
+            new OperationCompletionPayload
+            {
+                ReleasedPointLock = released ? key : null,
+                Durability = durability,
+                CachedType = type
+            },
+            cancellationToken);
 
         return (type, resultKey);
     }
@@ -1380,10 +1457,58 @@ internal sealed class KeyValuesManager : IDisposable
         HLCTimestamp transactionId,
         string prefixKey,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
-        return locator.LocateAndTryReleaseExclusivePrefixLock(transactionId, prefixKey, durability, cancellationToken);
+        if (transactionId.IsNull() || operationId.IsEmpty || string.IsNullOrEmpty(coordinatorKey))
+            return locator.LocateAndTryReleaseExclusivePrefixLock(transactionId, prefixKey, durability, cancellationToken);
+
+        return RegisterAndReleaseExclusivePrefixLock(transactionId, coordinatorKey, operationId, prefixKey, durability, cancellationToken);
+    }
+
+    /// <summary>
+    /// Register-remote wrapper for a transaction-scoped exclusive prefix-lock release: on a confirmed
+    /// release, drops the held prefix lock from the coordinator-owned lock set so it is not released
+    /// again at finalize.
+    /// </summary>
+    private async Task<KeyValueResponseType> RegisterAndReleaseExclusivePrefixLock(
+        HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string prefixKey,
+        KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        (OperationRegistrationOutcome outcome, _, _, _) =
+            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.PrefixLock, OperationDigest.ForPrefixLockRelease(prefixKey, durability), cancellationToken);
+
+        switch (outcome)
+        {
+            case OperationRegistrationOutcome.AlreadyCompleted:
+                return KeyValueResponseType.Unlocked;
+            case OperationRegistrationOutcome.AlreadyPending:
+            case OperationRegistrationOutcome.RejectedCapacity:
+                return KeyValueResponseType.MustRetry;
+            case OperationRegistrationOutcome.RejectedSessionClosed:
+                return KeyValueResponseType.Aborted;
+            case OperationRegistrationOutcome.RejectedDuplicate:
+                return KeyValueResponseType.Errored;
+        }
+
+        KeyValueResponseType type =
+            await locator.LocateAndTryReleaseExclusivePrefixLock(transactionId, prefixKey, durability, cancellationToken);
+
+        bool released = type == KeyValueResponseType.Unlocked;
+
+        await LocateAndCompleteOperation(
+            coordinatorKey, transactionId, operationId,
+            new OperationCompletionPayload
+            {
+                ReleasedPrefixLock = released ? prefixKey : null,
+                Durability = durability,
+                CachedType = type
+            },
+            cancellationToken);
+
+        return type;
     }
 
     public Task<(KeyValueResponseType, HLCTimestamp HolderTransactionId)> LocateAndTryAcquireRangeLock(
@@ -1394,8 +1519,75 @@ internal sealed class KeyValuesManager : IDisposable
         int expiresMs,
         KeyValueDurability durability,
         RangeLockMode mode,
-        CancellationToken cancellationToken
-    ) => locator.LocateAndTryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, cancellationToken);
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
+    )
+    {
+        if (transactionId.IsNull() || operationId.IsEmpty || string.IsNullOrEmpty(coordinatorKey))
+            return locator.LocateAndTryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, cancellationToken);
+
+        return RegisterAndAcquireRangeLock(transactionId, coordinatorKey, operationId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, cancellationToken);
+    }
+
+    /// <summary>
+    /// Register-remote wrapper for a transaction-scoped range-lock acquire, upgrade, or renewal: registers
+    /// the operation and, on a confirmed lock, records the range descriptor (bounds + mode) into the
+    /// coordinator-owned lock set. A confirmed re-acquire at a different mode replaces the held mode, so a
+    /// shared→exclusive upgrade or heartbeat renewal does not leave a duplicate descriptor.
+    /// </summary>
+    private async Task<(KeyValueResponseType, HLCTimestamp)> RegisterAndAcquireRangeLock(
+        HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string prefix,
+        string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs,
+        KeyValueDurability durability, RangeLockMode mode, CancellationToken cancellationToken,
+        Func<Task>? afterSnapshot = null)
+    {
+        (OperationRegistrationOutcome outcome, _, _, _) =
+            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.RangeLock,
+                OperationDigest.ForRangeLockAcquire(prefix, startKey, startInclusive, endKey, endInclusive, mode, expiresMs, durability), cancellationToken);
+
+        switch (outcome)
+        {
+            case OperationRegistrationOutcome.AlreadyCompleted:
+                return (KeyValueResponseType.Locked, transactionId);
+            case OperationRegistrationOutcome.AlreadyPending:
+            case OperationRegistrationOutcome.RejectedCapacity:
+                return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
+            case OperationRegistrationOutcome.RejectedSessionClosed:
+                return (KeyValueResponseType.Aborted, HLCTimestamp.Zero);
+            case OperationRegistrationOutcome.RejectedDuplicate:
+                return (KeyValueResponseType.Errored, HLCTimestamp.Zero);
+        }
+
+        (KeyValueResponseType type, HLCTimestamp holder) =
+            await locator.LocateAndTryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, afterSnapshot, cancellationToken);
+
+        bool acquired = type == KeyValueResponseType.Locked;
+        RangeLockKey range = new(prefix, startKey, startInclusive, endKey, endInclusive, durability);
+
+        await LocateAndCompleteOperation(
+            coordinatorKey, transactionId, operationId,
+            new OperationCompletionPayload
+            {
+                AcquiredRangeLock = acquired ? (range, mode) : null,
+                Durability = durability,
+                CachedType = type
+            },
+            cancellationToken);
+
+        return (type, holder);
+    }
+
+    /// <summary>
+    /// Test seam: runs the registered range-lock acquire with a hook fired after the range-map snapshot,
+    /// so a split can be injected into the acquire window to exercise the generation fence and its
+    /// effect on the coordinator-owned working set.
+    /// </summary>
+    internal Task<(KeyValueResponseType, HLCTimestamp)> RegisterAndAcquireRangeLockWithHook(
+        HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string prefix,
+        string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs,
+        KeyValueDurability durability, RangeLockMode mode, Func<Task> afterSnapshot, CancellationToken cancellationToken)
+        => RegisterAndAcquireRangeLock(transactionId, coordinatorKey, operationId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, cancellationToken, afterSnapshot);
 
     public Task<(KeyValueResponseType, HLCTimestamp HolderTransactionId)> LocateAndTryAcquireExclusiveRangeLock(
         HLCTimestamp transactionId,
@@ -1424,10 +1616,60 @@ internal sealed class KeyValuesManager : IDisposable
         string? startKey, bool startInclusive,
         string? endKey,   bool endInclusive,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
-        return locator.LocateAndTryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken);
+        if (transactionId.IsNull() || operationId.IsEmpty || string.IsNullOrEmpty(coordinatorKey))
+            return locator.LocateAndTryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken);
+
+        return RegisterAndReleaseRangeLock(transactionId, coordinatorKey, operationId, prefix, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken);
+    }
+
+    /// <summary>
+    /// Register-remote wrapper for a transaction-scoped range-lock release: on a confirmed release, drops
+    /// the range descriptor from the coordinator-owned lock set so it is not released again at finalize.
+    /// </summary>
+    private async Task<KeyValueResponseType> RegisterAndReleaseRangeLock(
+        HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string prefix,
+        string? startKey, bool startInclusive, string? endKey, bool endInclusive,
+        KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        (OperationRegistrationOutcome outcome, _, _, _) =
+            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.RangeLock,
+                OperationDigest.ForRangeLockRelease(prefix, startKey, startInclusive, endKey, endInclusive, durability), cancellationToken);
+
+        switch (outcome)
+        {
+            case OperationRegistrationOutcome.AlreadyCompleted:
+                return KeyValueResponseType.Unlocked;
+            case OperationRegistrationOutcome.AlreadyPending:
+            case OperationRegistrationOutcome.RejectedCapacity:
+                return KeyValueResponseType.MustRetry;
+            case OperationRegistrationOutcome.RejectedSessionClosed:
+                return KeyValueResponseType.Aborted;
+            case OperationRegistrationOutcome.RejectedDuplicate:
+                return KeyValueResponseType.Errored;
+        }
+
+        KeyValueResponseType type =
+            await locator.LocateAndTryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken);
+
+        bool released = type == KeyValueResponseType.Unlocked;
+        RangeLockKey range = new(prefix, startKey, startInclusive, endKey, endInclusive, durability);
+
+        await LocateAndCompleteOperation(
+            coordinatorKey, transactionId, operationId,
+            new OperationCompletionPayload
+            {
+                ReleasedRangeLock = released ? range : null,
+                Durability = durability,
+                CachedType = type
+            },
+            cancellationToken);
+
+        return type;
     }
 
     /// <summary>
@@ -1544,9 +1786,72 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public Task<KeyValueGetByBucketResult> LocateAndGetByBucket(HLCTimestamp transactionId, string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+    public Task<KeyValueGetByBucketResult> LocateAndGetByBucket(HLCTimestamp transactionId, string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
     {
-        return locator.LocateAndGetByBucket(transactionId, prefixedKey, readTimestamp, durability, cancellationToken);
+        if (transactionId.IsNull() || operationId.IsEmpty || string.IsNullOrEmpty(coordinatorKey))
+            return locator.LocateAndGetByBucket(transactionId, prefixedKey, readTimestamp, durability, cancellationToken);
+
+        return RegisterAndGetByBucket(transactionId, coordinatorKey, operationId, prefixedKey, readTimestamp, durability, cancellationToken);
+    }
+
+    /// <summary>
+    /// Register-remote wrapper for a transaction-scoped bucket scan: registers the operation so it is
+    /// fenced against finalize, then records every returned item as a read observation with point-read-set
+    /// semantics. The scan asserts only that these exact items were observed at these revisions — not that
+    /// no other key matches the bucket predicate.
+    /// </summary>
+    private async Task<KeyValueGetByBucketResult> RegisterAndGetByBucket(
+        HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string prefixedKey,
+        HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        (OperationRegistrationOutcome outcome, _, _, _) =
+            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Scan,
+                OperationDigest.ForScan(prefixedKey, readTimestamp.L, readTimestamp.C, durability), cancellationToken);
+
+        switch (outcome)
+        {
+            case OperationRegistrationOutcome.AlreadyCompleted:
+            case OperationRegistrationOutcome.AlreadyPending:
+            case OperationRegistrationOutcome.RejectedCapacity:
+                // A pending or already-completed scan re-runs the read without re-recording observations;
+                // the read-set already holds the first observation and reads are idempotent.
+                if (outcome == OperationRegistrationOutcome.AlreadyCompleted)
+                    return await locator.LocateAndGetByBucket(transactionId, prefixedKey, readTimestamp, durability, cancellationToken);
+                return new KeyValueGetByBucketResult(KeyValueResponseType.MustRetry, []);
+            case OperationRegistrationOutcome.RejectedSessionClosed:
+                return new KeyValueGetByBucketResult(KeyValueResponseType.Aborted, []);
+            case OperationRegistrationOutcome.RejectedDuplicate:
+                return new KeyValueGetByBucketResult(KeyValueResponseType.Errored, []);
+        }
+
+        KeyValueGetByBucketResult result =
+            await locator.LocateAndGetByBucket(transactionId, prefixedKey, readTimestamp, durability, cancellationToken);
+
+        List<KeyValueTransactionReadKey>? observations = null;
+        if (result.Type == KeyValueResponseType.Get && result.Items.Count > 0)
+        {
+            observations = new(result.Items.Count);
+            foreach ((string itemKey, ReadOnlyKeyValueEntry entry) in result.Items)
+                observations.Add(new KeyValueTransactionReadKey
+                {
+                    Key = itemKey,
+                    Durability = durability,
+                    Exists = entry.State == KeyValueState.Set,
+                    Revision = entry.Revision
+                });
+        }
+
+        await LocateAndCompleteOperation(
+            coordinatorKey, transactionId, operationId,
+            new OperationCompletionPayload
+            {
+                ReadObservations = observations,
+                Durability = durability,
+                CachedType = result.Type
+            },
+            cancellationToken);
+
+        return result;
     }
 
     internal Task<KeyValueGetByBucketResult> LocateAndGetByBucketWithHooks(
@@ -1672,9 +1977,9 @@ internal sealed class KeyValuesManager : IDisposable
     }
 
     /// <summary>Routes an operation completion to the coordinator node identified by <paramref name="coordinatorKey"/>.</summary>
-    public Task LocateAndCompleteOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, string? modifiedKey, string? pointLockKey, string? readKey, bool readExists, long readRevision, KeyValueDurability durability, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, CancellationToken cancellationToken)
+    public Task LocateAndCompleteOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken)
     {
-        return locator.LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, modifiedKey, pointLockKey, readKey, readExists, readRevision, durability, cachedType, cachedRevision, cachedTimestamp, cancellationToken);
+        return locator.LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, cancellationToken);
     }
 
     /// <summary>Node-local registration: the session lives here (this node is the coordinator for the key).</summary>
@@ -1690,33 +1995,119 @@ internal sealed class KeyValuesManager : IDisposable
     }
 
     /// <summary>Node-local completion: folds the confirmed effect into the coordinator-owned working set.</summary>
-    public void CompleteOperation(HLCTimestamp transactionId, TransactionOperationId operationId, string? modifiedKey, string? pointLockKey, string? readKey, bool readExists, long readRevision, KeyValueDurability durability, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp)
+    public void CompleteOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload)
     {
         // A transient outcome must never be cached as terminal — cancel the registration so a retry
         // with the same operation id re-registers as new and actually applies the mutation.
-        if (cachedType == KeyValueResponseType.MustRetry)
+        if (payload.CachedType == KeyValueResponseType.MustRetry)
         {
             txCoordinator.CancelOperation(transactionId, operationId);
             return;
         }
 
-        OperationEffect? effect = null;
-        if (!string.IsNullOrEmpty(modifiedKey) || !string.IsNullOrEmpty(pointLockKey) || !string.IsNullOrEmpty(readKey))
+        OperationEffect? effect = BuildEffect(payload);
+        txCoordinator.CompleteOperation(transactionId, operationId, effect, new CachedOperationResponse(payload.CachedType, payload.CachedRevision, payload.CachedTimestamp));
+    }
+
+    /// <summary>Maps a completion payload into the coordinator-owned working-set effect, or null when it records nothing.</summary>
+    private static OperationEffect? BuildEffect(OperationCompletionPayload payload)
+    {
+        KeyValueDurability durability = payload.Durability;
+
+        bool hasEffect =
+            !string.IsNullOrEmpty(payload.ModifiedKey) ||
+            !string.IsNullOrEmpty(payload.AcquiredPointLock) || !string.IsNullOrEmpty(payload.ReleasedPointLock) ||
+            !string.IsNullOrEmpty(payload.AcquiredPrefixLock) || !string.IsNullOrEmpty(payload.ReleasedPrefixLock) ||
+            payload.AcquiredRangeLock is not null || payload.ReleasedRangeLock is not null ||
+            payload.Read is not null ||
+            (payload.ReadObservations is { Count: > 0 });
+
+        if (!hasEffect)
+            return null;
+
+        return new()
         {
-            // An Unlocked outcome carries the released lock in pointLockKey and removes it from the
-            // held set; every other outcome that carries a pointLockKey adds it.
-            bool isRelease = cachedType == KeyValueResponseType.Unlocked;
+            ModifiedKey = string.IsNullOrEmpty(payload.ModifiedKey) ? null : (payload.ModifiedKey, durability),
+            PointLock = string.IsNullOrEmpty(payload.AcquiredPointLock) ? null : (payload.AcquiredPointLock, durability),
+            RemovePointLock = string.IsNullOrEmpty(payload.ReleasedPointLock) ? null : (payload.ReleasedPointLock, durability),
+            PrefixLock = string.IsNullOrEmpty(payload.AcquiredPrefixLock) ? null : (payload.AcquiredPrefixLock, durability),
+            RemovePrefixLock = string.IsNullOrEmpty(payload.ReleasedPrefixLock) ? null : (payload.ReleasedPrefixLock, durability),
+            RangeLock = payload.AcquiredRangeLock,
+            RemoveRangeLock = payload.ReleasedRangeLock,
+            ReadObservation = payload.Read,
+            ReadObservations = payload.ReadObservations
+        };
+    }
 
-            effect = new()
+    /// <summary>Routes a working-set query to the coordinator node identified by <paramref name="coordinatorKey"/>.</summary>
+    public Task<TransactionWorkingSet?> LocateAndGetTransactionWorkingSet(string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken)
+    {
+        return locator.LocateAndGetTransactionWorkingSet(coordinatorKey, transactionId, cancellationToken);
+    }
+
+    /// <summary>Routes a close-and-snapshot to the coordinator node identified by <paramref name="coordinatorKey"/>.</summary>
+    public Task<(KeyValueResponseType, TransactionWorkingSet?)> LocateAndCloseTransaction(string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken)
+    {
+        return locator.LocateAndCloseTransaction(coordinatorKey, transactionId, cancellationToken);
+    }
+
+    /// <summary>Node-local working-set query: the session lives here (this node leads the coordinator partition).</summary>
+    public TransactionWorkingSet? GetTransactionWorkingSet(HLCTimestamp transactionId)
+    {
+        WorkingSetSnapshot? snapshot = txCoordinator.GetTransactionWorkingSet(transactionId);
+        return snapshot is null ? null : MapWorkingSet(snapshot);
+    }
+
+    /// <summary>Node-local close-and-snapshot: freezes the session and returns its frozen working set.</summary>
+    public async Task<(KeyValueResponseType, TransactionWorkingSet?)> CloseTransaction(HLCTimestamp transactionId, CancellationToken cancellationToken)
+    {
+        (KeyValueResponseType type, WorkingSetSnapshot? snapshot) = await txCoordinator.CloseTransaction(transactionId, cancellationToken);
+        return (type, snapshot is null ? null : MapWorkingSet(snapshot));
+    }
+
+    private static TransactionWorkingSet MapWorkingSet(WorkingSetSnapshot snapshot) => new()
+    {
+        ModifiedKeys = ToModifiedList(snapshot.ModifiedKeys),
+        AcquiredLocks = ToModifiedList(snapshot.LocksAcquired),
+        AcquiredPrefixLocks = ToModifiedList(snapshot.PrefixLocksAcquired),
+        AcquiredRangeLocks = ToRangeLockList(snapshot.RangeLocksAcquired),
+        ReadKeys = snapshot.ReadKeys is null
+            ? []
+            : snapshot.ReadKeys.Values.OrderBy(r => r.Key, StringComparer.Ordinal).ToList(),
+        PendingOperationCount = snapshot.PendingOperationCount
+    };
+
+    private static List<KeyValueTransactionRangeLock> ToRangeLockList(IReadOnlyDictionary<RangeLockKey, RangeLockMode>? ranges)
+    {
+        if (ranges is null)
+            return [];
+
+        return ranges
+            .OrderBy(x => x.Key.Prefix, StringComparer.Ordinal)
+            .ThenBy(x => x.Key.StartKey, StringComparer.Ordinal)
+            .ThenBy(x => x.Key.EndKey, StringComparer.Ordinal)
+            .Select(x => new KeyValueTransactionRangeLock
             {
-                ModifiedKey = string.IsNullOrEmpty(modifiedKey) ? null : (modifiedKey, durability),
-                PointLock = string.IsNullOrEmpty(pointLockKey) || isRelease ? null : (pointLockKey, durability),
-                RemovePointLock = string.IsNullOrEmpty(pointLockKey) || !isRelease ? null : (pointLockKey, durability),
-                ReadObservation = string.IsNullOrEmpty(readKey) ? null : new KeyValueTransactionReadKey { Key = readKey, Durability = durability, Exists = readExists, Revision = readRevision }
-            };
-        }
+                Prefix = x.Key.Prefix,
+                StartKey = x.Key.StartKey,
+                StartInclusive = x.Key.StartInclusive,
+                EndKey = x.Key.EndKey,
+                EndInclusive = x.Key.EndInclusive,
+                Durability = x.Key.Durability,
+                Mode = x.Value
+            })
+            .ToList();
+    }
 
-        txCoordinator.CompleteOperation(transactionId, operationId, effect, new CachedOperationResponse(cachedType, cachedRevision, cachedTimestamp));
+    private static List<KeyValueTransactionModifiedKey> ToModifiedList(IReadOnlySet<(string Key, KeyValueDurability Durability)>? set)
+    {
+        if (set is null)
+            return [];
+
+        return set
+            .OrderBy(x => x.Key, StringComparer.Ordinal)
+            .Select(x => new KeyValueTransactionModifiedKey { Key = x.Key, Durability = x.Durability })
+            .ToList();
     }
 
     /// <summary>

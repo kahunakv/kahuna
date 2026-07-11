@@ -1476,9 +1476,19 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         throw new NotSupportedException("Operation registration over the gRPC inter-node transport is not implemented yet.");
     }
 
-    public Task CompleteOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, string? modifiedKey, string? pointLockKey, string? readKey, bool readExists, long readRevision, KeyValueDurability durability, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, CancellationToken cancellationToken)
+    public Task CompleteOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken)
     {
         throw new NotSupportedException("Operation completion over the gRPC inter-node transport is not implemented yet.");
+    }
+
+    public Task<TransactionWorkingSet?> GetTransactionWorkingSet(string node, string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken)
+    {
+        throw new NotSupportedException("Working-set query over the gRPC inter-node transport is not implemented yet.");
+    }
+
+    public Task<(KeyValueResponseType, TransactionWorkingSet?)> CloseTransaction(string node, string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken)
+    {
+        throw new NotSupportedException("Close-and-snapshot over the gRPC inter-node transport is not implemented yet.");
     }
 
     private static IEnumerable<GrpcTransactionModifiedKey> GetArquiredOrModifiedItems(List<KeyValueTransactionModifiedKey> items)

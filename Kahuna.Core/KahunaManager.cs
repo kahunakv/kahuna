@@ -531,10 +531,12 @@ public sealed class KahunaManager : IKahuna, IDisposable
         string prefixKey,
         int expiresMs,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
-        return keyValues.LocateAndTryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability, cancellationToken);
+        return keyValues.LocateAndTryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability, cancellationToken, coordinatorKey, operationId);
     }
 
     /// <summary>
@@ -585,10 +587,12 @@ public sealed class KahunaManager : IKahuna, IDisposable
         HLCTimestamp transactionId,
         string prefixKey,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
-        return keyValues.LocateAndTryReleaseExclusivePrefixLock(transactionId, prefixKey, durability, cancellationToken);
+        return keyValues.LocateAndTryReleaseExclusivePrefixLock(transactionId, prefixKey, durability, cancellationToken, coordinatorKey, operationId);
     }
 
     public Task<(KeyValueResponseType, HLCTimestamp HolderTransactionId)> LocateAndTryAcquireRangeLock(
@@ -599,8 +603,10 @@ public sealed class KahunaManager : IKahuna, IDisposable
         int expiresMs,
         KeyValueDurability durability,
         RangeLockMode mode,
-        CancellationToken cancellationToken
-    ) => keyValues.LocateAndTryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, cancellationToken);
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
+    ) => keyValues.LocateAndTryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, cancellationToken, coordinatorKey, operationId);
 
     public Task<(KeyValueResponseType, HLCTimestamp HolderTransactionId)> LocateAndTryAcquireExclusiveRangeLock(
         HLCTimestamp transactionId,
@@ -618,10 +624,12 @@ public sealed class KahunaManager : IKahuna, IDisposable
         string? startKey, bool startInclusive,
         string? endKey,   bool endInclusive,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
-        return keyValues.LocateAndTryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken);
+        return keyValues.LocateAndTryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken, coordinatorKey, operationId);
     }
 
     /// <summary>
@@ -762,10 +770,12 @@ public sealed class KahunaManager : IKahuna, IDisposable
         string prefixedKey,
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
-        return keyValues.LocateAndGetByBucket(transactionId, prefixedKey, readTimestamp, durability, cancellationToken);
+        return keyValues.LocateAndGetByBucket(transactionId, prefixedKey, readTimestamp, durability, cancellationToken, coordinatorKey, operationId);
     }
 
     public Task<KeyValueGetByRangeResult> LocateAndGetByRange(
@@ -852,9 +862,9 @@ public sealed class KahunaManager : IKahuna, IDisposable
         return keyValues.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
     }
 
-    public Task LocateAndCompleteOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, string? modifiedKey, string? pointLockKey, string? readKey, bool readExists, long readRevision, KeyValueDurability durability, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, CancellationToken cancellationToken)
+    public Task LocateAndCompleteOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken)
     {
-        return keyValues.LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, modifiedKey, pointLockKey, readKey, readExists, readRevision, durability, cachedType, cachedRevision, cachedTimestamp, cancellationToken);
+        return keyValues.LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, cancellationToken);
     }
 
     public (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp) BeginOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest)
@@ -862,9 +872,29 @@ public sealed class KahunaManager : IKahuna, IDisposable
         return keyValues.BeginOperation(transactionId, operationId, kind, payloadDigest);
     }
 
-    public void CompleteOperation(HLCTimestamp transactionId, TransactionOperationId operationId, string? modifiedKey, string? pointLockKey, string? readKey, bool readExists, long readRevision, KeyValueDurability durability, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp)
+    public void CompleteOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload)
     {
-        keyValues.CompleteOperation(transactionId, operationId, modifiedKey, pointLockKey, readKey, readExists, readRevision, durability, cachedType, cachedRevision, cachedTimestamp);
+        keyValues.CompleteOperation(transactionId, operationId, payload);
+    }
+
+    public Task<TransactionWorkingSet?> LocateAndGetTransactionWorkingSet(string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken)
+    {
+        return keyValues.LocateAndGetTransactionWorkingSet(coordinatorKey, transactionId, cancellationToken);
+    }
+
+    public Task<(KeyValueResponseType, TransactionWorkingSet?)> LocateAndCloseTransaction(string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken)
+    {
+        return keyValues.LocateAndCloseTransaction(coordinatorKey, transactionId, cancellationToken);
+    }
+
+    public TransactionWorkingSet? GetTransactionWorkingSet(HLCTimestamp transactionId)
+    {
+        return keyValues.GetTransactionWorkingSet(transactionId);
+    }
+
+    public Task<(KeyValueResponseType, TransactionWorkingSet?)> CloseTransaction(HLCTimestamp transactionId, CancellationToken cancellationToken)
+    {
+        return keyValues.CloseTransaction(transactionId, cancellationToken);
     }
 
     /// <summary>
@@ -1473,6 +1503,19 @@ public sealed class KahunaManager : IKahuna, IDisposable
     ) => keyValues.LocateAndTryAcquireExclusiveRangeLockWithHook(
             transactionId, prefix, startKey, startInclusive, endKey, endInclusive,
             expiresMs, durability, afterSnapshot, cancellationToken);
+
+    /// <summary>
+    /// Test seam: the register-remote range-lock acquire with a split-injection hook, so a test can
+    /// assert how the generation fence interacts with the coordinator-owned working set (a fenced acquire
+    /// must record no range descriptor).
+    /// </summary>
+    internal Task<(KeyValueResponseType, HLCTimestamp)> RegisterAndAcquireRangeLockWithHook(
+        HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string prefix,
+        string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs,
+        KeyValueDurability durability, RangeLockMode mode, Func<Task> afterSnapshot, CancellationToken cancellationToken
+    ) => keyValues.RegisterAndAcquireRangeLockWithHook(
+            transactionId, coordinatorKey, operationId, prefix, startKey, startInclusive, endKey, endInclusive,
+            expiresMs, durability, mode, afterSnapshot, cancellationToken);
 
     // ── Backup / PITR ──────────────────────────────────────────────────────────────────────
 

@@ -68,6 +68,60 @@ internal static class OperationDigest
         return hash.GetHashAndReset();
     }
 
+    internal static byte[] ForPrefixLockAcquire(string prefixKey, int expiresMs, KeyValueDurability durability)
+    {
+        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        AppendTag(hash, OperationKind.PrefixLock);
+        AppendString(hash, prefixKey);
+        AppendInt(hash, expiresMs);
+        AppendInt(hash, (int)durability);
+        return hash.GetHashAndReset();
+    }
+
+    internal static byte[] ForPrefixLockRelease(string prefixKey, KeyValueDurability durability)
+    {
+        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        AppendTag(hash, OperationKind.PrefixLock);
+        // A distinct constant separates a release declaration from an acquire of the same prefix.
+        AppendInt(hash, -1);
+        AppendString(hash, prefixKey);
+        AppendInt(hash, (int)durability);
+        return hash.GetHashAndReset();
+    }
+
+    internal static byte[] ForRangeLockAcquire(string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, RangeLockMode mode, int expiresMs, KeyValueDurability durability)
+    {
+        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        AppendTag(hash, OperationKind.RangeLock);
+        AppendBounds(hash, prefix, startKey, startInclusive, endKey, endInclusive);
+        AppendInt(hash, (int)mode);
+        AppendInt(hash, expiresMs);
+        AppendInt(hash, (int)durability);
+        return hash.GetHashAndReset();
+    }
+
+    internal static byte[] ForRangeLockRelease(string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability)
+    {
+        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        AppendTag(hash, OperationKind.RangeLock);
+        // A distinct constant separates a release declaration from an acquire of the same bounds.
+        AppendInt(hash, -1);
+        AppendBounds(hash, prefix, startKey, startInclusive, endKey, endInclusive);
+        AppendInt(hash, (int)durability);
+        return hash.GetHashAndReset();
+    }
+
+    internal static byte[] ForScan(string prefixedKey, long readTimestampL, long readTimestampC, KeyValueDurability durability)
+    {
+        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        AppendTag(hash, OperationKind.Scan);
+        AppendString(hash, prefixedKey);
+        AppendLong(hash, readTimestampL);
+        AppendLong(hash, readTimestampC);
+        AppendInt(hash, (int)durability);
+        return hash.GetHashAndReset();
+    }
+
     internal static byte[] ForRead(OperationKind kind, string key, long revision, KeyValueDurability durability)
     {
         using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -76,6 +130,15 @@ internal static class OperationDigest
         AppendLong(hash, revision);
         AppendInt(hash, (int)durability);
         return hash.GetHashAndReset();
+    }
+
+    private static void AppendBounds(IncrementalHash hash, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive)
+    {
+        AppendString(hash, prefix);
+        AppendBytes(hash, startKey is null ? null : Encoding.UTF8.GetBytes(startKey));
+        AppendInt(hash, startInclusive ? 1 : 0);
+        AppendBytes(hash, endKey is null ? null : Encoding.UTF8.GetBytes(endKey));
+        AppendInt(hash, endInclusive ? 1 : 0);
     }
 
     private static void AppendTag(IncrementalHash hash, OperationKind kind) => AppendInt(hash, (int)kind);

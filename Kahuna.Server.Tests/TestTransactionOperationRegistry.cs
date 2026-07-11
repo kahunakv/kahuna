@@ -250,6 +250,86 @@ public sealed class TestTransactionOperationRegistry
     }
 
     [Fact]
+    public void CompleteOperation_PrefixLockAddThenRemove()
+    {
+        TransactionContext ctx = NewContext();
+
+        ctx.BeginOperation(Op(1), OperationKind.PrefixLock, null);
+        ctx.CompleteOperation(Op(1), new OperationEffect { PrefixLock = ("users:", KeyValueDurability.Persistent) },
+            new CachedOperationResponse(KeyValueResponseType.Locked, 0, HLCTimestamp.Zero));
+        Assert.Contains(("users:", KeyValueDurability.Persistent), ctx.GetWorkingSetSnapshot().PrefixLocksAcquired!);
+
+        ctx.BeginOperation(Op(2), OperationKind.PrefixLock, null);
+        ctx.CompleteOperation(Op(2), new OperationEffect { RemovePrefixLock = ("users:", KeyValueDurability.Persistent) },
+            new CachedOperationResponse(KeyValueResponseType.Unlocked, 0, HLCTimestamp.Zero));
+        Assert.Empty(ctx.GetWorkingSetSnapshot().PrefixLocksAcquired!);
+    }
+
+    [Fact]
+    public void CompleteOperation_RangeLockAddThenRemove()
+    {
+        TransactionContext ctx = NewContext();
+        RangeLockKey range = new("orders", "a", true, "z", false, KeyValueDurability.Persistent);
+
+        ctx.BeginOperation(Op(1), OperationKind.RangeLock, null);
+        ctx.CompleteOperation(Op(1), new OperationEffect { RangeLock = (range, RangeLockMode.Exclusive) },
+            new CachedOperationResponse(KeyValueResponseType.Locked, 0, HLCTimestamp.Zero));
+
+        IReadOnlyDictionary<RangeLockKey, RangeLockMode> held = ctx.GetWorkingSetSnapshot().RangeLocksAcquired!;
+        Assert.True(held.TryGetValue(range, out RangeLockMode mode));
+        Assert.Equal(RangeLockMode.Exclusive, mode);
+
+        ctx.BeginOperation(Op(2), OperationKind.RangeLock, null);
+        ctx.CompleteOperation(Op(2), new OperationEffect { RemoveRangeLock = range },
+            new CachedOperationResponse(KeyValueResponseType.Unlocked, 0, HLCTimestamp.Zero));
+        Assert.Empty(ctx.GetWorkingSetSnapshot().RangeLocksAcquired!);
+    }
+
+    [Fact]
+    public void CompleteOperation_RangeLockUpgrade_ReplacesModeWithoutDuplicating()
+    {
+        TransactionContext ctx = NewContext();
+        RangeLockKey range = new("orders", "a", true, "z", false, KeyValueDurability.Persistent);
+
+        // Shared acquire, then a confirmed shared→exclusive upgrade of the same bounds.
+        ctx.BeginOperation(Op(1), OperationKind.RangeLock, null);
+        ctx.CompleteOperation(Op(1), new OperationEffect { RangeLock = (range, RangeLockMode.Shared) },
+            new CachedOperationResponse(KeyValueResponseType.Locked, 0, HLCTimestamp.Zero));
+
+        ctx.BeginOperation(Op(2), OperationKind.RangeLock, null);
+        ctx.CompleteOperation(Op(2), new OperationEffect { RangeLock = (range, RangeLockMode.Exclusive) },
+            new CachedOperationResponse(KeyValueResponseType.Locked, 0, HLCTimestamp.Zero));
+
+        IReadOnlyDictionary<RangeLockKey, RangeLockMode> held = ctx.GetWorkingSetSnapshot().RangeLocksAcquired!;
+        // The upgrade replaces the mode of the matching descriptor — one entry, now exclusive.
+        Assert.Single(held);
+        Assert.Equal(RangeLockMode.Exclusive, held[range]);
+    }
+
+    [Fact]
+    public void CompleteOperation_ScanRecordsEveryReturnedItem()
+    {
+        TransactionContext ctx = NewContext();
+        ctx.BeginOperation(Op(1), OperationKind.Scan, null);
+        ctx.CompleteOperation(
+            Op(1),
+            new OperationEffect
+            {
+                ReadObservations =
+                [
+                    new KeyValueTransactionReadKey { Key = "u:1", Durability = KeyValueDurability.Persistent, Exists = true, Revision = 4 },
+                    new KeyValueTransactionReadKey { Key = "u:2", Durability = KeyValueDurability.Persistent, Exists = true, Revision = 7 }
+                ]
+            },
+            new CachedOperationResponse(KeyValueResponseType.Get, 0, HLCTimestamp.Zero));
+
+        IReadOnlyDictionary<(string, KeyValueDurability), KeyValueTransactionReadKey> reads = ctx.GetWorkingSetSnapshot().ReadKeys!;
+        Assert.Equal(2, reads.Count);
+        Assert.Equal(4, reads[("u:1", KeyValueDurability.Persistent)].Revision);
+        Assert.Equal(7, reads[("u:2", KeyValueDurability.Persistent)].Revision);
+    }
+
+    [Fact]
     public void WorkingSetSnapshot_IsIndependentCopy()
     {
         TransactionContext ctx = NewContext();

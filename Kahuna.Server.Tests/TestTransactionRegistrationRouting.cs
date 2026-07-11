@@ -63,8 +63,16 @@ public sealed class TestTransactionRegistrationRouting
             HLCTimestamp cachedTs = new(1, 500, 0);
             await nodes[2].Kahuna.LocateAndCompleteOperation(
                 handle.CoordinatorKey, handle.TransactionId, op1,
-                modifiedKey: "k1", pointLockKey: "k1", readKey: null, readExists: false, readRevision: 0,
-                KeyValueDurability.Persistent, KeyValueResponseType.Set, cachedRevision: 7, cachedTs, ct);
+                new OperationCompletionPayload
+                {
+                    ModifiedKey = "k1",
+                    AcquiredPointLock = "k1",
+                    Durability = KeyValueDurability.Persistent,
+                    CachedType = KeyValueResponseType.Set,
+                    CachedRevision = 7,
+                    CachedTimestamp = cachedTs
+                },
+                ct);
 
             // Retry with the same id (from yet another node) → cached response, no re-apply.
             (OperationRegistrationOutcome replayOutcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp) =
@@ -272,6 +280,228 @@ public sealed class TestTransactionRegistrationRouting
         finally
         {
             await LeaveAll(nodes);
+        }
+    }
+
+    [Fact]
+    public async Task WorkingSetQuery_AndCloseSnapshot_ReflectServerRecordedEffects_AndFenceNewOps()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+
+            // Record a write and a point lock under the transaction.
+            (KeyValueResponseType setType, _, _) = await SetWithRetry(nodes[1], handle, TransactionOperationId.NewRandom(), "v1"u8.ToArray(), ct);
+            Assert.Equal(KeyValueResponseType.Set, setType);
+            KeyValueResponseType lockType = await LockWithRetry(() =>
+                nodes[1].Kahuna.LocateAndTryAcquireExclusiveLock(handle.TransactionId, "lk1", 10_000, KeyValueDurability.Persistent, ct, handle.CoordinatorKey, TransactionOperationId.NewRandom()), ct);
+            Assert.Equal(KeyValueResponseType.Locked, lockType);
+
+            // Live working-set query reflects the confirmed effects.
+            TransactionWorkingSet? live = await nodes[2].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(live);
+            Assert.Contains(live!.ModifiedKeys, m => m.Key == "wk1");
+            Assert.Contains(live.AcquiredLocks, m => m.Key == "lk1");
+
+            // Close-and-snapshot returns the frozen set and is idempotent.
+            (KeyValueResponseType closeType, TransactionWorkingSet? frozen) = await nodes[0].Kahuna.LocateAndCloseTransaction(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.Equal(KeyValueResponseType.Set, closeType);
+            Assert.NotNull(frozen);
+            Assert.Contains(frozen!.ModifiedKeys, m => m.Key == "wk1");
+
+            (KeyValueResponseType closeAgain, TransactionWorkingSet? frozenAgain) = await nodes[1].Kahuna.LocateAndCloseTransaction(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.Equal(KeyValueResponseType.Set, closeAgain);
+            Assert.NotNull(frozenAgain);
+
+            // After close, a new transaction-scoped operation is fenced out.
+            (KeyValueResponseType afterClose, _, _) = await nodes[2].Kahuna.LocateAndTrySetKeyValue(
+                handle.TransactionId, "wk2", "late"u8.ToArray(), null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent,
+                ct, 0, handle.CoordinatorKey, TransactionOperationId.NewRandom());
+            Assert.Equal(KeyValueResponseType.Aborted, afterClose);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    [Fact]
+    public async Task PrefixLock_RoutesAndDedups_AndWorkingSetReflectsHeldPrefixLock()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+
+            const string prefix = "pfx:";
+            TransactionOperationId acquireOp = TransactionOperationId.NewRandom();
+            KeyValueResponseType acquired = await PrefixLockWithRetry(() =>
+                nodes[1].Kahuna.LocateAndTryAcquireExclusivePrefixLock(handle.TransactionId, prefix, 10_000, KeyValueDurability.Persistent, ct, handle.CoordinatorKey, acquireOp), ct);
+            Assert.Equal(KeyValueResponseType.Locked, acquired);
+
+            // Replay the acquire under the same op id → reported as already held by this transaction.
+            Assert.Equal(KeyValueResponseType.Locked,
+                await nodes[2].Kahuna.LocateAndTryAcquireExclusivePrefixLock(handle.TransactionId, prefix, 10_000, KeyValueDurability.Persistent, ct, handle.CoordinatorKey, acquireOp));
+
+            // The coordinator working set reflects the held prefix lock.
+            TransactionWorkingSet? live = await nodes[2].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(live);
+            Assert.Contains(live!.AcquiredPrefixLocks, m => m.Key == prefix);
+
+            TransactionOperationId releaseOp = TransactionOperationId.NewRandom();
+            Assert.Equal(KeyValueResponseType.Unlocked,
+                await nodes[0].Kahuna.LocateAndTryReleaseExclusivePrefixLock(handle.TransactionId, prefix, KeyValueDurability.Persistent, ct, handle.CoordinatorKey, releaseOp));
+
+            // Replay the release under the same op id → idempotent Unlocked.
+            Assert.Equal(KeyValueResponseType.Unlocked,
+                await nodes[1].Kahuna.LocateAndTryReleaseExclusivePrefixLock(handle.TransactionId, prefix, KeyValueDurability.Persistent, ct, handle.CoordinatorKey, releaseOp));
+
+            // After a confirmed release the descriptor is dropped from the coordinator-owned lock set.
+            TransactionWorkingSet? afterRelease = await nodes[0].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(afterRelease);
+            Assert.DoesNotContain(afterRelease!.AcquiredPrefixLocks, m => m.Key == prefix);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    [Fact]
+    public async Task RangeLock_AcquireUpgradeRelease_RoutesAndDedups_AndWorkingSetReflectsRange()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+
+            const string prefix = "rng";
+            const string startKey = "a";
+            const string endKey = "z";
+
+            // Shared acquire.
+            TransactionOperationId sharedOp = TransactionOperationId.NewRandom();
+            KeyValueResponseType shared = await RangeLockWithRetry(() =>
+                nodes[1].Kahuna.LocateAndTryAcquireRangeLock(handle.TransactionId, prefix, startKey, true, endKey, false, 10_000, KeyValueDurability.Persistent, RangeLockMode.Shared, ct, handle.CoordinatorKey, sharedOp), ct);
+            Assert.Equal(KeyValueResponseType.Locked, shared);
+
+            // Replay under the same op id → idempotent, still held by this transaction.
+            (KeyValueResponseType replayShared, _) =
+                await nodes[2].Kahuna.LocateAndTryAcquireRangeLock(handle.TransactionId, prefix, startKey, true, endKey, false, 10_000, KeyValueDurability.Persistent, RangeLockMode.Shared, ct, handle.CoordinatorKey, sharedOp);
+            Assert.Equal(KeyValueResponseType.Locked, replayShared);
+
+            TransactionWorkingSet? afterShared = await nodes[2].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(afterShared);
+            KeyValueTransactionRangeLock? sharedDesc = afterShared!.AcquiredRangeLocks.SingleOrDefault(r => r.Prefix == prefix && r.StartKey == startKey && r.EndKey == endKey);
+            Assert.NotNull(sharedDesc);
+            Assert.Equal(RangeLockMode.Shared, sharedDesc!.Mode);
+
+            // Shared→exclusive upgrade of the same bounds (a distinct op id, distinct digest).
+            TransactionOperationId upgradeOp = TransactionOperationId.NewRandom();
+            KeyValueResponseType upgraded = await RangeLockWithRetry(() =>
+                nodes[0].Kahuna.LocateAndTryAcquireRangeLock(handle.TransactionId, prefix, startKey, true, endKey, false, 10_000, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct, handle.CoordinatorKey, upgradeOp), ct);
+            Assert.Equal(KeyValueResponseType.Locked, upgraded);
+
+            TransactionWorkingSet? afterUpgrade = await nodes[1].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(afterUpgrade);
+            // The upgrade replaces the mode of the matching descriptor — exactly one range, now exclusive.
+            List<KeyValueTransactionRangeLock> matching = afterUpgrade!.AcquiredRangeLocks.Where(r => r.Prefix == prefix && r.StartKey == startKey && r.EndKey == endKey).ToList();
+            Assert.Single(matching);
+            Assert.Equal(RangeLockMode.Exclusive, matching[0].Mode);
+
+            // Release drops the descriptor.
+            TransactionOperationId releaseOp = TransactionOperationId.NewRandom();
+            Assert.Equal(KeyValueResponseType.Unlocked,
+                await nodes[2].Kahuna.LocateAndTryReleaseExclusiveRangeLock(handle.TransactionId, prefix, startKey, true, endKey, false, KeyValueDurability.Persistent, ct, handle.CoordinatorKey, releaseOp));
+
+            // Replay the release → idempotent Unlocked.
+            Assert.Equal(KeyValueResponseType.Unlocked,
+                await nodes[0].Kahuna.LocateAndTryReleaseExclusiveRangeLock(handle.TransactionId, prefix, startKey, true, endKey, false, KeyValueDurability.Persistent, ct, handle.CoordinatorKey, releaseOp));
+
+            TransactionWorkingSet? afterRelease = await nodes[1].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(afterRelease);
+            Assert.DoesNotContain(afterRelease!.AcquiredRangeLocks, r => r.Prefix == prefix && r.StartKey == startKey && r.EndKey == endKey);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    [Fact]
+    public async Task Scan_RegistersAndRecordsReturnedItemsAsReadObservations()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            const string bucket = "scanbucket";
+            string k1 = bucket + "/one";
+            string k2 = bucket + "/two";
+
+            // Seed two committed keys under the bucket (non-transactional).
+            (KeyValueResponseType s1, _, _) = await nodes[0].Kahuna.LocateAndTrySetKeyValue(HLCTimestamp.Zero, k1, "v1"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            (KeyValueResponseType s2, _, _) = await nodes[0].Kahuna.LocateAndTrySetKeyValue(HLCTimestamp.Zero, k2, "v2"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, s1);
+            Assert.Equal(KeyValueResponseType.Set, s2);
+
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Optimistic }, ct);
+
+            TransactionOperationId scanOp = TransactionOperationId.NewRandom();
+            KeyValueGetByBucketResult result = await nodes[1].Kahuna.LocateAndGetByBucket(handle.TransactionId, bucket, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct, handle.CoordinatorKey, scanOp);
+            Assert.Equal(KeyValueResponseType.Get, result.Type);
+            Assert.Equal(2, result.Items.Count);
+
+            // Every returned item is recorded in the coordinator read set with point-read-set semantics.
+            TransactionWorkingSet? live = await nodes[2].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(live);
+            Assert.Contains(live!.ReadKeys, r => r.Key == k1);
+            Assert.Contains(live.ReadKeys, r => r.Key == k2);
+
+            // Replaying the scan under the same op id re-runs the read without changing the recorded set.
+            KeyValueGetByBucketResult replay = await nodes[2].Kahuna.LocateAndGetByBucket(handle.TransactionId, bucket, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct, handle.CoordinatorKey, scanOp);
+            Assert.Equal(KeyValueResponseType.Get, replay.Type);
+            Assert.Equal(2, replay.Items.Count);
+
+            TransactionWorkingSet? afterReplay = await nodes[0].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(afterReplay);
+            Assert.Equal(2, afterReplay!.ReadKeys.Count);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    private static async Task<KeyValueResponseType> PrefixLockWithRetry(Func<Task<KeyValueResponseType>> op, CancellationToken ct)
+    {
+        long deadline = Environment.TickCount64 + 10_000;
+        while (true)
+        {
+            KeyValueResponseType type = await op();
+            if (type != KeyValueResponseType.MustRetry || Environment.TickCount64 >= deadline)
+                return type;
+            await Task.Delay(50, ct);
+        }
+    }
+
+    private static async Task<KeyValueResponseType> RangeLockWithRetry(Func<Task<(KeyValueResponseType, HLCTimestamp)>> op, CancellationToken ct)
+    {
+        long deadline = Environment.TickCount64 + 10_000;
+        while (true)
+        {
+            (KeyValueResponseType type, _) = await op();
+            if (type != KeyValueResponseType.MustRetry || Environment.TickCount64 >= deadline)
+                return type;
+            await Task.Delay(50, ct);
         }
     }
 
