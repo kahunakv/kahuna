@@ -58,16 +58,56 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
     /// <param name="message"></param>
     /// <returns></returns>
     private KeyValueResponse LockExistingKeysByPrefix(HLCTimestamp currentTime, KeyValueRequest message)
-    {        
+    {
         if (message.TransactionId == HLCTimestamp.Zero)
-            return KeyValueStaticResponses.ErroredResponse;               
-        
+            return KeyValueStaticResponses.ErroredResponse;
+
+        // Stamp per-key write intents atomically: if any key in the bucket is mid-replication we abort
+        // and roll back every intent already written this call, so a mid-loop failure never strands a
+        // partial set of intents on the bucket's keys. The single LocksByPrefix.Add below is the O(1)
+        // record that actually blocks the whole bucket (including phantom keys) on the write path.
+        List<(KeyValueEntry Entry, KeyValueWriteIntent? Prior)>? stamped = null;
+
         foreach ((string key, KeyValueEntry entry) in context.Store.GetByBucket(message.Key))
         {
-            KeyValueResponse response = TryLock(currentTime, message.TransactionId, key, message.ExpiresMs, entry);                                                    
+            // clients must retry operations until an in-flight replication on the key completes,
+            // before its intent can be safely overwritten.
+            if (entry.ReplicationIntent is not null)
+            {
+                if (entry.ReplicationIntent.Expires - currentTime > TimeSpan.Zero)
+                {
+                    if (stamped is not null)
+                        foreach ((KeyValueEntry rollback, KeyValueWriteIntent? prior) in stamped)
+                            rollback.WriteIntent = prior;
 
-            if (response.Type != KeyValueResponseType.Locked)
-                return response;
+                    return KeyValueStaticResponses.WaitingForReplicationResponse;
+                }
+
+                entry.ReplicationIntent = null;
+            }
+
+            if (entry.WriteIntent is not null)
+            {
+                // if the transactionId is the same owner no need to re-stamp the intent
+                if (entry.WriteIntent.TransactionId == message.TransactionId)
+                    continue;
+
+                // Another transaction holds a live write intent on this key. Leave it in place —
+                // the LocksByPrefix entry is enough to block that transaction's commit as a phantom.
+                if (entry.WriteIntent.Expires != HLCTimestamp.Zero && entry.WriteIntent.Expires - currentTime > TimeSpan.Zero)
+                    continue;
+            }
+
+            stamped ??= [];
+            stamped.Add((entry, entry.WriteIntent));
+
+            entry.WriteIntent = new()
+            {
+                TransactionId = message.TransactionId,
+                Expires = message.TransactionId + message.ExpiresMs,
+            };
+
+            context.Logger.LogAssignedWriteIntent(key, message.TransactionId);
         }
 
         context.LocksByPrefix.Add(message.Key, new()
@@ -75,43 +115,7 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
             TransactionId = message.TransactionId,
             Expires = message.TransactionId + message.ExpiresMs
         });
-                
-        return KeyValueStaticResponses.LockedResponse;
-    }           
-    
-    private KeyValueResponse TryLock(HLCTimestamp currentTime, HLCTimestamp transactionId, string key, int expiresMs, KeyValueEntry entry)
-    {            
-        // Validate if there's an active replication enty on the key/value entry
-        // clients must retry operations to make sure the entry is fully replicated
-        // before modifying the entry
-        if (entry.ReplicationIntent is not null)
-        {
-            if (entry.ReplicationIntent.Expires - currentTime > TimeSpan.Zero)                
-                return KeyValueStaticResponses.WaitingForReplicationResponse;
-                
-            entry.ReplicationIntent = null;
-        }
-        
-        if (entry.WriteIntent is not null)
-        {
-            // if the transactionId is the same owner no need to acquire the lock
-            if (entry.WriteIntent.TransactionId == transactionId)
-                return KeyValueStaticResponses.LockedResponse;
 
-            // Another transaction holds a live write intent on this key. Skip overwriting it —
-            // the LocksByPrefix entry is enough to block that transaction's commit as a phantom.
-            if (entry.WriteIntent.Expires != HLCTimestamp.Zero && entry.WriteIntent.Expires - currentTime > TimeSpan.Zero)
-                return KeyValueStaticResponses.LockedResponse;
-        }
-
-        entry.WriteIntent = new()
-        {
-            TransactionId = transactionId,
-            Expires = transactionId + expiresMs,
-        };        
-        
-        context.Logger.LogAssignedWriteIntent(key, transactionId);
-        
         return KeyValueStaticResponses.LockedResponse;
-    }     
+    }
 }

@@ -85,15 +85,19 @@ requests for that single thread). Two rules keep it cheap:
 
 1. **It only runs when over budget.** A collect pass is considered roughly every few hundred
    operations, but it does real work only if the actor is above its limits.
-2. **It does bounded work per pass.** At most `CollectBatchMax` (default 1,000) entries are evicted
-   in one cycle. If that isn't enough to get back under budget, it schedules a follow-up rather than
-   running long.
+2. **It does bounded work per pass.** A single cycle both *evicts* at most `CollectBatchMax`
+   (default 1,000) entries **and** *inspects* at most that many — the expiry heap and the LRU walk
+   stop after `CollectBatchMax` looks even when those entries turn out to be ineligible (dirty or
+   intent-held) and nothing is reclaimed. If more work remains, it schedules a follow-up rather than
+   running long. The LRU walk keeps a **cursor** so each follow-up resumes where the last one stopped
+   instead of re-scanning a large pinned prefix; once a full pass completes it stops re-scheduling.
 
-The crucial property is that **the collector never scans the whole store.** A naive design would
-walk every cached key each cycle looking for things to remove; with hundreds of thousands of keys,
-that walk would freeze the partition repeatedly. Instead, the collector consults three purpose-built
-structures that are kept up to date as keys change, and each reclamation step costs time proportional
-to *what it reclaims*, not to how much is cached.
+The crucial property is that **a single collect cycle never scans the whole store.** A naive design
+would walk every cached key each cycle looking for things to remove; with hundreds of thousands of
+keys — or a store where most entries are temporarily pinned — that walk would freeze the partition
+repeatedly. Instead, the collector consults three purpose-built structures that are kept up to date as
+keys change, and caps how many entries it *looks at* per mailbox turn, so one cycle's cost is bounded
+by the batch budget, not by how much is cached or how much is currently ineligible.
 
 ### 4.1 Tombstone queue — reclaiming deleted keys
 
@@ -287,8 +291,9 @@ General guidance:
 
 Each partition is a single-threaded actor with a sorted in-memory cache bounded by a per-actor budget.
 Deleted keys, expired keys, and cold keys are reclaimed by a collector that consults a tombstone
-queue, an expiry heap, and an intrusive LRU list — so it only ever touches the entries it actually
-reclaims, never the whole store. Two rules keep reclamation safe: never drop an entry that's mid-
+queue, an expiry heap, and an intrusive LRU list, and inspects at most a batch's worth of entries per
+cycle — resuming via a cursor and a self-scheduled follow-up rather than scanning the whole store on
+one mailbox turn. Two rules keep reclamation safe: never drop an entry that's mid-
 operation (has an intent), and never drop one whose latest change might not be on disk yet (is dirty).
 Persistent data dropped from the cache is harmless because reads fall back to disk; ephemeral data is
 memory-only by design. Per-entry history (revisions and transaction snapshots) is trimmed where it

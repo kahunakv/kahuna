@@ -31,8 +31,9 @@ internal sealed class KeyValueEntry
     public long Revision { get; set; }
 
     /// <summary>
-    /// The highest revision confirmed written to disk. Entry is dirty (ineligible for eviction
-    /// until the flush safety window elapses) when <see cref="Revision"/> &gt; FlushedRevision.
+    /// The highest revision confirmed written to disk. Entry is dirty (ineligible for eviction)
+    /// while <see cref="Revision"/> &gt; FlushedRevision — advanced only by a flush acknowledgement
+    /// from the background writer after a confirmed store, never by elapsed time.
     /// Ephemeral entries set this equal to <see cref="Revision"/> at commit time — they have no
     /// disk copy, so the guard never applies. Entries loaded from disk are initialized to
     /// <see cref="Revision"/> as well. Default -1 ensures a newly-committed persistent entry is
@@ -104,15 +105,14 @@ internal sealed class KeyValueEntry
     internal KeyValueEntry? LruNext;
 
     /// <summary>
-    /// Returns true when this entry's latest committed revision may not yet be on disk and the
-    /// entry is therefore ineligible for eviction.  Both conditions must hold: the revision counter
-    /// is ahead of what was last confirmed flushed, AND the entry was modified recently enough that
-    /// the flush cycle may not have run yet (time-guard proxy for the missing flush-ack).
+    /// Returns true when this entry's latest committed revision is not yet confirmed on disk and the
+    /// entry is therefore ineligible for eviction. The single condition is that the revision counter
+    /// is ahead of what the background writer has acknowledged flushing; a dirty entry stays pinned
+    /// until that acknowledgement arrives, regardless of how much time has passed — evicting it early
+    /// would drop the only cached copy of a committed-but-unflushed revision.
     /// Ephemeral entries always have FlushedRevision == Revision and return false.
     /// </summary>
-    public bool IsDirty(long safetyWindowMs, HLCTimestamp currentTime) =>
-        Revision > FlushedRevision &&
-        (currentTime - LastModified) < TimeSpan.FromMilliseconds(safetyWindowMs);
+    public bool IsDirty() => Revision > FlushedRevision;
 
     /// <summary>
     /// Finds the most recent archived revision whose <see cref="KeyValueRevisionEntry.LastModified"/>

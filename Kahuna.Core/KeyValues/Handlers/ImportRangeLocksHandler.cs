@@ -1,4 +1,6 @@
 
+using Kommander.Time;
+
 namespace Kahuna.Server.KeyValues.Handlers;
 
 /// <summary>
@@ -23,14 +25,25 @@ internal sealed class ImportRangeLocksHandler : BaseHandler
         if (message.RangeLockImportList is null || message.RangeLockImportList.Count == 0)
             return KeyValueStaticResponses.LockedResponse;
 
+        HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
+
         if (!context.LocksByRange.TryGetValue(message.Key, out List<KeyValueRangeLock>? locks))
         {
             locks = [];
             context.LocksByRange[message.Key] = locks;
         }
+        else
+        {
+            // Prune expired destination locks first so re-import dedups against live locks only.
+            RangeLockChecks.PruneExpired(locks, currentTime, int.MaxValue);
+        }
 
         foreach (KeyValueRangeLock entry in message.RangeLockImportList)
         {
+            // Never import an already-expired lock as if it were live.
+            if (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime <= TimeSpan.Zero)
+                continue;
+
             // Deduplicate: skip if this tx already has an overlapping entry (handles re-import).
             bool duplicate = false;
             foreach (KeyValueRangeLock existing in locks)

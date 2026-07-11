@@ -29,7 +29,15 @@ public sealed class KahunaConfiguration
     public int ScriptCacheMaxEntries { get; set; } = 1_000;
     
     public int DefaultTransactionTimeout { get; set; }
-    
+
+    /// <summary>
+    /// Upper bound, in milliseconds, on how long a single two-phase-commit <c>CommitLogs</c>/<c>RollbackLogs</c>
+    /// Raft wait may block before it is cancelled and returns a retryable <c>OperationCancelled</c>
+    /// (mapped to <c>MustRetry</c>) so the coordinator re-drives the same ticket against the settled
+    /// partition instead of parking on a stuck leader. A value &lt;= 0 disables the deadline (unbounded wait).
+    /// </summary>
+    public int Phase2CommitTimeout { get; set; } = 5000;
+
     public int RevisionsToKeepCached { get; set; }
     
     public TimeSpan CacheEntryTtl { get; set; }

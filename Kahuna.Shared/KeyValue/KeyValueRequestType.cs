@@ -35,4 +35,5 @@ public enum KeyValueRequestType
     GetSafeTimestamp,
     ResumeRead,
     InvalidateOrApply,
+    FlushAck,
 }

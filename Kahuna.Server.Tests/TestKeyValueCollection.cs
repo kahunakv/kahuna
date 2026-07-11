@@ -127,7 +127,9 @@ public sealed class TestKeyValueCollection
                 Value = payload,
                 State = KeyValueState.Set,
                 LastUsed = now,
-                Expires = HLCTimestamp.Zero
+                Expires = HLCTimestamp.Zero,
+                Revision = 0,
+                FlushedRevision = 0   // clean (flushed): this test exercises the byte budget, not the dirty guard
             });
         }
 
@@ -558,6 +560,8 @@ public sealed class TestKeyValueCollection
             State = state,
             LastUsed = lastUsed,
             Expires = expires,
+            Revision = 0,
+            FlushedRevision = 0,   // clean (flushed): these entries exercise budget/eviction, not the dirty guard
             ReplicationIntent = replicationIntent
         });
     }

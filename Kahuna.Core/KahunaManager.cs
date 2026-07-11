@@ -107,17 +107,26 @@ public sealed class KahunaManager : IKahuna, IDisposable
 
         SnapshotFloorStore snapshotFloorStore = new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
 
+        // Late-bound bridge so the background writer can acknowledge flushes back to the key-value
+        // layer; the writer is spawned before the KeyValuesManager exists, so it is wired below.
+        FlushNotificationSink flushNotificationSink = new();
+
         backgroundWriter = actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
             "background-writer",
             raft,
             persistenceBackend,
             snapshotFloorStore,
             configuration,
-            logger
+            logger,
+            flushNotificationSink
         );
 
         this.locks = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);
         this.keyValues = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger, snapshotFloorStore);
+
+        // Now that the key-value router exists, route flush acknowledgements to the owning actor so
+        // it can advance FlushedRevision (making committed-but-unflushed entries eligible for eviction).
+        flushNotificationSink.OnKeyValueFlushed = keyValues.NotifyFlushed;
         this.sequencer = new(keyValues, logger);
 
         // Register the key-range data-movement hook once, here, so every host (embedded,

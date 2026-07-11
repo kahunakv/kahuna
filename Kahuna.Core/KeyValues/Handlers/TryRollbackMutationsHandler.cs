@@ -166,9 +166,17 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
 
         int partitionId = ResolvePartition(key);
 
+        // Bound the phase-two Raft wait so a stuck partition cannot park this actor indefinitely.
+        // On the deadline the rollback returns the retryable OperationCancelled (classified transient
+        // below), and the coordinator re-drives the same ticket — idempotent once it rolls back.
+        // A non-positive timeout disables the bound.
+        int timeoutMs = context.Configuration.Phase2CommitTimeout;
+        using CancellationTokenSource? cts = timeoutMs > 0 ? new CancellationTokenSource(timeoutMs) : null;
+
         (bool success, RaftOperationStatus status, long logIndex) = await context.Raft.RollbackLogs(
             partitionId,
-            proposalTicketId
+            proposalTicketId,
+            cts?.Token ?? CancellationToken.None
         );
 
         if (!success)

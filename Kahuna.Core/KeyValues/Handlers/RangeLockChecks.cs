@@ -40,6 +40,29 @@ internal static class RangeLockChecks
         return false;
     }
 
+    /// <summary>
+    /// Removes expired range locks from <paramref name="locks"/> in place, inspecting at most
+    /// <paramref name="inspectionBudget"/> entries. A lock with <c>Expires == Zero</c> (no deadline)
+    /// is never pruned. Iterates back-to-front so removal does not disturb the scan. Returns true when
+    /// the list is now empty, letting the caller drop the owning bucket from <c>LocksByRange</c>.
+    /// Expired range locks are otherwise only cleared by a matching release, so an abandoned
+    /// transaction's lock would linger indefinitely and be transferred as live on a split/merge; this
+    /// is the shared prune used on acquire, export, import, and the periodic collector sweep.
+    /// </summary>
+    internal static bool PruneExpired(List<KeyValueRangeLock> locks, HLCTimestamp currentTime, int inspectionBudget)
+    {
+        int inspected = 0;
+        for (int i = locks.Count - 1; i >= 0 && inspected < inspectionBudget; i--)
+        {
+            inspected++;
+            KeyValueRangeLock rl = locks[i];
+            if (rl.Expires != HLCTimestamp.Zero && rl.Expires - currentTime <= TimeSpan.Zero)
+                locks.RemoveAt(i);
+        }
+
+        return locks.Count == 0;
+    }
+
     internal static bool KeyInRange(string key, KeyValueRangeLock rangeLock)
     {
         if (rangeLock.StartKey is not null)

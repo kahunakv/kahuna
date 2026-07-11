@@ -246,9 +246,17 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
 
         int partitionId = ResolvePartition(key);
 
+        // Bound the phase-two Raft wait so a stuck partition (no leader, quorum loss, WAL stall)
+        // cannot park this actor indefinitely. On the deadline the commit returns the retryable
+        // OperationCancelled (classified transient below), and the coordinator re-drives the same
+        // ticket — an idempotent no-op once it commits. A non-positive timeout disables the bound.
+        int timeoutMs = context.Configuration.Phase2CommitTimeout;
+        using CancellationTokenSource? cts = timeoutMs > 0 ? new CancellationTokenSource(timeoutMs) : null;
+
         (bool success, RaftOperationStatus status, long commitLogId) = await context.Raft.CommitLogs(
             partitionId,
-            proposalTicketId
+            proposalTicketId,
+            cts?.Token ?? CancellationToken.None
         );
 
         if (!success)

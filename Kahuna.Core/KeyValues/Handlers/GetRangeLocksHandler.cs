@@ -1,4 +1,6 @@
 
+using Kommander.Time;
+
 namespace Kahuna.Server.KeyValues.Handlers;
 
 /// <summary>
@@ -16,6 +18,15 @@ internal sealed class GetRangeLocksHandler : BaseHandler
     {
         if (!context.LocksByRange.TryGetValue(message.Key, out List<KeyValueRangeLock>? locks) || locks.Count == 0)
             return KeyValueResponse.ForRangeLocks([]);
+
+        // Prune expired locks before the snapshot so an abandoned lock is never carried into the
+        // split/merge transfer stream as if it were live; drop the bucket if nothing survives.
+        HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
+        if (RangeLockChecks.PruneExpired(locks, currentTime, int.MaxValue))
+        {
+            context.LocksByRange.Remove(message.Key);
+            return KeyValueResponse.ForRangeLocks([]);
+        }
 
         // Return a shallow copy — the caller must not mutate the live list.
         return KeyValueResponse.ForRangeLocks(new List<KeyValueRangeLock>(locks));

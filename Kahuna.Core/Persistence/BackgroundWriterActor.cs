@@ -58,6 +58,8 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
     private readonly ILogger<IKahuna> logger;
 
+    private readonly FlushNotificationSink flushNotificationSink;
+
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> self;
     
     /// <summary>
@@ -131,7 +133,8 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         IPersistenceBackend persistenceBackend,
         SnapshotFloorStore? snapshotFloorStore,
         KahunaConfiguration configuration,
-        ILogger<IKahuna> logger
+        ILogger<IKahuna> logger,
+        FlushNotificationSink flushNotificationSink
     )
     {
         this.raft = raft;
@@ -139,6 +142,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         this.snapshotFloorStore = snapshotFloorStore;
         this.configuration = configuration;
         this.logger = logger;
+        this.flushNotificationSink = flushNotificationSink;
         this.self = context.Self;
 
         TimeSpan writerDelay = configuration.DirtyObjectsWriterDelay > 0
@@ -457,6 +461,12 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             }
 
             logger.LogSuccessfullyStoredKeyValues(items.Count, stopwatch.ElapsedMilliseconds);
+
+            // Acknowledge each durably-stored key-value back to its owning actor so it can advance
+            // FlushedRevision and release the entry for eviction. The actor ignores acks that don't
+            // match a live entry at that revision, so stale/superseded acks are harmless.
+            foreach (PersistenceRequestItem item in items)
+                flushNotificationSink.NotifyFlushed(item.Key, item.Revision);
 
             if (ConfigurationValidator.IsPersistentRevisionRetentionEnabled(configuration)
                 && configuration.PersistentRevisionCleanupOnWrite)

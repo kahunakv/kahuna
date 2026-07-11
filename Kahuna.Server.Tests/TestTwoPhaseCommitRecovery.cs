@@ -38,7 +38,8 @@ public sealed class TestTwoPhaseCommitRecovery
 
     private (RaftManager, KahunaManager) BuildClusterNode(
         int nodeId, int port, string[] peers,
-        MemoryInterNodeCommmunication interNode, InMemoryCommunication comm)
+        MemoryInterNodeCommmunication interNode, InMemoryCommunication comm,
+        int phase2CommitTimeout = 5000)
     {
         ActorSystem actorSystem = new(logger: raftLogger);
 
@@ -76,6 +77,7 @@ public sealed class TestTwoPhaseCommitRecovery
             StoragePath               = "/tmp",
             StorageRevision           = Guid.NewGuid().ToString(),
             DefaultTransactionTimeout = 5000,
+            Phase2CommitTimeout       = phase2CommitTimeout,
             ScriptCacheExpiration     = TimeSpan.FromMinutes(1),
         };
 
@@ -88,7 +90,7 @@ public sealed class TestTwoPhaseCommitRecovery
         return (raft, kahuna);
     }
 
-    private async Task<Node[]> AssembleCluster()
+    private async Task<Node[]> AssembleCluster(int phase2CommitTimeout = 5000)
     {
         MemoryInterNodeCommmunication interNode = new();
         InMemoryCommunication comm = new();
@@ -97,9 +99,9 @@ public sealed class TestTwoPhaseCommitRecovery
         string[] p2 = ["localhost:9400", "localhost:9402"];
         string[] p3 = ["localhost:9400", "localhost:9401"];
 
-        (RaftManager r1, KahunaManager k1) = BuildClusterNode(1, 9400, p1, interNode, comm);
-        (RaftManager r2, KahunaManager k2) = BuildClusterNode(2, 9401, p2, interNode, comm);
-        (RaftManager r3, KahunaManager k3) = BuildClusterNode(3, 9402, p3, interNode, comm);
+        (RaftManager r1, KahunaManager k1) = BuildClusterNode(1, 9400, p1, interNode, comm, phase2CommitTimeout);
+        (RaftManager r2, KahunaManager k2) = BuildClusterNode(2, 9401, p2, interNode, comm, phase2CommitTimeout);
+        (RaftManager r3, KahunaManager k3) = BuildClusterNode(3, 9402, p3, interNode, comm, phase2CommitTimeout);
 
         interNode.SetNodes(new() { { "localhost:9400", k1 }, { "localhost:9401", k2 }, { "localhost:9402", k3 } });
         comm.SetNodes(new() { { "localhost:9400", r1 }, { "localhost:9401", r2 }, { "localhost:9402", r3 } });
@@ -528,6 +530,93 @@ public sealed class TestTwoPhaseCommitRecovery
             Assert.Equal(KeyValueResponseType.Committed, commitResult);
 
             // Read both keys back and verify the new values are durably committed.
+            (KeyValueResponseType r1, ReadOnlyKeyValueEntry? e1) = await nodes[0].Kahuna.LocateAndTryGetValue(
+                HLCTimestamp.Zero, key1, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Get, r1);
+            Assert.Equal(new1, e1!.Value);
+
+            (KeyValueResponseType r2, ReadOnlyKeyValueEntry? e2) = await nodes[0].Kahuna.LocateAndTryGetValue(
+                HLCTimestamp.Zero, key2, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Get, r2);
+            Assert.Equal(new2, e2!.Value);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// Deadline-bounded phase two: with an aggressively small Phase2CommitTimeout the initial
+    /// CommitLogs wait trips before the cross-node commit confirms, returning the retryable
+    /// OperationCancelled (mapped to MustRetry). The commit is nevertheless enqueued at the Raft
+    /// layer and applies shortly after, so the coordinator's next retry re-issues CommitLogs for the
+    /// same ticket and gets an idempotent Success — the transaction commits with no data loss and no
+    /// permanent abort. This exercises the deadline → transient → retry → idempotent-recommit path
+    /// end to end (composing the deadline bound with Task B's retained-state retry and Kommander's
+    /// idempotent re-commit).
+    /// </summary>
+    [Fact]
+    public async Task DeadlineBoundedCommit_TripsThenCommitsViaIdempotentRetry()
+    {
+        // 1 ms per-attempt commit deadline: the initial cross-node CommitLogs cannot confirm that
+        // fast, so it is cancelled and retried; the retry re-drives the same ticket idempotently.
+        Node[] nodes = await AssembleCluster(phase2CommitTimeout: 1);
+        try
+        {
+            CancellationToken ct = TestContext.Current.CancellationToken;
+
+            const string uniqueId = "deadline-txn-session-1";
+            const string key1     = "deadline-txn-alpha";
+            const string key2     = "deadline-txn-beta";
+            byte[]       init1    = "initial-alpha"u8.ToArray();
+            byte[]       init2    = "initial-beta"u8.ToArray();
+            byte[]       new1     = "new-alpha"u8.ToArray();
+            byte[]       new2     = "new-beta"u8.ToArray();
+
+            (KeyValueResponseType si1, _, _) = await RetrySet(() =>
+                nodes[0].Kahuna.LocateAndTrySetKeyValue(HLCTimestamp.Zero, key1, init1, null, -1,
+                    KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct));
+            Assert.Equal(KeyValueResponseType.Set, si1);
+            (KeyValueResponseType si2, _, _) = await RetrySet(() =>
+                nodes[0].Kahuna.LocateAndTrySetKeyValue(HLCTimestamp.Zero, key2, init2, null, -1,
+                    KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct));
+            Assert.Equal(KeyValueResponseType.Set, si2);
+
+            (KeyValueResponseType startType, HLCTimestamp txId) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(
+                    new KeyValueTransactionOptions
+                    {
+                        UniqueId     = uniqueId,
+                        Locking      = KeyValueTransactionLocking.Pessimistic,
+                        AsyncRelease = true,
+                        Timeout      = 10_000,
+                    },
+                    ct);
+            Assert.Equal(KeyValueResponseType.Set, startType);
+            Assert.NotEqual(HLCTimestamp.Zero, txId);
+
+            (KeyValueResponseType set1, _, _) = await RetrySet(() =>
+                nodes[0].Kahuna.LocateAndTrySetKeyValue(txId, key1, new1, null, -1,
+                    KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct));
+            Assert.Equal(KeyValueResponseType.Set, set1);
+            (KeyValueResponseType set2, _, _) = await RetrySet(() =>
+                nodes[0].Kahuna.LocateAndTrySetKeyValue(txId, key2, new2, null, -1,
+                    KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct));
+            Assert.Equal(KeyValueResponseType.Set, set2);
+
+            List<KeyValueTransactionModifiedKey> modKeys =
+            [
+                new() { Key = key1, Durability = KeyValueDurability.Persistent },
+                new() { Key = key2, Durability = KeyValueDurability.Persistent },
+            ];
+
+            // Despite the sub-millisecond per-attempt deadline tripping the initial commit, the
+            // coordinator's idempotent retry drives the transaction to a durable commit.
+            KeyValueResponseType commitResult = await nodes[0].Kahuna.LocateAndCommitTransaction(
+                uniqueId, txId, acquiredLocks: modKeys, modifiedKeys: modKeys, readKeys: [], ct);
+            Assert.Equal(KeyValueResponseType.Committed, commitResult);
+
             (KeyValueResponseType r1, ReadOnlyKeyValueEntry? e1) = await nodes[0].Kahuna.LocateAndTryGetValue(
                 HLCTimestamp.Zero, key1, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
             Assert.Equal(KeyValueResponseType.Get, r1);

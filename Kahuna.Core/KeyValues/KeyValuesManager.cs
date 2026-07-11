@@ -534,6 +534,15 @@ internal sealed class KeyValuesManager : IDisposable
     /// </summary>
     internal (int PartitionId, long Generation) LocateRange(string key) => locator.LocateRange(key);
 
+    /// <summary>
+    /// Routes a flush acknowledgement from the background writer to the persistent actor that owns
+    /// <paramref name="key"/> (same consistent-hash routing as a normal persistent op), so the actor
+    /// can advance the entry's FlushedRevision. Fire-and-forget: a lost ack only delays eviction of
+    /// an already-durable entry, never risks correctness.
+    /// </summary>
+    internal void NotifyFlushed(string key, long revision)
+        => persistentKeyValuesRouter.Send(KeyValueRequest.ForFlushAck(key, revision));
+
     /// <summary>The split-transaction executor. Splits a key range at a given split key.</summary>
     internal RangeSplitter RangeSplitter => rangeSplitter!;
 

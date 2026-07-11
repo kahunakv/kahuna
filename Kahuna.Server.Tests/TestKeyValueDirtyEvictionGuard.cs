@@ -20,10 +20,12 @@ using Nixie;
 namespace Kahuna.Server.Tests;
 
 /// <summary>
-/// Verifies the dirty-eviction guard (Phase A0): entries whose committed revision has not yet been
+/// Verifies the dirty-eviction guard: entries whose committed revision has not yet been
 /// flushed to disk must not be evicted by a collect cycle.  Without the guard a collect cycle that
 /// fires before the BackgroundWriter flush removes the in-memory entry; the next read falls back to
-/// disk and returns a stale revision (or DoesNotExist for a brand-new key).
+/// disk and returns a stale revision (or DoesNotExist for a brand-new key). The guard is purely
+/// revision-based (Revision &gt; FlushedRevision) — a dirty entry stays pinned until the background
+/// writer acknowledges its flush, with no time-based override.
 /// </summary>
 [Collection("ClusterTests")]
 public sealed class TestKeyValueDirtyEvictionGuard
@@ -38,32 +40,38 @@ public sealed class TestKeyValueDirtyEvictionGuard
     // ── guard logic ──────────────────────────────────────────────────────────────────────
 
     [Fact]
-    public void IsDirty_True_WhenRevisionAheadAndWithinWindow()
+    public void IsDirty_True_WhenRevisionAheadOfFlushed()
     {
-        HLCTimestamp now = new(1, TimeSpan.FromSeconds(100).Ticks, 0);
-        KeyValueEntry entry = new() { Revision = 1, FlushedRevision = -1, LastModified = now };
+        KeyValueEntry entry = new() { Revision = 1, FlushedRevision = -1 };
 
-        Assert.True(entry.IsDirty(10_000, now));
+        Assert.True(entry.IsDirty());
     }
 
     [Fact]
     public void IsDirty_False_ForEphemeral_WhenFlushedRevisionEqualsRevision()
     {
-        HLCTimestamp now = new(1, TimeSpan.FromSeconds(100).Ticks, 0);
-        KeyValueEntry entry = new() { Revision = 0, FlushedRevision = 0, LastModified = now };
+        KeyValueEntry entry = new() { Revision = 0, FlushedRevision = 0 };
 
-        Assert.False(entry.IsDirty(10_000, now));
+        Assert.False(entry.IsDirty());
     }
 
     [Fact]
-    public void IsDirty_False_WhenOutsideSafetyWindow()
+    public void IsDirty_True_WhenRevisionAhead_RegardlessOfAge()
     {
-        HLCTimestamp now = new(1, TimeSpan.FromSeconds(100).Ticks, 0);
-        HLCTimestamp oldModified = new(1, TimeSpan.FromSeconds(100 - 30).Ticks, 0); // 30 s ago
-        KeyValueEntry entry = new() { Revision = 1, FlushedRevision = -1, LastModified = oldModified };
+        // No time-based override: an unflushed entry is dirty no matter how long ago it was
+        // modified. This is the core of the flush-ack guard — the only way it becomes clean is
+        // for FlushedRevision to catch up to Revision.
+        KeyValueEntry entry = new()
+        {
+            Revision = 1,
+            FlushedRevision = -1,
+            LastModified = new(1, TimeSpan.FromSeconds(1).Ticks, 0) // ancient
+        };
 
-        // safetyWindowMs = 10 000 ms; 30 s elapsed → outside window
-        Assert.False(entry.IsDirty(10_000, now));
+        Assert.True(entry.IsDirty());
+
+        entry.FlushedRevision = entry.Revision; // flush acknowledged
+        Assert.False(entry.IsDirty());
     }
 
     // ── eviction guard — Step 1 (garbage / tombstone) ────────────────────────────────────
@@ -94,9 +102,9 @@ public sealed class TestKeyValueDirtyEvictionGuard
             Value = Encoding.UTF8.GetBytes("latest-value"),
             State = KeyValueState.Set,
             Revision = 1,
-            FlushedRevision = -1,   // unflushed persistent entry
+            FlushedRevision = -1,   // unflushed persistent entry → dirty
             LastUsed = cold,
-            LastModified = now,     // modified just now → inside safety window
+            LastModified = now,
             Expires = HLCTimestamp.Zero
         });
 
@@ -143,14 +151,17 @@ public sealed class TestKeyValueDirtyEvictionGuard
     }
 
     /// <summary>
-    /// Once the entry's LastModified is outside the safety window it is eligible again.
+    /// An unflushed entry stays pinned no matter how old it is: eligibility is gated purely on the
+    /// flush acknowledgement (FlushedRevision catching up to Revision), never on elapsed time. Once
+    /// the flush is acknowledged the same entry becomes evictable.
     /// </summary>
     [Fact]
-    public void DirtyEntry_BecomesEligible_AfterSafetyWindowElapses()
+    public void DirtyEntry_StaysPinned_UntilFlushAcknowledged_RegardlessOfAge()
     {
-        // With DirtyObjectsWriterDelay=0 the floor kicks in: safetyWindowMs = 10 000 ms.
+        // Budget 0 → every entry is over budget, so the pinned dirty entry alone keeps the store
+        // over budget; once it is acknowledged (clean) the next cycle can actually reclaim it.
         KahunaConfiguration config = CreateConfiguration(dirtyObjectsWriterDelay: 0);
-        config.MaxEntriesPerActor = 5;
+        config.MaxEntriesPerActor = 0;
         config.CollectBatchMax = 100;
 
         (TryCollectHandler handler, KeyValueContext context, RaftManager raft) = CreateHandler(config);
@@ -164,7 +175,7 @@ public sealed class TestKeyValueDirtyEvictionGuard
             Value = Encoding.UTF8.GetBytes("old-value"),
             State = KeyValueState.Set,
             Revision = 1,
-            FlushedRevision = -1,   // revision counter still dirty, but window has elapsed
+            FlushedRevision = -1,   // unflushed — dirty regardless of how long ago it was modified
             LastUsed = oldModified,
             LastModified = oldModified,
             Expires = HLCTimestamp.Zero
@@ -174,11 +185,19 @@ public sealed class TestKeyValueDirtyEvictionGuard
         for (int i = 0; i < 8; i++)
             InsertCleanEntry(context, $"filler/{i:D2}", KeyValueState.Set, now);
 
-        // 9 entries, budget 5 → need to evict 4. stale/key is coldest eligible → evicted.
+        // 9 entries, budget 5 → eviction pressure. stale/key is the coldest LRU victim, but it is
+        // unflushed, so the guard must protect it even though it was modified 30 s ago.
+        handler.Execute();
+
+        Assert.True(context.Store.ContainsKey("stale/key"),
+            "an unflushed entry must stay pinned regardless of age — no time-based eviction override");
+
+        // Acknowledge the flush; the entry is now clean and evictable on the next cycle.
+        context.Store.Get("stale/key")!.FlushedRevision = 1;
         handler.Execute();
 
         Assert.False(context.Store.ContainsKey("stale/key"),
-            "entry outside safety window must be eligible for eviction");
+            "once the flush is acknowledged the entry becomes eligible for eviction");
     }
 
     /// <summary>
@@ -214,7 +233,7 @@ public sealed class TestKeyValueDirtyEvictionGuard
         // Core invariant: IsDirty must be false for an ephemeral entry.
         // This is the property the guard tests — if IsDirty() returned true the entry would be
         // pinned. A future regression that sets FlushedRevision = -1 for ephemeral would break here.
-        Assert.False(context.Store.Get("ephemeral/key")!.IsDirty(10_000, now),
+        Assert.False(context.Store.Get("ephemeral/key")!.IsDirty(),
             "IsDirty must be false for an ephemeral entry (FlushedRevision == Revision)");
 
         handler.Execute();
@@ -351,7 +370,7 @@ public sealed class TestKeyValueDirtyEvictionGuard
         return cfg;
     }
 
-    /// <summary>Clean filler entry: LastModified = Zero puts it outside any safety window.</summary>
+    /// <summary>Clean filler entry: FlushedRevision == Revision → never dirty, always evictable.</summary>
     private static void InsertCleanEntry(KeyValueContext context, string key, KeyValueState state, HLCTimestamp lastUsed)
     {
         context.InsertStoreEntry(key, new KeyValueEntry

@@ -24,7 +24,16 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
         if (message.TransactionId == HLCTimestamp.Zero)
             return KeyValueStaticResponses.ErroredResponse;
 
-        if (context.LocksByRange.TryGetValue(message.Key, out List<KeyValueRangeLock>? existingLocks))
+        // Prune abandoned expired range locks on the way in so they neither block a fresh acquire
+        // nor accumulate on a hot key space; drop the bucket entirely once it holds no live locks.
+        if (context.LocksByRange.TryGetValue(message.Key, out List<KeyValueRangeLock>? existingLocks)
+            && RangeLockChecks.PruneExpired(existingLocks, currentTime, int.MaxValue))
+        {
+            context.LocksByRange.Remove(message.Key);
+            existingLocks = null;
+        }
+
+        if (existingLocks is not null)
         {
             // Idempotency / upgrade: same tx, same range bounds
             foreach (KeyValueRangeLock existing in existingLocks)
@@ -53,10 +62,9 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
                             return KeyValueResponse.Denied(KeyValueResponseType.AlreadyLocked, other.TransactionId);
                     }
 
-                    // Partial-failure inherited from original code: if TryLock fails midway,
-                    // some keys already hold intents while the lock stays Shared. The caller
-                    // will see a non-Locked response and should abort/retry the transaction;
-                    // the orphaned intents expire naturally via their TTL.
+                    // PlaceWriteIntents is atomic: a mid-loop replication conflict rolls back every
+                    // intent it wrote, so a failed promotion leaves the lock Shared with no stray
+                    // exclusive intents. The caller retries the transaction on the non-Locked response.
                     KeyValueResponse intents = PlaceWriteIntents(currentTime, message);
                     if (intents.Type != KeyValueResponseType.Locked)
                         return intents;
@@ -128,43 +136,48 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
         string start = message.StartKey ?? message.Key;
         bool startIncl = message.StartKey is null || message.StartInclusive;
 
+        // Stamp per-key write intents atomically: a mid-loop replication conflict rolls back every
+        // intent written this call, so a failed acquire/promotion never strands intents on the range's
+        // keys. The LocksByRange record installed by the caller is what blocks the write path.
+        List<(KeyValueEntry Entry, KeyValueWriteIntent? Prior)>? stamped = null;
+
         foreach ((string key, KeyValueEntry entry) in context.Store.GetByRange(start, startIncl, message.EndKey, message.EndInclusive, int.MaxValue))
         {
-            KeyValueResponse response = TryLock(currentTime, message.TransactionId, key, message.ExpiresMs, entry);
-            if (response.Type != KeyValueResponseType.Locked)
-                return response;
+            if (entry.ReplicationIntent is not null)
+            {
+                if (entry.ReplicationIntent.Expires - currentTime > TimeSpan.Zero)
+                {
+                    if (stamped is not null)
+                        foreach ((KeyValueEntry rollback, KeyValueWriteIntent? prior) in stamped)
+                            rollback.WriteIntent = prior;
+
+                    return KeyValueStaticResponses.WaitingForReplicationResponse;
+                }
+
+                entry.ReplicationIntent = null;
+            }
+
+            if (entry.WriteIntent is not null)
+            {
+                if (entry.WriteIntent.TransactionId == message.TransactionId)
+                    continue;
+
+                // Another tx holds a live write intent — leave it; LocksByRange will block their commit.
+                if (entry.WriteIntent.Expires != HLCTimestamp.Zero && entry.WriteIntent.Expires - currentTime > TimeSpan.Zero)
+                    continue;
+            }
+
+            stamped ??= [];
+            stamped.Add((entry, entry.WriteIntent));
+
+            entry.WriteIntent = new()
+            {
+                TransactionId = message.TransactionId,
+                Expires       = message.TransactionId + message.ExpiresMs,
+            };
+
+            context.Logger.LogAssignedWriteIntentRangeLock(key, message.TransactionId);
         }
-
-        return KeyValueStaticResponses.LockedResponse;
-    }
-
-    private KeyValueResponse TryLock(HLCTimestamp currentTime, HLCTimestamp transactionId, string key, int expiresMs, KeyValueEntry entry)
-    {
-        if (entry.ReplicationIntent is not null)
-        {
-            if (entry.ReplicationIntent.Expires - currentTime > TimeSpan.Zero)
-                return KeyValueStaticResponses.WaitingForReplicationResponse;
-
-            entry.ReplicationIntent = null;
-        }
-
-        if (entry.WriteIntent is not null)
-        {
-            if (entry.WriteIntent.TransactionId == transactionId)
-                return KeyValueStaticResponses.LockedResponse;
-
-            // Another tx holds a live write intent — skip it; LocksByRange will block their commit.
-            if (entry.WriteIntent.Expires != HLCTimestamp.Zero && entry.WriteIntent.Expires - currentTime > TimeSpan.Zero)
-                return KeyValueStaticResponses.LockedResponse;
-        }
-
-        entry.WriteIntent = new()
-        {
-            TransactionId = transactionId,
-            Expires       = transactionId + expiresMs,
-        };
-
-        context.Logger.LogAssignedWriteIntentRangeLock(key, transactionId);
 
         return KeyValueStaticResponses.LockedResponse;
     }

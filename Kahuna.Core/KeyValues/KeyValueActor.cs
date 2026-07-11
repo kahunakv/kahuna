@@ -361,7 +361,8 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         // Periodic Collect messages and follower-apply InvalidateOrApply messages are
         // internal maintenance — suppress per-message tracing to avoid log spam.
         bool logThis = message.Type != KeyValueRequestType.Collect
-                    && message.Type != KeyValueRequestType.InvalidateOrApply;
+                    && message.Type != KeyValueRequestType.InvalidateOrApply
+                    && message.Type != KeyValueRequestType.FlushAck;
 
         try
         {
@@ -379,7 +380,8 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 );
 
             if (message.Type != KeyValueRequestType.Collect
-                && message.Type != KeyValueRequestType.InvalidateOrApply)
+                && message.Type != KeyValueRequestType.InvalidateOrApply
+                && message.Type != KeyValueRequestType.FlushAck)
             {
                 if (--operations == 0)
                 {
@@ -418,6 +420,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.ReleaseProposal => ReleaseProposal(message),
                 KeyValueRequestType.ResumeRead => ResumeRead(message),
                 KeyValueRequestType.InvalidateOrApply => InvalidateOrApply(message),
+                KeyValueRequestType.FlushAck => FlushAck(message),
                 KeyValueRequestType.Collect => CollectMessage(),
                 _ => KeyValueStaticResponses.ErroredResponse
             };
@@ -659,6 +662,30 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private KeyValueResponse? InvalidateOrApply(KeyValueRequest message)
     {
         return invalidateOrApplyHandler.Execute(message);
+    }
+
+    /// <summary>
+    /// Applies a flush acknowledgement from the background writer: the revision carried in
+    /// <see cref="KeyValueRequest.CompareRevision"/> is now durably on disk for this key.
+    /// Advances <see cref="KeyValueEntry.FlushedRevision"/> so the entry becomes eligible for
+    /// eviction, but only when the acked revision is one this entry actually reached
+    /// (<c>acked &lt;= entry.Revision</c>) — a stale ack for a superseded revision (e.g. the key
+    /// was deleted and re-created at a lower revision) is ignored so it can never mark a newer
+    /// unflushed revision as clean. If the entry is already gone, the ack is a no-op.
+    /// </summary>
+    private KeyValueResponse? FlushAck(KeyValueRequest message)
+    {
+        if (kvContext is null)
+            return null;
+
+        if (!kvContext.Store.TryGetValue(message.Key, out KeyValueEntry? entry) || entry is null)
+            return null;
+
+        long ackedRevision = message.CompareRevision;
+        if (ackedRevision <= entry.Revision && ackedRevision > entry.FlushedRevision)
+            entry.FlushedRevision = ackedRevision;
+
+        return null;
     }
 
     /// <summary>

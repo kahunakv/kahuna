@@ -126,6 +126,29 @@ public sealed class KeyValueRequest : IConsistentHashable
     }
 
     /// <summary>
+    /// Constructs a <c>FlushAck</c> message: the background writer notifying the owning actor that
+    /// <paramref name="key"/> has been durably stored up to <paramref name="revision"/>. The revision
+    /// travels in <see cref="CompareRevision"/> (unused by this message type); routing keys on
+    /// <paramref name="key"/> so it reaches the same actor that holds the entry.
+    /// </summary>
+    internal static KeyValueRequest ForFlushAck(string key, long revision)
+        => new(
+            KeyValueRequestType.FlushAck,
+            HLCTimestamp.Zero,
+            HLCTimestamp.Zero,
+            key,
+            null,
+            null,
+            revision,
+            KeyValueFlags.None,
+            0,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Persistent,
+            0,
+            0,
+            null);
+
+    /// <summary>
     /// Creates a type-only request (e.g. periodic cache collection).
     /// </summary>
     public KeyValueRequest(KeyValueRequestType type)

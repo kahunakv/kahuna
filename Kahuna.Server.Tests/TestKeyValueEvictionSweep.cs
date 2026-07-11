@@ -108,6 +108,93 @@ public sealed class TestKeyValueEvictionSweep
             $"LRU walk visited {stats.LruVisited} — expected ≤ 70 (20 skipped + 50 evicted)");
     }
 
+    // ── bounded inspection: expiry backlog and all-ineligible store ───────────────────
+
+    /// <summary>
+    /// A large backlog of expired-but-dirty entries (deferred, never evicted) must not let a single
+    /// collect cycle pop the whole heap on the mailbox thread. The expiry loop caps *inspections* at
+    /// the batch budget just like the tombstone drain, so it dequeues at most batchMax entries and
+    /// leaves the rest for a later cycle.
+    /// </summary>
+    [Fact]
+    public void Collect_WithLargeStaleExpiryBacklog_InspectsAtMostBatchMax()
+    {
+        const int batchMax = 50;
+        const int backlog = 400;
+
+        // Budget is not the driver here — the entries are expired *and* dirty, so they can never be
+        // evicted; without the cap the loop would pop all 400.
+        KahunaConfiguration config = CreateConfiguration(maxEntries: 50_000, batchMax: batchMax);
+        (TryCollectHandler handler, KeyValueContext context, RaftManager raft) = CreateHandler(config);
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        HLCTimestamp past = new(now.N, now.L - TimeSpan.FromMinutes(5).Ticks, now.C);
+        for (int i = 0; i < backlog; i++)
+            InsertExpiredDirty(context, $"expired/{i:D4}", past, now);
+
+        handler.Execute();
+
+        CollectCycleStats stats = handler.LastCycleStats;
+
+        Assert.True(stats.ExpiryInspected <= batchMax,
+            $"expiry loop inspected {stats.ExpiryInspected} entries — expected ≤ batchMax ({batchMax})");
+        Assert.Equal(0, stats.ExpiryEvicted); // all dirty → deferred, none evicted
+        // The backlog is not drained in one cycle: deferred entries are re-enqueued and the rest are
+        // never popped, so the heap still holds (essentially) the full backlog.
+        Assert.True(context.Store.Count == backlog,
+            $"no expired-dirty entry should be evicted (store still {context.Store.Count} of {backlog})");
+    }
+
+    /// <summary>
+    /// When every entry is ineligible (dirty/pinned) and the store is over budget, the LRU walk must
+    /// not scan the whole store on one mailbox turn: it inspects at most the budget, self-schedules a
+    /// follow-up, and — via the persisted cursor — advances forward each cycle until the whole list
+    /// has been inspected, then stops (no infinite re-scan of the pinned prefix).
+    /// </summary>
+    [Fact]
+    public void Collect_AllEntriesIneligible_DoesNotWalkWholeStore()
+    {
+        const int batchMax = 50;
+        const int total = 400;
+
+        // Tiny budget (10) with 400 entries → well over budget; all entries dirty → none evictable.
+        KahunaConfiguration config = CreateConfiguration(maxEntries: 10, batchMax: batchMax);
+        (TryCollectHandler handler, KeyValueContext context, RaftManager raft) = CreateHandler(config);
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        for (int i = 0; i < total; i++)
+            InsertDirty(context, $"dirty/{i:D4}", now);
+
+        // First cycle: bounded inspection + follow-up scheduled, nothing evicted (all pinned).
+        handler.Execute();
+        CollectCycleStats first = handler.LastCycleStats;
+
+        Assert.True(first.LruVisited <= batchMax,
+            $"LRU walk visited {first.LruVisited} — expected ≤ batchMax ({batchMax})");
+        Assert.True(first.LruVisited < context.Store.Count,
+            $"LRU walk visited {first.LruVisited} of {context.Store.Count} — looks like a full scan");
+        Assert.Equal(0, first.LruEvicted);
+        Assert.True(first.Backlog, "an over-budget cycle cut short by the inspection budget must self-schedule a follow-up");
+
+        // The cursor advances forward across cycles: after enough cycles to cover the whole list the
+        // walk reaches the end and stops re-scheduling — proving it terminates instead of spinning.
+        bool reachedEnd = false;
+        for (int cycle = 0; cycle < (total / batchMax) + 2; cycle++)
+        {
+            handler.Execute();
+            Assert.True(handler.LastCycleStats.LruVisited <= batchMax);
+            if (!handler.LastCycleStats.Backlog)
+            {
+                reachedEnd = true;
+                break;
+            }
+        }
+
+        Assert.True(reachedEnd, "the bounded LRU walk must eventually complete a full pass and stop self-scheduling");
+        // Nothing was evictable, so the store is untouched throughout.
+        Assert.Equal(total, context.Store.Count);
+    }
+
     // ── E.2: collect-cycle wall time bounded by batchMax, not Store.Count ─────────────
 
     /// <summary>
@@ -248,10 +335,10 @@ public sealed class TestKeyValueEvictionSweep
     /// Linchpin of the eviction design: a clean, already-flushed persistent entry evicted from
     /// the LRU cache must be transparently recovered via the persistence backend on the next read.
     ///
-    /// Setup (option-a approach — no dirty-window wait):
+    /// Setup:
     ///   1. Pre-seed a MemoryPersistenceBackend with the target value (simulates a prior flush).
-    ///   2. Insert the entry into the actor store as FlushedRevision == Revision (clean) with
-    ///      LastModified = Zero (outside any safety window) → IsDirty() == false.
+    ///   2. Insert the entry into the actor store as FlushedRevision == Revision (clean) →
+    ///      IsDirty() == false, so it is eligible for eviction.
     ///   3. Insert warmer filler entries → target sits at the cold LRU head.
     ///   4. Collect evicts the target; assert it is *gone* from the store (cache eviction proof).
     ///   5. TryGetHandler with Persistent durability: store miss → backend.GetKeyValue → value.
@@ -278,8 +365,7 @@ public sealed class TestKeyValueEvictionSweep
         (TryCollectHandler handler, KeyValueContext context, RaftManager raft) = CreateHandler(config, backend);
         HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
-        // Insert the target as clean + cold (FlushedRevision == Revision, LastModified = Zero).
-        // LastModified = Zero puts it decades outside any safety window → IsDirty() == false.
+        // Insert the target as clean + cold (FlushedRevision == Revision → IsDirty() == false).
         // Inserted first → coldest LRU head → first victim of eviction.
         context.InsertStoreEntry(target, new KeyValueEntry
         {
@@ -522,5 +608,35 @@ public sealed class TestKeyValueEvictionSweep
             Revision = 0,
             FlushedRevision = 0
         });
+    }
+
+    /// <summary>Dirty (unflushed) entry: Revision &gt; FlushedRevision → pinned, never evictable.</summary>
+    private static void InsertDirty(KeyValueContext context, string key, HLCTimestamp lastUsed)
+    {
+        context.InsertStoreEntry(key, new KeyValueEntry
+        {
+            Value = Encoding.UTF8.GetBytes("v"),
+            State = KeyValueState.Set,
+            LastUsed = lastUsed,
+            LastModified = lastUsed,
+            Revision = 1,
+            FlushedRevision = -1
+        });
+    }
+
+    /// <summary>Expired-and-dirty entry seeded into the expiry heap: past TTL but pinned (deferred).</summary>
+    private static void InsertExpiredDirty(KeyValueContext context, string key, HLCTimestamp expires, HLCTimestamp lastUsed)
+    {
+        context.InsertStoreEntry(key, new KeyValueEntry
+        {
+            Value = Encoding.UTF8.GetBytes("v"),
+            State = KeyValueState.Set,
+            LastUsed = lastUsed,
+            LastModified = lastUsed,
+            Revision = 1,
+            FlushedRevision = -1,
+            Expires = expires
+        });
+        context.EnqueueExpiry(key, expires);
     }
 }
