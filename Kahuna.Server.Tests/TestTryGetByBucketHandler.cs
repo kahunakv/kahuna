@@ -52,12 +52,12 @@ public sealed class TestTryGetByBucketHandler
                     new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             // Pre-populate two in-memory ephemeral keys under the "usr" bucket.
-            await actorRef.Ask(MakeSet("usr/alice", Encoding.UTF8.GetBytes("alice-val"), 1), TimeSpan.FromSeconds(5));
-            await actorRef.Ask(MakeSet("usr/bob", Encoding.UTF8.GetBytes("bob-val"), 2), TimeSpan.FromSeconds(5));
+            await actorRef.Ask(MakeSet("usr/alice", Encoding.UTF8.GetBytes("alice-val"), 1), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            await actorRef.Ask(MakeSet("usr/bob", Encoding.UTF8.GetBytes("bob-val"), 2), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             // Ephemeral scan — never touches disk.
             KeyValueResponse? resp = await actorRef.Ask(
-                MakeBucketScan("usr", KeyValueDurability.Ephemeral), TimeSpan.FromSeconds(5));
+                MakeBucketScan("usr", KeyValueDurability.Ephemeral), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.Get, resp!.Type);
@@ -90,7 +90,7 @@ public sealed class TestTryGetByBucketHandler
                     "bucket-disk-actor", null!, null!, backend, raft,
                     new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
-            KeyValueResponse? resp = await actorRef.Ask(MakeBucketScan("doc"), TimeSpan.FromSeconds(5));
+            KeyValueResponse? resp = await actorRef.Ask(MakeBucketScan("doc"), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.Get, resp!.Type);
@@ -131,17 +131,17 @@ public sealed class TestTryGetByBucketHandler
                     new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             // Start the scan (will block in stage 2 until gate opens).
-            Task<KeyValueResponse?> scanTask = actorRef.Ask(MakeBucketScan("cfg"), TimeSpan.FromSeconds(10));
+            Task<KeyValueResponse?> scanTask = actorRef.Ask(MakeBucketScan("cfg"), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
             // Wait until the disk read has started, then write a new value for "cfg/k".
             // The key is not in memory before the scan (stage 1 finds nothing), so this
             // write lands between stage 1 and stage 3 — exactly the concurrent-write scenario.
             entered.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-            await actorRef.Ask(MakeSet("cfg/k", Encoding.UTF8.GetBytes("in-mem-new"), 0), TimeSpan.FromSeconds(5));
+            await actorRef.Ask(MakeSet("cfg/k", Encoding.UTF8.GetBytes("in-mem-new"), 0), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             // Ephemeral TryGet as sentinel: drains the actor queue so the set above has
             // been processed before we release the gate and stage 3 runs.
-            await actorRef.Ask(MakeEphemeralGet("sentinel"), TimeSpan.FromSeconds(5));
+            await actorRef.Ask(MakeEphemeralGet("sentinel"), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             gate.Set();
 
             KeyValueResponse? resp = await scanTask;
@@ -179,7 +179,7 @@ public sealed class TestTryGetByBucketHandler
                     "bucket-deleted-actor", null!, null!, backend, raft,
                     new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
-            KeyValueResponse? resp = await actorRef.Ask(MakeBucketScan("data"), TimeSpan.FromSeconds(5));
+            KeyValueResponse? resp = await actorRef.Ask(MakeBucketScan("data"), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.Get, resp!.Type);
@@ -228,8 +228,8 @@ public sealed class TestTryGetByBucketHandler
                     new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             // Dispatch both scans before either completes; they will race to start their disk reads.
-            Task<KeyValueResponse?> latestTask = actorRef.Ask(MakeBucketScan("ord"), TimeSpan.FromSeconds(10));
-            Task<KeyValueResponse?> snapshotTask = actorRef.Ask(MakeSnapshotBucketScan("ord", readTs), TimeSpan.FromSeconds(10));
+            Task<KeyValueResponse?> latestTask = actorRef.Ask(MakeBucketScan("ord"), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            Task<KeyValueResponse?> snapshotTask = actorRef.Ask(MakeSnapshotBucketScan("ord", readTs), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
             // Wait for both disk reads to enter the backend — if coalescing occurred only
             // one disk read would start, and this wait would time out.
@@ -283,8 +283,8 @@ public sealed class TestTryGetByBucketHandler
                     new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             // Plain scan (coalesceable) then transactional scan (not coalesceable — must stay private).
-            Task<KeyValueResponse?> plainTask = actorRef.Ask(MakeBucketScan("inv"), TimeSpan.FromSeconds(10));
-            Task<KeyValueResponse?> txnTask = actorRef.Ask(MakeTransactionalBucketScan("inv", txId), TimeSpan.FromSeconds(10));
+            Task<KeyValueResponse?> plainTask = actorRef.Ask(MakeBucketScan("inv"), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            Task<KeyValueResponse?> txnTask = actorRef.Ask(MakeTransactionalBucketScan("inv", txId), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
             // Two independent disk reads must start — coalescing would prevent the second.
             backend.BothEntered.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
@@ -354,7 +354,7 @@ public sealed class TestTryGetByBucketHandler
                     new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             KeyValueResponse? resp = await actorRef.Ask(
-                MakeSnapshotBucketScan("db", readTs), TimeSpan.FromSeconds(5));
+                MakeSnapshotBucketScan("db", readTs), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.Get, resp!.Type);
@@ -407,14 +407,14 @@ public sealed class TestTryGetByBucketHandler
 
             // Dispatch the snapshot scan — stage 2 will block in GetKeyValueByPrefix.
             Task<KeyValueResponse?> scanTask = actorRef.Ask(
-                MakeSnapshotBucketScan("mail", readTs), TimeSpan.FromSeconds(10));
+                MakeSnapshotBucketScan("mail", readTs), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
             // Wait until stage 2 has started its disk read.
             entered.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             // Send an unrelated ephemeral get and drain it — proves the mailbox is not blocked.
             KeyValueResponse? sentinel = await actorRef.Ask(
-                MakeEphemeralGet("sentinel"), TimeSpan.FromSeconds(5));
+                MakeEphemeralGet("sentinel"), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             Assert.NotNull(sentinel);
 
             // Release stage 2.
@@ -472,7 +472,7 @@ public sealed class TestTryGetByBucketHandler
                     "bucket-backpressure-actor", null!, null!, backend, decoratedRaft,
                     new KeySpaceRegistry(), new RangeMapStore(decoratedRaft, null, null, logger), config, logger);
 
-            KeyValueResponse? resp = await actorRef.Ask(MakeBucketScan("doc"), TimeSpan.FromSeconds(5));
+            KeyValueResponse? resp = await actorRef.Ask(MakeBucketScan("doc"), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             // Rejected enqueue must surface as retryable, not a faulted actor or a lost promise.
             Assert.NotNull(resp);

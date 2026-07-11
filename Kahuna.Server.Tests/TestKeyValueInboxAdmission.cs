@@ -42,9 +42,9 @@ public sealed class TestKeyValueInboxAdmission
             // messages so they arrive while the ordinary inbox is saturated.
             for (int i = 0; i < 6000; i++)
             {
-                userTasks.Add(actor.Ask(MakeExists("hot/" + i))!);
+                userTasks.Add(actor.Ask(MakeExists("hot/" + i), TestContext.Current.CancellationToken)!);
                 if (i % 200 == 0)
-                    controlTasks.Add(actor.Ask(new KeyValueRequest(KeyValueRequestType.ResumeRead))!);
+                    controlTasks.Add(actor.Ask(new KeyValueRequest(KeyValueRequestType.ResumeRead), TestContext.Current.CancellationToken)!);
             }
 
             int busyUser = await CountActorBusy(userTasks);
@@ -68,15 +68,15 @@ public sealed class TestKeyValueInboxAdmission
             // Saturate the ordinary inbox.
             List<Task<KeyValueResponse?>> flood = [];
             for (int i = 0; i < 5000; i++)
-                flood.Add(actor.Ask(MakeExists("hot/" + i))!);
+                flood.Add(actor.Ask(MakeExists("hot/" + i), TestContext.Current.CancellationToken)!);
 
             // A read completion (ResumeRead carrying a continuation) is a control message — it must be
             // admitted ahead of the ordinary backlog and resolve its waiter rather than being stranded.
             TaskCompletionSource<KeyValueResponse?> readPromise = new();
             PointReadContinuation cont = new("absent/key", KeyValueResponseType.Get, readPromise);
-            _ = actor.Ask(new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont })!;
+            _ = actor.Ask(new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont }, TestContext.Current.CancellationToken)!;
 
-            Task completed = await Task.WhenAny(readPromise.Task, Task.Delay(TimeSpan.FromSeconds(5)));
+            Task completed = await Task.WhenAny(readPromise.Task, Task.Delay(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
             Assert.Same(readPromise.Task, completed);
             Assert.True(readPromise.Task.IsCompletedSuccessfully);
 

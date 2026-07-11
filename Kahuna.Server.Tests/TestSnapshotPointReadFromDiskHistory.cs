@@ -75,7 +75,7 @@ public class TestSnapshotPointReadFromDiskHistory
 
             // Snapshot get at T — in-memory misses, disk fallback must return as-of revision.
             KeyValueResponse? resp = await actorRef.Ask(
-                MakeSnapshotGet(key, snapshotT), TimeSpan.FromSeconds(5));
+                MakeSnapshotGet(key, snapshotT), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.Get, resp!.Type);
@@ -85,7 +85,7 @@ public class TestSnapshotPointReadFromDiskHistory
 
             // Snapshot get before the key existed — disk fallback returns null → DoesNotExist.
             KeyValueResponse? noResp = await actorRef.Ask(
-                MakeSnapshotGet(key, beforeCreate), TimeSpan.FromSeconds(5));
+                MakeSnapshotGet(key, beforeCreate), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             Assert.NotNull(noResp);
             Assert.Equal(KeyValueResponseType.DoesNotExist, noResp!.Type);
@@ -127,7 +127,7 @@ public class TestSnapshotPointReadFromDiskHistory
 
             // Snapshot exists at T — disk fallback must report Exists with the as-of revision.
             KeyValueResponse? resp = await actorRef.Ask(
-                MakeSnapshotExists(key, snapshotT), TimeSpan.FromSeconds(5));
+                MakeSnapshotExists(key, snapshotT), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.Exists, resp!.Type);
@@ -138,7 +138,7 @@ public class TestSnapshotPointReadFromDiskHistory
 
             // Snapshot exists before the key existed — disk fallback returns null → DoesNotExist.
             KeyValueResponse? noResp = await actorRef.Ask(
-                MakeSnapshotExists(key, beforeCreate), TimeSpan.FromSeconds(5));
+                MakeSnapshotExists(key, beforeCreate), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             Assert.NotNull(noResp);
             Assert.Equal(KeyValueResponseType.DoesNotExist, noResp!.Type);

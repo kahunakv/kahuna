@@ -291,7 +291,7 @@ public sealed class TestTryGetHandler
             // Ask uses Reply.HasValue=true so the detach path can capture the promise.
             KeyValueResponse? resp = await actorRef.Ask(
                 MakeGet("backend-key", KeyValueDurability.Persistent),
-                TimeSpan.FromSeconds(5)
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken
             );
 
             Assert.NotNull(resp);
@@ -376,7 +376,7 @@ public sealed class TestTryGetHandler
 
             KeyValueResponse? resp = await actorRef.Ask(
                 MakeGet("faulting-key", KeyValueDurability.Persistent),
-                TimeSpan.FromSeconds(5)
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken
             );
 
             Assert.NotNull(resp);
@@ -479,7 +479,7 @@ public sealed class TestTryGetHandler
             // Fire N concurrent Asks — they all land in the actor mailbox together.
             Task<KeyValueResponse?>[] asks = new Task<KeyValueResponse?>[concurrency];
             for (int i = 0; i < concurrency; i++)
-                asks[i] = actorRef.Ask(MakeGet("shared-key", KeyValueDurability.Persistent), TimeSpan.FromSeconds(10));
+                asks[i] = actorRef.Ask(MakeGet("shared-key", KeyValueDurability.Persistent), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
             // Send a sentinel ephemeral-miss Ask after all N Asks. Because the mailbox is FIFO,
             // when the sentinel reply arrives every TryGet ahead of it has been processed —
@@ -488,7 +488,7 @@ public sealed class TestTryGetHandler
             // close before the sentinel confirms all stage-1 misses are done.
             KeyValueResponse? sentinel = await actorRef.Ask(
                 MakeGet("sentinel-key", KeyValueDurability.Ephemeral),
-                TimeSpan.FromSeconds(10));
+                TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
             Assert.Equal(KeyValueResponseType.DoesNotExist, sentinel!.Type);
 
             // All N coalesced — unblock the disk read.
@@ -606,7 +606,7 @@ public sealed class TestTryGetHandler
             // Key is not in cache; revision 5 is only on disk.
             KeyValueResponse? resp = await actorRef.Ask(
                 MakeGet("hist-key", KeyValueDurability.Persistent, compareRevision: 5),
-                TimeSpan.FromSeconds(5));
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.Get, resp!.Type);
@@ -636,7 +636,7 @@ public sealed class TestTryGetHandler
 
             KeyValueResponse? resp = await actorRef.Ask(
                 MakeGet("hist-key", KeyValueDurability.Persistent, compareRevision: 99),
-                TimeSpan.FromSeconds(5));
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.DoesNotExist, resp!.Type);
@@ -675,16 +675,16 @@ public sealed class TestTryGetHandler
             // Both Asks for the same key — one is a latest read, one is a by-revision read.
             Task<KeyValueResponse?> latestAsk = actorRef.Ask(
                 MakeGet("shared", KeyValueDurability.Persistent),
-                TimeSpan.FromSeconds(10));
+                TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
             Task<KeyValueResponse?> revisionAsk = actorRef.Ask(
                 MakeGet("shared", KeyValueDurability.Persistent, compareRevision: 3),
-                TimeSpan.FromSeconds(10));
+                TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
             // Drain the mailbox: when the sentinel replies, both stage-1 dispatches are done
             // and both reads are in-flight (blocked on the gate).
             KeyValueResponse? sentinel = await actorRef.Ask(
                 MakeGet("sentinel", KeyValueDurability.Ephemeral),
-                TimeSpan.FromSeconds(10));
+                TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
             Assert.Equal(KeyValueResponseType.DoesNotExist, sentinel!.Type);
 
             // Unblock both backend reads simultaneously.
@@ -736,15 +736,15 @@ public sealed class TestTryGetHandler
 
             Task<KeyValueResponse?> getAsk = actorRef.Ask(
                 MakeGet("shape-key", KeyValueDurability.Persistent, compareRevision: 3),
-                TimeSpan.FromSeconds(10));
+                TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
             Task<KeyValueResponse?> existsAsk = actorRef.Ask(
                 MakeExists("shape-key", 3),
-                TimeSpan.FromSeconds(10));
+                TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
             // Sentinel drains the mailbox — both dispatches are in-flight, gate keeps them blocked.
             KeyValueResponse? sentinel = await actorRef.Ask(
                 MakeGet("sentinel", KeyValueDurability.Ephemeral),
-                TimeSpan.FromSeconds(10));
+                TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
             Assert.Equal(KeyValueResponseType.DoesNotExist, sentinel!.Type);
 
             gate.Set();

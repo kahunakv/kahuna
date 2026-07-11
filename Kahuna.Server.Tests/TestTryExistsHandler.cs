@@ -128,7 +128,7 @@ public sealed class TestTryExistsHandler
 
             KeyValueResponse? resp = await actorRef.Ask(
                 MakeExists("live-key", compareRevision: -1),
-                TimeSpan.FromSeconds(5));
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.Exists, resp!.Type);
@@ -157,7 +157,7 @@ public sealed class TestTryExistsHandler
 
             KeyValueResponse? resp = await actorRef.Ask(
                 MakeExists("absent-key", compareRevision: -1),
-                TimeSpan.FromSeconds(5));
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.DoesNotExist, resp!.Type);
@@ -191,15 +191,15 @@ public sealed class TestTryExistsHandler
 
             Task<KeyValueResponse?> getAsk = actorRef.Ask(
                 MakeGet("shape-key"),
-                TimeSpan.FromSeconds(10));
+                TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
             Task<KeyValueResponse?> existsAsk = actorRef.Ask(
                 MakeExists("shape-key", compareRevision: -1),
-                TimeSpan.FromSeconds(10));
+                TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
             // Drain mailbox: both dispatches done before gate is released.
             KeyValueResponse? sentinel = await actorRef.Ask(
                 MakeExists("sentinel", compareRevision: -1, durability: KeyValueDurability.Ephemeral),
-                TimeSpan.FromSeconds(10));
+                TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
             Assert.Equal(KeyValueResponseType.DoesNotExist, sentinel!.Type);
 
             gate.Set();
@@ -242,7 +242,7 @@ public sealed class TestTryExistsHandler
 
             KeyValueResponse? resp = await actorRef.Ask(
                 MakeExists("hist-key", 4),
-                TimeSpan.FromSeconds(5));
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.Exists, resp!.Type);
@@ -272,7 +272,7 @@ public sealed class TestTryExistsHandler
 
             KeyValueResponse? resp = await actorRef.Ask(
                 MakeExists("hist-key", 99),
-                TimeSpan.FromSeconds(5));
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.DoesNotExist, resp!.Type);

@@ -168,6 +168,16 @@ public sealed class TestRemoveKeyRange
         Assert.Fail($"Timed out waiting for descriptor of '{keySpace}' to be removed.");
     }
 
+    private static async Task WaitUntilMode(Node node, string keySpace, RoutingMode expected, int timeoutMs = 5000)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        long deadline = Environment.TickCount64 + (long)(timeoutMs * TimingScale);
+        while (Environment.TickCount64 < deadline && node.Kahuna.KeySpaceRegistry.GetMode(keySpace) != expected)
+            await Task.Delay(25, ct);
+
+        Assert.Equal(expected, node.Kahuna.KeySpaceRegistry.GetMode(keySpace));
+    }
+
     private static async Task WaitUntilDescriptorPresent(Node node, string keySpace, int timeoutMs = 5000)
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
@@ -310,8 +320,11 @@ public sealed class TestRemoveKeyRange
             foreach (Node node in nodes)
                 await WaitUntilDescriptorPresent(node, "t:r");
 
+            // The range map's Current is swapped visible before the same replication callback reconciles
+            // the node-local KeySpaceRegistry, so a poll can observe the descriptor a hair before the mode
+            // flips. Wait for the mode to settle rather than asserting on the intermediate window.
             foreach (Node node in nodes)
-                Assert.Equal(RoutingMode.KeyRange, node.Kahuna.KeySpaceRegistry.GetMode("t:r"));
+                await WaitUntilMode(node, "t:r", RoutingMode.KeyRange);
 
             // Remove — descriptor is gone from map and sync fires via replication.
             await leader.Kahuna.RemoveKeyRangeAsync("t:r", ct);
@@ -321,13 +334,7 @@ public sealed class TestRemoveKeyRange
 
             // After sync the routing mode must have reverted to Hash on every node.
             foreach (Node node in nodes)
-            {
-                long deadline = Environment.TickCount64 + (long)(3000 * TimingScale);
-                while (Environment.TickCount64 < deadline && node.Kahuna.KeySpaceRegistry.GetMode("t:r") != RoutingMode.Hash)
-                    await Task.Delay(25, ct);
-
-                Assert.Equal(RoutingMode.Hash, node.Kahuna.KeySpaceRegistry.GetMode("t:r"));
-            }
+                await WaitUntilMode(node, "t:r", RoutingMode.Hash);
         }
         finally
         {

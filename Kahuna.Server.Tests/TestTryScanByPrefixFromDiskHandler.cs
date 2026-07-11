@@ -52,7 +52,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
                     "pfx-hit-actor", null!, null!, backend, raft,
                     new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
-            KeyValueResponse? resp = await actorRef.Ask(MakePrefixScan("svc/"), TimeSpan.FromSeconds(5));
+            KeyValueResponse? resp = await actorRef.Ask(MakePrefixScan("svc/"), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.Get, resp!.Type);
@@ -81,7 +81,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
                     "pfx-empty-actor", null!, null!, backend, raft,
                     new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
-            KeyValueResponse? resp = await actorRef.Ask(MakePrefixScan("nothing/"), TimeSpan.FromSeconds(5));
+            KeyValueResponse? resp = await actorRef.Ask(MakePrefixScan("nothing/"), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.Get, resp!.Type);
@@ -113,7 +113,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
                     "pfx-deleted-actor", null!, null!, backend, raft,
                     new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
-            KeyValueResponse? resp = await actorRef.Ask(MakePrefixScan("ns/"), TimeSpan.FromSeconds(5));
+            KeyValueResponse? resp = await actorRef.Ask(MakePrefixScan("ns/"), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.Get, resp!.Type);
@@ -144,7 +144,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
                     "pfx-fault-actor", null!, null!, backend, raft,
                     new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
-            KeyValueResponse? resp = await actorRef.Ask(MakePrefixScan("err/"), TimeSpan.FromSeconds(5));
+            KeyValueResponse? resp = await actorRef.Ask(MakePrefixScan("err/"), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.MustRetry, resp!.Type);
@@ -177,7 +177,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
 
             const int n = 5;
             Task<KeyValueResponse?>[] asks = Enumerable.Range(0, n)
-                .Select(_ => actorRef.Ask(MakePrefixScan("app/"), TimeSpan.FromSeconds(10)))
+                .Select(_ => actorRef.Ask(MakePrefixScan("app/"), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken))
                 .ToArray();
 
             // Wait until the first read has entered the backend, then send a sentinel
@@ -186,7 +186,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
             // scans have been processed and coalesced onto the single continuation.
             entered.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             KeyValueResponse? sentinel = await actorRef.Ask(
-                MakeEphemeralGet("sentinel"), TimeSpan.FromSeconds(10));
+                MakeEphemeralGet("sentinel"), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
             gate.Set();
 
@@ -256,7 +256,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
             KeyValueRequest scan = MakePrefixScan("p/");
             scan.ReadTimestamp = readTs;
 
-            KeyValueResponse? resp = await actorRef.Ask(scan, TimeSpan.FromSeconds(5));
+            KeyValueResponse? resp = await actorRef.Ask(scan, TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.Get, resp!.Type);
