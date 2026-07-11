@@ -1374,120 +1374,113 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     /// <param name="options"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, HLCTimestamp)> StartTransaction(string node, KeyValueTransactionOptions options, CancellationToken cancellationToken)
+    public async Task<(KeyValueResponseType, TransactionHandle)> StartTransaction(string node, KeyValueTransactionOptions options, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
-        
+
         GrpcStartTransactionRequest request = new()
         {
-            UniqueId = options.UniqueId,        
+            CoordinatorKey = options.CoordinatorKey,
             LockingType = (GrpcLockingType)options.Locking,
             Timeout = options.Timeout,
             AsyncRelease = options.AsyncRelease,
             AutoCommit = options.AutoCommit,
         };
-        
+
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
         GrpcStartTransactionResponse remoteResponse = response.StartTransaction!;
-        
+
         remoteResponse.ServedFrom = $"https://{node}";
-        
+
+        HLCTimestamp transactionId = new(remoteResponse.TransactionIdNode, remoteResponse.TransactionIdPhysical, remoteResponse.TransactionIdCounter);
         return (
-            (KeyValueResponseType)remoteResponse.Type, 
-            new(remoteResponse.TransactionIdNode, remoteResponse.TransactionIdPhysical, remoteResponse.TransactionIdCounter)
+            (KeyValueResponseType)remoteResponse.Type,
+            new TransactionHandle(transactionId, options.CoordinatorKey)
         );
     }
 
-    /// <summary>
-    /// 
-    /// </summary>
-    /// <param name="node"></param>
-    /// <param name="uniqueId"></param>
-    /// <param name="timestamp"></param>
-    /// <param name="acquiredLocks"></param>
-    /// <param name="modifiedKeys"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
     public async Task<KeyValueResponseType> CommitTransaction(
-        string node, 
-        string uniqueId, 
-        HLCTimestamp timestamp, 
-        List<KeyValueTransactionModifiedKey> acquiredLocks, 
+        string node,
+        TransactionHandle handle,
+        List<KeyValueTransactionModifiedKey> acquiredLocks,
         List<KeyValueTransactionModifiedKey> modifiedKeys,
         List<KeyValueTransactionReadKey> readKeys,
         CancellationToken cancellationToken
     )
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
-        
+
         GrpcCommitTransactionRequest request = new()
         {
-            UniqueId = uniqueId,
-            TransactionIdNode = timestamp.N,
-            TransactionIdPhysical = timestamp.L,
-            TransactionIdCounter = timestamp.C            
+            CoordinatorKey = handle.CoordinatorKey,
+            TransactionIdNode = handle.TransactionId.N,
+            TransactionIdPhysical = handle.TransactionId.L,
+            TransactionIdCounter = handle.TransactionId.C
         };
-        
+
         if (acquiredLocks.Count > 0)
             request.AcquiredLocks.AddRange(GetArquiredOrModifiedItems(acquiredLocks));
-        
+
         if (modifiedKeys.Count > 0)
             request.ModifiedKeys.AddRange(GetArquiredOrModifiedItems(modifiedKeys));
-        
+
         if (readKeys.Count > 0)
             request.ReadKeys.AddRange(GetReadItems(readKeys));
-        
+
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
         GrpcCommitTransactionResponse remoteResponse = response.CommitTransaction!;
-        
-        remoteResponse.ServedFrom = $"https://{node}";
-        
-        return (KeyValueResponseType)remoteResponse.Type;
-    }    
 
-    /// <summary>
-    /// 
-    /// </summary>
-    /// <param name="node"></param>
-    /// <param name="uniqueId"></param>
-    /// <param name="timestamp"></param>
-    /// <param name="acquiredLocks"></param>
-    /// <param name="modifiedKeys"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
+        remoteResponse.ServedFrom = $"https://{node}";
+
+        return (KeyValueResponseType)remoteResponse.Type;
+    }
+
     public async Task<KeyValueResponseType> RollbackTransaction(
-        string node, 
-        string uniqueId, 
-        HLCTimestamp timestamp, 
-        List<KeyValueTransactionModifiedKey> acquiredLocks, 
-        List<KeyValueTransactionModifiedKey> modifiedKeys, 
+        string node,
+        TransactionHandle handle,
+        List<KeyValueTransactionModifiedKey> acquiredLocks,
+        List<KeyValueTransactionModifiedKey> modifiedKeys,
         CancellationToken cancellationToken
     )
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
-        
+
         GrpcRollbackTransactionRequest request = new()
         {
-            UniqueId = uniqueId,
-            TransactionIdNode = timestamp.N,
-            TransactionIdPhysical = timestamp.L,
-            TransactionIdCounter = timestamp.C            
+            CoordinatorKey = handle.CoordinatorKey,
+            TransactionIdNode = handle.TransactionId.N,
+            TransactionIdPhysical = handle.TransactionId.L,
+            TransactionIdCounter = handle.TransactionId.C
         };
-        
+
         if (acquiredLocks.Count > 0)
             request.AcquiredLocks.AddRange(GetArquiredOrModifiedItems(acquiredLocks));
-        
+
         if (modifiedKeys.Count > 0)
             request.ModifiedKeys.AddRange(GetArquiredOrModifiedItems(modifiedKeys));
-        
+
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
         GrpcRollbackTransactionResponse remoteResponse = response.RollbackTransaction!;
-        
+
         remoteResponse.ServedFrom = $"https://{node}";
-        
+
         return (KeyValueResponseType)remoteResponse.Type;
     }
     
+    public Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp)> BeginOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken)
+    {
+        // Cross-node operation registration is not yet carried over the gRPC transport; the operation
+        // identity fields are not on the gRPC request/response messages. This path is unreachable until
+        // the external gRPC operation-id plumbing lands (the registration is only invoked once an
+        // operation id is supplied). Fail loudly rather than silently skip the coordinator guard.
+        throw new NotSupportedException("Operation registration over the gRPC inter-node transport is not implemented yet.");
+    }
+
+    public Task CompleteOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, string? modifiedKey, string? pointLockKey, string? readKey, bool readExists, long readRevision, KeyValueDurability durability, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, CancellationToken cancellationToken)
+    {
+        throw new NotSupportedException("Operation completion over the gRPC inter-node transport is not implemented yet.");
+    }
+
     private static IEnumerable<GrpcTransactionModifiedKey> GetArquiredOrModifiedItems(List<KeyValueTransactionModifiedKey> items)
     {
         foreach (KeyValueTransactionModifiedKey item in items)

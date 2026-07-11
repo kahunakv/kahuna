@@ -150,15 +150,17 @@ public sealed class TestEmbeddedKahunaNode
             bucket.Items.Select(item => item.Item1).ToArray()
         );
 
-        (response, HLCTimestamp transactionId) = await node.Kahuna.LocateAndStartTransaction(
+        TransactionHandle txHandle;
+        (response, txHandle) = await node.Kahuna.LocateAndStartTransaction(
             new()
             {
-                UniqueId = "tenant/tx",
+                CoordinatorKey = "tenant/tx",
                 Timeout = 5000,
                 Locking = KeyValueTransactionLocking.Pessimistic
             },
             TestContext.Current.CancellationToken
         );
+        HLCTimestamp transactionId = txHandle.TransactionId;
 
         Assert.Equal(KeyValueResponseType.Set, response);
 
@@ -188,8 +190,7 @@ public sealed class TestEmbeddedKahunaNode
         Assert.Equal(KeyValueResponseType.Set, response);
 
         response = await node.Kahuna.LocateAndCommitTransaction(
-            "tenant/tx",
-            transactionId,
+            txHandle,
             [new() { Key = txKey, Durability = KeyValueDurability.Persistent }],
             [new() { Key = txKey, Durability = KeyValueDurability.Persistent }],
             [],

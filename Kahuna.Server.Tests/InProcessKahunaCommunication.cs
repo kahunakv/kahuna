@@ -193,16 +193,16 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
     {
         KeyValueTransactionOptions opts = new()
         {
-            UniqueId     = uniqueId,
-            Timeout      = txOptions.Timeout,
-            Locking      = txOptions.Locking,
-            AsyncRelease = txOptions.AsyncRelease,
-            AutoCommit   = txOptions.AutoCommit
+            CoordinatorKey = uniqueId,
+            Timeout        = txOptions.Timeout,
+            Locking        = txOptions.Locking,
+            AsyncRelease   = txOptions.AsyncRelease,
+            AutoCommit     = txOptions.AutoCommit
         };
-        (KeyValueResponseType type, HLCTimestamp ts) = await kahuna.LocateAndStartTransaction(opts, cancellationToken);
+        (KeyValueResponseType type, TransactionHandle handle) = await kahuna.LocateAndStartTransaction(opts, cancellationToken);
         if (type != KeyValueResponseType.Set)
             throw new KahunaException("Failed to start transaction: " + type, type);
-        return (url, ts);
+        return (url, handle.TransactionId);
     }
 
     public async Task<bool> CommitTransactionSession(
@@ -210,8 +210,9 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
         List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys,
         List<KeyValueTransactionReadKey> readKeys, CancellationToken cancellationToken)
     {
+        TransactionHandle handle = new(transactionId, uniqueId);
         KeyValueResponseType type = await kahuna.LocateAndCommitTransaction(
-            uniqueId, transactionId, acquiredLocks, modifiedKeys, readKeys, cancellationToken);
+            handle, acquiredLocks, modifiedKeys, readKeys, cancellationToken);
         return type == KeyValueResponseType.Committed;
     }
 
@@ -220,8 +221,9 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
         List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys,
         CancellationToken cancellationToken)
     {
+        TransactionHandle handle = new(transactionId, uniqueId);
         KeyValueResponseType type = await kahuna.LocateAndRollbackTransaction(
-            uniqueId, transactionId, acquiredLocks, modifiedKeys, cancellationToken);
+            handle, acquiredLocks, modifiedKeys, cancellationToken);
         return type == KeyValueResponseType.RolledBack;
     }
     public Task<(SequenceResponseType, ReadOnlySequenceEntry?, int)> GetSequence(string url, string name, SequenceDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();

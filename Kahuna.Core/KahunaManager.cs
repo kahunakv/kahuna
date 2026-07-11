@@ -337,7 +337,9 @@ public sealed class KahunaManager : IKahuna, IDisposable
         int expiresMs,
         KeyValueDurability durability,
         CancellationToken cancellationToken,
-        long routedGeneration = 0
+        long routedGeneration = 0,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
         return await keyValues.LocateAndTrySetKeyValue(
@@ -350,7 +352,9 @@ public sealed class KahunaManager : IKahuna, IDisposable
             expiresMs,
             durability,
             cancellationToken,
-            routedGeneration
+            routedGeneration,
+            coordinatorKey,
+            operationId
         );
     }
 
@@ -454,13 +458,15 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryDeleteKeyValue(
-        HLCTimestamp transactionId, 
-        string key, 
-        KeyValueDurability durability, 
-        CancellationToken cancellationToken
+        HLCTimestamp transactionId,
+        string key,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
-        return keyValues.LocateAndTryDeleteKeyValue(transactionId, key, durability, cancellationToken);
+        return keyValues.LocateAndTryDeleteKeyValue(transactionId, key, durability, cancellationToken, coordinatorKey, operationId);
     }
     
     /// <summary>
@@ -473,14 +479,16 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryExtendKeyValue(
-        HLCTimestamp transactionId, 
-        string key, 
-        int expiresMs, 
-        KeyValueDurability durability, 
-        CancellationToken cancellationToken
+        HLCTimestamp transactionId,
+        string key,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
-        return keyValues.LocateAndTryExtendKeyValue(transactionId, key, expiresMs, durability, cancellationToken);
+        return keyValues.LocateAndTryExtendKeyValue(transactionId, key, expiresMs, durability, cancellationToken, coordinatorKey, operationId);
     }
     
     /// <summary>
@@ -788,51 +796,67 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="options">The options specifying the parameters of the transaction.</param>
     /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
     /// <returns>A task that represents the asynchronous operation. The task result contains the response type and the timestamp of the initiated transaction.</returns>
-    public Task<(KeyValueResponseType, HLCTimestamp)> LocateAndStartTransaction(KeyValueTransactionOptions options, CancellationToken cancellationToken)
+    public Task<(KeyValueResponseType, TransactionHandle)> LocateAndStartTransaction(KeyValueTransactionOptions options, CancellationToken cancellationToken)
     {
-        return keyValues.LocateAndStartTransaction(options, cancellationToken);        
+        return keyValues.LocateAndStartTransaction(options, cancellationToken);
     }
 
     /// <summary>
-    /// Commits a transaction by locating required resources and applying all necessary modifications.
+    /// Commits the transaction identified by <paramref name="handle"/>.
     /// </summary>
-    /// <param name="uniqueId">The unique identifier for the transaction to be committed.</param>
-    /// <param name="timestamp">The timestamp associated with the transaction.</param>
+    /// <param name="handle">The handle returned by <see cref="LocateAndStartTransaction"/>.</param>
     /// <param name="acquiredLocks">A list of locks acquired as part of the transaction.</param>
     /// <param name="modifiedKeys">A list of keys modified as part of the transaction.</param>
+    /// <param name="readKeys">A list of keys read during the transaction.</param>
     /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
-    /// <returns>A task representing the asynchronous operation, with a result of <see cref="KeyValueResponseType"/> indicating the outcome of the transaction commit.</returns>
+    /// <returns>A task representing the asynchronous operation with the commit outcome.</returns>
     public Task<KeyValueResponseType> LocateAndCommitTransaction(
-        string uniqueId, 
-        HLCTimestamp timestamp, 
-        List<KeyValueTransactionModifiedKey> acquiredLocks, 
+        TransactionHandle handle,
+        List<KeyValueTransactionModifiedKey> acquiredLocks,
         List<KeyValueTransactionModifiedKey> modifiedKeys,
         List<KeyValueTransactionReadKey> readKeys,
         CancellationToken cancellationToken
     )
     {
-        return keyValues.LocateAndCommitTransaction(uniqueId, timestamp, acquiredLocks, modifiedKeys, readKeys, cancellationToken);
+        return keyValues.LocateAndCommitTransaction(handle, acquiredLocks, modifiedKeys, readKeys, cancellationToken);
     }
 
     /// <summary>
-    /// Rolls back a transaction and restores the state of the system to the point
-    /// before the transaction was executed.
+    /// Rolls back the transaction identified by <paramref name="handle"/>.
     /// </summary>
-    /// <param name="uniqueId">The unique identifier for the transaction to be rolled back.</param>
-    /// <param name="timestamp">The timestamp associated with the transaction.</param>
+    /// <param name="handle">The handle returned by <see cref="LocateAndStartTransaction"/>.</param>
     /// <param name="acquiredLocks">A list of locks acquired during the transaction.</param>
     /// <param name="modifiedKeys">A list of keys modified during the transaction.</param>
     /// <param name="cancellationToken">A token to observe for cancellation requests.</param>
     /// <returns>A <see cref="KeyValueResponseType"/> indicating the result of the rollback operation.</returns>
     public Task<KeyValueResponseType> LocateAndRollbackTransaction(
-        string uniqueId, 
-        HLCTimestamp timestamp, 
-        List<KeyValueTransactionModifiedKey> acquiredLocks, 
+        TransactionHandle handle,
+        List<KeyValueTransactionModifiedKey> acquiredLocks,
         List<KeyValueTransactionModifiedKey> modifiedKeys,
         CancellationToken cancellationToken
     )
     {
-        return keyValues.LocateAndRollbackTransaction(uniqueId, timestamp, acquiredLocks, modifiedKeys, cancellationToken);
+        return keyValues.LocateAndRollbackTransaction(handle, acquiredLocks, modifiedKeys, cancellationToken);
+    }
+
+    public Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp)> LocateAndBeginOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken)
+    {
+        return keyValues.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
+    }
+
+    public Task LocateAndCompleteOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, string? modifiedKey, string? pointLockKey, string? readKey, bool readExists, long readRevision, KeyValueDurability durability, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, CancellationToken cancellationToken)
+    {
+        return keyValues.LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, modifiedKey, pointLockKey, readKey, readExists, readRevision, durability, cachedType, cachedRevision, cachedTimestamp, cancellationToken);
+    }
+
+    public (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp) BeginOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest)
+    {
+        return keyValues.BeginOperation(transactionId, operationId, kind, payloadDigest);
+    }
+
+    public void CompleteOperation(HLCTimestamp transactionId, TransactionOperationId operationId, string? modifiedKey, string? pointLockKey, string? readKey, bool readExists, long readRevision, KeyValueDurability durability, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp)
+    {
+        keyValues.CompleteOperation(transactionId, operationId, modifiedKey, pointLockKey, readKey, readExists, readRevision, durability, cachedType, cachedRevision, cachedTimestamp);
     }
 
     /// <summary>
@@ -1153,40 +1177,43 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// </summary>
     /// <param name="options">The options to configure the transaction.</param>
     /// <returns>Returns the timestamp of the started transaction.</returns>
-    public Task<(KeyValueResponseType, HLCTimestamp)> StartTransaction(KeyValueTransactionOptions options)
+    public Task<(KeyValueResponseType, TransactionHandle)> StartTransaction(KeyValueTransactionOptions options)
     {
         return keyValues.StartTransaction(options);
     }
 
     /// <summary>
-    /// Commits a transaction with the specified timestamp and list of modified keys.
+    /// Commits the transaction identified by <paramref name="handle"/>.
     /// </summary>
-    /// <param name="timestamp">The timestamp associated with the transaction.</param>
+    /// <param name="handle">The handle returned by <see cref="StartTransaction"/>.</param>
+    /// <param name="acquiredLocks">The list of keys that were locked as part of the transaction.</param>
     /// <param name="modifiedKeys">The list of keys that were modified as part of the transaction.</param>
-    /// <returns>A task that represents the asynchronous operation, containing a boolean indicating whether the transaction commitment was successful.</returns>
+    /// <param name="readKeys">The list of keys read during the transaction.</param>
+    /// <returns>A task containing the commit outcome.</returns>
     public Task<KeyValueResponseType> CommitTransaction(
-        HLCTimestamp timestamp, 
-        List<KeyValueTransactionModifiedKey> acquiredLocks, 
+        TransactionHandle handle,
+        List<KeyValueTransactionModifiedKey> acquiredLocks,
         List<KeyValueTransactionModifiedKey> modifiedKeys,
         List<KeyValueTransactionReadKey> readKeys
     )
     {
-        return keyValues.CommitTransaction(timestamp, acquiredLocks, modifiedKeys, readKeys);
+        return keyValues.CommitTransaction(handle, acquiredLocks, modifiedKeys, readKeys);
     }
 
     /// <summary>
-    /// Rolls back a transaction, reverting changes associated with the specified keys.
+    /// Rolls back the transaction identified by <paramref name="handle"/>.
     /// </summary>
-    /// <param name="timestamp">The timestamp of the transaction to be rolled back.</param>
+    /// <param name="handle">The handle returned by <see cref="StartTransaction"/>.</param>
+    /// <param name="acquiredLocks">The list of keys locked during the transaction.</param>
     /// <param name="modifiedKeys">The list of modified keys associated with the transaction.</param>
-    /// <returns>A task that represents the asynchronous operation. The task result contains a boolean indicating whether the rollback succeeded.</returns>
+    /// <returns>A task containing the rollback outcome.</returns>
     public Task<KeyValueResponseType> RollbackTransaction(
-        HLCTimestamp timestamp, 
-        List<KeyValueTransactionModifiedKey> acquiredLocks, 
+        TransactionHandle handle,
+        List<KeyValueTransactionModifiedKey> acquiredLocks,
         List<KeyValueTransactionModifiedKey> modifiedKeys
     )
     {
-        return keyValues.RollbackTransaction(timestamp, acquiredLocks, modifiedKeys);
+        return keyValues.RollbackTransaction(handle, acquiredLocks, modifiedKeys);
     }
 
     public Task<(SequenceResponseType, ReadOnlySequenceEntry?)> LocateAndGetSequence(

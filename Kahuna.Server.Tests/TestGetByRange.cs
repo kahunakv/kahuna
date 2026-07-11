@@ -209,9 +209,10 @@ public sealed class TestGetByRange
         await SeedKeys(node, "test/ryow", 3, KeyValueDurability.Ephemeral);
 
         // Start a transaction and write a new key (uncommitted)
-        (KeyValueResponseType txResp, HLCTimestamp txId) = await node.Kahuna.LocateAndStartTransaction(
-            new() { UniqueId = "test/ryow/tx", Timeout = 5000, Locking = KeyValueTransactionLocking.Optimistic },
+        (KeyValueResponseType txResp, TransactionHandle txHandle) = await node.Kahuna.LocateAndStartTransaction(
+            new() { CoordinatorKey = "test/ryow/tx", Timeout = 5000, Locking = KeyValueTransactionLocking.Optimistic },
             TestContext.Current.CancellationToken);
+        HLCTimestamp txId = txHandle.TransactionId;
         Assert.Equal(KeyValueResponseType.Set, txResp);
 
         const string newKey = "test/ryow/0099";
@@ -505,9 +506,10 @@ public sealed class TestGetByRange
         await SeedKeys(node, prefix, 5, KeyValueDurability.Ephemeral);
 
         // Open a transaction and write an uncommitted key.
-        (KeyValueResponseType txResp, HLCTimestamp txId) = await node.Kahuna.LocateAndStartTransaction(
-            new() { UniqueId = "ryow/snap/tx", Timeout = 5000, Locking = KeyValueTransactionLocking.Optimistic },
+        (KeyValueResponseType txResp, TransactionHandle txHandle) = await node.Kahuna.LocateAndStartTransaction(
+            new() { CoordinatorKey = "ryow/snap/tx", Timeout = 5000, Locking = KeyValueTransactionLocking.Optimistic },
             TestContext.Current.CancellationToken);
+        HLCTimestamp txId = txHandle.TransactionId;
         Assert.Equal(KeyValueResponseType.Set, txResp);
 
         const string txKey = $"{prefix}/0099";

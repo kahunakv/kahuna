@@ -980,48 +980,46 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     /// <exception cref="KahunaServerException"></exception>
-    public async Task<(KeyValueResponseType, HLCTimestamp)> StartTransaction(string node, KeyValueTransactionOptions options, CancellationToken cancellationToken)
-    {
-        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))        
-            return await kahunaNode.StartTransaction(options);        
-        
-        throw new KahunaServerException($"The node {node} does not exist.");
-    }
-
-    /// <summary>
-    /// 
-    /// </summary>
-    /// <param name="node"></param>
-    /// <param name="uniqueId"></param>
-    /// <param name="timestamp"></param>
-    /// <param name="acquiredLocks"></param>
-    /// <param name="modifiedKeys"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    /// <exception cref="KahunaServerException"></exception>
-    public async Task<KeyValueResponseType> CommitTransaction(string node, string uniqueId, HLCTimestamp timestamp, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, List<KeyValueTransactionReadKey> readKeys, CancellationToken cancellationToken)
-    {
-        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))        
-            return await kahunaNode.CommitTransaction(timestamp, acquiredLocks, modifiedKeys, readKeys);        
-        
-        throw new KahunaServerException($"The node {node} does not exist.");
-    }
-
-    /// <summary>
-    /// 
-    /// </summary>
-    /// <param name="node"></param>
-    /// <param name="uniqueId"></param>
-    /// <param name="timestamp"></param>
-    /// <param name="acquiredLocks"></param>
-    /// <param name="modifiedKeys"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    /// <exception cref="KahunaServerException"></exception>
-    public async Task<KeyValueResponseType> RollbackTransaction(string node, string uniqueId, HLCTimestamp timestamp, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken)
+    public async Task<(KeyValueResponseType, TransactionHandle)> StartTransaction(string node, KeyValueTransactionOptions options, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.RollbackTransaction(timestamp, acquiredLocks, modifiedKeys);
+            return await kahunaNode.StartTransaction(options);
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public async Task<KeyValueResponseType> CommitTransaction(string node, TransactionHandle handle, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, List<KeyValueTransactionReadKey> readKeys, CancellationToken cancellationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+            return await kahunaNode.CommitTransaction(handle, acquiredLocks, modifiedKeys, readKeys);
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public async Task<KeyValueResponseType> RollbackTransaction(string node, TransactionHandle handle, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+            return await kahunaNode.RollbackTransaction(handle, acquiredLocks, modifiedKeys);
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public async Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp)> BeginOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+            return await Task.FromResult(kahunaNode.BeginOperation(transactionId, operationId, kind, payloadDigest));
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public async Task CompleteOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, string? modifiedKey, string? pointLockKey, string? readKey, bool readExists, long readRevision, KeyValueDurability durability, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, CancellationToken cancellationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            kahunaNode.CompleteOperation(transactionId, operationId, modifiedKey, pointLockKey, readKey, readExists, readRevision, durability, cachedType, cachedRevision, cachedTimestamp);
+            await Task.CompletedTask;
+            return;
+        }
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }

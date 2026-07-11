@@ -1636,15 +1636,15 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns>A response containing the transaction status and transaction ID (physical and counter).</returns>
     internal async Task<GrpcStartTransactionResponse> StartTransactionInternal(GrpcStartTransactionRequest request, ServerCallContext context)
     {
-        if (string.IsNullOrEmpty(request.UniqueId))
+        if (string.IsNullOrEmpty(request.CoordinatorKey))
             return new()
             {
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
-            
-        (KeyValueResponseType type, HLCTimestamp transactionId) = await keyValues.LocateAndStartTransaction(new()
+
+        (KeyValueResponseType type, TransactionHandle handle) = await keyValues.LocateAndStartTransaction(new()
         {
-            UniqueId = request.UniqueId,
+            CoordinatorKey = request.CoordinatorKey,
             Locking = (KeyValueTransactionLocking)request.LockingType,
             Timeout = request.Timeout,
             AsyncRelease = request.AsyncRelease,
@@ -1654,14 +1654,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         GrpcStartTransactionResponse response = new()
         {
             Type = (GrpcKeyValueResponseType)type,
-            TransactionIdNode = transactionId.N,
-            TransactionIdPhysical = transactionId.L,
-            TransactionIdCounter = transactionId.C
+            TransactionIdNode = handle.TransactionId.N,
+            TransactionIdPhysical = handle.TransactionId.L,
+            TransactionIdCounter = handle.TransactionId.C
         };
-        
-        //if (result.Items.Count > 0)
-        //    response.Items.Add(GetKeyValueItems(result.Items));
-        
+
         return response;
     }
 
@@ -1683,30 +1680,31 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <param name="context">The server call context providing metadata and call-specific context.</param>
     /// <returns>Returns a response indicating the outcome of the transaction commit operation.</returns>
     internal async Task<GrpcCommitTransactionResponse> CommitTransactionInternal(GrpcCommitTransactionRequest request, ServerCallContext context)
-    {                
-        if (string.IsNullOrEmpty(request.UniqueId))
+    {
+        if (string.IsNullOrEmpty(request.CoordinatorKey))
             return new()
             {
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
-            
-        KeyValueResponseType type = await keyValues.LocateAndCommitTransaction(
-            request.UniqueId,
+
+        TransactionHandle handle = new(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
+            request.CoordinatorKey
+        );
+
+        KeyValueResponseType type = await keyValues.LocateAndCommitTransaction(
+            handle,
             GetTransactionAcquiredOrModifiedKeys(request.AcquiredLocks).ToList(),
             GetTransactionAcquiredOrModifiedKeys(request.ModifiedKeys).ToList(),
             GetTransactionReadKeys(request.ReadKeys).ToList(),
             context.CancellationToken
-        );               
+        );
 
         GrpcCommitTransactionResponse response = new()
         {
             Type = (GrpcKeyValueResponseType)type,
         };
-        
-        //if (result.Items.Count > 0)
-        //    response.Items.Add(GetKeyValueItems(result.Items));
-        
+
         return response;
     }
 
@@ -1728,29 +1726,30 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <param name="context">The server call context for the RPC request.</param>
     /// <returns>A task representing the operation, returning a <see cref="GrpcRollbackTransactionResponse"/> indicating the result of the rollback operation.</returns>
     internal async Task<GrpcRollbackTransactionResponse> RollbackTransactionInternal(GrpcRollbackTransactionRequest request, ServerCallContext context)
-    {                
-        if (string.IsNullOrEmpty(request.UniqueId))
+    {
+        if (string.IsNullOrEmpty(request.CoordinatorKey))
             return new()
             {
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
-            
-        KeyValueResponseType type = await keyValues.LocateAndRollbackTransaction(
-            request.UniqueId,
+
+        TransactionHandle handle = new(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
+            request.CoordinatorKey
+        );
+
+        KeyValueResponseType type = await keyValues.LocateAndRollbackTransaction(
+            handle,
             GetTransactionAcquiredOrModifiedKeys(request.AcquiredLocks).ToList(),
             GetTransactionAcquiredOrModifiedKeys(request.ModifiedKeys).ToList(),
             context.CancellationToken
-        );        
+        );
 
         GrpcRollbackTransactionResponse response = new()
         {
             Type = (GrpcKeyValueResponseType)type,
         };
-        
-        //if (result.Items.Count > 0)
-        //    response.Items.Add(GetKeyValueItems(result.Items));
-        
+
         return response;
     }
 

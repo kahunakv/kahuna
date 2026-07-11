@@ -64,8 +64,9 @@ public sealed class TestSnapshotSafeTime : BaseCluster
             Assert.Equal(KeyValueResponseType.Set, setA);
 
             // Open a 2PC transaction and stage valB.
-            (KeyValueResponseType startType, HLCTimestamp txId) = await kahuna1.LocateAndStartTransaction(
-                new() { UniqueId = Guid.NewGuid().ToString(), Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+            (KeyValueResponseType startType, TransactionHandle txHandle) = await kahuna1.LocateAndStartTransaction(
+                new() { CoordinatorKey = Guid.NewGuid().ToString(), Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+            HLCTimestamp txId = txHandle.TransactionId;
             Assert.Equal(KeyValueResponseType.Set, startType);
 
             (KeyValueResponseType setB, _, _) = await kahuna2.LocateAndTrySetKeyValue(
@@ -144,8 +145,9 @@ public sealed class TestSnapshotSafeTime : BaseCluster
             HLCTimestamp snapshotT = entryA.LastModified; // valA's commit ts
 
             // Stage valB; the actor HLC is strictly > snapshotT so CommitTimestamp > snapshotT.
-            (KeyValueResponseType startType, HLCTimestamp txId) = await kahuna1.LocateAndStartTransaction(
-                new() { UniqueId = Guid.NewGuid().ToString(), Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+            (KeyValueResponseType startType, TransactionHandle txHandle) = await kahuna1.LocateAndStartTransaction(
+                new() { CoordinatorKey = Guid.NewGuid().ToString(), Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+            HLCTimestamp txId = txHandle.TransactionId;
             Assert.Equal(KeyValueResponseType.Set, startType);
 
             (KeyValueResponseType setB, _, _) = await kahuna2.LocateAndTrySetKeyValue(
@@ -211,8 +213,9 @@ public sealed class TestSnapshotSafeTime : BaseCluster
             // Acquire a short-lived exclusive lock (200 ms TTL). CommitTimestamp == Zero
             // (plain lock, not a 2PC prepared intent) → handler returns WaitingForReplication
             // until the lock expires; the retry loop then clears it and returns Get.
-            (KeyValueResponseType startType, HLCTimestamp lockTxId) = await kahuna1.LocateAndStartTransaction(
-                new() { UniqueId = Guid.NewGuid().ToString(), Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+            (KeyValueResponseType startType, TransactionHandle lockTxHandle) = await kahuna1.LocateAndStartTransaction(
+                new() { CoordinatorKey = Guid.NewGuid().ToString(), Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+            HLCTimestamp lockTxId = lockTxHandle.TransactionId;
             Assert.Equal(KeyValueResponseType.Set, startType);
 
             (KeyValueResponseType lockResult, _, _, _) = await kahuna2.LocateAndTryAcquireExclusiveLock(
@@ -287,8 +290,9 @@ public sealed class TestSnapshotSafeTime : BaseCluster
             Assert.Equal(KeyValueResponseType.Set, setA2);
 
             // Open a 2PC transaction and stage valB on both keys.
-            (KeyValueResponseType startType, HLCTimestamp txId) = await kahuna1.LocateAndStartTransaction(
-                new() { UniqueId = Guid.NewGuid().ToString(), Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+            (KeyValueResponseType startType, TransactionHandle txHandle) = await kahuna1.LocateAndStartTransaction(
+                new() { CoordinatorKey = Guid.NewGuid().ToString(), Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+            HLCTimestamp txId = txHandle.TransactionId;
             Assert.Equal(KeyValueResponseType.Set, startType);
 
             (KeyValueResponseType setB1, _, _) = await kahuna2.LocateAndTrySetKeyValue(

@@ -494,18 +494,19 @@ public sealed class TestTwoPhaseCommitRecovery
                     KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct));
             Assert.Equal(KeyValueResponseType.Set, si2);
 
-            // Start a coordinator transaction. UniqueId routes the session to a coordinator node.
-            (KeyValueResponseType startType, HLCTimestamp txId) =
+            // Start a coordinator transaction (coordinator key routes the session to a stable node).
+            (KeyValueResponseType startType, TransactionHandle txHandle) =
                 await nodes[0].Kahuna.LocateAndStartTransaction(
                     new KeyValueTransactionOptions
                     {
-                        UniqueId     = uniqueId,
-                        Locking      = KeyValueTransactionLocking.Pessimistic,
-                        AsyncRelease = true,
-                        Timeout      = 10_000,
+                        CoordinatorKey = uniqueId,
+                        Locking        = KeyValueTransactionLocking.Pessimistic,
+                        AsyncRelease   = true,
+                        Timeout        = 10_000,
                     },
                     ct);
             Assert.Equal(KeyValueResponseType.Set, startType);
+            HLCTimestamp txId = txHandle.TransactionId;
             Assert.NotEqual(HLCTimestamp.Zero, txId);
 
             // Write both keys inside the transaction (routes to each key's partition leader).
@@ -526,7 +527,7 @@ public sealed class TestTwoPhaseCommitRecovery
                 new() { Key = key2, Durability = KeyValueDurability.Persistent },
             ];
             KeyValueResponseType commitResult = await nodes[0].Kahuna.LocateAndCommitTransaction(
-                uniqueId, txId, acquiredLocks: modKeys, modifiedKeys: modKeys, readKeys: [], ct);
+                txHandle, acquiredLocks: modKeys, modifiedKeys: modKeys, readKeys: [], ct);
             Assert.Equal(KeyValueResponseType.Committed, commitResult);
 
             // Read both keys back and verify the new values are durably committed.
@@ -583,17 +584,18 @@ public sealed class TestTwoPhaseCommitRecovery
                     KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct));
             Assert.Equal(KeyValueResponseType.Set, si2);
 
-            (KeyValueResponseType startType, HLCTimestamp txId) =
+            (KeyValueResponseType startType, TransactionHandle txHandle2) =
                 await nodes[0].Kahuna.LocateAndStartTransaction(
                     new KeyValueTransactionOptions
                     {
-                        UniqueId     = uniqueId,
-                        Locking      = KeyValueTransactionLocking.Pessimistic,
-                        AsyncRelease = true,
-                        Timeout      = 10_000,
+                        CoordinatorKey = uniqueId,
+                        Locking        = KeyValueTransactionLocking.Pessimistic,
+                        AsyncRelease   = true,
+                        Timeout        = 10_000,
                     },
                     ct);
             Assert.Equal(KeyValueResponseType.Set, startType);
+            HLCTimestamp txId = txHandle2.TransactionId;
             Assert.NotEqual(HLCTimestamp.Zero, txId);
 
             (KeyValueResponseType set1, _, _) = await RetrySet(() =>
@@ -614,7 +616,7 @@ public sealed class TestTwoPhaseCommitRecovery
             // Despite the sub-millisecond per-attempt deadline tripping the initial commit, the
             // coordinator's idempotent retry drives the transaction to a durable commit.
             KeyValueResponseType commitResult = await nodes[0].Kahuna.LocateAndCommitTransaction(
-                uniqueId, txId, acquiredLocks: modKeys, modifiedKeys: modKeys, readKeys: [], ct);
+                txHandle2, acquiredLocks: modKeys, modifiedKeys: modKeys, readKeys: [], ct);
             Assert.Equal(KeyValueResponseType.Committed, commitResult);
 
             (KeyValueResponseType r1, ReadOnlyKeyValueEntry? e1) = await nodes[0].Kahuna.LocateAndTryGetValue(

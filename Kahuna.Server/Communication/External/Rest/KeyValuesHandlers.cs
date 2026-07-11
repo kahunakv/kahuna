@@ -28,7 +28,7 @@ public static class KeyValuesHandlers
 
             (KeyValueResponseType response, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTrySetKeyValue(
                 request.TransactionId,
-                request.Key, 
+                request.Key,
                 request.Value,
                 request.CompareValue,
                 request.CompareRevision,

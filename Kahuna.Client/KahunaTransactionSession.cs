@@ -31,11 +31,11 @@ public class KahunaTransactionSession : IAsyncDisposable
     private string Url { get; }
 
     /// <summary>
-    /// Gets the unique identifier for the current KahunaTransactionSession instance.
-    /// This unique id allows to consistently identify and redirect the transaction session
-    /// to the appropiate transaction coordinator node.
+    /// Gets the coordinator key for the current KahunaTransactionSession instance.
+    /// This key pins the transaction session to the appropriate coordinator node for
+    /// the lifetime of the transaction so that commit and rollback reach the same node.
     /// </summary>
-    private string UniqueId { get; }
+    private string CoordinatorKey { get; }
 
     /// <summary>
     /// Gets or sets the locking mechanism used within the current KahunaTransactionSession.
@@ -102,11 +102,11 @@ public class KahunaTransactionSession : IAsyncDisposable
     /// <param name="transactionId"></param>
     /// <param name="locking"></param>
     /// <param name="transactionTimeout"></param>
-    public KahunaTransactionSession(KahunaClient client, string url, string uniqueId, HLCTimestamp transactionId, KeyValueTransactionLocking locking, int transactionTimeout)
+    public KahunaTransactionSession(KahunaClient client, string url, string coordinatorKey, HLCTimestamp transactionId, KeyValueTransactionLocking locking, int transactionTimeout)
     {
         Client = client;
         Url = url;
-        UniqueId = uniqueId;
+        CoordinatorKey = coordinatorKey;
         TransactionId = transactionId;
         Locking = locking;
         TransactionTimeout = transactionTimeout > 0 ? transactionTimeout : DefaultTransactionTimeoutMs;
@@ -950,7 +950,7 @@ public class KahunaTransactionSession : IAsyncDisposable
             
             bool result = await Client.Communication.CommitTransactionSession(
                 Url,
-                UniqueId,
+                CoordinatorKey,
                 TransactionId,
                 acquiredLocksList,
                 modifiedKeysList,
@@ -1005,7 +1005,7 @@ public class KahunaTransactionSession : IAsyncDisposable
 
             bool result = await Client.Communication.RollbackTransactionSession(
                 Url,
-                UniqueId,
+                CoordinatorKey,
                 TransactionId,
                 acquiredKeysList,
                 [],

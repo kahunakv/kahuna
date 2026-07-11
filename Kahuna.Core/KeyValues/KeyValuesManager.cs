@@ -896,10 +896,60 @@ internal sealed class KeyValuesManager : IDisposable
         int expiresMs,
         KeyValueDurability durability,
         CancellationToken cancellationToken,
-        long routedGeneration = 0
+        long routedGeneration = 0,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
-        return locator.LocateAndTrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, cancellationToken, routedGeneration);
+        if (transactionId.IsNull() || operationId.IsEmpty || string.IsNullOrEmpty(coordinatorKey))
+            return locator.LocateAndTrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, cancellationToken, routedGeneration);
+
+        byte[] digest = OperationDigest.ForSet(key, value, compareValue, compareRevision, flags, expiresMs, durability);
+
+        return RegisterAndTrySetKeyValue(transactionId, coordinatorKey, operationId, key, value, compareValue, compareRevision, flags, expiresMs, durability, digest, cancellationToken, routedGeneration);
+    }
+
+    /// <summary>
+    /// Register-remote wrapper for a transaction-scoped write: registers the operation on the
+    /// coordinator (dedup guard), applies the write on the key's leader only when the registration is
+    /// new, then records the confirmed effect and caches the response. A retry carrying the same
+    /// operation id replays the cached response instead of applying the write twice.
+    /// </summary>
+    private async Task<(KeyValueResponseType, long, HLCTimestamp)> RegisterAndTrySetKeyValue(
+        HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string key,
+        byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs,
+        KeyValueDurability durability, byte[] digest, CancellationToken cancellationToken, long routedGeneration)
+    {
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp) =
+            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Set, digest, cancellationToken);
+
+        switch (outcome)
+        {
+            case OperationRegistrationOutcome.AlreadyCompleted:
+                return (cachedType, cachedRevision, cachedTimestamp);
+            case OperationRegistrationOutcome.AlreadyPending:
+            case OperationRegistrationOutcome.RejectedCapacity:
+                return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+            case OperationRegistrationOutcome.RejectedSessionClosed:
+                return (KeyValueResponseType.Aborted, 0, HLCTimestamp.Zero);
+            case OperationRegistrationOutcome.RejectedDuplicate:
+                return (KeyValueResponseType.Errored, 0, HLCTimestamp.Zero);
+        }
+
+        (KeyValueResponseType type, long revision, HLCTimestamp lastModified) =
+            await locator.LocateAndTrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, cancellationToken, routedGeneration);
+
+        // Only a confirmed set records a modified key + its implicit point lock into the working set.
+        bool applied = type == KeyValueResponseType.Set;
+
+        await LocateAndCompleteOperation(
+            coordinatorKey, transactionId, operationId,
+            modifiedKey: applied ? key : null,
+            pointLockKey: applied ? key : null,
+            readKey: null, readExists: false, readRevision: 0,
+            durability, type, revision, lastModified, cancellationToken);
+
+        return (type, revision, lastModified);
     }
 
     /// <summary>
@@ -1008,9 +1058,47 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken)
+    public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
     {
-        return locator.LocateAndTryDeleteKeyValue(transactionId, key, durability, cancellationToken);
+        if (transactionId.IsNull() || operationId.IsEmpty || string.IsNullOrEmpty(coordinatorKey))
+            return locator.LocateAndTryDeleteKeyValue(transactionId, key, durability, cancellationToken);
+
+        return RegisterAndTryDeleteKeyValue(transactionId, coordinatorKey, operationId, key, durability, OperationDigest.ForDelete(key, durability), cancellationToken);
+    }
+
+    private async Task<(KeyValueResponseType, long, HLCTimestamp)> RegisterAndTryDeleteKeyValue(
+        HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string key,
+        KeyValueDurability durability, byte[] digest, CancellationToken cancellationToken)
+    {
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp) =
+            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Delete, digest, cancellationToken);
+
+        switch (outcome)
+        {
+            case OperationRegistrationOutcome.AlreadyCompleted:
+                return (cachedType, cachedRevision, cachedTimestamp);
+            case OperationRegistrationOutcome.AlreadyPending:
+            case OperationRegistrationOutcome.RejectedCapacity:
+                return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+            case OperationRegistrationOutcome.RejectedSessionClosed:
+                return (KeyValueResponseType.Aborted, 0, HLCTimestamp.Zero);
+            case OperationRegistrationOutcome.RejectedDuplicate:
+                return (KeyValueResponseType.Errored, 0, HLCTimestamp.Zero);
+        }
+
+        (KeyValueResponseType type, long revision, HLCTimestamp lastModified) =
+            await locator.LocateAndTryDeleteKeyValue(transactionId, key, durability, cancellationToken);
+
+        bool applied = type == KeyValueResponseType.Deleted;
+
+        await LocateAndCompleteOperation(
+            coordinatorKey, transactionId, operationId,
+            modifiedKey: applied ? key : null,
+            pointLockKey: applied ? key : null,
+            readKey: null, readExists: false, readRevision: 0,
+            durability, type, revision, lastModified, cancellationToken);
+
+        return (type, revision, lastModified);
     }
     
     /// <summary>
@@ -1022,9 +1110,47 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+    public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
     {
-        return locator.LocateAndTryExtendKeyValue(transactionId, key, expiresMs, durability, cancellationToken);
+        if (transactionId.IsNull() || operationId.IsEmpty || string.IsNullOrEmpty(coordinatorKey))
+            return locator.LocateAndTryExtendKeyValue(transactionId, key, expiresMs, durability, cancellationToken);
+
+        return RegisterAndTryExtendKeyValue(transactionId, coordinatorKey, operationId, key, expiresMs, durability, OperationDigest.ForExtend(key, expiresMs, durability), cancellationToken);
+    }
+
+    private async Task<(KeyValueResponseType, long, HLCTimestamp)> RegisterAndTryExtendKeyValue(
+        HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string key,
+        int expiresMs, KeyValueDurability durability, byte[] digest, CancellationToken cancellationToken)
+    {
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp) =
+            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Extend, digest, cancellationToken);
+
+        switch (outcome)
+        {
+            case OperationRegistrationOutcome.AlreadyCompleted:
+                return (cachedType, cachedRevision, cachedTimestamp);
+            case OperationRegistrationOutcome.AlreadyPending:
+            case OperationRegistrationOutcome.RejectedCapacity:
+                return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+            case OperationRegistrationOutcome.RejectedSessionClosed:
+                return (KeyValueResponseType.Aborted, 0, HLCTimestamp.Zero);
+            case OperationRegistrationOutcome.RejectedDuplicate:
+                return (KeyValueResponseType.Errored, 0, HLCTimestamp.Zero);
+        }
+
+        (KeyValueResponseType type, long revision, HLCTimestamp lastModified) =
+            await locator.LocateAndTryExtendKeyValue(transactionId, key, expiresMs, durability, cancellationToken);
+
+        bool applied = type == KeyValueResponseType.Extended;
+
+        await LocateAndCompleteOperation(
+            coordinatorKey, transactionId, operationId,
+            modifiedKey: applied ? key : null,
+            pointLockKey: applied ? key : null,
+            readKey: null, readExists: false, readRevision: 0,
+            durability, type, revision, lastModified, cancellationToken);
+
+        return (type, revision, lastModified);
     }
     
     /// <summary>
@@ -1370,52 +1496,96 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="cancellationToken">The cancellation token for the operation.</param>
     /// <returns>A task representing the asynchronous operation, containing the result of the transaction initiation
     /// as a tuple consisting of the response type and the associated HLC timestamp.</returns>
-    public Task<(KeyValueResponseType, HLCTimestamp)> LocateAndStartTransaction(KeyValueTransactionOptions options, CancellationToken cancellationToken)
+    public Task<(KeyValueResponseType, TransactionHandle)> LocateAndStartTransaction(KeyValueTransactionOptions options, CancellationToken cancellationToken)
     {
-        return locator.LocateAndStartTransaction(options, cancellationToken);        
+        return locator.LocateAndStartTransaction(options, cancellationToken);
     }
 
     /// <summary>
-    /// Attempts to locate and commit a transaction with the specified unique identifier, timestamp,
-    /// acquired locks, and modified keys.
+    /// Attempts to locate and commit the transaction identified by <paramref name="handle"/>.
     /// </summary>
-    /// <param name="uniqueId">The unique identifier of the transaction.</param>
-    /// <param name="timestamp">The timestamp associated with the transaction.</param>
+    /// <param name="handle">The handle returned by <see cref="LocateAndStartTransaction"/>.</param>
     /// <param name="acquiredLocks">A list of keys that have been locked during the transaction.</param>
     /// <param name="modifiedKeys">A list of keys that were modified as part of the transaction.</param>
+    /// <param name="readKeys">A list of keys read during the transaction.</param>
     /// <param name="cancellationToken">A token used to monitor for cancellation requests.</param>
     /// <returns>A task that represents the asynchronous operation, containing the result of the transaction operation.</returns>
     public Task<KeyValueResponseType> LocateAndCommitTransaction(
-        string uniqueId,
-        HLCTimestamp timestamp,
+        TransactionHandle handle,
         List<KeyValueTransactionModifiedKey> acquiredLocks,
         List<KeyValueTransactionModifiedKey> modifiedKeys,
         List<KeyValueTransactionReadKey> readKeys,
         CancellationToken cancellationToken
     )
     {
-        return locator.LocateAndCommitTransaction(uniqueId, timestamp, acquiredLocks, modifiedKeys, readKeys, cancellationToken);
+        return locator.LocateAndCommitTransaction(handle, acquiredLocks, modifiedKeys, readKeys, cancellationToken);
+    }
+
+    /// <summary>Routes an operation registration to the coordinator node identified by <paramref name="coordinatorKey"/>.</summary>
+    public Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp)> LocateAndBeginOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken)
+    {
+        return locator.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
+    }
+
+    /// <summary>Routes an operation completion to the coordinator node identified by <paramref name="coordinatorKey"/>.</summary>
+    public Task LocateAndCompleteOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, string? modifiedKey, string? pointLockKey, string? readKey, bool readExists, long readRevision, KeyValueDurability durability, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, CancellationToken cancellationToken)
+    {
+        return locator.LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, modifiedKey, pointLockKey, readKey, readExists, readRevision, durability, cachedType, cachedRevision, cachedTimestamp, cancellationToken);
+    }
+
+    /// <summary>Node-local registration: the session lives here (this node is the coordinator for the key).</summary>
+    public (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp) BeginOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest)
+    {
+        OperationRegistrationResult result = txCoordinator.BeginOperation(transactionId, operationId, kind, payloadDigest);
+
+        CachedOperationResponse cached = result.CachedResponse is CachedOperationResponse c
+            ? c
+            : new(KeyValueResponseType.Errored, 0, HLCTimestamp.Zero);
+
+        return (result.Outcome, cached.Type, cached.Revision, cached.CommitTimestamp);
+    }
+
+    /// <summary>Node-local completion: folds the confirmed effect into the coordinator-owned working set.</summary>
+    public void CompleteOperation(HLCTimestamp transactionId, TransactionOperationId operationId, string? modifiedKey, string? pointLockKey, string? readKey, bool readExists, long readRevision, KeyValueDurability durability, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp)
+    {
+        // A transient outcome must never be cached as terminal — cancel the registration so a retry
+        // with the same operation id re-registers as new and actually applies the mutation.
+        if (cachedType == KeyValueResponseType.MustRetry)
+        {
+            txCoordinator.CancelOperation(transactionId, operationId);
+            return;
+        }
+
+        OperationEffect? effect = null;
+        if (!string.IsNullOrEmpty(modifiedKey) || !string.IsNullOrEmpty(pointLockKey) || !string.IsNullOrEmpty(readKey))
+        {
+            effect = new()
+            {
+                ModifiedKey = string.IsNullOrEmpty(modifiedKey) ? null : (modifiedKey, durability),
+                PointLock = string.IsNullOrEmpty(pointLockKey) ? null : (pointLockKey, durability),
+                ReadObservation = string.IsNullOrEmpty(readKey) ? null : new KeyValueTransactionReadKey { Key = readKey, Durability = durability, Exists = readExists, Revision = readRevision }
+            };
+        }
+
+        txCoordinator.CompleteOperation(transactionId, operationId, effect, new CachedOperationResponse(cachedType, cachedRevision, cachedTimestamp));
     }
 
     /// <summary>
-    /// Locates and rolls back a transaction identified by a unique ID and timestamp.
-    /// This operation resolves any locks and reverts modifications associated with the transaction.
+    /// Locates and rolls back the transaction identified by <paramref name="handle"/>.
     /// </summary>
-    /// <param name="uniqueId">The unique identifier of the transaction to be rolled back.</param>
-    /// <param name="timestamp">The timestamp associated with the transaction.</param>
+    /// <param name="handle">The handle returned by <see cref="LocateAndStartTransaction"/>.</param>
     /// <param name="acquiredLocks">A list of keys that were locked during the transaction.</param>
     /// <param name="modifiedKeys">A list of keys that were modified during the transaction.</param>
     /// <param name="cancellationToken">A cancellation token to observe while waiting for the task to complete.</param>
     /// <returns>A task that represents the asynchronous operation, containing the result of the rollback operation as a <see cref="KeyValueResponseType"/>.</returns>
     public Task<KeyValueResponseType> LocateAndRollbackTransaction(
-        string uniqueId,
-        HLCTimestamp timestamp,
+        TransactionHandle handle,
         List<KeyValueTransactionModifiedKey> acquiredLocks,
         List<KeyValueTransactionModifiedKey> modifiedKeys,
         CancellationToken cancellationToken
     )
     {
-        return locator.LocateAndRollbackTransaction(uniqueId, timestamp, acquiredLocks, modifiedKeys, cancellationToken);
+        return locator.LocateAndRollbackTransaction(handle, acquiredLocks, modifiedKeys, cancellationToken);
     }
 
     /// <summary>
@@ -3271,42 +3441,43 @@ internal sealed class KeyValuesManager : IDisposable
     /// </summary>
     /// <param name="options">The options for configuring the transaction.</param>
     /// <returns>Returns an <c>HLCTimestamp</c> representing the timestamp of the started transaction.</returns>
-    public Task<(KeyValueResponseType, HLCTimestamp)> StartTransaction(KeyValueTransactionOptions options)
+    public Task<(KeyValueResponseType, TransactionHandle)> StartTransaction(KeyValueTransactionOptions options)
     {
         return txCoordinator.StartTransaction(options);
     }
 
     /// <summary>
-    /// Commits a transaction identified by the given timestamp.
+    /// Commits the transaction identified by <paramref name="handle"/>.
     /// </summary>
-    /// <param name="timestamp">The timestamp associated with the transaction to be committed.</param>
-    /// <param name="acquiredLocks">List of acquired locks</param> 
-    /// <param name="modifiedKeys">List of modified keys</param> 
-    /// <returns>A task that represents the asynchronous operation, containing a boolean value that indicates whether the transaction was successfully committed.</returns>
+    /// <param name="handle">The handle returned by <see cref="StartTransaction"/>.</param>
+    /// <param name="acquiredLocks">List of acquired locks.</param>
+    /// <param name="modifiedKeys">List of modified keys.</param>
+    /// <param name="readKeys">List of keys read during the transaction.</param>
+    /// <returns>A task that represents the asynchronous operation containing the commit result.</returns>
     public Task<KeyValueResponseType> CommitTransaction(
-        HLCTimestamp timestamp, 
-        List<KeyValueTransactionModifiedKey> acquiredLocks, 
+        TransactionHandle handle,
+        List<KeyValueTransactionModifiedKey> acquiredLocks,
         List<KeyValueTransactionModifiedKey> modifiedKeys,
         List<KeyValueTransactionReadKey> readKeys
     )
     {
-        return txCoordinator.CommitTransaction(timestamp, acquiredLocks, modifiedKeys, readKeys);
+        return txCoordinator.CommitTransaction(handle, acquiredLocks, modifiedKeys, readKeys);
     }
 
     /// <summary>
-    /// Rollbacks a transaction identified by the given timestamp.
+    /// Rolls back the transaction identified by <paramref name="handle"/>.
     /// </summary>
-    /// <param name="timestamp"></param>
-    /// <param name="acquiredLocks">List of acquired locks</param> 
-    /// <param name="modifiedKeys">List of modified keys</param> 
+    /// <param name="handle">The handle returned by <see cref="StartTransaction"/>.</param>
+    /// <param name="acquiredLocks">List of acquired locks.</param>
+    /// <param name="modifiedKeys">List of modified keys.</param>
     /// <returns></returns>
     public Task<KeyValueResponseType> RollbackTransaction(
-        HLCTimestamp timestamp, 
-        List<KeyValueTransactionModifiedKey> acquiredLocks, 
+        TransactionHandle handle,
+        List<KeyValueTransactionModifiedKey> acquiredLocks,
         List<KeyValueTransactionModifiedKey> modifiedKeys
     )
     {
-        return txCoordinator.RollbackTransaction(timestamp, acquiredLocks, modifiedKeys);
+        return txCoordinator.RollbackTransaction(handle, acquiredLocks, modifiedKeys);
     }
 
     internal async Task RunCollectOnAllInstancesAsync()

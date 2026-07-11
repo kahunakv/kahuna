@@ -258,17 +258,18 @@ public class TestKeyValueScriptTransactions : BaseCluster
         {
             KeyValueTransactionOptions options = new()
             {
-                UniqueId = Guid.NewGuid().ToString(),
+                CoordinatorKey = Guid.NewGuid().ToString(),
                 Locking = KeyValueTransactionLocking.Pessimistic
             };
 
-            // Persistent tests        
-            (KeyValueResponseType type, HLCTimestamp transactionId) = await kahuna1.LocateAndStartTransaction(options, TestContext.Current.CancellationToken);
-        
+            // Persistent tests
+            (KeyValueResponseType type, TransactionHandle txHandle) = await kahuna1.LocateAndStartTransaction(options, TestContext.Current.CancellationToken);
+            HLCTimestamp transactionId = txHandle.TransactionId;
+
             Assert.Equal(KeyValueResponseType.Set, type);
             Assert.True(transactionId.L > 0);
-        
-            KeyValueResponseType response = await kahuna2.LocateAndCommitTransaction(options.UniqueId, transactionId, [], [], [], TestContext.Current.CancellationToken);
+
+            KeyValueResponseType response = await kahuna2.LocateAndCommitTransaction(txHandle, [], [], [], TestContext.Current.CancellationToken);
             Assert.Equal(KeyValueResponseType.Committed, response);
         
         }
@@ -288,17 +289,18 @@ public class TestKeyValueScriptTransactions : BaseCluster
         {
             KeyValueTransactionOptions options = new()
             {
-                UniqueId = Guid.NewGuid().ToString(),
+                CoordinatorKey = Guid.NewGuid().ToString(),
                 Locking = KeyValueTransactionLocking.Pessimistic
             };
 
-            // Persistent tests        
-            (KeyValueResponseType type, HLCTimestamp transactionId) = await kahuna1.LocateAndStartTransaction(options, TestContext.Current.CancellationToken);
-        
+            // Persistent tests
+            (KeyValueResponseType type, TransactionHandle txHandle) = await kahuna1.LocateAndStartTransaction(options, TestContext.Current.CancellationToken);
+            HLCTimestamp transactionId = txHandle.TransactionId;
+
             Assert.Equal(KeyValueResponseType.Set, type);
             Assert.True(transactionId.L > 0);
-        
-            KeyValueResponseType response = await kahuna2.LocateAndRollbackTransaction(options.UniqueId, transactionId, [], [], TestContext.Current.CancellationToken);
+
+            KeyValueResponseType response = await kahuna2.LocateAndRollbackTransaction(txHandle, [], [], TestContext.Current.CancellationToken);
             Assert.Equal(KeyValueResponseType.RolledBack, response);
         
         }
@@ -318,13 +320,14 @@ public class TestKeyValueScriptTransactions : BaseCluster
         {
             KeyValueTransactionOptions options = new()
             {
-                UniqueId = Guid.NewGuid().ToString(),
+                CoordinatorKey = Guid.NewGuid().ToString(),
                 Locking = KeyValueTransactionLocking.Pessimistic
             };
 
-            // Persistent tests        
-            (KeyValueResponseType type, HLCTimestamp transactionId) = await kahuna1.LocateAndStartTransaction(options, TestContext.Current.CancellationToken);
-        
+            // Persistent tests
+            (KeyValueResponseType type, TransactionHandle txHandle) = await kahuna1.LocateAndStartTransaction(options, TestContext.Current.CancellationToken);
+            HLCTimestamp transactionId = txHandle.TransactionId;
+
             Assert.Equal(KeyValueResponseType.Set, type);
             Assert.True(transactionId.L > 0);
 
@@ -332,18 +335,17 @@ public class TestKeyValueScriptTransactions : BaseCluster
             Assert.Equal(KeyValueResponseType.Locked, resp.type);
             Assert.Equal("pp1", resp.key);
             Assert.Equal(KeyValueDurability.Persistent, resp.durability);
-        
+
             (type, long revision, HLCTimestamp modifiedTime) = await kahuna3.LocateAndTrySetKeyValue(transactionId, "pp1", "hello world"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
-        
+
             Assert.Equal(KeyValueResponseType.Set, type);
             Assert.Equal(0, revision);
             Assert.True(modifiedTime > transactionId);
-        
+
             KeyValueResponseType response = await kahuna1.LocateAndCommitTransaction(
-                options.UniqueId, 
-                transactionId, 
-                [new() { Key = "pp1", Durability = KeyValueDurability.Persistent }], 
-                [new() { Key = "pp1", Durability = KeyValueDurability.Persistent }], 
+                txHandle,
+                [new() { Key = "pp1", Durability = KeyValueDurability.Persistent }],
+                [new() { Key = "pp1", Durability = KeyValueDurability.Persistent }],
                 [],
                 TestContext.Current.CancellationToken
             );
@@ -372,43 +374,43 @@ public class TestKeyValueScriptTransactions : BaseCluster
         {
             KeyValueTransactionOptions options = new()
             {
-                UniqueId = Guid.NewGuid().ToString(),
+                CoordinatorKey = Guid.NewGuid().ToString(),
                 Locking = KeyValueTransactionLocking.Pessimistic
             };
 
-            // Persistent tests        
-            (KeyValueResponseType type, HLCTimestamp transactionId) = await kahuna1.LocateAndStartTransaction(options, TestContext.Current.CancellationToken);
-        
+            // Persistent tests
+            (KeyValueResponseType type, TransactionHandle txHandle) = await kahuna1.LocateAndStartTransaction(options, TestContext.Current.CancellationToken);
+            HLCTimestamp transactionId = txHandle.TransactionId;
+
             Assert.Equal(KeyValueResponseType.Set, type);
             Assert.True(transactionId.L > 0);
-        
+
             (KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp _) resp = await kahuna2.LocateAndTryAcquireExclusiveLock(transactionId, "pp1", 5000, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
             Assert.Equal(KeyValueResponseType.Locked, resp.type);
             Assert.Equal("pp1", resp.key);
             Assert.Equal(KeyValueDurability.Persistent, resp.durability);
-        
+
             (type, long revision, HLCTimestamp modifiedTime) = await kahuna3.LocateAndTrySetKeyValue(transactionId, "pp1", "hello world"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
-        
+
             Assert.Equal(KeyValueResponseType.Set, type);
             Assert.Equal(0, revision);
             Assert.True(modifiedTime > transactionId);
-        
+
             resp = await kahuna1.LocateAndTryAcquireExclusiveLock(transactionId, "pp2", 5000, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
             Assert.Equal(KeyValueResponseType.Locked, resp.type);
             Assert.Equal("pp2", resp.key);
             Assert.Equal(KeyValueDurability.Persistent, resp.durability);
-        
+
             (type, revision, modifiedTime) = await kahuna2.LocateAndTrySetKeyValue(transactionId, "pp2", "hello world"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
-        
+
             Assert.Equal(KeyValueResponseType.Set, type);
             Assert.Equal(0, revision);
             Assert.True(modifiedTime > transactionId);
-        
+
             KeyValueResponseType response = await kahuna3.LocateAndCommitTransaction(
-                options.UniqueId, 
-                transactionId, 
-                [new() { Key = "pp1", Durability = KeyValueDurability.Persistent }, new() { Key = "pp2", Durability = KeyValueDurability.Persistent }], 
-                [new() { Key = "pp1", Durability = KeyValueDurability.Persistent }, new() { Key = "pp2", Durability = KeyValueDurability.Persistent }], 
+                txHandle,
+                [new() { Key = "pp1", Durability = KeyValueDurability.Persistent }, new() { Key = "pp2", Durability = KeyValueDurability.Persistent }],
+                [new() { Key = "pp1", Durability = KeyValueDurability.Persistent }, new() { Key = "pp2", Durability = KeyValueDurability.Persistent }],
                 [],
                 TestContext.Current.CancellationToken
             );
@@ -444,13 +446,14 @@ public class TestKeyValueScriptTransactions : BaseCluster
         {
             KeyValueTransactionOptions options = new()
             {
-                UniqueId = Guid.NewGuid().ToString(),
+                CoordinatorKey = Guid.NewGuid().ToString(),
                 Locking = KeyValueTransactionLocking.Pessimistic
             };
 
-            // Persistent tests        
-            (KeyValueResponseType type, HLCTimestamp transactionId) = await kahuna1.LocateAndStartTransaction(options, TestContext.Current.CancellationToken);
-        
+            // Persistent tests
+            (KeyValueResponseType type, TransactionHandle txHandle) = await kahuna1.LocateAndStartTransaction(options, TestContext.Current.CancellationToken);
+            HLCTimestamp transactionId = txHandle.TransactionId;
+
             Assert.Equal(KeyValueResponseType.Set, type);
             Assert.True(transactionId.L > 0);
 
@@ -458,18 +461,17 @@ public class TestKeyValueScriptTransactions : BaseCluster
             Assert.Equal(KeyValueResponseType.Locked, resp.type);
             Assert.Equal("pp1", resp.key);
             Assert.Equal(KeyValueDurability.Persistent, resp.durability);
-        
+
             (type, long revision, HLCTimestamp modifiedTime) = await kahuna3.LocateAndTrySetKeyValue(transactionId, "pp1", "hello world"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
-        
+
             Assert.Equal(KeyValueResponseType.Set, type);
             Assert.Equal(0, revision);
             Assert.True(modifiedTime > transactionId);
-        
+
             KeyValueResponseType response = await kahuna1.LocateAndRollbackTransaction(
-                options.UniqueId, 
-                transactionId, 
-                [new() { Key = "pp1", Durability = KeyValueDurability.Persistent }], 
-                [new() { Key = "pp1", Durability = KeyValueDurability.Persistent }], 
+                txHandle,
+                [new() { Key = "pp1", Durability = KeyValueDurability.Persistent }],
+                [new() { Key = "pp1", Durability = KeyValueDurability.Persistent }],
                 TestContext.Current.CancellationToken
             );
         
@@ -495,43 +497,43 @@ public class TestKeyValueScriptTransactions : BaseCluster
         {
             KeyValueTransactionOptions options = new()
             {
-                UniqueId = Guid.NewGuid().ToString(),
+                CoordinatorKey = Guid.NewGuid().ToString(),
                 Locking = KeyValueTransactionLocking.Pessimistic
             };
 
-            // Persistent tests        
-            (KeyValueResponseType type, HLCTimestamp transactionId) = await kahuna1.LocateAndStartTransaction(options, TestContext.Current.CancellationToken);
-        
+            // Persistent tests
+            (KeyValueResponseType type, TransactionHandle txHandle) = await kahuna1.LocateAndStartTransaction(options, TestContext.Current.CancellationToken);
+            HLCTimestamp transactionId = txHandle.TransactionId;
+
             Assert.Equal(KeyValueResponseType.Set, type);
             Assert.True(transactionId.L > 0);
-        
+
             (KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp _) resp = await kahuna2.LocateAndTryAcquireExclusiveLock(transactionId, "pp1", 5000, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
             Assert.Equal(KeyValueResponseType.Locked, resp.type);
             Assert.Equal("pp1", resp.key);
             Assert.Equal(KeyValueDurability.Persistent, resp.durability);
-        
+
             (type, long revision, HLCTimestamp modifiedTime) = await kahuna3.LocateAndTrySetKeyValue(transactionId, "pp1", "hello world"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
-        
+
             Assert.Equal(KeyValueResponseType.Set, type);
             Assert.Equal(0, revision);
             Assert.True(modifiedTime > transactionId);
-        
+
             resp = await kahuna1.LocateAndTryAcquireExclusiveLock(transactionId, "pp2", 5000, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
             Assert.Equal(KeyValueResponseType.Locked, resp.type);
             Assert.Equal("pp2", resp.key);
             Assert.Equal(KeyValueDurability.Persistent, resp.durability);
-        
+
             (type, revision, modifiedTime) = await kahuna2.LocateAndTrySetKeyValue(transactionId, "pp2", "hello world"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
-        
+
             Assert.Equal(KeyValueResponseType.Set, type);
             Assert.Equal(0, revision);
             Assert.True(modifiedTime > transactionId);
-        
+
             KeyValueResponseType response = await kahuna3.LocateAndRollbackTransaction(
-                options.UniqueId, 
-                transactionId, 
-                [new() { Key = "pp1", Durability = KeyValueDurability.Persistent }, new() { Key = "pp2", Durability = KeyValueDurability.Persistent }], 
-                [new() { Key = "pp1", Durability = KeyValueDurability.Persistent }, new() { Key = "pp2", Durability = KeyValueDurability.Persistent }], 
+                txHandle,
+                [new() { Key = "pp1", Durability = KeyValueDurability.Persistent }, new() { Key = "pp2", Durability = KeyValueDurability.Persistent }],
+                [new() { Key = "pp1", Durability = KeyValueDurability.Persistent }, new() { Key = "pp2", Durability = KeyValueDurability.Persistent }],
                 TestContext.Current.CancellationToken
             );
         
@@ -564,10 +566,11 @@ public class TestKeyValueScriptTransactions : BaseCluster
 
         try
         {
-            (KeyValueResponseType type, HLCTimestamp transactionId) = await kahuna1.LocateAndStartTransaction(
-                new() { UniqueId = Guid.NewGuid().ToString(), Locking = KeyValueTransactionLocking.Pessimistic },
+            (KeyValueResponseType type, TransactionHandle txHandle) = await kahuna1.LocateAndStartTransaction(
+                new() { CoordinatorKey = Guid.NewGuid().ToString(), Locking = KeyValueTransactionLocking.Pessimistic },
                 TestContext.Current.CancellationToken
             );
+            HLCTimestamp transactionId = txHandle.TransactionId;
             Assert.Equal(KeyValueResponseType.Set, type);
 
             (type, _, _, _) = await kahuna1.LocateAndTryAcquireExclusiveLock(transactionId, "prb1", 5000, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
@@ -611,10 +614,11 @@ public class TestKeyValueScriptTransactions : BaseCluster
 
         try
         {
-            (KeyValueResponseType type, HLCTimestamp transactionId) = await kahuna1.LocateAndStartTransaction(
-                new() { UniqueId = Guid.NewGuid().ToString(), Locking = KeyValueTransactionLocking.Pessimistic },
+            (KeyValueResponseType type, TransactionHandle txHandle) = await kahuna1.LocateAndStartTransaction(
+                new() { CoordinatorKey = Guid.NewGuid().ToString(), Locking = KeyValueTransactionLocking.Pessimistic },
                 TestContext.Current.CancellationToken
             );
+            HLCTimestamp transactionId = txHandle.TransactionId;
             Assert.Equal(KeyValueResponseType.Set, type);
 
             (type, _, _, _) = await kahuna2.LocateAndTryAcquireExclusiveLock(transactionId, "pcb1", 5000, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
@@ -658,10 +662,11 @@ public class TestKeyValueScriptTransactions : BaseCluster
 
         try
         {
-            (KeyValueResponseType type, HLCTimestamp transactionId) = await kahuna1.LocateAndStartTransaction(
-                new() { UniqueId = Guid.NewGuid().ToString(), Locking = KeyValueTransactionLocking.Pessimistic },
+            (KeyValueResponseType type, TransactionHandle txHandle) = await kahuna1.LocateAndStartTransaction(
+                new() { CoordinatorKey = Guid.NewGuid().ToString(), Locking = KeyValueTransactionLocking.Pessimistic },
                 TestContext.Current.CancellationToken
             );
+            HLCTimestamp transactionId = txHandle.TransactionId;
             Assert.Equal(KeyValueResponseType.Set, type);
 
             foreach (string key in new[] { "prbm1", "prbm2" })
@@ -714,10 +719,11 @@ public class TestKeyValueScriptTransactions : BaseCluster
 
         try
         {
-            (KeyValueResponseType type, HLCTimestamp transactionId) = await kahuna1.LocateAndStartTransaction(
-                new() { UniqueId = Guid.NewGuid().ToString(), Locking = KeyValueTransactionLocking.Pessimistic },
+            (KeyValueResponseType type, TransactionHandle txHandle) = await kahuna1.LocateAndStartTransaction(
+                new() { CoordinatorKey = Guid.NewGuid().ToString(), Locking = KeyValueTransactionLocking.Pessimistic },
                 TestContext.Current.CancellationToken
             );
+            HLCTimestamp transactionId = txHandle.TransactionId;
             Assert.Equal(KeyValueResponseType.Set, type);
 
             foreach (string key in new[] { "pcbm1", "pcbm2" })

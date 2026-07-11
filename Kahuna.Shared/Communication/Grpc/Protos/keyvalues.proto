@@ -702,7 +702,7 @@ message GrpcScanAllByPrefixResponse {
 
 message GrpcStartTransactionRequest
 {
-  string UniqueId = 1;
+  string CoordinatorKey = 1;
   GrpcLockingType LockingType = 2;
   int32 Timeout = 3;
   bool AsyncRelease = 4;
@@ -720,7 +720,7 @@ message GrpcStartTransactionResponse
 
 message GrpcCommitTransactionRequest
 {
-  string UniqueId = 1;
+  string CoordinatorKey = 1;
   int32 TransactionIdNode = 2;
   int64 TransactionIdPhysical = 3;
   uint32 TransactionIdCounter = 4;
@@ -731,7 +731,7 @@ message GrpcCommitTransactionRequest
 
 message GrpcRollbackTransactionRequest
 {
-  string UniqueId = 1;
+  string CoordinatorKey = 1;
   int32 TransactionIdNode = 2;
   int64 TransactionIdPhysical = 3;
   uint32 TransactionIdCounter = 4;

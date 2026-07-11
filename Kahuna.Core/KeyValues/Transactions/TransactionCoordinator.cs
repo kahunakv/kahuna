@@ -8,6 +8,7 @@ using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
+using TransactionHandle = Kahuna.Shared.KeyValue.TransactionHandle;
 
 namespace Kahuna.Server.KeyValues.Transactions;
 
@@ -54,11 +55,16 @@ internal sealed class TransactionCoordinator
     }
 
     /// <summary>
-    /// Starts a new interactive transaction session and returns its unique identifier.
+    /// Starts a new interactive transaction session and returns a handle that pins the session to
+    /// the coordinator partition. The handle must be supplied on every subsequent commit/rollback.
     /// </summary>
-    public async Task<(KeyValueResponseType, HLCTimestamp)> StartTransaction(KeyValueTransactionOptions options)
+    public async Task<(KeyValueResponseType, TransactionHandle)> StartTransaction(KeyValueTransactionOptions options)
     {
-        bool result;
+        string coordinatorKey = string.IsNullOrEmpty(options.CoordinatorKey)
+            ? Guid.NewGuid().ToString("N")
+            : options.CoordinatorKey;
+
+        bool added;
         HLCTimestamp transactionId;
 
         do
@@ -67,34 +73,39 @@ internal sealed class TransactionCoordinator
 
             TransactionContext context = new()
             {
-                TransactionId = transactionId,
-                Locking = options.Locking,
-                Action = KeyValueTransactionAction.Commit,
-                AsyncRelease = options.AsyncRelease,
-                Timeout = options.Timeout <= 0 ? configuration.DefaultTransactionTimeout : options.Timeout
+                CoordinatorKey = coordinatorKey,
+                TransactionId  = transactionId,
+                Locking        = options.Locking,
+                Action         = KeyValueTransactionAction.Commit,
+                AsyncRelease   = options.AsyncRelease,
+                Timeout        = options.Timeout <= 0 ? configuration.DefaultTransactionTimeout : options.Timeout
             };
 
-            result = sessions.TryAdd(transactionId, context);
+            added = sessions.TryAdd(transactionId, context);
 
-        } while (!result);
+        } while (!added);
 
         logger.LogStartedInteractiveTransaction(transactionId);
 
         await Task.CompletedTask;
 
-        return (KeyValueResponseType.Set, transactionId);
+        return (KeyValueResponseType.Set, new TransactionHandle(transactionId, coordinatorKey));
     }
 
     /// <summary>
-    /// Commits the interactive transaction identified by <paramref name="transactionId"/>.
+    /// Commits the transaction identified by the supplied handle.
+    /// The handle carries both the transaction ID (used to locate the session) and the
+    /// coordinator key (used by the caller to route this request to the right node).
     /// </summary>
     public async Task<KeyValueResponseType> CommitTransaction(
-        HLCTimestamp transactionId,
+        TransactionHandle handle,
         List<KeyValueTransactionModifiedKey> acquiredLocks,
         List<KeyValueTransactionModifiedKey> modifiedKeys,
         List<KeyValueTransactionReadKey> readKeys
     )
     {
+        HLCTimestamp transactionId = handle.TransactionId;
+
         if (!sessions.TryGetValue(transactionId, out TransactionContext? context))
         {
             logger.LogWarning("Trying to commit unknown transaction {TransactionId}", transactionId);
@@ -178,14 +189,16 @@ internal sealed class TransactionCoordinator
     }
 
     /// <summary>
-    /// Rolls back the interactive transaction identified by <paramref name="transactionId"/>.
+    /// Rolls back the transaction identified by the supplied handle.
     /// </summary>
     public async Task<KeyValueResponseType> RollbackTransaction(
-        HLCTimestamp transactionId,
+        TransactionHandle handle,
         List<KeyValueTransactionModifiedKey> acquiredLocks,
         List<KeyValueTransactionModifiedKey> modifiedKeys
     )
     {
+        HLCTimestamp transactionId = handle.TransactionId;
+
         if (!sessions.TryGetValue(transactionId, out TransactionContext? context))
         {
             logger.LogWarning("Trying to rollback unknown transaction {TransactionId}", transactionId);
@@ -223,6 +236,106 @@ internal sealed class TransactionCoordinator
             }
         }
     }
+
+    // ---- operation registry façade ----
+
+    /// <summary>
+    /// Registers an operation under the session identified by <paramref name="transactionId"/> for
+    /// idempotent tracking. Returns <see cref="OperationRegistrationResult"/> describing whether
+    /// the operation is new, already in flight, or already completed with a cached response.
+    /// </summary>
+    public OperationRegistrationResult BeginOperation(
+        HLCTimestamp transactionId,
+        TransactionOperationId operationId,
+        OperationKind kind,
+        byte[]? payloadDigest)
+    {
+        if (!sessions.TryGetValue(transactionId, out TransactionContext? context))
+            return new(OperationRegistrationOutcome.RejectedSessionClosed);
+
+        return context.BeginOperation(operationId, kind, payloadDigest);
+    }
+
+    /// <summary>
+    /// Marks the operation as completed and stores the response so that duplicate submissions
+    /// can receive the same answer without re-executing the operation.
+    /// </summary>
+    public void CompleteOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationEffect? effect, object? response)
+    {
+        if (sessions.TryGetValue(transactionId, out TransactionContext? context))
+            context.CompleteOperation(operationId, effect, response);
+    }
+
+    /// <summary>
+    /// Cancels the specified operation if it is still in the pending state.
+    /// </summary>
+    public bool CancelOperation(HLCTimestamp transactionId, TransactionOperationId operationId)
+    {
+        if (!sessions.TryGetValue(transactionId, out TransactionContext? context))
+            return false;
+
+        return context.TryCancelOperation(operationId);
+    }
+
+    // ---- working-set query and close snapshot ----
+
+    /// <summary>
+    /// Returns a snapshot of the working set for the specified transaction, or null if the
+    /// session does not exist.
+    /// </summary>
+    public WorkingSetSnapshot? GetTransactionWorkingSet(HLCTimestamp transactionId)
+    {
+        if (!sessions.TryGetValue(transactionId, out TransactionContext? context))
+            return null;
+
+        return context.GetWorkingSetSnapshot();
+    }
+
+    /// <summary>
+    /// Transitions the session to <see cref="SessionLifecycle.Finalizing"/>, waits for all
+    /// in-flight operations to drain, captures a working-set snapshot, and transitions to
+    /// <see cref="SessionLifecycle.Terminal"/>. Callers use the returned snapshot to drive the
+    /// 2PC prepare/commit/rollback steps independently of the live context.
+    /// </summary>
+    public async Task<(KeyValueResponseType, WorkingSetSnapshot?)> CloseTransaction(
+        HLCTimestamp transactionId,
+        CancellationToken cancellationToken)
+    {
+        if (!sessions.TryGetValue(transactionId, out TransactionContext? context))
+            return (KeyValueResponseType.Errored, null);
+
+        if (!context.TryBeginFinalizing())
+        {
+            // Another finalize won the race or the session is terminal. Return the snapshot only once
+            // it has actually been published; until then ask the caller to retry rather than hand back
+            // a null set that reads as success.
+            WorkingSetSnapshot? published = context.PublishedSnapshot;
+            return published is not null
+                ? (KeyValueResponseType.Set, published)
+                : (KeyValueResponseType.MustRetry, null);
+        }
+
+        using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(context.Timeout);
+
+        try
+        {
+            await context.WaitForPendingOperations(cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            // Drain deadline hit — reopen the session so the caller can retry the close.
+            context.RevertFinalizing();
+            return (KeyValueResponseType.MustRetry, null);
+        }
+
+        WorkingSetSnapshot snapshot = context.GetWorkingSetSnapshot();
+        context.PublishTerminal(snapshot);
+
+        return (KeyValueResponseType.Set, snapshot);
+    }
+
+    // ---- session reaper ----
 
     /// <summary>
     /// Reclaims interactive sessions that were started but never committed or rolled back —

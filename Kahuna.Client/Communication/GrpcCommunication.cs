@@ -1593,7 +1593,7 @@ public class GrpcCommunication : IKahunaCommunication
     {
         GrpcStartTransactionRequest request = new()
         {
-            UniqueId = uniqueId,
+            CoordinatorKey = uniqueId,
             Timeout = txOptions.Timeout,
             LockingType = (GrpcLockingType)txOptions.Locking,
             AsyncRelease = txOptions.AsyncRelease,
@@ -1660,7 +1660,7 @@ public class GrpcCommunication : IKahunaCommunication
     {
         GrpcCommitTransactionRequest request = new()
         {
-            UniqueId = uniqueId,
+            CoordinatorKey = uniqueId,
             TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
@@ -1734,7 +1734,7 @@ public class GrpcCommunication : IKahunaCommunication
     {
         GrpcRollbackTransactionRequest request = new()
         {
-            UniqueId = uniqueId,
+            CoordinatorKey = uniqueId,
             TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,

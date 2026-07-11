@@ -596,8 +596,9 @@ public class TestScriptAsOfReads : BaseCluster
             Assert.Equal(KeyValueResponseType.Set, setA);
 
             // Open a 2PC transaction and stage valB.
-            (KeyValueResponseType startType, HLCTimestamp txId) = await kahuna1.LocateAndStartTransaction(
-                new() { UniqueId = Guid.NewGuid().ToString(), Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+            (KeyValueResponseType startType, TransactionHandle txHandle) = await kahuna1.LocateAndStartTransaction(
+                new() { CoordinatorKey = Guid.NewGuid().ToString(), Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+            HLCTimestamp txId = txHandle.TransactionId;
             Assert.Equal(KeyValueResponseType.Set, startType);
 
             (KeyValueResponseType setB, _, _) = await RetryOnMustRetryAsync(() => kahuna2.LocateAndTrySetKeyValue(

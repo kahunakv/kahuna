@@ -1883,95 +1883,135 @@ internal sealed class KeyValueLocator
     /// <param name="options">The transaction options, including a unique identifier used to determine the partition.</param>
     /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
     /// <returns>A tuple containing the result of the transaction operation (<see cref="KeyValueResponseType"/>),
-    /// and a timestamp (<see cref="HLCTimestamp"/>) indicating when the transaction was processed.</returns>
-    public async Task<(KeyValueResponseType, HLCTimestamp)> LocateAndStartTransaction(KeyValueTransactionOptions options, CancellationToken cancellationToken)
+    /// and a <see cref="TransactionHandle"/> that must be used for all subsequent commit/rollback calls.</returns>
+    public async Task<(KeyValueResponseType, TransactionHandle)> LocateAndStartTransaction(KeyValueTransactionOptions options, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrEmpty(options.UniqueId))
-            return new(KeyValueResponseType.Errored, HLCTimestamp.Zero);
-        
-        int partitionId = dataPartitionRouter.Locate(options.UniqueId);
+        if (string.IsNullOrEmpty(options.CoordinatorKey))
+            options.CoordinatorKey = Guid.NewGuid().ToString("N");
+
+        int partitionId = dataPartitionRouter.Locate(options.CoordinatorKey);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
             return await manager.StartTransaction(options);
-            
+
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
-            return new(KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
-        
-        logger.LogStartTransactionRedirected(options.UniqueId, partitionId, leader);
-        
+            return new(KeyValueResponseType.MustRetry, TransactionHandle.None);
+
+        logger.LogStartTransactionRedirected(options.CoordinatorKey, partitionId, leader);
+
         return await interNodeCommunication.StartTransaction(leader, options, cancellationToken);
     }
 
     /// <summary>
-    /// Locates the appropriate partition and commits a transaction associated with the given unique identifier.
+    /// Locates the appropriate partition and commits the transaction identified by <paramref name="handle"/>.
     /// </summary>
-    /// <param name="uniqueId">The unique identifier associated with the transaction.</param>
-    /// <param name="timestamp">The timestamp of the transaction using hybrid logical clock.</param>
+    /// <param name="handle">The handle returned by <see cref="LocateAndStartTransaction"/>.</param>
     /// <param name="acquiredLocks">The list of keys that have been locked as part of the transaction.</param>
     /// <param name="modifiedKeys">The list of keys that have been modified as part of the transaction.</param>
+    /// <param name="readKeys">The list of keys read during the transaction.</param>
     /// <param name="cancellationToken">A token to cancel the asynchronous operation.</param>
     /// <returns>
     /// A <see cref="KeyValueResponseType"/> indicating the outcome of the transaction operation.
     /// </returns>
     public async Task<KeyValueResponseType> LocateAndCommitTransaction(
-        string uniqueId,
-        HLCTimestamp timestamp,
+        TransactionHandle handle,
         List<KeyValueTransactionModifiedKey> acquiredLocks,
         List<KeyValueTransactionModifiedKey> modifiedKeys,
         List<KeyValueTransactionReadKey> readKeys,
         CancellationToken cancellationToken
     )
     {
-        if (string.IsNullOrEmpty(uniqueId))
+        if (handle.IsEmpty)
             return KeyValueResponseType.Errored;
-        
-        int partitionId = dataPartitionRouter.Locate(uniqueId);
+
+        int partitionId = dataPartitionRouter.Locate(handle.CoordinatorKey);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
-            return await manager.CommitTransaction(timestamp, acquiredLocks, modifiedKeys, readKeys);
-            
+            return await manager.CommitTransaction(handle, acquiredLocks, modifiedKeys, readKeys);
+
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
             return KeyValueResponseType.MustRetry;
-        
-        logger.LogCommitTransactionRedirected(uniqueId, partitionId, leader);
-        
-        return await interNodeCommunication.CommitTransaction(leader, uniqueId, timestamp, acquiredLocks, modifiedKeys, readKeys, cancellationToken);
+
+        logger.LogCommitTransactionRedirected(handle.CoordinatorKey, partitionId, leader);
+
+        return await interNodeCommunication.CommitTransaction(leader, handle, acquiredLocks, modifiedKeys, readKeys, cancellationToken);
     }
 
     /// <summary>
-    /// Locates and rolls back a transaction based on the specified parameters.
+    /// Locates and rolls back the transaction identified by <paramref name="handle"/>.
     /// </summary>
-    /// <param name="uniqueId">The unique identifier of the transaction to locate and rollback.</param>
-    /// <param name="timestamp">The timestamp associated with the transaction.</param>
+    /// <param name="handle">The handle returned by <see cref="LocateAndStartTransaction"/>.</param>
     /// <param name="acquiredLocks">The list of keys that were locked during the transaction.</param>
     /// <param name="modifiedKeys">The list of keys that were modified during the transaction.</param>
     /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
     /// <returns>A <see cref="KeyValueResponseType"/> indicating the result of the operation.</returns>
     public async Task<KeyValueResponseType> LocateAndRollbackTransaction(
-        string uniqueId,
-        HLCTimestamp timestamp,
+        TransactionHandle handle,
         List<KeyValueTransactionModifiedKey> acquiredLocks,
-        List<KeyValueTransactionModifiedKey> modifiedKeys, 
+        List<KeyValueTransactionModifiedKey> modifiedKeys,
         CancellationToken cancellationToken
     )
     {
-        if (string.IsNullOrEmpty(uniqueId))
+        if (handle.IsEmpty)
             return KeyValueResponseType.Errored;
-        
-        int partitionId = dataPartitionRouter.Locate(uniqueId);
+
+        int partitionId = dataPartitionRouter.Locate(handle.CoordinatorKey);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
-            return await manager.RollbackTransaction(timestamp, acquiredLocks, modifiedKeys);
-            
+            return await manager.RollbackTransaction(handle, acquiredLocks, modifiedKeys);
+
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
             return KeyValueResponseType.MustRetry;
-        
-        logger.LogRollbackTransactionRedirected(uniqueId, partitionId, leader);
-        
-        return await interNodeCommunication.RollbackTransaction(leader, uniqueId, timestamp, acquiredLocks, modifiedKeys, cancellationToken);
+
+        logger.LogRollbackTransactionRedirected(handle.CoordinatorKey, partitionId, leader);
+
+        return await interNodeCommunication.RollbackTransaction(leader, handle, acquiredLocks, modifiedKeys, cancellationToken);
+    }
+
+    /// <summary>
+    /// Routes an operation registration to the node that leads the coordinator partition for
+    /// <paramref name="coordinatorKey"/> — the node that holds the session — registering it locally
+    /// when this node is that leader and forwarding otherwise.
+    /// </summary>
+    public async Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp)> LocateAndBeginOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(coordinatorKey))
+            return (OperationRegistrationOutcome.RejectedSessionClosed, KeyValueResponseType.Errored, 0, HLCTimestamp.Zero);
+
+        int partitionId = dataPartitionRouter.Locate(coordinatorKey);
+
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+            return manager.BeginOperation(transactionId, operationId, kind, payloadDigest);
+
+        string leader = await raft.WaitForLeader(partitionId, cancellationToken);
+        if (leader == raft.GetLocalEndpoint())
+            return (OperationRegistrationOutcome.AlreadyPending, KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+
+        return await interNodeCommunication.BeginOperation(leader, coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
+    }
+
+    /// <summary>Routes an operation completion to the coordinator-partition leader for <paramref name="coordinatorKey"/>.</summary>
+    public async Task LocateAndCompleteOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, string? modifiedKey, string? pointLockKey, string? readKey, bool readExists, long readRevision, KeyValueDurability durability, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(coordinatorKey))
+            return;
+
+        int partitionId = dataPartitionRouter.Locate(coordinatorKey);
+
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+        {
+            manager.CompleteOperation(transactionId, operationId, modifiedKey, pointLockKey, readKey, readExists, readRevision, durability, cachedType, cachedRevision, cachedTimestamp);
+            return;
+        }
+
+        string leader = await raft.WaitForLeader(partitionId, cancellationToken);
+        if (leader == raft.GetLocalEndpoint())
+            return;
+
+        await interNodeCommunication.CompleteOperation(leader, coordinatorKey, transactionId, operationId, modifiedKey, pointLockKey, readKey, readExists, readRevision, durability, cachedType, cachedRevision, cachedTimestamp, cancellationToken);
     }
 
     /// <summary>
