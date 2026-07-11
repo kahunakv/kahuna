@@ -48,6 +48,17 @@ public sealed class KahunaConfiguration
     /// </summary>
     public int ReadContinuationTimeout { get; set; } = 30_000;
 
+    /// <summary>
+    /// Maximum number of <em>ordinary</em> (user-request) messages that may be queued in a single
+    /// key-value actor's inbox before further ordinary messages are rejected with a retryable
+    /// <c>MustRetry</c> (mapped from Nixie's <c>ActorBusyException</c>). This backpressures a hot-key
+    /// flood without ever rejecting control messages — completions, cache-coherence, and maintenance —
+    /// which are exempt from the bound and delivered ahead of the backlog. A value &lt;= 0 disables the
+    /// bound (unbounded inbox, original behavior). The default is generous so it only engages under a
+    /// genuine flood, not normal bursts.
+    /// </summary>
+    public int MaxKeyValueActorInboxSize { get; set; } = 16_384;
+
     public int RevisionsToKeepCached { get; set; }
     
     public TimeSpan CacheEntryTtl { get; set; }

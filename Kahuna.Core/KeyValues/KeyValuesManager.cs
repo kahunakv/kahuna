@@ -657,15 +657,67 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="persistence"></param>
     /// <param name="workers"></param>
     /// <returns></returns>
+    /// <summary>
+    /// Builds the bounded-inbox + priority-control options for a key-value actor. The bound applies
+    /// only to ordinary user requests; control messages (<see cref="IsControlRequest"/>) are exempt and
+    /// delivered ahead of the backlog so a hot-key flood never strands an in-flight completion.
+    /// </summary>
+    private static ActorRunnerOptions<KeyValueRequest> BuildActorInboxOptions(KahunaConfiguration configuration) => new()
+    {
+        MaxInboxSize = configuration.MaxKeyValueActorInboxSize > 0 ? configuration.MaxKeyValueActorInboxSize : null,
+        IsControlMessage = IsControlRequest
+    };
+
+    /// <summary>
+    /// Classifies a request as a priority control message, exempt from the inbox bound. Beyond the
+    /// caller-promise-carrying completions (<c>ResumeRead</c>, <c>CompleteProposal</c>,
+    /// <c>ReleaseProposal</c>) — which would strand in-flight work if rejected — this also exempts the
+    /// internal fire-and-forget/maintenance messages that must never be silently dropped under
+    /// backpressure: <c>InvalidateOrApply</c> (follower cache coherence — dropping it yields a stale
+    /// read), <c>FlushAck</c> (durability marker), and the periodic <c>Collect</c> / snapshot
+    /// <c>GetSafeTimestamp</c>. Everything else is an external user op and is subject to the bound.
+    /// </summary>
+    internal static bool IsControlRequest(KeyValueRequest request) =>
+        request.Type is KeyValueRequestType.ResumeRead
+            or KeyValueRequestType.CompleteProposal
+            or KeyValueRequestType.ReleaseProposal
+            or KeyValueRequestType.InvalidateOrApply
+            or KeyValueRequestType.FlushAck
+            or KeyValueRequestType.Collect
+            or KeyValueRequestType.GetSafeTimestamp;
+
+    /// <summary>
+    /// Sends a request to a bounded key-value actor router, mapping the actor's inbox-full backpressure
+    /// (<see cref="ActorBusyException"/>, thrown when a hot actor is saturated with ordinary requests)
+    /// to a retryable <c>MustRetry</c> response. Control messages are exempt from the bound and never
+    /// reach this path. The message was never enqueued, so retrying is unconditionally safe.
+    /// </summary>
+    private static async Task<KeyValueResponse?> AskKeyValueActor(
+        IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> router,
+        KeyValueRequest request)
+    {
+        try
+        {
+            return await router.Ask(request);
+        }
+        catch (ActorBusyException)
+        {
+            return new KeyValueResponse(KeyValueResponseType.MustRetry);
+        }
+    }
+
     private IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> GetEphemeralRouter(
         KahunaConfiguration configuration
     )
     {
         logger.LogStartingEphemeralWorkers(configuration.KeyValueWorkers);
 
+        ActorRunnerOptions<KeyValueRequest> options = BuildActorInboxOptions(configuration);
+
         for (int i = 0; i < configuration.KeyValueWorkers; i++)
-            ephemeralInstances.Add(actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+            ephemeralInstances.Add(actorSystem.SpawnWithOptions<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                 "ephemeral-keyvalue-" + i,
+                options,
                 backgroundWriter,
                 proposalRouter,
                 persistenceBackend,
@@ -693,9 +745,12 @@ internal sealed class KeyValuesManager : IDisposable
     {
         logger.LogStartingPersistentWorkers(configuration.KeyValueWorkers);
 
+        ActorRunnerOptions<KeyValueRequest> options = BuildActorInboxOptions(configuration);
+
         for (int i = 0; i < configuration.KeyValueWorkers; i++)
-            persistentInstances.Add(actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+            persistentInstances.Add(actorSystem.SpawnWithOptions<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                 "persistent-keyvalue-" + i,
+                options,
                 backgroundWriter,
                 proposalRouter,
                 persistenceBackend,
@@ -1409,9 +1464,9 @@ internal sealed class KeyValuesManager : IDisposable
                 KeyValueResponse? response;
 
                 if (durability == KeyValueDurability.Ephemeral)
-                    response = await ephemeralKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
                 else
-                    response = await persistentKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                 if (response is null)
                     return (KeyValueResponseType.Errored, -1, HLCTimestamp.Zero);
@@ -1476,9 +1531,9 @@ internal sealed class KeyValuesManager : IDisposable
                 KeyValueResponse? response;
 
                 if (item.Durability == KeyValueDurability.Ephemeral)
-                    response = await ephemeralKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
                 else
-                    response = await persistentKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                 if (response is null || response.Type == KeyValueResponseType.WaitingForReplication)
                     return new() { Type = KeyValueResponseType.Errored };
@@ -1537,9 +1592,9 @@ internal sealed class KeyValuesManager : IDisposable
                     KeyValueResponse? response;
 
                     if (item.Durability == KeyValueDurability.Ephemeral)
-                        response = await ephemeralKeyValuesRouter.Ask(request);
+                        response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
                     else
-                        response = await persistentKeyValuesRouter.Ask(request);
+                        response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                     if (response is null)
                         return new()
@@ -1621,9 +1676,9 @@ internal sealed class KeyValuesManager : IDisposable
                 KeyValueResponse? response;
 
                 if (durability == KeyValueDurability.Ephemeral)
-                    response = await ephemeralKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
                 else
-                    response = await persistentKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                 if (response is null)
                     return (KeyValueResponseType.Errored, -1, HLCTimestamp.Zero);
@@ -1682,9 +1737,9 @@ internal sealed class KeyValuesManager : IDisposable
                 KeyValueResponse? response;
 
                 if (durability == KeyValueDurability.Ephemeral)
-                    response = await ephemeralKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
                 else
-                    response = await persistentKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                 if (response is null)
                     return (KeyValueResponseType.Errored, -1, HLCTimestamp.Zero);
@@ -1759,9 +1814,9 @@ internal sealed class KeyValuesManager : IDisposable
                 KeyValueResponse? response;
 
                 if (durability == KeyValueDurability.Ephemeral)
-                    response = await ephemeralKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
                 else
-                    response = await persistentKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                 if (response is null)
                     return (KeyValueResponseType.Errored, null);
@@ -1826,9 +1881,9 @@ internal sealed class KeyValuesManager : IDisposable
                 KeyValueResponse? response;
 
                 if (durability == KeyValueDurability.Ephemeral)
-                    response = await ephemeralKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
                 else
-                    response = await persistentKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                 if (response is null)
                     return (KeyValueResponseType.Errored, null);
@@ -1944,8 +1999,8 @@ internal sealed class KeyValuesManager : IDisposable
         try
         {
             KeyValueResponse? response = durability == KeyValueDurability.Ephemeral
-                ? await ephemeralKeyValuesRouter.Ask(request)
-                : await persistentKeyValuesRouter.Ask(request);
+                ? await AskKeyValueActor(ephemeralKeyValuesRouter, request)
+                : await AskKeyValueActor(persistentKeyValuesRouter, request);
 
             return response?.Type ?? KeyValueResponseType.Errored;
         }
@@ -1989,9 +2044,9 @@ internal sealed class KeyValuesManager : IDisposable
                 KeyValueResponse? response;
 
                 if (durability == KeyValueDurability.Ephemeral)
-                    response = await ephemeralKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
                 else
-                    response = await persistentKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                 if (response is null)
                     return (KeyValueResponseType.Errored, key, durability, HLCTimestamp.Zero);
@@ -2052,9 +2107,9 @@ internal sealed class KeyValuesManager : IDisposable
                 KeyValueResponse? response;
 
                 if (durability == KeyValueDurability.Ephemeral)
-                    response = await ephemeralKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
                 else
-                    response = await persistentKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                 if (response is null)
                     return KeyValueResponseType.Errored;
@@ -2113,9 +2168,9 @@ internal sealed class KeyValuesManager : IDisposable
                 KeyValueResponse? response;
 
                 if (key.durability == KeyValueDurability.Ephemeral)
-                    response = await ephemeralKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
                 else
-                    response = await persistentKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                 if (response is null || response.Type == KeyValueResponseType.WaitingForReplication)
                 {
@@ -2170,9 +2225,9 @@ internal sealed class KeyValuesManager : IDisposable
                 KeyValueResponse? response;
 
                 if (durability == KeyValueDurability.Ephemeral)
-                    response = await ephemeralKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
                 else
-                    response = await persistentKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                 if (response is null)
                     return (KeyValueResponseType.Errored, key);
@@ -2227,9 +2282,9 @@ internal sealed class KeyValuesManager : IDisposable
                 KeyValueResponse? response;
 
                 if (durability == KeyValueDurability.Ephemeral)
-                    response = await ephemeralKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
                 else
-                    response = await persistentKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                 if (response is null)
                     return KeyValueResponseType.Errored;
@@ -2300,9 +2355,9 @@ internal sealed class KeyValuesManager : IDisposable
                 KeyValueResponse? response;
 
                 if (durability == KeyValueDurability.Ephemeral)
-                    response = await ephemeralKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
                 else
-                    response = await persistentKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                 if (response is null)
                     return (KeyValueResponseType.Errored, HLCTimestamp.Zero);
@@ -2361,9 +2416,9 @@ internal sealed class KeyValuesManager : IDisposable
                 KeyValueResponse? response;
 
                 if (durability == KeyValueDurability.Ephemeral)
-                    response = await ephemeralKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
                 else
-                    response = await persistentKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                 if (response is null)
                     return KeyValueResponseType.Errored;
@@ -2409,7 +2464,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            KeyValueResponse? response = await persistentKeyValuesRouter.Ask(request);
+            KeyValueResponse? response = await AskKeyValueActor(persistentKeyValuesRouter, request);
             return response?.RangeLockList ?? [];
         }
         finally
@@ -2447,7 +2502,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            await persistentKeyValuesRouter.Ask(request);
+            await AskKeyValueActor(persistentKeyValuesRouter, request);
         }
         finally
         {
@@ -2567,9 +2622,9 @@ internal sealed class KeyValuesManager : IDisposable
                 KeyValueResponse? response;
 
                 if (key.durability == KeyValueDurability.Ephemeral)
-                    response = await ephemeralKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
                 else
-                    response = await persistentKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                 if (response is null || response.Type == KeyValueResponseType.WaitingForReplication)
                 {
@@ -2630,9 +2685,9 @@ internal sealed class KeyValuesManager : IDisposable
                 KeyValueResponse? response;
 
                 if (durability == KeyValueDurability.Ephemeral)
-                    response = await ephemeralKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
                 else
-                    response = await persistentKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                 if (response is null)
                     return (KeyValueResponseType.Errored, HLCTimestamp.Zero, key, durability);
@@ -2703,9 +2758,9 @@ internal sealed class KeyValuesManager : IDisposable
                 KeyValueResponse? response;
 
                 if (key.durability == KeyValueDurability.Ephemeral)
-                    response = await ephemeralKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
                 else
-                    response = await persistentKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                 if (response is null || response.Type == KeyValueResponseType.WaitingForReplication)
                     return (KeyValueResponseType.Errored, HLCTimestamp.Zero, key.key, key.durability);
@@ -2758,9 +2813,9 @@ internal sealed class KeyValuesManager : IDisposable
                 KeyValueResponse? response;
 
                 if (durability == KeyValueDurability.Ephemeral)
-                    response = await ephemeralKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
                 else
-                    response = await persistentKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                 if (response is null)
                     return (KeyValueResponseType.Errored, -1);
@@ -2829,9 +2884,9 @@ internal sealed class KeyValuesManager : IDisposable
                 KeyValueResponse? response;
 
                 if (key.durability == KeyValueDurability.Ephemeral)
-                    response = await ephemeralKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
                 else
-                    response = await persistentKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                 if (response is null || response.Type == KeyValueResponseType.WaitingForReplication)
                     return (KeyValueResponseType.Errored, key.key, -1, key.durability);
@@ -2880,9 +2935,9 @@ internal sealed class KeyValuesManager : IDisposable
         KeyValueResponse? response;
         
         if (durability == KeyValueDurability.Ephemeral)
-            response = await ephemeralKeyValuesRouter.Ask(request);
+            response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
         else
-            response = await persistentKeyValuesRouter.Ask(request);
+            response = await AskKeyValueActor(persistentKeyValuesRouter, request);
         
         if (response is null)
             return (KeyValueResponseType.Errored, -1);
@@ -2937,9 +2992,9 @@ internal sealed class KeyValuesManager : IDisposable
             KeyValueResponse? response;
 
             if (key.durability == KeyValueDurability.Ephemeral)
-                response = await ephemeralKeyValuesRouter.Ask(request);
+                response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
             else
-                response = await persistentKeyValuesRouter.Ask(request);
+                response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
             if (response is null)
                 return (KeyValueResponseType.Errored, key.key, -1, key.durability);
@@ -3071,7 +3126,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         request.ReadTimestamp = readTimestamp;
 
-        KeyValueResponse? response = await persistentKeyValuesRouter.Ask(request);
+        KeyValueResponse? response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
         if (response is null)
             return new(KeyValueResponseType.Errored, []);
@@ -3120,9 +3175,9 @@ internal sealed class KeyValuesManager : IDisposable
                 KeyValueResponse? response;
 
                 if (durability == KeyValueDurability.Ephemeral)
-                    response = await ephemeralKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
                 else
-                    response = await persistentKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                 if (response is null)
                     return new(KeyValueResponseType.Errored, []);
@@ -3181,9 +3236,9 @@ internal sealed class KeyValuesManager : IDisposable
                 KeyValueResponse? response;
 
                 if (durability == KeyValueDurability.Ephemeral)
-                    response = await ephemeralKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
                 else
-                    response = await persistentKeyValuesRouter.Ask(request);
+                    response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                 if (response is null)
                     return new(KeyValueResponseType.Errored, [], null, false);
