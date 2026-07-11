@@ -46,15 +46,33 @@ internal sealed class TryGetByRangeHandler : BaseHandler
 
         List<(string, ReadOnlyKeyValueEntry)> items = [];
 
-        // No hard limit on the BTree walk — the loop stops when we collect limit+1 live
-        // items (HasMore sentinel) or the range is exhausted. A hard limit+1 window would
-        // produce a premature HasMore=false whenever tombstones/expired entries fill the window.
+        // The walk stops when we collect limit+1 live items (HasMore sentinel) or the range is
+        // exhausted — a hard limit+1 window would produce a premature HasMore=false whenever
+        // tombstones/expired entries fill the window. To keep an interleaved run of dead entries from
+        // parking the mailbox thread on an O(resident-range) walk, bound the *inspected* count too:
+        // once it is exceeded we stop and resume the next page from the last inspected key. Because the
+        // page cursor is exclusive, resuming past a tombstone loses no live entry — the caller just
+        // fetches another page. The budget carries limit+1 live capacity plus slack for dead rows, so a
+        // normal (sparse-tombstone) page behaves exactly as before.
+        int inspectionBudget = limit + 1 + KeyValueScanLimits.MaxScanInspectionSlack;
+        int inspected = 0;
+        string? resumeAfterKey = null;
+
         foreach ((string key, KeyValueEntry? _) in context.Store.GetByRange(memStart, memStartIncl, memEnd, memEndIncl, int.MaxValue))
         {
+            inspected++;
+
             KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability, snapshotTs, snapshotRead: !message.ReadTimestamp.IsNull());
 
             if (response.Type == KeyValueResponseType.DoesNotExist)
+            {
+                if (inspected >= inspectionBudget)
+                {
+                    resumeAfterKey = key;
+                    break;
+                }
                 continue;
+            }
 
             if (response.Type != KeyValueResponseType.Get || response.Entry is null)
                 return new(response.Type, new KeyValueGetByRangeResult(response.Type, [], null, false));
@@ -63,9 +81,15 @@ internal sealed class TryGetByRangeHandler : BaseHandler
 
             if (items.Count == limit + 1)
                 break;
+
+            if (inspected >= inspectionBudget)
+            {
+                resumeAfterKey = key;
+                break;
+            }
         }
 
-        return BuildResponse(prefix, message.Durability, items, limit, snapshotTs);
+        return BuildResponse(prefix, message.Durability, items, limit, snapshotTs, resumeAfterKey);
     }
 
     // ── Persistent (K-way merge of memory + disk, detached off the actor mailbox) ──────────
@@ -236,14 +260,24 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         KeyValueDurability durability,
         List<(string, ReadOnlyKeyValueEntry)> items,
         int limit,
-        HLCTimestamp snapshotTs)
+        HLCTimestamp snapshotTs,
+        string? resumeAfterKey = null)
     {
-        bool hasMore = items.Count > limit;
-        if (hasMore)
+        // Two independent "more pages exist" signals: the limit+1 sentinel (a full page of live items)
+        // and inspection truncation (the walk stopped on the inspection budget before filling the page).
+        // The sentinel's cursor is the last returned item; truncation's cursor is the last inspected key
+        // (possibly a tombstone past the last live item) so the next page resumes strictly beyond it.
+        bool sentinelHasMore = items.Count > limit;
+        if (sentinelHasMore)
             items.RemoveAt(items.Count - 1);
 
-        string? nextCursor = hasMore && items.Count > 0
-            ? KeyValueRangeCursor.Encode(items[^1].Item1, durability, prefix, snapshotTs)
+        string? cursorKey = sentinelHasMore
+            ? (items.Count > 0 ? items[^1].Item1 : null)
+            : resumeAfterKey;
+
+        bool hasMore = cursorKey is not null;
+        string? nextCursor = hasMore
+            ? KeyValueRangeCursor.Encode(cursorKey!, durability, prefix, snapshotTs)
             : null;
 
         KeyValueGetByRangeResult result = new(KeyValueResponseType.Get, items, nextCursor, hasMore);

@@ -58,12 +58,14 @@ internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
         if (scanKey.HasValue &&
             context.PendingReads.TryGetValue(scanKey.Value, out ReadContinuation? inflight))
         {
-            inflight.AddWaiter(promise);
+            if (!inflight.AddWaiter(promise))
+                return KeyValueStaticResponses.MustRetryResponse;
             actorContext.ByPassReply = true;
             return KeyValueStaticResponses.WaitingForReplicationResponse;
         }
 
         PrefixFromDiskScanContinuation cont = new(message.Key, readTimestamp, currentTime, promise, scanKey);
+        ArmReadDeadline(cont, currentTime);
         if (scanKey.HasValue)
             context.PendingReads[scanKey.Value] = cont;
 

@@ -202,13 +202,15 @@ internal sealed class TryGetHandler : BaseHandler
             (string, long, bool) pointKey = (message.Key, -1L, false);
             if (context.PendingReads.TryGetValue(pointKey, out ReadContinuation? inflight))
             {
-                inflight.AddWaiter(promise);
+                if (!inflight.AddWaiter(promise))
+                    return KeyValueStaticResponses.MustRetryResponse;
                 actorContext.ByPassReply = true;
                 return KeyValueStaticResponses.WaitingForReplicationResponse;
             }
 
             // No read in flight — register and dispatch a new one.
             PointReadContinuation cont = new(message.Key, KeyValueResponseType.Get, promise);
+            ArmReadDeadline(cont, currentTime);
             context.PendingReads[pointKey] = cont;
             int partitionId = ResolvePartition(message.Key);
 
@@ -306,13 +308,15 @@ internal sealed class TryGetHandler : BaseHandler
 
         if (context.PendingReads.TryGetValue(revKey, out ReadContinuation? inflight))
         {
-            inflight.AddWaiter(promise);
+            if (!inflight.AddWaiter(promise))
+                return KeyValueStaticResponses.MustRetryResponse;
             actorContext.ByPassReply = true;
             return KeyValueStaticResponses.WaitingForReplicationResponse;
         }
 
         ByRevisionReadContinuation cont = new(
             message.Key, message.CompareRevision, KeyValueResponseType.Get, promise);
+        ArmReadDeadline(cont, context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId()));
         context.PendingReads[revKey] = cont;
         int partitionId = ResolvePartition(message.Key);
 

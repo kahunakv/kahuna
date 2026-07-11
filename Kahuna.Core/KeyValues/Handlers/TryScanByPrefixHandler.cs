@@ -34,19 +34,36 @@ internal sealed class TryScanByPrefixHandler : BaseHandler
         List<(string, ReadOnlyKeyValueEntry)> items = [];
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
 
+        // Bound inspected entries, not just returned ones: a run of interleaved tombstones/expired rows
+        // must not make this synchronous walk scan the whole resident bucket on the mailbox thread.
+        int inspectionBudget = KeyValueScanLimits.MaxPrefixScanResults + KeyValueScanLimits.MaxScanInspectionSlack;
+        int inspected = 0;
+        bool truncated = false;
+
         foreach ((string key, KeyValueEntry? _) in context.Store.GetByBucket(message.Key))
         {
-            KeyValueResponse response = await Get(currentTime, key, message.Durability, message.ReadTimestamp);
+            inspected++;
 
-            if (response.Type != KeyValueResponseType.Get)
-                continue;
+            KeyValueResponse response = await Get(currentTime, key, message.Durability, message.ReadTimestamp);
 
             if (response is { Type: KeyValueResponseType.Get, Entry: not null })
                 items.Add((key, response.Entry));
 
             if (items.Count >= KeyValueScanLimits.MaxPrefixScanResults)
                 break;
+
+            if (inspected >= inspectionBudget)
+            {
+                truncated = true;
+                break;
+            }
         }
+
+        if (truncated)
+            context.Logger.LogWarning(
+                "Prefix scan of {Prefix} stopped after inspecting {Inspected} entries with {Collected} results; " +
+                "bucket is tombstone-dense — use the paginated range scan for a complete result set",
+                message.Key, inspected, items.Count);
 
         return new(KeyValueResponseType.Get, items);
     }

@@ -36,6 +36,18 @@ internal abstract class BaseHandler
     }
 
     /// <summary>
+    /// Arms the actor-enforced deadline on a resumable read continuation from the configured
+    /// timeout, so the periodic collect sweep can expire it (resolving waiters with a retryable
+    /// result) if its backend read hangs. A configured timeout &lt;= 0 leaves the read unbounded.
+    /// </summary>
+    protected void ArmReadDeadline(ReadContinuation continuation, HLCTimestamp currentTime)
+    {
+        int timeoutMs = context.Configuration.ReadContinuationTimeout;
+        if (timeoutMs > 0)
+            continuation.Deadline = currentTime + timeoutMs;
+    }
+
+    /// <summary>
     /// Resolves <paramref name="key"/> to its owning partition id. Key-range spaces look up the
     /// live descriptor; hash spaces use <see cref="DataPartitionRouter"/> over the user partitions
     /// <c>[1, InitialPartitions]</c>. Both routing call sites (locator and handlers) must call

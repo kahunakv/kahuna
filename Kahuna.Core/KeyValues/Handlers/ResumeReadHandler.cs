@@ -28,6 +28,18 @@ internal sealed class ResumeReadHandler : BaseHandler
             return KeyValueStaticResponses.ErroredResponse;
         }
 
+        // Late completion: the deadline sweep already expired this continuation, resolved its waiters
+        // with a retryable result, and removed any in-flight registration. Running Execute now would
+        // double-resolve (harmless via TrySetResult) but could also re-touch actor state for a read the
+        // callers have already retried; drop it.
+        if (continuation.Cancelled)
+        {
+            context.Logger.LogWarning(
+                "KeyValueActor/ResumeRead: dropping late completion for expired continuation on key {Key}",
+                message.Key);
+            return null;
+        }
+
         try
         {
             continuation.Execute(context);

@@ -183,13 +183,11 @@ internal sealed class RangeScanContinuation : ReadContinuation
             else if (diskKey is null) cmp = -1;
             else cmp = string.CompareOrdinal(memKey, diskKey);
 
-            bool isResident;
             if (cmp < 0)
             {
                 keyToProcess = memKey!;
                 entry = memItems[memIdx].Entry;
                 memIdx++;
-                isResident = true;
             }
             else if (cmp > 0)
             {
@@ -209,7 +207,6 @@ internal sealed class RangeScanContinuation : ReadContinuation
                     LastModified = de.LastModified,
                     State = de.State
                 };
-                isResident = false;
             }
             else
             {
@@ -218,7 +215,6 @@ internal sealed class RangeScanContinuation : ReadContinuation
                 entry = memItems[memIdx].Entry;
                 memIdx++;
                 diskIdx++;
-                isResident = true;
             }
 
             // Exclusive-start enforcement: the BTree honours this natively; apply it to
@@ -238,7 +234,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
                     goto Done;
             }
 
-            KeyValueResponse? response = EvaluateKeySync(context, keyToProcess, entry, isResident, diskProjections);
+            KeyValueResponse? response = EvaluateKeySync(context, keyToProcess, entry, diskProjections);
 
             if (response is null || response.Type == KeyValueResponseType.DoesNotExist)
                 continue;
@@ -340,7 +336,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
         memMaybeMore = next.Count == memBatch;
     }
 
-    private KeyValueResponse? EvaluateKeySync(KeyValueContext context, string key, KeyValueEntry? entry, bool isResident, Dictionary<string, ReadOnlyKeyValueEntry>? diskProjections)
+    private KeyValueResponse? EvaluateKeySync(KeyValueContext context, string key, KeyValueEntry? entry, Dictionary<string, ReadOnlyKeyValueEntry>? diskProjections)
     {
         // Replication intent: a pending replication on this key means the entry is not yet
         // fully committed. Clear expired intents as housekeeping; block if still live.
@@ -392,23 +388,20 @@ internal sealed class RangeScanContinuation : ReadContinuation
             // For AS-OF snapshot scans: fall through — the snapshot-visibility path below
             // serves the committed revision at-or-before the snapshot, matching the read-only
             // contract (no OCC tracking for snapshot scans).
-            // For disk-only keys (isResident=false): skip MVCC creation entirely. The transient
-            // entry is discarded after this call, so the MVCC entry would never participate in
-            // OCC conflict detection. Writing it + calling AdjustEstimatedEntryBytes on an entry
-            // not in the store leaks approximateStoreBytes without bound; fall through to the
-            // committed-state path instead (correct read, no OCC tracking for non-resident keys).
             //
-            // Residual edge: isResident reflects membership in the stage-1 memory snapshot, not
-            // the current store. A key evicted by a Collect arriving between pages still has
-            // isResident=true here, so the accounting call below runs on an entry that's no
-            // longer in the store. The window is narrow (only keys resident at scan start, only
-            // during a Collect between pages), but to close it entirely, replace the isResident
-            // guard with context.Store.ContainsKey(key) at the accounting call site.
-            if (!isSnapshotRead && isResident)
+            // OCC snapshot + byte accounting mutate actor-owned state, so they may run only on an
+            // entry that is genuinely resident *now*. `entry` was captured from the stage-1 memory
+            // snapshot: a Collect arriving between pages can have evicted it (StoreKey nulled, bytes
+            // already reclaimed) or replaced it with a different object. Recording MVCC state on such
+            // an orphan leaks approximateStoreBytes and loses OCC tracking (later ops re-load a
+            // different object). Re-look up the key and proceed only when the captured object is the
+            // one still in the store; otherwise (evicted, replaced, or disk-only) treat it as
+            // non-resident — fall through to the committed-state read with no OCC tracking.
+            if (!isSnapshotRead
+                && entry is not null
+                && context.Store.TryGetValue(key, out KeyValueEntry? liveEntry)
+                && ReferenceEquals(liveEntry, entry))
             {
-                if (entry is null)
-                    return null; // key does not exist; nothing to snapshot for OCC
-
                 // Snapshot the current committed state for OCC conflict detection.
                 KeyValueMvccEntry newMvcc = new()
                 {

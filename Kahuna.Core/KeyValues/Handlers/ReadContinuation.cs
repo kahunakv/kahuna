@@ -1,4 +1,6 @@
 
+using Kommander.Time;
+
 namespace Kahuna.Server.KeyValues.Handlers;
 
 /// <summary>
@@ -23,12 +25,44 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// </summary>
 internal abstract class ReadContinuation
 {
+    /// <summary>
+    /// Upper bound on coalesced waiters a single in-flight read may accumulate. A hot key whose
+    /// backend read is slow could otherwise attach unbounded callers to one continuation, so the
+    /// (cap+1)-th caller is turned away with a retryable result rather than parked indefinitely.
+    /// </summary>
+    internal const int DefaultMaxWaiters = 1024;
+
     // Primary promise plus any coalesced waiters. Mutated only on the actor thread (stage 1
     // adds waiters, stage 3 broadcasts). No synchronisation needed.
     private readonly List<TaskCompletionSource<KeyValueResponse?>> waiters;
 
+    /// <summary>
+    /// Actor-enforced deadline for this in-flight read. <see cref="HLCTimestamp.Zero"/> means no
+    /// deadline. The periodic collect sweep expires a continuation whose deadline has passed so a
+    /// hung/slow backend read cannot strand its waiters forever; a completion that arrives after
+    /// expiry is ignored (see <see cref="Cancelled"/>).
+    /// </summary>
+    internal HLCTimestamp Deadline { get; set; }
+
+    /// <summary>
+    /// Set once when the continuation is expired by the deadline sweep. Acts as a one-shot
+    /// generation guard: a late stage-3 completion carrying this same continuation is dropped rather
+    /// than double-resolving already-retried waiters or re-registering a removed in-flight entry.
+    /// </summary>
+    internal bool Cancelled { get; private set; }
+
+    /// <summary>Maximum waiters (primary + coalesced) this continuation admits.</summary>
+    internal int MaxWaiters { get; init; } = DefaultMaxWaiters;
+
     /// <summary>The primary caller's completion source (the one that initiated the read).</summary>
     internal TaskCompletionSource<KeyValueResponse?> Promise => waiters[0];
+
+    /// <summary>Current waiter count (primary + coalesced). Actor-thread only.</summary>
+    internal int WaiterCount => waiters.Count;
+
+    /// <summary>True once the deadline at <paramref name="now"/> has passed and the read is unfinished.</summary>
+    internal bool IsExpired(HLCTimestamp now) =>
+        !Cancelled && Deadline != HLCTimestamp.Zero && now.CompareTo(Deadline) >= 0;
 
     /// <summary>
     /// The raw result from the backend read (stage 2). Set by the stage-2 callback before
@@ -62,10 +96,17 @@ internal abstract class ReadContinuation
     /// Attaches a coalesced caller to this in-flight read. The caller's Promise will be
     /// resolved with the same result as the primary at stage-3 resume time.
     /// Must be called only on the actor thread (stage 1).
+    ///
+    /// Returns false when the continuation is already expired or the waiter cap is reached; the
+    /// caller must then NOT attach and should be given a retryable result instead of parked.
     /// </summary>
-    internal void AddWaiter(TaskCompletionSource<KeyValueResponse?> promise)
+    internal bool AddWaiter(TaskCompletionSource<KeyValueResponse?> promise)
     {
+        if (Cancelled || waiters.Count >= MaxWaiters)
+            return false;
+
         waiters.Add(promise);
+        return true;
     }
 
     /// <summary>
@@ -95,6 +136,21 @@ internal abstract class ReadContinuation
     /// </summary>
     internal void Fail(KeyValueContext context, KeyValueResponse? response)
     {
+        RemovePendingKey(context);
+        Resolve(response);
+    }
+
+    /// <summary>
+    /// Deadline-expiry path, run on the actor thread by the periodic collect sweep. Marks the
+    /// continuation cancelled (so a late completion is ignored), removes any in-flight registration,
+    /// and resolves every waiter with the given retryable response. Idempotent.
+    /// </summary>
+    internal void Expire(KeyValueContext context, KeyValueResponse? response)
+    {
+        if (Cancelled)
+            return;
+
+        Cancelled = true;
         RemovePendingKey(context);
         Resolve(response);
     }

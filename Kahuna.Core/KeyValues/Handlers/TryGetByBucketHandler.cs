@@ -35,16 +35,31 @@ internal sealed class TryGetByBucketHandler : BaseHandler
         List<(string, ReadOnlyKeyValueEntry)> items = [];
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
 
+        // Bound inspected entries, not just returned ones: a run of interleaved tombstones/expired rows
+        // must not make this synchronous walk scan the whole resident bucket on the mailbox thread.
+        int inspectionBudget = KeyValueScanLimits.MaxPrefixScanResults + KeyValueScanLimits.MaxScanInspectionSlack;
+        int inspected = 0;
+        bool truncated = false;
+
         foreach ((string key, KeyValueEntry? entry) in context.Store.GetByBucket(message.Key))
         {
             if (entry is null)
                 continue;
 
+            inspected++;
+
             KeyValueResponse? result = BucketScanContinuation.EvaluateEntry(
                 context, currentTime, message.TransactionId, message.ReadTimestamp, key, entry);
 
             if (result is null || result.Type == KeyValueResponseType.DoesNotExist)
+            {
+                if (inspected >= inspectionBudget)
+                {
+                    truncated = true;
+                    break;
+                }
                 continue;
+            }
 
             if (result.Type != KeyValueResponseType.Get || result.Entry is null)
                 return new(result.Type, []);
@@ -53,7 +68,19 @@ internal sealed class TryGetByBucketHandler : BaseHandler
 
             if (items.Count >= KeyValueScanLimits.MaxPrefixScanResults)
                 break;
+
+            if (inspected >= inspectionBudget)
+            {
+                truncated = true;
+                break;
+            }
         }
+
+        if (truncated)
+            context.Logger.LogWarning(
+                "Ephemeral bucket scan of {Prefix} stopped after inspecting {Inspected} entries with {Collected} results; " +
+                "bucket is tombstone-dense — use the paginated range scan for a complete result set",
+                message.Key, inspected, items.Count);
 
         items.Sort(EnsureLexicographicalOrder);
 
@@ -121,7 +148,8 @@ internal sealed class TryGetByBucketHandler : BaseHandler
 
         if (scanKey.HasValue && context.PendingReads.TryGetValue(scanKey.Value, out ReadContinuation? inflight))
         {
-            inflight.AddWaiter(promise);
+            if (!inflight.AddWaiter(promise))
+                return KeyValueStaticResponses.MustRetryResponse;
             actorContext.ByPassReply = true;
             return KeyValueStaticResponses.WaitingForReplicationResponse;
         }
@@ -129,6 +157,7 @@ internal sealed class TryGetByBucketHandler : BaseHandler
         BucketScanContinuation cont = new(
             message.Key, message.TransactionId, message.ReadTimestamp,
             items, seenKeys, currentTime, promise, scanKey);
+        ArmReadDeadline(cont, currentTime);
         if (scanKey.HasValue)
             context.PendingReads[scanKey.Value] = cont;
 

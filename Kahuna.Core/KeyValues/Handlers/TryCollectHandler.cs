@@ -243,6 +243,12 @@ internal sealed class TryCollectHandler : BaseHandler
         // and resumed via lockSweepKeys so the sweep never scans the whole lock table in one turn.
         SweepExpiredPredicateLocks(currentTime, inspectionMax);
 
+        // Step 4: expire in-flight resumable reads whose deadline has passed. A hung or slow backend
+        // read otherwise leaves its coalesced waiters parked indefinitely; resolving them with a
+        // retryable result lets the callers retry, and marking the continuation cancelled makes a
+        // late stage-3 completion a no-op. Only registered (coalesceable) reads are swept here.
+        SweepExpiredReads(currentTime);
+
         foreach (string key in keysToEvict)
             context.RemoveStoreEntry(key);
 
@@ -338,6 +344,31 @@ internal sealed class TryCollectHandler : BaseHandler
                 && RangeLockChecks.PruneExpired(rangeLocks, currentTime, int.MaxValue))
                 context.LocksByRange.Remove(bucket);
         }
+    }
+
+    /// <summary>
+    /// Expires registered in-flight reads whose deadline has passed: resolves their waiters with a
+    /// retryable result and marks each continuation cancelled so a late completion is dropped. The
+    /// expired entries are collected first, then expired, because <see cref="ReadContinuation.Expire"/>
+    /// removes the continuation from <c>PendingReads</c> (mutating it mid-enumeration would throw).
+    /// </summary>
+    private void SweepExpiredReads(HLCTimestamp currentTime)
+    {
+        if (context.PendingReads.Count == 0)
+            return;
+
+        List<ReadContinuation>? expired = null;
+        foreach (KeyValuePair<(string, long, bool), ReadContinuation> kv in context.PendingReads)
+        {
+            if (kv.Value.IsExpired(currentTime))
+                (expired ??= []).Add(kv.Value);
+        }
+
+        if (expired is null)
+            return;
+
+        foreach (ReadContinuation cont in expired)
+            cont.Expire(context, KeyValueStaticResponses.MustRetryResponse);
     }
 
     private long EstimateEvictionBytes(HashSet<string> keys)

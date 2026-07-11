@@ -38,6 +38,16 @@ public sealed class KahunaConfiguration
     /// </summary>
     public int Phase2CommitTimeout { get; set; } = 5000;
 
+    /// <summary>
+    /// Upper bound, in milliseconds, on how long a resumable backend read (point read, bucket/range
+    /// scan) may stay in flight before the periodic collect sweep expires it: its coalesced waiters are
+    /// resolved with a retryable <c>MustRetry</c> and a completion arriving afterwards is dropped. This
+    /// bounds the blast radius of a hung/slow disk read so it cannot strand callers indefinitely. A
+    /// value &lt;= 0 disables the deadline (unbounded wait). Enforcement granularity is one
+    /// <c>CollectionInterval</c>.
+    /// </summary>
+    public int ReadContinuationTimeout { get; set; } = 30_000;
+
     public int RevisionsToKeepCached { get; set; }
     
     public TimeSpan CacheEntryTtl { get; set; }
