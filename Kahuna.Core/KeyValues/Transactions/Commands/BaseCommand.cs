@@ -13,7 +13,7 @@ namespace Kahuna.Server.KeyValues.Transactions.Commands;
 /// </summary>
 internal abstract class BaseCommand
 {
-    internal static string GetKeyName(KeyValueTransactionContext context, NodeAst ast)
+    internal static string GetKeyName(ScriptTransactionContext context, NodeAst ast)
     {
         if (string.IsNullOrEmpty(ast.yytext))
             throw new KahunaScriptException($"Invalid key name type {ast.nodeType}", ast.yyline);
@@ -32,7 +32,7 @@ internal abstract class BaseCommand
     /// Per-statement AS OF (ast.extendedTwo) overrides the transaction-level context.ReadTimestamp.
     /// AS OF 0 is rejected. When neither is present, returns Zero (latest).
     /// </summary>
-    internal static HLCTimestamp ResolveReadTimestamp(KeyValueTransactionContext context, NodeAst ast)
+    internal static HLCTimestamp ResolveReadTimestamp(ScriptTransactionContext context, NodeAst ast)
     {
         if (ast.extendedTwo is null)
             return context.ReadTimestamp;
@@ -45,7 +45,7 @@ internal abstract class BaseCommand
     }
 
     internal static void RecordReadKey(
-        KeyValueTransactionContext context,
+        ScriptTransactionContext context,
         string key,
         KeyValueDurability durability,
         bool exists,

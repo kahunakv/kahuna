@@ -6,7 +6,7 @@ namespace Kahuna.Server.KeyValues.Transactions.Operators;
 
 internal static class NotSetOperator
 {
-    public static KeyValueExpressionResult Eval(KeyValueTransactionContext context, NodeAst ast)
+    public static KeyValueExpressionResult Eval(ScriptTransactionContext context, NodeAst ast)
     {
         if (context.ModifiedResult is null)
             throw new KahunaScriptException("Invalid NOT SET expression", ast.yyline);

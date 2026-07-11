@@ -63,7 +63,7 @@ internal static class CallFunction
     /// Thrown when the AST node for the function is invalid, the function name is missing,
     /// or the function is not defined.
     /// </exception>
-    public static KeyValueExpressionResult Eval(KeyValueTransactionContext context, NodeAst ast)
+    public static KeyValueExpressionResult Eval(ScriptTransactionContext context, NodeAst ast)
     {
         if (ast.leftAst is null)
             throw new KahunaScriptException("Invalid function expression", ast.yyline);
@@ -89,7 +89,7 @@ internal static class CallFunction
     /// <param name="context">The transactional context in which the evaluation occurs.</param>
     /// <param name="ast">The abstract syntax tree (AST) node representing the function call arguments.</param>
     /// <param name="arguments">The list to which the evaluated function call arguments are appended.</param>
-    private static void GetFuncCallArguments(KeyValueTransactionContext context, NodeAst ast, List<KeyValueExpressionResult> arguments)
+    private static void GetFuncCallArguments(ScriptTransactionContext context, NodeAst ast, List<KeyValueExpressionResult> arguments)
     {
         while (true)
         {

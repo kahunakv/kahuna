@@ -8,7 +8,7 @@ internal sealed class DeleteManyCommand : BaseCommand
 {
     public static async Task<KeyValueTransactionResult> Execute(
         KeyValuesManager manager,
-        KeyValueTransactionContext context,
+        ScriptTransactionContext context,
         NodeAst ast,
         CancellationToken cancellationToken
     )
@@ -68,7 +68,7 @@ internal sealed class DeleteManyCommand : BaseCommand
         return context.ModifiedResult;
     }
 
-    private static void GetDeleteCalls(KeyValueTransactionContext context, NodeAst ast, List<KahunaDeleteKeyValueRequestItem> arguments)
+    private static void GetDeleteCalls(ScriptTransactionContext context, NodeAst ast, List<KahunaDeleteKeyValueRequestItem> arguments)
     {
         while (true)
         {
@@ -105,7 +105,7 @@ internal sealed class DeleteManyCommand : BaseCommand
     }
 
     private static KahunaDeleteKeyValueRequestItem GetDeleteCall(
-        KeyValueTransactionContext context,
+        ScriptTransactionContext context,
         NodeAst ast,
         KeyValueDurability durability
     )

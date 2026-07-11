@@ -6,7 +6,7 @@ namespace Kahuna.Server.KeyValues.Transactions.Commands;
 
 internal sealed class ThrowCommand : BaseCommand
 {
-    public static void Execute(KeyValueTransactionContext context, NodeAst ast, CancellationToken cancellationToken)
+    public static void Execute(ScriptTransactionContext context, NodeAst ast, CancellationToken cancellationToken)
     {
         if (ast.leftAst is null)
             throw new KahunaScriptException("Invalid THROW expression", ast.yyline);

@@ -11,7 +11,7 @@ internal sealed class SetManyCommand : BaseCommand
 {
     public static async Task<KeyValueTransactionResult> Execute(
         KeyValuesManager manager,
-        KeyValueTransactionContext context,
+        ScriptTransactionContext context,
         NodeAst ast,        
         CancellationToken cancellationToken
     )
@@ -66,7 +66,7 @@ internal sealed class SetManyCommand : BaseCommand
         return context.ModifiedResult;
     }
     
-    private static void GetSetCalls(KeyValueTransactionContext context, NodeAst ast, List<KahunaSetKeyValueRequestItem> arguments)
+    private static void GetSetCalls(ScriptTransactionContext context, NodeAst ast, List<KahunaSetKeyValueRequestItem> arguments)
     {
         while (true)
         {
@@ -102,7 +102,7 @@ internal sealed class SetManyCommand : BaseCommand
         }
     }
 
-    private static KahunaSetKeyValueRequestItem GetSetCall(KeyValueTransactionContext context, NodeAst ast, KeyValueDurability durability)
+    private static KahunaSetKeyValueRequestItem GetSetCall(ScriptTransactionContext context, NodeAst ast, KeyValueDurability durability)
     {
         if (ast.leftAst?.yytext is null)
             throw new KahunaScriptException("Invalid key", ast.yyline);

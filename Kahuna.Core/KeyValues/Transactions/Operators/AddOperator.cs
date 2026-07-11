@@ -11,7 +11,7 @@ namespace Kahuna.Server.KeyValues.Transactions.Operators;
 /// </summary>
 internal static class AddOperator
 {
-    public static KeyValueExpressionResult Eval(KeyValueTransactionContext context, NodeAst ast)
+    public static KeyValueExpressionResult Eval(ScriptTransactionContext context, NodeAst ast)
     {
         if (ast.leftAst is null)
             throw new KahunaScriptException("Invalid left expression", ast.yyline);

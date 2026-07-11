@@ -11,7 +11,7 @@ internal static class EqualsOperator
 {
     private const int StackAllocThreshold = 256;
 
-    public static KeyValueExpressionResult Eval(KeyValueTransactionContext context, NodeAst ast, string operatorType)
+    public static KeyValueExpressionResult Eval(ScriptTransactionContext context, NodeAst ast, string operatorType)
     {
         if (ast.leftAst is null)
             throw new KahunaScriptException("Invalid left expression", ast.yyline);

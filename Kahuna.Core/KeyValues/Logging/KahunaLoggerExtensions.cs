@@ -125,7 +125,7 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Debug, Message = "Starting {Workers} persistent key/value workers")]
     public static partial void LogStartingPersistentWorkers(this ILogger<IKahuna> logger, int workers);
 
-    // ── KeyValueTransactionCoordinator exception logs ─────────────────────
+    // ── Transaction coordinator exception logs ─────────────────────
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "KahunaScriptException")]
     public static partial void LogKahunaScriptException(this ILogger<IKahuna> logger, Exception exception);

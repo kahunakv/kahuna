@@ -46,7 +46,9 @@ internal sealed class KeyValuesManager : IDisposable
 
     private readonly KeyValueLocator locator;
     
-    private readonly KeyValueTransactionCoordinator txCoordinator;
+    private readonly TransactionCoordinator txCoordinator;
+
+    private readonly ScriptTransactionExecutor scriptExecutor;
     
     private readonly IActorRef<ScriptParserEvicterActor, ScriptParserEvicterRequest> scriptParserEvicter;
 
@@ -152,6 +154,7 @@ internal sealed class KeyValuesManager : IDisposable
         );
 
         txCoordinator = new(this, configuration, raft, logger);
+        scriptExecutor = new(this, configuration, raft, logger, txCoordinator);
 
         // Periodic reaper for interactive transaction sessions abandoned without commit/rollback.
         actorSystem.Spawn<TransactionReaperActor, TransactionReaperRequest>(
@@ -3012,7 +3015,7 @@ internal sealed class KeyValuesManager : IDisposable
     /// <returns></returns>
     public Task<KeyValueTransactionResult> TryExecuteTx(byte[] script, string? hash, List<KeyValueParameter>? parameters)
     {
-        return txCoordinator.TryExecuteTx(script, hash, parameters);
+        return scriptExecutor.TryExecuteTx(script, hash, parameters);
     }
 
     /// <summary>

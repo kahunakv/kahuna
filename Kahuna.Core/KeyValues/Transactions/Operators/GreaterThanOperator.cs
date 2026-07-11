@@ -7,7 +7,7 @@ namespace Kahuna.Server.KeyValues.Transactions.Operators;
 
 internal static class GreaterThanOperator
 {
-    public static KeyValueExpressionResult Eval(KeyValueTransactionContext context, NodeAst ast, string operatorType)
+    public static KeyValueExpressionResult Eval(ScriptTransactionContext context, NodeAst ast, string operatorType)
     {
         if (ast.leftAst is null)
             throw new KahunaScriptException("Invalid left expression", ast.yyline);

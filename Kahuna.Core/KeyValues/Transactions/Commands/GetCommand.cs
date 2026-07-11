@@ -19,7 +19,7 @@ internal sealed class GetCommand : BaseCommand
 {
     public static async Task<KeyValueTransactionResult> Execute(
         KeyValuesManager manager,
-        KeyValueTransactionContext context,
+        ScriptTransactionContext context,
         NodeAst ast,
         KeyValueDurability durability,
         CancellationToken cancellationToken

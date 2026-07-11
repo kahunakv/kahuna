@@ -21,7 +21,7 @@ internal sealed class KeyValueLockHelper : BaseCommand
     /// <exception cref="KahunaScriptException"></exception>
     /// <exception cref="ArgumentOutOfRangeException"></exception>
     internal static void GetLocksToAcquire(
-        KeyValueTransactionContext context, 
+        ScriptTransactionContext context, 
         NodeAst ast, 
         HashSet<string> ephemeralLocks, 
         HashSet<string> persistentLocks,

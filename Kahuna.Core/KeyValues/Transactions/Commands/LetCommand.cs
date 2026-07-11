@@ -14,7 +14,7 @@ namespace Kahuna.Server.KeyValues.Transactions.Commands;
 internal sealed class LetCommand : BaseCommand
 {
     public static KeyValueTransactionResult Execute(
-        KeyValueTransactionContext context,
+        ScriptTransactionContext context,
         NodeAst ast
     )
     {

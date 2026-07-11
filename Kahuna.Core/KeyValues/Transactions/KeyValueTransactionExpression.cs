@@ -21,7 +21,7 @@ internal static class KeyValueTransactionExpression
     /// <param name="context">The context of the key-value transaction which contains necessary state and configuration.</param>
     /// <param name="ast">The abstract syntax tree to be evaluated, representing the input expression or operation.</param>
     /// <returns>A result encapsulated in a <see cref="KeyValueExpressionResult"/> object, containing the evaluation outcome.</returns>
-    public static KeyValueExpressionResult Eval(KeyValueTransactionContext context, NodeAst ast)
+    public static KeyValueExpressionResult Eval(ScriptTransactionContext context, NodeAst ast)
     {
         switch (ast.nodeType)
         {

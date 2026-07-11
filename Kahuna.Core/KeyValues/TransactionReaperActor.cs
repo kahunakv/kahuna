@@ -11,12 +11,12 @@ namespace Kahuna.Server.KeyValues;
 /// </summary>
 internal sealed class TransactionReaperActor : IActor<TransactionReaperRequest>
 {
-    private readonly KeyValueTransactionCoordinator coordinator;
+    private readonly TransactionCoordinator coordinator;
     private readonly ILogger<IKahuna> logger;
 
     public TransactionReaperActor(
         IActorContext<TransactionReaperActor, TransactionReaperRequest> context,
-        KeyValueTransactionCoordinator coordinator,
+        TransactionCoordinator coordinator,
         KahunaConfiguration configuration,
         ILogger<IKahuna> logger
     )
