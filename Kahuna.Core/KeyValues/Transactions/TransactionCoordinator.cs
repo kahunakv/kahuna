@@ -113,6 +113,12 @@ internal sealed class TransactionCoordinator
             return KeyValueResponseType.Errored;
         }
 
+        // Close the session to new operations and wait for any in-flight ones to complete, so the
+        // coordinator-owned working set is frozen before two-phase commit reads it. Operations that
+        // registered before this point are part of the commit; any that arrive after are rejected.
+        if (!await FreezeForFinalize(context))
+            return KeyValueResponseType.MustRetry;
+
         try
         {
             context.Result = new() { Type = KeyValueResponseType.Set, Reason = null };
@@ -206,6 +212,10 @@ internal sealed class TransactionCoordinator
             return KeyValueResponseType.Errored;
         }
 
+        // Freeze the coordinator-owned working set before rolling back its operations.
+        if (!await FreezeForFinalize(context))
+            return KeyValueResponseType.MustRetry;
+
         try
         {
             foreach (KeyValueTransactionModifiedKey acquiredLock in acquiredLocks)
@@ -297,6 +307,29 @@ internal sealed class TransactionCoordinator
     /// <see cref="SessionLifecycle.Terminal"/>. Callers use the returned snapshot to drive the
     /// 2PC prepare/commit/rollback steps independently of the live context.
     /// </summary>
+    /// <summary>
+    /// Closes a session to new operations and waits for in-flight ones to drain, so a subsequent
+    /// two-phase commit / rollback reads a stable coordinator-owned working set. Returns false (and
+    /// reopens the session if this call was the one that closed it) when the drain deadline elapses.
+    /// </summary>
+    private async Task<bool> FreezeForFinalize(TransactionContext context)
+    {
+        bool closedHere = context.TryBeginFinalizing();
+
+        using CancellationTokenSource cts = new(context.Timeout <= 0 ? configuration.DefaultTransactionTimeout : context.Timeout);
+        try
+        {
+            await context.WaitForPendingOperations(cts.Token);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            if (closedHere)
+                context.RevertFinalizing();
+            return false;
+        }
+    }
+
     public async Task<(KeyValueResponseType, WorkingSetSnapshot?)> CloseTransaction(
         HLCTimestamp transactionId,
         CancellationToken cancellationToken)

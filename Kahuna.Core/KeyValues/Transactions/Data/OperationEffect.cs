@@ -16,6 +16,9 @@ internal sealed class OperationEffect
     /// <summary>A point lock the operation acquired (the implicit write lock, or an explicit lock op).</summary>
     public (string Key, KeyValueDurability Durability)? PointLock { get; init; }
 
+    /// <summary>A point lock the operation released, dropped from the held-lock set so it is not released again.</summary>
+    public (string Key, KeyValueDurability Durability)? RemovePointLock { get; init; }
+
     /// <summary>A key observed by a non-snapshot read, recorded for read-set cleanup/validation.</summary>
     public KeyValueTransactionReadKey? ReadObservation { get; init; }
 }

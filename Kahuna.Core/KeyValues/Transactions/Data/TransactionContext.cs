@@ -201,6 +201,9 @@ internal class TransactionContext
             LocksAcquired.Add(pointLock);
         }
 
+        if (effect.RemovePointLock is { } removedLock)
+            LocksAcquired?.Remove(removedLock);
+
         if (effect.ReadObservation is { } read && !string.IsNullOrEmpty(read.Key))
         {
             ReadKeys ??= [];

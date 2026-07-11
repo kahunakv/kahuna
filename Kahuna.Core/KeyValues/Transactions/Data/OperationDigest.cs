@@ -47,6 +47,37 @@ internal static class OperationDigest
         return hash.GetHashAndReset();
     }
 
+    internal static byte[] ForPointLockAcquire(string key, int expiresMs, KeyValueDurability durability)
+    {
+        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        AppendTag(hash, OperationKind.PointLock);
+        AppendString(hash, key);
+        AppendInt(hash, expiresMs);
+        AppendInt(hash, (int)durability);
+        return hash.GetHashAndReset();
+    }
+
+    internal static byte[] ForPointLockRelease(string key, KeyValueDurability durability)
+    {
+        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        AppendTag(hash, OperationKind.PointLock);
+        // A distinct constant separates a release declaration from an acquire of the same key.
+        AppendInt(hash, -1);
+        AppendString(hash, key);
+        AppendInt(hash, (int)durability);
+        return hash.GetHashAndReset();
+    }
+
+    internal static byte[] ForRead(OperationKind kind, string key, long revision, KeyValueDurability durability)
+    {
+        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        AppendTag(hash, kind);
+        AppendString(hash, key);
+        AppendLong(hash, revision);
+        AppendInt(hash, (int)durability);
+        return hash.GetHashAndReset();
+    }
+
     private static void AppendTag(IncrementalHash hash, OperationKind kind) => AppendInt(hash, (int)kind);
 
     private static void AppendString(IncrementalHash hash, string value) =>

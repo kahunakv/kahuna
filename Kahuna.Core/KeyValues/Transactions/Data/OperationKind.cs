@@ -10,6 +10,7 @@ public enum OperationKind
     Get,
     Exists,
     Scan,
+    PointLock,
     PrefixLock,
     RangeLock
 }

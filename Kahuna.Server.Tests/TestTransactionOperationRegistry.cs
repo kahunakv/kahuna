@@ -202,6 +202,25 @@ public sealed class TestTransactionOperationRegistry
     }
 
     [Fact]
+    public void CompleteOperation_RecordsReadObservation()
+    {
+        TransactionContext ctx = NewContext();
+        ctx.BeginOperation(Op(1), OperationKind.Get, null);
+        ctx.CompleteOperation(
+            Op(1),
+            new OperationEffect
+            {
+                ReadObservation = new KeyValueTransactionReadKey { Key = "rk", Durability = KeyValueDurability.Persistent, Exists = true, Revision = 3 }
+            },
+            new CachedOperationResponse(KeyValueResponseType.Get, 3, HLCTimestamp.Zero));
+
+        WorkingSetSnapshot snap = ctx.GetWorkingSetSnapshot();
+        Assert.True(snap.ReadKeys!.TryGetValue(("rk", KeyValueDurability.Persistent), out KeyValueTransactionReadKey? read));
+        Assert.True(read!.Exists);
+        Assert.Equal(3, read.Revision);
+    }
+
+    [Fact]
     public void CompleteOperation_ReplayedDoesNotDoubleRecordEffect()
     {
         TransactionContext ctx = NewContext();
@@ -212,6 +231,22 @@ public sealed class TestTransactionOperationRegistry
         ctx.CompleteOperation(Op(1), effect, new CachedOperationResponse(KeyValueResponseType.Deleted, 1, HLCTimestamp.Zero));
 
         Assert.Single(ctx.GetWorkingSetSnapshot().ModifiedKeys!);
+    }
+
+    [Fact]
+    public void CompleteOperation_PointLockAddThenRemove()
+    {
+        TransactionContext ctx = NewContext();
+
+        ctx.BeginOperation(Op(1), OperationKind.PointLock, null);
+        ctx.CompleteOperation(Op(1), new OperationEffect { PointLock = ("lk", KeyValueDurability.Persistent) },
+            new CachedOperationResponse(KeyValueResponseType.Locked, 0, HLCTimestamp.Zero));
+        Assert.Contains(("lk", KeyValueDurability.Persistent), ctx.GetWorkingSetSnapshot().LocksAcquired!);
+
+        ctx.BeginOperation(Op(2), OperationKind.PointLock, null);
+        ctx.CompleteOperation(Op(2), new OperationEffect { RemovePointLock = ("lk", KeyValueDurability.Persistent) },
+            new CachedOperationResponse(KeyValueResponseType.Unlocked, 0, HLCTimestamp.Zero));
+        Assert.Empty(ctx.GetWorkingSetSnapshot().LocksAcquired!);
     }
 
     [Fact]

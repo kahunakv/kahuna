@@ -392,10 +392,12 @@ public sealed class KahunaManager : IKahuna, IDisposable
         long revision,
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
-        return keyValues.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
+        return keyValues.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId);
     }
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(
@@ -423,10 +425,12 @@ public sealed class KahunaManager : IKahuna, IDisposable
         long revision,
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
-        return keyValues.LocateAndTryExistsValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
+        return keyValues.LocateAndTryExistsValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId);
     }
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryExistsManyValues(
@@ -505,10 +509,12 @@ public sealed class KahunaManager : IKahuna, IDisposable
         string key,
         int expiresMs,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
-        return keyValues.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, durability, cancellationToken);
+        return keyValues.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, durability, cancellationToken, coordinatorKey, operationId);
     }
 
     /// <summary>
@@ -556,13 +562,15 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public Task<(KeyValueResponseType, string)> LocateAndTryReleaseExclusiveLock(
-        HLCTimestamp transactionId, 
-        string key, 
-        KeyValueDurability durability, 
-        CancellationToken cancellationToken
+        HLCTimestamp transactionId,
+        string key,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
-        return keyValues.LocateAndTryReleaseExclusiveLock(transactionId, key, durability, cancellationToken);
+        return keyValues.LocateAndTryReleaseExclusiveLock(transactionId, key, durability, cancellationToken, coordinatorKey, operationId);
     }
     
     /// <summary>

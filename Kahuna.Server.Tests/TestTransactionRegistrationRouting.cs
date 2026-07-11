@@ -1,5 +1,6 @@
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
@@ -171,6 +172,145 @@ public sealed class TestTransactionRegistrationRouting
         finally
         {
             await LeaveAll(nodes);
+        }
+    }
+
+    [Fact]
+    public async Task TransactionalGet_UnderOperationId_ReadsOwnWrite()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Optimistic }, ct);
+
+            byte[] value = "gv"u8.ToArray();
+            (KeyValueResponseType setType, _, _) = await SetWithRetry(nodes[1], handle, TransactionOperationId.NewRandom(), value, ct);
+            Assert.Equal(KeyValueResponseType.Set, setType);
+
+            // A registered read of the just-written key returns it (read-your-own-writes) and records the observation.
+            TransactionOperationId getOp = TransactionOperationId.NewRandom();
+            (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry) = await GetWithRetry(nodes[2], handle, getOp, ct);
+            Assert.Equal(KeyValueResponseType.Get, getType);
+            Assert.NotNull(entry);
+            Assert.Equal(value, entry!.Value);
+
+            // A repeat read under the same op id is idempotent (re-reads, same value).
+            (KeyValueResponseType replayType, ReadOnlyKeyValueEntry? replayEntry) =
+                await nodes[0].Kahuna.LocateAndTryGetValue(handle.TransactionId, "wk1", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct, handle.CoordinatorKey, getOp);
+            Assert.Equal(KeyValueResponseType.Get, replayType);
+            Assert.Equal(value, replayEntry!.Value);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    [Fact]
+    public async Task TransactionalPointLock_AcquireAndRelease_DedupUnderSameOperationId()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+
+            TransactionOperationId acquireOp = TransactionOperationId.NewRandom();
+            KeyValueResponseType acquired = await LockWithRetry(() =>
+                nodes[1].Kahuna.LocateAndTryAcquireExclusiveLock(handle.TransactionId, "lk1", 10_000, KeyValueDurability.Persistent, ct, handle.CoordinatorKey, acquireOp), ct);
+            Assert.Equal(KeyValueResponseType.Locked, acquired);
+
+            // Replay the acquire under the same op id → reported as already held by this transaction.
+            (KeyValueResponseType replayAcquire, _, _, _) =
+                await nodes[2].Kahuna.LocateAndTryAcquireExclusiveLock(handle.TransactionId, "lk1", 10_000, KeyValueDurability.Persistent, ct, handle.CoordinatorKey, acquireOp);
+            Assert.Equal(KeyValueResponseType.Locked, replayAcquire);
+
+            TransactionOperationId releaseOp = TransactionOperationId.NewRandom();
+            (KeyValueResponseType released, _) =
+                await nodes[0].Kahuna.LocateAndTryReleaseExclusiveLock(handle.TransactionId, "lk1", KeyValueDurability.Persistent, ct, handle.CoordinatorKey, releaseOp);
+            Assert.Equal(KeyValueResponseType.Unlocked, released);
+
+            // Replay the release under the same op id → idempotent Unlocked.
+            (KeyValueResponseType replayRelease, _) =
+                await nodes[1].Kahuna.LocateAndTryReleaseExclusiveLock(handle.TransactionId, "lk1", KeyValueDurability.Persistent, ct, handle.CoordinatorKey, releaseOp);
+            Assert.Equal(KeyValueResponseType.Unlocked, replayRelease);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    [Fact]
+    public async Task Commit_ConsumesServerRecordedWorkingSet_WithEmptyClientLists()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Optimistic }, ct);
+
+            byte[] value = "committed-value"u8.ToArray();
+            (KeyValueResponseType setType, _, _) = await SetWithRetry(nodes[1], handle, TransactionOperationId.NewRandom(), value, ct);
+            Assert.Equal(KeyValueResponseType.Set, setType);
+
+            // Commit with EMPTY client lists: the write must still commit because the coordinator owns
+            // the modified-key set recorded during the transaction.
+            KeyValueResponseType commit = await CommitWithRetry(nodes[2], handle, ct);
+            Assert.Equal(KeyValueResponseType.Committed, commit);
+
+            // The committed value is visible to a non-transactional read.
+            (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry) =
+                await nodes[0].Kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, "wk1", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Get, getType);
+            Assert.Equal(value, entry!.Value);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    private static async Task<KeyValueResponseType> CommitWithRetry(Node node, TransactionHandle handle, CancellationToken ct)
+    {
+        long deadline = Environment.TickCount64 + 10_000;
+        while (true)
+        {
+            KeyValueResponseType type = await node.Kahuna.LocateAndCommitTransaction(handle, [], [], [], ct);
+            if (type != KeyValueResponseType.MustRetry || Environment.TickCount64 >= deadline)
+                return type;
+            await Task.Delay(50, ct);
+        }
+    }
+
+    private static async Task<KeyValueResponseType> LockWithRetry(Func<Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)>> op, CancellationToken ct)
+    {
+        long deadline = Environment.TickCount64 + 10_000;
+        while (true)
+        {
+            (KeyValueResponseType type, _, _, _) = await op();
+            if (type != KeyValueResponseType.MustRetry || Environment.TickCount64 >= deadline)
+                return type;
+            await Task.Delay(50, ct);
+        }
+    }
+
+    private static async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> GetWithRetry(Node node, TransactionHandle handle, TransactionOperationId op, CancellationToken ct)
+    {
+        long deadline = Environment.TickCount64 + 10_000;
+        while (true)
+        {
+            (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) =
+                await node.Kahuna.LocateAndTryGetValue(handle.TransactionId, "wk1", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct, handle.CoordinatorKey, op);
+
+            if (type != KeyValueResponseType.MustRetry || Environment.TickCount64 >= deadline)
+                return (type, entry);
+
+            await Task.Delay(50, ct);
         }
     }
 
