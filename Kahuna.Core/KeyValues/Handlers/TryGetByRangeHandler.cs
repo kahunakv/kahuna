@@ -54,7 +54,11 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         // page cursor is exclusive, resuming past a tombstone loses no live entry — the caller just
         // fetches another page. The budget carries limit+1 live capacity plus slack for dead rows, so a
         // normal (sparse-tombstone) page behaves exactly as before.
-        int inspectionBudget = limit + 1 + KeyValueScanLimits.MaxScanInspectionSlack;
+        // Compute in long and clamp: an unbounded scan arrives as limit == int.MaxValue, and
+        // limit + 1 + slack would overflow to a negative int — making the "inspected >= budget"
+        // guard fire on the very first key and truncate the page to a single item.
+        long inspectionBudgetRaw = (long)limit + 1 + KeyValueScanLimits.MaxScanInspectionSlack;
+        int inspectionBudget = inspectionBudgetRaw > int.MaxValue ? int.MaxValue : (int)inspectionBudgetRaw;
         int inspected = 0;
         string? resumeAfterKey = null;
 

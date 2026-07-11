@@ -102,6 +102,27 @@ public sealed class TestKeyValueScanBounds
         Assert.Equal(liveKeys.OrderBy(k => k), collected.OrderBy(k => k));
     }
 
+    [Fact]
+    public async Task EphemeralRangeScan_WithUnboundedLimit_ReturnsAllLiveEntries()
+    {
+        (KeyValueContext context, RaftManager raft) = CreateContext(CreateConfiguration());
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        InsertLive(context, "k/a", now);
+        InsertLive(context, "k/b", now);
+
+        TryGetByRangeHandler scan = new(context);
+
+        // An unbounded scan arrives as int.MaxValue (the client maps limit <= 0 to int.MaxValue). The
+        // inspection budget must not overflow to a negative int and truncate the page after one key.
+        KeyValueResponse response = await scan.Execute(BuildRangeRequest("k", int.MaxValue, startKey: null));
+        KeyValueGetByRangeResult page = response.RangeResult!;
+
+        Assert.Equal(KeyValueResponseType.Get, response.Type);
+        Assert.False(page.HasMore);
+        Assert.Equal(new[] { "k/a", "k/b" }, page.Items.Select(i => i.Item1).OrderBy(k => k));
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────────────────
 
     private static void InsertTombstone(KeyValueContext context, string key, HLCTimestamp now)
