@@ -122,11 +122,51 @@ internal sealed class TransactionCoordinator
             return (KeyValueResponseType.Errored, null);
         }
 
-        // Close the session to new operations and wait for any in-flight ones to complete, so the
-        // coordinator-owned working set is frozen before two-phase commit reads it. Operations that
-        // registered before this point are part of the commit; any that arrive after are rejected.
+        // Serialize against a concurrent commit, rollback, or reaper on the same session. The owner runs the
+        // finalize once; any concurrent finalizer mirrors the owner's published outcome rather than racing a
+        // second two-phase commit against the same working set.
+        FinalizeAdmission admission = context.EnterFinalize(out FinalizeAttempt? attempt);
+        if (admission == FinalizeAdmission.Rejected)
+            return (KeyValueResponseType.Aborted, null);
+
+        if (admission == FinalizeAdmission.Mirror)
+        {
+            FinalizeOutcome mirrored = await attempt!.Completion;
+            return (mirrored.Type, mirrored.RecordAnchorKey);
+        }
+
+        FinalizeOutcome outcome = new(KeyValueResponseType.Aborted, null);
+        try
+        {
+            outcome = await ExecuteCommit(context, transactionId, acquiredLocks, modifiedKeys, readKeys);
+            return (outcome.Type, outcome.RecordAnchorKey);
+        }
+        finally
+        {
+            // Always publish, even on an unexpected throw, so no mirroring waiter can hang. A terminal
+            // outcome is retained for later duplicate finalizes; a MustRetry releases the slot for a retry.
+            context.CompleteFinalize(attempt!, outcome);
+        }
+    }
+
+    /// <summary>
+    /// Runs the commit finalize for the session that already owns the finalize slot: freezes the working
+    /// set, folds in the caller-supplied locks/keys, drives two-phase commit, and releases locks. Returns
+    /// the outcome the owner publishes to any mirroring finalizer.
+    /// </summary>
+    private async Task<FinalizeOutcome> ExecuteCommit(
+        TransactionContext context,
+        HLCTimestamp transactionId,
+        List<KeyValueTransactionModifiedKey> acquiredLocks,
+        List<KeyValueTransactionModifiedKey> modifiedKeys,
+        List<KeyValueTransactionReadKey> readKeys
+    )
+    {
+        // Wait for any in-flight operations to complete, so the coordinator-owned working set is frozen
+        // before two-phase commit reads it. Operations that registered before finalization began are part
+        // of the commit; any that arrive after are rejected. A drain timeout is a non-terminal MustRetry.
         if (!await FreezeForFinalize(context))
-            return (KeyValueResponseType.MustRetry, null);
+            return new(KeyValueResponseType.MustRetry, null);
 
         // The working set is now frozen: capture the immutable record anchor under the finalize fence and
         // return it from the commit itself. This is the race-free anchor source — a concurrent operation
@@ -161,40 +201,40 @@ internal sealed class TransactionCoordinator
             await TwoPhaseCommit(context, CancellationToken.None);
 
             if (context.Result is null)
-                return (KeyValueResponseType.Errored, recordAnchorKey);
+                return new(KeyValueResponseType.Errored, recordAnchorKey);
 
             if (context.Result.Type is KeyValueResponseType.Aborted or KeyValueResponseType.Errored)
-                return (KeyValueResponseType.Aborted, recordAnchorKey);
+                return new(KeyValueResponseType.Aborted, recordAnchorKey);
 
             logger.LogCommittedInteractiveTransaction(transactionId);
 
             sessions.TryRemove(transactionId, out _);
 
-            return (KeyValueResponseType.Committed, recordAnchorKey);
+            return new(KeyValueResponseType.Committed, recordAnchorKey);
         }
         catch (KahunaAbortedException ex)
         {
             logger.LogKahunaAbortedException(ex);
 
-            return (KeyValueResponseType.Aborted, recordAnchorKey);
+            return new(KeyValueResponseType.Aborted, recordAnchorKey);
         }
         catch (TaskCanceledException ex)
         {
             logger.LogTaskCanceledException(ex);
 
-            return (KeyValueResponseType.Aborted, recordAnchorKey);
+            return new(KeyValueResponseType.Aborted, recordAnchorKey);
         }
         catch (OperationCanceledException ex)
         {
             logger.LogOperationCanceledException(ex);
 
-            return (KeyValueResponseType.Aborted, recordAnchorKey);
+            return new(KeyValueResponseType.Aborted, recordAnchorKey);
         }
         catch (Exception ex)
         {
             logger.LogOperationCanceledException(ex);
 
-            return (KeyValueResponseType.Aborted, recordAnchorKey);
+            return new(KeyValueResponseType.Aborted, recordAnchorKey);
         }
         finally
         {
@@ -226,9 +266,44 @@ internal sealed class TransactionCoordinator
             return KeyValueResponseType.Errored;
         }
 
+        // Rollback contends for the same finalize slot as commit and the reaper, so a concurrent finalize is
+        // never run twice on one session; a mirroring caller returns the owner's outcome.
+        FinalizeAdmission admission = context.EnterFinalize(out FinalizeAttempt? attempt);
+        if (admission == FinalizeAdmission.Rejected)
+            return KeyValueResponseType.Aborted;
+
+        if (admission == FinalizeAdmission.Mirror)
+        {
+            FinalizeOutcome mirrored = await attempt!.Completion;
+            return mirrored.Type;
+        }
+
+        FinalizeOutcome outcome = new(KeyValueResponseType.Aborted, null);
+        try
+        {
+            outcome = await ExecuteRollback(context, transactionId, acquiredLocks, modifiedKeys);
+            return outcome.Type;
+        }
+        finally
+        {
+            context.CompleteFinalize(attempt!, outcome);
+        }
+    }
+
+    /// <summary>
+    /// Runs the rollback finalize for the session that already owns the finalize slot: freezes the working
+    /// set, folds in the caller-supplied locks/keys, marks the transaction for abort, and releases locks.
+    /// </summary>
+    private async Task<FinalizeOutcome> ExecuteRollback(
+        TransactionContext context,
+        HLCTimestamp transactionId,
+        List<KeyValueTransactionModifiedKey> acquiredLocks,
+        List<KeyValueTransactionModifiedKey> modifiedKeys
+    )
+    {
         // Freeze the coordinator-owned working set before rolling back its operations.
         if (!await FreezeForFinalize(context))
-            return KeyValueResponseType.MustRetry;
+            return new(KeyValueResponseType.MustRetry, null);
 
         try
         {
@@ -250,7 +325,7 @@ internal sealed class TransactionCoordinator
 
             sessions.TryRemove(transactionId, out _);
 
-            return KeyValueResponseType.RolledBack;
+            return new(KeyValueResponseType.RolledBack, null);
         }
         finally
         {
@@ -339,10 +414,9 @@ internal sealed class TransactionCoordinator
     /// </summary>
     private async Task<bool> FreezeForFinalize(TransactionContext context)
     {
-        // Close the session to new operations. The first finalize transitions Accepting→Finalizing; a
-        // retry after a prior drain timeout observes it already Finalizing and rejoins the same drain.
-        context.TryBeginFinalizing();
-
+        // The caller already owns the finalize slot, which closed the session to new operations on install
+        // (Accepting→Finalizing) — no operation can join once we reach here. Just wait for the in-flight
+        // ones to drain; a retry after a prior drain timeout rejoins this same still-closed drain.
         using CancellationTokenSource cts = new(context.Timeout <= 0 ? configuration.DefaultTransactionTimeout : context.Timeout);
         try
         {
@@ -426,23 +500,37 @@ internal sealed class TransactionCoordinator
             if ((deadline - now) > TimeSpan.Zero)
                 continue;
 
-            // Close the session to new operations before removing it from the map. A BeginOperation that
-            // already captured this context reference then observes the closed lifecycle and is rejected,
-            // instead of registering a New operation on a session that is about to vanish (whose completion
-            // would find no session and leave an applied mutation with no coordinator record). Skip a
-            // session that is already finalizing/terminal — that one belongs to an in-flight commit or
-            // rollback, not the reaper.
-            if (!context.TryCloseForReaping())
+            // Claim the finalize slot and close the session to new operations before removing it from the
+            // map. A BeginOperation that already captured this context reference then observes the closed
+            // lifecycle and is rejected, instead of registering a New operation on a session that is about
+            // to vanish (whose completion would find no session and leave an applied mutation with no
+            // coordinator record). Skip a session already owned by an in-flight commit or rollback — that
+            // finalize, not the reaper, decides its outcome.
+            FinalizeAttempt? attempt = context.TryEnterReap();
+            if (attempt is null)
                 continue;
 
-            if (!sessions.TryRemove(pair.Key, out _))
-                continue;
+            // Publish the reap outcome to any commit/rollback that races in and mirrors this attempt, so it
+            // learns the abandoned session was rolled back rather than finalizing a vanishing session.
+            FinalizeOutcome outcome = new(KeyValueResponseType.RolledBack, null);
+            try
+            {
+                if (!sessions.TryRemove(pair.Key, out _))
+                {
+                    outcome = new(KeyValueResponseType.Errored, null);
+                    continue;
+                }
 
-            context.Action = KeyValueTransactionAction.Abort;
+                context.Action = KeyValueTransactionAction.Abort;
 
-            logger.LogWarning("Reaping abandoned interactive transaction {TransactionId}", pair.Key);
+                logger.LogWarning("Reaping abandoned interactive transaction {TransactionId}", pair.Key);
 
-            await ReleaseAcquiredLocks(context);
+                await ReleaseAcquiredLocks(context);
+            }
+            finally
+            {
+                context.CompleteFinalize(attempt, outcome);
+            }
         }
     }
 

@@ -139,6 +139,7 @@ internal class TransactionContext
     private int pendingOperationCount;
     private Dictionary<TransactionOperationId, OperationRecord>? operations;
     private WorkingSetSnapshot? finalizeSnapshot;
+    private FinalizeAttempt? activeFinalize;
 
     /// <summary>Signal completed when the pending count reaches zero during a finalize drain.</summary>
     private TaskCompletionSource? pendingDrainSignal;
@@ -371,23 +372,76 @@ internal class TransactionContext
     }
 
     /// <summary>
-    /// Atomically closes the session to new operations as part of reaping, returning true only when the
-    /// session was still <see cref="SessionLifecycle.AcceptingOperations"/>. A session already finalizing or
-    /// terminal belongs to an in-flight commit/rollback and is left alone. Once this returns true, every
-    /// subsequent <see cref="BeginOperation"/> is rejected — so a caller that captured this context just
-    /// before the reaper removed it from the session map cannot register a new operation on a session that
-    /// is about to vanish (which would apply a mutation with no coordinator record).
+    /// Enters the single finalize slot for a commit or rollback. Exactly one caller owns an active
+    /// <see cref="FinalizeAttempt"/> at a time: the owner runs the finalize and publishes its outcome via
+    /// <see cref="CompleteFinalize"/>; concurrent commits/rollbacks observe the same attempt and mirror its
+    /// outcome. Installing the first attempt also closes the session to new operations
+    /// (<see cref="SessionLifecycle.AcceptingOperations"/> → <see cref="SessionLifecycle.Finalizing"/>) so
+    /// no operation can join once finalization has begun. A session already claimed by the reaper (or made
+    /// terminal) is rejected — there is nothing left to finalize.
     /// </summary>
-    internal bool TryCloseForReaping()
+    internal FinalizeAdmission EnterFinalize(out FinalizeAttempt? attempt)
     {
         lock (registryLock)
         {
-            if (lifecycle != SessionLifecycle.AcceptingOperations)
-                return false;
+            if (lifecycle is SessionLifecycle.Reaping or SessionLifecycle.Terminal)
+            {
+                attempt = null;
+                return FinalizeAdmission.Rejected;
+            }
+
+            if (activeFinalize is not null)
+            {
+                attempt = activeFinalize;
+                return FinalizeAdmission.Mirror;
+            }
+
+            // Install a fresh attempt. The session may already be Finalizing — a prior attempt that timed
+            // out during its drain cleared the slot but left the session closed to new operations; a new
+            // owner rejoins that same drain rather than reopening the session.
+            attempt = activeFinalize = new FinalizeAttempt();
+            if (lifecycle == SessionLifecycle.AcceptingOperations)
+                lifecycle = SessionLifecycle.Finalizing;
+            return FinalizeAdmission.Owner;
+        }
+    }
+
+    /// <summary>
+    /// Atomically claims the finalize slot for the reaper. Succeeds only when the session is still
+    /// <see cref="SessionLifecycle.AcceptingOperations"/> with no active finalize, transitioning it to
+    /// <see cref="SessionLifecycle.Reaping"/> and installing an attempt the reaper publishes so that a
+    /// commit/rollback racing the reaper mirrors the reap outcome instead of finalizing a vanishing
+    /// session. Returns null when a commit/rollback already owns the slot (leave it to that finalize) or
+    /// the session is not in an accepting state.
+    /// </summary>
+    internal FinalizeAttempt? TryEnterReap()
+    {
+        lock (registryLock)
+        {
+            if (lifecycle != SessionLifecycle.AcceptingOperations || activeFinalize is not null)
+                return null;
 
             lifecycle = SessionLifecycle.Reaping;
-            return true;
+            return activeFinalize = new FinalizeAttempt();
         }
+    }
+
+    /// <summary>
+    /// Publishes the outcome of a finalize to every waiter mirroring the attempt. A terminal outcome is
+    /// retained (the slot stays installed) so a later duplicate finalize mirrors the same answer; a
+    /// non-terminal <see cref="KeyValueResponseType.MustRetry"/> releases the slot so a subsequent call can
+    /// run a fresh attempt. Called exactly once by the owner, always (even on failure), so no mirroring
+    /// waiter can hang.
+    /// </summary>
+    internal void CompleteFinalize(FinalizeAttempt attempt, FinalizeOutcome outcome)
+    {
+        lock (registryLock)
+        {
+            if (!outcome.IsTerminal && ReferenceEquals(activeFinalize, attempt))
+                activeFinalize = null;
+        }
+
+        attempt.Publish(outcome);
     }
 
     /// <summary>
