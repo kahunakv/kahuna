@@ -1605,6 +1605,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             AcquiredPrefixLocks = grpc.AcquiredPrefixLocks.Select(FromGrpcModifiedKey).ToList(),
             AcquiredRangeLocks = grpc.AcquiredRangeLocks.Select(FromGrpcRangeLock).ToList(),
             ReadKeys = grpc.ReadKeys.Select(FromGrpcReadKey).ToList(),
+            RecordAnchorKey = grpc.HasRecordAnchorKey ? grpc.RecordAnchorKey : null,
             PendingOperationCount = grpc.PendingOperationCount
         };
     }

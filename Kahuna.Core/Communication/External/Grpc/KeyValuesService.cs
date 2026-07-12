@@ -1864,6 +1864,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             PendingOperationCount = ws.PendingOperationCount
         };
 
+        if (ws.RecordAnchorKey is not null)
+            result.RecordAnchorKey = ws.RecordAnchorKey;
+
         foreach (KeyValueTransactionModifiedKey m in ws.ModifiedKeys)
             result.ModifiedKeys.Add(new GrpcTransactionModifiedKey { Key = m.Key ?? "", Durability = (GrpcKeyValueDurability)m.Durability });
 

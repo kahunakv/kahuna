@@ -2074,6 +2074,7 @@ internal sealed class KeyValuesManager : IDisposable
         ReadKeys = snapshot.ReadKeys is null
             ? []
             : snapshot.ReadKeys.Values.OrderBy(r => r.Key, StringComparer.Ordinal).ToList(),
+        RecordAnchorKey = snapshot.RecordAnchorKey,
         PendingOperationCount = snapshot.PendingOperationCount
     };
 

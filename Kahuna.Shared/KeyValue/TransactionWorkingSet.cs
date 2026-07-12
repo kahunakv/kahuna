@@ -19,5 +19,8 @@ public sealed class TransactionWorkingSet
 
     public List<KeyValueTransactionReadKey> ReadKeys { get; init; } = [];
 
+    /// <summary>The first confirmed persistent modified key, or null if the transaction has no persistent write.</summary>
+    public string? RecordAnchorKey { get; init; }
+
     public int PendingOperationCount { get; init; }
 }

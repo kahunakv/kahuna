@@ -16,6 +16,10 @@ internal sealed class WorkingSetSnapshot
     public IReadOnlyDictionary<RangeLockKey, RangeLockMode>? RangeLocksAcquired { get; init; }
     public IReadOnlySet<(string Key, KeyValueDurability Durability)>? ModifiedKeys { get; init; }
     public IReadOnlyDictionary<(string Key, KeyValueDurability Durability), KeyValueTransactionReadKey>? ReadKeys { get; init; }
+
+    /// <summary>The first confirmed persistent modified key, or null if the transaction has no persistent write.</summary>
+    public string? RecordAnchorKey { get; init; }
+
     public int PendingOperationCount { get; init; }
     public SessionLifecycle Lifecycle { get; init; }
 }

@@ -554,6 +554,90 @@ public sealed class TestTransactionRegistrationRouting
         }
     }
 
+    /// <summary>
+    /// The record anchor is the first confirmed <b>persistent</b> modified key, assigned exactly once and
+    /// immutable: a later persistent write does not move it, though it is still recorded as a modified key.
+    /// </summary>
+    [Fact]
+    public async Task RecordAnchor_IsFirstPersistentModifiedKey_AndImmutable()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+
+            byte[] value = "v"u8.ToArray();
+
+            // First persistent write assigns the anchor.
+            Assert.Equal(KeyValueResponseType.Set,
+                await SetKeyWithRetry(nodes[1], handle, TransactionOperationId.NewRandom(), "anchor/a", value, KeyValueDurability.Persistent, ct));
+
+            TransactionWorkingSet? afterFirst = await nodes[2].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(afterFirst);
+            Assert.Equal("anchor/a", afterFirst!.RecordAnchorKey);
+
+            // A later persistent write does not move the anchor, but is still recorded as a modified key.
+            Assert.Equal(KeyValueResponseType.Set,
+                await SetKeyWithRetry(nodes[0], handle, TransactionOperationId.NewRandom(), "anchor/b", value, KeyValueDurability.Persistent, ct));
+
+            TransactionWorkingSet? afterSecond = await nodes[1].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(afterSecond);
+            Assert.Equal("anchor/a", afterSecond!.RecordAnchorKey);
+            Assert.Contains(afterSecond.ModifiedKeys, m => m.Key == "anchor/b");
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// An ephemeral modification is recorded as a modified key but never becomes the anchor: a Durable
+    /// record cannot live on an ephemeral key, so a transaction with only ephemeral writes has no anchor.
+    /// </summary>
+    [Fact]
+    public async Task RecordAnchor_NotAssignedForEphemeralModifications()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+
+            Assert.Equal(KeyValueResponseType.Set,
+                await SetKeyWithRetry(nodes[1], handle, TransactionOperationId.NewRandom(), "eph/a", "v"u8.ToArray(), KeyValueDurability.Ephemeral, ct));
+
+            TransactionWorkingSet? ws = await nodes[2].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(ws);
+            Assert.Null(ws!.RecordAnchorKey);
+            Assert.Contains(ws.ModifiedKeys, m => m.Key == "eph/a");
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    private static async Task<KeyValueResponseType> SetKeyWithRetry(Node node, TransactionHandle handle, TransactionOperationId op, string key, byte[] value, KeyValueDurability durability, CancellationToken ct)
+    {
+        long deadline = Environment.TickCount64 + 10_000;
+        while (true)
+        {
+            (KeyValueResponseType type, _, _) =
+                await node.Kahuna.LocateAndTrySetKeyValue(
+                    handle.TransactionId, key, value, null, -1, KeyValueFlags.None, 0, durability,
+                    ct, 0, handle.CoordinatorKey, op);
+
+            if (type != KeyValueResponseType.MustRetry || Environment.TickCount64 >= deadline)
+                return type;
+
+            await Task.Delay(50, ct);
+        }
+    }
+
     private static async Task<KeyValueResponseType> PrefixLockWithRetry(Func<Task<KeyValueResponseType>> op, CancellationToken ct)
     {
         long deadline = Environment.TickCount64 + 10_000;

@@ -78,6 +78,16 @@ internal class TransactionContext
     public HashSet<(string, KeyValueDurability)>? ModifiedKeys { get; set; }
 
     /// <summary>
+    /// The immutable record anchor: the first confirmed persistent modified key. Assigned exactly once,
+    /// at the coordinator, under <see cref="registryLock"/> the first time a persistent
+    /// <c>ModifiedKey</c> effect is folded in; ephemeral-only modifications never assign it. Names the
+    /// data partition that will own a Durable transaction record. Null until (and unless) a persistent
+    /// write is confirmed — a transaction with no persistent modification has no anchor and cannot be
+    /// promoted to Durable.
+    /// </summary>
+    public string? RecordAnchorKey { get; private set; }
+
+    /// <summary>
     /// Keys read during the transaction and their observed revisions.
     /// </summary>
     public Dictionary<(string, KeyValueDurability), KeyValueTransactionReadKey>? ReadKeys { get; set; }
@@ -199,6 +209,13 @@ internal class TransactionContext
         {
             ModifiedKeys ??= [];
             ModifiedKeys.Add(modified);
+
+            // The first confirmed persistent modification names the immutable record anchor. Assignment
+            // happens under registryLock, so concurrent completions are serialized and exactly one wins.
+            // Ephemeral modifications never become the anchor: a Durable record cannot live on an
+            // ephemeral key.
+            if (RecordAnchorKey is null && modified.Item2 == KeyValueDurability.Persistent)
+                RecordAnchorKey = modified.Item1;
         }
 
         if (effect.PointLock is { } pointLock)
@@ -363,6 +380,7 @@ internal class TransactionContext
                 RangeLocksAcquired   = RangeLocksAcquired   != null ? new Dictionary<RangeLockKey, RangeLockMode>(RangeLocksAcquired) : null,
                 ModifiedKeys         = ModifiedKeys          != null ? new HashSet<(string, KeyValueDurability)>(ModifiedKeys)         : null,
                 ReadKeys             = ReadKeys              != null ? new Dictionary<(string, KeyValueDurability), KeyValueTransactionReadKey>(ReadKeys) : null,
+                RecordAnchorKey      = RecordAnchorKey,
                 PendingOperationCount = pendingOperationCount,
                 Lifecycle            = lifecycle
             };

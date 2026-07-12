@@ -822,6 +822,7 @@ message GrpcTransactionWorkingSet
   repeated GrpcTransactionRangeLock AcquiredRangeLocks = 4;
   repeated GrpcTransactionReadKey ReadKeys = 5;
   int32 PendingOperationCount = 6;
+  optional string RecordAnchorKey = 7;
 }
 
 message GrpcBeginOperationRequest
