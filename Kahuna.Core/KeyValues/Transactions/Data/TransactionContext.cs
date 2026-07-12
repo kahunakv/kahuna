@@ -150,8 +150,10 @@ internal class TransactionContext
     {
         lock (registryLock)
         {
+            // Every outcome carries the transaction's current anchor so a retry recovers the same
+            // canonical handle even when it lands on an already-completed operation.
             if (lifecycle != SessionLifecycle.AcceptingOperations)
-                return new(OperationRegistrationOutcome.RejectedSessionClosed);
+                return new(OperationRegistrationOutcome.RejectedSessionClosed, recordAnchorKey: RecordAnchorKey);
 
             operations ??= new();
 
@@ -159,21 +161,21 @@ internal class TransactionContext
             {
                 // Reusing an ID with a different kind or payload is a caller error, not a retry.
                 if (existing.Kind != kind || !DigestsEqual(existing.PayloadDigest, payloadDigest))
-                    return new(OperationRegistrationOutcome.RejectedDuplicate);
+                    return new(OperationRegistrationOutcome.RejectedDuplicate, recordAnchorKey: RecordAnchorKey);
 
                 return existing.Status switch
                 {
-                    OperationStatus.Completed => new(OperationRegistrationOutcome.AlreadyCompleted, existing.CachedResponse),
-                    _                         => new(OperationRegistrationOutcome.AlreadyPending)
+                    OperationStatus.Completed => new(OperationRegistrationOutcome.AlreadyCompleted, existing.CachedResponse, RecordAnchorKey),
+                    _                         => new(OperationRegistrationOutcome.AlreadyPending, recordAnchorKey: RecordAnchorKey)
                 };
             }
 
             if (pendingOperationCount >= MaxPendingOperations)
-                return new(OperationRegistrationOutcome.RejectedCapacity);
+                return new(OperationRegistrationOutcome.RejectedCapacity, recordAnchorKey: RecordAnchorKey);
 
             operations[operationId] = new() { Kind = kind, PayloadDigest = payloadDigest };
             pendingOperationCount++;
-            return new(OperationRegistrationOutcome.New);
+            return new(OperationRegistrationOutcome.New, recordAnchorKey: RecordAnchorKey);
         }
     }
 
@@ -182,20 +184,22 @@ internal class TransactionContext
     /// response for future duplicate requests. Idempotent: completing an already-terminal operation is
     /// a no-op, so a replayed completion never double-records an effect.
     /// </summary>
-    internal void CompleteOperation(TransactionOperationId operationId, OperationEffect? effect, object? response)
+    /// <summary>Returns the transaction's record anchor after this effect is folded in (null if none yet).</summary>
+    internal string? CompleteOperation(TransactionOperationId operationId, OperationEffect? effect, object? response)
     {
         lock (registryLock)
         {
             if (operations is null || !operations.TryGetValue(operationId, out OperationRecord? record))
-                return;
+                return RecordAnchorKey;
 
             if (record.Status != OperationStatus.Pending)
-                return;
+                return RecordAnchorKey;
 
             record.Status = OperationStatus.Completed;
             record.CachedResponse = response;
             ApplyEffectLocked(effect);
             DecrementPending();
+            return RecordAnchorKey;
         }
     }
 

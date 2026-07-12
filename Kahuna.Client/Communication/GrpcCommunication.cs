@@ -1679,11 +1679,11 @@ public class GrpcCommunication : IKahunaCommunication
     /// <exception cref="KahunaException">
     /// Thrown if the transaction commit process encounters an error, fails, or exceeds retry limits.
     /// </exception>
-    public async Task<bool> CommitTransactionSession(
-        string url, 
-        string uniqueId, 
+    public async Task<(bool committed, string? recordAnchorKey)> CommitTransactionSession(
+        string url,
+        string uniqueId,
         HLCTimestamp transactionId,
-        List<KeyValueTransactionModifiedKey> acquiredLocks, 
+        List<KeyValueTransactionModifiedKey> acquiredLocks,
         List<KeyValueTransactionModifiedKey> modifiedKeys,
         List<KeyValueTransactionReadKey> readKeys,
         CancellationToken cancellationToken
@@ -1726,8 +1726,8 @@ public class GrpcCommunication : IKahunaCommunication
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
             if (response.Type == GrpcKeyValueResponseType.TypeCommitted)
-                return true; 
-                        
+                return (true, response.HasRecordAnchorKey ? response.RecordAnchorKey : null);
+
             if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
                 logger?.LogDebug("Server asked to retry commit key/value transaction");
             

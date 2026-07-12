@@ -771,7 +771,8 @@ message GrpcTransactionReadKey
 message GrpcCommitTransactionResponse
 {
   optional string ServedFrom = 1;
-  GrpcKeyValueResponseType Type = 2;  
+  GrpcKeyValueResponseType Type = 2;
+  optional string RecordAnchorKey = 3;
 }
 
 message GrpcRollbackTransactionResponse
@@ -846,6 +847,7 @@ message GrpcBeginOperationResponse
   int32 CachedTimestampNode = 5;
   int64 CachedTimestampPhysical = 6;
   uint32 CachedTimestampCounter = 7;
+  optional string RecordAnchorKey = 8;
 }
 
 message GrpcCompleteOperationRequest
@@ -876,6 +878,7 @@ message GrpcCompleteOperationRequest
 message GrpcCompleteOperationResponse
 {
   optional string ServedFrom = 1;
+  optional string RecordAnchorKey = 2;
 }
 
 message GrpcGetTransactionWorkingSetRequest

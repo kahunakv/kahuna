@@ -1467,7 +1467,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         return (KeyValueResponseType)remoteResponse.Type;
     }
     
-    public async Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp)> BeginOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken)
+    public async Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey)> BeginOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
@@ -1494,11 +1494,12 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             (OperationRegistrationOutcome)remoteResponse.Outcome,
             (KeyValueResponseType)remoteResponse.CachedType,
             remoteResponse.CachedRevision,
-            cachedTimestamp
+            cachedTimestamp,
+            remoteResponse.HasRecordAnchorKey ? remoteResponse.RecordAnchorKey : null
         );
     }
 
-    public async Task CompleteOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken)
+    public async Task<string?> CompleteOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
@@ -1529,7 +1530,9 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         if (payload.ReadObservations is not null)
             request.ReadObservations.AddRange(payload.ReadObservations.Select(ToGrpcReadKey));
 
-        await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcCompleteOperationResponse remoteResponse = response.CompleteOperation!;
+        return remoteResponse.HasRecordAnchorKey ? remoteResponse.RecordAnchorKey : null;
     }
 
     public async Task<TransactionWorkingSet?> GetTransactionWorkingSet(string node, string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken)

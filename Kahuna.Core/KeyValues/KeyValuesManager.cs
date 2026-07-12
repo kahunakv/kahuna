@@ -920,7 +920,7 @@ internal sealed class KeyValuesManager : IDisposable
         byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs,
         KeyValueDurability durability, byte[] digest, CancellationToken cancellationToken, long routedGeneration)
     {
-        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp) =
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Set, digest, cancellationToken);
 
         switch (outcome)
@@ -1018,7 +1018,7 @@ internal sealed class KeyValuesManager : IDisposable
     {
         byte[] digest = OperationDigest.ForRead(kind, key, revision, durability);
 
-        (OperationRegistrationOutcome outcome, _, _, _) =
+        (OperationRegistrationOutcome outcome, _, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, digest, cancellationToken);
 
         switch (outcome)
@@ -1137,7 +1137,7 @@ internal sealed class KeyValuesManager : IDisposable
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string key,
         KeyValueDurability durability, byte[] digest, CancellationToken cancellationToken)
     {
-        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp) =
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Delete, digest, cancellationToken);
 
         switch (outcome)
@@ -1195,7 +1195,7 @@ internal sealed class KeyValuesManager : IDisposable
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string key,
         int expiresMs, KeyValueDurability durability, byte[] digest, CancellationToken cancellationToken)
     {
-        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp) =
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Extend, digest, cancellationToken);
 
         switch (outcome)
@@ -1266,7 +1266,7 @@ internal sealed class KeyValuesManager : IDisposable
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string key,
         int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        (OperationRegistrationOutcome outcome, _, _, _) =
+        (OperationRegistrationOutcome outcome, _, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.PointLock, OperationDigest.ForPointLockAcquire(key, expiresMs, durability), cancellationToken);
 
         switch (outcome)
@@ -1334,7 +1334,7 @@ internal sealed class KeyValuesManager : IDisposable
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string prefixKey,
         int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        (OperationRegistrationOutcome outcome, _, _, _) =
+        (OperationRegistrationOutcome outcome, _, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.PrefixLock, OperationDigest.ForPrefixLockAcquire(prefixKey, expiresMs, durability), cancellationToken);
 
         switch (outcome)
@@ -1410,7 +1410,7 @@ internal sealed class KeyValuesManager : IDisposable
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string key,
         KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        (OperationRegistrationOutcome outcome, _, _, _) =
+        (OperationRegistrationOutcome outcome, _, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.PointLock, OperationDigest.ForPointLockRelease(key, durability), cancellationToken);
 
         switch (outcome)
@@ -1477,7 +1477,7 @@ internal sealed class KeyValuesManager : IDisposable
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string prefixKey,
         KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        (OperationRegistrationOutcome outcome, _, _, _) =
+        (OperationRegistrationOutcome outcome, _, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.PrefixLock, OperationDigest.ForPrefixLockRelease(prefixKey, durability), cancellationToken);
 
         switch (outcome)
@@ -1542,7 +1542,7 @@ internal sealed class KeyValuesManager : IDisposable
         KeyValueDurability durability, RangeLockMode mode, CancellationToken cancellationToken,
         Func<Task>? afterSnapshot = null)
     {
-        (OperationRegistrationOutcome outcome, _, _, _) =
+        (OperationRegistrationOutcome outcome, _, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.RangeLock,
                 OperationDigest.ForRangeLockAcquire(prefix, startKey, startInclusive, endKey, endInclusive, mode, expiresMs, durability), cancellationToken);
 
@@ -1636,7 +1636,7 @@ internal sealed class KeyValuesManager : IDisposable
         string? startKey, bool startInclusive, string? endKey, bool endInclusive,
         KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        (OperationRegistrationOutcome outcome, _, _, _) =
+        (OperationRegistrationOutcome outcome, _, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.RangeLock,
                 OperationDigest.ForRangeLockRelease(prefix, startKey, startInclusive, endKey, endInclusive, durability), cancellationToken);
 
@@ -1804,7 +1804,7 @@ internal sealed class KeyValuesManager : IDisposable
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string prefixedKey,
         HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        (OperationRegistrationOutcome outcome, _, _, _) =
+        (OperationRegistrationOutcome outcome, _, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Scan,
                 OperationDigest.ForScan(prefixedKey, readTimestamp.L, readTimestamp.C, durability), cancellationToken);
 
@@ -1971,19 +1971,19 @@ internal sealed class KeyValuesManager : IDisposable
     }
 
     /// <summary>Routes an operation registration to the coordinator node identified by <paramref name="coordinatorKey"/>.</summary>
-    public Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp)> LocateAndBeginOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken)
+    public Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey)> LocateAndBeginOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken)
     {
         return locator.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
     }
 
-    /// <summary>Routes an operation completion to the coordinator node identified by <paramref name="coordinatorKey"/>.</summary>
-    public Task LocateAndCompleteOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken)
+    /// <summary>Routes an operation completion to the coordinator node identified by <paramref name="coordinatorKey"/>. Returns the record anchor after the fold, or null.</summary>
+    public Task<string?> LocateAndCompleteOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken)
     {
         return locator.LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, cancellationToken);
     }
 
     /// <summary>Node-local registration: the session lives here (this node is the coordinator for the key).</summary>
-    public (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp) BeginOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest)
+    public (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey) BeginOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest)
     {
         OperationRegistrationResult result = txCoordinator.BeginOperation(transactionId, operationId, kind, payloadDigest);
 
@@ -1991,22 +1991,25 @@ internal sealed class KeyValuesManager : IDisposable
             ? c
             : new(KeyValueResponseType.Errored, 0, HLCTimestamp.Zero);
 
-        return (result.Outcome, cached.Type, cached.Revision, cached.CommitTimestamp);
+        return (result.Outcome, cached.Type, cached.Revision, cached.CommitTimestamp, result.RecordAnchorKey);
     }
 
-    /// <summary>Node-local completion: folds the confirmed effect into the coordinator-owned working set.</summary>
-    public void CompleteOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload)
+    /// <summary>
+    /// Node-local completion: folds the confirmed effect into the coordinator-owned working set. Returns
+    /// the transaction's record anchor after the fold, or null when nothing durable-anchoring exists yet.
+    /// </summary>
+    public string? CompleteOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload)
     {
         // A transient outcome must never be cached as terminal — cancel the registration so a retry
         // with the same operation id re-registers as new and actually applies the mutation.
         if (payload.CachedType == KeyValueResponseType.MustRetry)
         {
             txCoordinator.CancelOperation(transactionId, operationId);
-            return;
+            return null;
         }
 
         OperationEffect? effect = BuildEffect(payload);
-        txCoordinator.CompleteOperation(transactionId, operationId, effect, new CachedOperationResponse(payload.CachedType, payload.CachedRevision, payload.CachedTimestamp));
+        return txCoordinator.CompleteOperation(transactionId, operationId, effect, new CachedOperationResponse(payload.CachedType, payload.CachedRevision, payload.CachedTimestamp));
     }
 
     /// <summary>Maps a completion payload into the coordinator-owned working-set effect, or null when it records nothing.</summary>

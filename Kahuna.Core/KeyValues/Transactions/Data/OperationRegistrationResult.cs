@@ -30,10 +30,18 @@ public enum OperationRegistrationOutcome
 /// </summary>
 internal readonly struct OperationRegistrationResult(
     OperationRegistrationOutcome outcome,
-    object? cachedResponse = null)
+    object? cachedResponse = null,
+    string? recordAnchorKey = null)
 {
     public OperationRegistrationOutcome Outcome { get; } = outcome;
 
     /// <summary>Non-null only when <see cref="Outcome"/> is <see cref="OperationRegistrationOutcome.AlreadyCompleted"/>.</summary>
     public object? CachedResponse { get; } = cachedResponse;
+
+    /// <summary>
+    /// The transaction's record anchor as known at registration time, or null if no persistent write has
+    /// been confirmed yet. Carried on every outcome so a retry that hits an already-completed operation
+    /// recovers the same canonical anchor without reapplying the participant operation.
+    /// </summary>
+    public string? RecordAnchorKey { get; } = recordAnchorKey;
 }

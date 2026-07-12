@@ -55,13 +55,14 @@ public sealed class TestTransactionRegistrationRouting
             byte[] digestB = [9, 9, 9];
 
             // First registration from an arbitrary entry node → New.
-            (OperationRegistrationOutcome outcome, _, _, _) =
+            (OperationRegistrationOutcome outcome, _, _, _, _) =
                 await nodes[1].Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, op1, OperationKind.Set, digestA, ct);
             Assert.Equal(OperationRegistrationOutcome.New, outcome);
 
-            // Complete it with a confirmed effect and a cached write response.
+            // Complete it with a confirmed persistent effect and a cached write response. The completion
+            // returns the record anchor assigned from this first persistent modified key.
             HLCTimestamp cachedTs = new(1, 500, 0);
-            await nodes[2].Kahuna.LocateAndCompleteOperation(
+            string? completeAnchor = await nodes[2].Kahuna.LocateAndCompleteOperation(
                 handle.CoordinatorKey, handle.TransactionId, op1,
                 new OperationCompletionPayload
                 {
@@ -73,22 +74,25 @@ public sealed class TestTransactionRegistrationRouting
                     CachedTimestamp = cachedTs
                 },
                 ct);
+            Assert.Equal("k1", completeAnchor);
 
-            // Retry with the same id (from yet another node) → cached response, no re-apply.
-            (OperationRegistrationOutcome replayOutcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp) =
+            // Retry with the same id (from yet another node) → cached response, no re-apply, and the same
+            // canonical anchor is recovered even though this retry never re-ran the mutation.
+            (OperationRegistrationOutcome replayOutcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? replayAnchor) =
                 await nodes[0].Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, op1, OperationKind.Set, digestA, ct);
             Assert.Equal(OperationRegistrationOutcome.AlreadyCompleted, replayOutcome);
             Assert.Equal(KeyValueResponseType.Set, cachedType);
             Assert.Equal(7, cachedRevision);
             Assert.Equal(cachedTs, cachedTimestamp);
+            Assert.Equal("k1", replayAnchor);
 
             // Same id, different declaration → rejected as a conflict.
-            (OperationRegistrationOutcome conflictOutcome, _, _, _) =
+            (OperationRegistrationOutcome conflictOutcome, _, _, _, _) =
                 await nodes[1].Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, op1, OperationKind.Set, digestB, ct);
             Assert.Equal(OperationRegistrationOutcome.RejectedDuplicate, conflictOutcome);
 
             // A distinct operation id registers fresh.
-            (OperationRegistrationOutcome op2Outcome, _, _, _) =
+            (OperationRegistrationOutcome op2Outcome, _, _, _, _) =
                 await nodes[2].Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, TransactionOperationId.NewRandom(), OperationKind.Delete, null, ct);
             Assert.Equal(OperationRegistrationOutcome.New, op2Outcome);
         }
@@ -106,7 +110,7 @@ public sealed class TestTransactionRegistrationRouting
         try
         {
             // No StartTransaction: the coordinator holds no session for this id.
-            (OperationRegistrationOutcome outcome, _, _, _) = await nodes[0].Kahuna.LocateAndBeginOperation(
+            (OperationRegistrationOutcome outcome, _, _, _, _) = await nodes[0].Kahuna.LocateAndBeginOperation(
                 Guid.NewGuid().ToString("N"), new HLCTimestamp(1, 42, 0), TransactionOperationId.NewRandom(), OperationKind.Set, null, ct);
 
             Assert.Equal(OperationRegistrationOutcome.RejectedSessionClosed, outcome);
@@ -509,7 +513,7 @@ public sealed class TestTransactionRegistrationRouting
             {
                 int before = interNode.BeginOperationCallCount;
                 TransactionOperationId opId = TransactionOperationId.NewRandom();
-                (OperationRegistrationOutcome outcome, _, _, _) =
+                (OperationRegistrationOutcome outcome, _, _, _, _) =
                     await node.Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, opId, OperationKind.Set, digest, ct);
                 Assert.Equal(OperationRegistrationOutcome.New, outcome);
 

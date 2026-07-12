@@ -1697,10 +1697,13 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
 
-        TransactionHandle handle = new(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            request.CoordinatorKey
-        );
+        HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
+        TransactionHandle handle = new(transactionId, request.CoordinatorKey);
+
+        // Capture the coordinator's canonical record anchor before commit tears down the session. The
+        // anchor is immutable once assigned, so reading it just before commit is race-free; the SDK folds
+        // it back into its handle. Absent (null) when the transaction confirmed no persistent write.
+        TransactionWorkingSet? workingSet = await keyValues.LocateAndGetTransactionWorkingSet(request.CoordinatorKey, transactionId, context.CancellationToken);
 
         KeyValueResponseType type = await keyValues.LocateAndCommitTransaction(
             handle,
@@ -1714,6 +1717,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         {
             Type = (GrpcKeyValueResponseType)type,
         };
+
+        if (workingSet?.RecordAnchorKey is not null)
+            response.RecordAnchorKey = workingSet.RecordAnchorKey;
 
         return response;
     }
@@ -1774,7 +1780,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         TransactionOperationId operationId = new(request.OperationIdHigh, request.OperationIdLow);
         byte[]? digest = request.HasPayloadDigest ? request.PayloadDigest.ToByteArray() : null;
 
-        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp) =
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey) =
             keyValues.BeginOperation(transactionId, operationId, (OperationKind)request.Kind, digest);
 
         GrpcBeginOperationResponse response = new()
@@ -1786,6 +1792,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             CachedTimestampPhysical = cachedTimestamp.L,
             CachedTimestampCounter = cachedTimestamp.C
         };
+
+        if (recordAnchorKey is not null)
+            response.RecordAnchorKey = recordAnchorKey;
 
         return Task.FromResult(response);
     }
@@ -1813,9 +1822,13 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             CachedTimestamp = new(request.CachedTimestampNode, request.CachedTimestampPhysical, request.CachedTimestampCounter)
         };
 
-        keyValues.CompleteOperation(transactionId, operationId, payload);
+        string? recordAnchorKey = keyValues.CompleteOperation(transactionId, operationId, payload);
 
-        return Task.FromResult(new GrpcCompleteOperationResponse());
+        GrpcCompleteOperationResponse response = new();
+        if (recordAnchorKey is not null)
+            response.RecordAnchorKey = recordAnchorKey;
+
+        return Task.FromResult(response);
     }
 
     /// <summary>Inter-node landing point for a working-set query against the node-local session.</summary>

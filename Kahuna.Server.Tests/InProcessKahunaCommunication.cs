@@ -213,15 +213,19 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
         return (url, handle.TransactionId);
     }
 
-    public async Task<bool> CommitTransactionSession(
+    public async Task<(bool committed, string? recordAnchorKey)> CommitTransactionSession(
         string url, string uniqueId, HLCTimestamp transactionId,
         List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys,
         List<KeyValueTransactionReadKey> readKeys, CancellationToken cancellationToken)
     {
         TransactionHandle handle = new(transactionId, uniqueId);
+
+        // Capture the canonical record anchor before commit tears down the session (immutable once set).
+        TransactionWorkingSet? workingSet = await kahuna.LocateAndGetTransactionWorkingSet(uniqueId, transactionId, cancellationToken);
+
         KeyValueResponseType type = await kahuna.LocateAndCommitTransaction(
             handle, acquiredLocks, modifiedKeys, readKeys, cancellationToken);
-        return type == KeyValueResponseType.Committed;
+        return (type == KeyValueResponseType.Committed, workingSet?.RecordAnchorKey);
     }
 
     public async Task<bool> RollbackTransactionSession(

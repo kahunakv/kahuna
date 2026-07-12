@@ -270,10 +270,13 @@ internal sealed class TransactionCoordinator
     /// Marks the operation as completed and stores the response so that duplicate submissions
     /// can receive the same answer without re-executing the operation.
     /// </summary>
-    public void CompleteOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationEffect? effect, object? response)
+    /// <summary>Returns the transaction's record anchor after the effect is folded in, or null if the session is gone or has no persistent write.</summary>
+    public string? CompleteOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationEffect? effect, object? response)
     {
         if (sessions.TryGetValue(transactionId, out TransactionContext? context))
-            context.CompleteOperation(operationId, effect, response);
+            return context.CompleteOperation(operationId, effect, response);
+
+        return null;
     }
 
     /// <summary>

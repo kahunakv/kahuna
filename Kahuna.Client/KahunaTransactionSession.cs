@@ -60,7 +60,17 @@ public class KahunaTransactionSession : IAsyncDisposable
     /// This identifier is used to track and validate operations performed within the same transaction scope.
     /// </summary>
     public HLCTimestamp TransactionId { get; }
-    
+
+    /// <summary>
+    /// The transaction's record anchor: the first confirmed persistent modified key, assigned by the
+    /// coordinator. Absent until the coordinator reports it back (on commit) and null when the
+    /// transaction confirmed no persistent write. Names the data partition of a Durable transaction record.
+    /// </summary>
+    public string? RecordAnchorKey { get; private set; }
+
+    /// <summary>The canonical handle for this session: transaction id, coordinator key, and record anchor.</summary>
+    public TransactionHandle Handle => new(TransactionId, CoordinatorKey, RecordAnchorKey);
+
     /// <summary>
     /// Prevents simultaneous commits/rollbacks in the transaction session.
     /// </summary>
@@ -972,7 +982,7 @@ public class KahunaTransactionSession : IAsyncDisposable
                 ? readKeys.Values.ToList()
                 : [];
             
-            bool result = await Client.Communication.CommitTransactionSession(
+            (bool result, string? recordAnchorKey) = await Client.Communication.CommitTransactionSession(
                 Url,
                 CoordinatorKey,
                 TransactionId,
@@ -981,9 +991,13 @@ public class KahunaTransactionSession : IAsyncDisposable
                 readKeysList,
                 cancellationToken
             ).ConfigureAwait(false);
-            
+
             if (result)
+            {
+                // Fold the coordinator's canonical record anchor into the session handle.
+                RecordAnchorKey = recordAnchorKey;
                 Status = KahunaTransactionStatus.Committed;
+            }
 
             await ReleaseAllPrefixLocks(cancellationToken).ConfigureAwait(false);
             await ReleaseAllRangeLocks(cancellationToken).ConfigureAwait(false);

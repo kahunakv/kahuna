@@ -93,4 +93,64 @@ public sealed class TestClientTransactionRegisterRemote
         KahunaKeyValue after = await client.GetKeyValue(key, KeyValueDurability.Persistent, cancellationToken: TestContext.Current.CancellationToken);
         Assert.False(after.Success);
     }
+
+    /// <summary>
+    /// On commit, the coordinator's canonical record anchor (the first confirmed persistent modified key)
+    /// is folded back into the session handle, so <c>session.Handle.RecordAnchorKey</c> names that key.
+    /// </summary>
+    [Fact]
+    public async Task SessionCommit_FoldsCanonicalRecordAnchorIntoHandle()
+    {
+        await using EmbeddedKahunaNode node = CreateNode(loggerFactory);
+        await node.StartAsync(TestContext.Current.CancellationToken);
+
+        KahunaClient client = new("http://localhost", communication: new InProcessKahunaCommunication(node.Kahuna));
+
+        string first = "rr/anchor/a/" + Guid.NewGuid().ToString("N")[..8];
+        string second = "rr/anchor/b/" + Guid.NewGuid().ToString("N")[..8];
+
+        await using KahunaTransactionSession tx = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Pessimistic },
+            TestContext.Current.CancellationToken);
+
+        // Two persistent writes; the first one is the anchor.
+        await tx.SetKeyValue(first, "v1", durability: KeyValueDurability.Persistent, cancellationToken: TestContext.Current.CancellationToken);
+        await tx.SetKeyValue(second, "v2", durability: KeyValueDurability.Persistent, cancellationToken: TestContext.Current.CancellationToken);
+
+        // Before commit the SDK has not yet been told the anchor.
+        Assert.Null(tx.RecordAnchorKey);
+
+        Assert.True(await tx.Commit(TestContext.Current.CancellationToken));
+
+        // Commit folds the coordinator's canonical anchor into the handle.
+        Assert.Equal(first, tx.RecordAnchorKey);
+        Assert.Equal(first, tx.Handle.RecordAnchorKey);
+        Assert.Equal(tx.TransactionId, tx.Handle.TransactionId);
+    }
+
+    /// <summary>
+    /// A transaction that confirms no persistent write has no anchor: the folded handle carries a null
+    /// <c>RecordAnchorKey</c> after commit.
+    /// </summary>
+    [Fact]
+    public async Task SessionCommit_NoPersistentWrite_HasNoAnchor()
+    {
+        await using EmbeddedKahunaNode node = CreateNode(loggerFactory);
+        await node.StartAsync(TestContext.Current.CancellationToken);
+
+        KahunaClient client = new("http://localhost", communication: new InProcessKahunaCommunication(node.Kahuna));
+
+        string key = "rr/anchor/eph/" + Guid.NewGuid().ToString("N")[..8];
+
+        await using KahunaTransactionSession tx = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Pessimistic },
+            TestContext.Current.CancellationToken);
+
+        await tx.SetKeyValue(key, "ephemeral", durability: KeyValueDurability.Ephemeral, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.True(await tx.Commit(TestContext.Current.CancellationToken));
+
+        Assert.Null(tx.RecordAnchorKey);
+        Assert.Null(tx.Handle.RecordAnchorKey);
+    }
 }

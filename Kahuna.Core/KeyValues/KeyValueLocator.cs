@@ -1976,10 +1976,10 @@ internal sealed class KeyValueLocator
     /// <paramref name="coordinatorKey"/> — the node that holds the session — registering it locally
     /// when this node is that leader and forwarding otherwise.
     /// </summary>
-    public async Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp)> LocateAndBeginOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken)
+    public async Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey)> LocateAndBeginOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(coordinatorKey))
-            return (OperationRegistrationOutcome.RejectedSessionClosed, KeyValueResponseType.Errored, 0, HLCTimestamp.Zero);
+            return (OperationRegistrationOutcome.RejectedSessionClosed, KeyValueResponseType.Errored, 0, HLCTimestamp.Zero, null);
 
         int partitionId = dataPartitionRouter.Locate(coordinatorKey);
 
@@ -1988,30 +1988,27 @@ internal sealed class KeyValueLocator
 
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
-            return (OperationRegistrationOutcome.AlreadyPending, KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+            return (OperationRegistrationOutcome.AlreadyPending, KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero, null);
 
         return await interNodeCommunication.BeginOperation(leader, coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
     }
 
-    /// <summary>Routes an operation completion to the coordinator-partition leader for <paramref name="coordinatorKey"/>.</summary>
-    public async Task LocateAndCompleteOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken)
+    /// <summary>Routes an operation completion to the coordinator-partition leader for <paramref name="coordinatorKey"/>. Returns the record anchor after the fold, or null.</summary>
+    public async Task<string?> LocateAndCompleteOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(coordinatorKey))
-            return;
+            return null;
 
         int partitionId = dataPartitionRouter.Locate(coordinatorKey);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
-        {
-            manager.CompleteOperation(transactionId, operationId, payload);
-            return;
-        }
+            return manager.CompleteOperation(transactionId, operationId, payload);
 
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
-            return;
+            return null;
 
-        await interNodeCommunication.CompleteOperation(leader, coordinatorKey, transactionId, operationId, payload, cancellationToken);
+        return await interNodeCommunication.CompleteOperation(leader, coordinatorKey, transactionId, operationId, payload, cancellationToken);
     }
 
     /// <summary>Routes a working-set query to the coordinator-partition leader for <paramref name="coordinatorKey"/>.</summary>
