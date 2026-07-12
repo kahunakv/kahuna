@@ -663,10 +663,11 @@ public sealed class KahunaManager : IKahuna, IDisposable
         string key,
         KeyValueDurability durability,
         CancellationToken cancellationToken,
-        long routedGeneration = 0
+        long routedGeneration = 0,
+        string? recordAnchorKey = null
     )
     {
-        return keyValues.LocateAndTryPrepareMutations(transactionId, commitId, key, durability, cancellationToken, routedGeneration);
+        return keyValues.LocateAndTryPrepareMutations(transactionId, commitId, key, durability, cancellationToken, routedGeneration, recordAnchorKey);
     }
 
     /// <summary>
@@ -680,11 +681,12 @@ public sealed class KahunaManager : IKahuna, IDisposable
     public Task<List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> LocateAndTryPrepareManyMutations(
         HLCTimestamp transactionId,
         HLCTimestamp commitId,
-        List<(string key, KeyValueDurability durability)> keys, 
-        CancellationToken cancellationToken
+        List<(string key, KeyValueDurability durability)> keys,
+        CancellationToken cancellationToken,
+        string? recordAnchorKey = null
     )
     {
-        return keyValues.LocateAndTryPrepareManyMutations(transactionId, commitId, keys, cancellationToken);
+        return keyValues.LocateAndTryPrepareManyMutations(transactionId, commitId, keys, cancellationToken, recordAnchorKey);
     }
 
     /// <summary>
@@ -1122,10 +1124,11 @@ public sealed class KahunaManager : IKahuna, IDisposable
         HLCTimestamp commitId,
         string key,
         KeyValueDurability durability,
-        long routedGeneration = 0
+        long routedGeneration = 0,
+        string? recordAnchorKey = null
     )
     {
-        return keyValues.TryPrepareMutations(transactionId, commitId, key, durability, routedGeneration);
+        return keyValues.TryPrepareMutations(transactionId, commitId, key, durability, routedGeneration, recordAnchorKey);
     }
 
     /// <summary>

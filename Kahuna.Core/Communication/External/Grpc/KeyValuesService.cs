@@ -1018,7 +1018,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             request.Key,
             (KeyValueDurability)request.Durability,
             context.CancellationToken,
-            request.RoutedGeneration
+            request.RoutedGeneration,
+            request.HasRecordAnchorKey ? request.RecordAnchorKey : null
         );
 
         return new()
@@ -1052,8 +1053,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> responses = await keyValues.LocateAndTryPrepareManyMutations(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             new(request.CommitIdNode, request.CommitIdPhysical, request.CommitIdCounter),
-            GetRequestPrepareItems(request.Items), 
-            context.CancellationToken
+            GetRequestPrepareItems(request.Items),
+            context.CancellationToken,
+            request.HasRecordAnchorKey ? request.RecordAnchorKey : null
         );
 
         GrpcTryPrepareManyMutationsResponse response = new();

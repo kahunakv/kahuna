@@ -1225,7 +1225,8 @@ internal sealed class KeyValueLocator
         string key,
         KeyValueDurability durability,
         CancellationToken cancelationToken,
-        long routedGeneration = 0
+        long routedGeneration = 0,
+        string? recordAnchorKey = null
     )
     {
         if (string.IsNullOrEmpty(key))
@@ -1240,7 +1241,7 @@ internal sealed class KeyValueLocator
             routedGeneration = freshGeneration;
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
-            return await manager.TryPrepareMutations(transactionId, commitId, key, durability, routedGeneration);
+            return await manager.TryPrepareMutations(transactionId, commitId, key, durability, routedGeneration, recordAnchorKey);
 
         string leader = await raft.WaitForLeader(partitionId, cancelationToken);
         if (leader == raft.GetLocalEndpoint())
@@ -1248,7 +1249,7 @@ internal sealed class KeyValueLocator
 
         logger.LogPrepareKeyValueRedirected(key, partitionId, leader);
 
-        return await interNodeCommunication.TryPrepareMutations(leader, transactionId, commitId, key, durability, routedGeneration, cancelationToken);
+        return await interNodeCommunication.TryPrepareMutations(leader, transactionId, commitId, key, durability, routedGeneration, cancelationToken, recordAnchorKey);
     }
     
     /// <summary>
@@ -1262,8 +1263,9 @@ internal sealed class KeyValueLocator
     public async Task<List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> LocateAndTryPrepareManyMutations(
         HLCTimestamp transactionId,
         HLCTimestamp commitId,
-        List<(string key, KeyValueDurability durability)> keys, 
-        CancellationToken cancelationToken
+        List<(string key, KeyValueDurability durability)> keys,
+        CancellationToken cancelationToken,
+        string? recordAnchorKey = null
     )
     {
         string localNode = raft.GetLocalEndpoint();
@@ -1290,7 +1292,7 @@ internal sealed class KeyValueLocator
         
         // Requests to nodes are sent in parallel
         foreach ((string leader, List<(string key, KeyValueDurability durability)> xkeys) in acquisitionPlan)
-            tasks.Add(TryPrepareNodeMutations(transactionId, commitId, leader, localNode, xkeys, lockSync, responses, cancelationToken));
+            tasks.Add(TryPrepareNodeMutations(transactionId, commitId, leader, localNode, xkeys, lockSync, responses, cancelationToken, recordAnchorKey));
         
         await Task.WhenAll(tasks);
 
@@ -1305,14 +1307,15 @@ internal sealed class KeyValueLocator
         List<(string key, KeyValueDurability durability)> xkeys,
         Lock lockSync,
         List<(KeyValueResponseType type, HLCTimestamp, string key, KeyValueDurability durability)> responses,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string? recordAnchorKey = null
     )
     {
         logger.LogPrepareManyKeyValueRedirect(xkeys.Count, leader);
-        
+
         if (leader == localNode)
         {
-            List<(KeyValueResponseType type, HLCTimestamp ticketId, string key, KeyValueDurability durability)> prepareResponses = await manager.TryPrepareManyMutations(transactionId, commitId, xkeys);
+            List<(KeyValueResponseType type, HLCTimestamp ticketId, string key, KeyValueDurability durability)> prepareResponses = await manager.TryPrepareManyMutations(transactionId, commitId, xkeys, recordAnchorKey);
 
             lock (lockSync)
             {
@@ -1322,8 +1325,8 @@ internal sealed class KeyValueLocator
 
             return;
         }
-            
-        await interNodeCommunication.TryPrepareNodeMutations(leader, transactionId, commitId, xkeys, lockSync, responses, cancellationToken);
+
+        await interNodeCommunication.TryPrepareNodeMutations(leader, transactionId, commitId, xkeys, lockSync, responses, cancellationToken, recordAnchorKey);
     }
     
     /// <summary>

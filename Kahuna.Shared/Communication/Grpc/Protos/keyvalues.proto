@@ -513,6 +513,7 @@ message GrpcTryPrepareMutationsRequest {
   string Key = 7;
   GrpcKeyValueDurability Durability = 8;
   int64 RoutedGeneration = 9;
+  optional string RecordAnchorKey = 10;
 }
 
 message GrpcTryPrepareMutationsResponse {
@@ -531,6 +532,7 @@ message GrpcTryPrepareManyMutationsRequest {
   int64 CommitIdPhysical = 5;
   uint32 CommitIdCounter = 6;
   repeated GrpcTryPrepareManyMutationsRequestItem Items = 7;
+  optional string RecordAnchorKey = 8;
 }
 
 message GrpcTryPrepareManyMutationsRequestItem {

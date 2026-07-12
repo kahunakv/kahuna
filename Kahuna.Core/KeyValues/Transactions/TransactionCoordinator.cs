@@ -712,7 +712,8 @@ internal sealed class TransactionCoordinator
                 context.TransactionId,
                 commitId,
                 key, durability,
-                cancellationToken
+                cancellationToken,
+                recordAnchorKey: context.RecordAnchorKey
             );
 
             if (!context.SetState(KeyValueTransactionState.Prepared, KeyValueTransactionState.Preparing))
@@ -734,7 +735,8 @@ internal sealed class TransactionCoordinator
             context.TransactionId,
             commitId,
             context.ModifiedKeys.ToList(),
-            cancellationToken
+            cancellationToken,
+            context.RecordAnchorKey
         );
 
         if (!context.SetState(KeyValueTransactionState.Prepared, KeyValueTransactionState.Preparing))

@@ -136,13 +136,17 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             {
                 TransactionId   = message.TransactionId,
                 Expires         = message.TransactionId + DefaultTxCompleteTimeout,
-                CommitTimestamp = mvccEntry.LastModified
+                CommitTimestamp = mvccEntry.LastModified,
+                RecordAnchorKey = message.RecordAnchorKey
             };
         }
         else
         {
             entry.WriteIntent.Expires         = message.TransactionId + DefaultTxCompleteTimeout;
             entry.WriteIntent.CommitTimestamp = mvccEntry.LastModified;
+            // Stamp the anchor once the coordinator supplies it; a plain pre-prepare lock had none.
+            if (message.RecordAnchorKey is not null)
+                entry.WriteIntent.RecordAnchorKey = message.RecordAnchorKey;
         }
 
         if (message.Durability != KeyValueDurability.Persistent)

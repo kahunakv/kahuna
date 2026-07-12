@@ -721,11 +721,12 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         string key,
         KeyValueDurability durability,
         long routedGeneration,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string? recordAnchorKey = null
     )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.TryPrepareMutations(transactionId, commitId, key, durability, routedGeneration);
+            return await kahunaNode.TryPrepareMutations(transactionId, commitId, key, durability, routedGeneration, recordAnchorKey);
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -747,8 +748,9 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         HLCTimestamp commitId,
         List<(string key, KeyValueDurability durability)> xkeys, 
         Lock lockSync, 
-        List<(KeyValueResponseType type, HLCTimestamp, string key, KeyValueDurability durability)> responses, 
-        CancellationToken cancellationToken
+        List<(KeyValueResponseType type, HLCTimestamp, string key, KeyValueDurability durability)> responses,
+        CancellationToken cancellationToken,
+        string? recordAnchorKey = null
     )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
@@ -757,7 +759,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
 
             foreach ((string key, KeyValueDurability durability) in xkeys)
             {
-                (KeyValueResponseType type, HLCTimestamp proposalId, string _, KeyValueDurability _) = await kahunaNode.TryPrepareMutations(transactionId, commitId, key, durability);
+                (KeyValueResponseType type, HLCTimestamp proposalId, string _, KeyValueDurability _) = await kahunaNode.TryPrepareMutations(transactionId, commitId, key, durability, 0, recordAnchorKey);
                 bag.Add((type, proposalId, key, durability));
             }
 

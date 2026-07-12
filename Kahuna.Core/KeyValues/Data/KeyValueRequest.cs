@@ -81,6 +81,13 @@ public sealed class KeyValueRequest : IConsistentHashable
     public long RoutedGeneration { get; internal set; }
 
     /// <summary>
+    /// Transaction record anchor carried on a prepare request so the participant leader can stamp it into
+    /// the write intent (and, later, the durable completion receipt). Null for non-prepare requests and
+    /// for transactions with no confirmed persistent write.
+    /// </summary>
+    public string? RecordAnchorKey { get; internal set; }
+
+    /// <summary>
     ///
     /// </summary>
     public TaskCompletionSource<KeyValueResponse?>? Promise { get; private set; }
@@ -265,6 +272,8 @@ public sealed class KeyValueRequest : IConsistentHashable
         ReadTimestamp = HLCTimestamp.Zero;
         Continuation = null;
         InvalidateOrApplyData = null;
+        RoutedGeneration = 0;
+        RecordAnchorKey = null;
     }
 
     public int GetHash()

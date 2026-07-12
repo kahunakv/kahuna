@@ -15,4 +15,11 @@ internal sealed class KeyValueWriteIntent
     /// Non-Zero means the intent has been prepared via 2PC and the pending commit ts is known.
     /// </summary>
     public HLCTimestamp CommitTimestamp { get; set; }
+
+    /// <summary>
+    /// The transaction's canonical record anchor (its first confirmed persistent modified key), supplied by
+    /// the coordinator at prepare. Null for a plain per-key lock or a transaction with no persistent write.
+    /// Participant-side metadata that a durable completion receipt is later keyed by.
+    /// </summary>
+    public string? RecordAnchorKey { get; set; }
 }

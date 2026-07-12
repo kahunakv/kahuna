@@ -1699,10 +1699,11 @@ internal sealed class KeyValuesManager : IDisposable
         string key,
         KeyValueDurability durability,
         CancellationToken cancelationToken,
-        long routedGeneration = 0
+        long routedGeneration = 0,
+        string? recordAnchorKey = null
     )
     {
-        return locator.LocateAndTryPrepareMutations(transactionId, commitId, key, durability, cancelationToken, routedGeneration);
+        return locator.LocateAndTryPrepareMutations(transactionId, commitId, key, durability, cancelationToken, routedGeneration, recordAnchorKey);
     }
     
     /// <summary>
@@ -1716,11 +1717,12 @@ internal sealed class KeyValuesManager : IDisposable
     public Task<List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> LocateAndTryPrepareManyMutations(
         HLCTimestamp transactionId,
         HLCTimestamp commitId,
-        List<(string key, KeyValueDurability durability)> keys, 
-        CancellationToken cancelationToken
+        List<(string key, KeyValueDurability durability)> keys,
+        CancellationToken cancelationToken,
+        string? recordAnchorKey = null
     )
     {
-        return locator.LocateAndTryPrepareManyMutations(transactionId, commitId, keys, cancelationToken);
+        return locator.LocateAndTryPrepareManyMutations(transactionId, commitId, keys, cancelationToken, recordAnchorKey);
     }
     
     /// <summary>
@@ -3373,7 +3375,8 @@ internal sealed class KeyValuesManager : IDisposable
         HLCTimestamp commitId,
         string key,
         KeyValueDurability durability,
-        long routedGeneration = 0
+        long routedGeneration = 0,
+        string? recordAnchorKey = null
     )
     {
         KeyValueRequest request = KeyValueRequestPool.Rent(
@@ -3394,6 +3397,7 @@ internal sealed class KeyValuesManager : IDisposable
         );
 
         request.RoutedGeneration = routedGeneration;
+        request.RecordAnchorKey = recordAnchorKey;
 
         try
         {
@@ -3436,7 +3440,8 @@ internal sealed class KeyValuesManager : IDisposable
     public async Task<List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> TryPrepareManyMutations(
         HLCTimestamp transactionId,
         HLCTimestamp commitId,
-        List<(string key, KeyValueDurability durability)> keys
+        List<(string key, KeyValueDurability durability)> keys,
+        string? recordAnchorKey = null
     )
     {
         Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>[] tasks =
@@ -3469,6 +3474,8 @@ internal sealed class KeyValuesManager : IDisposable
                 0,
                 null
             );
+
+            request.RecordAnchorKey = recordAnchorKey;
 
             try
             {

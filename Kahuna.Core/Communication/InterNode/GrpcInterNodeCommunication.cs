@@ -1037,7 +1037,8 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         string key,
         KeyValueDurability durability,
         long routedGeneration,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string? recordAnchorKey = null
     )
     {
         //GrpcChannel channel = SharedChannels.GetChannel(node);
@@ -1057,7 +1058,10 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcKeyValueDurability)durability,
             RoutedGeneration = routedGeneration,
         };
-        
+
+        if (recordAnchorKey is not null)
+            request.RecordAnchorKey = recordAnchorKey;
+
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
         GrpcTryPrepareMutationsResponse remoteResponse = response.TryPrepareMutations!;
         
@@ -1077,12 +1081,13 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         HLCTimestamp commitId,
         List<(string key, KeyValueDurability durability)> xkeys, 
         Lock lockSync, 
-        List<(KeyValueResponseType type, HLCTimestamp, string key, KeyValueDurability durability)> responses, 
-        CancellationToken cancellationToken
+        List<(KeyValueResponseType type, HLCTimestamp, string key, KeyValueDurability durability)> responses,
+        CancellationToken cancellationToken,
+        string? recordAnchorKey = null
     )
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
-            
+
         GrpcTryPrepareManyMutationsRequest request = new()
         {
             TransactionIdNode = transactionId.N,
@@ -1092,7 +1097,10 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             CommitIdPhysical = commitId.L,
             CommitIdCounter = commitId.C,
         };
-            
+
+        if (recordAnchorKey is not null)
+            request.RecordAnchorKey = recordAnchorKey;
+
         request.Items.Add(GetPrepareRequestItems(xkeys));
         
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
