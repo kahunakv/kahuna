@@ -177,27 +177,14 @@ internal sealed class TransactionCoordinator
         {
             context.Result = new() { Type = KeyValueResponseType.Set, Reason = null };
 
-            foreach (KeyValueTransactionModifiedKey acquiredLock in acquiredLocks)
-            {
-                context.LocksAcquired ??= [];
-                context.LocksAcquired.Add((acquiredLock.Key ?? "", acquiredLock.Durability));
-            }
+            // Bridge any caller-supplied working set into the server-owned set so the finalize drives
+            // uniformly from confirmed effects. In the register-remote model these are already folded from
+            // operation completions; on the legacy path they are the only source until the arguments are
+            // removed. Two-phase commit and the cleanup below read only the server-owned working set.
+            FoldCallerWorkingSet(context, acquiredLocks, modifiedKeys, readKeys);
 
-            foreach (KeyValueTransactionModifiedKey modifiedKey in modifiedKeys)
-            {
-                context.ModifiedKeys ??= [];
-                context.ModifiedKeys.Add((modifiedKey.Key ?? "", modifiedKey.Durability));
-            }
-
-            foreach (KeyValueTransactionReadKey readKey in readKeys)
-            {
-                if (string.IsNullOrEmpty(readKey.Key))
-                    continue;
-
-                context.ReadKeys ??= [];
-                context.ReadKeys[(readKey.Key, readKey.Durability)] = readKey;
-            }
-
+            // An empty read-only transaction has no modified keys: two-phase commit is a no-op and the
+            // transaction commits validly. Its read MVCC snapshots are still cleaned in the finally.
             await TwoPhaseCommit(context, CancellationToken.None);
 
             if (context.Result is null)
@@ -238,13 +225,51 @@ internal sealed class TransactionCoordinator
         }
         finally
         {
-            if (context.Locking == KeyValueTransactionLocking.Pessimistic || (context.State != KeyValueTransactionState.Committed && context.State != KeyValueTransactionState.RolledBack))
-            {
-                if (context.AsyncRelease)
-                    _ = ReleaseAcquiredLocks(context);
-                else
-                    await ReleaseAcquiredLocks(context);
-            }
+            // Post-commit cleanup is best-effort: the mutations (if any) are already durably committed, so a
+            // Committed result never depends on it. Release every confirmed lock shape not finalized by 2PC
+            // and clean the transaction's read MVCC snapshots. Because no terminal promise rides on its
+            // completion, AsyncRelease may run it detached without over-promising cleanup.
+            if (context.AsyncRelease)
+                _ = ReleaseWorkingSet(context);
+            else
+                await ReleaseWorkingSet(context);
+        }
+    }
+
+    /// <summary>
+    /// Folds a caller-supplied finalize working set (acquired locks, modified keys, read keys) into the
+    /// server-owned working set. A no-op when the caller supplies nothing (register-remote sessions already
+    /// carry every confirmed effect); the legacy client-driven path uses it to seed the working set.
+    /// </summary>
+    private static void FoldCallerWorkingSet(
+        TransactionContext context,
+        List<KeyValueTransactionModifiedKey> acquiredLocks,
+        List<KeyValueTransactionModifiedKey> modifiedKeys,
+        List<KeyValueTransactionReadKey>? readKeys
+    )
+    {
+        foreach (KeyValueTransactionModifiedKey acquiredLock in acquiredLocks)
+        {
+            context.LocksAcquired ??= [];
+            context.LocksAcquired.Add((acquiredLock.Key ?? "", acquiredLock.Durability));
+        }
+
+        foreach (KeyValueTransactionModifiedKey modifiedKey in modifiedKeys)
+        {
+            context.ModifiedKeys ??= [];
+            context.ModifiedKeys.Add((modifiedKey.Key ?? "", modifiedKey.Durability));
+        }
+
+        if (readKeys is null)
+            return;
+
+        foreach (KeyValueTransactionReadKey readKey in readKeys)
+        {
+            if (string.IsNullOrEmpty(readKey.Key))
+                continue;
+
+            context.ReadKeys ??= [];
+            context.ReadKeys[(readKey.Key, readKey.Durability)] = readKey;
         }
     }
 
@@ -305,35 +330,25 @@ internal sealed class TransactionCoordinator
         if (!await FreezeForFinalize(context))
             return new(KeyValueResponseType.MustRetry, null);
 
-        try
-        {
-            foreach (KeyValueTransactionModifiedKey acquiredLock in acquiredLocks)
-            {
-                context.LocksAcquired ??= [];
-                context.LocksAcquired.Add((acquiredLock.Key ?? "", acquiredLock.Durability));
-            }
+        // Bridge any caller-supplied working set into the server-owned set; cleanup drives from it.
+        FoldCallerWorkingSet(context, acquiredLocks, modifiedKeys, readKeys: null);
 
-            foreach (KeyValueTransactionModifiedKey modifiedKey in modifiedKeys)
-            {
-                context.ModifiedKeys ??= [];
-                context.ModifiedKeys.Add((modifiedKey.Key ?? "", modifiedKey.Durability));
-            }
+        context.Action = KeyValueTransactionAction.Abort;
 
-            context.Action = KeyValueTransactionAction.Abort;
+        // Rollback runs no prepare: it clears the transaction's staged (un-prepared) writes, releases every
+        // confirmed lock shape, and cleans its read MVCC — all from the server-owned working set. Cleanup is
+        // synchronous and RolledBack is reported only when every mandatory (intent-bearing) release
+        // acknowledged; otherwise the caller retries (the released finalize slot lets a later call re-run).
+        // RolledBack must never promise cleanup that did not complete, so it is never dispatched via
+        // AsyncRelease.
+        if (!await ReleaseWorkingSet(context))
+            return new(KeyValueResponseType.MustRetry, null);
 
-            logger.LogRolledBackInteractiveTransaction(transactionId);
+        logger.LogRolledBackInteractiveTransaction(transactionId);
 
-            sessions.TryRemove(transactionId, out _);
+        sessions.TryRemove(transactionId, out _);
 
-            return new(KeyValueResponseType.RolledBack, null);
-        }
-        finally
-        {
-            if (context.Locking == KeyValueTransactionLocking.Pessimistic || context.State != KeyValueTransactionState.Committed && context.State != KeyValueTransactionState.RolledBack)
-            {
-                await ReleaseAcquiredLocks(context);
-            }
-        }
+        return new(KeyValueResponseType.RolledBack, null);
     }
 
     // ---- operation registry façade ----
@@ -525,7 +540,7 @@ internal sealed class TransactionCoordinator
 
                 logger.LogWarning("Reaping abandoned interactive transaction {TransactionId}", pair.Key);
 
-                await ReleaseAcquiredLocks(context);
+                await ReleaseWorkingSet(context);
             }
             finally
             {
@@ -535,52 +550,155 @@ internal sealed class TransactionCoordinator
     }
 
     /// <summary>
-    /// Releases all locks held by the given context. Called from commit, rollback, and the reaper,
-    /// as well as from the script executor after script-scoped transactions.
+    /// Releases every confirmed lock shape held by the transaction and cleans its per-key MVCC state from the
+    /// coordinator-owned working set. Called from commit, rollback, the reaper, and the script executor.
     /// </summary>
-    internal async Task ReleaseAcquiredLocks(TransactionContext context)
+    /// <remarks>
+    /// The ticket-free exclusive-lock release removes the transaction's MVCC entry <b>and</b> clears any write
+    /// intent it owns, so one per-key call cleans a point lock, a staged (un-prepared) write, and a read
+    /// snapshot alike. Point locks and staged writes are <b>mandatory</b> cleanup — both carry a write intent
+    /// that blocks other writers until cleared; read-only MVCC snapshots are <b>best-effort</b> (no intent;
+    /// lazily trimmed). On a committed transaction the modified keys were already finalized by two-phase
+    /// commit, so their locks are not released a second time. Every cleanup item is attempted even after an
+    /// individual failure. Returns true when every mandatory release acknowledged — the caller uses this to
+    /// decide whether a rollback may report <c>RolledBack</c> or must retry.
+    /// </remarks>
+    internal async Task<bool> ReleaseWorkingSet(TransactionContext context)
     {
-        try
+        bool committed = context.State == KeyValueTransactionState.Committed;
+        bool allMandatoryAcked = true;
+
+        // Intent-bearing per-key cleanup: point locks and, when not committed, staged (un-prepared) writes.
+        HashSet<(string, KeyValueDurability)> mandatoryKeys = [];
+
+        if (context.LocksAcquired is not null)
         {
-            if (context.PrefixLocksAcquired is not null && context.PrefixLocksAcquired.Count > 0)
+            foreach ((string, KeyValueDurability) lockKey in context.LocksAcquired)
             {
-                foreach ((string prefixKey, KeyValueDurability durability) in context.PrefixLocksAcquired)
-                    await manager.LocateAndTryReleaseExclusivePrefixLock(context.TransactionId, prefixKey, durability, CancellationToken.None);
+                // A committed modified key was already unlocked by the commit phase; don't release it twice.
+                if (committed && context.ModifiedKeys is not null && context.ModifiedKeys.Contains(lockKey))
+                    continue;
+
+                mandatoryKeys.Add(lockKey);
             }
+        }
 
-            if (context.LocksAcquired is not null && context.LocksAcquired.Count > 0)
+        // Clean staged (un-prepared) writes only when no prepare ran on this transaction. When the state is
+        // still Pending, every modified key holds only the write intent placed at write time — no proposal
+        // ticket exists, so the ticket-free release is the correct and only cleanup. Once a prepare has run
+        // (Preparing/Prepared/Committing/RollingBack/RolledBack) two-phase commit owns those keys' proposals
+        // and cleans them via their tickets; re-releasing them here could clear an intent out from under an
+        // in-flight rollback, so leave them to 2PC.
+        if (context.State == KeyValueTransactionState.Pending && context.ModifiedKeys is not null)
+        {
+            foreach ((string, KeyValueDurability) modified in context.ModifiedKeys)
+                mandatoryKeys.Add(modified);
+        }
+
+        // Best-effort read MVCC cleanup for keys not already covered by a mandatory release or a committed
+        // mutation (which the commit phase already cleaned).
+        HashSet<(string, KeyValueDurability)> readKeys = [];
+
+        if (context.ReadKeys is not null)
+        {
+            foreach ((string, KeyValueDurability) readKey in context.ReadKeys.Keys)
             {
-                List<(string, KeyValueDurability)> locksToRelease;
+                if (mandatoryKeys.Contains(readKey))
+                    continue;
 
-                if (context.ModifiedKeys is null || (context.State != KeyValueTransactionState.Committed && context.State != KeyValueTransactionState.RolledBack))
-                    locksToRelease = context.LocksAcquired.ToList();
+                if (committed && context.ModifiedKeys is not null && context.ModifiedKeys.Contains(readKey))
+                    continue;
+
+                readKeys.Add(readKey);
+            }
+        }
+
+        // One batched round-trip cleans every per-key entry; the release handler is idempotent, so a key
+        // already cleaned is a harmless no-op.
+        List<(string, KeyValueDurability)> perKey = [.. mandatoryKeys, .. readKeys];
+
+        if (perKey.Count > 0)
+        {
+            try
+            {
+                if (perKey.Count == 1)
+                {
+                    (string key, KeyValueDurability durability) = perKey[0];
+
+                    (KeyValueResponseType type, string _) = await manager.LocateAndTryReleaseExclusiveLock(context.TransactionId, key, durability, CancellationToken.None);
+
+                    if (mandatoryKeys.Contains((key, durability)) && !IsReleaseAcked(type))
+                        allMandatoryAcked = false;
+                }
                 else
                 {
-                    locksToRelease = [];
+                    List<(KeyValueResponseType, string, KeyValueDurability)> results =
+                        await manager.LocateAndTryReleaseManyExclusiveLocks(context.TransactionId, perKey, CancellationToken.None);
 
-                    foreach ((string, KeyValueDurability) lockKey in context.LocksAcquired)
+                    foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) in results)
                     {
-                        if (!context.ModifiedKeys.Contains(lockKey))
-                            locksToRelease.Add(lockKey);
+                        if (mandatoryKeys.Contains((key, durability)) && !IsReleaseAcked(type))
+                            allMandatoryAcked = false;
                     }
                 }
-
-                if (locksToRelease.Count == 1)
-                {
-                    (string lockKey, KeyValueDurability durability) = locksToRelease.First();
-
-                    await manager.LocateAndTryReleaseExclusiveLock(context.TransactionId, lockKey, durability, CancellationToken.None);
-                    return;
-                }
-
-                await manager.LocateAndTryReleaseManyExclusiveLocks(context.TransactionId, locksToRelease, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError("ReleaseWorkingSet keys: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+                allMandatoryAcked = false;
             }
         }
-        catch (Exception ex)
+
+        // Prefix locks (mandatory).
+        if (context.PrefixLocksAcquired is not null)
         {
-            logger.LogError("ReleaseAcquiredLocks: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
+            foreach ((string prefixKey, KeyValueDurability durability) in context.PrefixLocksAcquired)
+            {
+                try
+                {
+                    KeyValueResponseType type = await manager.LocateAndTryReleaseExclusivePrefixLock(context.TransactionId, prefixKey, durability, CancellationToken.None);
+                    if (!IsReleaseAcked(type))
+                        allMandatoryAcked = false;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError("ReleaseWorkingSet prefix {Prefix}: {Type} {Message}", prefixKey, ex.GetType().Name, ex.Message);
+                    allMandatoryAcked = false;
+                }
+            }
         }
+
+        // Range locks (mandatory).
+        if (context.RangeLocksAcquired is not null)
+        {
+            foreach (RangeLockKey range in context.RangeLocksAcquired.Keys)
+            {
+                try
+                {
+                    KeyValueResponseType type = await manager.LocateAndTryReleaseExclusiveRangeLock(
+                        context.TransactionId, range.Prefix, range.StartKey, range.StartInclusive,
+                        range.EndKey, range.EndInclusive, range.Durability, CancellationToken.None);
+                    if (!IsReleaseAcked(type))
+                        allMandatoryAcked = false;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError("ReleaseWorkingSet range {Prefix}: {Type} {Message}", range.Prefix, ex.GetType().Name, ex.Message);
+                    allMandatoryAcked = false;
+                }
+            }
+        }
+
+        return allMandatoryAcked;
     }
+
+    /// <summary>
+    /// Whether a lock/MVCC release response counts as an acknowledgement. Only transient conditions
+    /// (a participant still catching up, or a not-yet-stable leader) leave state uncleared and warrant a
+    /// retry; every other response — including "nothing was there" — means the release is settled.
+    /// </summary>
+    private static bool IsReleaseAcked(KeyValueResponseType type) =>
+        type is not (KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication);
 
     /// <summary>
     /// Executes the 2PC protocol for the transaction.

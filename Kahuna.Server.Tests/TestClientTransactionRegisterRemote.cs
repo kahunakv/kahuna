@@ -153,4 +153,75 @@ public sealed class TestClientTransactionRegisterRemote
         Assert.Null(tx.RecordAnchorKey);
         Assert.Null(tx.Handle.RecordAnchorKey);
     }
+
+    /// <summary>
+    /// An empty read-only transaction — one that reads but never writes — is a valid commit. Two-phase
+    /// commit is a no-op with no modified keys, and finalize still cleans the read's MVCC snapshot.
+    /// </summary>
+    [Fact]
+    public async Task EmptyReadOnlyTransaction_Commits()
+    {
+        await using EmbeddedKahunaNode node = CreateNode(loggerFactory);
+        await node.StartAsync(TestContext.Current.CancellationToken);
+
+        KahunaClient client = new("http://localhost", communication: new InProcessKahunaCommunication(node.Kahuna));
+
+        string seeded = "rr/ro/seed/" + Guid.NewGuid().ToString("N")[..8];
+        string absent = "rr/ro/absent/" + Guid.NewGuid().ToString("N")[..8];
+        await client.SetKeyValue(seeded, "committed", durability: KeyValueDurability.Persistent, cancellationToken: TestContext.Current.CancellationToken);
+
+        await using (KahunaTransactionSession tx = await client.StartTransactionSession(
+                         new() { Locking = KeyValueTransactionLocking.Optimistic },
+                         TestContext.Current.CancellationToken))
+        {
+            KahunaKeyValue present = await tx.GetKeyValue(seeded, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+            Assert.True(present.Success);
+
+            KahunaKeyValue missing = await tx.GetKeyValue(absent, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+            Assert.False(missing.Success);
+
+            // No writes: the transaction commits validly.
+            Assert.True(await tx.Commit(TestContext.Current.CancellationToken));
+        }
+    }
+
+    /// <summary>
+    /// An optimistic transaction stages a write with no point lock (the modified key is not in the acquired
+    /// lock set), then rolls back. Finalize must clean the staged write from the modified-key set — clearing
+    /// the write intent — so a following transaction can write the same key without contending with a leaked
+    /// intent. This exercises the modified-key cleanup path that the acquired-lock release alone would miss.
+    /// </summary>
+    [Fact]
+    public async Task OptimisticRollback_ClearsStagedWrite_AllowingImmediateRewrite()
+    {
+        await using EmbeddedKahunaNode node = CreateNode(loggerFactory);
+        await node.StartAsync(TestContext.Current.CancellationToken);
+
+        KahunaClient client = new("http://localhost", communication: new InProcessKahunaCommunication(node.Kahuna));
+
+        string key = "rr/opt-rollback/" + Guid.NewGuid().ToString("N")[..8];
+
+        await using (KahunaTransactionSession tx1 = await client.StartTransactionSession(
+                         new() { Locking = KeyValueTransactionLocking.Optimistic },
+                         TestContext.Current.CancellationToken))
+        {
+            await tx1.SetKeyValue(key, "staged", durability: KeyValueDurability.Persistent, cancellationToken: TestContext.Current.CancellationToken);
+            Assert.True(await tx1.Rollback(TestContext.Current.CancellationToken));
+        }
+
+        // A second transaction writes the same key. If tx1's staged write (and its write intent) had leaked,
+        // this write would contend with the lingering intent; the rollback cleanup must have cleared it.
+        await using (KahunaTransactionSession tx2 = await client.StartTransactionSession(
+                         new() { Locking = KeyValueTransactionLocking.Optimistic },
+                         TestContext.Current.CancellationToken))
+        {
+            KahunaKeyValue write = await tx2.SetKeyValue(key, "rewritten", durability: KeyValueDurability.Persistent, cancellationToken: TestContext.Current.CancellationToken);
+            Assert.True(write.Success);
+            Assert.True(await tx2.Commit(TestContext.Current.CancellationToken));
+        }
+
+        KahunaKeyValue after = await client.GetKeyValue(key, KeyValueDurability.Persistent, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(after.Success);
+        Assert.Equal("rewritten", after.ValueAsString());
+    }
 }
