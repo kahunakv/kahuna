@@ -749,6 +749,38 @@ public sealed class TestTransactionRegistrationRouting
     }
 
     /// <summary>
+    /// Completing an operation whose session no longer exists (reaped/aborted, or never started) must not
+    /// be silently acknowledged as success — otherwise a participant that already applied the operation
+    /// would report a write that never entered any coordinator working set. The completion surfaces as a
+    /// failure the participant turns into a retry, which then observes the closed/absent session and aborts.
+    /// </summary>
+    [Fact]
+    public async Task CompleteOperation_OnMissingSession_IsNotSilentlyAcknowledged()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            string coordinatorKey = Guid.NewGuid().ToString("N");
+
+            await Assert.ThrowsAnyAsync<Exception>(() =>
+                nodes[0].Kahuna.LocateAndCompleteOperation(
+                    coordinatorKey, new HLCTimestamp(1, 77, 0), TransactionOperationId.NewRandom(),
+                    new OperationCompletionPayload
+                    {
+                        ModifiedKey = "gone",
+                        Durability = KeyValueDurability.Persistent,
+                        CachedType = KeyValueResponseType.Set
+                    },
+                    ct));
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
     /// The record anchor is the first confirmed <b>persistent</b> modified key, assigned exactly once and
     /// immutable: a later persistent write does not move it, though it is still recorded as a modified key.
     /// </summary>

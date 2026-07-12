@@ -270,13 +270,21 @@ internal sealed class TransactionCoordinator
     /// Marks the operation as completed and stores the response so that duplicate submissions
     /// can receive the same answer without re-executing the operation.
     /// </summary>
-    /// <summary>Returns the transaction's record anchor after the effect is folded in, or null if the session is gone or has no persistent write.</summary>
+    /// <summary>
+    /// Folds the confirmed effect into the coordinator working set and returns the transaction's record
+    /// anchor (null if no persistent write yet). Throws when the session no longer exists — the effect
+    /// cannot be folded, so this completion is not acknowledged and the caller must not report success.
+    /// </summary>
     public string? CompleteOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationEffect? effect, object? response)
     {
         if (sessions.TryGetValue(transactionId, out TransactionContext? context))
             return context.CompleteOperation(operationId, effect, response);
 
-        return null;
+        // The session is gone (reaped/aborted, or never existed). Signalling rather than returning a null
+        // anchor — which reads as success — keeps a participant that already applied the operation from
+        // claiming a write that never entered the coordinator working set; it surfaces MustRetry and a
+        // retry then observes the closed/absent session and aborts.
+        throw new KahunaServerException($"No transaction session {transactionId} to complete operation {operationId}.");
     }
 
     /// <summary>
@@ -396,6 +404,15 @@ internal sealed class TransactionCoordinator
             HLCTimestamp deadline = pair.Key + (context.Timeout + ReapGraceMs);
 
             if ((deadline - now) > TimeSpan.Zero)
+                continue;
+
+            // Close the session to new operations before removing it from the map. A BeginOperation that
+            // already captured this context reference then observes the closed lifecycle and is rejected,
+            // instead of registering a New operation on a session that is about to vanish (whose completion
+            // would find no session and leave an applied mutation with no coordinator record). Skip a
+            // session that is already finalizing/terminal — that one belongs to an in-flight commit or
+            // rollback, not the reaper.
+            if (!context.TryCloseForReaping())
                 continue;
 
             if (!sessions.TryRemove(pair.Key, out _))

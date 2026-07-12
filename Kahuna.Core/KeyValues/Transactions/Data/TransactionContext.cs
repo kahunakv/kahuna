@@ -333,6 +333,26 @@ internal class TransactionContext
         }
     }
 
+    /// <summary>
+    /// Atomically closes the session to new operations as part of reaping, returning true only when the
+    /// session was still <see cref="SessionLifecycle.AcceptingOperations"/>. A session already finalizing or
+    /// terminal belongs to an in-flight commit/rollback and is left alone. Once this returns true, every
+    /// subsequent <see cref="BeginOperation"/> is rejected — so a caller that captured this context just
+    /// before the reaper removed it from the session map cannot register a new operation on a session that
+    /// is about to vanish (which would apply a mutation with no coordinator record).
+    /// </summary>
+    internal bool TryCloseForReaping()
+    {
+        lock (registryLock)
+        {
+            if (lifecycle != SessionLifecycle.AcceptingOperations)
+                return false;
+
+            lifecycle = SessionLifecycle.Reaping;
+            return true;
+        }
+    }
+
     /// <summary>Reopens the session for operations after a finalize attempt was abandoned (e.g. drain timeout).</summary>
     internal void RevertFinalizing()
     {
