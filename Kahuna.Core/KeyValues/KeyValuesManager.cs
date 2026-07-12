@@ -85,6 +85,12 @@ internal sealed class KeyValuesManager : IDisposable
 
     private readonly KeySpaceRegistry keySpaceRegistry = new();
 
+    /// <summary>
+    /// Participant-side results of transaction operations whose actor executed but whose coordinator
+    /// completion is not yet acknowledged, so a retry can recover the confirmed effect without reapplying.
+    /// </summary>
+    private readonly ParticipantOperationCache participantOperationCache = new();
+
     private RangeSplitter? rangeSplitter;
 
     private RangeSplitTrigger? rangeSplitTrigger;
@@ -901,8 +907,11 @@ internal sealed class KeyValuesManager : IDisposable
         TransactionOperationId operationId = default
     )
     {
-        if (transactionId.IsNull() || operationId.IsEmpty || string.IsNullOrEmpty(coordinatorKey))
+        RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
+        if (routing is RegistrationRouting.Legacy)
             return locator.LocateAndTrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, cancellationToken, routedGeneration);
+        if (routing is RegistrationRouting.Malformed)
+            return Task.FromResult((KeyValueResponseType.InvalidInput, 0L, HLCTimestamp.Zero));
 
         byte[] digest = OperationDigest.ForSet(key, value, compareValue, compareRevision, flags, expiresMs, durability);
 
@@ -926,8 +935,12 @@ internal sealed class KeyValuesManager : IDisposable
         switch (outcome)
         {
             case OperationRegistrationOutcome.AlreadyCompleted:
+                participantOperationCache.Remove(transactionId, operationId);
                 return (cachedType, cachedRevision, cachedTimestamp);
             case OperationRegistrationOutcome.AlreadyPending:
+                if (await TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId) is { } recovered)
+                    return ((KeyValueResponseType, long, HLCTimestamp))recovered;
+                return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedCapacity:
                 return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedSessionClosed:
@@ -942,20 +955,24 @@ internal sealed class KeyValuesManager : IDisposable
         // Only a confirmed set records a modified key + its implicit point lock into the working set.
         bool applied = type == KeyValueResponseType.Set;
 
-        await LocateAndCompleteOperation(
-            coordinatorKey, transactionId, operationId,
-            new OperationCompletionPayload
-            {
-                ModifiedKey = applied ? key : null,
-                AcquiredPointLock = applied ? key : null,
-                Durability = durability,
-                CachedType = type,
-                CachedRevision = revision,
-                CachedTimestamp = lastModified
-            },
-            cancellationToken);
+        (KeyValueResponseType, long, HLCTimestamp) response = (type, revision, lastModified);
 
-        return (type, revision, lastModified);
+        // Cache the result and drive the completion; if it is not acknowledged, surface MustRetry so a
+        // same-id retry recovers the confirmed effect without applying the set a second time.
+        if (!await CompleteRegisteredOperation(
+                coordinatorKey, transactionId, operationId, response,
+                new OperationCompletionPayload
+                {
+                    ModifiedKey = applied ? key : null,
+                    AcquiredPointLock = applied ? key : null,
+                    Durability = durability,
+                    CachedType = type,
+                    CachedRevision = revision,
+                    CachedTimestamp = lastModified
+                }))
+            return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+
+        return response;
     }
 
     /// <summary>
@@ -984,8 +1001,11 @@ internal sealed class KeyValuesManager : IDisposable
         // the unregistered fan-out when the caller supplied no operation identity (non-transactional path).
         HLCTimestamp transactionId = deleteManyItems.Count > 0 ? deleteManyItems[0].TransactionId : HLCTimestamp.Zero;
 
-        if (transactionId.IsNull() || operationId.IsEmpty || string.IsNullOrEmpty(coordinatorKey))
+        RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
+        if (routing is RegistrationRouting.Legacy)
             return locator.LocateAndTryDeleteManyKeyValue(deleteManyItems, cancellationToken);
+        if (routing is RegistrationRouting.Malformed)
+            return Task.FromResult(AllItemsResponse(deleteManyItems, KeyValueResponseType.InvalidInput));
 
         return RegisterAndTryDeleteManyKeyValue(transactionId, coordinatorKey, operationId, deleteManyItems, cancellationToken);
     }
@@ -1004,6 +1024,11 @@ internal sealed class KeyValuesManager : IDisposable
         switch (outcome)
         {
             case OperationRegistrationOutcome.AlreadyPending:
+                // A batch stuck pending from a lost completion cannot re-register as New, so re-driving
+                // is impossible here; recover the confirmed effect from the participant cache instead.
+                if (await TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId) is { } recovered)
+                    return (List<KahunaDeleteKeyValueResponseItem>)recovered;
+                return AllItemsResponse(deleteManyItems, KeyValueResponseType.MustRetry);
             case OperationRegistrationOutcome.RejectedCapacity:
                 return AllItemsResponse(deleteManyItems, KeyValueResponseType.MustRetry);
             case OperationRegistrationOutcome.RejectedSessionClosed:
@@ -1049,16 +1074,18 @@ internal sealed class KeyValuesManager : IDisposable
                 modifiedKeys.Add(item);
         }
 
-        await LocateAndCompleteOperation(
-            coordinatorKey, transactionId, operationId,
-            new OperationCompletionPayload
-            {
-                ModifiedKeys = modifiedKeys.Count > 0 ? modifiedKeys : null,
-                // A batch is re-driven, never cache-replayed, so a definitive (non-MustRetry) terminal type
-                // just lets the registration complete and the effects fold.
-                CachedType = KeyValueResponseType.Deleted
-            },
-            cancellationToken);
+        // Cache the batch result and drive the completion off the caller token; if it is not acknowledged,
+        // surface MustRetry so a same-id retry recovers the confirmed effect without re-deleting.
+        if (!await CompleteRegisteredOperation(
+                coordinatorKey, transactionId, operationId, responses,
+                new OperationCompletionPayload
+                {
+                    ModifiedKeys = modifiedKeys.Count > 0 ? modifiedKeys : null,
+                    // A definitive (non-MustRetry) terminal type just lets the registration complete and the
+                    // effects fold.
+                    CachedType = KeyValueResponseType.Deleted
+                }))
+            return AllItemsResponse(deleteManyItems, KeyValueResponseType.MustRetry);
 
         return responses;
     }
@@ -1099,8 +1126,11 @@ internal sealed class KeyValuesManager : IDisposable
         TransactionOperationId operationId = default
     )
     {
-        if (transactionId.IsNull() || operationId.IsEmpty || string.IsNullOrEmpty(coordinatorKey))
+        RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
+        if (routing is RegistrationRouting.Legacy)
             return locator.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
+        if (routing is RegistrationRouting.Malformed)
+            return Task.FromResult((KeyValueResponseType.InvalidInput, (ReadOnlyKeyValueEntry?)null));
 
         return RegisterAndTryReadValue(OperationKind.Get, transactionId, coordinatorKey, operationId, key, revision, readTimestamp, durability, cancellationToken);
     }
@@ -1176,8 +1206,11 @@ internal sealed class KeyValuesManager : IDisposable
         TransactionOperationId operationId = default
     )
     {
-        if (transactionId.IsNull() || operationId.IsEmpty || string.IsNullOrEmpty(coordinatorKey))
+        RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
+        if (routing is RegistrationRouting.Legacy)
             return locator.LocateAndTryExistsValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
+        if (routing is RegistrationRouting.Malformed)
+            return Task.FromResult((KeyValueResponseType.InvalidInput, (ReadOnlyKeyValueEntry?)null));
 
         return RegisterAndTryReadValue(OperationKind.Exists, transactionId, coordinatorKey, operationId, key, revision, readTimestamp, durability, cancellationToken);
     }
@@ -1226,8 +1259,11 @@ internal sealed class KeyValuesManager : IDisposable
     /// <returns></returns>
     public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
     {
-        if (transactionId.IsNull() || operationId.IsEmpty || string.IsNullOrEmpty(coordinatorKey))
+        RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
+        if (routing is RegistrationRouting.Legacy)
             return locator.LocateAndTryDeleteKeyValue(transactionId, key, durability, cancellationToken);
+        if (routing is RegistrationRouting.Malformed)
+            return Task.FromResult((KeyValueResponseType.InvalidInput, 0L, HLCTimestamp.Zero));
 
         return RegisterAndTryDeleteKeyValue(transactionId, coordinatorKey, operationId, key, durability, OperationDigest.ForDelete(key, durability), cancellationToken);
     }
@@ -1242,8 +1278,12 @@ internal sealed class KeyValuesManager : IDisposable
         switch (outcome)
         {
             case OperationRegistrationOutcome.AlreadyCompleted:
+                participantOperationCache.Remove(transactionId, operationId);
                 return (cachedType, cachedRevision, cachedTimestamp);
             case OperationRegistrationOutcome.AlreadyPending:
+                if (await TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId) is { } recovered)
+                    return ((KeyValueResponseType, long, HLCTimestamp))recovered;
+                return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedCapacity:
                 return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedSessionClosed:
@@ -1257,20 +1297,22 @@ internal sealed class KeyValuesManager : IDisposable
 
         bool applied = type == KeyValueResponseType.Deleted;
 
-        await LocateAndCompleteOperation(
-            coordinatorKey, transactionId, operationId,
-            new OperationCompletionPayload
-            {
-                ModifiedKey = applied ? key : null,
-                AcquiredPointLock = applied ? key : null,
-                Durability = durability,
-                CachedType = type,
-                CachedRevision = revision,
-                CachedTimestamp = lastModified
-            },
-            cancellationToken);
+        (KeyValueResponseType, long, HLCTimestamp) response = (type, revision, lastModified);
 
-        return (type, revision, lastModified);
+        if (!await CompleteRegisteredOperation(
+                coordinatorKey, transactionId, operationId, response,
+                new OperationCompletionPayload
+                {
+                    ModifiedKey = applied ? key : null,
+                    AcquiredPointLock = applied ? key : null,
+                    Durability = durability,
+                    CachedType = type,
+                    CachedRevision = revision,
+                    CachedTimestamp = lastModified
+                }))
+            return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+
+        return response;
     }
     
     /// <summary>
@@ -1284,8 +1326,11 @@ internal sealed class KeyValuesManager : IDisposable
     /// <returns></returns>
     public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
     {
-        if (transactionId.IsNull() || operationId.IsEmpty || string.IsNullOrEmpty(coordinatorKey))
+        RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
+        if (routing is RegistrationRouting.Legacy)
             return locator.LocateAndTryExtendKeyValue(transactionId, key, expiresMs, durability, cancellationToken);
+        if (routing is RegistrationRouting.Malformed)
+            return Task.FromResult((KeyValueResponseType.InvalidInput, 0L, HLCTimestamp.Zero));
 
         return RegisterAndTryExtendKeyValue(transactionId, coordinatorKey, operationId, key, expiresMs, durability, OperationDigest.ForExtend(key, expiresMs, durability), cancellationToken);
     }
@@ -1300,8 +1345,12 @@ internal sealed class KeyValuesManager : IDisposable
         switch (outcome)
         {
             case OperationRegistrationOutcome.AlreadyCompleted:
+                participantOperationCache.Remove(transactionId, operationId);
                 return (cachedType, cachedRevision, cachedTimestamp);
             case OperationRegistrationOutcome.AlreadyPending:
+                if (await TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId) is { } recovered)
+                    return ((KeyValueResponseType, long, HLCTimestamp))recovered;
+                return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedCapacity:
                 return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedSessionClosed:
@@ -1315,20 +1364,22 @@ internal sealed class KeyValuesManager : IDisposable
 
         bool applied = type == KeyValueResponseType.Extended;
 
-        await LocateAndCompleteOperation(
-            coordinatorKey, transactionId, operationId,
-            new OperationCompletionPayload
-            {
-                ModifiedKey = applied ? key : null,
-                AcquiredPointLock = applied ? key : null,
-                Durability = durability,
-                CachedType = type,
-                CachedRevision = revision,
-                CachedTimestamp = lastModified
-            },
-            cancellationToken);
+        (KeyValueResponseType, long, HLCTimestamp) response = (type, revision, lastModified);
 
-        return (type, revision, lastModified);
+        if (!await CompleteRegisteredOperation(
+                coordinatorKey, transactionId, operationId, response,
+                new OperationCompletionPayload
+                {
+                    ModifiedKey = applied ? key : null,
+                    AcquiredPointLock = applied ? key : null,
+                    Durability = durability,
+                    CachedType = type,
+                    CachedRevision = revision,
+                    CachedTimestamp = lastModified
+                }))
+            return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+
+        return response;
     }
     
     /// <summary>
@@ -1350,8 +1401,11 @@ internal sealed class KeyValuesManager : IDisposable
         TransactionOperationId operationId = default
     )
     {
-        if (transactionId.IsNull() || operationId.IsEmpty || string.IsNullOrEmpty(coordinatorKey))
+        RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
+        if (routing is RegistrationRouting.Legacy)
             return locator.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, durability, cancelationToken);
+        if (routing is RegistrationRouting.Malformed)
+            return Task.FromResult((KeyValueResponseType.InvalidInput, key, durability, HLCTimestamp.Zero));
 
         return RegisterAndAcquireExclusiveLock(transactionId, coordinatorKey, operationId, key, expiresMs, durability, cancelationToken);
     }
@@ -1371,8 +1425,12 @@ internal sealed class KeyValuesManager : IDisposable
         switch (outcome)
         {
             case OperationRegistrationOutcome.AlreadyCompleted:
+                participantOperationCache.Remove(transactionId, operationId);
                 return (KeyValueResponseType.Locked, key, durability, transactionId);
             case OperationRegistrationOutcome.AlreadyPending:
+                if (await TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId) is { } recovered)
+                    return ((KeyValueResponseType, string, KeyValueDurability, HLCTimestamp))recovered;
+                return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedCapacity:
                 return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedSessionClosed:
@@ -1386,17 +1444,19 @@ internal sealed class KeyValuesManager : IDisposable
 
         bool acquired = type == KeyValueResponseType.Locked;
 
-        await LocateAndCompleteOperation(
-            coordinatorKey, transactionId, operationId,
-            new OperationCompletionPayload
-            {
-                AcquiredPointLock = acquired ? key : null,
-                Durability = durability,
-                CachedType = type
-            },
-            cancellationToken);
+        (KeyValueResponseType, string, KeyValueDurability, HLCTimestamp) response = (type, resultKey, resultDurability, holder);
 
-        return (type, resultKey, resultDurability, holder);
+        if (!await CompleteRegisteredOperation(
+                coordinatorKey, transactionId, operationId, response,
+                new OperationCompletionPayload
+                {
+                    AcquiredPointLock = acquired ? key : null,
+                    Durability = durability,
+                    CachedType = type
+                }))
+            return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero);
+
+        return response;
     }
 
     /// <summary>
@@ -1418,8 +1478,11 @@ internal sealed class KeyValuesManager : IDisposable
         TransactionOperationId operationId = default
     )
     {
-        if (transactionId.IsNull() || operationId.IsEmpty || string.IsNullOrEmpty(coordinatorKey))
+        RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
+        if (routing is RegistrationRouting.Legacy)
             return locator.LocateAndTryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability, cancellationToken);
+        if (routing is RegistrationRouting.Malformed)
+            return Task.FromResult(KeyValueResponseType.InvalidInput);
 
         return RegisterAndAcquireExclusivePrefixLock(transactionId, coordinatorKey, operationId, prefixKey, expiresMs, durability, cancellationToken);
     }
@@ -1439,8 +1502,12 @@ internal sealed class KeyValuesManager : IDisposable
         switch (outcome)
         {
             case OperationRegistrationOutcome.AlreadyCompleted:
+                participantOperationCache.Remove(transactionId, operationId);
                 return KeyValueResponseType.Locked;
             case OperationRegistrationOutcome.AlreadyPending:
+                if (await TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId) is { } recovered)
+                    return (KeyValueResponseType)recovered;
+                return KeyValueResponseType.MustRetry;
             case OperationRegistrationOutcome.RejectedCapacity:
                 return KeyValueResponseType.MustRetry;
             case OperationRegistrationOutcome.RejectedSessionClosed:
@@ -1454,15 +1521,15 @@ internal sealed class KeyValuesManager : IDisposable
 
         bool acquired = type == KeyValueResponseType.Locked;
 
-        await LocateAndCompleteOperation(
-            coordinatorKey, transactionId, operationId,
-            new OperationCompletionPayload
-            {
-                AcquiredPrefixLock = acquired ? prefixKey : null,
-                Durability = durability,
-                CachedType = type
-            },
-            cancellationToken);
+        if (!await CompleteRegisteredOperation(
+                coordinatorKey, transactionId, operationId, type,
+                new OperationCompletionPayload
+                {
+                    AcquiredPrefixLock = acquired ? prefixKey : null,
+                    Durability = durability,
+                    CachedType = type
+                }))
+            return KeyValueResponseType.MustRetry;
 
         return type;
     }
@@ -1494,8 +1561,11 @@ internal sealed class KeyValuesManager : IDisposable
     /// <returns></returns>
     public Task<(KeyValueResponseType, string)> LocateAndTryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancelationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
     {
-        if (transactionId.IsNull() || operationId.IsEmpty || string.IsNullOrEmpty(coordinatorKey))
+        RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
+        if (routing is RegistrationRouting.Legacy)
             return locator.LocateAndTryReleaseExclusiveLock(transactionId, key, durability, cancelationToken);
+        if (routing is RegistrationRouting.Malformed)
+            return Task.FromResult((KeyValueResponseType.InvalidInput, key));
 
         return RegisterAndReleaseExclusiveLock(transactionId, coordinatorKey, operationId, key, durability, cancelationToken);
     }
@@ -1515,8 +1585,12 @@ internal sealed class KeyValuesManager : IDisposable
         switch (outcome)
         {
             case OperationRegistrationOutcome.AlreadyCompleted:
+                participantOperationCache.Remove(transactionId, operationId);
                 return (KeyValueResponseType.Unlocked, key);
             case OperationRegistrationOutcome.AlreadyPending:
+                if (await TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId) is { } recovered)
+                    return ((KeyValueResponseType, string))recovered;
+                return (KeyValueResponseType.MustRetry, key);
             case OperationRegistrationOutcome.RejectedCapacity:
                 return (KeyValueResponseType.MustRetry, key);
             case OperationRegistrationOutcome.RejectedSessionClosed:
@@ -1530,17 +1604,19 @@ internal sealed class KeyValuesManager : IDisposable
 
         bool released = type == KeyValueResponseType.Unlocked;
 
-        await LocateAndCompleteOperation(
-            coordinatorKey, transactionId, operationId,
-            new OperationCompletionPayload
-            {
-                ReleasedPointLock = released ? key : null,
-                Durability = durability,
-                CachedType = type
-            },
-            cancellationToken);
+        (KeyValueResponseType, string) response = (type, resultKey);
 
-        return (type, resultKey);
+        if (!await CompleteRegisteredOperation(
+                coordinatorKey, transactionId, operationId, response,
+                new OperationCompletionPayload
+                {
+                    ReleasedPointLock = released ? key : null,
+                    Durability = durability,
+                    CachedType = type
+                }))
+            return (KeyValueResponseType.MustRetry, key);
+
+        return response;
     }
     
     /// <summary>
@@ -1561,8 +1637,11 @@ internal sealed class KeyValuesManager : IDisposable
         TransactionOperationId operationId = default
     )
     {
-        if (transactionId.IsNull() || operationId.IsEmpty || string.IsNullOrEmpty(coordinatorKey))
+        RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
+        if (routing is RegistrationRouting.Legacy)
             return locator.LocateAndTryReleaseExclusivePrefixLock(transactionId, prefixKey, durability, cancellationToken);
+        if (routing is RegistrationRouting.Malformed)
+            return Task.FromResult(KeyValueResponseType.InvalidInput);
 
         return RegisterAndReleaseExclusivePrefixLock(transactionId, coordinatorKey, operationId, prefixKey, durability, cancellationToken);
     }
@@ -1582,8 +1661,12 @@ internal sealed class KeyValuesManager : IDisposable
         switch (outcome)
         {
             case OperationRegistrationOutcome.AlreadyCompleted:
+                participantOperationCache.Remove(transactionId, operationId);
                 return KeyValueResponseType.Unlocked;
             case OperationRegistrationOutcome.AlreadyPending:
+                if (await TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId) is { } recovered)
+                    return (KeyValueResponseType)recovered;
+                return KeyValueResponseType.MustRetry;
             case OperationRegistrationOutcome.RejectedCapacity:
                 return KeyValueResponseType.MustRetry;
             case OperationRegistrationOutcome.RejectedSessionClosed:
@@ -1597,15 +1680,15 @@ internal sealed class KeyValuesManager : IDisposable
 
         bool released = type == KeyValueResponseType.Unlocked;
 
-        await LocateAndCompleteOperation(
-            coordinatorKey, transactionId, operationId,
-            new OperationCompletionPayload
-            {
-                ReleasedPrefixLock = released ? prefixKey : null,
-                Durability = durability,
-                CachedType = type
-            },
-            cancellationToken);
+        if (!await CompleteRegisteredOperation(
+                coordinatorKey, transactionId, operationId, type,
+                new OperationCompletionPayload
+                {
+                    ReleasedPrefixLock = released ? prefixKey : null,
+                    Durability = durability,
+                    CachedType = type
+                }))
+            return KeyValueResponseType.MustRetry;
 
         return type;
     }
@@ -1623,8 +1706,11 @@ internal sealed class KeyValuesManager : IDisposable
         TransactionOperationId operationId = default
     )
     {
-        if (transactionId.IsNull() || operationId.IsEmpty || string.IsNullOrEmpty(coordinatorKey))
+        RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
+        if (routing is RegistrationRouting.Legacy)
             return locator.LocateAndTryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, cancellationToken);
+        if (routing is RegistrationRouting.Malformed)
+            return Task.FromResult((KeyValueResponseType.InvalidInput, HLCTimestamp.Zero));
 
         return RegisterAndAcquireRangeLock(transactionId, coordinatorKey, operationId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, cancellationToken);
     }
@@ -1648,8 +1734,12 @@ internal sealed class KeyValuesManager : IDisposable
         switch (outcome)
         {
             case OperationRegistrationOutcome.AlreadyCompleted:
+                participantOperationCache.Remove(transactionId, operationId);
                 return (KeyValueResponseType.Locked, transactionId);
             case OperationRegistrationOutcome.AlreadyPending:
+                if (await TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId) is { } recovered)
+                    return ((KeyValueResponseType, HLCTimestamp))recovered;
+                return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedCapacity:
                 return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedSessionClosed:
@@ -1664,17 +1754,19 @@ internal sealed class KeyValuesManager : IDisposable
         bool acquired = type == KeyValueResponseType.Locked;
         RangeLockKey range = new(prefix, startKey, startInclusive, endKey, endInclusive, durability);
 
-        await LocateAndCompleteOperation(
-            coordinatorKey, transactionId, operationId,
-            new OperationCompletionPayload
-            {
-                AcquiredRangeLock = acquired ? (range, mode) : null,
-                Durability = durability,
-                CachedType = type
-            },
-            cancellationToken);
+        (KeyValueResponseType, HLCTimestamp) response = (type, holder);
 
-        return (type, holder);
+        if (!await CompleteRegisteredOperation(
+                coordinatorKey, transactionId, operationId, response,
+                new OperationCompletionPayload
+                {
+                    AcquiredRangeLock = acquired ? (range, mode) : null,
+                    Durability = durability,
+                    CachedType = type
+                }))
+            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
+
+        return response;
     }
 
     /// <summary>
@@ -1720,8 +1812,11 @@ internal sealed class KeyValuesManager : IDisposable
         TransactionOperationId operationId = default
     )
     {
-        if (transactionId.IsNull() || operationId.IsEmpty || string.IsNullOrEmpty(coordinatorKey))
+        RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
+        if (routing is RegistrationRouting.Legacy)
             return locator.LocateAndTryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken);
+        if (routing is RegistrationRouting.Malformed)
+            return Task.FromResult(KeyValueResponseType.InvalidInput);
 
         return RegisterAndReleaseRangeLock(transactionId, coordinatorKey, operationId, prefix, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken);
     }
@@ -1742,8 +1837,12 @@ internal sealed class KeyValuesManager : IDisposable
         switch (outcome)
         {
             case OperationRegistrationOutcome.AlreadyCompleted:
+                participantOperationCache.Remove(transactionId, operationId);
                 return KeyValueResponseType.Unlocked;
             case OperationRegistrationOutcome.AlreadyPending:
+                if (await TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId) is { } recovered)
+                    return (KeyValueResponseType)recovered;
+                return KeyValueResponseType.MustRetry;
             case OperationRegistrationOutcome.RejectedCapacity:
                 return KeyValueResponseType.MustRetry;
             case OperationRegistrationOutcome.RejectedSessionClosed:
@@ -1758,15 +1857,15 @@ internal sealed class KeyValuesManager : IDisposable
         bool released = type == KeyValueResponseType.Unlocked;
         RangeLockKey range = new(prefix, startKey, startInclusive, endKey, endInclusive, durability);
 
-        await LocateAndCompleteOperation(
-            coordinatorKey, transactionId, operationId,
-            new OperationCompletionPayload
-            {
-                ReleasedRangeLock = released ? range : null,
-                Durability = durability,
-                CachedType = type
-            },
-            cancellationToken);
+        if (!await CompleteRegisteredOperation(
+                coordinatorKey, transactionId, operationId, type,
+                new OperationCompletionPayload
+                {
+                    ReleasedRangeLock = released ? range : null,
+                    Durability = durability,
+                    CachedType = type
+                }))
+            return KeyValueResponseType.MustRetry;
 
         return type;
     }
@@ -1889,8 +1988,11 @@ internal sealed class KeyValuesManager : IDisposable
     /// <returns></returns>
     public Task<KeyValueGetByBucketResult> LocateAndGetByBucket(HLCTimestamp transactionId, string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
     {
-        if (transactionId.IsNull() || operationId.IsEmpty || string.IsNullOrEmpty(coordinatorKey))
+        RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
+        if (routing is RegistrationRouting.Legacy)
             return locator.LocateAndGetByBucket(transactionId, prefixedKey, readTimestamp, durability, cancellationToken);
+        if (routing is RegistrationRouting.Malformed)
+            return Task.FromResult(new KeyValueGetByBucketResult(KeyValueResponseType.InvalidInput, []));
 
         return RegisterAndGetByBucket(transactionId, coordinatorKey, operationId, prefixedKey, readTimestamp, durability, cancellationToken);
     }
@@ -2069,6 +2171,94 @@ internal sealed class KeyValuesManager : IDisposable
     )
     {
         return locator.LocateAndCommitTransaction(handle, acquiredLocks, modifiedKeys, readKeys, cancellationToken);
+    }
+
+    /// <summary>How a transaction-scoped request routes based on the register-remote identity it carries.</summary>
+    private enum RegistrationRouting
+    {
+        /// <summary>Non-transactional, or a script/REST transaction that owns its 2PC: take the legacy locator path.</summary>
+        Legacy,
+
+        /// <summary>An interactive request carrying only one of {coordinator key, operation id}: reject as malformed.</summary>
+        Malformed,
+
+        /// <summary>An interactive request carrying both identity components: register on the coordinator.</summary>
+        Registered
+    }
+
+    /// <summary>
+    /// Classifies a transaction-scoped point/lock request by the register-remote identity it carries. A
+    /// non-transactional request, or a script/REST transaction that manages its own 2PC, carries neither a
+    /// coordinator key nor an operation id and takes the legacy locator path. An interactive request must
+    /// carry <b>both</b>; carrying exactly one is malformed — applying it would mutate a participant outside
+    /// the finalize fence, so it is rejected rather than silently degraded to the unregistered path.
+    /// </summary>
+    private static RegistrationRouting ClassifyRegistration(HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId)
+    {
+        bool hasCoordinator = !string.IsNullOrEmpty(coordinatorKey);
+        bool hasOperation = !operationId.IsEmpty;
+
+        if (transactionId.IsNull() || (!hasCoordinator && !hasOperation))
+            return RegistrationRouting.Legacy;
+
+        return hasCoordinator && hasOperation ? RegistrationRouting.Registered : RegistrationRouting.Malformed;
+    }
+
+    /// <summary>
+    /// Drives the coordinator completion for an operation whose actor just executed, first caching the
+    /// confirmed response and effect on this participant so a lost or cancelled completion is recoverable.
+    /// The completion runs detached from the caller's cancellation token: once the actor has mutated,
+    /// abandoning the completion because the caller went away would strand the effect with the coordinator
+    /// record stuck pending. Returns true when the coordinator acknowledged the fold; false means the
+    /// caller must surface <see cref="KeyValueResponseType.MustRetry"/>, and a same-id retry recovers the
+    /// result through <see cref="TryRecoverRegisteredOperation"/> without reapplying the operation.
+    /// </summary>
+    private async Task<bool> CompleteRegisteredOperation(
+        string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId,
+        object response, OperationCompletionPayload payload)
+    {
+        participantOperationCache.Store(transactionId, operationId, response, payload);
+
+        try
+        {
+            await LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, CancellationToken.None);
+            participantOperationCache.Remove(transactionId, operationId);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // The completion did not reach the coordinator (lost/cancelled RPC, transient leader change).
+            // Keep the pinned participant result so a same-id retry re-drives the idempotent completion.
+            logger.LogWarning(ex, "Completion of transaction operation {OperationId} was not acknowledged; retaining participant result for retry", operationId);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// On an <see cref="OperationRegistrationOutcome.AlreadyPending"/> outcome, attempts to finish an
+    /// operation whose actor already executed on this participant but whose completion was lost. Re-drives
+    /// the coordinator completion from the cached effect (the coordinator fold is idempotent) instead of
+    /// reapplying the operation. Returns the original boxed response when recovery succeeds; null means the
+    /// caller should surface <see cref="KeyValueResponseType.MustRetry"/> (no local record, or the
+    /// completion is still unreachable).
+    /// </summary>
+    private async Task<object?> TryRecoverRegisteredOperation(
+        string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId)
+    {
+        if (!participantOperationCache.TryGet(transactionId, operationId, out object? response, out OperationCompletionPayload? payload))
+            return null;
+
+        try
+        {
+            await LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload!, CancellationToken.None);
+            participantOperationCache.Remove(transactionId, operationId);
+            return response;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Retry completion of transaction operation {OperationId} was not acknowledged; will retry again", operationId);
+            return null;
+        }
     }
 
     /// <summary>Routes an operation registration to the coordinator node identified by <paramref name="coordinatorKey"/>.</summary>

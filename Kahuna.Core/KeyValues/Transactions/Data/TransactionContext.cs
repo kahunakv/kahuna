@@ -295,7 +295,12 @@ internal class TransactionContext
             if (record.Status != OperationStatus.Pending)
                 return false;
 
-            record.Status = OperationStatus.Cancelled;
+            // Remove the record entirely rather than leaving a terminal marker. BeginOperation maps every
+            // non-completed record to AlreadyPending, so a lingering cancelled entry would wedge every
+            // same-id retry on MustRetry forever. Cancellation only happens after a transient/no-effect
+            // result — nothing was folded into the working set — so the id is safe to release for a fresh
+            // registration that re-drives the operation.
+            operations.Remove(operationId);
             DecrementPending();
             return true;
         }

@@ -1030,11 +1030,25 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
         {
             Interlocked.Increment(ref completeOperationCallCount);
+
+            // Test seam: simulate a completion that never reaches the coordinator (the record stays
+            // pending) so participant-side retry recovery can be exercised. The throw happens before the
+            // coordinator is touched, matching a lost/failed inbound RPC.
+            if (CompleteOperationFault is not null && CompleteOperationFault(transactionId, operationId))
+                throw new KahunaServerException("Injected completion fault (test seam).");
+
             return await Task.FromResult(kahunaNode.CompleteOperation(transactionId, operationId, payload));
         }
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
+
+    /// <summary>
+    /// Test seam: when set and it returns true for a given completion, that <see cref="CompleteOperation"/>
+    /// call throws before reaching the coordinator, leaving the operation record pending so a same-id
+    /// retry must recover it from the participant cache instead of reapplying the operation.
+    /// </summary>
+    public Func<HLCTimestamp, TransactionOperationId, bool>? CompleteOperationFault { get; set; }
 
     public async Task<TransactionWorkingSet?> GetTransactionWorkingSet(string node, string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken)
     {

@@ -559,6 +559,196 @@ public sealed class TestTransactionRegistrationRouting
     }
 
     /// <summary>
+    /// A transaction-scoped write whose actor applies but whose completion is lost leaves the coordinator
+    /// record pending. A same-id retry must recover the confirmed effect from the participant cache —
+    /// re-driving the completion, not reapplying the write — instead of spinning on <c>MustRetry</c>
+    /// forever. Exercised over the real transport by failing the first completion of the write.
+    /// </summary>
+    [Fact]
+    public async Task RegisteredWrite_LostCompletionThenRetry_RecoversWithoutSecondApply()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (Node[] nodes, MemoryInterNodeCommmunication interNode) = await AssembleWithTransport();
+        try
+        {
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+
+            // Classify a node whose register-remote calls hop the transport to the coordinator (so the
+            // write's completion routes through the fault-injecting transport) and the coordinator-partition
+            // leader (for a local, hop-free working-set read).
+            Node? coordinatorLeader = null;
+            Node? remoteEntry = null;
+            byte[] probe = [4, 5, 6];
+
+            foreach (Node node in nodes)
+            {
+                int before = interNode.BeginOperationCallCount;
+                (OperationRegistrationOutcome probeOutcome, _, _, _, _) =
+                    await node.Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, TransactionOperationId.NewRandom(), OperationKind.Set, probe, ct);
+                Assert.Equal(OperationRegistrationOutcome.New, probeOutcome);
+
+                if (interNode.BeginOperationCallCount == before)
+                    coordinatorLeader = node;
+                else
+                    remoteEntry = node;
+            }
+
+            Assert.NotNull(coordinatorLeader);
+            Assert.NotNull(remoteEntry);
+
+            // Fail the first completion of this specific write so its coordinator record stays pending.
+            TransactionOperationId writeOp = TransactionOperationId.NewRandom();
+            bool faulted = false;
+            interNode.CompleteOperationFault = (_, opId) =>
+            {
+                if (opId == writeOp && !faulted)
+                {
+                    faulted = true;
+                    return true;
+                }
+
+                return false;
+            };
+
+            int completesBefore = interNode.CompleteOperationCallCount;
+
+            // First attempt applies the write, its completion is lost; the retry recovers the confirmed
+            // response from the participant cache without re-running the actor.
+            (KeyValueResponseType type, long revision, _) =
+                await SetWithRetry(remoteEntry!, handle, writeOp, [1, 1, 1], ct);
+
+            Assert.True(faulted, "the injected completion fault should have fired");
+            Assert.Equal(KeyValueResponseType.Set, type);
+            Assert.True(revision >= 0);
+
+            // Completion was attempted twice (the faulted attempt plus the successful recovery), proving the
+            // retry re-drove the idempotent completion rather than staying stuck on MustRetry.
+            Assert.True(interNode.CompleteOperationCallCount - completesBefore >= 2);
+
+            // The effect folded exactly once at the coordinator: wk1 is recorded and anchors the record.
+            TransactionWorkingSet? ws =
+                await coordinatorLeader!.Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(ws);
+            Assert.Equal("wk1", ws!.RecordAnchorKey);
+            Assert.Contains(ws.ModifiedKeys, m => m.Key == "wk1");
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// Cancelling a pending operation (after a transient/no-effect result) releases its id: a same-id retry
+    /// carrying the identical declaration re-registers as <c>New</c> and can complete with a real effect,
+    /// rather than wedging on <c>MustRetry</c> forever because a lingering cancelled record maps to
+    /// <c>AlreadyPending</c>.
+    /// </summary>
+    [Fact]
+    public async Task CancelledOperation_SameIdReregistersAsNew_AndCompletes()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+
+            TransactionOperationId op = TransactionOperationId.NewRandom();
+            byte[] digest = [7, 7, 7];
+
+            // Register the operation, then cancel it via a transient (MustRetry) completion — a no-effect
+            // result the node-local completion path turns into a cancellation.
+            (OperationRegistrationOutcome first, _, _, _, _) =
+                await nodes[0].Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, op, OperationKind.Set, digest, ct);
+            Assert.Equal(OperationRegistrationOutcome.New, first);
+
+            await nodes[0].Kahuna.LocateAndCompleteOperation(
+                handle.CoordinatorKey, handle.TransactionId, op,
+                new OperationCompletionPayload { CachedType = KeyValueResponseType.MustRetry }, ct);
+
+            // The same id with the identical declaration must re-register as New (pre-fix it returned
+            // AlreadyPending forever), then complete with a confirmed effect.
+            (OperationRegistrationOutcome second, _, _, _, _) =
+                await nodes[0].Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, op, OperationKind.Set, digest, ct);
+            Assert.Equal(OperationRegistrationOutcome.New, second);
+
+            string? anchor = await nodes[0].Kahuna.LocateAndCompleteOperation(
+                handle.CoordinatorKey, handle.TransactionId, op,
+                new OperationCompletionPayload
+                {
+                    ModifiedKey = "ck1",
+                    Durability = KeyValueDurability.Persistent,
+                    CachedType = KeyValueResponseType.Set,
+                    CachedRevision = 3,
+                    CachedTimestamp = new HLCTimestamp(1, 20, 0)
+                }, ct);
+            Assert.Equal("ck1", anchor);
+
+            TransactionWorkingSet? ws =
+                await nodes[0].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(ws);
+            Assert.Equal("ck1", ws!.RecordAnchorKey);
+            Assert.Contains(ws.ModifiedKeys, m => m.Key == "ck1");
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// A transaction-scoped request that carries only one of {coordinator key, operation id} is malformed:
+    /// it must return <c>InvalidInput</c> rather than silently degrade to the unregistered path and mutate a
+    /// participant outside the finalize fence. A request with neither (a script/non-transactional call) still
+    /// takes the legacy path — that case is exercised throughout the rest of the suite.
+    /// </summary>
+    [Fact]
+    public async Task MalformedTransactionIdentity_IsRejectedAsInvalidInput()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+
+            HLCTimestamp txId = handle.TransactionId;
+            TransactionOperationId op = TransactionOperationId.NewRandom();
+
+            // Coordinator key but no operation id → malformed.
+            (KeyValueResponseType setNoOp, _, _) = await nodes[0].Kahuna.LocateAndTrySetKeyValue(
+                txId, "mk1", [1], null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct, 0, handle.CoordinatorKey, default);
+            Assert.Equal(KeyValueResponseType.InvalidInput, setNoOp);
+
+            // Operation id but no coordinator key → malformed.
+            (KeyValueResponseType setNoCoord, _, _) = await nodes[0].Kahuna.LocateAndTrySetKeyValue(
+                txId, "mk1", [1], null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct, 0, "", op);
+            Assert.Equal(KeyValueResponseType.InvalidInput, setNoCoord);
+
+            // Delete and point-lock acquire reject partial identity the same way.
+            (KeyValueResponseType delNoOp, _, _) = await nodes[0].Kahuna.LocateAndTryDeleteKeyValue(
+                txId, "mk1", KeyValueDurability.Persistent, ct, handle.CoordinatorKey, default);
+            Assert.Equal(KeyValueResponseType.InvalidInput, delNoOp);
+
+            (KeyValueResponseType lockNoOp, _, _, _) = await nodes[0].Kahuna.LocateAndTryAcquireExclusiveLock(
+                txId, "mk1", 5000, KeyValueDurability.Persistent, ct, handle.CoordinatorKey, default);
+            Assert.Equal(KeyValueResponseType.InvalidInput, lockNoOp);
+
+            // None of the rejected requests registered or folded an effect: no anchor was assigned.
+            TransactionWorkingSet? ws =
+                await nodes[0].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, txId, ct);
+            Assert.NotNull(ws);
+            Assert.Null(ws!.RecordAnchorKey);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
     /// The record anchor is the first confirmed <b>persistent</b> modified key, assigned exactly once and
     /// immutable: a later persistent write does not move it, though it is still recorded as a modified key.
     /// </summary>
