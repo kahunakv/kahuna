@@ -2162,7 +2162,7 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="readKeys">A list of keys read during the transaction.</param>
     /// <param name="cancellationToken">A token used to monitor for cancellation requests.</param>
     /// <returns>A task that represents the asynchronous operation, containing the result of the transaction operation.</returns>
-    public Task<KeyValueResponseType> LocateAndCommitTransaction(
+    public Task<(KeyValueResponseType, string?)> LocateAndCommitTransaction(
         TransactionHandle handle,
         List<KeyValueTransactionModifiedKey> acquiredLocks,
         List<KeyValueTransactionModifiedKey> modifiedKeys,
@@ -4296,7 +4296,7 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="modifiedKeys">List of modified keys.</param>
     /// <param name="readKeys">List of keys read during the transaction.</param>
     /// <returns>A task that represents the asynchronous operation containing the commit result.</returns>
-    public Task<KeyValueResponseType> CommitTransaction(
+    public Task<(KeyValueResponseType, string?)> CommitTransaction(
         TransactionHandle handle,
         List<KeyValueTransactionModifiedKey> acquiredLocks,
         List<KeyValueTransactionModifiedKey> modifiedKeys,

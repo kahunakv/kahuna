@@ -1668,6 +1668,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             Timeout = request.Timeout,
             AsyncRelease = request.AsyncRelease,
             AutoCommit = request.AutoCommit,
+            ReadValidation = (ReadValidation)request.ReadValidation,
+            DecisionDurability = (DecisionDurability)request.DecisionDurability,
+            ReadTimestamp = new HLCTimestamp(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
         }, context.CancellationToken);
 
         GrpcStartTransactionResponse response = new()
@@ -1709,12 +1712,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
         TransactionHandle handle = new(transactionId, request.CoordinatorKey);
 
-        // Capture the coordinator's canonical record anchor before commit tears down the session. The
-        // anchor is immutable once assigned, so reading it just before commit is race-free; the SDK folds
-        // it back into its handle. Absent (null) when the transaction confirmed no persistent write.
-        TransactionWorkingSet? workingSet = await keyValues.LocateAndGetTransactionWorkingSet(request.CoordinatorKey, transactionId, context.CancellationToken);
-
-        KeyValueResponseType type = await keyValues.LocateAndCommitTransaction(
+        // Commit returns the coordinator's canonical record anchor captured from the frozen finalize
+        // snapshot under the fence, so there is no race window between reading the anchor and freezing the
+        // working set. The anchor is null when the transaction confirmed no persistent write.
+        (KeyValueResponseType type, string? recordAnchorKey) = await keyValues.LocateAndCommitTransaction(
             handle,
             GetTransactionAcquiredOrModifiedKeys(request.AcquiredLocks).ToList(),
             GetTransactionAcquiredOrModifiedKeys(request.ModifiedKeys).ToList(),
@@ -1727,8 +1728,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             Type = (GrpcKeyValueResponseType)type,
         };
 
-        if (workingSet?.RecordAnchorKey is not null)
-            response.RecordAnchorKey = workingSet.RecordAnchorKey;
+        if (recordAnchorKey is not null)
+            response.RecordAnchorKey = recordAnchorKey;
 
         return response;
     }

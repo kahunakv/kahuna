@@ -125,7 +125,7 @@ public interface IKahuna
 
     public Task<(KeyValueResponseType, TransactionHandle)> LocateAndStartTransaction(KeyValueTransactionOptions options, CancellationToken cancellationToken);
 
-    public Task<KeyValueResponseType> LocateAndCommitTransaction(TransactionHandle handle, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, List<KeyValueTransactionReadKey> readKeys, CancellationToken cancellationToken);
+    public Task<(KeyValueResponseType, string?)> LocateAndCommitTransaction(TransactionHandle handle, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, List<KeyValueTransactionReadKey> readKeys, CancellationToken cancellationToken);
 
     public Task<KeyValueResponseType> LocateAndRollbackTransaction(TransactionHandle handle, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken);
 
@@ -209,7 +209,7 @@ public interface IKahuna
 
     public Task<(KeyValueResponseType, TransactionHandle)> StartTransaction(KeyValueTransactionOptions options);
 
-    public Task<KeyValueResponseType> CommitTransaction(TransactionHandle handle, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, List<KeyValueTransactionReadKey> readKeys);
+    public Task<(KeyValueResponseType, string?)> CommitTransaction(TransactionHandle handle, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, List<KeyValueTransactionReadKey> readKeys);
 
     public Task<KeyValueResponseType> RollbackTransaction(TransactionHandle handle, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys);
 

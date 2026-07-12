@@ -1,4 +1,5 @@
 
+using Kommander.Time;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues.Transactions.Data;
@@ -44,4 +45,9 @@ public sealed class KeyValueTransactionOptions
     /// Controls how durable the coordinator decision record must be before the client receives the outcome.
     /// </summary>
     public DecisionDurability DecisionDurability { get; set; } = DecisionDurability.BestEffort;
+
+    /// <summary>
+    /// Transaction-wide snapshot timestamp for reads. Zero means "latest".
+    /// </summary>
+    public HLCTimestamp ReadTimestamp { get; set; }
 }

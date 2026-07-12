@@ -269,7 +269,7 @@ public class TestKeyValueScriptTransactions : BaseCluster
             Assert.Equal(KeyValueResponseType.Set, type);
             Assert.True(transactionId.L > 0);
 
-            KeyValueResponseType response = await kahuna2.LocateAndCommitTransaction(txHandle, [], [], [], TestContext.Current.CancellationToken);
+            (KeyValueResponseType response, _) = await kahuna2.LocateAndCommitTransaction(txHandle, [], [], [], TestContext.Current.CancellationToken);
             Assert.Equal(KeyValueResponseType.Committed, response);
         
         }
@@ -342,7 +342,7 @@ public class TestKeyValueScriptTransactions : BaseCluster
             Assert.Equal(0, revision);
             Assert.True(modifiedTime > transactionId);
 
-            KeyValueResponseType response = await kahuna1.LocateAndCommitTransaction(
+            (KeyValueResponseType response, _) = await kahuna1.LocateAndCommitTransaction(
                 txHandle,
                 [new() { Key = "pp1", Durability = KeyValueDurability.Persistent }],
                 [new() { Key = "pp1", Durability = KeyValueDurability.Persistent }],
@@ -407,7 +407,7 @@ public class TestKeyValueScriptTransactions : BaseCluster
             Assert.Equal(0, revision);
             Assert.True(modifiedTime > transactionId);
 
-            KeyValueResponseType response = await kahuna3.LocateAndCommitTransaction(
+            (KeyValueResponseType response, _) = await kahuna3.LocateAndCommitTransaction(
                 txHandle,
                 [new() { Key = "pp1", Durability = KeyValueDurability.Persistent }, new() { Key = "pp2", Durability = KeyValueDurability.Persistent }],
                 [new() { Key = "pp1", Durability = KeyValueDurability.Persistent }, new() { Key = "pp2", Durability = KeyValueDurability.Persistent }],

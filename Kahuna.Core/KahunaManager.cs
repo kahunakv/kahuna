@@ -830,7 +830,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="readKeys">A list of keys read during the transaction.</param>
     /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
     /// <returns>A task representing the asynchronous operation with the commit outcome.</returns>
-    public Task<KeyValueResponseType> LocateAndCommitTransaction(
+    public Task<(KeyValueResponseType, string?)> LocateAndCommitTransaction(
         TransactionHandle handle,
         List<KeyValueTransactionModifiedKey> acquiredLocks,
         List<KeyValueTransactionModifiedKey> modifiedKeys,
@@ -1231,7 +1231,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="modifiedKeys">The list of keys that were modified as part of the transaction.</param>
     /// <param name="readKeys">The list of keys read during the transaction.</param>
     /// <returns>A task containing the commit outcome.</returns>
-    public Task<KeyValueResponseType> CommitTransaction(
+    public Task<(KeyValueResponseType, string?)> CommitTransaction(
         TransactionHandle handle,
         List<KeyValueTransactionModifiedKey> acquiredLocks,
         List<KeyValueTransactionModifiedKey> modifiedKeys,

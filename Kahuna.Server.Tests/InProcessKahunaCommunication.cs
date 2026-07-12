@@ -206,11 +206,14 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
     {
         KeyValueTransactionOptions opts = new()
         {
-            CoordinatorKey = uniqueId,
-            Timeout        = txOptions.Timeout,
-            Locking        = txOptions.Locking,
-            AsyncRelease   = txOptions.AsyncRelease,
-            AutoCommit     = txOptions.AutoCommit
+            CoordinatorKey     = uniqueId,
+            Timeout            = txOptions.Timeout,
+            Locking            = txOptions.Locking,
+            AsyncRelease       = txOptions.AsyncRelease,
+            AutoCommit         = txOptions.AutoCommit,
+            ReadValidation     = txOptions.ReadValidation,
+            DecisionDurability = txOptions.DecisionDurability,
+            ReadTimestamp      = txOptions.ReadTimestamp
         };
         (KeyValueResponseType type, TransactionHandle handle) = await kahuna.LocateAndStartTransaction(opts, cancellationToken);
         if (type != KeyValueResponseType.Set)
@@ -225,12 +228,11 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
     {
         TransactionHandle handle = new(transactionId, uniqueId);
 
-        // Capture the canonical record anchor before commit tears down the session (immutable once set).
-        TransactionWorkingSet? workingSet = await kahuna.LocateAndGetTransactionWorkingSet(uniqueId, transactionId, cancellationToken);
-
-        KeyValueResponseType type = await kahuna.LocateAndCommitTransaction(
+        // Commit returns the coordinator's canonical record anchor from the frozen finalize snapshot, so
+        // there is no race between reading the anchor and freezing the working set.
+        (KeyValueResponseType type, string? recordAnchorKey) = await kahuna.LocateAndCommitTransaction(
             handle, acquiredLocks, modifiedKeys, readKeys, cancellationToken);
-        return (type == KeyValueResponseType.Committed, workingSet?.RecordAnchorKey);
+        return (type == KeyValueResponseType.Committed, recordAnchorKey);
     }
 
     public async Task<bool> RollbackTransactionSession(

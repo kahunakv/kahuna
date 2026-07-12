@@ -749,6 +749,95 @@ public sealed class TestTransactionRegistrationRouting
     }
 
     /// <summary>
+    /// Commit returns the coordinator's canonical record anchor from the frozen finalize snapshot — the
+    /// anchor travels back on the commit response itself, not via a separate pre-commit working-set query,
+    /// so there is no window in which a concurrent operation assigns the anchor after it is read but before
+    /// the working set freezes.
+    /// </summary>
+    [Fact]
+    public async Task Commit_ReturnsRecordAnchorFromFrozenFinalizeResult()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+
+            // A confirmed persistent write assigns the record anchor on the coordinator.
+            (KeyValueResponseType setType, _, _) =
+                await SetWithRetry(nodes[1], handle, TransactionOperationId.NewRandom(), "v"u8.ToArray(), ct);
+            Assert.Equal(KeyValueResponseType.Set, setType);
+
+            // The commit itself carries the anchor back, captured under the finalize fence.
+            (KeyValueResponseType commitType, string? anchor) = await CommitReturningAnchor(nodes[2], handle, ct);
+            Assert.Equal(KeyValueResponseType.Committed, commitType);
+            Assert.Equal("wk1", anchor);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// A pinned read snapshot and write-skew validation are contradictory — a fixed past timestamp cannot
+    /// observe writes that land after it, so the two together cannot honor the guarantee. StartTransaction
+    /// rejects the combination up front with <c>InvalidInput</c> and hands back no usable session id.
+    /// </summary>
+    [Fact]
+    public async Task StartTransaction_SnapshotReadWithTrackAndValidate_IsRejected()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            (KeyValueResponseType type, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new()
+                {
+                    Locking = KeyValueTransactionLocking.Optimistic,
+                    ReadValidation = ReadValidation.TrackAndValidate,
+                    ReadTimestamp = new HLCTimestamp(1, 1000, 0)
+                }, ct);
+
+            Assert.Equal(KeyValueResponseType.InvalidInput, type);
+            Assert.Equal(HLCTimestamp.Zero, handle.TransactionId);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// A pinned read snapshot without write-skew validation is a legitimate combination (a plain snapshot
+    /// read) — the Begin-time guard is specific to the contradictory pairing and must not reject it.
+    /// </summary>
+    [Fact]
+    public async Task StartTransaction_SnapshotReadWithoutValidation_IsAccepted()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            (KeyValueResponseType type, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new()
+                {
+                    Locking = KeyValueTransactionLocking.Optimistic,
+                    ReadValidation = ReadValidation.None,
+                    ReadTimestamp = new HLCTimestamp(1, 1000, 0)
+                }, ct);
+
+            Assert.Equal(KeyValueResponseType.Set, type);
+            Assert.NotEqual(HLCTimestamp.Zero, handle.TransactionId);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
     /// Completing an operation whose session no longer exists (reaped/aborted, or never started) must not
     /// be silently acknowledged as success — otherwise a participant that already applied the operation
     /// would report a write that never entered any coordinator working set. The completion surfaces as a
@@ -1001,12 +1090,18 @@ public sealed class TestTransactionRegistrationRouting
 
     private static async Task<KeyValueResponseType> CommitWithRetry(Node node, TransactionHandle handle, CancellationToken ct)
     {
+        (KeyValueResponseType type, _) = await CommitReturningAnchor(node, handle, ct);
+        return type;
+    }
+
+    private static async Task<(KeyValueResponseType, string?)> CommitReturningAnchor(Node node, TransactionHandle handle, CancellationToken ct)
+    {
         long deadline = Environment.TickCount64 + 10_000;
         while (true)
         {
-            KeyValueResponseType type = await node.Kahuna.LocateAndCommitTransaction(handle, [], [], [], ct);
+            (KeyValueResponseType type, string? anchor) = await node.Kahuna.LocateAndCommitTransaction(handle, [], [], [], ct);
             if (type != KeyValueResponseType.MustRetry || Environment.TickCount64 >= deadline)
-                return type;
+                return (type, anchor);
             await Task.Delay(50, ct);
         }
     }

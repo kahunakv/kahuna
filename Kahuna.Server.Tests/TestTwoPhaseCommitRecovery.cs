@@ -526,7 +526,7 @@ public sealed class TestTwoPhaseCommitRecovery
                 new() { Key = key1, Durability = KeyValueDurability.Persistent },
                 new() { Key = key2, Durability = KeyValueDurability.Persistent },
             ];
-            KeyValueResponseType commitResult = await nodes[0].Kahuna.LocateAndCommitTransaction(
+            (KeyValueResponseType commitResult, _) = await nodes[0].Kahuna.LocateAndCommitTransaction(
                 txHandle, acquiredLocks: modKeys, modifiedKeys: modKeys, readKeys: [], ct);
             Assert.Equal(KeyValueResponseType.Committed, commitResult);
 
@@ -615,7 +615,7 @@ public sealed class TestTwoPhaseCommitRecovery
 
             // Despite the sub-millisecond per-attempt deadline tripping the initial commit, the
             // coordinator's idempotent retry drives the transaction to a durable commit.
-            KeyValueResponseType commitResult = await nodes[0].Kahuna.LocateAndCommitTransaction(
+            (KeyValueResponseType commitResult, _) = await nodes[0].Kahuna.LocateAndCommitTransaction(
                 txHandle2, acquiredLocks: modKeys, modifiedKeys: modKeys, readKeys: [], ct);
             Assert.Equal(KeyValueResponseType.Committed, commitResult);
 

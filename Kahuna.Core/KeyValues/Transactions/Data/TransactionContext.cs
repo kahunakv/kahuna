@@ -37,6 +37,16 @@ internal class TransactionContext
     public HLCTimestamp ReadTimestamp { get; init; }
 
     /// <summary>
+    /// Controls whether reads are tracked and validated for write-skew at commit time.
+    /// </summary>
+    public ReadValidation ReadValidation { get; init; }
+
+    /// <summary>
+    /// Controls how durable the coordinator decision record must be before the client receives the outcome.
+    /// </summary>
+    public DecisionDurability DecisionDurability { get; init; }
+
+    /// <summary>
     /// Last result of the current key-value execution.
     /// </summary>
     public KeyValueTransactionResult? Result { get; set; }

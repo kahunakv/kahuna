@@ -64,6 +64,12 @@ internal sealed class TransactionCoordinator
             ? Guid.NewGuid().ToString("N")
             : options.CoordinatorKey;
 
+        // A fixed read snapshot and write-skew validation are mutually exclusive: pinning reads to a past
+        // timestamp cannot detect concurrent writes that land after that snapshot, so the two together would
+        // silently promise a guarantee the engine cannot honor. Reject the combination up front.
+        if (options.ReadTimestamp != HLCTimestamp.Zero && options.ReadValidation == ReadValidation.TrackAndValidate)
+            return (KeyValueResponseType.InvalidInput, new TransactionHandle(HLCTimestamp.Zero, coordinatorKey));
+
         bool added;
         HLCTimestamp transactionId;
 
@@ -73,12 +79,15 @@ internal sealed class TransactionCoordinator
 
             TransactionContext context = new()
             {
-                CoordinatorKey = coordinatorKey,
-                TransactionId  = transactionId,
-                Locking        = options.Locking,
-                Action         = KeyValueTransactionAction.Commit,
-                AsyncRelease   = options.AsyncRelease,
-                Timeout        = options.Timeout <= 0 ? configuration.DefaultTransactionTimeout : options.Timeout
+                CoordinatorKey     = coordinatorKey,
+                TransactionId      = transactionId,
+                Locking            = options.Locking,
+                ReadValidation     = options.ReadValidation,
+                DecisionDurability = options.DecisionDurability,
+                ReadTimestamp      = options.ReadTimestamp,
+                Action             = KeyValueTransactionAction.Commit,
+                AsyncRelease       = options.AsyncRelease,
+                Timeout            = options.Timeout <= 0 ? configuration.DefaultTransactionTimeout : options.Timeout
             };
 
             added = sessions.TryAdd(transactionId, context);
@@ -97,7 +106,7 @@ internal sealed class TransactionCoordinator
     /// The handle carries both the transaction ID (used to locate the session) and the
     /// coordinator key (used by the caller to route this request to the right node).
     /// </summary>
-    public async Task<KeyValueResponseType> CommitTransaction(
+    public async Task<(KeyValueResponseType, string?)> CommitTransaction(
         TransactionHandle handle,
         List<KeyValueTransactionModifiedKey> acquiredLocks,
         List<KeyValueTransactionModifiedKey> modifiedKeys,
@@ -110,14 +119,19 @@ internal sealed class TransactionCoordinator
         {
             logger.LogWarning("Trying to commit unknown transaction {TransactionId}", transactionId);
 
-            return KeyValueResponseType.Errored;
+            return (KeyValueResponseType.Errored, null);
         }
 
         // Close the session to new operations and wait for any in-flight ones to complete, so the
         // coordinator-owned working set is frozen before two-phase commit reads it. Operations that
         // registered before this point are part of the commit; any that arrive after are rejected.
         if (!await FreezeForFinalize(context))
-            return KeyValueResponseType.MustRetry;
+            return (KeyValueResponseType.MustRetry, null);
+
+        // The working set is now frozen: capture the immutable record anchor under the finalize fence and
+        // return it from the commit itself. This is the race-free anchor source — a concurrent operation
+        // can no longer assign the anchor after a pre-commit read but before the fence closes.
+        string? recordAnchorKey = context.RecordAnchorKey;
 
         try
         {
@@ -147,40 +161,40 @@ internal sealed class TransactionCoordinator
             await TwoPhaseCommit(context, CancellationToken.None);
 
             if (context.Result is null)
-                return KeyValueResponseType.Errored;
+                return (KeyValueResponseType.Errored, recordAnchorKey);
 
             if (context.Result.Type is KeyValueResponseType.Aborted or KeyValueResponseType.Errored)
-                return KeyValueResponseType.Aborted;
+                return (KeyValueResponseType.Aborted, recordAnchorKey);
 
             logger.LogCommittedInteractiveTransaction(transactionId);
 
             sessions.TryRemove(transactionId, out _);
 
-            return KeyValueResponseType.Committed;
+            return (KeyValueResponseType.Committed, recordAnchorKey);
         }
         catch (KahunaAbortedException ex)
         {
             logger.LogKahunaAbortedException(ex);
 
-            return KeyValueResponseType.Aborted;
+            return (KeyValueResponseType.Aborted, recordAnchorKey);
         }
         catch (TaskCanceledException ex)
         {
             logger.LogTaskCanceledException(ex);
 
-            return KeyValueResponseType.Aborted;
+            return (KeyValueResponseType.Aborted, recordAnchorKey);
         }
         catch (OperationCanceledException ex)
         {
             logger.LogOperationCanceledException(ex);
 
-            return KeyValueResponseType.Aborted;
+            return (KeyValueResponseType.Aborted, recordAnchorKey);
         }
         catch (Exception ex)
         {
             logger.LogOperationCanceledException(ex);
 
-            return KeyValueResponseType.Aborted;
+            return (KeyValueResponseType.Aborted, recordAnchorKey);
         }
         finally
         {
@@ -517,11 +531,22 @@ internal sealed class TransactionCoordinator
     }
 
     /// <summary>
+    /// Whether the transaction's read-set must be validated for write-skew before prepare. Optimistic locking
+    /// implies validation for backward compatibility; an explicit <see cref="ReadValidation.TrackAndValidate"/>
+    /// policy requests it regardless of locking mode.
+    /// </summary>
+    private static bool RequiresReadSetValidation(TransactionContext context)
+    {
+        return context.Locking == KeyValueTransactionLocking.Optimistic
+            || context.ReadValidation == ReadValidation.TrackAndValidate;
+    }
+
+    /// <summary>
     /// Validates optimistic read dependencies against the current committed state before prepare.
     /// </summary>
     private async Task<bool> ValidateReadSet(TransactionContext context, CancellationToken cancellationToken)
     {
-        if (context.Locking != KeyValueTransactionLocking.Optimistic || context.ReadKeys is null || context.ReadKeys.Count == 0)
+        if (!RequiresReadSetValidation(context) || context.ReadKeys is null || context.ReadKeys.Count == 0)
             return true;
 
         List<KeyValueTransactionReadKey> toValidate = [];
@@ -636,7 +661,7 @@ internal sealed class TransactionCoordinator
     /// </summary>
     private async Task<bool> CheckReadSetForConflicts(TransactionContext context, CancellationToken cancellationToken)
     {
-        if (context.Locking != KeyValueTransactionLocking.Optimistic || context.ReadKeys is null || context.ReadKeys.Count == 0)
+        if (!RequiresReadSetValidation(context) || context.ReadKeys is null || context.ReadKeys.Count == 0)
             return true;
 
         List<KeyValueTransactionReadKey> toCheck = [];

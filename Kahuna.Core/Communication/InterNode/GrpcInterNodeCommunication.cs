@@ -1393,6 +1393,11 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             Timeout = options.Timeout,
             AsyncRelease = options.AsyncRelease,
             AutoCommit = options.AutoCommit,
+            ReadValidation = (GrpcReadValidation)options.ReadValidation,
+            DecisionDurability = (GrpcDecisionDurability)options.DecisionDurability,
+            ReadTimestampNode = options.ReadTimestamp.N,
+            ReadTimestampPhysical = options.ReadTimestamp.L,
+            ReadTimestampCounter = options.ReadTimestamp.C,
         };
 
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
@@ -1407,7 +1412,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         );
     }
 
-    public async Task<KeyValueResponseType> CommitTransaction(
+    public async Task<(KeyValueResponseType, string?)> CommitTransaction(
         string node,
         TransactionHandle handle,
         List<KeyValueTransactionModifiedKey> acquiredLocks,
@@ -1440,7 +1445,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
 
         remoteResponse.ServedFrom = $"https://{node}";
 
-        return (KeyValueResponseType)remoteResponse.Type;
+        return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.HasRecordAnchorKey ? remoteResponse.RecordAnchorKey : null);
     }
 
     public async Task<KeyValueResponseType> RollbackTransaction(

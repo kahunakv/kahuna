@@ -189,7 +189,7 @@ public sealed class TestEmbeddedKahunaNode
 
         Assert.Equal(KeyValueResponseType.Set, response);
 
-        response = await node.Kahuna.LocateAndCommitTransaction(
+        (response, _) = await node.Kahuna.LocateAndCommitTransaction(
             txHandle,
             [new() { Key = txKey, Durability = KeyValueDurability.Persistent }],
             [new() { Key = txKey, Durability = KeyValueDurability.Persistent }],

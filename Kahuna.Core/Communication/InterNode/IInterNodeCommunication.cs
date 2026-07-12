@@ -80,7 +80,7 @@ public interface IInterNodeCommunication
     
     public Task<(KeyValueResponseType, TransactionHandle)> StartTransaction(string node, KeyValueTransactionOptions options, CancellationToken cancellationToken);
 
-    public Task<KeyValueResponseType> CommitTransaction(string node, TransactionHandle handle, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, List<KeyValueTransactionReadKey> readKeys, CancellationToken cancellationToken);
+    public Task<(KeyValueResponseType, string?)> CommitTransaction(string node, TransactionHandle handle, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, List<KeyValueTransactionReadKey> readKeys, CancellationToken cancellationToken);
 
     public Task<KeyValueResponseType> RollbackTransaction(string node, TransactionHandle handle, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken);
 

@@ -1917,7 +1917,7 @@ internal sealed class KeyValueLocator
     /// <returns>
     /// A <see cref="KeyValueResponseType"/> indicating the outcome of the transaction operation.
     /// </returns>
-    public async Task<KeyValueResponseType> LocateAndCommitTransaction(
+    public async Task<(KeyValueResponseType, string?)> LocateAndCommitTransaction(
         TransactionHandle handle,
         List<KeyValueTransactionModifiedKey> acquiredLocks,
         List<KeyValueTransactionModifiedKey> modifiedKeys,
@@ -1926,7 +1926,7 @@ internal sealed class KeyValueLocator
     )
     {
         if (handle.IsEmpty)
-            return KeyValueResponseType.Errored;
+            return (KeyValueResponseType.Errored, null);
 
         int partitionId = dataPartitionRouter.Locate(handle.CoordinatorKey);
 
@@ -1935,7 +1935,7 @@ internal sealed class KeyValueLocator
 
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
-            return KeyValueResponseType.MustRetry;
+            return (KeyValueResponseType.MustRetry, null);
 
         logger.LogCommitTransactionRedirected(handle.CoordinatorKey, partitionId, leader);
 

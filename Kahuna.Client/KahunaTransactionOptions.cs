@@ -1,3 +1,4 @@
+using Kommander.Time;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Client;
@@ -26,4 +27,19 @@ public sealed class KahunaTransactionOptions
     /// Whether the transaction should be automatically committed after the session is disposed
     /// </summary>
     public bool AutoCommit { get; set; } = true;
+
+    /// <summary>
+    /// Controls whether reads are tracked and validated for write-skew at commit time.
+    /// </summary>
+    public ReadValidation ReadValidation { get; set; } = ReadValidation.None;
+
+    /// <summary>
+    /// Controls how durable the coordinator decision record must be before the client receives the outcome.
+    /// </summary>
+    public DecisionDurability DecisionDurability { get; set; } = DecisionDurability.BestEffort;
+
+    /// <summary>
+    /// Transaction-wide snapshot timestamp for reads. Zero means "latest".
+    /// </summary>
+    public HLCTimestamp ReadTimestamp { get; set; }
 }

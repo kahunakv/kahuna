@@ -1639,7 +1639,12 @@ public class GrpcCommunication : IKahunaCommunication
             Timeout = txOptions.Timeout,
             LockingType = (GrpcLockingType)txOptions.Locking,
             AsyncRelease = txOptions.AsyncRelease,
-            AutoCommit = txOptions.AutoCommit
+            AutoCommit = txOptions.AutoCommit,
+            ReadValidation = (GrpcReadValidation)txOptions.ReadValidation,
+            DecisionDurability = (GrpcDecisionDurability)txOptions.DecisionDurability,
+            ReadTimestampNode = txOptions.ReadTimestamp.N,
+            ReadTimestampPhysical = txOptions.ReadTimestamp.L,
+            ReadTimestampCounter = txOptions.ReadTimestamp.C
         };
 
         int retries = 0;

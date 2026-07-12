@@ -727,6 +727,11 @@ message GrpcStartTransactionRequest
   int32 Timeout = 3;
   bool AsyncRelease = 4;
   bool AutoCommit = 5;
+  GrpcReadValidation ReadValidation = 6;
+  GrpcDecisionDurability DecisionDurability = 7;
+  int32 ReadTimestampNode = 8;
+  int64 ReadTimestampPhysical = 9;
+  uint32 ReadTimestampCounter = 10;
 }
 
 message GrpcStartTransactionResponse
@@ -1248,6 +1253,14 @@ enum GrpcKeyValueState {
 enum GrpcLockingType {
   LOCKING_TYPE_PESSIMISTIC = 0;
   LOCKING_TYPE_OPTIMISTIC = 1;
+}
+enum GrpcReadValidation {
+  READ_VALIDATION_NONE = 0;
+  READ_VALIDATION_TRACK_AND_VALIDATE = 1;
+}
+enum GrpcDecisionDurability {
+  DECISION_DURABILITY_BEST_EFFORT = 0;
+  DECISION_DURABILITY_DURABLE = 1;
 }
 message GrpcAcquireSnapshotHoldRequest {
   string HolderId          = 1;
