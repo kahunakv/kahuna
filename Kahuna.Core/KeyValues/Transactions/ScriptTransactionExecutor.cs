@@ -359,13 +359,13 @@ internal sealed class ScriptTransactionExecutor
         }
         finally
         {
-            if (context.Locking == KeyValueTransactionLocking.Pessimistic || context.State != KeyValueTransactionState.Committed && context.State != KeyValueTransactionState.RolledBack)
-            {
-                if (context.AsyncRelease)
-                    _ = coordinator.ReleaseAcquiredLocks(context);
-                else
-                    await coordinator.ReleaseAcquiredLocks(context);
-            }
+            // Release every confirmed lock shape not finalized by two-phase commit and clean the
+            // transaction's read MVCC. Safe to run on a committed transaction: its modified keys were already
+            // finalized and are skipped internally. Best-effort — no terminal promise rides on completion.
+            if (context.AsyncRelease)
+                _ = coordinator.ReleaseWorkingSet(context);
+            else
+                await coordinator.ReleaseWorkingSet(context);
         }
     }
 

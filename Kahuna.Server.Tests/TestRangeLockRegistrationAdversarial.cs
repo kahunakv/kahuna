@@ -295,6 +295,84 @@ public sealed class TestRangeLockRegistrationAdversarial : BaseCluster
         }
     }
 
+    // ── Finalize releases confirmed range locks from server effects ─────────────────────────────
+
+    /// <summary>
+    /// Committing a transaction that holds a range lock releases it as part of finalize — driven purely
+    /// from the coordinator-owned working set, with no client-supplied lock list — so another transaction
+    /// can immediately acquire the same exclusive range. Proves the server owns range-lock cleanup.
+    /// </summary>
+    [Fact]
+    public async Task RangeLockReleasedOnCommit_AllowsAnotherTransactionToAcquire()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (IRaft, KahunaManager)[] nodes = await Assemble();
+        try
+        {
+            await SeedSingle(nodes, ct);
+            KahunaManager node = nodes[0].Item2;
+
+            TransactionHandle first = await StartTx(node, ct);
+            TransactionOperationId acquireOp = TransactionOperationId.NewRandom();
+            KeyValueResponseType acquired = await RangeAcquireWithRetry(() =>
+                node.LocateAndTryAcquireRangeLock(first.TransactionId, Space, null, true, null, false, 30_000, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct, first.CoordinatorKey, acquireOp), ct);
+            Assert.Equal(KeyValueResponseType.Locked, acquired);
+
+            // Commit with EMPTY client working-set lists: the range lock is only in the server-owned set,
+            // so a Committed here that also frees the range proves finalize releases from server effects.
+            (KeyValueResponseType commitType, _) =
+                await node.LocateAndCommitTransaction(first, [], [], [], ct);
+            Assert.Equal(KeyValueResponseType.Committed, commitType);
+
+            // A second transaction can now take the same exclusive range — the first tx's lock is gone.
+            TransactionHandle second = await StartTx(node, ct);
+            TransactionOperationId secondOp = TransactionOperationId.NewRandom();
+            KeyValueResponseType reacquired = await RangeAcquireWithRetry(() =>
+                node.LocateAndTryAcquireRangeLock(second.TransactionId, Space, null, true, null, false, 30_000, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct, second.CoordinatorKey, secondOp), ct);
+            Assert.Equal(KeyValueResponseType.Locked, reacquired);
+        }
+        finally
+        {
+            await LeaveAll(nodes, ct);
+        }
+    }
+
+    /// <summary>
+    /// Rolling back a transaction that holds a range lock releases it from the server-owned working set —
+    /// again with no client-supplied lock list — so a following transaction can acquire the same range.
+    /// </summary>
+    [Fact]
+    public async Task RangeLockReleasedOnRollback_AllowsAnotherTransactionToAcquire()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (IRaft, KahunaManager)[] nodes = await Assemble();
+        try
+        {
+            await SeedSingle(nodes, ct);
+            KahunaManager node = nodes[0].Item2;
+
+            TransactionHandle first = await StartTx(node, ct);
+            TransactionOperationId acquireOp = TransactionOperationId.NewRandom();
+            KeyValueResponseType acquired = await RangeAcquireWithRetry(() =>
+                node.LocateAndTryAcquireRangeLock(first.TransactionId, Space, null, true, null, false, 30_000, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct, first.CoordinatorKey, acquireOp), ct);
+            Assert.Equal(KeyValueResponseType.Locked, acquired);
+
+            KeyValueResponseType rollbackType =
+                await node.LocateAndRollbackTransaction(first, [], [], ct);
+            Assert.Equal(KeyValueResponseType.RolledBack, rollbackType);
+
+            TransactionHandle second = await StartTx(node, ct);
+            TransactionOperationId secondOp = TransactionOperationId.NewRandom();
+            KeyValueResponseType reacquired = await RangeAcquireWithRetry(() =>
+                node.LocateAndTryAcquireRangeLock(second.TransactionId, Space, null, true, null, false, 30_000, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct, second.CoordinatorKey, secondOp), ct);
+            Assert.Equal(KeyValueResponseType.Locked, reacquired);
+        }
+        finally
+        {
+            await LeaveAll(nodes, ct);
+        }
+    }
+
     // ── harness ────────────────────────────────────────────────────────────────────────────────
 
     private async Task<(IRaft, KahunaManager)[]> Assemble()
