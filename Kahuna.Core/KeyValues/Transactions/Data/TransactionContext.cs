@@ -135,6 +135,7 @@ internal class TransactionContext
 
     private readonly object registryLock = new();
     private SessionLifecycle lifecycle = SessionLifecycle.AcceptingOperations;
+    private bool readObservationConflict;
     private int pendingOperationCount;
     private Dictionary<TransactionOperationId, OperationRecord>? operations;
     private WorkingSetSnapshot? finalizeSnapshot;
@@ -146,6 +147,16 @@ internal class TransactionContext
     public SessionLifecycle Lifecycle
     {
         get { lock (registryLock) return lifecycle; }
+    }
+
+    /// <summary>
+    /// True once two operations recorded conflicting base observations (differing existence or revision) for
+    /// the same key. The transaction read an unstable snapshot of that key, so it must fail read validation
+    /// at commit rather than commit on a self-inconsistent read set.
+    /// </summary>
+    internal bool ReadObservationConflict
+    {
+        get { lock (registryLock) return readObservationConflict; }
     }
 
     /// <summary>
@@ -273,23 +284,39 @@ internal class TransactionContext
         if (effect.RemoveRangeLock is { } removedRangeLock)
             RangeLocksAcquired?.Remove(removedRangeLock);
 
-        if (effect.ReadObservation is { } read && !string.IsNullOrEmpty(read.Key))
-        {
-            ReadKeys ??= [];
-            ReadKeys[(read.Key, read.Durability)] = read;
-        }
+        if (effect.ReadObservation is { } read)
+            FoldReadObservationLocked(read);
 
         if (effect.ReadObservations is { } reads)
         {
             foreach (KeyValueTransactionReadKey observed in reads)
-            {
-                if (string.IsNullOrEmpty(observed.Key))
-                    continue;
-
-                ReadKeys ??= [];
-                ReadKeys[(observed.Key, observed.Durability)] = observed;
-            }
+                FoldReadObservationLocked(observed);
         }
+    }
+
+    /// <summary>
+    /// Caller must hold <see cref="registryLock"/>. Records the first base observation for a key and keeps
+    /// it stable: a later observation for the same key with a different existence or base revision means the
+    /// transaction saw two inconsistent snapshots of that key, which cannot both be valid — flag the read set
+    /// as conflicted so commit-time validation aborts. The first observation is retained (never overwritten).
+    /// </summary>
+    private void FoldReadObservationLocked(KeyValueTransactionReadKey observed)
+    {
+        if (string.IsNullOrEmpty(observed.Key))
+            return;
+
+        ReadKeys ??= [];
+        (string, KeyValueDurability) key = (observed.Key, observed.Durability);
+
+        if (ReadKeys.TryGetValue(key, out KeyValueTransactionReadKey? existing))
+        {
+            if (existing.Exists != observed.Exists || existing.Revision != observed.Revision)
+                readObservationConflict = true;
+
+            return;
+        }
+
+        ReadKeys[key] = observed;
     }
 
     /// <summary>
@@ -360,16 +387,6 @@ internal class TransactionContext
 
             lifecycle = SessionLifecycle.Reaping;
             return true;
-        }
-    }
-
-    /// <summary>Reopens the session for operations after a finalize attempt was abandoned (e.g. drain timeout).</summary>
-    internal void RevertFinalizing()
-    {
-        lock (registryLock)
-        {
-            if (lifecycle == SessionLifecycle.Finalizing)
-                lifecycle = SessionLifecycle.AcceptingOperations;
         }
     }
 

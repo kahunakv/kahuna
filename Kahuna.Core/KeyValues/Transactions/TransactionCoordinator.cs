@@ -339,7 +339,9 @@ internal sealed class TransactionCoordinator
     /// </summary>
     private async Task<bool> FreezeForFinalize(TransactionContext context)
     {
-        bool closedHere = context.TryBeginFinalizing();
+        // Close the session to new operations. The first finalize transitions Accepting→Finalizing; a
+        // retry after a prior drain timeout observes it already Finalizing and rejoins the same drain.
+        context.TryBeginFinalizing();
 
         using CancellationTokenSource cts = new(context.Timeout <= 0 ? configuration.DefaultTransactionTimeout : context.Timeout);
         try
@@ -349,8 +351,8 @@ internal sealed class TransactionCoordinator
         }
         catch (OperationCanceledException)
         {
-            if (closedHere)
-                context.RevertFinalizing();
+            // Drain deadline hit. Keep the session closed — do NOT reopen it to new operations — so no
+            // operation can join after finalization began; the caller retries and rejoins this same drain.
             return false;
         }
     }
@@ -364,13 +366,17 @@ internal sealed class TransactionCoordinator
 
         if (!context.TryBeginFinalizing())
         {
-            // Another finalize won the race or the session is terminal. Return the snapshot only once
-            // it has actually been published; until then ask the caller to retry rather than hand back
-            // a null set that reads as success.
+            // Not the first to close. If a finalize already completed, hand back its published snapshot.
             WorkingSetSnapshot? published = context.PublishedSnapshot;
-            return published is not null
-                ? (KeyValueResponseType.Set, published)
-                : (KeyValueResponseType.MustRetry, null);
+            if (published is not null)
+                return (KeyValueResponseType.Set, published);
+
+            // A finalize is still in progress (this is a retry after a prior drain timeout, or a
+            // concurrent close): the session stays Finalizing and closed to new operations, so fall
+            // through and rejoin the same pending drain rather than reopening it. Any other state
+            // (reaping/terminal-without-snapshot) is not ours to close — ask the caller to retry.
+            if (context.Lifecycle != SessionLifecycle.Finalizing)
+                return (KeyValueResponseType.MustRetry, null);
         }
 
         using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -382,8 +388,8 @@ internal sealed class TransactionCoordinator
         }
         catch (OperationCanceledException)
         {
-            // Drain deadline hit — reopen the session so the caller can retry the close.
-            context.RevertFinalizing();
+            // Drain deadline hit. Keep the session closed — do NOT reopen it to new operations — so a
+            // later Close rejoins this same pre-close pending set instead of admitting new work.
             return (KeyValueResponseType.MustRetry, null);
         }
 
@@ -546,7 +552,23 @@ internal sealed class TransactionCoordinator
     /// </summary>
     private async Task<bool> ValidateReadSet(TransactionContext context, CancellationToken cancellationToken)
     {
-        if (!RequiresReadSetValidation(context) || context.ReadKeys is null || context.ReadKeys.Count == 0)
+        if (!RequiresReadSetValidation(context))
+            return true;
+
+        // The transaction observed the same key at two different base states — an unstable read snapshot that
+        // cannot be validated as consistent. Abort rather than commit on a self-contradictory read set.
+        if (context.ReadObservationConflict)
+        {
+            context.Result = new()
+            {
+                Type = KeyValueResponseType.Aborted,
+                Reason = "Read observation instability: a key was observed at two different base revisions"
+            };
+
+            return false;
+        }
+
+        if (context.ReadKeys is null || context.ReadKeys.Count == 0)
             return true;
 
         List<KeyValueTransactionReadKey> toValidate = [];

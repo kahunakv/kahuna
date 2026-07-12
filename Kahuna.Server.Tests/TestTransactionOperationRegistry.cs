@@ -172,14 +172,15 @@ public sealed class TestTransactionOperationRegistry
     }
 
     [Fact]
-    public void RevertFinalizing_ReopensForOperations()
+    public void Finalizing_StaysClosedToNewOperations()
     {
         TransactionContext ctx = NewContext();
         Assert.True(ctx.TryBeginFinalizing());
-        ctx.RevertFinalizing();
 
-        Assert.Equal(SessionLifecycle.AcceptingOperations, ctx.Lifecycle);
-        Assert.Equal(OperationRegistrationOutcome.New, ctx.BeginOperation(Op(1), OperationKind.Set, null).Outcome);
+        // Once finalization begins the session never reopens to new operations — even if a finalize
+        // attempt is later abandoned (e.g. a drain timeout), a new registration must be rejected.
+        Assert.Equal(SessionLifecycle.Finalizing, ctx.Lifecycle);
+        Assert.Equal(OperationRegistrationOutcome.RejectedSessionClosed, ctx.BeginOperation(Op(1), OperationKind.Set, null).Outcome);
     }
 
     [Fact]
@@ -218,6 +219,68 @@ public sealed class TestTransactionOperationRegistry
         Assert.True(snap.ReadKeys!.TryGetValue(("rk", KeyValueDurability.Persistent), out KeyValueTransactionReadKey? read));
         Assert.True(read!.Exists);
         Assert.Equal(3, read.Revision);
+    }
+
+    [Fact]
+    public void ReadObservation_DivergentSecondForSameKey_KeepsFirst_AndFlagsConflict()
+    {
+        TransactionContext ctx = NewContext();
+
+        ctx.BeginOperation(Op(1), OperationKind.Get, [1]);
+        ctx.CompleteOperation(
+            Op(1),
+            new OperationEffect { ReadObservation = new KeyValueTransactionReadKey { Key = "k", Durability = KeyValueDurability.Persistent, Exists = true, Revision = 5 } },
+            new CachedOperationResponse(KeyValueResponseType.Get, 5, HLCTimestamp.Zero));
+
+        Assert.False(ctx.ReadObservationConflict);
+
+        // A second operation observes the same key at a different base revision.
+        ctx.BeginOperation(Op(2), OperationKind.Get, [2]);
+        ctx.CompleteOperation(
+            Op(2),
+            new OperationEffect { ReadObservation = new KeyValueTransactionReadKey { Key = "k", Durability = KeyValueDurability.Persistent, Exists = true, Revision = 9 } },
+            new CachedOperationResponse(KeyValueResponseType.Get, 9, HLCTimestamp.Zero));
+
+        // The first observation is retained (not overwritten) and the read set is flagged as conflicted.
+        Assert.True(ctx.ReadObservationConflict);
+        WorkingSetSnapshot snap = ctx.GetWorkingSetSnapshot();
+        Assert.Equal(5, snap.ReadKeys![("k", KeyValueDurability.Persistent)].Revision);
+    }
+
+    [Fact]
+    public void ReadObservation_IdenticalRepeatForSameKey_IsNotConflict()
+    {
+        TransactionContext ctx = NewContext();
+
+        ctx.BeginOperation(Op(1), OperationKind.Get, [1]);
+        ctx.CompleteOperation(
+            Op(1),
+            new OperationEffect { ReadObservation = new KeyValueTransactionReadKey { Key = "k", Durability = KeyValueDurability.Persistent, Exists = true, Revision = 5 } },
+            new CachedOperationResponse(KeyValueResponseType.Get, 5, HLCTimestamp.Zero));
+
+        ctx.BeginOperation(Op(2), OperationKind.Get, [2]);
+        ctx.CompleteOperation(
+            Op(2),
+            new OperationEffect { ReadObservation = new KeyValueTransactionReadKey { Key = "k", Durability = KeyValueDurability.Persistent, Exists = true, Revision = 5 } },
+            new CachedOperationResponse(KeyValueResponseType.Get, 5, HLCTimestamp.Zero));
+
+        Assert.False(ctx.ReadObservationConflict);
+    }
+
+    [Fact]
+    public void OperationDigest_Read_DiffersByReadTimestamp()
+    {
+        byte[] a = OperationDigest.ForRead(OperationKind.Get, "k", 1, new HLCTimestamp(1, 100, 0), KeyValueDurability.Persistent);
+        byte[] b = OperationDigest.ForRead(OperationKind.Get, "k", 1, new HLCTimestamp(1, 200, 0), KeyValueDurability.Persistent);
+        Assert.False(a.AsSpan().SequenceEqual(b));
+    }
+
+    [Fact]
+    public void OperationDigest_Scan_DiffersByReadTimestampNode()
+    {
+        byte[] a = OperationDigest.ForScan("bucket", new HLCTimestamp(1, 100, 5), KeyValueDurability.Persistent);
+        byte[] b = OperationDigest.ForScan("bucket", new HLCTimestamp(2, 100, 5), KeyValueDurability.Persistent);
+        Assert.False(a.AsSpan().SequenceEqual(b));
     }
 
     [Fact]

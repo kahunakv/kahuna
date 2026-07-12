@@ -838,6 +838,88 @@ public sealed class TestTransactionRegistrationRouting
     }
 
     /// <summary>
+    /// A snapshot read (a non-null read timestamp) is pinned to a past state and owns no live transactional
+    /// MVCC, so it must contribute no read dependency to the coordinator read set — otherwise commit-time
+    /// validation would probe a key the transaction never depended on at the current timestamp. A latest
+    /// read (a null/zero read timestamp) still records its observation.
+    /// </summary>
+    [Fact]
+    public async Task SnapshotRead_RecordsNoReadObservation_LatestReadDoes()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Optimistic }, ct);
+
+            // A snapshot read at a pinned (non-null) timestamp completes but records no read dependency.
+            await nodes[0].Kahuna.LocateAndTryGetValue(
+                handle.TransactionId, "snapKey", -1, handle.TransactionId, KeyValueDurability.Persistent,
+                ct, handle.CoordinatorKey, TransactionOperationId.NewRandom());
+
+            // A latest read (zero timestamp = read-your-writes / newest) records its observation.
+            await nodes[0].Kahuna.LocateAndTryGetValue(
+                handle.TransactionId, "latestKey", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent,
+                ct, handle.CoordinatorKey, TransactionOperationId.NewRandom());
+
+            TransactionWorkingSet? ws =
+                await nodes[0].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(ws);
+            Assert.DoesNotContain(ws!.ReadKeys, r => r.Key == "snapKey");
+            Assert.Contains(ws.ReadKeys, r => r.Key == "latestKey");
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// When a close cannot drain in time (an operation registered before the close never completes), the
+    /// close must return <c>MustRetry</c> with no partial snapshot <em>and leave the session closed</em>:
+    /// a new operation attempted after finalization began is rejected, never admitted by a reopened
+    /// session. A later close continues waiting on the same pre-close pending set.
+    /// </summary>
+    [Fact]
+    public async Task CloseTimeout_KeepsSessionClosed_RejectsNewRegistration()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            // A short transaction timeout bounds the close drain deadline.
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(
+                    new() { Locking = KeyValueTransactionLocking.Pessimistic, Timeout = 500 }, ct);
+
+            // Register an operation but never complete it, so the close drain cannot finish.
+            TransactionOperationId stuck = TransactionOperationId.NewRandom();
+            (OperationRegistrationOutcome stuckOutcome, _, _, _, _) =
+                await nodes[0].Kahuna.LocateAndBeginOperation(
+                    handle.CoordinatorKey, handle.TransactionId, stuck, OperationKind.Set, [1, 2, 3], ct);
+            Assert.Equal(OperationRegistrationOutcome.New, stuckOutcome);
+
+            // The close hits its drain deadline and asks the caller to retry — with no partial snapshot.
+            (KeyValueResponseType closeType, TransactionWorkingSet? ws) =
+                await nodes[0].Kahuna.LocateAndCloseTransaction(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.Equal(KeyValueResponseType.MustRetry, closeType);
+            Assert.Null(ws);
+
+            // The session stayed closed: a brand-new operation is rejected, not admitted by a reopened session.
+            TransactionOperationId fresh = TransactionOperationId.NewRandom();
+            (OperationRegistrationOutcome afterClose, _, _, _, _) =
+                await nodes[0].Kahuna.LocateAndBeginOperation(
+                    handle.CoordinatorKey, handle.TransactionId, fresh, OperationKind.Set, [4, 5, 6], ct);
+            Assert.Equal(OperationRegistrationOutcome.RejectedSessionClosed, afterClose);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
     /// A lock acquire that first completed with a definitive failure (the key is held by another
     /// transaction, so <c>AlreadyLocked</c>) must replay that exact failure on a same-operation-id retry —
     /// never hardcode <c>Locked</c>. Returning success would tell the caller it holds a lock it does not,

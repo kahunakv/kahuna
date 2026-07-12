@@ -1145,7 +1145,7 @@ internal sealed class KeyValuesManager : IDisposable
         OperationKind kind, HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string key,
         long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        byte[] digest = OperationDigest.ForRead(kind, key, revision, durability);
+        byte[] digest = OperationDigest.ForRead(kind, key, revision, readTimestamp, durability);
 
         (OperationRegistrationOutcome outcome, _, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, digest, cancellationToken);
@@ -1171,11 +1171,18 @@ internal sealed class KeyValuesManager : IDisposable
 
         bool exists = entry is not null && type is KeyValueResponseType.Get or KeyValueResponseType.Exists;
 
+        // A snapshot read is pinned to a past timestamp: it owns no live transactional MVCC entry and so
+        // contributes no read dependency to validate at commit. It still completes for finalize fencing and
+        // idempotent replay, but records no observation into the read set.
+        bool snapshotRead = !readTimestamp.IsNull();
+
         await LocateAndCompleteOperation(
             coordinatorKey, transactionId, operationId,
             new OperationCompletionPayload
             {
-                Read = new KeyValueTransactionReadKey { Key = key, Durability = durability, Exists = exists, Revision = exists ? entry!.Revision : -1 },
+                Read = snapshotRead
+                    ? null
+                    : new KeyValueTransactionReadKey { Key = key, Durability = durability, Exists = exists, Revision = exists ? entry!.Revision : -1 },
                 Durability = durability,
                 CachedType = type,
                 CachedRevision = exists ? entry!.Revision : 0,
@@ -2018,7 +2025,7 @@ internal sealed class KeyValuesManager : IDisposable
     {
         (OperationRegistrationOutcome outcome, _, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Scan,
-                OperationDigest.ForScan(prefixedKey, readTimestamp.L, readTimestamp.C, durability), cancellationToken);
+                OperationDigest.ForScan(prefixedKey, readTimestamp, durability), cancellationToken);
 
         switch (outcome)
         {
@@ -2039,8 +2046,10 @@ internal sealed class KeyValuesManager : IDisposable
         KeyValueGetByBucketResult result =
             await locator.LocateAndGetByBucket(transactionId, prefixedKey, readTimestamp, durability, cancellationToken);
 
+        // A snapshot scan is pinned to a past timestamp and owns no live transactional MVCC, so its items
+        // contribute no read dependencies; it still completes for finalize fencing and idempotent replay.
         List<KeyValueTransactionReadKey>? observations = null;
-        if (result.Type == KeyValueResponseType.Get && result.Items.Count > 0)
+        if (readTimestamp.IsNull() && result.Type == KeyValueResponseType.Get && result.Items.Count > 0)
         {
             observations = new(result.Items.Count);
             foreach ((string itemKey, ReadOnlyKeyValueEntry entry) in result.Items)

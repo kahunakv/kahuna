@@ -793,16 +793,20 @@ message GrpcRollbackTransactionResponse
 
 // ── Register-remote operation registration (inter-node) ─────────────────────────────────
 
+// Values mirror the server-side OperationKind exactly: the inter-node transport blind-casts the C# enum
+// integer onto this field, so these numbers ARE the wire meaning. Keep them in lockstep with OperationKind
+// and never renumber an existing member.
 enum GrpcOperationKind {
   GRPC_OP_KIND_SET = 0;
   GRPC_OP_KIND_DELETE = 1;
-  GRPC_OP_KIND_EXTEND = 2;
-  GRPC_OP_KIND_GET = 3;
-  GRPC_OP_KIND_EXISTS = 4;
-  GRPC_OP_KIND_SCAN = 5;
-  GRPC_OP_KIND_POINT_LOCK = 6;
-  GRPC_OP_KIND_PREFIX_LOCK = 7;
-  GRPC_OP_KIND_RANGE_LOCK = 8;
+  GRPC_OP_KIND_DELETE_MANY = 2;
+  GRPC_OP_KIND_EXTEND = 3;
+  GRPC_OP_KIND_GET = 4;
+  GRPC_OP_KIND_EXISTS = 5;
+  GRPC_OP_KIND_SCAN = 6;
+  GRPC_OP_KIND_POINT_LOCK = 7;
+  GRPC_OP_KIND_PREFIX_LOCK = 8;
+  GRPC_OP_KIND_RANGE_LOCK = 9;
 }
 
 enum GrpcOperationRegistrationOutcome {

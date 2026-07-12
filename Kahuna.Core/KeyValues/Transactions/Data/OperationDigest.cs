@@ -2,6 +2,7 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
+using Kommander.Time;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues.Transactions.Data;
@@ -129,25 +130,34 @@ internal static class OperationDigest
         return hash.GetHashAndReset();
     }
 
-    internal static byte[] ForScan(string prefixedKey, long readTimestampL, long readTimestampC, KeyValueDurability durability)
+    internal static byte[] ForScan(string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability)
     {
         using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         AppendTag(hash, OperationKind.Scan);
         AppendString(hash, prefixedKey);
-        AppendLong(hash, readTimestampL);
-        AppendLong(hash, readTimestampC);
+        AppendHlc(hash, readTimestamp);
         AppendInt(hash, (int)durability);
         return hash.GetHashAndReset();
     }
 
-    internal static byte[] ForRead(OperationKind kind, string key, long revision, KeyValueDurability durability)
+    internal static byte[] ForRead(OperationKind kind, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability)
     {
         using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         AppendTag(hash, kind);
         AppendString(hash, key);
         AppendLong(hash, revision);
+        AppendHlc(hash, readTimestamp);
         AppendInt(hash, (int)durability);
         return hash.GetHashAndReset();
+    }
+
+    /// <summary>Binds the complete hybrid logical clock — node, physical, counter — so two reads that differ
+    /// only in the snapshot they pin to are distinct declarations.</summary>
+    private static void AppendHlc(IncrementalHash hash, HLCTimestamp timestamp)
+    {
+        AppendInt(hash, timestamp.N);
+        AppendLong(hash, timestamp.L);
+        AppendLong(hash, timestamp.C);
     }
 
     private static void AppendBounds(IncrementalHash hash, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive)
