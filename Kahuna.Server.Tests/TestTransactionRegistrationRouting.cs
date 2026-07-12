@@ -481,6 +481,79 @@ public sealed class TestTransactionRegistrationRouting
         }
     }
 
+    /// <summary>
+    /// Pins the register-remote forward: a transaction-scoped operation entered on a node that is NOT
+    /// the coordinator-partition leader is dispatched over the inter-node transport to the coordinator,
+    /// which records its effect. The coordinator-partition leader for the same transaction handles the
+    /// registration locally with no transport hop. This proves the forward branch fires on the
+    /// coordinator≠entry path rather than every registration happening to be local.
+    /// </summary>
+    [Fact]
+    public async Task RegisterRemote_FromNonCoordinatorNode_ForwardsOverTransport_AndCoordinatorRecordsEffect()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (Node[] nodes, MemoryInterNodeCommmunication interNode) = await AssembleWithTransport();
+        try
+        {
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+
+            // Exactly one node leads the coordinator partition (Locate(coordinatorKey)); route a fresh
+            // registration through every node and classify each by whether it hopped the transport.
+            Node? coordinatorLeader = null;
+            Node? remoteEntry = null;
+            TransactionOperationId remoteOp = default;
+            byte[] digest = [1, 2, 3];
+
+            foreach (Node node in nodes)
+            {
+                int before = interNode.BeginOperationCallCount;
+                TransactionOperationId opId = TransactionOperationId.NewRandom();
+                (OperationRegistrationOutcome outcome, _, _, _) =
+                    await node.Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, opId, OperationKind.Set, digest, ct);
+                Assert.Equal(OperationRegistrationOutcome.New, outcome);
+
+                if (interNode.BeginOperationCallCount == before)
+                    coordinatorLeader = node;      // handled locally: this node leads the coordinator partition
+                else
+                {
+                    remoteEntry = node;            // forwarded inter-node: this node is not the leader
+                    remoteOp = opId;
+                }
+            }
+
+            // The forward branch and the local branch were both exercised.
+            Assert.NotNull(coordinatorLeader);
+            Assert.NotNull(remoteEntry);
+
+            // Completing the forwarded op from the same non-coordinator node hops the transport again,
+            // carrying the confirmed effect to the coordinator.
+            int beforeComplete = interNode.CompleteOperationCallCount;
+            await remoteEntry!.Kahuna.LocateAndCompleteOperation(
+                handle.CoordinatorKey, handle.TransactionId, remoteOp,
+                new OperationCompletionPayload
+                {
+                    ModifiedKey = "rk1",
+                    Durability = KeyValueDurability.Persistent,
+                    CachedType = KeyValueResponseType.Set,
+                    CachedRevision = 1,
+                    CachedTimestamp = new HLCTimestamp(1, 10, 0)
+                },
+                ct);
+            Assert.True(interNode.CompleteOperationCallCount > beforeComplete);
+
+            // The effect that arrived over the inter-node transport is present in the coordinator's set,
+            // observed via the coordinator-partition leader itself (a local read, no further hop).
+            TransactionWorkingSet? ws = await coordinatorLeader!.Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(ws);
+            Assert.Contains(ws!.ModifiedKeys, m => m.Key == "rk1");
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
     private static async Task<KeyValueResponseType> PrefixLockWithRetry(Func<Task<KeyValueResponseType>> op, CancellationToken ct)
     {
         long deadline = Environment.TickCount64 + 10_000;
@@ -631,6 +704,12 @@ public sealed class TestTransactionRegistrationRouting
 
     private async Task<Node[]> Assemble()
     {
+        (Node[] nodes, _) = await AssembleWithTransport();
+        return nodes;
+    }
+
+    private async Task<(Node[], MemoryInterNodeCommmunication)> AssembleWithTransport()
+    {
         MemoryInterNodeCommmunication interNode = new();
         InMemoryCommunication comm = new();
 
@@ -650,7 +729,7 @@ public sealed class TestTransactionRegistrationRouting
         for (int partition = 1; partition <= 2; partition++)
             await WaitForAnyLeader(partition, r1, r2, r3);
 
-        return [new(r1, k1), new(r2, k2), new(r3, k3)];
+        return ([new(r1, k1), new(r2, k2), new(r3, k3)], interNode);
     }
 
     private static async Task WaitForAnyLeader(int partition, params RaftManager[] rafts)

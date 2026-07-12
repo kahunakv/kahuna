@@ -1474,7 +1474,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
         keyValues.ForceSplitAtKeyAsync(keySpace, splitKey, duringQuiesce, ct);
 
     /// <summary>
-    /// Test seam (F5): <paramref name="beforeQuery"/> is called before each descriptor's paged query
+    /// Test seam for the multi-range bucket fan-out: <paramref name="beforeQuery"/> is called before each descriptor's paged query
     /// starts; <paramref name="afterDescriptor"/> is called after each descriptor's pages are fully
     /// collected. Used by <c>Bucket_FanOut_IsParallelAndLeaderCoalesced</c> (gate-based concurrency
     /// proof) and <c>Bucket_SplitMidScan_NoDupNoMissing</c> (mid-fan-out split injection).

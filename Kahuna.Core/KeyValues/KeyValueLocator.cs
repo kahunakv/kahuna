@@ -1529,11 +1529,11 @@ internal sealed class KeyValueLocator
     /// <summary>
     /// Locates the appropriate node for the specified key prefix and retrieves the corresponding key-value items.
     /// For unsplit spaces routes to the single partition leader. For split key-range spaces fans out across
-    /// all descriptors in parallel (F5), pages through each with <see cref="QueryDescriptorRange"/>, and
-    /// returns the concatenated result via parallel fan-out (F5).
+    /// all descriptors in parallel, pages through each with <see cref="QueryDescriptorRange"/>, and
+    /// returns the concatenated result.
     ///
     /// <para>
-    /// <b>Fan-out model (F5):</b> all descriptors are queried concurrently via <c>Task.WhenAll</c>,
+    /// <b>Fan-out model:</b> all descriptors are queried concurrently via <c>Task.WhenAll</c>,
     /// bounded by <c>MaxParallelBucketDescriptors = 8</c>. One <see cref="QueryDescriptorRange"/> task
     /// is issued per descriptor; the concurrency limit ensures the fan-out does not stampede the cluster
     /// with descriptors at the boundaries of that limit.
@@ -1595,7 +1595,7 @@ internal sealed class KeyValueLocator
             return await interNodeCommunication.GetByBucket(singleLeader, transactionId, prefixedKey, readTimestamp, durability, cancellationToken);
         }
 
-        // Multi-range path (F5 parallel): key-range space is split; fan out to all descriptors
+        // Multi-range path (parallel): key-range space is split; fan out to all descriptors
         // concurrently. Snapshot the map once — safe because orphan retention + MVCC means the source
         // partition still answers snapshot reads for stale entries after a cutover.
         string keySpace = KeySpaceRegistry.ExtractKeySpace(prefixedKey + "/");

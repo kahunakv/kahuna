@@ -245,7 +245,7 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
     // ── Bucket_FanOut_IsParallel ──────────────────────────────────────────────
 
     /// <summary>
-    /// Verifies F5 — the multi-range fan-out runs all descriptor queries in parallel, not
+    /// Verifies the multi-range fan-out runs all descriptor queries in parallel, not
     /// sequentially.
     ///
     /// <para>
@@ -394,7 +394,7 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
 
     /// <summary>
     /// Verifies that a split committed between two descriptor fan-out queries produces a complete,
-    /// duplicate-free result (F5 mid-scan safety).
+    /// duplicate-free result (mid-scan safety).
     ///
     /// <para>
     /// Setup: bucket split into 2 descriptors (D0, D1). After D0's pages are collected, a second
@@ -404,7 +404,7 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
     /// </para>
     ///
     /// <para>
-    /// <b>Timing note.</b> Under the F5 parallel fan-out, D0 and D1 query concurrently. The
+    /// <b>Timing note.</b> Under the parallel fan-out, D0 and D1 query concurrently. The
     /// <c>afterDescriptor(0)</c> hook fires after D0's pages are fully collected, but D1's query
     /// may already be complete by that point — so the second split is not guaranteed to land
     /// <em>during</em> D1's read window. The test therefore validates snapshot-stability and

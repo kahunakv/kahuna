@@ -16,9 +16,17 @@ namespace Kahuna.Server.Communication.Internode;
 public class MemoryInterNodeCommmunication : IInterNodeCommunication
 {
     private int getByRangeCallCount;
+    private int beginOperationCallCount;
+    private int completeOperationCallCount;
 
-    /// <summary>Number of <c>GetByRange</c> RPCs dispatched to a remote node. Used by F5 fan-out tests.</summary>
+    /// <summary>Number of <c>GetByRange</c> RPCs dispatched to a remote node. Used by multi-range fan-out tests.</summary>
     public int GetByRangeCallCount => Volatile.Read(ref getByRangeCallCount);
+
+    /// <summary>Number of register-remote <c>BeginOperation</c> RPCs dispatched to a remote coordinator node.</summary>
+    public int BeginOperationCallCount => Volatile.Read(ref beginOperationCallCount);
+
+    /// <summary>Number of register-remote <c>CompleteOperation</c> RPCs dispatched to a remote coordinator node.</summary>
+    public int CompleteOperationCallCount => Volatile.Read(ref completeOperationCallCount);
 
     /// <summary>
     /// Stores the mapping of node names to their respective `IKahuna` instances.
@@ -1007,7 +1015,10 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     public async Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp)> BeginOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            Interlocked.Increment(ref beginOperationCallCount);
             return await Task.FromResult(kahunaNode.BeginOperation(transactionId, operationId, kind, payloadDigest));
+        }
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -1016,6 +1027,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
         {
+            Interlocked.Increment(ref completeOperationCallCount);
             kahunaNode.CompleteOperation(transactionId, operationId, payload);
             await Task.CompletedTask;
             return;
