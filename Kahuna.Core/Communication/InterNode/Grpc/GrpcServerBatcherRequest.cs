@@ -89,6 +89,14 @@ internal sealed class GrpcServerBatcherRequest
 
     public GrpcGetSnapshotFloorRequest? GetSnapshotFloor { get; }
 
+    public GrpcBeginOperationRequest? BeginOperation { get; }
+
+    public GrpcCompleteOperationRequest? CompleteOperation { get; }
+
+    public GrpcGetTransactionWorkingSetRequest? GetTransactionWorkingSet { get; }
+
+    public GrpcCloseTransactionRequest? CloseTransaction { get; }
+
     public GrpcServerBatcherRequest(GrpcTryLockRequest tryLock)
     {
         TryLock = tryLock;
@@ -262,6 +270,26 @@ internal sealed class GrpcServerBatcherRequest
     public GrpcServerBatcherRequest(GrpcRollbackTransactionRequest rollbackTransaction)
     {
         RollbackTransaction = rollbackTransaction;
+    }
+
+    public GrpcServerBatcherRequest(GrpcBeginOperationRequest beginOperation)
+    {
+        BeginOperation = beginOperation;
+    }
+
+    public GrpcServerBatcherRequest(GrpcCompleteOperationRequest completeOperation)
+    {
+        CompleteOperation = completeOperation;
+    }
+
+    public GrpcServerBatcherRequest(GrpcGetTransactionWorkingSetRequest getTransactionWorkingSet)
+    {
+        GetTransactionWorkingSet = getTransactionWorkingSet;
+    }
+
+    public GrpcServerBatcherRequest(GrpcCloseTransactionRequest closeTransaction)
+    {
+        CloseTransaction = closeTransaction;
     }
 
     public GrpcServerBatcherRequest(GrpcEnsureKeyRangeSeededRequest ensureKeyRangeSeeded)

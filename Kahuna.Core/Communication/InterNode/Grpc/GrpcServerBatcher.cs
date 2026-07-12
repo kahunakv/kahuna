@@ -354,6 +354,42 @@ internal sealed class GrpcServerBatcher
         return TryProcessQueue(grpcBatcherItem, promise);
     }
 
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcBeginOperationRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcCompleteOperationRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcGetTransactionWorkingSetRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcCloseTransactionRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
     public Task<GrpcServerBatcherResponse> Enqueue(GrpcEnsureKeyRangeSeededRequest message)
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -737,6 +773,26 @@ internal sealed class GrpcServerBatcher
             batchRequest.Type = GrpcServerBatchType.ServerTryRollbackTransaction;
             batchRequest.RollbackTransaction = itemRequest.RollbackTransaction;
         }
+        else if (itemRequest.BeginOperation is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerBeginOperation;
+            batchRequest.BeginOperation = itemRequest.BeginOperation;
+        }
+        else if (itemRequest.CompleteOperation is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerCompleteOperation;
+            batchRequest.CompleteOperation = itemRequest.CompleteOperation;
+        }
+        else if (itemRequest.GetTransactionWorkingSet is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerGetTransactionWorkingSet;
+            batchRequest.GetTransactionWorkingSet = itemRequest.GetTransactionWorkingSet;
+        }
+        else if (itemRequest.CloseTransaction is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerCloseTransaction;
+            batchRequest.CloseTransaction = itemRequest.CloseTransaction;
+        }
         else if (itemRequest.EnsureKeyRangeSeeded is not null)
         {
             batchRequest.Type = GrpcServerBatchType.ServerTryEnsureKeyRangeSeeded;
@@ -984,6 +1040,22 @@ internal sealed class GrpcServerBatcher
 
                     case GrpcServerBatchType.ServerTryRollbackTransaction:
                         item.Promise.TrySetResult(new(response.RollbackTransaction));
+                        break;
+
+                    case GrpcServerBatchType.ServerBeginOperation:
+                        item.Promise.TrySetResult(new(response.BeginOperation));
+                        break;
+
+                    case GrpcServerBatchType.ServerCompleteOperation:
+                        item.Promise.TrySetResult(new(response.CompleteOperation));
+                        break;
+
+                    case GrpcServerBatchType.ServerGetTransactionWorkingSet:
+                        item.Promise.TrySetResult(new(response.GetTransactionWorkingSet));
+                        break;
+
+                    case GrpcServerBatchType.ServerCloseTransaction:
+                        item.Promise.TrySetResult(new(response.CloseTransaction));
                         break;
 
                     case GrpcServerBatchType.ServerTryEnsureKeyRangeSeeded:

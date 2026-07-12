@@ -102,7 +102,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             request.ExpiresMs,
             (KeyValueDurability)request.Durability,
             context.CancellationToken,
-            request.RoutedGeneration
+            request.RoutedGeneration,
+            request.CoordinatorKey,
+            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
         );
 
         return new()
@@ -293,10 +295,12 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         
         (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTryExtendKeyValue(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            request.Key, 
+            request.Key,
             request.ExpiresMs,
-            (KeyValueDurability)request.Durability, 
-            context.CancellationToken
+            (KeyValueDurability)request.Durability,
+            context.CancellationToken,
+            request.CoordinatorKey,
+            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
         );
 
         return new()
@@ -339,9 +343,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         
         (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTryDeleteKeyValue(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            request.Key, 
-            (KeyValueDurability)request.Durability, 
-            context.CancellationToken
+            request.Key,
+            (KeyValueDurability)request.Durability,
+            context.CancellationToken,
+            request.CoordinatorKey,
+            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
         );
 
         return new()
@@ -393,7 +399,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             request.Revision,
             new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
             (KeyValueDurability)request.Durability,
-            context.CancellationToken
+            context.CancellationToken,
+            request.CoordinatorKey,
+            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
         );
         
         if (keyValueContext is not null)
@@ -473,7 +481,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             request.Revision,
             new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
             (KeyValueDurability)request.Durability,
-            context.CancellationToken
+            context.CancellationToken,
+            request.CoordinatorKey,
+            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
         );
         
         if (keyValueContext is not null)
@@ -1751,6 +1761,137 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         };
 
         return response;
+    }
+
+    /// <summary>
+    /// Inter-node landing point for a register-remote operation registration. This node leads the
+    /// coordinator partition (the caller routed here by coordinator key), so it registers against the
+    /// node-local session.
+    /// </summary>
+    internal Task<GrpcBeginOperationResponse> BeginOperationInternal(GrpcBeginOperationRequest request, ServerCallContext context)
+    {
+        HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
+        TransactionOperationId operationId = new(request.OperationIdHigh, request.OperationIdLow);
+        byte[]? digest = request.HasPayloadDigest ? request.PayloadDigest.ToByteArray() : null;
+
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp) =
+            keyValues.BeginOperation(transactionId, operationId, (OperationKind)request.Kind, digest);
+
+        GrpcBeginOperationResponse response = new()
+        {
+            Outcome = (GrpcOperationRegistrationOutcome)outcome,
+            CachedType = (GrpcKeyValueResponseType)cachedType,
+            CachedRevision = cachedRevision,
+            CachedTimestampNode = cachedTimestamp.N,
+            CachedTimestampPhysical = cachedTimestamp.L,
+            CachedTimestampCounter = cachedTimestamp.C
+        };
+
+        return Task.FromResult(response);
+    }
+
+    /// <summary>Inter-node landing point for a register-remote operation completion.</summary>
+    internal Task<GrpcCompleteOperationResponse> CompleteOperationInternal(GrpcCompleteOperationRequest request, ServerCallContext context)
+    {
+        HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
+        TransactionOperationId operationId = new(request.OperationIdHigh, request.OperationIdLow);
+
+        OperationCompletionPayload payload = new()
+        {
+            ModifiedKey = request.HasModifiedKey ? request.ModifiedKey : null,
+            AcquiredPointLock = request.HasAcquiredPointLock ? request.AcquiredPointLock : null,
+            ReleasedPointLock = request.HasReleasedPointLock ? request.ReleasedPointLock : null,
+            AcquiredPrefixLock = request.HasAcquiredPrefixLock ? request.AcquiredPrefixLock : null,
+            ReleasedPrefixLock = request.HasReleasedPrefixLock ? request.ReleasedPrefixLock : null,
+            AcquiredRangeLock = request.AcquiredRangeLock is null ? null : (ToRangeLockKey(request.AcquiredRangeLock), (RangeLockMode)request.AcquiredRangeLock.Mode),
+            ReleasedRangeLock = request.ReleasedRangeLock is null ? null : ToRangeLockKey(request.ReleasedRangeLock),
+            Read = request.Read is null ? null : ToReadKey(request.Read),
+            ReadObservations = request.ReadObservations.Count == 0 ? null : request.ReadObservations.Select(ToReadKey).ToList(),
+            Durability = (KeyValueDurability)request.Durability,
+            CachedType = (KeyValueResponseType)request.CachedType,
+            CachedRevision = request.CachedRevision,
+            CachedTimestamp = new(request.CachedTimestampNode, request.CachedTimestampPhysical, request.CachedTimestampCounter)
+        };
+
+        keyValues.CompleteOperation(transactionId, operationId, payload);
+
+        return Task.FromResult(new GrpcCompleteOperationResponse());
+    }
+
+    /// <summary>Inter-node landing point for a working-set query against the node-local session.</summary>
+    internal Task<GrpcGetTransactionWorkingSetResponse> GetTransactionWorkingSetInternal(GrpcGetTransactionWorkingSetRequest request, ServerCallContext context)
+    {
+        HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
+
+        TransactionWorkingSet? workingSet = keyValues.GetTransactionWorkingSet(transactionId);
+
+        GrpcGetTransactionWorkingSetResponse response = new()
+        {
+            Found = workingSet is not null,
+            WorkingSet = workingSet is null ? new GrpcTransactionWorkingSet() : ToGrpcWorkingSet(workingSet)
+        };
+
+        return Task.FromResult(response);
+    }
+
+    /// <summary>Inter-node landing point for a close-and-snapshot against the node-local session.</summary>
+    internal async Task<GrpcCloseTransactionResponse> CloseTransactionInternal(GrpcCloseTransactionRequest request, ServerCallContext context)
+    {
+        HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
+
+        (KeyValueResponseType type, TransactionWorkingSet? workingSet) = await keyValues.CloseTransaction(transactionId, context.CancellationToken);
+
+        GrpcCloseTransactionResponse response = new()
+        {
+            Type = (GrpcKeyValueResponseType)type,
+            HasWorkingSet = workingSet is not null,
+            WorkingSet = workingSet is null ? new GrpcTransactionWorkingSet() : ToGrpcWorkingSet(workingSet)
+        };
+
+        return response;
+    }
+
+    private static RangeLockKey ToRangeLockKey(GrpcTransactionRangeLock g) =>
+        new(g.Prefix, g.HasStartKey ? g.StartKey : null, g.StartInclusive, g.HasEndKey ? g.EndKey : null, g.EndInclusive, (KeyValueDurability)g.Durability);
+
+    private static KeyValueTransactionReadKey ToReadKey(GrpcTransactionReadKey g) =>
+        new() { Key = g.Key, Durability = (KeyValueDurability)g.Durability, Exists = g.Exists, Revision = g.Revision };
+
+    private static GrpcTransactionWorkingSet ToGrpcWorkingSet(TransactionWorkingSet ws)
+    {
+        GrpcTransactionWorkingSet result = new()
+        {
+            PendingOperationCount = ws.PendingOperationCount
+        };
+
+        foreach (KeyValueTransactionModifiedKey m in ws.ModifiedKeys)
+            result.ModifiedKeys.Add(new GrpcTransactionModifiedKey { Key = m.Key ?? "", Durability = (GrpcKeyValueDurability)m.Durability });
+
+        foreach (KeyValueTransactionModifiedKey m in ws.AcquiredLocks)
+            result.AcquiredLocks.Add(new GrpcTransactionModifiedKey { Key = m.Key ?? "", Durability = (GrpcKeyValueDurability)m.Durability });
+
+        foreach (KeyValueTransactionModifiedKey m in ws.AcquiredPrefixLocks)
+            result.AcquiredPrefixLocks.Add(new GrpcTransactionModifiedKey { Key = m.Key ?? "", Durability = (GrpcKeyValueDurability)m.Durability });
+
+        foreach (KeyValueTransactionRangeLock r in ws.AcquiredRangeLocks)
+        {
+            GrpcTransactionRangeLock grpcRange = new()
+            {
+                Prefix = r.Prefix ?? "",
+                StartInclusive = r.StartInclusive,
+                EndInclusive = r.EndInclusive,
+                Durability = (GrpcKeyValueDurability)r.Durability,
+                Mode = (GrpcRangeLockMode)r.Mode
+            };
+            if (r.StartKey is not null) grpcRange.StartKey = r.StartKey;
+            if (r.EndKey is not null) grpcRange.EndKey = r.EndKey;
+            result.AcquiredRangeLocks.Add(grpcRange);
+        }
+
+        foreach (KeyValueTransactionReadKey rk in ws.ReadKeys)
+            result.ReadKeys.Add(new GrpcTransactionReadKey { Key = rk.Key ?? "", Durability = (GrpcKeyValueDurability)rk.Durability, Exists = rk.Exists, Revision = rk.Revision });
+
+        return result;
     }
 
     private static IEnumerable<KeyValueTransactionModifiedKey> GetTransactionAcquiredOrModifiedKeys(RepeatedField<GrpcTransactionModifiedKey> requestModifiedKeys)

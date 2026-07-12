@@ -429,12 +429,16 @@ public class RestCommunication : IKahunaCommunication
         HLCTimestamp transactionId, 
         string key, 
         byte[]? value, 
-        int expiryTime, 
-        KeyValueFlags flags, 
+        int expiryTime,
+        KeyValueFlags flags,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
+        // The REST transport does not yet forward register-remote operation identity; coordinatorKey
+        // and operationId are accepted to satisfy the shared communication contract but are not sent.
         KahunaSetKeyValueRequest request = new()
         {
             TransactionId = transactionId,
@@ -587,7 +591,9 @@ public class RestCommunication : IKahunaCommunication
         byte[]? compareValue,
         int expiryTime,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
         KahunaSetKeyValueRequest request = new()
@@ -667,7 +673,9 @@ public class RestCommunication : IKahunaCommunication
         long compareRevision,
         int expiryTime,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
         KahunaSetKeyValueRequest request = new()
@@ -744,13 +752,15 @@ public class RestCommunication : IKahunaCommunication
         long revision,
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
         KahunaGetKeyValueRequest request = new()
         {
             TransactionId = transactionId,
-            Key = key, 
+            Key = key,
             Revision = revision,
             Durability = durability
         };
@@ -820,13 +830,15 @@ public class RestCommunication : IKahunaCommunication
         long revision,
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
         KahunaExistsKeyValueRequest request = new()
         {
             TransactionId = transactionId,
-            Key = key, 
+            Key = key,
             Revision = revision,
             Durability = durability
         };
@@ -883,11 +895,13 @@ public class RestCommunication : IKahunaCommunication
     /// Thrown when the deletion operation fails for a non-retryable reason.
     /// </exception>
     public async Task<(bool, long, int)> TryDeleteKeyValue(
-        string url, 
-        HLCTimestamp transactionId, 
-        string key, 
-        KeyValueDurability durability, 
-        CancellationToken cancellationToken
+        string url,
+        HLCTimestamp transactionId,
+        string key,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
         KahunaDeleteKeyValueRequest request = new()
@@ -949,12 +963,14 @@ public class RestCommunication : IKahunaCommunication
     /// Thrown when the operation fails permanently and cannot be retried.
     /// </exception>
     public async Task<(bool, long, int)> TryExtendKeyValue(
-        string url, 
-        HLCTimestamp transactionId, 
-        string key, 
-        int expiresMs, 
-        KeyValueDurability durability, 
-        CancellationToken cancellationToken
+        string url,
+        HLCTimestamp transactionId,
+        string key,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
         KahunaExtendKeyValueRequest request = new()

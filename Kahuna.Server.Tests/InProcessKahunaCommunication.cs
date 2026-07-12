@@ -23,10 +23,11 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
 
     public async Task<(bool, byte[]?, long, HLCTimestamp, int)> TryGetKeyValue(
         string url, HLCTimestamp transactionId, string key, long revision,
-        HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+        HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken,
+        string coordinatorKey = "", TransactionOperationId operationId = default)
     {
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) =
-            await kahuna.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
+            await kahuna.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId);
 
         if (type == KeyValueResponseType.Get && entry is not null)
             return (true, entry.Value, entry.Revision, entry.LastModified, 0);
@@ -36,10 +37,11 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
 
     public async Task<(bool, long, int)> TrySetKeyValue(
         string url, HLCTimestamp transactionId, string key, byte[]? value, int expiryTime,
-        KeyValueFlags flags, KeyValueDurability durability, CancellationToken cancellationToken)
+        KeyValueFlags flags, KeyValueDurability durability, CancellationToken cancellationToken,
+        string coordinatorKey = "", TransactionOperationId operationId = default)
     {
         (KeyValueResponseType type, long revision, _) =
-            await kahuna.LocateAndTrySetKeyValue(transactionId, key, value, null, -1, flags, expiryTime, durability, cancellationToken);
+            await kahuna.LocateAndTrySetKeyValue(transactionId, key, value, null, -1, flags, expiryTime, durability, cancellationToken, 0, coordinatorKey, operationId);
 
         return (type == KeyValueResponseType.Set, revision, 0);
     }
@@ -136,22 +138,28 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
     public Task<KahunaLockInfo?> GetLock(string url, string resource, LockDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
     public Task<(List<KahunaSetKeyValueResponseItem>, int)> TrySetManyKeyValues(string url, IEnumerable<KahunaSetKeyValueRequestItem> requestItems, CancellationToken cancellationToken) => throw new NotImplementedException();
     public Task<(List<KahunaDeleteKeyValueResponseItem>, int)> TryDeleteManyKeyValues(string url, IEnumerable<KahunaDeleteKeyValueRequestItem> requestItems, CancellationToken cancellationToken) => throw new NotImplementedException();
-    public Task<(bool, long, int)> TryCompareValueAndSetKeyValue(string url, HLCTimestamp transactionId, string key, byte[]? value, byte[]? compareValue, int expiryTime, KeyValueDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
-    public Task<(bool, long, int)> TryCompareRevisionAndSetKeyValue(string url, HLCTimestamp transactionId, string key, byte[]? value, long compareRevision, int expiryTime, KeyValueDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
     public async Task<(bool, long, int)> TryExistsKeyValue(
         string url, HLCTimestamp transactionId, string key, long revision,
-        HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+        HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken,
+        string coordinatorKey = "", TransactionOperationId operationId = default)
     {
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) =
-            await kahuna.LocateAndTryExistsValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
+            await kahuna.LocateAndTryExistsValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId);
         return type == KeyValueResponseType.Exists
             ? (true, entry?.Revision ?? 0, 0)
             : (false, 0, 0);
     }
-    public Task<(bool, long, int)> TryDeleteKeyValue(string url, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
-    public Task<(bool, long, int)> TryExtendKeyValue(string url, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
+    public Task<(bool, long, int)> TryCompareValueAndSetKeyValue(string url, HLCTimestamp transactionId, string key, byte[]? value, byte[]? compareValue, int expiryTime, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default) => throw new NotImplementedException();
+    public Task<(bool, long, int)> TryCompareRevisionAndSetKeyValue(string url, HLCTimestamp transactionId, string key, byte[]? value, long compareRevision, int expiryTime, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default) => throw new NotImplementedException();
+    public Task<(bool, long, int)> TryDeleteKeyValue(string url, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default) => throw new NotImplementedException();
+    public Task<(bool, long, int)> TryExtendKeyValue(string url, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default) => throw new NotImplementedException();
     public Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransactionScript(string url, byte[] script, string? hash, List<KeyValueParameter>? parameters, CancellationToken cancellationToken) => throw new NotImplementedException();
-    public Task<bool> TryAcquireExclusiveKeyValueLock(string url, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
+    public async Task<bool> TryAcquireExclusiveKeyValueLock(string url, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        (KeyValueResponseType result, _, _, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
+            transactionId, key, expiresMs, durability, cancellationToken);
+        return result == KeyValueResponseType.Locked;
+    }
     public Task<bool> TryAcquireExclusivePrefixKeyValueLock(string url, HLCTimestamp transactionId, string prefixKey, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
     public Task TryReleaseExclusivePrefixKeyValueLock(string url, HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
     public async Task<bool> TryAcquireRangeKeyValueLock(

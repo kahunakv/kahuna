@@ -273,7 +273,9 @@ public class KahunaTransactionSession : IAsyncDisposable
             expiryTime,
             flags,
             durability,
-            cancellationToken
+            cancellationToken,
+            CoordinatorKey,
+            TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
 
         if (success)
@@ -310,14 +312,16 @@ public class KahunaTransactionSession : IAsyncDisposable
         byte[] valueBytes = Encoding.UTF8.GetBytes(value);
         
         (bool success, long revision, int timeElapsedMs) = await Client.Communication.TrySetKeyValue(
-            Url, 
+            Url,
             TransactionId,
-            key, 
-            valueBytes, 
-            expiryTime, 
-            flags, 
-            durability, 
-            cancellationToken
+            key,
+            valueBytes,
+            expiryTime,
+            flags,
+            durability,
+            cancellationToken,
+            CoordinatorKey,
+            TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
         
         if (success)
@@ -355,14 +359,16 @@ public class KahunaTransactionSession : IAsyncDisposable
         await AcquireExclusiveKeyValueLock(key, durability, cancellationToken);
                        
         (bool success, long revision, int timeElapsedMs) = await Client.Communication.TrySetKeyValue(
-            Url, 
+            Url,
             TransactionId,
-            key, 
-            value, 
-            (int)expiry.TotalMilliseconds, 
-            flags, 
-            durability, 
-            cancellationToken
+            key,
+            value,
+            (int)expiry.TotalMilliseconds,
+            flags,
+            durability,
+            cancellationToken,
+            CoordinatorKey,
+            TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
         
         if (success)
@@ -406,12 +412,14 @@ public class KahunaTransactionSession : IAsyncDisposable
         (bool success, long revision, int timeElapsedMs) = await Client.Communication.TryCompareValueAndSetKeyValue(
             Url, 
             TransactionId,
-            key, 
-            value, 
-            compareValue, 
-            expiryTime, 
-            durability, 
-            cancellationToken
+            key,
+            value,
+            compareValue,
+            expiryTime,
+            durability,
+            cancellationToken,
+            CoordinatorKey,
+            TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
         
         if (success)
@@ -458,12 +466,14 @@ public class KahunaTransactionSession : IAsyncDisposable
         (bool success, long revision, int timeElapsedMs) = await Client.Communication.TryCompareValueAndSetKeyValue(
             Url, 
             TransactionId,
-            key, 
-            valueBytes, 
-            Encoding.UTF8.GetBytes(compareValue), 
-            expiryTime, 
+            key,
+            valueBytes,
+            Encoding.UTF8.GetBytes(compareValue),
+            expiryTime,
             durability,
-            cancellationToken
+            cancellationToken,
+            CoordinatorKey,
+            TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
         
         if (success)
@@ -503,12 +513,14 @@ public class KahunaTransactionSession : IAsyncDisposable
         (bool success, long revision, int timeElapsedMs) = await Client.Communication.TryCompareRevisionAndSetKeyValue(
             Url, 
             TransactionId,
-            key, 
-            value, 
-            compareRevision, 
-            expiryTime, 
+            key,
+            value,
+            compareRevision,
+            expiryTime,
             durability,
-            cancellationToken
+            cancellationToken,
+            CoordinatorKey,
+            TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
         
         if (success)
@@ -550,12 +562,14 @@ public class KahunaTransactionSession : IAsyncDisposable
         (bool success, long revision, int timeElapsedMs) = await Client.Communication.TryCompareRevisionAndSetKeyValue(
             Url,
             TransactionId,
-            key, 
-            valueBytes, 
-            compareRevision, 
-            expiryTime, 
+            key,
+            valueBytes,
+            compareRevision,
+            expiryTime,
             durability,
-            cancellationToken
+            cancellationToken,
+            CoordinatorKey,
+            TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
         
         if (success)
@@ -589,7 +603,9 @@ public class KahunaTransactionSession : IAsyncDisposable
             -1,
             HLCTimestamp.Zero,
             durability,
-            cancellationToken
+            cancellationToken,
+            CoordinatorKey,
+            TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
 
         RecordReadKey(key, durability, success, success ? revision : -1);
@@ -619,7 +635,9 @@ public class KahunaTransactionSession : IAsyncDisposable
             -1,
             HLCTimestamp.Zero,
             durability,
-            cancellationToken
+            cancellationToken,
+            CoordinatorKey,
+            TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
         
         RecordReadKey(key, durability, success, success ? revision : -1);
@@ -650,10 +668,12 @@ public class KahunaTransactionSession : IAsyncDisposable
         (bool success, long revision, int timeElapsedMs) = await Client.Communication.TryExtendKeyValue(
             Url, 
             TransactionId,
-            key, 
-            expiresMs, 
-            durability, 
-            cancellationToken
+            key,
+            expiresMs,
+            durability,
+            cancellationToken,
+            CoordinatorKey,
+            TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
         
         if (success)
@@ -688,10 +708,12 @@ public class KahunaTransactionSession : IAsyncDisposable
         (bool success, long revision, int timeElapsedMs) = await Client.Communication.TryExtendKeyValue(
             Url, 
             TransactionId,
-            key, 
-            (int)expiresMs.TotalMilliseconds, 
-            durability, 
-            cancellationToken
+            key,
+            (int)expiresMs.TotalMilliseconds,
+            durability,
+            cancellationToken,
+            CoordinatorKey,
+            TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
         
         if (success)
@@ -726,7 +748,9 @@ public class KahunaTransactionSession : IAsyncDisposable
             TransactionId,
             key,
             durability,
-            cancellationToken
+            cancellationToken,
+            CoordinatorKey,
+            TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
         
         if (success)

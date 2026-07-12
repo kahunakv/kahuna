@@ -1467,29 +1467,165 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         return (KeyValueResponseType)remoteResponse.Type;
     }
     
-    public Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp)> BeginOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken)
+    public async Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp)> BeginOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken)
     {
-        // Cross-node operation registration is not yet carried over the gRPC transport; the operation
-        // identity fields are not on the gRPC request/response messages. This path is unreachable until
-        // the external gRPC operation-id plumbing lands (the registration is only invoked once an
-        // operation id is supplied). Fail loudly rather than silently skip the coordinator guard.
-        throw new NotSupportedException("Operation registration over the gRPC inter-node transport is not implemented yet.");
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcBeginOperationRequest request = new()
+        {
+            CoordinatorKey = coordinatorKey,
+            TransactionIdNode = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low,
+            Kind = (GrpcOperationKind)kind
+        };
+
+        if (payloadDigest is not null)
+            request.PayloadDigest = ByteString.CopyFrom(payloadDigest);
+
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcBeginOperationResponse remoteResponse = response.BeginOperation!;
+
+        HLCTimestamp cachedTimestamp = new(remoteResponse.CachedTimestampNode, remoteResponse.CachedTimestampPhysical, remoteResponse.CachedTimestampCounter);
+
+        return (
+            (OperationRegistrationOutcome)remoteResponse.Outcome,
+            (KeyValueResponseType)remoteResponse.CachedType,
+            remoteResponse.CachedRevision,
+            cachedTimestamp
+        );
     }
 
-    public Task CompleteOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken)
+    public async Task CompleteOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken)
     {
-        throw new NotSupportedException("Operation completion over the gRPC inter-node transport is not implemented yet.");
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcCompleteOperationRequest request = new()
+        {
+            CoordinatorKey = coordinatorKey,
+            TransactionIdNode = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low,
+            Durability = (GrpcKeyValueDurability)payload.Durability,
+            CachedType = (GrpcKeyValueResponseType)payload.CachedType,
+            CachedRevision = payload.CachedRevision,
+            CachedTimestampNode = payload.CachedTimestamp.N,
+            CachedTimestampPhysical = payload.CachedTimestamp.L,
+            CachedTimestampCounter = payload.CachedTimestamp.C
+        };
+
+        if (payload.ModifiedKey is not null) request.ModifiedKey = payload.ModifiedKey;
+        if (payload.AcquiredPointLock is not null) request.AcquiredPointLock = payload.AcquiredPointLock;
+        if (payload.ReleasedPointLock is not null) request.ReleasedPointLock = payload.ReleasedPointLock;
+        if (payload.AcquiredPrefixLock is not null) request.AcquiredPrefixLock = payload.AcquiredPrefixLock;
+        if (payload.ReleasedPrefixLock is not null) request.ReleasedPrefixLock = payload.ReleasedPrefixLock;
+        if (payload.AcquiredRangeLock is { } acquiredRange) request.AcquiredRangeLock = ToGrpcRangeLock(acquiredRange.Range, acquiredRange.Mode);
+        if (payload.ReleasedRangeLock is { } releasedRange) request.ReleasedRangeLock = ToGrpcRangeLock(releasedRange, RangeLockMode.Exclusive);
+        if (payload.Read is not null) request.Read = ToGrpcReadKey(payload.Read);
+        if (payload.ReadObservations is not null)
+            request.ReadObservations.AddRange(payload.ReadObservations.Select(ToGrpcReadKey));
+
+        await batcher.Enqueue(request);
     }
 
-    public Task<TransactionWorkingSet?> GetTransactionWorkingSet(string node, string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken)
+    public async Task<TransactionWorkingSet?> GetTransactionWorkingSet(string node, string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken)
     {
-        throw new NotSupportedException("Working-set query over the gRPC inter-node transport is not implemented yet.");
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcGetTransactionWorkingSetRequest request = new()
+        {
+            CoordinatorKey = coordinatorKey,
+            TransactionIdNode = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C
+        };
+
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcGetTransactionWorkingSetResponse remoteResponse = response.GetTransactionWorkingSet!;
+
+        return remoteResponse.Found ? FromGrpcWorkingSet(remoteResponse.WorkingSet) : null;
     }
 
-    public Task<(KeyValueResponseType, TransactionWorkingSet?)> CloseTransaction(string node, string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken)
+    public async Task<(KeyValueResponseType, TransactionWorkingSet?)> CloseTransaction(string node, string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken)
     {
-        throw new NotSupportedException("Close-and-snapshot over the gRPC inter-node transport is not implemented yet.");
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcCloseTransactionRequest request = new()
+        {
+            CoordinatorKey = coordinatorKey,
+            TransactionIdNode = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C
+        };
+
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcCloseTransactionResponse remoteResponse = response.CloseTransaction!;
+
+        return (
+            (KeyValueResponseType)remoteResponse.Type,
+            remoteResponse.HasWorkingSet ? FromGrpcWorkingSet(remoteResponse.WorkingSet) : null
+        );
     }
+
+    private static GrpcTransactionRangeLock ToGrpcRangeLock(RangeLockKey range, RangeLockMode mode)
+    {
+        GrpcTransactionRangeLock grpc = new()
+        {
+            Prefix = range.Prefix,
+            StartInclusive = range.StartInclusive,
+            EndInclusive = range.EndInclusive,
+            Durability = (GrpcKeyValueDurability)range.Durability,
+            Mode = (GrpcRangeLockMode)mode
+        };
+
+        if (range.StartKey is not null) grpc.StartKey = range.StartKey;
+        if (range.EndKey is not null) grpc.EndKey = range.EndKey;
+
+        return grpc;
+    }
+
+    private static GrpcTransactionReadKey ToGrpcReadKey(KeyValueTransactionReadKey read) => new()
+    {
+        Key = read.Key ?? "",
+        Durability = (GrpcKeyValueDurability)read.Durability,
+        Exists = read.Exists,
+        Revision = read.Revision
+    };
+
+    private static TransactionWorkingSet FromGrpcWorkingSet(GrpcTransactionWorkingSet grpc)
+    {
+        return new()
+        {
+            ModifiedKeys = grpc.ModifiedKeys.Select(FromGrpcModifiedKey).ToList(),
+            AcquiredLocks = grpc.AcquiredLocks.Select(FromGrpcModifiedKey).ToList(),
+            AcquiredPrefixLocks = grpc.AcquiredPrefixLocks.Select(FromGrpcModifiedKey).ToList(),
+            AcquiredRangeLocks = grpc.AcquiredRangeLocks.Select(FromGrpcRangeLock).ToList(),
+            ReadKeys = grpc.ReadKeys.Select(FromGrpcReadKey).ToList(),
+            PendingOperationCount = grpc.PendingOperationCount
+        };
+    }
+
+    private static KeyValueTransactionModifiedKey FromGrpcModifiedKey(GrpcTransactionModifiedKey g) =>
+        new() { Key = g.Key, Durability = (KeyValueDurability)g.Durability };
+
+    private static KeyValueTransactionReadKey FromGrpcReadKey(GrpcTransactionReadKey g) =>
+        new() { Key = g.Key, Durability = (KeyValueDurability)g.Durability, Exists = g.Exists, Revision = g.Revision };
+
+    private static KeyValueTransactionRangeLock FromGrpcRangeLock(GrpcTransactionRangeLock g) =>
+        new()
+        {
+            Prefix = g.Prefix,
+            StartKey = g.HasStartKey ? g.StartKey : null,
+            StartInclusive = g.StartInclusive,
+            EndKey = g.HasEndKey ? g.EndKey : null,
+            EndInclusive = g.EndInclusive,
+            Durability = (KeyValueDurability)g.Durability,
+            Mode = (RangeLockMode)g.Mode
+        };
 
     private static IEnumerable<GrpcTransactionModifiedKey> GetArquiredOrModifiedItems(List<KeyValueTransactionModifiedKey> items)
     {

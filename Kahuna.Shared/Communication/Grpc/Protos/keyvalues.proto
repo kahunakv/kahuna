@@ -54,6 +54,9 @@ message GrpcTrySetKeyValueRequest {
   int32 ExpiresMs = 9;
   GrpcKeyValueDurability Durability = 10;
   int64 RoutedGeneration = 11;
+  string CoordinatorKey = 12;
+  uint64 OperationIdHigh = 13;
+  uint64 OperationIdLow = 14;
 }
 
 message GrpcTrySetKeyValueResponse {
@@ -135,6 +138,9 @@ message GrpcTryExtendKeyValueRequest {
   string Key = 4;
   int32 ExpiresMs = 5;
   GrpcKeyValueDurability Durability = 6;
+  string CoordinatorKey = 7;
+  uint64 OperationIdHigh = 8;
+  uint64 OperationIdLow = 9;
 }
 
 message GrpcTryExtendKeyValueResponse {
@@ -153,6 +159,9 @@ message GrpcTryDeleteKeyValueRequest {
   uint32 TransactionIdCounter = 3;
   string Key = 4;
   GrpcKeyValueDurability Durability = 5;
+  string CoordinatorKey = 6;
+  uint64 OperationIdHigh = 7;
+  uint64 OperationIdLow = 8;
 }
 
 message GrpcTryDeleteKeyValueResponse {
@@ -175,6 +184,9 @@ message GrpcTryGetKeyValueRequest {
   int32 ReadTimestampNode = 7;
   int64 ReadTimestampPhysical = 8;
   uint32 ReadTimestampCounter = 9;
+  string CoordinatorKey = 10;
+  uint64 OperationIdHigh = 11;
+  uint64 OperationIdLow = 12;
 }
 
 message GrpcTryGetKeyValueResponse {
@@ -205,6 +217,9 @@ message GrpcTryExistsKeyValueRequest {
   int32 ReadTimestampNode = 7;
   int64 ReadTimestampPhysical = 8;
   uint32 ReadTimestampCounter = 9;
+  string CoordinatorKey = 10;
+  uint64 OperationIdHigh = 11;
+  uint64 OperationIdLow = 12;
 }
 
 message GrpcTryExistsKeyValueResponse {
@@ -762,7 +777,135 @@ message GrpcCommitTransactionResponse
 message GrpcRollbackTransactionResponse
 {
   optional string ServedFrom = 1;
-  GrpcKeyValueResponseType Type = 2;  
+  GrpcKeyValueResponseType Type = 2;
+}
+
+// ── Register-remote operation registration (inter-node) ─────────────────────────────────
+
+enum GrpcOperationKind {
+  GRPC_OP_KIND_SET = 0;
+  GRPC_OP_KIND_DELETE = 1;
+  GRPC_OP_KIND_EXTEND = 2;
+  GRPC_OP_KIND_GET = 3;
+  GRPC_OP_KIND_EXISTS = 4;
+  GRPC_OP_KIND_SCAN = 5;
+  GRPC_OP_KIND_POINT_LOCK = 6;
+  GRPC_OP_KIND_PREFIX_LOCK = 7;
+  GRPC_OP_KIND_RANGE_LOCK = 8;
+}
+
+enum GrpcOperationRegistrationOutcome {
+  GRPC_OP_OUTCOME_NEW = 0;
+  GRPC_OP_OUTCOME_ALREADY_PENDING = 1;
+  GRPC_OP_OUTCOME_ALREADY_COMPLETED = 2;
+  GRPC_OP_OUTCOME_REJECTED_SESSION_CLOSED = 3;
+  GRPC_OP_OUTCOME_REJECTED_DUPLICATE = 4;
+  GRPC_OP_OUTCOME_REJECTED_CAPACITY = 5;
+}
+
+message GrpcTransactionRangeLock
+{
+  string Prefix = 1;
+  optional string StartKey = 2;
+  bool StartInclusive = 3;
+  optional string EndKey = 4;
+  bool EndInclusive = 5;
+  GrpcKeyValueDurability Durability = 6;
+  GrpcRangeLockMode Mode = 7;
+}
+
+message GrpcTransactionWorkingSet
+{
+  repeated GrpcTransactionModifiedKey ModifiedKeys = 1;
+  repeated GrpcTransactionModifiedKey AcquiredLocks = 2;
+  repeated GrpcTransactionModifiedKey AcquiredPrefixLocks = 3;
+  repeated GrpcTransactionRangeLock AcquiredRangeLocks = 4;
+  repeated GrpcTransactionReadKey ReadKeys = 5;
+  int32 PendingOperationCount = 6;
+}
+
+message GrpcBeginOperationRequest
+{
+  string CoordinatorKey = 1;
+  int32 TransactionIdNode = 2;
+  int64 TransactionIdPhysical = 3;
+  uint32 TransactionIdCounter = 4;
+  uint64 OperationIdHigh = 5;
+  uint64 OperationIdLow = 6;
+  GrpcOperationKind Kind = 7;
+  optional bytes PayloadDigest = 8;
+}
+
+message GrpcBeginOperationResponse
+{
+  optional string ServedFrom = 1;
+  GrpcOperationRegistrationOutcome Outcome = 2;
+  GrpcKeyValueResponseType CachedType = 3;
+  int64 CachedRevision = 4;
+  int32 CachedTimestampNode = 5;
+  int64 CachedTimestampPhysical = 6;
+  uint32 CachedTimestampCounter = 7;
+}
+
+message GrpcCompleteOperationRequest
+{
+  string CoordinatorKey = 1;
+  int32 TransactionIdNode = 2;
+  int64 TransactionIdPhysical = 3;
+  uint32 TransactionIdCounter = 4;
+  uint64 OperationIdHigh = 5;
+  uint64 OperationIdLow = 6;
+  optional string ModifiedKey = 7;
+  optional string AcquiredPointLock = 8;
+  optional string ReleasedPointLock = 9;
+  optional string AcquiredPrefixLock = 10;
+  optional string ReleasedPrefixLock = 11;
+  optional GrpcTransactionRangeLock AcquiredRangeLock = 12;
+  optional GrpcTransactionRangeLock ReleasedRangeLock = 13;
+  optional GrpcTransactionReadKey Read = 14;
+  repeated GrpcTransactionReadKey ReadObservations = 15;
+  GrpcKeyValueDurability Durability = 16;
+  GrpcKeyValueResponseType CachedType = 17;
+  int64 CachedRevision = 18;
+  int32 CachedTimestampNode = 19;
+  int64 CachedTimestampPhysical = 20;
+  uint32 CachedTimestampCounter = 21;
+}
+
+message GrpcCompleteOperationResponse
+{
+  optional string ServedFrom = 1;
+}
+
+message GrpcGetTransactionWorkingSetRequest
+{
+  string CoordinatorKey = 1;
+  int32 TransactionIdNode = 2;
+  int64 TransactionIdPhysical = 3;
+  uint32 TransactionIdCounter = 4;
+}
+
+message GrpcGetTransactionWorkingSetResponse
+{
+  optional string ServedFrom = 1;
+  bool Found = 2;
+  GrpcTransactionWorkingSet WorkingSet = 3;
+}
+
+message GrpcCloseTransactionRequest
+{
+  string CoordinatorKey = 1;
+  int32 TransactionIdNode = 2;
+  int64 TransactionIdPhysical = 3;
+  uint32 TransactionIdCounter = 4;
+}
+
+message GrpcCloseTransactionResponse
+{
+  optional string ServedFrom = 1;
+  GrpcKeyValueResponseType Type = 2;
+  bool HasWorkingSet = 3;
+  GrpcTransactionWorkingSet WorkingSet = 4;
 }
 
 message GrpcKeyValueByPrefixItemResponse {
@@ -867,6 +1010,10 @@ message GrpcBatchServerKeyValueRequest {
     GrpcReleaseSnapshotHoldRequest ReleaseSnapshotHold = 40;
     GrpcGetSnapshotFloorRequest GetSnapshotFloor = 41;
     GrpcEnsureKeyRangeRemovedRequest EnsureKeyRangeRemoved = 42;
+    GrpcBeginOperationRequest BeginOperation = 43;
+    GrpcCompleteOperationRequest CompleteOperation = 44;
+    GrpcGetTransactionWorkingSetRequest GetTransactionWorkingSet = 45;
+    GrpcCloseTransactionRequest CloseTransaction = 46;
   }
 }
 
@@ -914,6 +1061,10 @@ message GrpcBatchServerKeyValueResponse
     GrpcReleaseSnapshotHoldResponse ReleaseSnapshotHold = 39;
     GrpcGetSnapshotFloorResponse GetSnapshotFloor = 40;
     GrpcEnsureKeyRangeRemovedResponse EnsureKeyRangeRemoved = 41;
+    GrpcBeginOperationResponse BeginOperation = 42;
+    GrpcCompleteOperationResponse CompleteOperation = 43;
+    GrpcGetTransactionWorkingSetResponse GetTransactionWorkingSet = 44;
+    GrpcCloseTransactionResponse CloseTransaction = 45;
   }
 }
 
@@ -1031,6 +1182,10 @@ enum GrpcServerBatchType {
   SERVER_TRY_RELEASE_SNAPSHOT_HOLD = 38;
   SERVER_TRY_GET_SNAPSHOT_FLOOR = 39;
   SERVER_TRY_ENSURE_KEY_RANGE_REMOVED = 40;
+  SERVER_BEGIN_OPERATION = 41;
+  SERVER_COMPLETE_OPERATION = 42;
+  SERVER_GET_TRANSACTION_WORKING_SET = 43;
+  SERVER_CLOSE_TRANSACTION = 44;
 }
 
 enum GrpcRangeLockMode {

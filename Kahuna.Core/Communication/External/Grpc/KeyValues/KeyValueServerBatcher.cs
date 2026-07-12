@@ -340,6 +340,38 @@ internal sealed class KeyValueServerBatcher
                     }
                     break;
 
+                    case GrpcServerBatchType.ServerBeginOperation:
+                    {
+                        GrpcBeginOperationRequest? beginOperationRequest = request.BeginOperation;
+
+                        Track(BeginOperationDelayed(semaphore, request.RequestId, beginOperationRequest, responseStream, context));
+                    }
+                    break;
+
+                    case GrpcServerBatchType.ServerCompleteOperation:
+                    {
+                        GrpcCompleteOperationRequest? completeOperationRequest = request.CompleteOperation;
+
+                        Track(CompleteOperationDelayed(semaphore, request.RequestId, completeOperationRequest, responseStream, context));
+                    }
+                    break;
+
+                    case GrpcServerBatchType.ServerGetTransactionWorkingSet:
+                    {
+                        GrpcGetTransactionWorkingSetRequest? getWorkingSetRequest = request.GetTransactionWorkingSet;
+
+                        Track(GetTransactionWorkingSetDelayed(semaphore, request.RequestId, getWorkingSetRequest, responseStream, context));
+                    }
+                    break;
+
+                    case GrpcServerBatchType.ServerCloseTransaction:
+                    {
+                        GrpcCloseTransactionRequest? closeTransactionRequest = request.CloseTransaction;
+
+                        Track(CloseTransactionDelayed(semaphore, request.RequestId, closeTransactionRequest, responseStream, context));
+                    }
+                    break;
+
                     case GrpcServerBatchType.ServerTryAcquireSnapshotHold:
                     {
                         GrpcAcquireSnapshotHoldRequest? req = request.AcquireSnapshotHold;
@@ -1091,7 +1123,7 @@ internal sealed class KeyValueServerBatcher
     )
     {
         GrpcRollbackTransactionResponse rollbackTransactionResponse = await service.RollbackTransactionInternal(rollbackTransactionRequest, context);
-        
+
         GrpcBatchServerKeyValueResponse response = new()
         {
             Type = GrpcServerBatchType.ServerTryRollbackTransaction,
@@ -1101,7 +1133,87 @@ internal sealed class KeyValueServerBatcher
 
         await WriteResponseToStream(semaphore, responseStream, response, context);
     }
-    
+
+    private async Task BeginOperationDelayed(
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcBeginOperationRequest beginOperationRequest,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcBeginOperationResponse beginOperationResponse = await service.BeginOperationInternal(beginOperationRequest, context);
+
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type = GrpcServerBatchType.ServerBeginOperation,
+            RequestId = requestId,
+            BeginOperation = beginOperationResponse
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+
+    private async Task CompleteOperationDelayed(
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcCompleteOperationRequest completeOperationRequest,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcCompleteOperationResponse completeOperationResponse = await service.CompleteOperationInternal(completeOperationRequest, context);
+
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type = GrpcServerBatchType.ServerCompleteOperation,
+            RequestId = requestId,
+            CompleteOperation = completeOperationResponse
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+
+    private async Task GetTransactionWorkingSetDelayed(
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcGetTransactionWorkingSetRequest getWorkingSetRequest,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcGetTransactionWorkingSetResponse getWorkingSetResponse = await service.GetTransactionWorkingSetInternal(getWorkingSetRequest, context);
+
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type = GrpcServerBatchType.ServerGetTransactionWorkingSet,
+            RequestId = requestId,
+            GetTransactionWorkingSet = getWorkingSetResponse
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+
+    private async Task CloseTransactionDelayed(
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcCloseTransactionRequest closeTransactionRequest,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcCloseTransactionResponse closeTransactionResponse = await service.CloseTransactionInternal(closeTransactionRequest, context);
+
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type = GrpcServerBatchType.ServerCloseTransaction,
+            RequestId = requestId,
+            CloseTransaction = closeTransactionResponse
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+
     private async Task AcquireSnapshotHoldDelayed(
         SemaphoreSlim semaphore,
         int requestId,

@@ -293,7 +293,9 @@ public class GrpcCommunication : IKahunaCommunication
         int expiryTime,
         KeyValueFlags flags,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
         GrpcTrySetKeyValueRequest request = new()
@@ -304,8 +306,11 @@ public class GrpcCommunication : IKahunaCommunication
             Key = key,
             Value = value is not null ? UnsafeByteOperations.UnsafeWrap(value) : null,
             Flags = (GrpcKeyValueFlags)flags,
-            ExpiresMs = expiryTime, 
-            Durability = (GrpcKeyValueDurability)durability
+            ExpiresMs = expiryTime,
+            Durability = (GrpcKeyValueDurability)durability,
+            CoordinatorKey = coordinatorKey,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low
         };
         
         int retries = 0;
@@ -592,10 +597,12 @@ public class GrpcCommunication : IKahunaCommunication
         HLCTimestamp transactionId, 
         string key, 
         byte[]? value, 
-        byte[]? compareValue, 
-        int expiryTime, 
-        KeyValueDurability durability, 
-        CancellationToken cancellationToken
+        byte[]? compareValue,
+        int expiryTime,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
         GrpcTrySetKeyValueRequest request = new()
@@ -607,8 +614,11 @@ public class GrpcCommunication : IKahunaCommunication
             Value = value is not null ? UnsafeByteOperations.UnsafeWrap(value) : null,
             CompareValue = compareValue is not null ? UnsafeByteOperations.UnsafeWrap(compareValue) : null,
             Flags = GrpcKeyValueFlags.SetIfEqualToValue,
-            ExpiresMs = expiryTime, 
-            Durability = (GrpcKeyValueDurability)durability
+            ExpiresMs = expiryTime,
+            Durability = (GrpcKeyValueDurability)durability,
+            CoordinatorKey = coordinatorKey,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low
         };
         
         int retries = 0;
@@ -668,7 +678,9 @@ public class GrpcCommunication : IKahunaCommunication
         long compareRevision,
         int expiryTime,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
         GrpcTrySetKeyValueRequest request = new()
@@ -680,8 +692,11 @@ public class GrpcCommunication : IKahunaCommunication
             Value = value is not null ? UnsafeByteOperations.UnsafeWrap(value) : null,
             CompareRevision = compareRevision,
             Flags = GrpcKeyValueFlags.SetIfEqualToRevision,
-            ExpiresMs = expiryTime, 
-            Durability = (GrpcKeyValueDurability)durability
+            ExpiresMs = expiryTime,
+            Durability = (GrpcKeyValueDurability)durability,
+            CoordinatorKey = coordinatorKey,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low
         };
 
         int retries = 0;
@@ -744,7 +759,9 @@ public class GrpcCommunication : IKahunaCommunication
         long revision,
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
         GrpcTryGetKeyValueRequest request = new()
@@ -757,7 +774,10 @@ public class GrpcCommunication : IKahunaCommunication
             ReadTimestampNode = readTimestamp.N,
             ReadTimestampPhysical = readTimestamp.L,
             ReadTimestampCounter = readTimestamp.C,
-            Durability = (GrpcKeyValueDurability)durability
+            Durability = (GrpcKeyValueDurability)durability,
+            CoordinatorKey = coordinatorKey,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low
         };
 
         for (int unavailableRetries = 0; unavailableRetries < 2; unavailableRetries++)
@@ -840,7 +860,9 @@ public class GrpcCommunication : IKahunaCommunication
         long revision,
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
         GrpcTryExistsKeyValueRequest request = new()
@@ -853,7 +875,10 @@ public class GrpcCommunication : IKahunaCommunication
             Durability = (GrpcKeyValueDurability)durability,
             ReadTimestampNode = readTimestamp.N,
             ReadTimestampPhysical = readTimestamp.L,
-            ReadTimestampCounter = readTimestamp.C
+            ReadTimestampCounter = readTimestamp.C,
+            CoordinatorKey = coordinatorKey,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low
         };
 
         int retries = 0;
@@ -907,7 +932,7 @@ public class GrpcCommunication : IKahunaCommunication
     /// A tuple containing a boolean indicating if the deletion was successful, a long representing the logical timestamp of the operation, and an integer indicating the number of retries performed.
     /// </returns>
     /// <exception cref="KahunaException">Thrown if the deletion operation fails or encounters an unrecoverable error.</exception>
-    public async Task<(bool, long, int)> TryDeleteKeyValue(string url, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(bool, long, int)> TryDeleteKeyValue(string url, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
     {
         GrpcTryDeleteKeyValueRequest request = new()
         {
@@ -915,7 +940,10 @@ public class GrpcCommunication : IKahunaCommunication
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
-            Durability = (GrpcKeyValueDurability)durability
+            Durability = (GrpcKeyValueDurability)durability,
+            CoordinatorKey = coordinatorKey,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low
         };
         
         int retries = 0;
@@ -971,7 +999,7 @@ public class GrpcCommunication : IKahunaCommunication
     /// the updated expiry timestamp in ticks, and the time taken for the operation in milliseconds.
     /// </returns>
     /// <exception cref="KahunaException">Thrown when the operation fails or encounters an unrecoverable error.</exception>
-    public async Task<(bool, long, int)> TryExtendKeyValue(string url, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<(bool, long, int)> TryExtendKeyValue(string url, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
     {
         GrpcTryExtendKeyValueRequest request = new()
         {
@@ -979,8 +1007,11 @@ public class GrpcCommunication : IKahunaCommunication
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
-            ExpiresMs = expiresMs, 
-            Durability = (GrpcKeyValueDurability)durability
+            ExpiresMs = expiresMs,
+            Durability = (GrpcKeyValueDurability)durability,
+            CoordinatorKey = coordinatorKey,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low
         };
 
         int retries = 0;
