@@ -838,6 +838,53 @@ public sealed class TestTransactionRegistrationRouting
     }
 
     /// <summary>
+    /// A lock acquire that first completed with a definitive failure (the key is held by another
+    /// transaction, so <c>AlreadyLocked</c>) must replay that exact failure on a same-operation-id retry —
+    /// never hardcode <c>Locked</c>. Returning success would tell the caller it holds a lock it does not,
+    /// and no lock effect was ever recorded in the coordinator working set.
+    /// </summary>
+    [Fact]
+    public async Task RegisteredLockAcquire_CachedFailureReplaysFailureNotSuccess()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            // Transaction A takes and holds the exclusive lock on the contended key.
+            (_, TransactionHandle handleA) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+            (KeyValueResponseType aType, _, _, _) =
+                await AcquireLockWithRetry(nodes[0], handleA, TransactionOperationId.NewRandom(), "lk1", ct);
+            Assert.Equal(KeyValueResponseType.Locked, aType);
+
+            // Transaction B's first attempt on the same key is denied — this failure is cached under op B.
+            (_, TransactionHandle handleB) =
+                await nodes[1].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+            TransactionOperationId opB = TransactionOperationId.NewRandom();
+            (KeyValueResponseType bType, _, _, HLCTimestamp bHolder) =
+                await AcquireLockWithRetry(nodes[1], handleB, opB, "lk1", ct);
+            Assert.Equal(KeyValueResponseType.AlreadyLocked, bType);
+            Assert.Equal(handleA.TransactionId, bHolder);
+
+            // A retry under the same operation id replays the exact cached failure, not a bogus success.
+            (KeyValueResponseType retryType, _, _, _) =
+                await nodes[1].Kahuna.LocateAndTryAcquireExclusiveLock(
+                    handleB.TransactionId, "lk1", 5000, KeyValueDurability.Persistent, ct, handleB.CoordinatorKey, opB);
+            Assert.Equal(KeyValueResponseType.AlreadyLocked, retryType);
+
+            // The denied acquire recorded no lock effect: B's working set holds no point lock.
+            TransactionWorkingSet? ws =
+                await nodes[1].Kahuna.LocateAndGetTransactionWorkingSet(handleB.CoordinatorKey, handleB.TransactionId, ct);
+            Assert.NotNull(ws);
+            Assert.DoesNotContain(ws!.AcquiredLocks, l => l.Key == "lk1");
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
     /// Completing an operation whose session no longer exists (reaped/aborted, or never started) must not
     /// be silently acknowledged as success — otherwise a participant that already applied the operation
     /// would report a write that never entered any coordinator working set. The completion surfaces as a
@@ -1160,6 +1207,23 @@ public sealed class TestTransactionRegistrationRouting
 
             if (type != KeyValueResponseType.MustRetry || Environment.TickCount64 >= deadline)
                 return (type, revision, lastModified);
+
+            await Task.Delay(50, ct);
+        }
+    }
+
+    private static async Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> AcquireLockWithRetry(
+        Node node, TransactionHandle handle, TransactionOperationId op, string key, CancellationToken ct)
+    {
+        long deadline = Environment.TickCount64 + 10_000;
+        while (true)
+        {
+            (KeyValueResponseType type, string resultKey, KeyValueDurability durability, HLCTimestamp holder) =
+                await node.Kahuna.LocateAndTryAcquireExclusiveLock(
+                    handle.TransactionId, key, 5000, KeyValueDurability.Persistent, ct, handle.CoordinatorKey, op);
+
+            if (type != KeyValueResponseType.MustRetry || Environment.TickCount64 >= deadline)
+                return (type, resultKey, durability, holder);
 
             await Task.Delay(50, ct);
         }

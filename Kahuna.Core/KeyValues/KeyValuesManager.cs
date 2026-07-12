@@ -1419,14 +1419,17 @@ internal sealed class KeyValuesManager : IDisposable
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string key,
         int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        (OperationRegistrationOutcome outcome, _, _, _, _) =
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.PointLock, OperationDigest.ForPointLockAcquire(key, expiresMs, durability), cancellationToken);
 
         switch (outcome)
         {
             case OperationRegistrationOutcome.AlreadyCompleted:
+                // Replay the exact cached outcome: a first attempt that failed (e.g. AlreadyLocked/Aborted)
+                // must not resurface as a successful acquire. The holder is only meaningful on a self-held
+                // lock, so it is the transaction id on success and unknown (Zero) on a cached failure.
                 participantOperationCache.Remove(transactionId, operationId);
-                return (KeyValueResponseType.Locked, key, durability, transactionId);
+                return (cachedType, key, durability, cachedType == KeyValueResponseType.Locked ? transactionId : HLCTimestamp.Zero);
             case OperationRegistrationOutcome.AlreadyPending:
                 if (await TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId) is { } recovered)
                     return ((KeyValueResponseType, string, KeyValueDurability, HLCTimestamp))recovered;
@@ -1496,14 +1499,15 @@ internal sealed class KeyValuesManager : IDisposable
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string prefixKey,
         int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        (OperationRegistrationOutcome outcome, _, _, _, _) =
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.PrefixLock, OperationDigest.ForPrefixLockAcquire(prefixKey, expiresMs, durability), cancellationToken);
 
         switch (outcome)
         {
             case OperationRegistrationOutcome.AlreadyCompleted:
+                // Replay the exact cached outcome so a first-attempt failure does not resurface as success.
                 participantOperationCache.Remove(transactionId, operationId);
-                return KeyValueResponseType.Locked;
+                return cachedType;
             case OperationRegistrationOutcome.AlreadyPending:
                 if (await TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId) is { } recovered)
                     return (KeyValueResponseType)recovered;
@@ -1579,14 +1583,15 @@ internal sealed class KeyValuesManager : IDisposable
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string key,
         KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        (OperationRegistrationOutcome outcome, _, _, _, _) =
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.PointLock, OperationDigest.ForPointLockRelease(key, durability), cancellationToken);
 
         switch (outcome)
         {
             case OperationRegistrationOutcome.AlreadyCompleted:
+                // Replay the exact cached outcome so a first-attempt failure does not resurface as success.
                 participantOperationCache.Remove(transactionId, operationId);
-                return (KeyValueResponseType.Unlocked, key);
+                return (cachedType, key);
             case OperationRegistrationOutcome.AlreadyPending:
                 if (await TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId) is { } recovered)
                     return ((KeyValueResponseType, string))recovered;
@@ -1655,14 +1660,15 @@ internal sealed class KeyValuesManager : IDisposable
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string prefixKey,
         KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        (OperationRegistrationOutcome outcome, _, _, _, _) =
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.PrefixLock, OperationDigest.ForPrefixLockRelease(prefixKey, durability), cancellationToken);
 
         switch (outcome)
         {
             case OperationRegistrationOutcome.AlreadyCompleted:
+                // Replay the exact cached outcome so a first-attempt failure does not resurface as success.
                 participantOperationCache.Remove(transactionId, operationId);
-                return KeyValueResponseType.Unlocked;
+                return cachedType;
             case OperationRegistrationOutcome.AlreadyPending:
                 if (await TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId) is { } recovered)
                     return (KeyValueResponseType)recovered;
@@ -1727,15 +1733,17 @@ internal sealed class KeyValuesManager : IDisposable
         KeyValueDurability durability, RangeLockMode mode, CancellationToken cancellationToken,
         Func<Task>? afterSnapshot = null)
     {
-        (OperationRegistrationOutcome outcome, _, _, _, _) =
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.RangeLock,
                 OperationDigest.ForRangeLockAcquire(prefix, startKey, startInclusive, endKey, endInclusive, mode, expiresMs, durability), cancellationToken);
 
         switch (outcome)
         {
             case OperationRegistrationOutcome.AlreadyCompleted:
+                // Replay the exact cached outcome: a first attempt that failed must not resurface as a
+                // successful acquire. The holder is the transaction id on success, unknown (Zero) otherwise.
                 participantOperationCache.Remove(transactionId, operationId);
-                return (KeyValueResponseType.Locked, transactionId);
+                return (cachedType, cachedType == KeyValueResponseType.Locked ? transactionId : HLCTimestamp.Zero);
             case OperationRegistrationOutcome.AlreadyPending:
                 if (await TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId) is { } recovered)
                     return ((KeyValueResponseType, HLCTimestamp))recovered;
@@ -1830,15 +1838,16 @@ internal sealed class KeyValuesManager : IDisposable
         string? startKey, bool startInclusive, string? endKey, bool endInclusive,
         KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        (OperationRegistrationOutcome outcome, _, _, _, _) =
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.RangeLock,
                 OperationDigest.ForRangeLockRelease(prefix, startKey, startInclusive, endKey, endInclusive, durability), cancellationToken);
 
         switch (outcome)
         {
             case OperationRegistrationOutcome.AlreadyCompleted:
+                // Replay the exact cached outcome so a first-attempt failure does not resurface as success.
                 participantOperationCache.Remove(transactionId, operationId);
-                return KeyValueResponseType.Unlocked;
+                return cachedType;
             case OperationRegistrationOutcome.AlreadyPending:
                 if (await TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId) is { } recovered)
                     return (KeyValueResponseType)recovered;
