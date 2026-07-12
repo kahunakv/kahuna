@@ -105,6 +105,9 @@ message GrpcTrySetManyKeyValueResponseItem {
 
 message GrpcTryDeleteManyKeyValueRequest {
   repeated GrpcTryDeleteManyKeyValueRequestItem Items = 1;
+  optional string CoordinatorKey = 2;
+  optional uint64 OperationIdHigh = 3;
+  optional uint64 OperationIdLow = 4;
 }
 
 message GrpcTryDeleteManyKeyValueRequestItem {
@@ -869,6 +872,7 @@ message GrpcCompleteOperationRequest
   optional GrpcTransactionRangeLock ReleasedRangeLock = 13;
   optional GrpcTransactionReadKey Read = 14;
   repeated GrpcTransactionReadKey ReadObservations = 15;
+  repeated GrpcTransactionModifiedKey ModifiedKeys = 22;
   GrpcKeyValueDurability Durability = 16;
   GrpcKeyValueResponseType CachedType = 17;
   int64 CachedRevision = 18;

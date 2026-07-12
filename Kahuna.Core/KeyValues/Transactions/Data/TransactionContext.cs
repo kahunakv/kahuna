@@ -203,6 +203,21 @@ internal class TransactionContext
         }
     }
 
+    /// <summary>
+    /// Caller must hold <see cref="registryLock"/>. Records one confirmed modified key and, if it is the
+    /// first persistent one, assigns the immutable record anchor. Because the lock serializes concurrent
+    /// completions, exactly one modification wins the anchor. Ephemeral modifications never become the
+    /// anchor: a Durable record cannot live on an ephemeral key.
+    /// </summary>
+    private void FoldModifiedKeyLocked((string Key, KeyValueDurability Durability) modified)
+    {
+        ModifiedKeys ??= [];
+        ModifiedKeys.Add(modified);
+
+        if (RecordAnchorKey is null && modified.Durability == KeyValueDurability.Persistent)
+            RecordAnchorKey = modified.Key;
+    }
+
     /// <summary>Caller must hold <see cref="registryLock"/>. Folds a confirmed effect into the working set.</summary>
     private void ApplyEffectLocked(OperationEffect? effect)
     {
@@ -210,16 +225,14 @@ internal class TransactionContext
             return;
 
         if (effect.ModifiedKey is { } modified)
-        {
-            ModifiedKeys ??= [];
-            ModifiedKeys.Add(modified);
+            FoldModifiedKeyLocked(modified);
 
-            // The first confirmed persistent modification names the immutable record anchor. Assignment
-            // happens under registryLock, so concurrent completions are serialized and exactly one wins.
-            // Ephemeral modifications never become the anchor: a Durable record cannot live on an
-            // ephemeral key.
-            if (RecordAnchorKey is null && modified.Item2 == KeyValueDurability.Persistent)
-                RecordAnchorKey = modified.Item1;
+        // A batch folds its confirmed keys in canonical request order, so the first persistent one wins the
+        // anchor deterministically regardless of the order per-partition fan-out completed.
+        if (effect.ModifiedKeys is { } modifiedKeys)
+        {
+            foreach ((string, KeyValueDurability) batchModified in modifiedKeys)
+                FoldModifiedKeyLocked(batchModified);
         }
 
         if (effect.PointLock is { } pointLock)

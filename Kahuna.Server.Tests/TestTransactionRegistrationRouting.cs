@@ -625,6 +625,117 @@ public sealed class TestTransactionRegistrationRouting
         }
     }
 
+    /// <summary>
+    /// A batch delete registers as a single coordinator operation whose confirmed persistent keys fold in
+    /// canonical request order, so the anchor is the first key in the submitted list — not the arrival order
+    /// of the per-partition fan-out, and not the sorted order.
+    /// </summary>
+    [Fact]
+    public async Task RecordAnchor_BatchDelete_UsesFirstPersistentKeyInRequestOrder()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            // Seed three committed persistent keys in a prior transaction so the batch delete confirms each.
+            (_, TransactionHandle seed) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+            byte[] value = "v"u8.ToArray();
+            foreach (string key in new[] { "batch/m", "batch/a", "batch/z" })
+                Assert.Equal(KeyValueResponseType.Set,
+                    await SetKeyWithRetry(nodes[1], seed, TransactionOperationId.NewRandom(), key, value, KeyValueDurability.Persistent, ct));
+            Assert.Equal(KeyValueResponseType.Committed, await CommitWithRetry(nodes[0], seed, ct));
+
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+
+            // Submit deliberately un-sorted request order: first item "batch/m" is neither the sorted-first
+            // key ("batch/a") nor guaranteed to be the earliest fan-out completion.
+            List<KahunaDeleteKeyValueResponseItem> responses = await DeleteManyWithRetry(
+                nodes[2], handle, TransactionOperationId.NewRandom(),
+                ["batch/m", "batch/a", "batch/z"], KeyValueDurability.Persistent, ct);
+
+            foreach (KahunaDeleteKeyValueResponseItem r in responses)
+                Assert.Equal(KeyValueResponseType.Deleted, r.Type);
+
+            TransactionWorkingSet? ws = await nodes[1].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(ws);
+            Assert.Equal("batch/m", ws!.RecordAnchorKey);
+            Assert.Contains(ws.ModifiedKeys, m => m.Key == "batch/m");
+            Assert.Contains(ws.ModifiedKeys, m => m.Key == "batch/a");
+            Assert.Contains(ws.ModifiedKeys, m => m.Key == "batch/z");
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// A batch delete replayed under the same operation id is re-driven (deletes are idempotent) and recovers
+    /// the same anchor without double-recording: the coordinator completion is a no-op the second time.
+    /// </summary>
+    [Fact]
+    public async Task RecordAnchor_BatchDelete_RetrySameOperationId_RecoversSameAnchor()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            (_, TransactionHandle seed) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+            byte[] value = "v"u8.ToArray();
+            foreach (string key in new[] { "dup/m", "dup/a" })
+                Assert.Equal(KeyValueResponseType.Set,
+                    await SetKeyWithRetry(nodes[1], seed, TransactionOperationId.NewRandom(), key, value, KeyValueDurability.Persistent, ct));
+            Assert.Equal(KeyValueResponseType.Committed, await CommitWithRetry(nodes[0], seed, ct));
+
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+
+            TransactionOperationId op = TransactionOperationId.NewRandom();
+            await DeleteManyWithRetry(nodes[2], handle, op, ["dup/m", "dup/a"], KeyValueDurability.Persistent, ct);
+
+            TransactionWorkingSet? afterFirst = await nodes[1].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.Equal("dup/m", afterFirst!.RecordAnchorKey);
+            int modifiedCount = afterFirst.ModifiedKeys.Count;
+
+            // Replay the identical batch under the same operation id.
+            await DeleteManyWithRetry(nodes[2], handle, op, ["dup/m", "dup/a"], KeyValueDurability.Persistent, ct);
+
+            TransactionWorkingSet? afterReplay = await nodes[0].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.Equal("dup/m", afterReplay!.RecordAnchorKey);
+            Assert.Equal(modifiedCount, afterReplay.ModifiedKeys.Count);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    private static async Task<List<KahunaDeleteKeyValueResponseItem>> DeleteManyWithRetry(
+        Node node, TransactionHandle handle, TransactionOperationId op, string[] keys, KeyValueDurability durability, CancellationToken ct)
+    {
+        long deadline = Environment.TickCount64 + 10_000;
+        while (true)
+        {
+            List<KahunaDeleteKeyValueRequestItem> items = [.. keys.Select(k => new KahunaDeleteKeyValueRequestItem
+            {
+                TransactionId = handle.TransactionId,
+                Key = k,
+                Durability = durability
+            })];
+
+            List<KahunaDeleteKeyValueResponseItem> responses =
+                await node.Kahuna.LocateAndTryDeleteManyKeyValue(items, ct, handle.CoordinatorKey, op);
+
+            if (!responses.Any(r => r.Type == KeyValueResponseType.MustRetry) || Environment.TickCount64 >= deadline)
+                return responses;
+
+            await Task.Delay(50, ct);
+        }
+    }
+
     private static async Task<KeyValueResponseType> SetKeyWithRetry(Node node, TransactionHandle handle, TransactionOperationId op, string key, byte[] value, KeyValueDurability durability, CancellationToken ct)
     {
         long deadline = Environment.TickCount64 + 10_000;

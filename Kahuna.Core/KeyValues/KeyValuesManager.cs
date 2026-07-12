@@ -974,10 +974,109 @@ internal sealed class KeyValuesManager : IDisposable
 
     public Task<List<KahunaDeleteKeyValueResponseItem>> LocateAndTryDeleteManyKeyValue(
         List<KahunaDeleteKeyValueRequestItem> deleteManyItems,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
-        return locator.LocateAndTryDeleteManyKeyValue(deleteManyItems, cancellationToken);
+        // The whole batch registers as a single coordinator operation so its confirmed persistent keys
+        // fold in canonical request order and anchor the transaction record deterministically. Fall back to
+        // the unregistered fan-out when the caller supplied no operation identity (non-transactional path).
+        HLCTimestamp transactionId = deleteManyItems.Count > 0 ? deleteManyItems[0].TransactionId : HLCTimestamp.Zero;
+
+        if (transactionId.IsNull() || operationId.IsEmpty || string.IsNullOrEmpty(coordinatorKey))
+            return locator.LocateAndTryDeleteManyKeyValue(deleteManyItems, cancellationToken);
+
+        return RegisterAndTryDeleteManyKeyValue(transactionId, coordinatorKey, operationId, deleteManyItems, cancellationToken);
+    }
+
+    private async Task<List<KahunaDeleteKeyValueResponseItem>> RegisterAndTryDeleteManyKeyValue(
+        HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId,
+        List<KahunaDeleteKeyValueRequestItem> deleteManyItems, CancellationToken cancellationToken)
+    {
+        List<(string Key, KeyValueDurability Durability)> canonicalItems = new(deleteManyItems.Count);
+        foreach (KahunaDeleteKeyValueRequestItem item in deleteManyItems)
+            canonicalItems.Add((item.Key ?? "", item.Durability));
+
+        (OperationRegistrationOutcome outcome, _, _, _, _) =
+            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.DeleteMany, OperationDigest.ForDeleteMany(canonicalItems), cancellationToken);
+
+        switch (outcome)
+        {
+            case OperationRegistrationOutcome.AlreadyPending:
+            case OperationRegistrationOutcome.RejectedCapacity:
+                return AllItemsResponse(deleteManyItems, KeyValueResponseType.MustRetry);
+            case OperationRegistrationOutcome.RejectedSessionClosed:
+                return AllItemsResponse(deleteManyItems, KeyValueResponseType.Aborted);
+            case OperationRegistrationOutcome.RejectedDuplicate:
+                return AllItemsResponse(deleteManyItems, KeyValueResponseType.Errored);
+            // New and AlreadyCompleted both execute: a batch is re-driven on retry (deletes are idempotent)
+            // rather than replaying a cached list, and CompleteOperation is a no-op if it already completed.
+        }
+
+        List<KahunaDeleteKeyValueResponseItem> responses =
+            await locator.LocateAndTryDeleteManyKeyValue(deleteManyItems, cancellationToken);
+
+        // A transient outcome on any item leaves the batch undecided: cancel the registration (no effect was
+        // folded — folding only happens on completion) so a same-id retry re-registers as New and re-drives
+        // every item, converging without losing keys that only succeed on the retry.
+        bool anyTransient = false;
+        foreach (KahunaDeleteKeyValueResponseItem response in responses)
+        {
+            if (response.Type == KeyValueResponseType.MustRetry)
+            {
+                anyTransient = true;
+                break;
+            }
+        }
+
+        if (anyTransient)
+        {
+            txCoordinator.CancelOperation(transactionId, operationId);
+            return responses;
+        }
+
+        // Fold the confirmed deletes in canonical request order (fan-out returns them unordered), so the
+        // first persistent key deterministically anchors the transaction record.
+        Dictionary<(string, KeyValueDurability), KeyValueResponseType> byKey = new(responses.Count);
+        foreach (KahunaDeleteKeyValueResponseItem response in responses)
+            byKey[(response.Key ?? "", response.Durability)] = response.Type;
+
+        List<(string, KeyValueDurability)> modifiedKeys = [];
+        foreach ((string Key, KeyValueDurability Durability) item in canonicalItems)
+        {
+            if (byKey.TryGetValue(item, out KeyValueResponseType type) && type == KeyValueResponseType.Deleted)
+                modifiedKeys.Add(item);
+        }
+
+        await LocateAndCompleteOperation(
+            coordinatorKey, transactionId, operationId,
+            new OperationCompletionPayload
+            {
+                ModifiedKeys = modifiedKeys.Count > 0 ? modifiedKeys : null,
+                // A batch is re-driven, never cache-replayed, so a definitive (non-MustRetry) terminal type
+                // just lets the registration complete and the effects fold.
+                CachedType = KeyValueResponseType.Deleted
+            },
+            cancellationToken);
+
+        return responses;
+    }
+
+    private static List<KahunaDeleteKeyValueResponseItem> AllItemsResponse(
+        List<KahunaDeleteKeyValueRequestItem> items, KeyValueResponseType type)
+    {
+        List<KahunaDeleteKeyValueResponseItem> responses = new(items.Count);
+        foreach (KahunaDeleteKeyValueRequestItem item in items)
+            responses.Add(new()
+            {
+                Key = item.Key ?? "",
+                Type = type,
+                Revision = -1,
+                LastModified = HLCTimestamp.Zero,
+                Durability = item.Durability
+            });
+        return responses;
     }
 
     /// <summary>
@@ -2021,6 +2120,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         bool hasEffect =
             !string.IsNullOrEmpty(payload.ModifiedKey) ||
+            (payload.ModifiedKeys is { Count: > 0 }) ||
             !string.IsNullOrEmpty(payload.AcquiredPointLock) || !string.IsNullOrEmpty(payload.ReleasedPointLock) ||
             !string.IsNullOrEmpty(payload.AcquiredPrefixLock) || !string.IsNullOrEmpty(payload.ReleasedPrefixLock) ||
             payload.AcquiredRangeLock is not null || payload.ReleasedRangeLock is not null ||
@@ -2033,6 +2133,7 @@ internal sealed class KeyValuesManager : IDisposable
         return new()
         {
             ModifiedKey = string.IsNullOrEmpty(payload.ModifiedKey) ? null : (payload.ModifiedKey, durability),
+            ModifiedKeys = payload.ModifiedKeys is { Count: > 0 } ? payload.ModifiedKeys : null,
             PointLock = string.IsNullOrEmpty(payload.AcquiredPointLock) ? null : (payload.AcquiredPointLock, durability),
             RemovePointLock = string.IsNullOrEmpty(payload.ReleasedPointLock) ? null : (payload.ReleasedPointLock, durability),
             PrefixLock = string.IsNullOrEmpty(payload.AcquiredPrefixLock) ? null : (payload.AcquiredPrefixLock, durability),

@@ -137,7 +137,12 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
     public Task<(bool, long)> TryExtendLock(string url, string resource, byte[] owner, int expiryTime, LockDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
     public Task<KahunaLockInfo?> GetLock(string url, string resource, LockDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
     public Task<(List<KahunaSetKeyValueResponseItem>, int)> TrySetManyKeyValues(string url, IEnumerable<KahunaSetKeyValueRequestItem> requestItems, CancellationToken cancellationToken) => throw new NotImplementedException();
-    public Task<(List<KahunaDeleteKeyValueResponseItem>, int)> TryDeleteManyKeyValues(string url, IEnumerable<KahunaDeleteKeyValueRequestItem> requestItems, CancellationToken cancellationToken) => throw new NotImplementedException();
+    public async Task<(List<KahunaDeleteKeyValueResponseItem>, int)> TryDeleteManyKeyValues(string url, IEnumerable<KahunaDeleteKeyValueRequestItem> requestItems, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
+    {
+        List<KahunaDeleteKeyValueResponseItem> responses =
+            await kahuna.LocateAndTryDeleteManyKeyValue([.. requestItems], cancellationToken, coordinatorKey, operationId);
+        return (responses, 0);
+    }
     public async Task<(bool, long, int)> TryExistsKeyValue(
         string url, HLCTimestamp transactionId, string key, long revision,
         HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken,

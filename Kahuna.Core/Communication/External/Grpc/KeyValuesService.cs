@@ -217,9 +217,16 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     {
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
+        string coordinatorKey = request.HasCoordinatorKey ? request.CoordinatorKey : "";
+        TransactionOperationId operationId = request is { HasOperationIdHigh: true, HasOperationIdLow: true }
+            ? new(request.OperationIdHigh, request.OperationIdLow)
+            : default;
+
         List<KahunaDeleteKeyValueResponseItem> responses = await keyValues.LocateAndTryDeleteManyKeyValue(
             GetRequestDeleteManyItems(request.Items),
-            context.CancellationToken
+            context.CancellationToken,
+            coordinatorKey,
+            operationId
         );
 
         GrpcTryDeleteManyKeyValueResponse response = new()
@@ -1818,6 +1825,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             ReleasedRangeLock = request.ReleasedRangeLock is null ? null : ToRangeLockKey(request.ReleasedRangeLock),
             Read = request.Read is null ? null : ToReadKey(request.Read),
             ReadObservations = request.ReadObservations.Count == 0 ? null : request.ReadObservations.Select(ToReadKey).ToList(),
+            ModifiedKeys = request.ModifiedKeys.Count == 0 ? null : request.ModifiedKeys.Select(m => (m.Key, (KeyValueDurability)m.Durability)).ToList(),
             Durability = (KeyValueDurability)request.Durability,
             CachedType = (KeyValueResponseType)request.CachedType,
             CachedRevision = request.CachedRevision,

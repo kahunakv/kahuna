@@ -1537,6 +1537,8 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         if (payload.Read is not null) request.Read = ToGrpcReadKey(payload.Read);
         if (payload.ReadObservations is not null)
             request.ReadObservations.AddRange(payload.ReadObservations.Select(ToGrpcReadKey));
+        if (payload.ModifiedKeys is not null)
+            request.ModifiedKeys.AddRange(payload.ModifiedKeys.Select(m => new GrpcTransactionModifiedKey { Key = m.Key, Durability = (GrpcKeyValueDurability)m.Durability }));
 
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
         GrpcCompleteOperationResponse remoteResponse = response.CompleteOperation!;

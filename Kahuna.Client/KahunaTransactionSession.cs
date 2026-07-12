@@ -809,7 +809,9 @@ public class KahunaTransactionSession : IAsyncDisposable
         (List<KahunaDeleteKeyValueResponseItem> responses, int timeElapsedMs) = await Client.Communication.TryDeleteManyKeyValues(
             Url,
             items,
-            cancellationToken
+            cancellationToken,
+            CoordinatorKey,
+            TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
 
         List<KahunaKeyValue> result = new(responses.Count);

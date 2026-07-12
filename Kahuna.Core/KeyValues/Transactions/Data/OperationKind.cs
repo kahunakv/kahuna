@@ -6,6 +6,7 @@ public enum OperationKind
 {
     Set,
     Delete,
+    DeleteMany,
     Extend,
     Get,
     Exists,

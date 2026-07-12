@@ -372,9 +372,9 @@ public sealed class KahunaManager : IKahuna, IDisposable
         );
     }
 
-    public Task<List<KahunaDeleteKeyValueResponseItem>> LocateAndTryDeleteManyKeyValue(List<KahunaDeleteKeyValueRequestItem> deleteManyItems, CancellationToken cancellationToken)
+    public Task<List<KahunaDeleteKeyValueResponseItem>> LocateAndTryDeleteManyKeyValue(List<KahunaDeleteKeyValueRequestItem> deleteManyItems, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
     {
-        return keyValues.LocateAndTryDeleteManyKeyValue(deleteManyItems, cancellationToken);
+        return keyValues.LocateAndTryDeleteManyKeyValue(deleteManyItems, cancellationToken, coordinatorKey, operationId);
     }
 
     /// <summary>

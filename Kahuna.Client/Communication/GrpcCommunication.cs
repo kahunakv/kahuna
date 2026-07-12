@@ -376,12 +376,23 @@ public class GrpcCommunication : IKahunaCommunication
     public async Task<(List<KahunaDeleteKeyValueResponseItem>, int)> TryDeleteManyKeyValues(
         string url,
         IEnumerable<KahunaDeleteKeyValueRequestItem> requestItems,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
         GrpcTryDeleteManyKeyValueRequest request = new();
 
         request.Items.AddRange(GetDeleteManyKeyValueRequestItems(requestItems));
+
+        // The whole batch registers as one coordinator operation so its confirmed persistent keys anchor
+        // the transaction record deterministically. Absent for the non-transactional batch path.
+        if (!string.IsNullOrEmpty(coordinatorKey) && !operationId.IsEmpty)
+        {
+            request.CoordinatorKey = coordinatorKey;
+            request.OperationIdHigh = operationId.High;
+            request.OperationIdLow = operationId.Low;
+        }
 
         GrpcBatcher batcher = GetSharedBatcher(url);
 

@@ -527,9 +527,13 @@ public class RestCommunication : IKahunaCommunication
     public async Task<(List<KahunaDeleteKeyValueResponseItem>, int)> TryDeleteManyKeyValues(
         string url,
         IEnumerable<KahunaDeleteKeyValueRequestItem> requestItems,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
+        // REST does not yet forward batch operation identity to the coordinator; the anchored
+        // register-remote path is exercised over gRPC.
         KahunaDeleteManyKeyValueRequest request = new()
         {
             Items = [.. requestItems]

@@ -13,6 +13,12 @@ internal sealed class OperationEffect
     /// <summary>A key that was written or deleted by the operation, with its durability.</summary>
     public (string Key, KeyValueDurability Durability)? ModifiedKey { get; init; }
 
+    /// <summary>
+    /// The keys a batch operation wrote or deleted, in canonical request order. Folded in list order at the
+    /// coordinator so the first persistent one deterministically becomes the transaction record anchor.
+    /// </summary>
+    public IReadOnlyList<(string Key, KeyValueDurability Durability)>? ModifiedKeys { get; init; }
+
     /// <summary>A point lock the operation acquired (the implicit write lock, or an explicit lock op).</summary>
     public (string Key, KeyValueDurability Durability)? PointLock { get; init; }
 

@@ -16,6 +16,13 @@ public sealed record OperationCompletionPayload
     /// <summary>A key written or deleted by the operation.</summary>
     public string? ModifiedKey { get; init; }
 
+    /// <summary>
+    /// The keys a batch operation wrote or deleted, in canonical request order (each with its own durability,
+    /// independent of <see cref="Durability"/>). The coordinator folds them in list order so the first
+    /// persistent key deterministically anchors the transaction record.
+    /// </summary>
+    public IReadOnlyList<(string Key, KeyValueDurability Durability)>? ModifiedKeys { get; init; }
+
     /// <summary>A point lock the operation acquired.</summary>
     public string? AcquiredPointLock { get; init; }
 

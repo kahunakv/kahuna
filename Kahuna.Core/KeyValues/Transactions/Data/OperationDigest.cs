@@ -37,6 +37,24 @@ internal static class OperationDigest
         return hash.GetHashAndReset();
     }
 
+    /// <summary>
+    /// Digest for a batch delete: the whole batch is one registered operation, so the digest binds the
+    /// items in the exact submission (canonical request) order. A same-operation-id retry must resend the
+    /// identical ordered list, which is also the order the coordinator folds the anchor in.
+    /// </summary>
+    internal static byte[] ForDeleteMany(IReadOnlyList<(string Key, KeyValueDurability Durability)> items)
+    {
+        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        AppendTag(hash, OperationKind.DeleteMany);
+        AppendInt(hash, items.Count);
+        foreach ((string key, KeyValueDurability durability) in items)
+        {
+            AppendString(hash, key);
+            AppendInt(hash, (int)durability);
+        }
+        return hash.GetHashAndReset();
+    }
+
     internal static byte[] ForExtend(string key, int expiresMs, KeyValueDurability durability)
     {
         using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
