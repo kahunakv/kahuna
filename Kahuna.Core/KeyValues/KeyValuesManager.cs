@@ -4294,6 +4294,15 @@ internal sealed class KeyValuesManager : IDisposable
     }
 
     /// <summary>
+    /// Reads the decision-durability policy recorded for an active interactive session, or null when no
+    /// active session with that id exists. Reflects exactly what Begin captured from the caller's options.
+    /// </summary>
+    internal DecisionDurability? GetRecordedDecisionDurability(HLCTimestamp transactionId)
+    {
+        return txCoordinator.GetRecordedDecisionDurability(transactionId);
+    }
+
+    /// <summary>
     /// Commits the transaction identified by <paramref name="handle"/>.
     /// </summary>
     /// <param name="handle">The handle returned by <see cref="StartTransaction"/>.</param>
