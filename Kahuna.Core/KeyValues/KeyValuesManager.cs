@@ -151,6 +151,12 @@ internal sealed class KeyValuesManager : IDisposable
         // live RegisterKeyRangeAsync call, causing routing mismatches in the 2PC prepare path.
         SyncKeySpaceRegistryFromRangeMap();
 
+        // Durable coordinator decision records: replicated on the data partition that currently routes
+        // each transaction's record anchor. Constructed before the key-value routers so every actor
+        // shares this one instance and can install the initial record as the anchor commit applies; the
+        // anchor → partition resolver is attached below once the locator exists.
+        coordinatorDecisionStore = new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
+
         proposalRouter = GetProposalRouter(configuration);
         ephemeralKeyValuesRouter = GetEphemeralRouter(configuration);
         persistentKeyValuesRouter = GetConsistentRouter(configuration);
@@ -184,13 +190,14 @@ internal sealed class KeyValuesManager : IDisposable
 
         locator = new(this, configuration, raft, interNodeCommunication, keySpaceRegistry, rangeQuiesceStore, logger);
 
-        // Durable coordinator decision records: replicated on the data partition that currently routes
-        // each transaction's record anchor. The locator resolves an anchor key to its partition and
-        // routing generation (the same pure range-map lookup the write path fences on).
-        coordinatorDecisionStore = new(raft, locator.LocateRange, configuration.StoragePath, configuration.StorageRevision, logger);
+        // Now that the locator exists, wire the anchor → data-partition resolver the coordinator-driven
+        // decision mutations fence on. The store itself was constructed earlier (before the key-value
+        // routers) so the actors could share the one instance for install-on-anchor-commit; that install
+        // path needs no resolver, only the coordinator's UpsertAsync/RemoveAsync do.
+        coordinatorDecisionStore.AttachAnchorResolver(locator.LocateRange);
 
-        restorer = new(backgroundWriter, raft, completionReceiptStore, logger);
-        replicator = new(backgroundWriter, persistentKeyValuesRouter, raft, writeFrequencyRegistry, keySpaceRegistry, completionReceiptStore, logger);
+        restorer = new(backgroundWriter, raft, completionReceiptStore, coordinatorDecisionStore, logger);
+        replicator = new(backgroundWriter, persistentKeyValuesRouter, raft, writeFrequencyRegistry, keySpaceRegistry, completionReceiptStore, coordinatorDecisionStore, logger);
         kvStateMachineTransfer = new(this, persistenceBackend, logger);
 
         // Whole-partition state transfer for the meta partition (id 0). Repairs a node below the
@@ -753,7 +760,8 @@ internal sealed class KeyValuesManager : IDisposable
                 configuration,
                 logger,
                 snapshotFloorStore,
-                completionReceiptStore
+                completionReceiptStore,
+                coordinatorDecisionStore
             ));
 
         return actorSystem.CreateConsistentHashRouter(ephemeralInstances);
@@ -787,7 +795,8 @@ internal sealed class KeyValuesManager : IDisposable
                 configuration,
                 logger,
                 snapshotFloorStore,
-                completionReceiptStore
+                completionReceiptStore,
+                coordinatorDecisionStore
             ));
 
         return actorSystem.CreateConsistentHashRouter(persistentInstances);
@@ -1939,10 +1948,11 @@ internal sealed class KeyValuesManager : IDisposable
         KeyValueDurability durability,
         CancellationToken cancelationToken,
         long routedGeneration = 0,
-        string? recordAnchorKey = null
+        string? recordAnchorKey = null,
+        CoordinatorDecisionRecord? embeddedDecision = null
     )
     {
-        return locator.LocateAndTryPrepareMutations(transactionId, commitId, key, durability, cancelationToken, routedGeneration, recordAnchorKey);
+        return locator.LocateAndTryPrepareMutations(transactionId, commitId, key, durability, cancelationToken, routedGeneration, recordAnchorKey, embeddedDecision);
     }
     
     /// <summary>
@@ -3777,7 +3787,8 @@ internal sealed class KeyValuesManager : IDisposable
         string key,
         KeyValueDurability durability,
         long routedGeneration = 0,
-        string? recordAnchorKey = null
+        string? recordAnchorKey = null,
+        CoordinatorDecisionRecord? embeddedDecision = null
     )
     {
         KeyValueRequest request = KeyValueRequestPool.Rent(
@@ -3799,6 +3810,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         request.RoutedGeneration = routedGeneration;
         request.RecordAnchorKey = recordAnchorKey;
+        request.EmbeddedDecision = embeddedDecision;
 
         try
         {

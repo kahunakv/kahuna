@@ -1,6 +1,8 @@
 
 using Kommander.Time;
 
+using Kahuna.Server.KeyValues.Transactions.Data;
+
 namespace Kahuna.Server.KeyValues;
 
 internal sealed class KeyValueWriteIntent
@@ -22,4 +24,13 @@ internal sealed class KeyValueWriteIntent
     /// Participant-side metadata that a durable completion receipt is later keyed by.
     /// </summary>
     public string? RecordAnchorKey { get; set; }
+
+    /// <summary>
+    /// The initial durable coordinator decision to install when this intent's mutation commits. Set only
+    /// on the anchor key's write intent for a Durable transaction (the coordinator prepares the anchor last,
+    /// once every non-anchor ticket is known). The leader reads it here to install the record inline as the
+    /// anchor commit applies; followers and restore read the equivalent serialized copy from the committed
+    /// key-value envelope. Null on every non-anchor intent and on all best-effort transactions.
+    /// </summary>
+    public CoordinatorDecisionRecord? EmbeddedDecision { get; set; }
 }

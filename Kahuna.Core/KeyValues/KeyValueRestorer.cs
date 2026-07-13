@@ -5,6 +5,7 @@ using Kommander;
 using Kommander.Data;
 using Kommander.Time;
 
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
@@ -25,13 +26,16 @@ internal sealed class KeyValueRestorer
 
     private readonly CompletionReceiptStore completionReceiptStore;
 
+    private readonly Transactions.CoordinatorDecisionStore? coordinatorDecisionStore;
+
     private readonly ILogger<IKahuna> logger;
 
-    public KeyValueRestorer(IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, IRaft raft, CompletionReceiptStore completionReceiptStore, ILogger<IKahuna> logger)
+    public KeyValueRestorer(IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, IRaft raft, CompletionReceiptStore completionReceiptStore, Transactions.CoordinatorDecisionStore? coordinatorDecisionStore, ILogger<IKahuna> logger)
     {
         this.backgroundWriter = backgroundWriter;
         this.raft = raft;
         this.completionReceiptStore = completionReceiptStore;
+        this.coordinatorDecisionStore = coordinatorDecisionStore;
         this.logger = logger;
     }
 
@@ -83,6 +87,17 @@ internal sealed class KeyValueRestorer
                 keyValueMessage.Key,
                 keyValueMessage.HasRecordAnchorKey ? keyValueMessage.RecordAnchorKey : null,
                 KeyValueDurability.Persistent);
+
+            // Reinstall the initial CommitDecided record embedded on the anchor key's committed mutation.
+            // The anchor commit precedes its progress deltas in this partition's single ordered log, so a
+            // replayed decision-log delta above it (already applied to the store) is not regressed.
+            if (coordinatorDecisionStore is not null && keyValueMessage.HasEmbeddedDecision)
+            {
+                CoordinatorDecisionRecord? record =
+                    Transactions.CoordinatorDecisionStore.DeserializeRecord(keyValueMessage.EmbeddedDecision.ToByteArray());
+                if (record is not null)
+                    coordinatorDecisionStore.InstallFromAnchorCommit(record);
+            }
 
             return true;
         }

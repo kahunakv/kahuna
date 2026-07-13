@@ -29,4 +29,10 @@ message KeyValueMessage {
   // The transaction's record anchor (first confirmed persistent modified key), carried alongside the
   // transaction id in the receipt for the durable coordinator decision to match against.
   optional string recordAnchorKey = 22;
+  // The initial durable coordinator decision record, present only on the anchor key's committed
+  // mutation. Carrying it here means one committed proposal atomically applies the anchor value, its
+  // completion receipt, and the CommitDecided record (anchor participant already acknowledged) — no
+  // separate Raft round trip, and no window where the anchor value is visible without the decision.
+  // Serialized CoordinatorDecisionSnapshotMessage holding exactly one record. Absent on every other key.
+  optional bytes embeddedDecision = 23;
 }

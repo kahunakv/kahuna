@@ -526,6 +526,9 @@ message GrpcTryPrepareMutationsRequest {
   GrpcKeyValueDurability Durability = 8;
   int64 RoutedGeneration = 9;
   optional string RecordAnchorKey = 10;
+  // Serialized initial coordinator decision, present only on the anchor key's prepare of a Durable
+  // transaction, so a coordinator on a non-leader node still embeds the record into the anchor commit.
+  optional bytes EmbeddedDecision = 11;
 }
 
 message GrpcTryPrepareMutationsResponse {

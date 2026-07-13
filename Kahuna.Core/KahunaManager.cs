@@ -665,10 +665,11 @@ public sealed class KahunaManager : IKahuna, IDisposable
         KeyValueDurability durability,
         CancellationToken cancellationToken,
         long routedGeneration = 0,
-        string? recordAnchorKey = null
+        string? recordAnchorKey = null,
+        CoordinatorDecisionRecord? embeddedDecision = null
     )
     {
-        return keyValues.LocateAndTryPrepareMutations(transactionId, commitId, key, durability, cancellationToken, routedGeneration, recordAnchorKey);
+        return keyValues.LocateAndTryPrepareMutations(transactionId, commitId, key, durability, cancellationToken, routedGeneration, recordAnchorKey, embeddedDecision);
     }
 
     /// <summary>
@@ -1110,10 +1111,11 @@ public sealed class KahunaManager : IKahuna, IDisposable
         string key,
         KeyValueDurability durability,
         long routedGeneration = 0,
-        string? recordAnchorKey = null
+        string? recordAnchorKey = null,
+        CoordinatorDecisionRecord? embeddedDecision = null
     )
     {
-        return keyValues.TryPrepareMutations(transactionId, commitId, key, durability, routedGeneration, recordAnchorKey);
+        return keyValues.TryPrepareMutations(transactionId, commitId, key, durability, routedGeneration, recordAnchorKey, embeddedDecision);
     }
 
     /// <summary>

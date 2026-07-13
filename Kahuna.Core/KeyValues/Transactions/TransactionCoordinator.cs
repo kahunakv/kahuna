@@ -229,6 +229,13 @@ internal sealed class TransactionCoordinator
             if (context.Result is null)
                 return new(KeyValueResponseType.Errored, recordAnchorKey);
 
+            // A Durable commit that installed the anchor decision but could not drive every participant to a
+            // durable ack within the phase-two window reports MustRetry, not a definite outcome: the anchor and
+            // its acknowledged participants are committed, so recovery finishes the rest. Non-terminal — the
+            // session stays live and a retry re-observes MustRetry until recovery completes the decision.
+            if (context.Result.Type is KeyValueResponseType.MustRetry)
+                return new(KeyValueResponseType.MustRetry, recordAnchorKey);
+
             if (context.Result.Type is KeyValueResponseType.Aborted or KeyValueResponseType.Errored)
                 return new(KeyValueResponseType.Aborted, recordAnchorKey);
 
@@ -888,8 +895,44 @@ internal sealed class TransactionCoordinator
     /// </summary>
     internal async Task TwoPhaseCommit(TransactionContext context, CancellationToken cancellationToken)
     {
+        // A finalize re-entered after a Durable commit installed its anchor decision but left participants to
+        // recover must not re-prepare (its 2PC state is already past Pending) and must not report a definite
+        // outcome: the decision is durable, so answer MustRetry until recovery completes it.
+        if (context.HasOutstandingDurableDecision)
+        {
+            context.Result = new() { Type = KeyValueResponseType.MustRetry, Reason = "Durable decision outstanding; recovery in progress" };
+            return;
+        }
+
         if (context.LocksAcquired is null || context.ModifiedKeys is null || context.ModifiedKeys.Count == 0)
             return;
+
+        // Durable policy rejections, before any write intent is placed. A Durable transaction records its
+        // decision on the data partition of its anchor (first confirmed persistent modified key), so it may
+        // not mutate an ephemeral key (no durable participant) and must have an anchor.
+        if (context.DecisionDurability == DecisionDurability.Durable)
+        {
+            if (context.ModifiedKeys.Any(static k => k.Item2 != KeyValueDurability.Persistent))
+            {
+                context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "A durable transaction cannot modify an ephemeral key" };
+                return;
+            }
+
+            if (context.RecordAnchorKey is null)
+            {
+                context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "A durable transaction with modifications must have a record anchor" };
+                return;
+            }
+
+            // Never cap-evict an outstanding decision to admit a new one: reject the new Durable transaction
+            // under capacity pressure instead. A non-positive cap disables the bound.
+            int decisionCap = configuration.TransactionOutcomeRetentionMax;
+            if (decisionCap > 0 && manager.CoordinatorDecisionStore.Count >= decisionCap)
+            {
+                context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Coordinator decision store at capacity; reject new durable transaction" };
+                return;
+            }
+        }
 
         if (!await ValidateReadSet(context, cancellationToken))
             return;
@@ -1157,6 +1200,12 @@ internal sealed class TransactionCoordinator
 
         HLCTimestamp commitId = raft.HybridLogicalClock.ReceiveEvent(raft.GetLocalNodeId(), highestModifiedTime);
 
+        // Durable transactions install their decision record atomically with the anchor commit. That requires
+        // preparing every non-anchor participant first (so their tickets are known), then preparing the anchor
+        // last with the initial CommitDecided record embedded in its proposal.
+        if (context.DecisionDurability == DecisionDurability.Durable && context.RecordAnchorKey is not null)
+            return await PrepareDurableMutations(context, commitId, cancellationToken);
+
         if (context.ModifiedKeys.Count == 1)
         {
             (string key, KeyValueDurability durability) = context.ModifiedKeys.First();
@@ -1216,6 +1265,103 @@ internal sealed class TransactionCoordinator
     }
 
     /// <summary>
+    /// Prepares a Durable transaction so its decision record can be installed atomically with the anchor
+    /// commit. Non-anchor participants prepare first; the anchor prepares last carrying the initial
+    /// <c>CommitDecided</c> record (anchor participant already acknowledged, non-anchor participants pending)
+    /// embedded in its proposal. The returned list has the anchor at position 0 so phase two commits it first.
+    /// </summary>
+    private async Task<(bool, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>?)> PrepareDurableMutations(
+        TransactionContext context,
+        HLCTimestamp commitId,
+        CancellationToken cancellationToken
+    )
+    {
+        string anchorKey = context.RecordAnchorKey!;
+
+        List<(string key, KeyValueDurability durability)> nonAnchor = [];
+        KeyValueDurability anchorDurability = KeyValueDurability.Persistent;
+        foreach ((string key, KeyValueDurability durability) in context.ModifiedKeys!)
+        {
+            if (string.Equals(key, anchorKey, StringComparison.Ordinal))
+                anchorDurability = durability;
+            else
+                nonAnchor.Add((key, durability));
+        }
+
+        List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> prepared = [];
+
+        // 1. Prepare every non-anchor participant first — no embedded decision rides these.
+        if (nonAnchor.Count > 0)
+        {
+            List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> responses =
+                await manager.LocateAndTryPrepareManyMutations(context.TransactionId, commitId, nonAnchor, cancellationToken, anchorKey);
+
+            if (responses.Any(r => r.Item1 != KeyValueResponseType.Prepared))
+            {
+                foreach ((KeyValueResponseType type, HLCTimestamp ticketId, string key, KeyValueDurability durability) in responses)
+                {
+                    if (type == KeyValueResponseType.Prepared)
+                        prepared.Add((key, ticketId, durability));
+                    else
+                        logger.LogWarning("Couldn't propose non-anchor {Key} {Response}", key, type);
+                }
+
+                if (!context.SetState(KeyValueTransactionState.Prepared, KeyValueTransactionState.Preparing))
+                    throw new KahunaAbortedException("Failed to set transaction state to Prepared");
+
+                context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Couldn't prepare non-anchor mutations" };
+                return (false, prepared);
+            }
+
+            prepared.AddRange(responses.Select(r => (r.Item3, r.Item2, r.Item4)));
+        }
+
+        // 2. Build the initial decision: anchor already acknowledged (its commit is the ack), the rest pending.
+        //    The cleanup plan is empty here — read/lock cleanup runs inline in the finalize; recording it as
+        //    frozen effects for recovery replay is handled by the per-partition recovery driver.
+        HLCTimestamp createdAt = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        List<CoordinatorParticipant> participants = new(prepared.Count + 1)
+        {
+            new CoordinatorParticipant(anchorKey, anchorDurability, HLCTimestamp.Zero, true, false)
+        };
+        foreach ((string key, HLCTimestamp ticketId, KeyValueDurability durability) in prepared)
+            participants.Add(new CoordinatorParticipant(key, durability, ticketId, false, false));
+
+        CoordinatorDecisionRecord record = new(
+            context.TransactionId,
+            context.CoordinatorKey,
+            anchorKey,
+            commitId,
+            CoordinatorDecisionStatus.CommitDecided,
+            participants,
+            [],
+            createdAt,
+            HLCTimestamp.Zero);
+
+        context.PreparedDecisionRecord = record;
+
+        // 3. Prepare the anchor last, embedding the record so its commit installs value + receipt + decision.
+        (KeyValueResponseType anchorType, HLCTimestamp anchorTicket, string _, KeyValueDurability _) =
+            await manager.LocateAndTryPrepareMutations(
+                context.TransactionId, commitId, anchorKey, anchorDurability, cancellationToken,
+                recordAnchorKey: anchorKey, embeddedDecision: record);
+
+        if (!context.SetState(KeyValueTransactionState.Prepared, KeyValueTransactionState.Preparing))
+            throw new KahunaAbortedException("Failed to set transaction state to Prepared");
+
+        if (anchorType != KeyValueResponseType.Prepared)
+        {
+            logger.LogWarning("Couldn't propose anchor {Key} {Response}", anchorKey, anchorType);
+            context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Couldn't prepare anchor mutation" };
+            return (false, prepared); // roll back the non-anchor prepares; the anchor never prepared
+        }
+
+        // Anchor at position 0: phase two must commit it first to install the decision before any secondary.
+        prepared.Insert(0, (anchorKey, anchorTicket, anchorDurability));
+        return (true, prepared);
+    }
+
+    /// <summary>
     /// Waits the inter-retry backoff, honouring cancellation.
     /// Returns true when the delay elapsed normally; false when cancellation fired.
     /// </summary>
@@ -1242,6 +1388,14 @@ internal sealed class TransactionCoordinator
 
         if (!context.SetState(KeyValueTransactionState.Committing, KeyValueTransactionState.Prepared))
             throw new KahunaAbortedException("Failed to set transaction state to Committing");
+
+        // Durable transactions commit the anchor first (installing the decision) then the rest, recording ack
+        // progress on the anchored record and never aborting once the decision is outstanding.
+        if (context.DecisionDurability == DecisionDurability.Durable && context.PreparedDecisionRecord is not null)
+        {
+            await CommitDurableMutations(context, mutationsPrepared, cancellationToken);
+            return;
+        }
 
         if (mutationsPrepared.Count == 1)
         {
@@ -1345,6 +1499,188 @@ internal sealed class TransactionCoordinator
 
         if (!context.SetState(KeyValueTransactionState.Committed, KeyValueTransactionState.Committing))
             throw new KahunaAbortedException("Failed to set transaction state to Committed");
+    }
+
+    /// <summary>
+    /// Commits a Durable transaction. The anchor (position 0) commits first: that single committed proposal
+    /// atomically applies the anchor value, its completion receipt, and the initial <c>CommitDecided</c> record
+    /// with the anchor participant already acknowledged. Only after the anchor commit proves the decision exists
+    /// are the remaining participants committed; each participant ack is recorded on the anchored record and its
+    /// completion receipt released. The record becomes <c>Completed</c> once every participant is acknowledged.
+    /// If the anchor never commits, no participant committed and the whole set rolls back (Aborted). If the anchor
+    /// committed but a secondary cannot be driven to a durable ack within the phase-two window, the decision is
+    /// outstanding: the commit returns <c>MustRetry</c> — never <c>Aborted</c> — and recovery finishes it.
+    /// </summary>
+    private async Task CommitDurableMutations(
+        TransactionContext context,
+        List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> mutationsPrepared,
+        CancellationToken cancellationToken)
+    {
+        (string anchorKey, HLCTimestamp anchorTicket, KeyValueDurability anchorDurability) = mutationsPrepared[0];
+
+        // 1. Commit the anchor first. Until it commits there is no durable decision, so a failure here rolls
+        //    back every prepared participant (none has committed) and aborts.
+        bool anchorCommitted = false;
+        for (int attempt = 0; attempt <= MaxPhase2Retries; attempt++)
+        {
+            if (attempt > 0 && !await DelayBetweenRetries(cancellationToken))
+                break;
+
+            (KeyValueResponseType response, long _) = await manager.LocateAndTryCommitMutations(
+                context.TransactionId, anchorKey, anchorTicket, anchorDurability, CancellationToken.None);
+
+            if (response == KeyValueResponseType.Committed)
+            {
+                anchorCommitted = true;
+                break;
+            }
+
+            if (response == KeyValueResponseType.MustRetry)
+            {
+                logger.LogWarning("CommitDurableMutations: transient failure committing anchor {Key} attempt {Attempt}, retrying", anchorKey, attempt + 1);
+                continue;
+            }
+
+            // A non-transient failure of the anchor commit, before any decision exists: roll everything back.
+            logger.LogWarning("CommitDurableMutations: anchor commit failed {Response} {Key}", response, anchorKey);
+            break;
+        }
+
+        if (!anchorCommitted)
+        {
+            if (context.AsyncRelease)
+                _ = RollbackMutations(context, mutationsPrepared, CancellationToken.None);
+            else
+                await RollbackMutations(context, mutationsPrepared, cancellationToken);
+
+            context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = $"Failed to commit anchor mutation {anchorKey}" };
+            return;
+        }
+
+        // The decision is now durable. From here the transaction can only complete or defer to recovery — it
+        // must never abort, because the anchor participant is committed.
+        context.HasOutstandingDurableDecision = true;
+
+        // 2. Commit the remaining participants, recording ack progress on the anchored record in batches.
+        Dictionary<string, (HLCTimestamp ticketId, KeyValueDurability durability)> pendingCommits =
+            mutationsPrepared.Skip(1).ToDictionary(x => x.key, x => (x.ticketId, x.durability));
+
+        for (int attempt = 0; attempt <= MaxPhase2Retries && pendingCommits.Count > 0; attempt++)
+        {
+            if (attempt > 0 && !await DelayBetweenRetries(cancellationToken))
+                break;
+
+            List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> batch =
+                [.. pendingCommits.Select(kvp => (kvp.Key, kvp.Value.ticketId, kvp.Value.durability))];
+
+            List<(KeyValueResponseType, string, long, KeyValueDurability)> responses =
+                await manager.LocateAndTryCommitManyMutations(context.TransactionId, batch, CancellationToken.None);
+
+            HashSet<string> newlyAcked = [];
+            bool hasTransientFailure = false;
+            bool hasPermanentFailure = false;
+            foreach ((KeyValueResponseType response, string key, long _, KeyValueDurability _) in responses)
+            {
+                if (response == KeyValueResponseType.Committed)
+                {
+                    pendingCommits.Remove(key);
+                    newlyAcked.Add(key);
+                    continue;
+                }
+
+                if (response == KeyValueResponseType.MustRetry)
+                {
+                    hasTransientFailure = true;
+                    continue;
+                }
+
+                // A non-transient participant failure cannot abort an outstanding decision; leave it for
+                // recovery and stop retrying so the commit does not spin the full phase-two window.
+                hasPermanentFailure = true;
+                logger.LogWarning("CommitDurableMutations: participant {Key} failed {Response}; deferring to recovery", key, response);
+            }
+
+            // Persist the ack progress for the participants that committed this round before forgetting receipts.
+            if (newlyAcked.Count > 0)
+                await PersistDecisionProgress(context, newlyAcked, complete: false, cancellationToken);
+
+            if (hasPermanentFailure)
+                break;
+
+            if (!hasTransientFailure)
+                break;
+        }
+
+        if (pendingCommits.Count == 0)
+        {
+            // Every participant acknowledged: mark the record Completed and finish.
+            await PersistDecisionProgress(context, [], complete: true, cancellationToken);
+            context.HasOutstandingDurableDecision = false;
+
+            if (!context.SetState(KeyValueTransactionState.Committed, KeyValueTransactionState.Committing))
+                throw new KahunaAbortedException("Failed to set transaction state to Committed");
+
+            return;
+        }
+
+        // The anchor and every acknowledged participant are durably committed, but some participant could not
+        // be driven to a durable ack. Do not abort — recovery drives the outstanding decision to completion.
+        logger.LogWarning(
+            "CommitDurableMutations: {Count} participant(s) still pending after phase two; decision outstanding, returning MustRetry",
+            pendingCommits.Count);
+        context.Result = new() { Type = KeyValueResponseType.MustRetry, Reason = "Durable decision outstanding; recovery will complete it" };
+    }
+
+    /// <summary>
+    /// Records ack progress on the anchored decision record: marks the given participants acknowledged (and,
+    /// on <paramref name="complete"/>, transitions the record to <c>Completed</c>), releasing each newly
+    /// acknowledged participant's local completion receipt. The participant set is preserved exactly (only the
+    /// progress flags change) so the anchor-partition upsert passes the frozen-participant-set check.
+    /// </summary>
+    private async Task PersistDecisionProgress(
+        TransactionContext context, HashSet<string> ackedKeys, bool complete, CancellationToken cancellationToken)
+    {
+        CoordinatorDecisionRecord current = context.PreparedDecisionRecord!;
+
+        List<CoordinatorParticipant> updated = new(current.Participants.Count);
+        foreach (CoordinatorParticipant participant in current.Participants)
+        {
+            bool nowAcked = participant.Acked || ackedKeys.Contains(participant.Key);
+            bool released = participant.ReceiptReleased;
+
+            // Forget the local completion receipt once its participant is acknowledged on the record. The
+            // receipt was needed only to resolve an ack-loss re-commit before the decision existed; the
+            // durable record now authorizes forgetting it. Cross-node receipt copies are swept by recovery.
+            if (nowAcked && !released)
+            {
+                manager.CompletionReceiptStore.Forget(context.TransactionId, participant.Key);
+                released = true;
+            }
+
+            updated.Add(participant with { Acked = nowAcked, ReceiptReleased = released });
+        }
+
+        CoordinatorDecisionStatus status = complete ? CoordinatorDecisionStatus.Completed : current.Status;
+        HLCTimestamp completedAt = complete
+            ? raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId())
+            : current.CompletedAt;
+
+        CoordinatorDecisionRecord next = current with
+        {
+            Participants = updated,
+            Status = status,
+            CompletedAt = completedAt
+        };
+
+        CoordinatorDecisionMutationResult result =
+            await manager.CoordinatorDecisionStore.UpsertAsync(next, expectedGeneration: 0, cancellationToken);
+
+        // Publish the advanced record for the next batch regardless of the replication outcome: a transient
+        // MustRetry leaves the durable record behind by one ack, which recovery reconciles idempotently.
+        context.PreparedDecisionRecord = next;
+
+        if (result != CoordinatorDecisionMutationResult.Applied)
+            logger.LogWarning("PersistDecisionProgress: decision upsert returned {Result} for {TransactionId}", result, context.TransactionId);
     }
 
     /// <summary>
