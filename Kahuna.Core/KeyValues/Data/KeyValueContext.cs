@@ -58,6 +58,13 @@ internal sealed class KeyValueContext
 
     public SnapshotFloorStore? SnapshotFloorStore { get; }
 
+    /// <summary>
+    /// Node-local persistent-participant completion receipts. Consulted when a re-commit finds the
+    /// write intent and MVCC entry gone, to tell a durable ack-loss re-commit (receipt present →
+    /// Committed) from a request that never committed here (no receipt → MustRetry).
+    /// </summary>
+    public CompletionReceiptStore CompletionReceiptStore { get; }
+
     public IPersistenceBackend PersistenceBackend  { get; }
 
     public BTree<string, KeyValueEntry> Store  { get; }
@@ -120,7 +127,8 @@ internal sealed class KeyValueContext
         RangeMapStore rangeMapStore,
         KahunaConfiguration configuration,
         ILogger<IKahuna> logger,
-        SnapshotFloorStore? snapshotFloorStore = null
+        SnapshotFloorStore? snapshotFloorStore = null,
+        CompletionReceiptStore? completionReceiptStore = null
     )
     {
         ActorContext = actorContext;
@@ -137,6 +145,7 @@ internal sealed class KeyValueContext
         Configuration = configuration;
         Logger = logger;
         SnapshotFloorStore = snapshotFloorStore;
+        CompletionReceiptStore = completionReceiptStore ?? new CompletionReceiptStore();
     }
 
     /// <summary>

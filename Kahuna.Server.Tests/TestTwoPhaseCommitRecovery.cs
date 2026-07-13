@@ -734,4 +734,115 @@ public sealed class TestTwoPhaseCommitRecovery
             await LeaveAll(nodes);
         }
     }
+
+    /// <summary>
+    /// A committed persistent participant records a durable completion receipt on the follower nodes:
+    /// the committed record carries the transaction id, and applying it via replication records the
+    /// receipt. This is the state that lets a re-commit survive a leader change.
+    /// </summary>
+    [Fact]
+    public async Task CommittedPersistentParticipant_RecordsReceiptOnFollowers()
+    {
+        Node[] nodes = await AssembleCluster();
+        try
+        {
+            CancellationToken ct = TestContext.Current.CancellationToken;
+
+            const string key = "receipt-follower-key";
+
+            int  keyPartition = 1 + HashUtils.ConsistentHash(key, nodes[0].Raft.Configuration.InitialPartitions);
+            Node leaderNode   = await LeaderOf(keyPartition, nodes);
+
+            HybridLogicalClock clock    = leaderNode.Raft.HybridLogicalClock;
+            HLCTimestamp       txId     = clock.TrySendOrLocalEvent(leaderNode.Raft.GetLocalNodeId());
+            HLCTimestamp       commitId = clock.TrySendOrLocalEvent(leaderNode.Raft.GetLocalNodeId());
+
+            HLCTimestamp ticketId = await PrepareTransaction(leaderNode, txId, commitId, key, "v1"u8.ToArray());
+
+            (KeyValueResponseType commitType, long _) =
+                await leaderNode.Kahuna.TryCommitMutations(txId, key, ticketId, KeyValueDurability.Persistent);
+            Assert.Equal(KeyValueResponseType.Committed, commitType);
+
+            // The leader recorded the receipt synchronously.
+            Assert.True(leaderNode.Kahuna.CompletionReceiptStore.Contains(txId, key));
+
+            // Every follower records it once the committed record replicates (apply is async).
+            await WaitForReceiptOnAllNodes(txId, key, nodes);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// The durable receipt closes the leader-change gap that <see cref="CommitOnUnpreparedNode_ReturnsMustRetryNotCommitted"/>
+    /// leaves as MustRetry: when the transaction actually committed, a re-commit arriving at a node
+    /// that never held the prepare state — because leadership moved after the commit — finds the
+    /// replicated completion receipt and answers Committed rather than MustRetry.
+    /// </summary>
+    [Fact]
+    public async Task CommitAfterLeaderChange_ResolvedByReceipt_ReturnsCommitted()
+    {
+        Node[] nodes = await AssembleCluster();
+        try
+        {
+            CancellationToken ct = TestContext.Current.CancellationToken;
+
+            const string key = "receipt-failover-key";
+
+            int  keyPartition   = 1 + HashUtils.ConsistentHash(key, nodes[0].Raft.Configuration.InitialPartitions);
+            Node committingLeader = await LeaderOf(keyPartition, nodes);
+
+            HybridLogicalClock clock    = committingLeader.Raft.HybridLogicalClock;
+            HLCTimestamp       txId     = clock.TrySendOrLocalEvent(committingLeader.Raft.GetLocalNodeId());
+            HLCTimestamp       commitId = clock.TrySendOrLocalEvent(committingLeader.Raft.GetLocalNodeId());
+
+            // Commit the transaction on the current leader — this replicates the completion receipt.
+            HLCTimestamp ticketId = await PrepareTransaction(committingLeader, txId, commitId, key, "v1"u8.ToArray());
+            (KeyValueResponseType commitType, long _) =
+                await committingLeader.Kahuna.TryCommitMutations(txId, key, ticketId, KeyValueDurability.Persistent);
+            Assert.Equal(KeyValueResponseType.Committed, commitType);
+
+            await WaitForReceiptOnAllNodes(txId, key, nodes);
+
+            // Move leadership away from the committing node.
+            await committingLeader.Raft.StepDownAsync(keyPartition, ct);
+            await Task.Delay((int)(100 * TimingScale), ct);
+            Node newLeader = await WaitForNewLeader(keyPartition, committingLeader, nodes);
+
+            // The new leader never held the prepare state (write intent + MVCC), but it recorded the
+            // receipt as a follower — so the ack-loss re-commit resolves Committed, not MustRetry.
+            Assert.True(newLeader.Kahuna.CompletionReceiptStore.Contains(txId, key));
+            (KeyValueResponseType recommitType, long _) =
+                await newLeader.Kahuna.TryCommitMutations(txId, key, ticketId, KeyValueDurability.Persistent);
+            Assert.Equal(KeyValueResponseType.Committed, recommitType);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>Polls until every cluster node has recorded a completion receipt for (txId, key).</summary>
+    private static async Task WaitForReceiptOnAllNodes(HLCTimestamp txId, string key, Node[] nodes)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        long deadline = Environment.TickCount64 + (long)(10_000 * TimingScale);
+
+        while (true)
+        {
+            bool all = nodes.All(n => n.Kahuna.CompletionReceiptStore.Contains(txId, key));
+            if (all)
+                return;
+
+            if (Environment.TickCount64 >= deadline)
+            {
+                string present = string.Join(", ", nodes.Select((n, i) => $"n{i}={n.Kahuna.CompletionReceiptStore.Contains(txId, key)}"));
+                Assert.Fail($"Completion receipt for {txId}/{key} not present on all nodes within deadline: {present}");
+            }
+
+            await Task.Delay(50, ct);
+        }
+    }
 }

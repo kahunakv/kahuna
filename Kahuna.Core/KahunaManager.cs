@@ -1216,6 +1216,9 @@ public sealed class KahunaManager : IKahuna, IDisposable
         return keyValues.GetRecordedDecisionDurability(transactionId);
     }
 
+    /// <summary>Node-local persistent-participant completion receipts. Diagnostic/test access.</summary>
+    internal CompletionReceiptStore CompletionReceiptStore => keyValues.CompletionReceiptStore;
+
     /// <summary>
     /// Commits the transaction identified by <paramref name="handle"/>.
     /// </summary>

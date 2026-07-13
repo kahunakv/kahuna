@@ -3,6 +3,7 @@ using Nixie;
 
 using Kommander;
 using Kommander.Data;
+using Kommander.Time;
 
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Replication;
@@ -22,12 +23,15 @@ internal sealed class KeyValueRestorer
 
     private readonly IRaft raft;
 
+    private readonly CompletionReceiptStore completionReceiptStore;
+
     private readonly ILogger<IKahuna> logger;
 
-    public KeyValueRestorer(IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, IRaft raft, ILogger<IKahuna> logger)
+    public KeyValueRestorer(IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, IRaft raft, CompletionReceiptStore completionReceiptStore, ILogger<IKahuna> logger)
     {
         this.backgroundWriter = backgroundWriter;
         this.raft = raft;
+        this.completionReceiptStore = completionReceiptStore;
         this.logger = logger;
     }
 
@@ -70,6 +74,15 @@ internal sealed class KeyValueRestorer
                 (int)state,
                 keyValueMessage.NoRevision
             ));
+
+            // Rebuild the completion receipt from the replayed committed record so a re-commit after a
+            // cold restart / leader change resolves Committed rather than MustRetry.
+            HLCTimestamp transactionId = new(keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter);
+            completionReceiptStore.Record(
+                transactionId,
+                keyValueMessage.Key,
+                keyValueMessage.HasRecordAnchorKey ? keyValueMessage.RecordAnchorKey : null,
+                KeyValueDurability.Persistent);
 
             return true;
         }
