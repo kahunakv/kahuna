@@ -224,4 +224,87 @@ public sealed class TestClientTransactionRegisterRemote
         Assert.True(after.Success);
         Assert.Equal("rewritten", after.ValueAsString());
     }
+
+    /// <summary>
+    /// After a session commits and is removed from the active map, a duplicate commit for the same handle
+    /// replays the retained terminal outcome (Committed with the same record anchor) from the idempotency
+    /// window, rather than reporting the transaction unknown.
+    /// </summary>
+    [Fact]
+    public async Task DuplicateCommit_AfterSessionRemoved_ReplaysCommittedFromRetention()
+    {
+        await using EmbeddedKahunaNode node = CreateNode(loggerFactory);
+        await node.StartAsync(TestContext.Current.CancellationToken);
+
+        KahunaClient client = new("http://localhost", communication: new InProcessKahunaCommunication(node.Kahuna));
+
+        string key = "rr/retain-commit/" + Guid.NewGuid().ToString("N")[..8];
+
+        Kahuna.Shared.KeyValue.TransactionHandle handle;
+
+        await using (KahunaTransactionSession tx = await client.StartTransactionSession(
+                         new() { Locking = KeyValueTransactionLocking.Pessimistic },
+                         TestContext.Current.CancellationToken))
+        {
+            await tx.SetKeyValue(key, "v", durability: KeyValueDurability.Persistent, cancellationToken: TestContext.Current.CancellationToken);
+            Assert.True(await tx.Commit(TestContext.Current.CancellationToken));
+            handle = tx.Handle;
+        }
+
+        // The session is gone from the active map, but its outcome is still within the idempotency window.
+        (KeyValueResponseType type, string? anchor) = await node.Kahuna.LocateAndCommitTransaction(handle, TestContext.Current.CancellationToken);
+
+        Assert.Equal(KeyValueResponseType.Committed, type);
+        Assert.Equal(key, anchor);
+    }
+
+    /// <summary>
+    /// After a session rolls back and is removed, a duplicate rollback replays the retained RolledBack outcome
+    /// from the idempotency window.
+    /// </summary>
+    [Fact]
+    public async Task DuplicateRollback_AfterSessionRemoved_ReplaysRolledBackFromRetention()
+    {
+        await using EmbeddedKahunaNode node = CreateNode(loggerFactory);
+        await node.StartAsync(TestContext.Current.CancellationToken);
+
+        KahunaClient client = new("http://localhost", communication: new InProcessKahunaCommunication(node.Kahuna));
+
+        string key = "rr/retain-rollback/" + Guid.NewGuid().ToString("N")[..8];
+
+        Kahuna.Shared.KeyValue.TransactionHandle handle;
+
+        await using (KahunaTransactionSession tx = await client.StartTransactionSession(
+                         new() { Locking = KeyValueTransactionLocking.Pessimistic },
+                         TestContext.Current.CancellationToken))
+        {
+            await tx.SetKeyValue(key, "v", durability: KeyValueDurability.Persistent, cancellationToken: TestContext.Current.CancellationToken);
+            Assert.True(await tx.Rollback(TestContext.Current.CancellationToken));
+            handle = tx.Handle;
+        }
+
+        KeyValueResponseType type = await node.Kahuna.LocateAndRollbackTransaction(handle, TestContext.Current.CancellationToken);
+
+        Assert.Equal(KeyValueResponseType.RolledBack, type);
+    }
+
+    /// <summary>
+    /// A finalize for a transaction the coordinator has never seen (and that is not in the idempotency window)
+    /// is reported as unknown <c>Errored</c> — never a conflict <c>Aborted</c>, which would falsely imply a
+    /// serialization failure on a transaction that never existed.
+    /// </summary>
+    [Fact]
+    public async Task Finalize_ForUnknownTransaction_IsErrored_NotAborted()
+    {
+        await using EmbeddedKahunaNode node = CreateNode(loggerFactory);
+        await node.StartAsync(TestContext.Current.CancellationToken);
+
+        Kahuna.Shared.KeyValue.TransactionHandle unknown = new(new Kommander.Time.HLCTimestamp(1, 999, 0), Guid.NewGuid().ToString("N"));
+
+        (KeyValueResponseType commitType, _) = await node.Kahuna.LocateAndCommitTransaction(unknown, TestContext.Current.CancellationToken);
+        Assert.Equal(KeyValueResponseType.Errored, commitType);
+
+        KeyValueResponseType rollbackType = await node.Kahuna.LocateAndRollbackTransaction(unknown, TestContext.Current.CancellationToken);
+        Assert.Equal(KeyValueResponseType.Errored, rollbackType);
+    }
 }

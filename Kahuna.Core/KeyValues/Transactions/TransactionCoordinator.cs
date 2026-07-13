@@ -27,6 +27,14 @@ internal sealed class TransactionCoordinator
     private const int ReapGraceMs = 15_000;
 
     /// <summary>
+    /// Upper bound, in milliseconds, on how long a participant retains an effect a dispatched operation may
+    /// have placed (the write-intent lease, DefaultTxCompleteTimeout, 15 s). While a reaped session still has
+    /// unresolved dispatched operations, the reaper waits at least this long past the session deadline before
+    /// expiring it, so it never abandons a session whose in-flight effect could still land at a participant.
+    /// </summary>
+    private const int MaxParticipantEffectTtlMs = 15_000;
+
+    /// <summary>
     /// Maximum number of phase-two (commit/rollback) retry attempts when a participant returns
     /// MustRetry due to a transient Raft condition (e.g. NodeIsNotLeader after a leader election).
     /// With Phase2RetryDelayMs = 250 this allows up to 5 s for leadership to stabilise.
@@ -45,6 +53,18 @@ internal sealed class TransactionCoordinator
     private readonly ILogger<IKahuna> logger;
 
     internal readonly ConcurrentDictionary<HLCTimestamp, TransactionContext> sessions = new();
+
+    /// <summary>
+    /// Best-effort retention of finalized outcomes after their session leaves <see cref="sessions"/>. A
+    /// duplicate commit/rollback that arrives once the session is gone replays the recorded terminal answer
+    /// (Committed/RolledBack/expired) instead of an unknown result. Bounded by size and HLC age (configuration
+    /// <c>TransactionOutcomeRetentionMax</c> / <c>TransactionOutcomeRetentionTtl</c>); after eviction a
+    /// duplicate receives an unknown <see cref="KeyValueResponseType.Errored"/>, never a conflict Aborted.
+    /// </summary>
+    private readonly ConcurrentDictionary<HLCTimestamp, RetainedOutcome> terminalOutcomes = new();
+
+    /// <summary>A finalized outcome held in the idempotency window, stamped with the HLC at retention time.</summary>
+    private readonly record struct RetainedOutcome(FinalizeOutcome Outcome, HLCTimestamp RetainedAt);
 
     public TransactionCoordinator(KeyValuesManager manager, KahunaConfiguration configuration, IRaft raft, ILogger<IKahuna> logger)
     {
@@ -112,6 +132,12 @@ internal sealed class TransactionCoordinator
 
         if (!sessions.TryGetValue(transactionId, out TransactionContext? context))
         {
+            // The session is gone. If its outcome is still within the idempotency window, a duplicate commit
+            // replays the recorded terminal answer; otherwise it is unknown (evicted or never existed) and
+            // reported as Errored — never a conflict Aborted.
+            if (terminalOutcomes.TryGetValue(transactionId, out RetainedOutcome retained))
+                return (retained.Outcome.Type, retained.Outcome.RecordAnchorKey);
+
             logger.LogWarning("Trying to commit unknown transaction {TransactionId}", transactionId);
 
             return (KeyValueResponseType.Errored, null);
@@ -134,6 +160,12 @@ internal sealed class TransactionCoordinator
         try
         {
             outcome = await ExecuteCommit(context, transactionId);
+
+            // A committed session was removed from the map; retain its outcome so a duplicate commit that
+            // races in after removal replays Committed rather than seeing an unknown transaction.
+            if (outcome.Type == KeyValueResponseType.Committed)
+                RetainTerminalOutcome(transactionId, outcome, raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()));
+
             return (outcome.Type, outcome.RecordAnchorKey);
         }
         finally
@@ -230,6 +262,10 @@ internal sealed class TransactionCoordinator
 
         if (!sessions.TryGetValue(transactionId, out TransactionContext? context))
         {
+            // Replay a retained terminal outcome within the idempotency window; otherwise unknown → Errored.
+            if (terminalOutcomes.TryGetValue(transactionId, out RetainedOutcome retained))
+                return retained.Outcome.Type;
+
             logger.LogWarning("Trying to rollback unknown transaction {TransactionId}", transactionId);
 
             return KeyValueResponseType.Errored;
@@ -251,6 +287,12 @@ internal sealed class TransactionCoordinator
         try
         {
             outcome = await ExecuteRollback(context, transactionId);
+
+            // A rolled-back session was removed from the map; retain its outcome so a duplicate rollback that
+            // races in after removal replays RolledBack rather than seeing an unknown transaction.
+            if (outcome.Type == KeyValueResponseType.RolledBack)
+                RetainTerminalOutcome(transactionId, outcome, raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()));
+
             return outcome.Type;
         }
         finally
@@ -353,15 +395,9 @@ internal sealed class TransactionCoordinator
     }
 
     /// <summary>
-    /// Transitions the session to <see cref="SessionLifecycle.Finalizing"/>, waits for all
-    /// in-flight operations to drain, captures a working-set snapshot, and transitions to
-    /// <see cref="SessionLifecycle.Terminal"/>. Callers use the returned snapshot to drive the
-    /// 2PC prepare/commit/rollback steps independently of the live context.
-    /// </summary>
-    /// <summary>
     /// Closes a session to new operations and waits for in-flight ones to drain, so a subsequent
-    /// two-phase commit / rollback reads a stable coordinator-owned working set. Returns false (and
-    /// reopens the session if this call was the one that closed it) when the drain deadline elapses.
+    /// two-phase commit / rollback reads a stable coordinator-owned working set. Returns false when the
+    /// drain deadline elapses (the session stays closed so the caller retries and rejoins the same drain).
     /// </summary>
     private async Task<bool> FreezeForFinalize(TransactionContext context)
     {
@@ -382,6 +418,16 @@ internal sealed class TransactionCoordinator
         }
     }
 
+    /// <summary>
+    /// Closes a session to new operations, drains in-flight ones, and captures the immutable working-set
+    /// snapshot that a later commit or rollback finalizes against (CamusDB calls Close to publish cache
+    /// keyspaces before committing). Close shares the single finalize slot with commit/rollback so a Close and
+    /// a finalize never run over the same transaction concurrently, but — unlike commit/rollback — Close does
+    /// <b>not</b> decide the transaction: it stores the snapshot, leaves the session
+    /// <see cref="SessionLifecycle.Finalizing"/> (still finalizable, never terminal), and releases the slot so
+    /// a subsequent commit/rollback owns it and finalizes the frozen working set. A repeat Close returns the
+    /// same stored snapshot.
+    /// </summary>
     public async Task<(KeyValueResponseType, WorkingSetSnapshot?)> CloseTransaction(
         HLCTimestamp transactionId,
         CancellationToken cancellationToken)
@@ -389,39 +435,121 @@ internal sealed class TransactionCoordinator
         if (!sessions.TryGetValue(transactionId, out TransactionContext? context))
             return (KeyValueResponseType.Errored, null);
 
-        if (!context.TryBeginFinalizing())
-        {
-            // Not the first to close. If a finalize already completed, hand back its published snapshot.
-            WorkingSetSnapshot? published = context.PublishedSnapshot;
-            if (published is not null)
-                return (KeyValueResponseType.Set, published);
+        // Already closed and snapshotted: return the same frozen snapshot without re-capturing.
+        WorkingSetSnapshot? stored = context.CloseSnapshot;
+        if (stored is not null)
+            return (KeyValueResponseType.Set, stored);
 
-            // A finalize is still in progress (this is a retry after a prior drain timeout, or a
-            // concurrent close): the session stays Finalizing and closed to new operations, so fall
-            // through and rejoin the same pending drain rather than reopening it. Any other state
-            // (reaping/terminal-without-snapshot) is not ours to close — ask the caller to retry.
-            if (context.Lifecycle != SessionLifecycle.Finalizing)
-                return (KeyValueResponseType.MustRetry, null);
+        // Contend for the single finalize slot so Close and a commit/rollback never touch the working set at
+        // once. Rejected means the reaper (or a terminal state) owns the session — nothing to close.
+        FinalizeAdmission admission = context.EnterFinalize(out FinalizeAttempt? attempt);
+        if (admission == FinalizeAdmission.Rejected)
+            return context.CloseSnapshot is { } published
+                ? (KeyValueResponseType.Set, published)
+                : (KeyValueResponseType.MustRetry, null);
+
+        if (admission == FinalizeAdmission.Mirror)
+        {
+            // Another finalize owns the slot. Wait for it: if it was a concurrent Close, its stored snapshot is
+            // now available; if it was a deciding commit/rollback, there is no snapshot and the caller retries.
+            await attempt!.Completion;
+            return context.CloseSnapshot is { } published
+                ? (KeyValueResponseType.Set, published)
+                : (KeyValueResponseType.MustRetry, null);
         }
 
-        using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        cts.CancelAfter(context.Timeout);
-
+        // Owner: drain, snapshot, store, then release the slot with a non-terminal outcome so the session
+        // stays Finalizing (closed to new operations, still finalizable) and a later commit/rollback owns it.
         try
         {
-            await context.WaitForPendingOperations(cts.Token);
+            using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            cts.CancelAfter(context.Timeout <= 0 ? configuration.DefaultTransactionTimeout : context.Timeout);
+
+            try
+            {
+                await context.WaitForPendingOperations(cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                // Drain deadline hit. Release the slot (MustRetry keeps the session Finalizing and closed) so a
+                // later Close rejoins the same drain; do not snapshot a set that has not finished draining.
+                context.CompleteFinalize(attempt!, new FinalizeOutcome(KeyValueResponseType.MustRetry, null));
+                return (KeyValueResponseType.MustRetry, null);
+            }
+
+            WorkingSetSnapshot snapshot = context.GetWorkingSetSnapshot();
+            context.StoreCloseSnapshot(snapshot);
+
+            // Release the slot without deciding the transaction. The non-terminal outcome frees the slot and
+            // bounces any commit/rollback that mirrored this Close with MustRetry so it retries and then owns
+            // the finalize itself; a mirroring Close instead observes the now-stored snapshot.
+            context.CompleteFinalize(attempt!, new FinalizeOutcome(KeyValueResponseType.MustRetry, null));
+
+            return (KeyValueResponseType.Set, context.CloseSnapshot ?? snapshot);
         }
-        catch (OperationCanceledException)
+        catch
         {
-            // Drain deadline hit. Keep the session closed — do NOT reopen it to new operations — so a
-            // later Close rejoins this same pre-close pending set instead of admitting new work.
-            return (KeyValueResponseType.MustRetry, null);
+            context.CompleteFinalize(attempt!, new FinalizeOutcome(KeyValueResponseType.MustRetry, null));
+            throw;
         }
+    }
 
-        WorkingSetSnapshot snapshot = context.GetWorkingSetSnapshot();
-        context.PublishTerminal(snapshot);
+    // ---- terminal outcome retention (idempotency window) ----
 
-        return (KeyValueResponseType.Set, snapshot);
+    /// <summary>
+    /// Records a finalized outcome so a duplicate finalize arriving after the session is removed replays the
+    /// same answer. Size-bounded: once the window exceeds <c>TransactionOutcomeRetentionMax</c> the oldest
+    /// entry (by retention HLC) is evicted. Only terminal outcomes are retained — a non-terminal MustRetry
+    /// leaves the session live, so there is nothing to replay.
+    /// </summary>
+    private void RetainTerminalOutcome(HLCTimestamp transactionId, FinalizeOutcome outcome, HLCTimestamp now)
+    {
+        if (!outcome.IsTerminal)
+            return;
+
+        terminalOutcomes[transactionId] = new RetainedOutcome(outcome, now);
+
+        int max = configuration.TransactionOutcomeRetentionMax;
+        if (max <= 0 || terminalOutcomes.Count <= max)
+            return;
+
+        // Over capacity: evict the oldest entries by retention timestamp until back within the bound.
+        while (terminalOutcomes.Count > max)
+        {
+            HLCTimestamp oldestKey = default;
+            HLCTimestamp oldestAt = HLCTimestamp.Zero;
+            bool found = false;
+
+            foreach (KeyValuePair<HLCTimestamp, RetainedOutcome> entry in terminalOutcomes)
+            {
+                if (!found || entry.Value.RetainedAt - oldestAt < TimeSpan.Zero)
+                {
+                    oldestKey = entry.Key;
+                    oldestAt = entry.Value.RetainedAt;
+                    found = true;
+                }
+            }
+
+            if (!found || !terminalOutcomes.TryRemove(oldestKey, out _))
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Prunes retained outcomes older than the configured idempotency window. Called on each reaper sweep so
+    /// the window is bounded by age in addition to size.
+    /// </summary>
+    private void PruneRetainedOutcomes(HLCTimestamp now)
+    {
+        TimeSpan ttl = configuration.TransactionOutcomeRetentionTtl;
+        if (ttl <= TimeSpan.Zero || terminalOutcomes.IsEmpty)
+            return;
+
+        foreach (KeyValuePair<HLCTimestamp, RetainedOutcome> entry in terminalOutcomes)
+        {
+            if (now - entry.Value.RetainedAt >= ttl)
+                terminalOutcomes.TryRemove(entry.Key, out _);
+        }
     }
 
     // ---- session reaper ----
@@ -432,10 +560,13 @@ internal sealed class TransactionCoordinator
     /// </summary>
     public async Task ReapAbandonedSessions()
     {
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        // Bound the idempotency window by age on the same sweep, independent of whether any session is reaped.
+        PruneRetainedOutcomes(now);
+
         if (sessions.IsEmpty)
             return;
-
-        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
         foreach (KeyValuePair<HLCTimestamp, TransactionContext> pair in sessions)
         {
@@ -446,7 +577,26 @@ internal sealed class TransactionCoordinator
                 or KeyValueTransactionState.RollingBack)
                 continue;
 
-            HLCTimestamp deadline = pair.Key + (context.Timeout + ReapGraceMs);
+            // A session already claimed by a prior reap whose cleanup could not fully release retries every
+            // sweep — regardless of the deadline — until every mandatory release acknowledges. Resume it with
+            // a fresh attempt; a null resume means the slot is still held by an in-flight reap, so skip.
+            if (context.Lifecycle == SessionLifecycle.Reaping)
+            {
+                FinalizeAttempt? resume = context.TryResumeReap();
+                if (resume is not null)
+                    await ReapSession(pair.Key, context, resume, now);
+
+                continue;
+            }
+
+            // A session with unresolved dispatched operations is not abandoned until the extended deadline —
+            // base timeout + grace + the maximum participant effect TTL — elapses, so the reaper never cancels
+            // an operation that could still land an effect at a participant.
+            int window = context.Timeout + ReapGraceMs;
+            if (context.HasPendingOperations)
+                window += MaxParticipantEffectTtlMs;
+
+            HLCTimestamp deadline = pair.Key + window;
 
             if ((deadline - now) > TimeSpan.Zero)
                 continue;
@@ -461,27 +611,65 @@ internal sealed class TransactionCoordinator
             if (attempt is null)
                 continue;
 
-            // Publish the reap outcome to any commit/rollback that races in and mirrors this attempt, so it
-            // learns the abandoned session was rolled back rather than finalizing a vanishing session.
-            FinalizeOutcome outcome = new(KeyValueResponseType.RolledBack, null);
-            try
+            await ReapSession(pair.Key, context, attempt, now);
+        }
+    }
+
+    /// <summary>
+    /// Reclaims one abandoned session that this reaper tick owns the finalize slot for. Releases its confirmed
+    /// working set and decides the outcome published to any racing finalizer:
+    /// <list type="bullet">
+    /// <item>every mandatory release acknowledged and no operation still pending → terminal
+    /// <see cref="KeyValueResponseType.RolledBack"/>; the session is removed and its outcome retained.</item>
+    /// <item>an operation is still unresolved after the extended deadline → the session is <b>expired</b>
+    /// without reporting RolledBack: it is removed and the outcome retained as an unknown
+    /// <see cref="KeyValueResponseType.Errored"/>. The dispatched operation is never cancelled; if its effect
+    /// lands later it finds no session, is not acknowledged, and expires at the participant on its intent
+    /// lease.</item>
+    /// <item>a mandatory release could not complete (transient) → non-terminal
+    /// <see cref="KeyValueResponseType.MustRetry"/>: the session stays <see cref="SessionLifecycle.Reaping"/>
+    /// and a later sweep retries the cleanup.</item>
+    /// </list>
+    /// </summary>
+    private async Task ReapSession(HLCTimestamp transactionId, TransactionContext context, FinalizeAttempt attempt, HLCTimestamp now)
+    {
+        FinalizeOutcome outcome = new(KeyValueResponseType.MustRetry, null);
+        try
+        {
+            context.Action = KeyValueTransactionAction.Abort;
+
+            logger.LogWarning("Reaping abandoned interactive transaction {TransactionId}", transactionId);
+
+            bool cleaned = await ReleaseWorkingSet(context);
+
+            if (context.HasPendingOperations)
             {
-                if (!sessions.TryRemove(pair.Key, out _))
-                {
-                    outcome = new(KeyValueResponseType.Errored, null);
-                    continue;
-                }
-
-                context.Action = KeyValueTransactionAction.Abort;
-
-                logger.LogWarning("Reaping abandoned interactive transaction {TransactionId}", pair.Key);
-
-                await ReleaseWorkingSet(context);
+                // Unresolved dispatched operation(s) after the extended deadline: give up on this session
+                // without ever reporting a rollback of work whose fate we do not know. Late effects get no
+                // acknowledgement and lapse at their participant.
+                outcome = new(KeyValueResponseType.Errored, null);
+                sessions.TryRemove(transactionId, out _);
             }
-            finally
+            else if (cleaned)
             {
-                context.CompleteFinalize(attempt, outcome);
+                outcome = new(KeyValueResponseType.RolledBack, null);
+                sessions.TryRemove(transactionId, out _);
             }
+            // else: cleanup incomplete — keep the session Reaping and retry on a later sweep (MustRetry).
+        }
+        catch (Exception ex)
+        {
+            logger.LogError("ReapSession {TransactionId}: {Type} {Message}", transactionId, ex.GetType().Name, ex.Message);
+            // Leave the session Reaping so a later sweep retries.
+            outcome = new(KeyValueResponseType.MustRetry, null);
+        }
+        finally
+        {
+            // Publish so a commit/rollback that raced in and mirrored this attempt learns the outcome. A
+            // terminal outcome (RolledBack/Errored) additionally enters the idempotency window; a non-terminal
+            // MustRetry releases the slot for the next sweep and is not retained.
+            context.CompleteFinalize(attempt, outcome);
+            RetainTerminalOutcome(transactionId, outcome, now);
         }
     }
 

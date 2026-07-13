@@ -332,6 +332,78 @@ public sealed class TestTransactionRegistrationRouting
         }
     }
 
+    /// <summary>
+    /// Close freezes the working set and returns its snapshot, then a later commit finalizes the frozen
+    /// transaction — the required Close→Commit flow. Close must not make the session terminal (which would
+    /// reject the commit as Aborted); it stays finalizable so the commit consumes the same frozen set.
+    /// </summary>
+    [Fact]
+    public async Task CloseThenCommit_CommitsTheFrozenWorkingSet()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+
+            byte[] value = "closed-then-committed"u8.ToArray();
+            (KeyValueResponseType setType, _, _) = await SetWithRetry(nodes[1], handle, TransactionOperationId.NewRandom(), value, ct);
+            Assert.Equal(KeyValueResponseType.Set, setType);
+
+            // Freeze and snapshot before committing (the cache-publish-before-commit flow).
+            (KeyValueResponseType closeType, TransactionWorkingSet? frozen) =
+                await nodes[0].Kahuna.LocateAndCloseTransaction(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.Equal(KeyValueResponseType.Set, closeType);
+            Assert.Contains(frozen!.ModifiedKeys, m => m.Key == "wk1");
+
+            // The frozen session is still finalizable: commit finalizes it (previously returned Aborted).
+            Assert.Equal(KeyValueResponseType.Committed, await CommitWithRetry(nodes[2], handle, ct));
+
+            (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry) =
+                await nodes[0].Kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, "wk1", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Get, getType);
+            Assert.Equal(value, entry!.Value);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// Close followed by rollback rolls back the frozen transaction, leaving no committed state.
+    /// </summary>
+    [Fact]
+    public async Task CloseThenRollback_RollsBackTheFrozenWorkingSet()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+
+            (KeyValueResponseType setType, _, _) = await SetWithRetry(nodes[1], handle, TransactionOperationId.NewRandom(), "discarded"u8.ToArray(), ct);
+            Assert.Equal(KeyValueResponseType.Set, setType);
+
+            (KeyValueResponseType closeType, _) =
+                await nodes[0].Kahuna.LocateAndCloseTransaction(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.Equal(KeyValueResponseType.Set, closeType);
+
+            KeyValueResponseType rollback = await RollbackWithRetry(nodes[2], handle, ct);
+            Assert.Equal(KeyValueResponseType.RolledBack, rollback);
+
+            (KeyValueResponseType getType, _) =
+                await nodes[0].Kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, "wk1", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+            Assert.NotEqual(KeyValueResponseType.Get, getType);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
     [Fact]
     public async Task PrefixLock_RoutesAndDedups_AndWorkingSetReflectsHeldPrefixLock()
     {
@@ -1231,6 +1303,18 @@ public sealed class TestTransactionRegistrationRouting
             (KeyValueResponseType type, string? anchor) = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
             if (type != KeyValueResponseType.MustRetry || Environment.TickCount64 >= deadline)
                 return (type, anchor);
+            await Task.Delay(50, ct);
+        }
+    }
+
+    private static async Task<KeyValueResponseType> RollbackWithRetry(Node node, TransactionHandle handle, CancellationToken ct)
+    {
+        long deadline = Environment.TickCount64 + 10_000;
+        while (true)
+        {
+            KeyValueResponseType type = await node.Kahuna.LocateAndRollbackTransaction(handle, ct);
+            if (type != KeyValueResponseType.MustRetry || Environment.TickCount64 >= deadline)
+                return type;
             await Task.Delay(50, ct);
         }
     }

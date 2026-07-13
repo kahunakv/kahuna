@@ -4,10 +4,10 @@ using Kahuna.Shared.KeyValue;
 namespace Kahuna.Server.KeyValues.Transactions.Data;
 
 /// <summary>
-/// An immutable snapshot of a transaction session's working set taken just before
-/// the coordinator transitions the session to <see cref="SessionLifecycle.Terminal"/>.
-/// Callers use this to drive the 2PC prepare/commit/rollback steps without holding
-/// a live reference to the context.
+/// An immutable snapshot of a transaction session's working set, captured once the session is frozen
+/// (closed to new operations and drained) by <c>CloseTransaction</c>. The session stays finalizable, so a
+/// later commit or rollback finalizes the same frozen set; callers (e.g. a consumer publishing cache
+/// keyspaces before commit) use this snapshot without holding a live reference to the context.
 /// </summary>
 internal sealed class WorkingSetSnapshot
 {
