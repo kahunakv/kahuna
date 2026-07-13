@@ -2180,15 +2180,9 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="readKeys">A list of keys read during the transaction.</param>
     /// <param name="cancellationToken">A token used to monitor for cancellation requests.</param>
     /// <returns>A task that represents the asynchronous operation, containing the result of the transaction operation.</returns>
-    public Task<(KeyValueResponseType, string?)> LocateAndCommitTransaction(
-        TransactionHandle handle,
-        List<KeyValueTransactionModifiedKey> acquiredLocks,
-        List<KeyValueTransactionModifiedKey> modifiedKeys,
-        List<KeyValueTransactionReadKey> readKeys,
-        CancellationToken cancellationToken
-    )
+    public Task<(KeyValueResponseType, string?)> LocateAndCommitTransaction(TransactionHandle handle, CancellationToken cancellationToken)
     {
-        return locator.LocateAndCommitTransaction(handle, acquiredLocks, modifiedKeys, readKeys, cancellationToken);
+        return locator.LocateAndCommitTransaction(handle, cancellationToken);
     }
 
     /// <summary>How a transaction-scoped request routes based on the register-remote identity it carries.</summary>
@@ -2429,18 +2423,11 @@ internal sealed class KeyValuesManager : IDisposable
     /// Locates and rolls back the transaction identified by <paramref name="handle"/>.
     /// </summary>
     /// <param name="handle">The handle returned by <see cref="LocateAndStartTransaction"/>.</param>
-    /// <param name="acquiredLocks">A list of keys that were locked during the transaction.</param>
-    /// <param name="modifiedKeys">A list of keys that were modified during the transaction.</param>
     /// <param name="cancellationToken">A cancellation token to observe while waiting for the task to complete.</param>
     /// <returns>A task that represents the asynchronous operation, containing the result of the rollback operation as a <see cref="KeyValueResponseType"/>.</returns>
-    public Task<KeyValueResponseType> LocateAndRollbackTransaction(
-        TransactionHandle handle,
-        List<KeyValueTransactionModifiedKey> acquiredLocks,
-        List<KeyValueTransactionModifiedKey> modifiedKeys,
-        CancellationToken cancellationToken
-    )
+    public Task<KeyValueResponseType> LocateAndRollbackTransaction(TransactionHandle handle, CancellationToken cancellationToken)
     {
-        return locator.LocateAndRollbackTransaction(handle, acquiredLocks, modifiedKeys, cancellationToken);
+        return locator.LocateAndRollbackTransaction(handle, cancellationToken);
     }
 
     /// <summary>
@@ -4310,34 +4297,20 @@ internal sealed class KeyValuesManager : IDisposable
     /// Commits the transaction identified by <paramref name="handle"/>.
     /// </summary>
     /// <param name="handle">The handle returned by <see cref="StartTransaction"/>.</param>
-    /// <param name="acquiredLocks">List of acquired locks.</param>
-    /// <param name="modifiedKeys">List of modified keys.</param>
-    /// <param name="readKeys">List of keys read during the transaction.</param>
     /// <returns>A task that represents the asynchronous operation containing the commit result.</returns>
-    public Task<(KeyValueResponseType, string?)> CommitTransaction(
-        TransactionHandle handle,
-        List<KeyValueTransactionModifiedKey> acquiredLocks,
-        List<KeyValueTransactionModifiedKey> modifiedKeys,
-        List<KeyValueTransactionReadKey> readKeys
-    )
+    public Task<(KeyValueResponseType, string?)> CommitTransaction(TransactionHandle handle)
     {
-        return txCoordinator.CommitTransaction(handle, acquiredLocks, modifiedKeys, readKeys);
+        return txCoordinator.CommitTransaction(handle);
     }
 
     /// <summary>
     /// Rolls back the transaction identified by <paramref name="handle"/>.
     /// </summary>
     /// <param name="handle">The handle returned by <see cref="StartTransaction"/>.</param>
-    /// <param name="acquiredLocks">List of acquired locks.</param>
-    /// <param name="modifiedKeys">List of modified keys.</param>
     /// <returns></returns>
-    public Task<KeyValueResponseType> RollbackTransaction(
-        TransactionHandle handle,
-        List<KeyValueTransactionModifiedKey> acquiredLocks,
-        List<KeyValueTransactionModifiedKey> modifiedKeys
-    )
+    public Task<KeyValueResponseType> RollbackTransaction(TransactionHandle handle)
     {
-        return txCoordinator.RollbackTransaction(handle, acquiredLocks, modifiedKeys);
+        return txCoordinator.RollbackTransaction(handle);
     }
 
     internal async Task RunCollectOnAllInstancesAsync()

@@ -1715,13 +1715,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         // Commit returns the coordinator's canonical record anchor captured from the frozen finalize
         // snapshot under the fence, so there is no race window between reading the anchor and freezing the
         // working set. The anchor is null when the transaction confirmed no persistent write.
-        (KeyValueResponseType type, string? recordAnchorKey) = await keyValues.LocateAndCommitTransaction(
-            handle,
-            GetTransactionAcquiredOrModifiedKeys(request.AcquiredLocks).ToList(),
-            GetTransactionAcquiredOrModifiedKeys(request.ModifiedKeys).ToList(),
-            GetTransactionReadKeys(request.ReadKeys).ToList(),
-            context.CancellationToken
-        );
+        (KeyValueResponseType type, string? recordAnchorKey) = await keyValues.LocateAndCommitTransaction(handle, context.CancellationToken);
 
         GrpcCommitTransactionResponse response = new()
         {
@@ -1764,12 +1758,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             request.CoordinatorKey
         );
 
-        KeyValueResponseType type = await keyValues.LocateAndRollbackTransaction(
-            handle,
-            GetTransactionAcquiredOrModifiedKeys(request.AcquiredLocks).ToList(),
-            GetTransactionAcquiredOrModifiedKeys(request.ModifiedKeys).ToList(),
-            context.CancellationToken
-        );
+        KeyValueResponseType type = await keyValues.LocateAndRollbackTransaction(handle, context.CancellationToken);
 
         GrpcRollbackTransactionResponse response = new()
         {
@@ -1919,32 +1908,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             result.ReadKeys.Add(new GrpcTransactionReadKey { Key = rk.Key ?? "", Durability = (GrpcKeyValueDurability)rk.Durability, Exists = rk.Exists, Revision = rk.Revision });
 
         return result;
-    }
-
-    private static IEnumerable<KeyValueTransactionModifiedKey> GetTransactionAcquiredOrModifiedKeys(RepeatedField<GrpcTransactionModifiedKey> requestModifiedKeys)
-    {
-        foreach (GrpcTransactionModifiedKey item in requestModifiedKeys)
-        {
-            yield return new()
-            {
-                Key = item.Key,
-                Durability = (KeyValueDurability)item.Durability
-            };
-        }
-    }
-    
-    private static IEnumerable<KeyValueTransactionReadKey> GetTransactionReadKeys(RepeatedField<GrpcTransactionReadKey> requestReadKeys)
-    {
-        foreach (GrpcTransactionReadKey item in requestReadKeys)
-        {
-            yield return new()
-            {
-                Key = item.Key,
-                Durability = (KeyValueDurability)item.Durability,
-                Exists = item.Exists,
-                Revision = item.Revision
-            };
-        }
     }
 
     /// <summary>

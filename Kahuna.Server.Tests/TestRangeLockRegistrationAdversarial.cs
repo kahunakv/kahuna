@@ -321,7 +321,7 @@ public sealed class TestRangeLockRegistrationAdversarial : BaseCluster
             // Commit with EMPTY client working-set lists: the range lock is only in the server-owned set,
             // so a Committed here that also frees the range proves finalize releases from server effects.
             (KeyValueResponseType commitType, _) =
-                await node.LocateAndCommitTransaction(first, [], [], [], ct);
+                await node.LocateAndCommitTransaction(first, ct);
             Assert.Equal(KeyValueResponseType.Committed, commitType);
 
             // A second transaction can now take the same exclusive range — the first tx's lock is gone.
@@ -358,7 +358,7 @@ public sealed class TestRangeLockRegistrationAdversarial : BaseCluster
             Assert.Equal(KeyValueResponseType.Locked, acquired);
 
             KeyValueResponseType rollbackType =
-                await node.LocateAndRollbackTransaction(first, [], [], ct);
+                await node.LocateAndRollbackTransaction(first, ct);
             Assert.Equal(KeyValueResponseType.RolledBack, rollbackType);
 
             TransactionHandle second = await StartTx(node, ct);

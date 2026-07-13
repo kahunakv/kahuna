@@ -998,18 +998,18 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    public async Task<(KeyValueResponseType, string?)> CommitTransaction(string node, TransactionHandle handle, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, List<KeyValueTransactionReadKey> readKeys, CancellationToken cancellationToken)
+    public async Task<(KeyValueResponseType, string?)> CommitTransaction(string node, TransactionHandle handle, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.CommitTransaction(handle, acquiredLocks, modifiedKeys, readKeys);
+            return await kahunaNode.CommitTransaction(handle);
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    public async Task<KeyValueResponseType> RollbackTransaction(string node, TransactionHandle handle, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken)
+    public async Task<KeyValueResponseType> RollbackTransaction(string node, TransactionHandle handle, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.RollbackTransaction(handle, acquiredLocks, modifiedKeys);
+            return await kahunaNode.RollbackTransaction(handle);
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }

@@ -170,7 +170,9 @@ public sealed class TestEmbeddedKahunaNode
             txKey,
             5000,
             KeyValueDurability.Persistent,
-            TestContext.Current.CancellationToken
+            TestContext.Current.CancellationToken,
+            coordinatorKey: txHandle.CoordinatorKey,
+            operationId: TransactionOperationId.NewRandom()
         );
 
         Assert.Equal(KeyValueResponseType.Locked, response);
@@ -184,18 +186,14 @@ public sealed class TestEmbeddedKahunaNode
             KeyValueFlags.Set,
             0,
             KeyValueDurability.Persistent,
-            TestContext.Current.CancellationToken
+            TestContext.Current.CancellationToken,
+            coordinatorKey: txHandle.CoordinatorKey,
+            operationId: TransactionOperationId.NewRandom()
         );
 
         Assert.Equal(KeyValueResponseType.Set, response);
 
-        (response, _) = await node.Kahuna.LocateAndCommitTransaction(
-            txHandle,
-            [new() { Key = txKey, Durability = KeyValueDurability.Persistent }],
-            [new() { Key = txKey, Durability = KeyValueDurability.Persistent }],
-            [],
-            TestContext.Current.CancellationToken
-        );
+        (response, _) = await node.Kahuna.LocateAndCommitTransaction(txHandle, TestContext.Current.CancellationToken);
 
         Assert.Equal(KeyValueResponseType.Committed, response);
 

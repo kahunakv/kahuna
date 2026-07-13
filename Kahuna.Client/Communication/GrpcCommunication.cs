@@ -1699,9 +1699,6 @@ public class GrpcCommunication : IKahunaCommunication
         string url,
         string uniqueId,
         HLCTimestamp transactionId,
-        List<KeyValueTransactionModifiedKey> acquiredLocks,
-        List<KeyValueTransactionModifiedKey> modifiedKeys,
-        List<KeyValueTransactionReadKey> readKeys,
         CancellationToken cancellationToken
     )
     {
@@ -1712,15 +1709,6 @@ public class GrpcCommunication : IKahunaCommunication
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
         };
-        
-        if (acquiredLocks.Count > 0)
-            request.AcquiredLocks.AddRange(GetTransactionAcquiredOrModifiedKeys(acquiredLocks));
-        
-        if (modifiedKeys.Count > 0)
-            request.ModifiedKeys.AddRange(GetTransactionAcquiredOrModifiedKeys(modifiedKeys));
-        
-        if (readKeys.Count > 0)
-            request.ReadKeys.AddRange(GetTransactionReadKeys(readKeys));
 
         int retries = 0;
         
@@ -1761,8 +1749,6 @@ public class GrpcCommunication : IKahunaCommunication
     /// <param name="url">The endpoint URL of the server where the rollback request will be executed.</param>
     /// <param name="uniqueId">A unique identifier associated with the session or transaction.</param>
     /// <param name="transactionId">The HLCTimestamp representing the transaction to be rolled back.</param>
-    /// <param name="modifiedKeys">Acquired locks during the transaction execution</param>
-    /// <param name="modifiedKeys">Modified keys to rollback</param> 
     /// <param name="cancellationToken">A token to observe for cancellation requests during the rollback operation.</param>
     /// <returns>
     /// A boolean value indicating whether the rollback operation was successful.
@@ -1771,11 +1757,9 @@ public class GrpcCommunication : IKahunaCommunication
     /// Thrown if the rollback operation encounters an error, retries are exhausted, or the operation is explicitly cancelled.
     /// </exception>
     public async Task<bool> RollbackTransactionSession(
-        string url, 
-        string uniqueId, 
-        HLCTimestamp transactionId, 
-        List<KeyValueTransactionModifiedKey> acquiredLocks, 
-        List<KeyValueTransactionModifiedKey> modifiedKeys, 
+        string url,
+        string uniqueId,
+        HLCTimestamp transactionId,
         CancellationToken cancellationToken
     )
     {
@@ -1786,12 +1770,6 @@ public class GrpcCommunication : IKahunaCommunication
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
         };
-        
-        if (acquiredLocks.Count > 0)
-            request.AcquiredLocks.AddRange(GetTransactionAcquiredOrModifiedKeys(acquiredLocks));
-        
-        if (modifiedKeys.Count > 0)
-            request.ModifiedKeys.AddRange(GetTransactionAcquiredOrModifiedKeys(modifiedKeys));
 
         int retries = 0;
         
@@ -1943,30 +1921,6 @@ public class GrpcCommunication : IKahunaCommunication
         );
     }
     
-    private static IEnumerable<GrpcTransactionModifiedKey> GetTransactionAcquiredOrModifiedKeys(List<KeyValueTransactionModifiedKey> modifiedKeys)
-    {
-        foreach (KeyValueTransactionModifiedKey modifiedKey in modifiedKeys)
-            yield return new()
-            {
-                Key = modifiedKey.Key, 
-                Durability = (GrpcKeyValueDurability)modifiedKey.Durability
-            };
-    }
-    
-    private static IEnumerable<GrpcTransactionReadKey> GetTransactionReadKeys(List<KeyValueTransactionReadKey> readKeys)
-    {
-        foreach (KeyValueTransactionReadKey readKey in readKeys)
-        {
-            yield return new()
-            {
-                Key = readKey.Key,
-                Durability = (GrpcKeyValueDurability)readKey.Durability,
-                Exists = readKey.Exists,
-                Revision = readKey.Revision
-            };
-        }
-    }
-
     private static IEnumerable<GrpcKeyValueParameter> GetTransactionParameters(List<KeyValueParameter> parameters)
     {
         foreach (KeyValueParameter parameter in parameters)

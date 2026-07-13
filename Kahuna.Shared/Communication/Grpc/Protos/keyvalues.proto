@@ -749,9 +749,6 @@ message GrpcCommitTransactionRequest
   int32 TransactionIdNode = 2;
   int64 TransactionIdPhysical = 3;
   uint32 TransactionIdCounter = 4;
-  repeated GrpcTransactionModifiedKey AcquiredLocks = 5;
-  repeated GrpcTransactionModifiedKey ModifiedKeys = 6;
-  repeated GrpcTransactionReadKey ReadKeys = 7;
 }
 
 message GrpcRollbackTransactionRequest
@@ -760,8 +757,6 @@ message GrpcRollbackTransactionRequest
   int32 TransactionIdNode = 2;
   int64 TransactionIdPhysical = 3;
   uint32 TransactionIdCounter = 4;
-  repeated GrpcTransactionModifiedKey AcquiredLocks = 5;
-  repeated GrpcTransactionModifiedKey ModifiedKeys = 6;
 }
 
 message GrpcTransactionModifiedKey

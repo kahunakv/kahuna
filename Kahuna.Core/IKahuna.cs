@@ -125,9 +125,9 @@ public interface IKahuna
 
     public Task<(KeyValueResponseType, TransactionHandle)> LocateAndStartTransaction(KeyValueTransactionOptions options, CancellationToken cancellationToken);
 
-    public Task<(KeyValueResponseType, string?)> LocateAndCommitTransaction(TransactionHandle handle, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, List<KeyValueTransactionReadKey> readKeys, CancellationToken cancellationToken);
+    public Task<(KeyValueResponseType, string?)> LocateAndCommitTransaction(TransactionHandle handle, CancellationToken cancellationToken);
 
-    public Task<KeyValueResponseType> LocateAndRollbackTransaction(TransactionHandle handle, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken);
+    public Task<KeyValueResponseType> LocateAndRollbackTransaction(TransactionHandle handle, CancellationToken cancellationToken);
 
     /// <summary>
     /// Registers a transaction-scoped operation on the coordinator session (routed by
@@ -209,9 +209,9 @@ public interface IKahuna
 
     public Task<(KeyValueResponseType, TransactionHandle)> StartTransaction(KeyValueTransactionOptions options);
 
-    public Task<(KeyValueResponseType, string?)> CommitTransaction(TransactionHandle handle, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, List<KeyValueTransactionReadKey> readKeys);
+    public Task<(KeyValueResponseType, string?)> CommitTransaction(TransactionHandle handle);
 
-    public Task<KeyValueResponseType> RollbackTransaction(TransactionHandle handle, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys);
+    public Task<KeyValueResponseType> RollbackTransaction(TransactionHandle handle);
 
     public Task<(SequenceResponseType, ReadOnlySequenceEntry?)> LocateAndGetSequence(string name, SequenceDurability durability, CancellationToken cancellationToken);
 

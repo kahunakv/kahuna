@@ -106,12 +106,7 @@ internal sealed class TransactionCoordinator
     /// The handle carries both the transaction ID (used to locate the session) and the
     /// coordinator key (used by the caller to route this request to the right node).
     /// </summary>
-    public async Task<(KeyValueResponseType, string?)> CommitTransaction(
-        TransactionHandle handle,
-        List<KeyValueTransactionModifiedKey> acquiredLocks,
-        List<KeyValueTransactionModifiedKey> modifiedKeys,
-        List<KeyValueTransactionReadKey> readKeys
-    )
+    public async Task<(KeyValueResponseType, string?)> CommitTransaction(TransactionHandle handle)
     {
         HLCTimestamp transactionId = handle.TransactionId;
 
@@ -138,7 +133,7 @@ internal sealed class TransactionCoordinator
         FinalizeOutcome outcome = new(KeyValueResponseType.Aborted, null);
         try
         {
-            outcome = await ExecuteCommit(context, transactionId, acquiredLocks, modifiedKeys, readKeys);
+            outcome = await ExecuteCommit(context, transactionId);
             return (outcome.Type, outcome.RecordAnchorKey);
         }
         finally
@@ -150,17 +145,11 @@ internal sealed class TransactionCoordinator
     }
 
     /// <summary>
-    /// Runs the commit finalize for the session that already owns the finalize slot: freezes the working
-    /// set, folds in the caller-supplied locks/keys, drives two-phase commit, and releases locks. Returns
-    /// the outcome the owner publishes to any mirroring finalizer.
+    /// Runs the commit finalize for the session that already owns the finalize slot: freezes the
+    /// server-owned working set, drives two-phase commit, and cleans up. Returns the outcome the owner
+    /// publishes to any mirroring finalizer.
     /// </summary>
-    private async Task<FinalizeOutcome> ExecuteCommit(
-        TransactionContext context,
-        HLCTimestamp transactionId,
-        List<KeyValueTransactionModifiedKey> acquiredLocks,
-        List<KeyValueTransactionModifiedKey> modifiedKeys,
-        List<KeyValueTransactionReadKey> readKeys
-    )
+    private async Task<FinalizeOutcome> ExecuteCommit(TransactionContext context, HLCTimestamp transactionId)
     {
         // Wait for any in-flight operations to complete, so the coordinator-owned working set is frozen
         // before two-phase commit reads it. Operations that registered before finalization began are part
@@ -177,12 +166,8 @@ internal sealed class TransactionCoordinator
         {
             context.Result = new() { Type = KeyValueResponseType.Set, Reason = null };
 
-            // Bridge any caller-supplied working set into the server-owned set so the finalize drives
-            // uniformly from confirmed effects. In the register-remote model these are already folded from
-            // operation completions; on the legacy path they are the only source until the arguments are
-            // removed. Two-phase commit and the cleanup below read only the server-owned working set.
-            FoldCallerWorkingSet(context, acquiredLocks, modifiedKeys, readKeys);
-
+            // Two-phase commit and the cleanup below read only the server-owned working set — every confirmed
+            // effect was folded from its operation completion, so the coordinator, not the client, decides.
             // An empty read-only transaction has no modified keys: two-phase commit is a no-op and the
             // transaction commits validly. Its read MVCC snapshots are still cleaned in the finally.
             await TwoPhaseCommit(context, CancellationToken.None);
@@ -237,50 +222,9 @@ internal sealed class TransactionCoordinator
     }
 
     /// <summary>
-    /// Folds a caller-supplied finalize working set (acquired locks, modified keys, read keys) into the
-    /// server-owned working set. A no-op when the caller supplies nothing (register-remote sessions already
-    /// carry every confirmed effect); the legacy client-driven path uses it to seed the working set.
-    /// </summary>
-    private static void FoldCallerWorkingSet(
-        TransactionContext context,
-        List<KeyValueTransactionModifiedKey> acquiredLocks,
-        List<KeyValueTransactionModifiedKey> modifiedKeys,
-        List<KeyValueTransactionReadKey>? readKeys
-    )
-    {
-        foreach (KeyValueTransactionModifiedKey acquiredLock in acquiredLocks)
-        {
-            context.LocksAcquired ??= [];
-            context.LocksAcquired.Add((acquiredLock.Key ?? "", acquiredLock.Durability));
-        }
-
-        foreach (KeyValueTransactionModifiedKey modifiedKey in modifiedKeys)
-        {
-            context.ModifiedKeys ??= [];
-            context.ModifiedKeys.Add((modifiedKey.Key ?? "", modifiedKey.Durability));
-        }
-
-        if (readKeys is null)
-            return;
-
-        foreach (KeyValueTransactionReadKey readKey in readKeys)
-        {
-            if (string.IsNullOrEmpty(readKey.Key))
-                continue;
-
-            context.ReadKeys ??= [];
-            context.ReadKeys[(readKey.Key, readKey.Durability)] = readKey;
-        }
-    }
-
-    /// <summary>
     /// Rolls back the transaction identified by the supplied handle.
     /// </summary>
-    public async Task<KeyValueResponseType> RollbackTransaction(
-        TransactionHandle handle,
-        List<KeyValueTransactionModifiedKey> acquiredLocks,
-        List<KeyValueTransactionModifiedKey> modifiedKeys
-    )
+    public async Task<KeyValueResponseType> RollbackTransaction(TransactionHandle handle)
     {
         HLCTimestamp transactionId = handle.TransactionId;
 
@@ -306,7 +250,7 @@ internal sealed class TransactionCoordinator
         FinalizeOutcome outcome = new(KeyValueResponseType.Aborted, null);
         try
         {
-            outcome = await ExecuteRollback(context, transactionId, acquiredLocks, modifiedKeys);
+            outcome = await ExecuteRollback(context, transactionId);
             return outcome.Type;
         }
         finally
@@ -316,22 +260,14 @@ internal sealed class TransactionCoordinator
     }
 
     /// <summary>
-    /// Runs the rollback finalize for the session that already owns the finalize slot: freezes the working
-    /// set, folds in the caller-supplied locks/keys, marks the transaction for abort, and releases locks.
+    /// Runs the rollback finalize for the session that already owns the finalize slot: freezes the
+    /// server-owned working set, marks the transaction for abort, and cleans up every confirmed effect.
     /// </summary>
-    private async Task<FinalizeOutcome> ExecuteRollback(
-        TransactionContext context,
-        HLCTimestamp transactionId,
-        List<KeyValueTransactionModifiedKey> acquiredLocks,
-        List<KeyValueTransactionModifiedKey> modifiedKeys
-    )
+    private async Task<FinalizeOutcome> ExecuteRollback(TransactionContext context, HLCTimestamp transactionId)
     {
         // Freeze the coordinator-owned working set before rolling back its operations.
         if (!await FreezeForFinalize(context))
             return new(KeyValueResponseType.MustRetry, null);
-
-        // Bridge any caller-supplied working set into the server-owned set; cleanup drives from it.
-        FoldCallerWorkingSet(context, acquiredLocks, modifiedKeys, readKeys: null);
 
         context.Action = KeyValueTransactionAction.Abort;
 

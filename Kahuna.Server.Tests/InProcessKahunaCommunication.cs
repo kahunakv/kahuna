@@ -222,27 +222,21 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
     }
 
     public async Task<(bool committed, string? recordAnchorKey)> CommitTransactionSession(
-        string url, string uniqueId, HLCTimestamp transactionId,
-        List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys,
-        List<KeyValueTransactionReadKey> readKeys, CancellationToken cancellationToken)
+        string url, string uniqueId, HLCTimestamp transactionId, CancellationToken cancellationToken)
     {
         TransactionHandle handle = new(transactionId, uniqueId);
 
         // Commit returns the coordinator's canonical record anchor from the frozen finalize snapshot, so
         // there is no race between reading the anchor and freezing the working set.
-        (KeyValueResponseType type, string? recordAnchorKey) = await kahuna.LocateAndCommitTransaction(
-            handle, acquiredLocks, modifiedKeys, readKeys, cancellationToken);
+        (KeyValueResponseType type, string? recordAnchorKey) = await kahuna.LocateAndCommitTransaction(handle, cancellationToken);
         return (type == KeyValueResponseType.Committed, recordAnchorKey);
     }
 
     public async Task<bool> RollbackTransactionSession(
-        string url, string uniqueId, HLCTimestamp transactionId,
-        List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys,
-        CancellationToken cancellationToken)
+        string url, string uniqueId, HLCTimestamp transactionId, CancellationToken cancellationToken)
     {
         TransactionHandle handle = new(transactionId, uniqueId);
-        KeyValueResponseType type = await kahuna.LocateAndRollbackTransaction(
-            handle, acquiredLocks, modifiedKeys, cancellationToken);
+        KeyValueResponseType type = await kahuna.LocateAndRollbackTransaction(handle, cancellationToken);
         return type == KeyValueResponseType.RolledBack;
     }
     public Task<(SequenceResponseType, ReadOnlySequenceEntry?, int)> GetSequence(string url, string name, SequenceDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
