@@ -1038,6 +1038,7 @@ message GrpcBatchServerKeyValueRequest {
     GrpcGetTransactionWorkingSetRequest GetTransactionWorkingSet = 45;
     GrpcCloseTransactionRequest CloseTransaction = 46;
     GrpcImportCompletionReceiptsRequest ImportCompletionReceipts = 47;
+    GrpcImportCoordinatorDecisionsRequest ImportCoordinatorDecisions = 48;
   }
 }
 
@@ -1090,6 +1091,7 @@ message GrpcBatchServerKeyValueResponse
     GrpcGetTransactionWorkingSetResponse GetTransactionWorkingSet = 44;
     GrpcCloseTransactionResponse CloseTransaction = 45;
     GrpcImportCompletionReceiptsResponse ImportCompletionReceipts = 46;
+    GrpcImportCoordinatorDecisionsResponse ImportCoordinatorDecisions = 47;
   }
 }
 
@@ -1165,6 +1167,15 @@ message GrpcImportCompletionReceiptsResponse {
   bool Success = 1;
 }
 
+// A batch of coordinator decision records serialized as one CoordinatorDecisionSnapshotMessage blob.
+message GrpcImportCoordinatorDecisionsRequest {
+  bytes Records = 1;
+}
+
+message GrpcImportCoordinatorDecisionsResponse {
+  bool Success = 1;
+}
+
 enum GrpcClientBatchType {
   TYPE_NONE = 0;
   TRY_SET_KEY_VALUE = 1;
@@ -1229,6 +1240,7 @@ enum GrpcServerBatchType {
   SERVER_GET_TRANSACTION_WORKING_SET = 43;
   SERVER_CLOSE_TRANSACTION = 44;
   SERVER_IMPORT_COMPLETION_RECEIPTS = 45;
+  SERVER_IMPORT_COORDINATOR_DECISIONS = 46;
 }
 
 enum GrpcRangeLockMode {

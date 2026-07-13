@@ -105,6 +105,9 @@ public interface IInterNodeCommunication
     /// <summary>Injects transferred completion receipts into the receipt store on <paramref name="node"/> (split/merge routing).</summary>
     public Task ImportCompletionReceipts(string node, IReadOnlyCollection<CompletionReceiptRecord> receipts, CancellationToken cancellationToken);
 
+    /// <summary>Merges transferred coordinator decision records into the decision store on <paramref name="node"/> (split/merge routing).</summary>
+    public Task ImportCoordinatorDecisions(string node, IReadOnlyCollection<CoordinatorDecisionRecord> records, CancellationToken cancellationToken);
+
     /// <summary>Forwards a snapshot-hold acquire to the meta-partition leader on <paramref name="node"/>.</summary>
     public Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)> AcquireSnapshotHold(string node, string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken cancellationToken);
 

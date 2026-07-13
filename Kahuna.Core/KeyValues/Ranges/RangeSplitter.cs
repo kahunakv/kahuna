@@ -2,6 +2,7 @@ using Kommander;
 using Kommander.Time;
 
 using Kahuna.Server.KeyValues.Logging;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues.Ranges;
@@ -249,6 +250,17 @@ internal sealed class RangeSplitter
 
             if (movedReceipts.Count > 0)
                 await manager.ImportCompletionReceiptsToPartitionLeaderAsync(newPartitionId, movedReceipts, ct);
+
+            // ── 7d. Transfer coordinator decision records whose anchor moves to [K,E) into P' ────
+            // Decision records are node-local replicated state routed by RecordAnchorKey. Install the
+            // moving range's records on the destination partition leader before cutover so a re-drive or
+            // finalize routed to P' after cutover finds its record instead of re-resolving on the stale
+            // source. Idempotent by transaction id, so a duplicate copy during handoff is safe.
+            IReadOnlyCollection<CoordinatorDecisionRecord> movedDecisions =
+                manager.GetLocalDecisionsForRange(splitKey, descriptor.EndKey);
+
+            if (movedDecisions.Count > 0)
+                await manager.ImportCoordinatorDecisionsToPartitionLeaderAsync(newPartitionId, movedDecisions, ct);
 
             // F3 test seam: allow the caller to race a direct write while quiesced.
             if (duringQuiesce is not null)

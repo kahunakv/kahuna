@@ -15,6 +15,7 @@ using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.Locks;
 using Kahuna.Server.Communication.Internode.Grpc;
+using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Locks.Data;
 
@@ -1789,6 +1790,26 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
 
         _ = batchResponse.ImportCompletionReceipts;
+    }
+
+    public async Task ImportCoordinatorDecisions(string node, IReadOnlyCollection<CoordinatorDecisionRecord> records, CancellationToken cancellationToken)
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        // The full record set (participants, cleanup effects) rides as one serialized snapshot blob.
+        GrpcImportCoordinatorDecisionsRequest request = new()
+        {
+            Records = UnsafeByteOperations.UnsafeWrap(CoordinatorDecisionStore.SerializeRecords(records))
+        };
+
+        GrpcServerBatcherResponse batchResponse;
+
+        if (cancellationToken == CancellationToken.None)
+            batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+        else
+            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        _ = batchResponse.ImportCoordinatorDecisions;
     }
 
     public async Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)>

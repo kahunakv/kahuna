@@ -13,6 +13,7 @@ using Google.Protobuf.Collections;
 using Grpc.Core;
 using Kahuna.Communication.External.Grpc.KeyValues;
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
@@ -2077,6 +2078,15 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
         keyValues.ImportCompletionReceipts(receipts);
         return Task.FromResult(new GrpcImportCompletionReceiptsResponse { Success = true });
+    }
+
+    internal Task<GrpcImportCoordinatorDecisionsResponse> ImportCoordinatorDecisionsInternal(GrpcImportCoordinatorDecisionsRequest request, ServerCallContext context)
+    {
+        IReadOnlyList<CoordinatorDecisionRecord> records =
+            CoordinatorDecisionStore.DeserializeRecords(request.Records.ToByteArray());
+
+        keyValues.ImportCoordinatorDecisions(records);
+        return Task.FromResult(new GrpcImportCoordinatorDecisionsResponse { Success = true });
     }
 
     internal Task<GrpcAcquireSnapshotHoldResponse> AcquireSnapshotHoldInternal(
