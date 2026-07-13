@@ -239,6 +239,17 @@ internal sealed class RangeSplitter
             if (clampedLocks.Count > 0)
                 await manager.ImportRangeLocksToPartitionLeaderAsync(keySpace, newPartitionId, clampedLocks, ct);
 
+            // ── 7c. Transfer completion receipts whose key moves to [K,E) into P' ────────
+            // Receipts are node-local (like locks, not Raft-replicated). Read the moving range's
+            // receipts from this node's store — which holds them because this node participated in
+            // P's group — and inject them into the destination partition leader so a re-commit routed
+            // to P' after cutover resolves Committed rather than MustRetry.
+            IReadOnlyCollection<CompletionReceiptRecord> movedReceipts =
+                manager.GetLocalCompletionReceiptsForRange(splitKey, descriptor.EndKey);
+
+            if (movedReceipts.Count > 0)
+                await manager.ImportCompletionReceiptsToPartitionLeaderAsync(newPartitionId, movedReceipts, ct);
+
             // F3 test seam: allow the caller to race a direct write while quiesced.
             if (duringQuiesce is not null)
                 await duringQuiesce();

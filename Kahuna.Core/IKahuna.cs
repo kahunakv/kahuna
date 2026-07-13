@@ -186,7 +186,10 @@ public interface IKahuna
 
     /// <summary>Injects clamped lock entries into the local actor for <paramref name="keySpace"/> (import).</summary>
     public Task ImportRangeLocks(string keySpace, List<KeyValueRangeLock> locks);
-    
+
+    /// <summary>Records transferred completion receipts into this node's local receipt store (split/merge import).</summary>
+    public Task ImportCompletionReceipts(IReadOnlyCollection<CompletionReceiptRecord> receipts);
+
     public Task<(KeyValueResponseType, string)> TryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueDurability durability);
     
     public Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability);

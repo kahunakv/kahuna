@@ -97,6 +97,8 @@ internal sealed class GrpcServerBatcherRequest
 
     public GrpcCloseTransactionRequest? CloseTransaction { get; }
 
+    public GrpcImportCompletionReceiptsRequest? ImportCompletionReceipts { get; }
+
     public GrpcServerBatcherRequest(GrpcTryLockRequest tryLock)
     {
         TryLock = tryLock;
@@ -310,6 +312,11 @@ internal sealed class GrpcServerBatcherRequest
     public GrpcServerBatcherRequest(GrpcImportRangeLocksRequest importRangeLocks)
     {
         ImportRangeLocks = importRangeLocks;
+    }
+
+    public GrpcServerBatcherRequest(GrpcImportCompletionReceiptsRequest importCompletionReceipts)
+    {
+        ImportCompletionReceipts = importCompletionReceipts;
     }
 
     public GrpcServerBatcherRequest(GrpcAcquireSnapshotHoldRequest acquireSnapshotHold)

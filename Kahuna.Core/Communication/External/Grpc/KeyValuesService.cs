@@ -2062,6 +2062,23 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return new GrpcImportRangeLocksResponse { Success = true };
     }
 
+    internal Task<GrpcImportCompletionReceiptsResponse> ImportCompletionReceiptsInternal(GrpcImportCompletionReceiptsRequest request, ServerCallContext context)
+    {
+        List<CompletionReceiptRecord> receipts = new(request.Receipts.Count);
+
+        foreach (GrpcCompletionReceiptEntry entry in request.Receipts)
+        {
+            receipts.Add(new CompletionReceiptRecord(
+                new HLCTimestamp(entry.TransactionIdNode, entry.TransactionIdPhysical, entry.TransactionIdCounter),
+                entry.Key,
+                entry.HasRecordAnchorKey ? entry.RecordAnchorKey : null,
+                (KeyValueDurability)entry.Durability));
+        }
+
+        keyValues.ImportCompletionReceipts(receipts);
+        return Task.FromResult(new GrpcImportCompletionReceiptsResponse { Success = true });
+    }
+
     internal Task<GrpcAcquireSnapshotHoldResponse> AcquireSnapshotHoldInternal(
         GrpcAcquireSnapshotHoldRequest request, ServerCallContext context) =>
         AcquireSnapshotHold(request, context);

@@ -236,6 +236,13 @@ internal sealed class KeyValueServerBatcher
                     }
                     break;
 
+                    case GrpcServerBatchType.ServerImportCompletionReceipts:
+                    {
+                        GrpcImportCompletionReceiptsRequest? req = request.ImportCompletionReceipts;
+                        Track(ImportCompletionReceiptsDelayed(semaphore, request.RequestId, req, responseStream, context));
+                    }
+                    break;
+
                     case GrpcServerBatchType.ServerTryReleaseManyExclusiveLocks:
                     {
                         GrpcTryReleaseManyExclusiveLocksRequest? tryReleaseManyExclusiveLocksRequest = request.TryReleaseManyExclusiveLocks;
@@ -866,6 +873,30 @@ internal sealed class KeyValueServerBatcher
                 Type = GrpcServerBatchType.ServerTryImportRangeLocks,
                 RequestId = requestId,
                 ImportRangeLocks = resp
+            });
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+
+    private async Task ImportCompletionReceiptsDelayed(
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcImportCompletionReceiptsRequest request,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context)
+    {
+        await semaphore.WaitAsync(context.CancellationToken);
+        try
+        {
+            GrpcImportCompletionReceiptsResponse resp = await service.ImportCompletionReceiptsInternal(request, context);
+            await responseStream.WriteAsync(new GrpcBatchServerKeyValueResponse
+            {
+                Type = GrpcServerBatchType.ServerImportCompletionReceipts,
+                RequestId = requestId,
+                ImportCompletionReceipts = resp
             });
         }
         finally

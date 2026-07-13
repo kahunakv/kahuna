@@ -426,6 +426,15 @@ internal sealed class GrpcServerBatcher
         return TryProcessQueue(grpcBatcherItem, promise);
     }
 
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcImportCompletionReceiptsRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
     public Task<GrpcServerBatcherResponse> Enqueue(GrpcAcquireSnapshotHoldRequest message)
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -813,6 +822,11 @@ internal sealed class GrpcServerBatcher
             batchRequest.Type = GrpcServerBatchType.ServerTryImportRangeLocks;
             batchRequest.ImportRangeLocks = itemRequest.ImportRangeLocks;
         }
+        else if (itemRequest.ImportCompletionReceipts is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerImportCompletionReceipts;
+            batchRequest.ImportCompletionReceipts = itemRequest.ImportCompletionReceipts;
+        }
         else if (itemRequest.AcquireSnapshotHold is not null)
         {
             batchRequest.Type = GrpcServerBatchType.ServerTryAcquireSnapshotHold;
@@ -1072,6 +1086,10 @@ internal sealed class GrpcServerBatcher
 
                     case GrpcServerBatchType.ServerTryImportRangeLocks:
                         item.Promise.TrySetResult(new(response.ImportRangeLocks));
+                        break;
+
+                    case GrpcServerBatchType.ServerImportCompletionReceipts:
+                        item.Promise.TrySetResult(new(response.ImportCompletionReceipts));
                         break;
 
                     case GrpcServerBatchType.ServerTryAcquireSnapshotHold:

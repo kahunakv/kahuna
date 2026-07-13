@@ -63,18 +63,29 @@ public sealed class TestCompletionReceiptStore
     }
 
     [Fact]
-    public void Snapshot_ReflectsRecordedReceipts()
+    public void SnapshotRange_FiltersByKeyRange_AndImportRangeRestores()
     {
         CompletionReceiptStore store = new();
         HLCTimestamp txA = new(1, 100, 0);
         HLCTimestamp txB = new(1, 200, 0);
-        store.Record(txA, "k1", "anchorA", KeyValueDurability.Persistent);
-        store.Record(txB, "k2", null, KeyValueDurability.Persistent);
+        HLCTimestamp txC = new(1, 300, 0);
+        store.Record(txA, "user/a", "user/a", KeyValueDurability.Persistent);
+        store.Record(txB, "user/m", null, KeyValueDurability.Persistent);
+        store.Record(txC, "user/z", null, KeyValueDurability.Persistent);
 
-        var snapshot = store.Snapshot();
+        // Everything.
+        Assert.Equal(3, store.SnapshotRange(null, null).Count);
 
-        Assert.Equal(2, snapshot.Count);
-        Assert.Contains(snapshot, r => r.TransactionId == txA && r.Key == "k1" && r.RecordAnchorKey == "anchorA");
-        Assert.Contains(snapshot, r => r.TransactionId == txB && r.Key == "k2" && r.RecordAnchorKey == null);
+        // Half-open [user/m, user/z): only user/m.
+        var moved = store.SnapshotRange("user/m", "user/z");
+        Assert.Single(moved);
+        Assert.Contains(moved, r => r.TransactionId == txB && r.Key == "user/m");
+
+        // Importing into a fresh store restores the receipts.
+        CompletionReceiptStore destination = new();
+        destination.ImportRange(moved);
+        Assert.True(destination.Contains(txB, "user/m"));
+        Assert.False(destination.Contains(txA, "user/a"));
+        Assert.Equal(1, destination.Count);
     }
 }
