@@ -21,6 +21,13 @@ public enum KahunaTransactionStatus
     Pending,
 
     /// <summary>
+    /// A commit or rollback has been requested and is in flight. The session is closed to new operations
+    /// so no work can be issued after finalization began; a finalize that fails returns the session to
+    /// <see cref="Pending"/> so the caller can retry.
+    /// </summary>
+    Finalizing,
+
+    /// <summary>
     /// Represents a transaction that has been successfully finalized and all changes
     /// made during the transaction have been permanently saved to the underlying system.
     /// The Committed state signifies the completion of the transaction's lifecycle
