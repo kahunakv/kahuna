@@ -3583,6 +3583,46 @@ internal sealed class KeyValuesManager : IDisposable
     }
 
     /// <summary>
+    /// Completion receipts whose key falls in <c>[startKey, endKey)</c> from this node's local store.
+    /// Read locally (the receipt store is node-global, like the backend the range export reads).
+    /// </summary>
+    internal IReadOnlyCollection<CompletionReceiptRecord> GetLocalCompletionReceiptsForRange(string? startKey, string? endKey)
+        => completionReceiptStore.SnapshotRange(startKey, endKey);
+
+    /// <summary>Records transferred completion receipts into this node's local store.</summary>
+    internal void ImportCompletionReceipts(IReadOnlyCollection<CompletionReceiptRecord> receiptsToImport)
+        => completionReceiptStore.ImportRange(receiptsToImport);
+
+    /// <summary>
+    /// Routes completion receipts to the leader of <paramref name="partitionId"/>, injecting them into
+    /// that node's receipt store. Forwards via IPC when this node is not the leader. Used by split/merge
+    /// so a re-commit routed to the destination partition after cutover finds its receipt.
+    /// </summary>
+    internal async Task ImportCompletionReceiptsToPartitionLeaderAsync(
+        int partitionId,
+        IReadOnlyCollection<CompletionReceiptRecord> receiptsToImport,
+        CancellationToken cancellationToken)
+    {
+        if (receiptsToImport.Count == 0)
+            return;
+
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
+        {
+            ImportCompletionReceipts(receiptsToImport);
+            return;
+        }
+
+        string leader = await raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        if (leader == raft.GetLocalEndpoint())
+        {
+            ImportCompletionReceipts(receiptsToImport);
+            return;
+        }
+
+        await interNodeCommunication.ImportCompletionReceipts(leader, receiptsToImport, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Releases an exclusive range lock on the leader of <paramref name="partitionId"/>, forwarding
     /// via IPC if this node is not the leader. Used by <see cref="RangeSplitter"/> to release the
     /// quiesce lock on the <em>original</em> partition after cutover, bypassing the locator which

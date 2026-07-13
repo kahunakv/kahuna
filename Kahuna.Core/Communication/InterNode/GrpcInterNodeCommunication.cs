@@ -1759,6 +1759,38 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         _ = batchResponse.ImportRangeLocks;
     }
 
+    public async Task ImportCompletionReceipts(string node, IReadOnlyCollection<CompletionReceiptRecord> receipts, CancellationToken cancellationToken)
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcImportCompletionReceiptsRequest request = new();
+
+        foreach (CompletionReceiptRecord receipt in receipts)
+        {
+            GrpcCompletionReceiptEntry entry = new()
+            {
+                TransactionIdNode     = receipt.TransactionId.N,
+                TransactionIdPhysical = receipt.TransactionId.L,
+                TransactionIdCounter  = receipt.TransactionId.C,
+                Key                   = receipt.Key,
+                Durability            = (int)receipt.Durability,
+            };
+
+            if (receipt.RecordAnchorKey is not null) entry.RecordAnchorKey = receipt.RecordAnchorKey;
+
+            request.Receipts.Add(entry);
+        }
+
+        GrpcServerBatcherResponse batchResponse;
+
+        if (cancellationToken == CancellationToken.None)
+            batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+        else
+            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        _ = batchResponse.ImportCompletionReceipts;
+    }
+
     public async Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)>
         AcquireSnapshotHold(string node, string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken cancellationToken)
     {

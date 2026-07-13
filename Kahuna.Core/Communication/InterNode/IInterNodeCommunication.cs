@@ -102,6 +102,9 @@ public interface IInterNodeCommunication
     /// <summary>Injects clamped lock entries into the actor pool for <paramref name="keySpace"/> on <paramref name="node"/>.</summary>
     public Task ImportRangeLocks(string node, string keySpace, List<KeyValueRangeLock> locks, CancellationToken cancellationToken);
 
+    /// <summary>Injects transferred completion receipts into the receipt store on <paramref name="node"/> (split/merge routing).</summary>
+    public Task ImportCompletionReceipts(string node, IReadOnlyCollection<CompletionReceiptRecord> receipts, CancellationToken cancellationToken);
+
     /// <summary>Forwards a snapshot-hold acquire to the meta-partition leader on <paramref name="node"/>.</summary>
     public Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)> AcquireSnapshotHold(string node, string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken cancellationToken);
 

@@ -1101,6 +1101,17 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
+    public async Task ImportCompletionReceipts(string node, IReadOnlyCollection<CompletionReceiptRecord> receipts, CancellationToken cancellationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            await kahunaNode.ImportCompletionReceipts(receipts);
+            return;
+        }
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
     public async Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)>
         AcquireSnapshotHold(string node, string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken cancellationToken)
     {

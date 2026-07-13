@@ -59,16 +59,33 @@ internal sealed class CompletionReceiptStore
     /// <summary>Current number of retained receipts. Diagnostic only.</summary>
     public int Count => receipts.Count;
 
-    /// <summary>
-    /// Snapshot of the current receipts, ordered arbitrarily. Used by whole-partition state transfer
-    /// so receipts survive a follower repaired below the WAL compaction floor.
-    /// </summary>
-    public IReadOnlyCollection<(HLCTimestamp TransactionId, string Key, string? RecordAnchorKey, KeyValueDurability Durability)> Snapshot()
+    /// <summary>Records a batch of receipts (used by split/merge routing on the destination leader).</summary>
+    public void ImportRange(IEnumerable<CompletionReceiptRecord> records)
     {
-        List<(HLCTimestamp, string, string?, KeyValueDurability)> result = new(receipts.Count);
+        foreach (CompletionReceiptRecord record in records)
+            Record(record.TransactionId, record.Key, record.RecordAnchorKey, record.Durability);
+    }
+
+    /// <summary>
+    /// Snapshot of the receipts whose key falls in <c>[startKey, endKey)</c> (ordinal), or all receipts
+    /// when both bounds are null. Used to route receipts by key to a destination partition during a
+    /// split or merge, mirroring the range-lock transfer.
+    /// </summary>
+    public IReadOnlyCollection<CompletionReceiptRecord> SnapshotRange(string? startKey, string? endKey)
+    {
+        List<CompletionReceiptRecord> result = new();
 
         foreach (KeyValuePair<ReceiptKey, CompletionReceipt> receipt in receipts)
-            result.Add((receipt.Key.TransactionId, receipt.Key.Key, receipt.Value.RecordAnchorKey, receipt.Value.Durability));
+        {
+            string key = receipt.Key.Key;
+
+            if (startKey is not null && string.CompareOrdinal(key, startKey) < 0)
+                continue;
+            if (endKey is not null && string.CompareOrdinal(key, endKey) >= 0)
+                continue;
+
+            result.Add(new CompletionReceiptRecord(receipt.Key.TransactionId, key, receipt.Value.RecordAnchorKey, receipt.Value.Durability));
+        }
 
         return result;
     }
@@ -78,3 +95,10 @@ internal sealed class CompletionReceiptStore
 
     private readonly record struct CompletionReceipt(string? RecordAnchorKey, KeyValueDurability Durability);
 }
+
+/// <summary>A transferable completion receipt: the full tuple used when routing receipts across split/merge.</summary>
+public readonly record struct CompletionReceiptRecord(
+    HLCTimestamp TransactionId,
+    string Key,
+    string? RecordAnchorKey,
+    KeyValueDurability Durability);

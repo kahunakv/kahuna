@@ -1387,6 +1387,12 @@ public sealed class KahunaManager : IKahuna, IDisposable
     public Task ImportRangeLocks(string keySpace, List<KeyValueRangeLock> locks) =>
         keyValues.ImportRangeLocksAsync(keySpace, locks);
 
+    public Task ImportCompletionReceipts(IReadOnlyCollection<CompletionReceiptRecord> receipts)
+    {
+        keyValues.ImportCompletionReceipts(receipts);
+        return Task.CompletedTask;
+    }
+
     /// <summary>Resolves a key to its owning <c>(partitionId, generation)</c> (key-order router).</summary>
     internal (int PartitionId, long Generation) LocateRange(string key) => keyValues.LocateRange(key);
 

@@ -1037,6 +1037,7 @@ message GrpcBatchServerKeyValueRequest {
     GrpcCompleteOperationRequest CompleteOperation = 44;
     GrpcGetTransactionWorkingSetRequest GetTransactionWorkingSet = 45;
     GrpcCloseTransactionRequest CloseTransaction = 46;
+    GrpcImportCompletionReceiptsRequest ImportCompletionReceipts = 47;
   }
 }
 
@@ -1088,6 +1089,7 @@ message GrpcBatchServerKeyValueResponse
     GrpcCompleteOperationResponse CompleteOperation = 43;
     GrpcGetTransactionWorkingSetResponse GetTransactionWorkingSet = 44;
     GrpcCloseTransactionResponse CloseTransaction = 45;
+    GrpcImportCompletionReceiptsResponse ImportCompletionReceipts = 46;
   }
 }
 
@@ -1143,6 +1145,23 @@ message GrpcImportRangeLocksRequest {
 }
 
 message GrpcImportRangeLocksResponse {
+  bool Success = 1;
+}
+
+message GrpcCompletionReceiptEntry {
+  int32  TransactionIdNode     = 1;
+  int64  TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter  = 3;
+  string Key                   = 4;
+  optional string RecordAnchorKey = 5;
+  int32  Durability            = 6;
+}
+
+message GrpcImportCompletionReceiptsRequest {
+  repeated GrpcCompletionReceiptEntry Receipts = 1;
+}
+
+message GrpcImportCompletionReceiptsResponse {
   bool Success = 1;
 }
 
@@ -1209,6 +1228,7 @@ enum GrpcServerBatchType {
   SERVER_COMPLETE_OPERATION = 42;
   SERVER_GET_TRANSACTION_WORKING_SET = 43;
   SERVER_CLOSE_TRANSACTION = 44;
+  SERVER_IMPORT_COMPLETION_RECEIPTS = 45;
 }
 
 enum GrpcRangeLockMode {

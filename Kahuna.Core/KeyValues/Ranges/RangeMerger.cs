@@ -138,6 +138,14 @@ internal sealed class RangeMerger
 
             if (clampedLocks.Count > 0)
                 await manager.ImportRangeLocksToPartitionLeaderAsync(keySpace, left.PartitionId, clampedLocks, ct);
+
+            // Transfer completion receipts for [B,C) into the survivor so a re-commit routed to the
+            // survivor after cutover resolves Committed. Node-local, like the locks above.
+            IReadOnlyCollection<CompletionReceiptRecord> movedReceipts =
+                manager.GetLocalCompletionReceiptsForRange(right.StartKey, right.EndKey);
+
+            if (movedReceipts.Count > 0)
+                await manager.ImportCompletionReceiptsToPartitionLeaderAsync(left.PartitionId, movedReceipts, ct);
         }
         catch (Exception ex)
         {
