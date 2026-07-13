@@ -771,9 +771,16 @@ internal sealed class TransactionCoordinator
                     List<(KeyValueResponseType, string, KeyValueDurability)> results =
                         await manager.LocateAndTryReleaseManyExclusiveLocks(context.TransactionId, perKey, CancellationToken.None);
 
+                    // Index the responses by key so every mandatory key can be verified against the batch. A
+                    // mandatory key that is absent from the results — or present with a non-proof response — is
+                    // not acknowledged: the batch must positively account for the full mandatory set.
+                    Dictionary<(string, KeyValueDurability), KeyValueResponseType> releasedByKey = new(results.Count);
                     foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) in results)
+                        releasedByKey[(key, durability)] = type;
+
+                    foreach ((string, KeyValueDurability) mandatory in mandatoryKeys)
                     {
-                        if (mandatoryKeys.Contains((key, durability)) && !IsReleaseAcked(type))
+                        if (!releasedByKey.TryGetValue(mandatory, out KeyValueResponseType type) || !IsReleaseAcked(type))
                             allMandatoryAcked = false;
                     }
                 }
@@ -829,12 +836,24 @@ internal sealed class TransactionCoordinator
     }
 
     /// <summary>
-    /// Whether a lock/MVCC release response counts as an acknowledgement. Only transient conditions
-    /// (a participant still catching up, or a not-yet-stable leader) leave state uncleared and warrant a
-    /// retry; every other response — including "nothing was there" — means the release is settled.
+    /// Whether a lock/MVCC release response is positive <b>proof</b> that this transaction's effect on the key
+    /// is gone. Only an explicit allowlist qualifies, because <c>RolledBack</c> must never be reported while an
+    /// intent may remain:
+    /// <list type="bullet">
+    /// <item><c>Unlocked</c> — the handler removed this transaction's MVCC entry and cleared its write intent.</item>
+    /// <item><c>DoesNotExist</c> — the entry is absent, so no effect of this transaction can be on it.</item>
+    /// <item><c>AlreadyLocked</c> — the entry's current write intent belongs to <em>another</em> transaction, so
+    /// this transaction's intent is not present and its MVCC entry was removed; not treating this as proof would
+    /// livelock the rollback against a lock it does not own.</item>
+    /// </list>
+    /// Every other response — <c>MustRetry</c>/<c>WaitingForReplication</c> (transient), <c>Errored</c>/
+    /// <c>InvalidInput</c> (the release did not run), or a missing batch result — is <b>not</b> proof and forces
+    /// the rollback to retry rather than falsely claiming the effect released.
     /// </summary>
-    private static bool IsReleaseAcked(KeyValueResponseType type) =>
-        type is not (KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication);
+    internal static bool IsReleaseAcked(KeyValueResponseType type) =>
+        type is KeyValueResponseType.Unlocked
+             or KeyValueResponseType.DoesNotExist
+             or KeyValueResponseType.AlreadyLocked;
 
     /// <summary>
     /// Executes the 2PC protocol for the transaction.
