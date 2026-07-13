@@ -49,6 +49,13 @@ public class KahunaTransactionSession : IAsyncDisposable
     private int TransactionTimeout { get; }
 
     /// <summary>
+    /// Transaction-wide snapshot timestamp applied to point reads. Zero means "latest": reads observe the
+    /// current committed state and record a read dependency. A non-zero value pins reads to that snapshot,
+    /// which the server serves without recording a read dependency.
+    /// </summary>
+    private HLCTimestamp ReadTimestamp { get; }
+
+    /// <summary>
     /// Gets or sets the current status of the transaction session.
     /// This property indicates whether the transaction is pending, committed, or rolled back,
     /// allowing the state of the transaction to be monitored and validated during operations.
@@ -99,7 +106,7 @@ public class KahunaTransactionSession : IAsyncDisposable
     /// <param name="transactionId"></param>
     /// <param name="locking"></param>
     /// <param name="transactionTimeout"></param>
-    public KahunaTransactionSession(KahunaClient client, string url, string coordinatorKey, HLCTimestamp transactionId, KeyValueTransactionLocking locking, int transactionTimeout)
+    public KahunaTransactionSession(KahunaClient client, string url, string coordinatorKey, HLCTimestamp transactionId, KeyValueTransactionLocking locking, int transactionTimeout, HLCTimestamp readTimestamp = default)
     {
         Client = client;
         Url = url;
@@ -107,6 +114,7 @@ public class KahunaTransactionSession : IAsyncDisposable
         TransactionId = transactionId;
         Locking = locking;
         TransactionTimeout = transactionTimeout > 0 ? transactionTimeout : DefaultTransactionTimeoutMs;
+        ReadTimestamp = readTimestamp;
     }
 
     private async Task AcquireExclusiveKeyValueLock(string key, KeyValueDurability durability, CancellationToken cancellationToken)
@@ -508,7 +516,7 @@ public class KahunaTransactionSession : IAsyncDisposable
             TransactionId,
             key,
             -1,
-            HLCTimestamp.Zero,
+            ReadTimestamp,
             durability,
             cancellationToken,
             CoordinatorKey,
@@ -539,7 +547,7 @@ public class KahunaTransactionSession : IAsyncDisposable
             TransactionId,
             key,
             -1,
-            HLCTimestamp.Zero,
+            ReadTimestamp,
             durability,
             cancellationToken,
             CoordinatorKey,

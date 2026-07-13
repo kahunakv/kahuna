@@ -129,6 +129,14 @@ internal sealed class TransactionCoordinator
     }
 
     /// <summary>
+    /// Reads the decision-durability policy recorded for an active session, or null when no active session
+    /// with that id exists. Reflects exactly what <see cref="StartTransaction"/> captured from the caller's
+    /// options, so a caller can confirm the policy was carried through Begin.
+    /// </summary>
+    internal DecisionDurability? GetRecordedDecisionDurability(HLCTimestamp transactionId)
+        => sessions.TryGetValue(transactionId, out TransactionContext? context) ? context.DecisionDurability : null;
+
+    /// <summary>
     /// Commits the transaction identified by the supplied handle.
     /// The handle carries both the transaction ID (used to locate the session) and the
     /// coordinator key (used by the caller to route this request to the right node).
