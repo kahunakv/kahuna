@@ -33,6 +33,14 @@ public sealed class TestClientTransactionRegisterRemote
         InitialPartitions = 1
     }, lf);
 
+    private static EmbeddedKahunaNode CreateNodeWithRetentionMax(ILoggerFactory lf, int retentionMax) => new(new()
+    {
+        Storage = "memory",
+        WalStorage = "memory",
+        InitialPartitions = 1,
+        TransactionOutcomeRetentionMax = retentionMax
+    }, lf);
+
     /// <summary>
     /// A write issued inside a session is visible to a later read in the same session, and the
     /// value survives commit — proving the register-remote operation recorded the mutation on the
@@ -471,5 +479,65 @@ public sealed class TestClientTransactionRegisterRemote
         // A retry is rejected because the session is no longer pending.
         await Assert.ThrowsAsync<KahunaException>(() => txA.Commit(ct));
         await Assert.ThrowsAsync<KahunaException>(() => txA.Rollback(ct));
+    }
+
+    /// <summary>
+    /// The terminal-outcome retention window is a strict size bound: with a max of 2, committing three
+    /// transactions evicts the oldest, so a duplicate commit of the first replays the unknown <c>Errored</c>
+    /// (evicted) while duplicates of the two most recent still replay <c>Committed</c>.
+    /// </summary>
+    [Fact]
+    public async Task RetentionSizeCap_EvictsOldestOutcome_StrictlyBounded()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = CreateNodeWithRetentionMax(loggerFactory, retentionMax: 2);
+        await node.StartAsync(ct);
+
+        KahunaClient client = new("http://localhost", communication: new InProcessKahunaCommunication(node.Kahuna));
+
+        List<Kahuna.Shared.KeyValue.TransactionHandle> handles = [];
+        for (int i = 0; i < 3; i++)
+        {
+            await using KahunaTransactionSession tx = await client.StartTransactionSession(
+                new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+            Assert.True(await tx.Commit(ct));
+            handles.Add(tx.Handle);
+        }
+
+        // The oldest outcome was evicted once the window exceeded two entries: its duplicate is unknown.
+        (KeyValueResponseType oldest, _) = await node.Kahuna.LocateAndCommitTransaction(handles[0], ct);
+        Assert.Equal(KeyValueResponseType.Errored, oldest);
+
+        // The two most recent outcomes are still retained and replay their terminal answer.
+        (KeyValueResponseType second, _) = await node.Kahuna.LocateAndCommitTransaction(handles[1], ct);
+        Assert.Equal(KeyValueResponseType.Committed, second);
+        (KeyValueResponseType third, _) = await node.Kahuna.LocateAndCommitTransaction(handles[2], ct);
+        Assert.Equal(KeyValueResponseType.Committed, third);
+    }
+
+    /// <summary>
+    /// A non-positive retention max disables the idempotency window entirely: nothing is retained, so a
+    /// duplicate commit after the session is removed reports unknown <c>Errored</c> rather than replaying
+    /// <c>Committed</c>.
+    /// </summary>
+    [Fact]
+    public async Task RetentionDisabled_WhenMaxNonPositive_DuplicateReportsErrored()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = CreateNodeWithRetentionMax(loggerFactory, retentionMax: 0);
+        await node.StartAsync(ct);
+
+        KahunaClient client = new("http://localhost", communication: new InProcessKahunaCommunication(node.Kahuna));
+
+        Kahuna.Shared.KeyValue.TransactionHandle handle;
+        await using (KahunaTransactionSession tx = await client.StartTransactionSession(
+                         new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct))
+        {
+            Assert.True(await tx.Commit(ct));
+            handle = tx.Handle;
+        }
+
+        (KeyValueResponseType duplicate, _) = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
+        Assert.Equal(KeyValueResponseType.Errored, duplicate);
     }
 }

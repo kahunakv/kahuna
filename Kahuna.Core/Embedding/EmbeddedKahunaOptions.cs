@@ -75,6 +75,10 @@ public sealed class EmbeddedKahunaOptions
 
     public TimeSpan CollectionInterval { get; set; } = TimeSpan.FromSeconds(60);
 
+    public int TransactionOutcomeRetentionMax { get; set; } = 10_000;
+
+    public TimeSpan TransactionOutcomeRetentionTtl { get; set; } = TimeSpan.FromMinutes(5);
+
     public int MaxEntriesPerActor { get; set; } = 50_000;
 
     public long MaxBytesPerActor { get; set; } = 256L * 1024 * 1024;

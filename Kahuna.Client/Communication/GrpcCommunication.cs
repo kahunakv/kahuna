@@ -1697,11 +1697,10 @@ public class GrpcCommunication : IKahunaCommunication
     /// <param name="url">The endpoint URL of the server where the transaction will be committed.</param>
     /// <param name="uniqueId">A unique identifier for the session or request being committed.</param>
     /// <param name="transactionId">The hybrid logical clock timestamp representing the transaction to be committed.</param>
-    /// <param name="acquiredLocks">Acquired locks during the transaction execution</param> 
-    /// <param name="modifiedKeys">Modified keys to commit</param>
     /// <param name="cancellationToken">A token to observe for cancellation requests during the transaction commit operation.</param>
     /// <returns>
-    /// A boolean value indicating whether the transaction was successfully committed.
+    /// A tuple whose <c>committed</c> flag indicates whether the transaction was successfully committed, and whose
+    /// <c>recordAnchorKey</c> carries the canonical record anchor (the first persistent modified key) when present.
     /// </returns>
     /// <exception cref="KahunaException">
     /// Thrown if the transaction commit process encounters an error, fails, or exceeds retry limits.
