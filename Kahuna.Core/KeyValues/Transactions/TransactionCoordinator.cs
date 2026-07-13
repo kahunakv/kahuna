@@ -161,10 +161,16 @@ internal sealed class TransactionCoordinator
         {
             outcome = await ExecuteCommit(context, transactionId);
 
-            // A committed session was removed from the map; retain its outcome so a duplicate commit that
-            // races in after removal replays Committed rather than seeing an unknown transaction.
-            if (outcome.Type == KeyValueResponseType.Committed)
+            // Any terminal outcome — a successful Committed or a definite Aborted/Errored (read conflict,
+            // permanent 2PC failure) — finalizes the session: remove it from the active map and retain the
+            // outcome so a duplicate finalize after removal replays the same answer. This is what stops a
+            // definite abort from stranding a Finalizing session the reaper cannot reclaim while the SDK
+            // believes it can retry. A non-terminal MustRetry (drain timeout) leaves the session live to retry.
+            if (outcome.IsTerminal)
+            {
+                sessions.TryRemove(transactionId, out _);
                 RetainTerminalOutcome(transactionId, outcome, raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()));
+            }
 
             return (outcome.Type, outcome.RecordAnchorKey);
         }
@@ -212,8 +218,8 @@ internal sealed class TransactionCoordinator
 
             logger.LogCommittedInteractiveTransaction(transactionId);
 
-            sessions.TryRemove(transactionId, out _);
-
+            // The caller (CommitTransaction) removes the session and retains the outcome for every terminal
+            // result uniformly, so a definite Aborted is finalized the same way a Committed is.
             return new(KeyValueResponseType.Committed, recordAnchorKey);
         }
         catch (KahunaAbortedException ex)
@@ -288,10 +294,15 @@ internal sealed class TransactionCoordinator
         {
             outcome = await ExecuteRollback(context, transactionId);
 
-            // A rolled-back session was removed from the map; retain its outcome so a duplicate rollback that
-            // races in after removal replays RolledBack rather than seeing an unknown transaction.
-            if (outcome.Type == KeyValueResponseType.RolledBack)
+            // A terminal RolledBack finalizes the session: remove it from the active map and retain the outcome
+            // so a duplicate rollback after removal replays RolledBack. A non-terminal MustRetry (drain timeout
+            // or incomplete mandatory release) leaves the session live so a later call — or the reaper, if the
+            // caller disappears — retries the cleanup.
+            if (outcome.IsTerminal)
+            {
+                sessions.TryRemove(transactionId, out _);
                 RetainTerminalOutcome(transactionId, outcome, raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()));
+            }
 
             return outcome.Type;
         }
@@ -324,8 +335,8 @@ internal sealed class TransactionCoordinator
 
         logger.LogRolledBackInteractiveTransaction(transactionId);
 
-        sessions.TryRemove(transactionId, out _);
-
+        // The caller (RollbackTransaction) removes the session and retains the outcome for the terminal
+        // RolledBack result.
         return new(KeyValueResponseType.RolledBack, null);
     }
 
@@ -602,11 +613,12 @@ internal sealed class TransactionCoordinator
                 continue;
 
             // Claim the finalize slot and close the session to new operations before removing it from the
-            // map. A BeginOperation that already captured this context reference then observes the closed
-            // lifecycle and is rejected, instead of registering a New operation on a session that is about
-            // to vanish (whose completion would find no session and leave an applied mutation with no
-            // coordinator record). Skip a session already owned by an in-flight commit or rollback — that
-            // finalize, not the reaper, decides its outcome.
+            // map. This reclaims both a still-accepting abandoned session and an abandoned finalization — one
+            // left Finalizing (closed to new ops) after a commit/rollback/Close returned MustRetry or stored a
+            // Close snapshot and the caller then disappeared, so no finalize owner remains to decide it. A
+            // BeginOperation that already captured this context observes the closed lifecycle and is rejected
+            // rather than registering on a vanishing session. TryEnterReap returns null when a commit or
+            // rollback still owns the slot (that finalize, not the reaper, decides the outcome).
             FinalizeAttempt? attempt = context.TryEnterReap();
             if (attempt is null)
                 continue;

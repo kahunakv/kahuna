@@ -40,5 +40,14 @@ public enum KahunaTransactionStatus
     /// This status reflects that the changes made during the transaction have been discarded,
     /// ensuring that the system remains consistent and no partial updates are retained.
     /// </summary>
-    Rolledback
+    Rolledback,
+
+    /// <summary>
+    /// A commit was definitively aborted — a read-set conflict or a permanent two-phase-commit failure — so
+    /// the transaction will never commit. This is terminal, not retryable: the server has already finalized
+    /// (released and removed) the transaction, so the caller must start a new one rather than retry, and
+    /// disposal does not roll back again. Distinct from <see cref="Pending"/>, which a transient
+    /// <c>MustRetry</c> returns to so the same finalize can be retried.
+    /// </summary>
+    Aborted
 }

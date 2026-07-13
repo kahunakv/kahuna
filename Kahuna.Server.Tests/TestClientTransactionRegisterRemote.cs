@@ -383,4 +383,93 @@ public sealed class TestClientTransactionRegisterRemote
         await txC.GetByRange(prefix, null, false, null, false, 0, default, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct);
         Assert.True(await txC.Commit(ct));
     }
+
+    /// <summary>
+    /// A definite commit abort (an optimistic read-set conflict) finalizes the transaction on the server:
+    /// the session is removed from the active map (no stranded Finalizing session the reaper cannot reclaim)
+    /// and the terminal Aborted outcome is retained, so a duplicate commit replays Aborted rather than the
+    /// unknown Errored it would return for a never-seen transaction.
+    /// </summary>
+    [Fact]
+    public async Task DefiniteCommitAbort_RemovesSessionAndRetainsAbortedOutcome()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = CreateNode(loggerFactory);
+        await node.StartAsync(ct);
+
+        string key = "rr/abort/" + Guid.NewGuid().ToString("N")[..8];
+
+        // Seed the key (non-transactional).
+        (KeyValueResponseType seed, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            Kommander.Time.HLCTimestamp.Zero, key, "v0"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Set, seed);
+
+        (_, Kahuna.Shared.KeyValue.TransactionHandle handle) =
+            await node.Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Optimistic }, ct);
+
+        // Read the key under the optimistic transaction (records a read observation at the current revision).
+        (KeyValueResponseType readType, _) = await node.Kahuna.LocateAndTryGetValue(
+            handle.TransactionId, key, -1, Kommander.Time.HLCTimestamp.Zero, KeyValueDurability.Persistent, ct,
+            handle.CoordinatorKey, TransactionOperationId.NewRandom());
+        Assert.Equal(KeyValueResponseType.Get, readType);
+
+        // Write a different key so two-phase commit runs (a read-only transaction has no modified keys and
+        // skips read-set validation entirely).
+        (KeyValueResponseType wType, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            handle.TransactionId, key + "/w", "x"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct,
+            0, handle.CoordinatorKey, TransactionOperationId.NewRandom());
+        Assert.Equal(KeyValueResponseType.Set, wType);
+
+        // A concurrent non-transactional write invalidates the read set.
+        (KeyValueResponseType overwrite, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            Kommander.Time.HLCTimestamp.Zero, key, "v1"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Set, overwrite);
+
+        // Commit aborts on the read-set conflict.
+        (KeyValueResponseType commitType, _) = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
+        Assert.Equal(KeyValueResponseType.Aborted, commitType);
+
+        // The session is gone from the active map — no strand.
+        TransactionWorkingSet? ws = await node.Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+        Assert.Null(ws);
+
+        // A duplicate commit replays the retained Aborted (not an unknown Errored).
+        (KeyValueResponseType duplicate, _) = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
+        Assert.Equal(KeyValueResponseType.Aborted, duplicate);
+    }
+
+    /// <summary>
+    /// The SDK session mirrors a definite commit abort with a terminal <see cref="KahunaTransactionStatus.Aborted"/>
+    /// state — not <see cref="KahunaTransactionStatus.Pending"/>, which would advertise retryability. A second
+    /// commit or a rollback is then rejected rather than looping against a transaction the server has finalized.
+    /// </summary>
+    [Fact]
+    public async Task SdkCommitAbort_ReachesTerminalAbortedStatus()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = CreateNode(loggerFactory);
+        await node.StartAsync(ct);
+
+        KahunaClient client = new("http://localhost", communication: new InProcessKahunaCommunication(node.Kahuna));
+        string key = "rr/sdk-abort/" + Guid.NewGuid().ToString("N")[..8];
+
+        await client.SetKeyValue(key, "v0", durability: KeyValueDurability.Persistent, cancellationToken: ct);
+
+        await using KahunaTransactionSession txA = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Optimistic }, ct);
+
+        // Read inside the optimistic transaction and write a different key (so two-phase commit runs and
+        // validates the read set), then invalidate the read set with a concurrent write.
+        await txA.GetKeyValue(key, KeyValueDurability.Persistent, ct);
+        await txA.SetKeyValue(key + "/w", "x", durability: KeyValueDurability.Persistent, cancellationToken: ct);
+        await client.SetKeyValue(key, "v1", durability: KeyValueDurability.Persistent, cancellationToken: ct);
+
+        // Commit aborts; the SDK reaches the terminal Aborted state (never reverting to Pending).
+        await Assert.ThrowsAsync<KahunaException>(() => txA.Commit(ct));
+        Assert.Equal(KahunaTransactionStatus.Aborted, txA.Status);
+
+        // A retry is rejected because the session is no longer pending.
+        await Assert.ThrowsAsync<KahunaException>(() => txA.Commit(ct));
+        await Assert.ThrowsAsync<KahunaException>(() => txA.Rollback(ct));
+    }
 }

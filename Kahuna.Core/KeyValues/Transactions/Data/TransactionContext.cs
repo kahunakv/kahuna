@@ -400,18 +400,24 @@ internal class TransactionContext
     }
 
     /// <summary>
-    /// Atomically claims the finalize slot for the reaper. Succeeds only when the session is still
-    /// <see cref="SessionLifecycle.AcceptingOperations"/> with no active finalize, transitioning it to
-    /// <see cref="SessionLifecycle.Reaping"/> and installing an attempt the reaper publishes so that a
-    /// commit/rollback racing the reaper mirrors the reap outcome instead of finalizing a vanishing
-    /// session. Returns null when a commit/rollback already owns the slot (leave it to that finalize) or
-    /// the session is not in an accepting state.
+    /// Atomically claims the finalize slot for the reaper. Succeeds only when <b>no</b> finalize is active —
+    /// i.e. no commit/rollback (or in-flight reap) owns the slot — and the session is either still accepting
+    /// operations or is a finalization that was <b>abandoned</b>: closed to new operations
+    /// (<see cref="SessionLifecycle.Finalizing"/>) but with its slot released because the last commit,
+    /// rollback, or Close returned a non-terminal <see cref="KeyValueResponseType.MustRetry"/> (or stored a
+    /// Close snapshot) and the caller then disappeared. Claiming transitions the session to
+    /// <see cref="SessionLifecycle.Reaping"/> and installs an attempt the reaper publishes so a commit/rollback
+    /// racing the reaper mirrors the reap outcome. Returns null when a finalize already owns the slot (leave it
+    /// to that finalize) or the session is already Reaping/Terminal.
     /// </summary>
     internal FinalizeAttempt? TryEnterReap()
     {
         lock (registryLock)
         {
-            if (lifecycle != SessionLifecycle.AcceptingOperations || activeFinalize is not null)
+            if (activeFinalize is not null)
+                return null;
+
+            if (lifecycle is not (SessionLifecycle.AcceptingOperations or SessionLifecycle.Finalizing))
                 return null;
 
             lifecycle = SessionLifecycle.Reaping;
