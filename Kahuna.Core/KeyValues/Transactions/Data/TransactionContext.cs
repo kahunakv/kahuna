@@ -113,6 +113,22 @@ internal class TransactionContext
     public KeyValueTransactionState State => state;
 
     /// <summary>
+    /// The durable coordinator decision record built at prepare for a Durable transaction: <c>CommitDecided</c>
+    /// with every prepared participant ticket and the frozen cleanup plan, the anchor participant already
+    /// acknowledged. Embedded in the anchor prepare so committing the anchor installs it atomically; the
+    /// coordinator keeps it to drive the frozen-participant-set progress acks. Null for best-effort transactions.
+    /// </summary>
+    public CoordinatorDecisionRecord? PreparedDecisionRecord { get; set; }
+
+    /// <summary>
+    /// Set once the anchor commit has installed a durable decision that has not yet completed. A commit that
+    /// exhausts phase-two retries with this set returns <c>MustRetry</c>, never <c>Aborted</c>: the anchor and
+    /// its acknowledged participants are durably committed, so recovery — not an abort — resolves the rest.
+    /// A re-entered finalize on the same live session short-circuits to <c>MustRetry</c> rather than aborting.
+    /// </summary>
+    public bool HasOutstandingDurableDecision { get; set; }
+
+    /// <summary>
     /// Atomically advances the transaction state from <paramref name="expectedState"/> to
     /// <paramref name="newState"/>. Returns true when the CAS succeeds.
     /// </summary>

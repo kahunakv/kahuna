@@ -95,6 +95,12 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         // receipt recorded on a confirmed persistent commit.
         string? recordAnchorKey = entry.WriteIntent.RecordAnchorKey;
 
+        // Capture the initial coordinator decision before the write intent is cleared. Present only on the
+        // anchor key of a Durable transaction; installing it as this anchor mutation commits means the
+        // anchor value, its completion receipt, and the CommitDecided record all land from one committed
+        // proposal — no window where a secondary participant could observe the anchor value without a record.
+        Transactions.Data.CoordinatorDecisionRecord? embeddedDecision = entry.WriteIntent.EmbeddedDecision;
+
         if (entry.MvccEntries is null)
         {
             context.Logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [1]", message.TransactionId);
@@ -235,6 +241,13 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
 
         context.RecordCommitted(message.TransactionId);
         context.CompletionReceiptStore.Record(message.TransactionId, message.Key, recordAnchorKey, KeyValueDurability.Persistent);
+
+        // Atomic with the anchor value + receipt above: install the initial CommitDecided record so no
+        // node ever exposes the committed anchor value without the decision record that authorizes the
+        // rest of the transaction. Followers and restore install the equivalent copy from the envelope.
+        if (embeddedDecision is not null)
+            context.CoordinatorDecisionStore?.InstallFromAnchorCommit(embeddedDecision);
+
         return new(KeyValueResponseType.Committed, commitIndex);
     }
 

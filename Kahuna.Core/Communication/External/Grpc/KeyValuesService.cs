@@ -1026,6 +1026,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
         
+        CoordinatorDecisionRecord? embeddedDecision = request.HasEmbeddedDecision
+            ? CoordinatorDecisionStore.DeserializeRecord(request.EmbeddedDecision.ToByteArray())
+            : null;
+
         (KeyValueResponseType type, HLCTimestamp proposalTicket, _, _) = await keyValues.LocateAndTryPrepareMutations(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             new(request.CommitIdNode, request.CommitIdPhysical, request.CommitIdCounter),
@@ -1033,7 +1037,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             (KeyValueDurability)request.Durability,
             context.CancellationToken,
             request.RoutedGeneration,
-            request.HasRecordAnchorKey ? request.RecordAnchorKey : null
+            request.HasRecordAnchorKey ? request.RecordAnchorKey : null,
+            embeddedDecision
         );
 
         return new()

@@ -134,10 +134,11 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         {
             entry.WriteIntent = new()
             {
-                TransactionId   = message.TransactionId,
-                Expires         = message.TransactionId + DefaultTxCompleteTimeout,
-                CommitTimestamp = mvccEntry.LastModified,
-                RecordAnchorKey = message.RecordAnchorKey
+                TransactionId    = message.TransactionId,
+                Expires          = message.TransactionId + DefaultTxCompleteTimeout,
+                CommitTimestamp  = mvccEntry.LastModified,
+                RecordAnchorKey  = message.RecordAnchorKey,
+                EmbeddedDecision = message.EmbeddedDecision
             };
         }
         else
@@ -147,6 +148,9 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             // Stamp the anchor once the coordinator supplies it; a plain pre-prepare lock had none.
             if (message.RecordAnchorKey is not null)
                 entry.WriteIntent.RecordAnchorKey = message.RecordAnchorKey;
+            // Likewise the initial decision, present only on the anchor key of a Durable transaction.
+            if (message.EmbeddedDecision is not null)
+                entry.WriteIntent.EmbeddedDecision = message.EmbeddedDecision;
         }
 
         if (message.Durability != KeyValueDurability.Persistent)
@@ -185,7 +189,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         KeyValueRequestType proposalType = proposal.State == KeyValueState.Deleted
             ? KeyValueRequestType.TryDelete
             : KeyValueRequestType.TrySet;
-        (bool success, HLCTimestamp proposalTicket) = await PrepareKeyValueMessage(proposalType, proposal, message.TransactionId, message.RecordAnchorKey);
+        (bool success, HLCTimestamp proposalTicket) = await PrepareKeyValueMessage(proposalType, proposal, message.TransactionId, message.RecordAnchorKey, message.EmbeddedDecision);
         if (!success)
         {
             context.Logger.LogWarning("Failed to propose logs for {TransactionId}", message.TransactionId);
@@ -203,7 +207,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
     /// <param name="proposal"></param>
     /// <param name="currentTime"></param>
     /// <returns></returns>
-    private async Task<(bool, HLCTimestamp)> PrepareKeyValueMessage(KeyValueRequestType type, KeyValueProposal proposal, HLCTimestamp transactionId, string? recordAnchorKey)
+    private async Task<(bool, HLCTimestamp)> PrepareKeyValueMessage(KeyValueRequestType type, KeyValueProposal proposal, HLCTimestamp transactionId, string? recordAnchorKey, Transactions.Data.CoordinatorDecisionRecord? embeddedDecision)
     {
         if (!context.Raft.Joined)
             return (true, HLCTimestamp.Zero);
@@ -236,6 +240,13 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
 
         if (recordAnchorKey is not null)
             kvm.RecordAnchorKey = recordAnchorKey;
+
+        // Serialize the initial decision into the committed envelope so a follower's replication apply and a
+        // cold-restart restore install it from the same log record that carries the anchor value. The leader
+        // installs it inline at commit from the write intent; this copy covers every other node.
+        if (embeddedDecision is not null)
+            kvm.EmbeddedDecision = UnsafeByteOperations.UnsafeWrap(
+                Transactions.CoordinatorDecisionStore.SerializeRecord(embeddedDecision));
 
         if (proposal.Value is not null)
             kvm.Value = UnsafeByteOperations.UnsafeWrap(proposal.Value);

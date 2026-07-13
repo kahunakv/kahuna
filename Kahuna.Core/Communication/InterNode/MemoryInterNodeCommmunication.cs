@@ -722,11 +722,12 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         KeyValueDurability durability,
         long routedGeneration,
         CancellationToken cancellationToken,
-        string? recordAnchorKey = null
+        string? recordAnchorKey = null,
+        CoordinatorDecisionRecord? embeddedDecision = null
     )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.TryPrepareMutations(transactionId, commitId, key, durability, routedGeneration, recordAnchorKey);
+            return await kahunaNode.TryPrepareMutations(transactionId, commitId, key, durability, routedGeneration, recordAnchorKey, embeddedDecision);
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }

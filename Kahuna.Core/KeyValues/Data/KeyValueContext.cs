@@ -65,6 +65,13 @@ internal sealed class KeyValueContext
     /// </summary>
     public CompletionReceiptStore CompletionReceiptStore { get; }
 
+    /// <summary>
+    /// The node's durable coordinator decision store. On the anchor key's persistent commit the handler
+    /// installs the embedded <c>CommitDecided</c> record here, so the anchor value, its completion receipt,
+    /// and the decision record all land from the one committed proposal. Null only in bare test contexts.
+    /// </summary>
+    public Transactions.CoordinatorDecisionStore? CoordinatorDecisionStore { get; }
+
     public IPersistenceBackend PersistenceBackend  { get; }
 
     public BTree<string, KeyValueEntry> Store  { get; }
@@ -128,7 +135,8 @@ internal sealed class KeyValueContext
         KahunaConfiguration configuration,
         ILogger<IKahuna> logger,
         SnapshotFloorStore? snapshotFloorStore = null,
-        CompletionReceiptStore? completionReceiptStore = null
+        CompletionReceiptStore? completionReceiptStore = null,
+        Transactions.CoordinatorDecisionStore? coordinatorDecisionStore = null
     )
     {
         ActorContext = actorContext;
@@ -146,6 +154,7 @@ internal sealed class KeyValueContext
         Logger = logger;
         SnapshotFloorStore = snapshotFloorStore;
         CompletionReceiptStore = completionReceiptStore ?? new CompletionReceiptStore();
+        CoordinatorDecisionStore = coordinatorDecisionStore;
     }
 
     /// <summary>

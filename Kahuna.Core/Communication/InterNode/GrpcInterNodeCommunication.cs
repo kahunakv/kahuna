@@ -1039,7 +1039,8 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         KeyValueDurability durability,
         long routedGeneration,
         CancellationToken cancellationToken,
-        string? recordAnchorKey = null
+        string? recordAnchorKey = null,
+        CoordinatorDecisionRecord? embeddedDecision = null
     )
     {
         //GrpcChannel channel = SharedChannels.GetChannel(node);
@@ -1062,6 +1063,10 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
 
         if (recordAnchorKey is not null)
             request.RecordAnchorKey = recordAnchorKey;
+
+        if (embeddedDecision is not null)
+            request.EmbeddedDecision = UnsafeByteOperations.UnsafeWrap(
+                CoordinatorDecisionStore.SerializeRecord(embeddedDecision));
 
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
         GrpcTryPrepareMutationsResponse remoteResponse = response.TryPrepareMutations!;

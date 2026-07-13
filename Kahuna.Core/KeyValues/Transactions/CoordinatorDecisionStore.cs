@@ -55,7 +55,11 @@ internal sealed class CoordinatorDecisionStore : IDisposable
 
     // Resolves a record anchor key to its current owning data partition and routing generation
     // (RangeRouting.Locate, exposed via KeyValueLocator.LocateRange). Pure map lookup, no forwarding.
-    private readonly Func<string, (int PartitionId, long Generation)> resolveAnchorPartition;
+    // Attached after construction: the store is built before the locator exists (so the key-value actors
+    // can share the one instance for install-on-apply, which needs no resolver), then the resolver is
+    // wired once the locator is ready. Only the coordinator-driven UpsertAsync/RemoveAsync use it, and
+    // those never run before full manager construction completes.
+    private Func<string, (int PartitionId, long Generation)>? resolveAnchorPartition;
 
     private readonly ILogger<IKahuna> logger;
 
@@ -74,13 +78,11 @@ internal sealed class CoordinatorDecisionStore : IDisposable
 
     public CoordinatorDecisionStore(
         IRaft raft,
-        Func<string, (int PartitionId, long Generation)> resolveAnchorPartition,
         string? storagePath,
         string? storageRevision,
         ILogger<IKahuna> logger)
     {
         this.raft = raft;
-        this.resolveAnchorPartition = resolveAnchorPartition;
         this.logger = logger;
 
         snapshotPath = string.IsNullOrEmpty(storagePath)
@@ -89,6 +91,13 @@ internal sealed class CoordinatorDecisionStore : IDisposable
 
         LoadFromDisk();
     }
+
+    /// <summary>
+    /// Wires the anchor-key → data-partition resolver once the locator is constructed. Called during
+    /// manager construction, before any coordinator-driven mutation can run.
+    /// </summary>
+    public void AttachAnchorResolver(Func<string, (int PartitionId, long Generation)> resolver)
+        => resolveAnchorPartition = resolver;
 
     // ── Reads ──────────────────────────────────────────────────────────────────────────────────
 
@@ -127,7 +136,7 @@ internal sealed class CoordinatorDecisionStore : IDisposable
         await mutateGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            (int partitionId, long generation) = resolveAnchorPartition(record.RecordAnchorKey);
+            (int partitionId, long generation) = resolveAnchorPartition!(record.RecordAnchorKey);
             if (expectedGeneration != 0 && generation != expectedGeneration)
                 return CoordinatorDecisionMutationResult.MustRetry;
 
@@ -157,7 +166,7 @@ internal sealed class CoordinatorDecisionStore : IDisposable
         await mutateGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            (int partitionId, _) = resolveAnchorPartition(recordAnchorKey);
+            (int partitionId, _) = resolveAnchorPartition!(recordAnchorKey);
 
             Dictionary<HLCTimestamp, CoordinatorDecisionRecord> next = new(records);
             next.Remove(transactionId);
@@ -241,6 +250,36 @@ internal sealed class CoordinatorDecisionStore : IDisposable
             else
                 target[record.TransactionId] = record;
         }
+    }
+
+    // ── Initial install riding the anchor key-value commit ───────────────────────────────────────
+
+    /// <summary>
+    /// Installs the initial <c>CommitDecided</c> record as its anchor mutation's committed proposal is
+    /// applied (leader inline commit, follower replication, WAL restore) — never a separate Raft round
+    /// trip, so the anchor value, its completion receipt, and this record converge from one committed
+    /// entry. Idempotent by transaction id: re-delivery and restore replay overwrite with the same record,
+    /// and because the record ships the participant set already frozen, a later progress delta on the
+    /// decision log still matches. It never regresses a record a later progress delta already advanced,
+    /// because the anchor commit precedes those deltas in the anchor partition's single ordered log.
+    /// </summary>
+    public void InstallFromAnchorCommit(CoordinatorDecisionRecord record)
+    {
+        Dictionary<HLCTimestamp, CoordinatorDecisionRecord> next = new(records)
+        {
+            [record.TransactionId] = record
+        };
+        CommitInMemory(next);
+    }
+
+    /// <summary>Serializes one record into the anchor commit envelope's embedded-decision blob.</summary>
+    public static byte[] SerializeRecord(CoordinatorDecisionRecord record) => SerializeRecords([record]);
+
+    /// <summary>Reads the single record from an anchor commit envelope's embedded-decision blob.</summary>
+    public static CoordinatorDecisionRecord? DeserializeRecord(byte[] data)
+    {
+        IReadOnlyList<CoordinatorDecisionRecord> records = DeserializeRecords(data);
+        return records.Count > 0 ? records[0] : null;
     }
 
     // ── State transfer (folded into KvStateMachineTransfer) ────────────────────────────────────
