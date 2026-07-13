@@ -232,9 +232,15 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
         TransactionHandle handle = new(transactionId, uniqueId);
 
         // Commit returns the coordinator's canonical record anchor from the frozen finalize snapshot, so
-        // there is no race between reading the anchor and freezing the working set.
+        // there is no race between reading the anchor and freezing the working set. Mirror the gRPC transport
+        // contract: true = committed, false = transient MustRetry (retryable), throw on a terminal failure so
+        // the SDK can move to a terminal state rather than looping on Pending.
         (KeyValueResponseType type, string? recordAnchorKey) = await kahuna.LocateAndCommitTransaction(handle, cancellationToken);
-        return (type == KeyValueResponseType.Committed, recordAnchorKey);
+        if (type == KeyValueResponseType.Committed)
+            return (true, recordAnchorKey);
+        if (type == KeyValueResponseType.MustRetry)
+            return (false, recordAnchorKey);
+        throw new KahunaException("Failed to commit key/value transaction: " + type, type);
     }
 
     public async Task<bool> RollbackTransactionSession(
@@ -242,7 +248,11 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
     {
         TransactionHandle handle = new(transactionId, uniqueId);
         KeyValueResponseType type = await kahuna.LocateAndRollbackTransaction(handle, cancellationToken);
-        return type == KeyValueResponseType.RolledBack;
+        if (type == KeyValueResponseType.RolledBack)
+            return true;
+        if (type == KeyValueResponseType.MustRetry)
+            return false;
+        throw new KahunaException("Failed to rollback key/value transaction: " + type, type);
     }
     public Task<(SequenceResponseType, ReadOnlySequenceEntry?, int)> GetSequence(string url, string name, SequenceDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
     public Task<(SequenceResponseType, long, int)> CreateSequence(string url, string name, long initialValue, long increment, long? maxValue, SequenceDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();

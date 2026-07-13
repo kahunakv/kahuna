@@ -67,6 +67,27 @@ public sealed class TestSessionReaping
     }
 
     [Fact]
+    public void Reap_ClaimsAbandonedFinalizingSession_ButNotOneWithAnActiveOwner()
+    {
+        TransactionContext ctx = NewSession();
+
+        // A commit/rollback owns the finalize slot — the reaper must not steal it.
+        Assert.Equal(FinalizeAdmission.Owner, ctx.EnterFinalize(out FinalizeAttempt? owner));
+        Assert.Null(ctx.TryEnterReap());
+        Assert.Equal(SessionLifecycle.Finalizing, ctx.Lifecycle);
+
+        // The owner published a non-terminal MustRetry (a drain timeout, say) and then disappeared: the slot
+        // is free but the session stays Finalizing, closed to new operations, with no owner to decide it.
+        ctx.CompleteFinalize(owner!, new FinalizeOutcome(KeyValueResponseType.MustRetry, null));
+        Assert.Equal(SessionLifecycle.Finalizing, ctx.Lifecycle);
+
+        // The reaper reclaims that abandoned finalization (previously it was stranded forever — TryEnterReap
+        // required an accepting session).
+        Assert.NotNull(ctx.TryEnterReap());
+        Assert.Equal(SessionLifecycle.Reaping, ctx.Lifecycle);
+    }
+
+    [Fact]
     public void HasPendingOperations_ReflectsRegisteredButUncompletedWork()
     {
         TransactionContext ctx = NewSession();
