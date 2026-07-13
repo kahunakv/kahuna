@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+package Kahuna.Server.Replication.Protos;
+
+// Phase of a durable coordinator decision record. A committed transaction's decision is written as
+// CommitDecided; it becomes Completed only once every participant mutation and required cleanup effect
+// has a durable acknowledgement.
+enum CoordinatorDecisionStatusMessage {
+  COORDINATOR_DECISION_COMMIT_DECIDED = 0;
+  COORDINATOR_DECISION_COMPLETED      = 1;
+}
+
+// One participant mutation of a durable transaction record. The logical key is the routing authority;
+// the ticket is the participant's prepared manual proposal (zero => none). acked marks the participant
+// commit durably acknowledged on the anchored record; receiptReleased marks its completion receipt
+// released after that acknowledgement.
+message CoordinatorParticipantMessage {
+  string key = 1;
+  int32  durability = 2; // KeyValueDurability
+  int32  ticketIdNode     = 3;
+  int64  ticketIdPhysical = 4;
+  uint32 ticketIdCounter  = 5;
+  bool   acked = 6;
+  bool   receiptReleased = 7;
+}
+
+// One frozen non-modified-read/lock cleanup effect and its release progress.
+message CoordinatorCleanupEffectMessage {
+  string effect = 1;
+  bool   released = 2;
+}
+
+// A durable coordinator decision record, keyed by transaction id. RecordAnchorKey is the logical key
+// that routes the record to its owning data partition; the diagnostic anchor partition id is not
+// stored because current routing is always authoritative.
+message CoordinatorDecisionMessage {
+  int32  transactionIdNode     = 1;
+  int64  transactionIdPhysical = 2;
+  uint32 transactionIdCounter  = 3;
+  string coordinatorKey  = 4;
+  string recordAnchorKey = 5;
+  int32  commitTimestampNode     = 6;
+  int64  commitTimestampPhysical = 7;
+  uint32 commitTimestampCounter  = 8;
+  CoordinatorDecisionStatusMessage status = 9;
+  repeated CoordinatorParticipantMessage participants = 10;
+  repeated CoordinatorCleanupEffectMessage cleanupEffects = 11;
+  int32  createdAtNode     = 12;
+  int64  createdAtPhysical = 13;
+  uint32 createdAtCounter  = 14;
+  int32  completedAtNode     = 15;
+  int64  completedAtPhysical = 16;
+  uint32 completedAtCounter  = 17;
+}
+
+// A single idempotent change to the decision store, keyed by transaction id. remove=true retires the
+// record (only its transaction id is read); otherwise the record is upserted (initial write or progress
+// update). Idempotent by transaction id, so Raft in-order re-delivery and replay of the tail above an
+// installed snapshot both converge on the same record set.
+message CoordinatorDecisionDeltaEntry {
+  bool remove = 1;
+  CoordinatorDecisionMessage record = 2;
+}
+
+// One replicated decision mutation. Carries a batch so a multi-record change commits as a single atomic
+// data-partition log entry.
+message CoordinatorDecisionDeltaMessage {
+  repeated CoordinatorDecisionDeltaEntry entries = 1;
+}
+
+// Full snapshot of every decision record owned by a data partition. Used for the durable on-disk
+// snapshot and for the data-partition state transfer that repairs a node below the WAL compaction floor;
+// each blob fully replaces the partition's record set.
+message CoordinatorDecisionSnapshotMessage {
+  repeated CoordinatorDecisionMessage records = 1;
+}
