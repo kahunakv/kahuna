@@ -656,7 +656,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             request.Key,
             request.ExpiresMs,
             (KeyValueDurability)request.Durability,
-            context.CancellationToken
+            context.CancellationToken,
+            request.CoordinatorKey,
+            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
         );
 
         return new()
@@ -697,11 +699,13 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             };
         
         KeyValueResponseType type = await keyValues.LocateAndTryAcquireExclusivePrefixLock(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
-            request.PrefixKey, 
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
+            request.PrefixKey,
             request.ExpiresMs,
-            (KeyValueDurability)request.Durability, 
-            context.CancellationToken
+            (KeyValueDurability)request.Durability,
+            context.CancellationToken,
+            request.CoordinatorKey,
+            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
         );
 
         return new()
@@ -885,7 +889,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             request.ExpiresMs,
             (KeyValueDurability)request.Durability,
             (RangeLockMode)request.Mode,
-            context.CancellationToken
+            context.CancellationToken,
+            request.CoordinatorKey,
+            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
         );
 
         return new()

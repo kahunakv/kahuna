@@ -159,23 +159,28 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
     public Task<(bool, long, int)> TryDeleteKeyValue(string url, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default) => throw new NotImplementedException();
     public Task<(bool, long, int)> TryExtendKeyValue(string url, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default) => throw new NotImplementedException();
     public Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransactionScript(string url, byte[] script, string? hash, List<KeyValueParameter>? parameters, CancellationToken cancellationToken) => throw new NotImplementedException();
-    public async Task<bool> TryAcquireExclusiveKeyValueLock(string url, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<bool> TryAcquireExclusiveKeyValueLock(string url, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
     {
         (KeyValueResponseType result, _, _, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
-            transactionId, key, expiresMs, durability, cancellationToken);
+            transactionId, key, expiresMs, durability, cancellationToken, coordinatorKey, operationId);
         return result == KeyValueResponseType.Locked;
     }
-    public Task<bool> TryAcquireExclusivePrefixKeyValueLock(string url, HLCTimestamp transactionId, string prefixKey, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
+    public async Task<bool> TryAcquireExclusivePrefixKeyValueLock(string url, HLCTimestamp transactionId, string prefixKey, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
+    {
+        KeyValueResponseType result = await kahuna.LocateAndTryAcquireExclusivePrefixLock(
+            transactionId, prefixKey, expiresMs, durability, cancellationToken, coordinatorKey, operationId);
+        return result == KeyValueResponseType.Locked;
+    }
     public Task TryReleaseExclusivePrefixKeyValueLock(string url, HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
     public async Task<bool> TryAcquireRangeKeyValueLock(
         string url, HLCTimestamp transactionId, string prefix,
         string? startKey, bool startInclusive, string? endKey, bool endInclusive,
         int expiresMs, KeyValueDurability durability, RangeLockMode mode,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
     {
         (KeyValueResponseType result, _) = await kahuna.LocateAndTryAcquireRangeLock(
             transactionId, prefix, startKey, startInclusive, endKey, endInclusive,
-            expiresMs, durability, mode, cancellationToken);
+            expiresMs, durability, mode, cancellationToken, coordinatorKey, operationId);
         return result == KeyValueResponseType.Locked;
     }
     public Task TryReleaseExclusiveRangeKeyValueLock(string url, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();

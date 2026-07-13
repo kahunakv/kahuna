@@ -126,7 +126,9 @@ public class KahunaTransactionSession : IAsyncDisposable
                 key,
                 TransactionTimeout,
                 durability,
-                cancellationToken
+                cancellationToken,
+                CoordinatorKey,
+                TransactionOperationId.NewRandom()
             ).ConfigureAwait(false);
         }
         catch (KahunaException ex) when (ex.KeyValueErrorCode is KeyValueResponseType.AlreadyLocked or KeyValueResponseType.MustRetry)
@@ -153,7 +155,9 @@ public class KahunaTransactionSession : IAsyncDisposable
             prefixKey,
             TransactionTimeout,
             durability,
-            cancellationToken
+            cancellationToken,
+            CoordinatorKey,
+            TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
 
         if (!successLock)
@@ -173,7 +177,8 @@ public class KahunaTransactionSession : IAsyncDisposable
     {
         bool successLock = await Client.Communication.TryAcquireRangeKeyValueLock(
             Url, TransactionId, prefix, startKey, startInclusive, endKey, endInclusive,
-            TransactionTimeout, durability, mode, cancellationToken
+            TransactionTimeout, durability, mode, cancellationToken,
+            CoordinatorKey, TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
 
         if (!successLock)
