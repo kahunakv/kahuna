@@ -185,7 +185,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         KeyValueRequestType proposalType = proposal.State == KeyValueState.Deleted
             ? KeyValueRequestType.TryDelete
             : KeyValueRequestType.TrySet;
-        (bool success, HLCTimestamp proposalTicket) = await PrepareKeyValueMessage(proposalType, proposal, message.TransactionId);
+        (bool success, HLCTimestamp proposalTicket) = await PrepareKeyValueMessage(proposalType, proposal, message.TransactionId, message.RecordAnchorKey);
         if (!success)
         {
             context.Logger.LogWarning("Failed to propose logs for {TransactionId}", message.TransactionId);
@@ -203,10 +203,10 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
     /// <param name="proposal"></param>
     /// <param name="currentTime"></param>
     /// <returns></returns>
-    private async Task<(bool, HLCTimestamp)> PrepareKeyValueMessage(KeyValueRequestType type, KeyValueProposal proposal, HLCTimestamp currentTime)
+    private async Task<(bool, HLCTimestamp)> PrepareKeyValueMessage(KeyValueRequestType type, KeyValueProposal proposal, HLCTimestamp transactionId, string? recordAnchorKey)
     {
         if (!context.Raft.Joined)
-            return (true, HLCTimestamp.Zero);        
+            return (true, HLCTimestamp.Zero);
 
         int partitionId = ResolvePartition(proposal.Key);
 
@@ -224,11 +224,19 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             LastModifiedNode = proposal.LastModified.N,
             LastModifiedPhysical = proposal.LastModified.L,
             LastModifiedCounter = proposal.LastModified.C,
-            TimePhysical = currentTime.L,
-            TimeCounter = currentTime.C,
+            TimePhysical = transactionId.L,
+            TimeCounter = transactionId.C,
+            // Carry the transaction identity so applying or restoring this committed record records a
+            // durable completion receipt (recovers Committed after a leader change erases prepare state).
+            TransactionIdNode = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
             NoRevision = proposal.NoRevision
         };
-        
+
+        if (recordAnchorKey is not null)
+            kvm.RecordAnchorKey = recordAnchorKey;
+
         if (proposal.Value is not null)
             kvm.Value = UnsafeByteOperations.UnsafeWrap(proposal.Value);
 

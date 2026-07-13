@@ -20,4 +20,13 @@ message KeyValueMessage {
   int64 timePhysical = 16;
   uint32 timeCounter = 17;
   optional bool noRevision = 18;
+  // Interactive-transaction identity carried on committed persistent mutations so that applying or
+  // restoring the committed value records a durable completion receipt. Zero for non-transactional
+  // (single-shot) writes, which never need a receipt.
+  int32 transactionIdNode = 19;
+  int64 transactionIdPhysical = 20;
+  uint32 transactionIdCounter = 21;
+  // The transaction's record anchor (first confirmed persistent modified key), carried alongside the
+  // transaction id in the receipt for the durable coordinator decision to match against.
+  optional string recordAnchorKey = 22;
 }

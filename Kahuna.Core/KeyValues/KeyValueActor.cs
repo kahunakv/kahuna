@@ -272,7 +272,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         KahunaConfiguration configuration,
         ILogger<IKahuna> logger
     ) : this(actorContext, backgroundWriter, proposalRouter, persistenceBackend, raft,
-             keySpaceRegistry, rangeMapStore, configuration, logger, null)
+             keySpaceRegistry, rangeMapStore, configuration, logger, null, null)
     {
     }
 
@@ -286,7 +286,8 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         RangeMapStore rangeMapStore,
         KahunaConfiguration configuration,
         ILogger<IKahuna> logger,
-        SnapshotFloorStore? snapshotFloorStore
+        SnapshotFloorStore? snapshotFloorStore,
+        CompletionReceiptStore? completionReceiptStore
     )
     {
         this.actorContext = actorContext;
@@ -306,7 +307,8 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
             rangeMapStore,
             configuration,
             logger,
-            snapshotFloorStore
+            snapshotFloorStore,
+            completionReceiptStore
         );
 
         KeyValueContext context = kvContext;

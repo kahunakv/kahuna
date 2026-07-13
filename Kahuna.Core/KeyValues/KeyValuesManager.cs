@@ -77,6 +77,8 @@ internal sealed class KeyValuesManager : IDisposable
 
     private readonly SnapshotFloorStore snapshotFloorStore;
 
+    private readonly CompletionReceiptStore completionReceiptStore = new();
+
     private readonly RangeQuiesceStore rangeQuiesceStore = new();
 
     private readonly KvStateMachineTransfer kvStateMachineTransfer;
@@ -180,8 +182,8 @@ internal sealed class KeyValuesManager : IDisposable
 
         locator = new(this, configuration, raft, interNodeCommunication, keySpaceRegistry, rangeQuiesceStore, logger);
 
-        restorer = new(backgroundWriter, raft, logger);
-        replicator = new(backgroundWriter, persistentKeyValuesRouter, raft, writeFrequencyRegistry, keySpaceRegistry, logger);
+        restorer = new(backgroundWriter, raft, completionReceiptStore, logger);
+        replicator = new(backgroundWriter, persistentKeyValuesRouter, raft, writeFrequencyRegistry, keySpaceRegistry, completionReceiptStore, logger);
         kvStateMachineTransfer = new(this, persistenceBackend, logger);
 
         // Whole-partition state transfer for the meta partition (id 0). Repairs a node below the
@@ -246,6 +248,9 @@ internal sealed class KeyValuesManager : IDisposable
     /// The replicated, refcounted, leased MVCC snapshot-floor registry.
     /// </summary>
     internal SnapshotFloorStore SnapshotFloorStore => snapshotFloorStore;
+
+    /// <summary>Node-local persistent-participant completion receipts. Diagnostic/test access.</summary>
+    internal CompletionReceiptStore CompletionReceiptStore => completionReceiptStore;
 
     /// <summary>
     /// Acquires or renews a refcounted hold protecting all revisions at/after
@@ -735,7 +740,8 @@ internal sealed class KeyValuesManager : IDisposable
                 rangeMapStore,
                 configuration,
                 logger,
-                snapshotFloorStore
+                snapshotFloorStore,
+                completionReceiptStore
             ));
 
         return actorSystem.CreateConsistentHashRouter(ephemeralInstances);
@@ -768,9 +774,10 @@ internal sealed class KeyValuesManager : IDisposable
                 rangeMapStore,
                 configuration,
                 logger,
-                snapshotFloorStore
+                snapshotFloorStore,
+                completionReceiptStore
             ));
-        
+
         return actorSystem.CreateConsistentHashRouter(persistentInstances);
     }
     

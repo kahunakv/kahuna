@@ -38,6 +38,8 @@ internal sealed class KeyValueReplicator
 
     private readonly KeySpaceRegistry keySpaceRegistry;
 
+    private readonly CompletionReceiptStore completionReceiptStore;
+
     private readonly ILogger<IKahuna> logger;
 
     public KeyValueReplicator(
@@ -46,6 +48,7 @@ internal sealed class KeyValueReplicator
         IRaft raft,
         KeyWriteFrequencyRegistry writeFrequencyRegistry,
         KeySpaceRegistry keySpaceRegistry,
+        CompletionReceiptStore completionReceiptStore,
         ILogger<IKahuna> logger)
     {
         this.backgroundWriter       = backgroundWriter;
@@ -53,7 +56,25 @@ internal sealed class KeyValueReplicator
         this.raft                   = raft;
         this.writeFrequencyRegistry = writeFrequencyRegistry;
         this.keySpaceRegistry       = keySpaceRegistry;
+        this.completionReceiptStore = completionReceiptStore;
         this.logger                 = logger;
+    }
+
+    /// <summary>
+    /// Records a durable completion receipt for a committed persistent mutation carried on the log
+    /// record, so a re-commit that lands here after the write intent / MVCC entry are gone answers
+    /// <c>Committed</c> instead of <c>MustRetry</c>. A non-transactional (single-shot) write carries a
+    /// zero transaction id and is skipped.
+    /// </summary>
+    private void RecordCompletionReceipt(KeyValueMessage keyValueMessage)
+    {
+        HLCTimestamp transactionId = new(keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter);
+
+        completionReceiptStore.Record(
+            transactionId,
+            keyValueMessage.Key,
+            keyValueMessage.HasRecordAnchorKey ? keyValueMessage.RecordAnchorKey : null,
+            KeyValueDurability.Persistent);
     }
 
     /// <summary>
@@ -122,6 +143,8 @@ internal sealed class KeyValueReplicator
                     SendInvalidateOrApply(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
                         expires, lastUsed, lastModified, KeyValueState.Set);
 
+                    RecordCompletionReceipt(keyValueMessage);
+
                     // Record the committed write into the local histogram.
                     // Running on every node (leader + followers) so the P0/meta leader — which
                     // runs the split trigger — always has warm data regardless of where the
@@ -163,6 +186,8 @@ internal sealed class KeyValueReplicator
                     SendInvalidateOrApply(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
                         expires, lastUsed, lastModified, KeyValueState.Deleted);
 
+                    RecordCompletionReceipt(keyValueMessage);
+
                     if (RangeRouting.IsKeyRange(keySpaceRegistry, keyValueMessage.Key))
                         writeFrequencyRegistry.GetOrCreate(partitionId).RecordWrite(keyValueMessage.Key);
 
@@ -197,6 +222,8 @@ internal sealed class KeyValueReplicator
 
                     SendInvalidateOrApply(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
                         expires, lastUsed, lastModified, KeyValueState.Set);
+
+                    RecordCompletionReceipt(keyValueMessage);
 
                     if (RangeRouting.IsKeyRange(keySpaceRegistry, keyValueMessage.Key))
                         writeFrequencyRegistry.GetOrCreate(partitionId).RecordWrite(keyValueMessage.Key);

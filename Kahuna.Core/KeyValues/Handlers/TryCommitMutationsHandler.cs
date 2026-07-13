@@ -40,6 +40,14 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             return KeyValueStaticResponses.ErroredResponse;
         }
 
+        // A completion receipt is authoritative proof this persistent commit already applied here —
+        // recorded when the committed record was applied on the leader, replicated to a follower, or
+        // replayed on restore. It holds even across a leadership change that erased the prepare state,
+        // and regardless of whether the committed value is currently resident or already flushed to
+        // disk, so a re-delivered commit resolves Committed up front rather than racing entry loading.
+        if (context.CompletionReceiptStore.Contains(message.TransactionId, message.Key))
+            return new(KeyValueResponseType.Committed, 0);
+
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
 
         KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability);
@@ -64,6 +72,8 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
                 if (context.WasCommittedHere(message.TransactionId))
                     return new(KeyValueResponseType.Committed, 0);
 
+                // A durable completion receipt (the top-of-handler check) has already resolved the
+                // ack-loss-after-leader-change case to Committed; reaching here means no receipt exists.
                 // Never prepared here: return MustRetry so the coordinator can re-route to the
                 // node (original leader, if it recovered) that still holds the write intent.
                 return KeyValueStaticResponses.MustRetryResponse;
@@ -80,6 +90,10 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
 
             return KeyValueStaticResponses.ErroredResponse;
         }
+
+        // Capture the record anchor before the write intent is cleared below; it rides the completion
+        // receipt recorded on a confirmed persistent commit.
+        string? recordAnchorKey = entry.WriteIntent.RecordAnchorKey;
 
         if (entry.MvccEntries is null)
         {
@@ -220,6 +234,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         ));
 
         context.RecordCommitted(message.TransactionId);
+        context.CompletionReceiptStore.Record(message.TransactionId, message.Key, recordAnchorKey, KeyValueDurability.Persistent);
         return new(KeyValueResponseType.Committed, commitIndex);
     }
 
