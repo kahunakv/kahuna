@@ -1412,14 +1412,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         );
     }
 
-    public async Task<(KeyValueResponseType, string?)> CommitTransaction(
-        string node,
-        TransactionHandle handle,
-        List<KeyValueTransactionModifiedKey> acquiredLocks,
-        List<KeyValueTransactionModifiedKey> modifiedKeys,
-        List<KeyValueTransactionReadKey> readKeys,
-        CancellationToken cancellationToken
-    )
+    public async Task<(KeyValueResponseType, string?)> CommitTransaction(string node, TransactionHandle handle, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
@@ -1431,15 +1424,6 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             TransactionIdCounter = handle.TransactionId.C
         };
 
-        if (acquiredLocks.Count > 0)
-            request.AcquiredLocks.AddRange(GetArquiredOrModifiedItems(acquiredLocks));
-
-        if (modifiedKeys.Count > 0)
-            request.ModifiedKeys.AddRange(GetArquiredOrModifiedItems(modifiedKeys));
-
-        if (readKeys.Count > 0)
-            request.ReadKeys.AddRange(GetReadItems(readKeys));
-
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
         GrpcCommitTransactionResponse remoteResponse = response.CommitTransaction!;
 
@@ -1448,13 +1432,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.HasRecordAnchorKey ? remoteResponse.RecordAnchorKey : null);
     }
 
-    public async Task<KeyValueResponseType> RollbackTransaction(
-        string node,
-        TransactionHandle handle,
-        List<KeyValueTransactionModifiedKey> acquiredLocks,
-        List<KeyValueTransactionModifiedKey> modifiedKeys,
-        CancellationToken cancellationToken
-    )
+    public async Task<KeyValueResponseType> RollbackTransaction(string node, TransactionHandle handle, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
@@ -1465,12 +1443,6 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             TransactionIdPhysical = handle.TransactionId.L,
             TransactionIdCounter = handle.TransactionId.C
         };
-
-        if (acquiredLocks.Count > 0)
-            request.AcquiredLocks.AddRange(GetArquiredOrModifiedItems(acquiredLocks));
-
-        if (modifiedKeys.Count > 0)
-            request.ModifiedKeys.AddRange(GetArquiredOrModifiedItems(modifiedKeys));
 
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
         GrpcRollbackTransactionResponse remoteResponse = response.RollbackTransaction!;
@@ -1645,32 +1617,6 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (KeyValueDurability)g.Durability,
             Mode = (RangeLockMode)g.Mode
         };
-
-    private static IEnumerable<GrpcTransactionModifiedKey> GetArquiredOrModifiedItems(List<KeyValueTransactionModifiedKey> items)
-    {
-        foreach (KeyValueTransactionModifiedKey item in items)
-        {
-            yield return new()
-            {
-                Key = item.Key,
-                Durability = (GrpcKeyValueDurability) item.Durability,
-            };
-        }
-    }
-    
-    private static IEnumerable<GrpcTransactionReadKey> GetReadItems(List<KeyValueTransactionReadKey> items)
-    {
-        foreach (KeyValueTransactionReadKey item in items)
-        {
-            yield return new()
-            {
-                Key = item.Key,
-                Durability = (GrpcKeyValueDurability)item.Durability,
-                Exists = item.Exists,
-                Revision = item.Revision
-            };
-        }
-    }
 
     private static List<(string, ReadOnlyKeyValueEntry)> GetReadOnlyItem(RepeatedField<GrpcKeyValueByPrefixItemResponse> remoteResponseItems)
     {

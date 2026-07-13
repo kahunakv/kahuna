@@ -952,45 +952,12 @@ public class KahunaTransactionSession : IAsyncDisposable
             if (Status != KahunaTransactionStatus.Pending)
                 throw new KahunaException("Cannot commit a transaction that is not pending.", KeyValueResponseType.Errored);
             
-            List<KeyValueTransactionModifiedKey> acquiredLocksList;
-
-            if (acquiredLocks is not null)
-            {
-                acquiredLocksList = new(acquiredLocks.Count);
-                
-                foreach ((string key, KeyValueDurability durability) in acquiredLocks)
-                    acquiredLocksList.Add(new() { Key = key, Durability = durability});
-            }
-            else
-            {
-                acquiredLocksList = [];
-            }
-            
-            List<KeyValueTransactionModifiedKey> modifiedKeysList;
-
-            if (modifiedKeys is not null)
-            {
-                modifiedKeysList = new(modifiedKeys.Count);
-                
-                foreach ((string key, KeyValueDurability durability) in modifiedKeys)
-                    modifiedKeysList.Add(new() { Key = key, Durability = durability});
-            }
-            else
-            {
-                modifiedKeysList = [];
-            }
-            
-            List<KeyValueTransactionReadKey> readKeysList = readKeys is not null
-                ? readKeys.Values.ToList()
-                : [];
-            
+            // The server owns the working set and drives 2PC from its own confirmed effects; commit carries
+            // only the handle identity.
             (bool result, string? recordAnchorKey) = await Client.Communication.CommitTransactionSession(
                 Url,
                 CoordinatorKey,
                 TransactionId,
-                acquiredLocksList,
-                modifiedKeysList,
-                readKeysList,
                 cancellationToken
             ).ConfigureAwait(false);
 
@@ -1029,26 +996,12 @@ public class KahunaTransactionSession : IAsyncDisposable
             if (Status != KahunaTransactionStatus.Pending)
                 throw new KahunaException("Cannot rollback a transaction that is not pending.", KeyValueResponseType.Errored);
             
-            List<KeyValueTransactionModifiedKey> acquiredKeysList;
-
-            if (acquiredLocks is not null)
-            {
-                acquiredKeysList = new(acquiredLocks.Count);
-                
-                foreach ((string key, KeyValueDurability durability) in acquiredLocks)
-                    acquiredKeysList.Add(new() { Key = key, Durability = durability});
-            }
-            else
-            {
-                acquiredKeysList = [];
-            }
-
+            // The server owns cleanup and drives rollback from its own confirmed effects; rollback carries
+            // only the handle identity.
             bool result = await Client.Communication.RollbackTransactionSession(
                 Url,
                 CoordinatorKey,
                 TransactionId,
-                acquiredKeysList,
-                [],
                 cancellationToken
             ).ConfigureAwait(false);
 

@@ -1917,13 +1917,7 @@ internal sealed class KeyValueLocator
     /// <returns>
     /// A <see cref="KeyValueResponseType"/> indicating the outcome of the transaction operation.
     /// </returns>
-    public async Task<(KeyValueResponseType, string?)> LocateAndCommitTransaction(
-        TransactionHandle handle,
-        List<KeyValueTransactionModifiedKey> acquiredLocks,
-        List<KeyValueTransactionModifiedKey> modifiedKeys,
-        List<KeyValueTransactionReadKey> readKeys,
-        CancellationToken cancellationToken
-    )
+    public async Task<(KeyValueResponseType, string?)> LocateAndCommitTransaction(TransactionHandle handle, CancellationToken cancellationToken)
     {
         if (handle.IsEmpty)
             return (KeyValueResponseType.Errored, null);
@@ -1931,7 +1925,7 @@ internal sealed class KeyValueLocator
         int partitionId = dataPartitionRouter.Locate(handle.CoordinatorKey);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
-            return await manager.CommitTransaction(handle, acquiredLocks, modifiedKeys, readKeys);
+            return await manager.CommitTransaction(handle);
 
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
@@ -1939,23 +1933,16 @@ internal sealed class KeyValueLocator
 
         logger.LogCommitTransactionRedirected(handle.CoordinatorKey, partitionId, leader);
 
-        return await interNodeCommunication.CommitTransaction(leader, handle, acquiredLocks, modifiedKeys, readKeys, cancellationToken);
+        return await interNodeCommunication.CommitTransaction(leader, handle, cancellationToken);
     }
 
     /// <summary>
     /// Locates and rolls back the transaction identified by <paramref name="handle"/>.
     /// </summary>
     /// <param name="handle">The handle returned by <see cref="LocateAndStartTransaction"/>.</param>
-    /// <param name="acquiredLocks">The list of keys that were locked during the transaction.</param>
-    /// <param name="modifiedKeys">The list of keys that were modified during the transaction.</param>
     /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
     /// <returns>A <see cref="KeyValueResponseType"/> indicating the result of the operation.</returns>
-    public async Task<KeyValueResponseType> LocateAndRollbackTransaction(
-        TransactionHandle handle,
-        List<KeyValueTransactionModifiedKey> acquiredLocks,
-        List<KeyValueTransactionModifiedKey> modifiedKeys,
-        CancellationToken cancellationToken
-    )
+    public async Task<KeyValueResponseType> LocateAndRollbackTransaction(TransactionHandle handle, CancellationToken cancellationToken)
     {
         if (handle.IsEmpty)
             return KeyValueResponseType.Errored;
@@ -1963,7 +1950,7 @@ internal sealed class KeyValueLocator
         int partitionId = dataPartitionRouter.Locate(handle.CoordinatorKey);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
-            return await manager.RollbackTransaction(handle, acquiredLocks, modifiedKeys);
+            return await manager.RollbackTransaction(handle);
 
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
@@ -1971,7 +1958,7 @@ internal sealed class KeyValueLocator
 
         logger.LogRollbackTransactionRedirected(handle.CoordinatorKey, partitionId, leader);
 
-        return await interNodeCommunication.RollbackTransaction(leader, handle, acquiredLocks, modifiedKeys, cancellationToken);
+        return await interNodeCommunication.RollbackTransaction(leader, handle, cancellationToken);
     }
 
     /// <summary>

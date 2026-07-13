@@ -1228,7 +1228,7 @@ public sealed class TestTransactionRegistrationRouting
         long deadline = Environment.TickCount64 + 10_000;
         while (true)
         {
-            (KeyValueResponseType type, string? anchor) = await node.Kahuna.LocateAndCommitTransaction(handle, [], [], [], ct);
+            (KeyValueResponseType type, string? anchor) = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
             if (type != KeyValueResponseType.MustRetry || Environment.TickCount64 >= deadline)
                 return (type, anchor);
             await Task.Delay(50, ct);

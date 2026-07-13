@@ -509,25 +509,22 @@ public sealed class TestTwoPhaseCommitRecovery
             HLCTimestamp txId = txHandle.TransactionId;
             Assert.NotEqual(HLCTimestamp.Zero, txId);
 
-            // Write both keys inside the transaction (routes to each key's partition leader).
+            // Write both keys inside the transaction via the register-remote path, so each confirmed effect
+            // folds into the coordinator's working set (routes to each key's partition leader).
             (KeyValueResponseType set1, _, _) = await RetrySet(() =>
                 nodes[0].Kahuna.LocateAndTrySetKeyValue(txId, key1, new1, null, -1,
-                    KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct));
+                    KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct,
+                    coordinatorKey: txHandle.CoordinatorKey, operationId: TransactionOperationId.NewRandom()));
             Assert.Equal(KeyValueResponseType.Set, set1);
             (KeyValueResponseType set2, _, _) = await RetrySet(() =>
                 nodes[0].Kahuna.LocateAndTrySetKeyValue(txId, key2, new2, null, -1,
-                    KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct));
+                    KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct,
+                    coordinatorKey: txHandle.CoordinatorKey, operationId: TransactionOperationId.NewRandom()));
             Assert.Equal(KeyValueResponseType.Set, set2);
 
-            // Commit via coordinator: drives TwoPhaseCommit → PrepareMutations → CommitMutations.
-            // Pass both keys in acquiredLocks and modifiedKeys (pessimistic write-only transaction).
-            List<KeyValueTransactionModifiedKey> modKeys =
-            [
-                new() { Key = key1, Durability = KeyValueDurability.Persistent },
-                new() { Key = key2, Durability = KeyValueDurability.Persistent },
-            ];
-            (KeyValueResponseType commitResult, _) = await nodes[0].Kahuna.LocateAndCommitTransaction(
-                txHandle, acquiredLocks: modKeys, modifiedKeys: modKeys, readKeys: [], ct);
+            // Commit via coordinator: drives TwoPhaseCommit → PrepareMutations → CommitMutations from the
+            // server-owned working set (the confirmed effects folded above).
+            (KeyValueResponseType commitResult, _) = await nodes[0].Kahuna.LocateAndCommitTransaction(txHandle, ct);
             Assert.Equal(KeyValueResponseType.Committed, commitResult);
 
             // Read both keys back and verify the new values are durably committed.
@@ -600,23 +597,18 @@ public sealed class TestTwoPhaseCommitRecovery
 
             (KeyValueResponseType set1, _, _) = await RetrySet(() =>
                 nodes[0].Kahuna.LocateAndTrySetKeyValue(txId, key1, new1, null, -1,
-                    KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct));
+                    KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct,
+                    coordinatorKey: txHandle2.CoordinatorKey, operationId: TransactionOperationId.NewRandom()));
             Assert.Equal(KeyValueResponseType.Set, set1);
             (KeyValueResponseType set2, _, _) = await RetrySet(() =>
                 nodes[0].Kahuna.LocateAndTrySetKeyValue(txId, key2, new2, null, -1,
-                    KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct));
+                    KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct,
+                    coordinatorKey: txHandle2.CoordinatorKey, operationId: TransactionOperationId.NewRandom()));
             Assert.Equal(KeyValueResponseType.Set, set2);
-
-            List<KeyValueTransactionModifiedKey> modKeys =
-            [
-                new() { Key = key1, Durability = KeyValueDurability.Persistent },
-                new() { Key = key2, Durability = KeyValueDurability.Persistent },
-            ];
 
             // Despite the sub-millisecond per-attempt deadline tripping the initial commit, the
             // coordinator's idempotent retry drives the transaction to a durable commit.
-            (KeyValueResponseType commitResult, _) = await nodes[0].Kahuna.LocateAndCommitTransaction(
-                txHandle2, acquiredLocks: modKeys, modifiedKeys: modKeys, readKeys: [], ct);
+            (KeyValueResponseType commitResult, _) = await nodes[0].Kahuna.LocateAndCommitTransaction(txHandle2, ct);
             Assert.Equal(KeyValueResponseType.Committed, commitResult);
 
             (KeyValueResponseType r1, ReadOnlyKeyValueEntry? e1) = await nodes[0].Kahuna.LocateAndTryGetValue(
