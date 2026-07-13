@@ -351,6 +351,9 @@ message GrpcTryAcquireExclusiveLockRequest {
   string Key = 4;
   int32 ExpiresMs = 5;
   GrpcKeyValueDurability Durability = 6;
+  string CoordinatorKey = 7;
+  uint64 OperationIdHigh = 8;
+  uint64 OperationIdLow = 9;
 }
 
 message GrpcTryAcquireExclusiveLockResponse {
@@ -381,6 +384,9 @@ message GrpcTryAcquireExclusivePrefixLockRequest {
   string PrefixKey = 4;
   int32 ExpiresMs = 5;
   GrpcKeyValueDurability Durability = 6;
+  string CoordinatorKey = 7;
+  uint64 OperationIdHigh = 8;
+  uint64 OperationIdLow = 9;
 }
 
 message GrpcTryAcquireExclusivePrefixLockResponse {
@@ -479,6 +485,9 @@ message GrpcTryAcquireExclusiveRangeLockRequest {
   int32  ExpiresMs              = 9;
   GrpcKeyValueDurability Durability = 10;
   GrpcRangeLockMode Mode        = 11;
+  string CoordinatorKey         = 12;
+  uint64 OperationIdHigh        = 13;
+  uint64 OperationIdLow         = 14;
 }
 
 message GrpcTryAcquireExclusiveRangeLockResponse {

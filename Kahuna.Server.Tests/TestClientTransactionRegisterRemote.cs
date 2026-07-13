@@ -307,4 +307,80 @@ public sealed class TestClientTransactionRegisterRemote
         KeyValueResponseType rollbackType = await node.Kahuna.LocateAndRollbackTransaction(unknown, TestContext.Current.CancellationToken);
         Assert.Equal(KeyValueResponseType.Errored, rollbackType);
     }
+
+    /// <summary>
+    /// A prefix lock a pessimistic session acquires through the SDK (here via a bucket scan) now registers on
+    /// the coordinator, so finalize releases it. It is genuinely held while the session is open — a second
+    /// session cannot take it — and a third session can take it only after the first commits, proving the
+    /// registered lock was released by finalize (before this fix it was unregistered and had no release path).
+    /// </summary>
+    [Fact]
+    public async Task SdkPrefixLock_RegistersAndIsReleasedByFinalize()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = CreateNode(loggerFactory);
+        await node.StartAsync(ct);
+
+        KahunaClient client = new("http://localhost", communication: new InProcessKahunaCommunication(node.Kahuna));
+        string prefix = "rr/plock/" + Guid.NewGuid().ToString("N")[..8];
+
+        await using KahunaTransactionSession txA = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+
+        // Pessimistic bucket scan acquires (and now registers) an exclusive prefix lock.
+        await txA.GetByBucket(prefix, KeyValueDurability.Persistent, ct);
+
+        // While A holds the prefix lock, a second session cannot acquire the same one — proving it is held.
+        await using (KahunaTransactionSession txB = await client.StartTransactionSession(
+                         new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct))
+        {
+            await Assert.ThrowsAsync<KahunaException>(() => txB.GetByBucket(prefix, KeyValueDurability.Persistent, ct));
+            await txB.Rollback(ct);
+        }
+
+        // Commit releases the registered prefix lock.
+        Assert.True(await txA.Commit(ct));
+
+        // A later session can now acquire the same prefix lock — proving finalize released it.
+        await using KahunaTransactionSession txC = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+        await txC.GetByBucket(prefix, KeyValueDurability.Persistent, ct);
+        Assert.True(await txC.Commit(ct));
+    }
+
+    /// <summary>
+    /// The same guarantee for a range lock acquired through the SDK (via a pessimistic range scan): registered
+    /// on the coordinator and released by rollback, so another session can re-acquire the overlapping range.
+    /// </summary>
+    [Fact]
+    public async Task SdkRangeLock_RegistersAndIsReleasedByFinalize()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = CreateNode(loggerFactory);
+        await node.StartAsync(ct);
+
+        KahunaClient client = new("http://localhost", communication: new InProcessKahunaCommunication(node.Kahuna));
+        string prefix = "rr/rlock/" + Guid.NewGuid().ToString("N")[..8];
+
+        await using KahunaTransactionSession txA = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+
+        // Pessimistic range scan acquires (and now registers) an exclusive range lock over the prefix.
+        await txA.GetByRange(prefix, null, false, null, false, 0, default, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct);
+
+        await using (KahunaTransactionSession txB = await client.StartTransactionSession(
+                         new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct))
+        {
+            await Assert.ThrowsAsync<KahunaException>(() => txB.GetByRange(prefix, null, false, null, false, 0, default, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct));
+            await txB.Rollback(ct);
+        }
+
+        // Rollback releases the registered range lock.
+        Assert.True(await txA.Rollback(ct));
+
+        await using KahunaTransactionSession txC = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+        await txC.GetByRange(prefix, null, false, null, false, 0, default, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct);
+        Assert.True(await txC.Commit(ct));
+    }
 }

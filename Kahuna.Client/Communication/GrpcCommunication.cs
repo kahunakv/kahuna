@@ -1145,7 +1145,7 @@ public class GrpcCommunication : IKahunaCommunication
     /// A task that represents the asynchronous operation. The task result is a boolean indicating whether the lock was successfully acquired.
     /// </returns>
     /// <exception cref="KahunaException">Thrown if the lock acquisition process fails or encounters an error.</exception>
-    public async Task<bool> TryAcquireExclusiveKeyValueLock(string url, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<bool> TryAcquireExclusiveKeyValueLock(string url, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
     {
         GrpcTryAcquireExclusiveLockRequest request = new()
         {
@@ -1154,7 +1154,10 @@ public class GrpcCommunication : IKahunaCommunication
             TransactionIdCounter = transactionId.C,
             Key = key,
             ExpiresMs = expiresMs,
-            Durability = (GrpcKeyValueDurability)durability
+            Durability = (GrpcKeyValueDurability)durability,
+            CoordinatorKey = coordinatorKey,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low
         };
 
         int retries = 0;
@@ -1190,7 +1193,7 @@ public class GrpcCommunication : IKahunaCommunication
         throw new KahunaException("Failed to acquire key/value lock: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
     }
 
-    public async Task<bool> TryAcquireExclusivePrefixKeyValueLock(string url, HLCTimestamp transactionId, string prefixKey, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<bool> TryAcquireExclusivePrefixKeyValueLock(string url, HLCTimestamp transactionId, string prefixKey, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
     {
         // Intentionally unary: prefix lock acquisition is a low-frequency control-plane op that
         // drives its own retry loop; routing through the streaming batcher adds no throughput benefit.
@@ -1201,7 +1204,10 @@ public class GrpcCommunication : IKahunaCommunication
             TransactionIdCounter = transactionId.C,
             PrefixKey = prefixKey,
             ExpiresMs = expiresMs,
-            Durability = (GrpcKeyValueDurability)durability
+            Durability = (GrpcKeyValueDurability)durability,
+            CoordinatorKey = coordinatorKey,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low
         };
 
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
@@ -1258,7 +1264,9 @@ public class GrpcCommunication : IKahunaCommunication
         int expiresMs,
         KeyValueDurability durability,
         RangeLockMode mode,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
         // Intentionally unary: range lock acquisition is a low-frequency control-plane op with its
@@ -1273,7 +1281,10 @@ public class GrpcCommunication : IKahunaCommunication
             EndInclusive = endInclusive,
             ExpiresMs = expiresMs,
             Durability = (GrpcKeyValueDurability)durability,
-            Mode = (GrpcRangeLockMode)mode
+            Mode = (GrpcRangeLockMode)mode,
+            CoordinatorKey = coordinatorKey,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low
         };
 
         if (startKey is not null) request.StartKey = startKey;
