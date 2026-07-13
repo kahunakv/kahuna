@@ -63,6 +63,13 @@ internal sealed class TransactionCoordinator
     /// </summary>
     private readonly ConcurrentDictionary<HLCTimestamp, RetainedOutcome> terminalOutcomes = new();
 
+    /// <summary>
+    /// Serializes retention writes (insert + size eviction, TTL prune) so the size cap is a strict upper bound
+    /// under concurrency — without it two finalizers can insert past the cap or pick the same eviction victim.
+    /// Reads (<c>TryGetValue</c> from commit/rollback) stay lock-free on the concurrent dictionary.
+    /// </summary>
+    private readonly object terminalOutcomesLock = new();
+
     /// <summary>A finalized outcome held in the idempotency window, stamped with the HLC at retention time.</summary>
     private readonly record struct RetainedOutcome(FinalizeOutcome Outcome, HLCTimestamp RetainedAt);
 
@@ -162,14 +169,15 @@ internal sealed class TransactionCoordinator
             outcome = await ExecuteCommit(context, transactionId);
 
             // Any terminal outcome — a successful Committed or a definite Aborted/Errored (read conflict,
-            // permanent 2PC failure) — finalizes the session: remove it from the active map and retain the
-            // outcome so a duplicate finalize after removal replays the same answer. This is what stops a
-            // definite abort from stranding a Finalizing session the reaper cannot reclaim while the SDK
-            // believes it can retry. A non-terminal MustRetry (drain timeout) leaves the session live to retry.
+            // permanent 2PC failure) — finalizes the session: retain the outcome, then remove the session from
+            // the active map. Retaining first closes the idempotency window: at every instant a duplicate
+            // finalize finds either the live session (mirrors this attempt's outcome) or the retained outcome,
+            // never a gap where it sees neither and reports unknown. A non-terminal MustRetry (drain timeout)
+            // leaves the session live to retry.
             if (outcome.IsTerminal)
             {
-                sessions.TryRemove(transactionId, out _);
                 RetainTerminalOutcome(transactionId, outcome, raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()));
+                sessions.TryRemove(transactionId, out _);
             }
 
             return (outcome.Type, outcome.RecordAnchorKey);
@@ -294,14 +302,14 @@ internal sealed class TransactionCoordinator
         {
             outcome = await ExecuteRollback(context, transactionId);
 
-            // A terminal RolledBack finalizes the session: remove it from the active map and retain the outcome
-            // so a duplicate rollback after removal replays RolledBack. A non-terminal MustRetry (drain timeout
-            // or incomplete mandatory release) leaves the session live so a later call — or the reaper, if the
-            // caller disappears — retries the cleanup.
+            // A terminal RolledBack finalizes the session: retain the outcome, then remove the session (retain
+            // first so a duplicate rollback never sees a gap where neither the session nor the record exists).
+            // A non-terminal MustRetry (drain timeout or incomplete mandatory release) leaves the session live
+            // so a later call — or the reaper, if the caller disappears — retries the cleanup.
             if (outcome.IsTerminal)
             {
-                sessions.TryRemove(transactionId, out _);
                 RetainTerminalOutcome(transactionId, outcome, raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()));
+                sessions.TryRemove(transactionId, out _);
             }
 
             return outcome.Type;
@@ -509,46 +517,55 @@ internal sealed class TransactionCoordinator
 
     /// <summary>
     /// Records a finalized outcome so a duplicate finalize arriving after the session is removed replays the
-    /// same answer. Size-bounded: once the window exceeds <c>TransactionOutcomeRetentionMax</c> the oldest
-    /// entry (by retention HLC) is evicted. Only terminal outcomes are retained — a non-terminal MustRetry
-    /// leaves the session live, so there is nothing to replay.
+    /// same answer. Only terminal outcomes are retained — a non-terminal MustRetry leaves the session live, so
+    /// there is nothing to replay. The insert and size eviction run under <see cref="terminalOutcomesLock"/> so
+    /// <c>TransactionOutcomeRetentionMax</c> is a <b>strict</b> upper bound: once the window would exceed it the
+    /// oldest entries (by retention HLC) are evicted before the write is observable. A non-positive max
+    /// <b>disables retention entirely</b> — nothing is retained, so a duplicate after removal reports an unknown
+    /// <see cref="KeyValueResponseType.Errored"/> (never a conflict Aborted).
     /// </summary>
     private void RetainTerminalOutcome(HLCTimestamp transactionId, FinalizeOutcome outcome, HLCTimestamp now)
     {
         if (!outcome.IsTerminal)
             return;
 
-        terminalOutcomes[transactionId] = new RetainedOutcome(outcome, now);
-
         int max = configuration.TransactionOutcomeRetentionMax;
-        if (max <= 0 || terminalOutcomes.Count <= max)
+        if (max <= 0)
             return;
 
-        // Over capacity: evict the oldest entries by retention timestamp until back within the bound.
-        while (terminalOutcomes.Count > max)
+        lock (terminalOutcomesLock)
         {
-            HLCTimestamp oldestKey = default;
-            HLCTimestamp oldestAt = HLCTimestamp.Zero;
-            bool found = false;
+            terminalOutcomes[transactionId] = new RetainedOutcome(outcome, now);
 
-            foreach (KeyValuePair<HLCTimestamp, RetainedOutcome> entry in terminalOutcomes)
+            // Serialized eviction: with a single writer, TryRemove always succeeds and the loop drives Count
+            // back to the cap before the lock is released, so the window never exceeds max at rest.
+            while (terminalOutcomes.Count > max)
             {
-                if (!found || entry.Value.RetainedAt - oldestAt < TimeSpan.Zero)
-                {
-                    oldestKey = entry.Key;
-                    oldestAt = entry.Value.RetainedAt;
-                    found = true;
-                }
-            }
+                HLCTimestamp oldestKey = default;
+                HLCTimestamp oldestAt = HLCTimestamp.Zero;
+                bool found = false;
 
-            if (!found || !terminalOutcomes.TryRemove(oldestKey, out _))
-                break;
+                foreach (KeyValuePair<HLCTimestamp, RetainedOutcome> entry in terminalOutcomes)
+                {
+                    if (!found || entry.Value.RetainedAt - oldestAt < TimeSpan.Zero)
+                    {
+                        oldestKey = entry.Key;
+                        oldestAt = entry.Value.RetainedAt;
+                        found = true;
+                    }
+                }
+
+                if (!found || !terminalOutcomes.TryRemove(oldestKey, out _))
+                    break;
+            }
         }
     }
 
     /// <summary>
     /// Prunes retained outcomes older than the configured idempotency window. Called on each reaper sweep so
-    /// the window is bounded by age in addition to size.
+    /// the window is bounded by age in addition to size. A non-positive TTL disables age pruning (size alone
+    /// bounds the window). Runs under <see cref="terminalOutcomesLock"/> so it does not race a concurrent
+    /// retention insert/eviction.
     /// </summary>
     private void PruneRetainedOutcomes(HLCTimestamp now)
     {
@@ -556,10 +573,13 @@ internal sealed class TransactionCoordinator
         if (ttl <= TimeSpan.Zero || terminalOutcomes.IsEmpty)
             return;
 
-        foreach (KeyValuePair<HLCTimestamp, RetainedOutcome> entry in terminalOutcomes)
+        lock (terminalOutcomesLock)
         {
-            if (now - entry.Value.RetainedAt >= ttl)
-                terminalOutcomes.TryRemove(entry.Key, out _);
+            foreach (KeyValuePair<HLCTimestamp, RetainedOutcome> entry in terminalOutcomes)
+            {
+                if (now - entry.Value.RetainedAt >= ttl)
+                    terminalOutcomes.TryRemove(entry.Key, out _);
+            }
         }
     }
 
@@ -655,19 +675,22 @@ internal sealed class TransactionCoordinator
             bool cleaned = await ReleaseWorkingSet(context);
 
             if (context.HasPendingOperations)
-            {
                 // Unresolved dispatched operation(s) after the extended deadline: give up on this session
                 // without ever reporting a rollback of work whose fate we do not know. Late effects get no
                 // acknowledgement and lapse at their participant.
                 outcome = new(KeyValueResponseType.Errored, null);
-                sessions.TryRemove(transactionId, out _);
-            }
             else if (cleaned)
-            {
                 outcome = new(KeyValueResponseType.RolledBack, null);
+            // else: cleanup incomplete — keep the session Reaping and retry on a later sweep (MustRetry).
+
+            // Retain the terminal outcome before removing the session so a duplicate finalize never observes a
+            // gap where neither the session nor the record exists. A non-terminal MustRetry retains nothing and
+            // leaves the session in the map for the next sweep.
+            if (outcome.IsTerminal)
+            {
+                RetainTerminalOutcome(transactionId, outcome, now);
                 sessions.TryRemove(transactionId, out _);
             }
-            // else: cleanup incomplete — keep the session Reaping and retry on a later sweep (MustRetry).
         }
         catch (Exception ex)
         {
@@ -677,11 +700,8 @@ internal sealed class TransactionCoordinator
         }
         finally
         {
-            // Publish so a commit/rollback that raced in and mirrored this attempt learns the outcome. A
-            // terminal outcome (RolledBack/Errored) additionally enters the idempotency window; a non-terminal
-            // MustRetry releases the slot for the next sweep and is not retained.
+            // Publish so a commit/rollback that raced in and mirrored this attempt learns the outcome.
             context.CompleteFinalize(attempt, outcome);
-            RetainTerminalOutcome(transactionId, outcome, now);
         }
     }
 
