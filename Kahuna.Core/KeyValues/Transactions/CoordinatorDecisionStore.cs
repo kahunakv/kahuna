@@ -245,6 +245,26 @@ internal sealed class CoordinatorDecisionStore : IDisposable
 
     // ── State transfer (folded into KvStateMachineTransfer) ────────────────────────────────────
 
+    /// <summary>Serializes a set of records into a single snapshot blob for cross-node transfer.</summary>
+    public static byte[] SerializeRecords(IEnumerable<CoordinatorDecisionRecord> records)
+    {
+        CoordinatorDecisionSnapshotMessage message = new();
+        foreach (CoordinatorDecisionRecord record in records)
+            message.Records.Add(ToMessage(record));
+        return ReplicationSerializer.Serialize(message);
+    }
+
+    /// <summary>Deserializes a snapshot blob produced by <see cref="SerializeRecords"/>.</summary>
+    public static IReadOnlyList<CoordinatorDecisionRecord> DeserializeRecords(byte[] data)
+    {
+        CoordinatorDecisionSnapshotMessage message =
+            ReplicationSerializer.UnserializeCoordinatorDecisionSnapshotMessage(data);
+        List<CoordinatorDecisionRecord> result = new(message.Records.Count);
+        foreach (CoordinatorDecisionMessage recordMessage in message.Records)
+            result.Add(FromMessage(recordMessage));
+        return result;
+    }
+
     /// <summary>Merges transferred records into the local set (split/merge and catch-up repair).</summary>
     public void ImportRecords(IEnumerable<CoordinatorDecisionRecord> incoming)
     {

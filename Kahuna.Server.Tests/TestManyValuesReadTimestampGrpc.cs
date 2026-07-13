@@ -203,6 +203,7 @@ public class TestManyValuesReadTimestampGrpc
         public Task<List<KeyValueRangeLock>> GetRangeLocks(string keySpace) => throw new NotImplementedException();
         public Task ImportRangeLocks(string keySpace, List<KeyValueRangeLock> locks) => throw new NotImplementedException();
         public Task ImportCompletionReceipts(IReadOnlyCollection<CompletionReceiptRecord> receipts) => throw new NotImplementedException();
+        public Task ImportCoordinatorDecisions(IReadOnlyCollection<CoordinatorDecisionRecord> records) => throw new NotImplementedException();
         public Task<(KeyValueResponseType, string)> TryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueDurability durability) => throw new NotImplementedException();
         public Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability) => throw new NotImplementedException();
         public Task<KeyValueResponseType> TryReleaseExclusiveRangeLock(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability) => throw new NotImplementedException();

@@ -1399,6 +1399,12 @@ public sealed class KahunaManager : IKahuna, IDisposable
         return Task.CompletedTask;
     }
 
+    public Task ImportCoordinatorDecisions(IReadOnlyCollection<CoordinatorDecisionRecord> records)
+    {
+        keyValues.ImportCoordinatorDecisions(records);
+        return Task.CompletedTask;
+    }
+
     /// <summary>Resolves a key to its owning <c>(partitionId, generation)</c> (key-order router).</summary>
     internal (int PartitionId, long Generation) LocateRange(string key) => keyValues.LocateRange(key);
 

@@ -190,6 +190,9 @@ public interface IKahuna
     /// <summary>Records transferred completion receipts into this node's local receipt store (split/merge import).</summary>
     public Task ImportCompletionReceipts(IReadOnlyCollection<CompletionReceiptRecord> receipts);
 
+    /// <summary>Merges transferred coordinator decision records into this node's local store (split/merge import).</summary>
+    public Task ImportCoordinatorDecisions(IReadOnlyCollection<CoordinatorDecisionRecord> records);
+
     public Task<(KeyValueResponseType, string)> TryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueDurability durability);
     
     public Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability);

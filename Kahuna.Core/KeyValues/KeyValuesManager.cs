@@ -3641,6 +3641,46 @@ internal sealed class KeyValuesManager : IDisposable
     }
 
     /// <summary>
+    /// Coordinator decision records whose anchor falls in <c>[startKey, endKey)</c> from this node's local
+    /// store. Read locally (the decision store is node-global, like the receipt store).
+    /// </summary>
+    internal IReadOnlyList<CoordinatorDecisionRecord> GetLocalDecisionsForRange(string? startKey, string? endKey)
+        => coordinatorDecisionStore.SnapshotRange(startKey, endKey);
+
+    /// <summary>Merges transferred decision records into this node's local store.</summary>
+    internal void ImportCoordinatorDecisions(IReadOnlyCollection<CoordinatorDecisionRecord> recordsToImport)
+        => coordinatorDecisionStore.ImportRecords(recordsToImport);
+
+    /// <summary>
+    /// Routes decision records to the leader of <paramref name="partitionId"/>, merging them into that
+    /// node's decision store. Forwards via IPC when this node is not the leader. Used by split/merge so a
+    /// re-drive or finalize routed to the destination partition after cutover finds its record.
+    /// </summary>
+    internal async Task ImportCoordinatorDecisionsToPartitionLeaderAsync(
+        int partitionId,
+        IReadOnlyCollection<CoordinatorDecisionRecord> recordsToImport,
+        CancellationToken cancellationToken)
+    {
+        if (recordsToImport.Count == 0)
+            return;
+
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
+        {
+            ImportCoordinatorDecisions(recordsToImport);
+            return;
+        }
+
+        string leader = await raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        if (leader == raft.GetLocalEndpoint())
+        {
+            ImportCoordinatorDecisions(recordsToImport);
+            return;
+        }
+
+        await interNodeCommunication.ImportCoordinatorDecisions(leader, recordsToImport, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Releases an exclusive range lock on the leader of <paramref name="partitionId"/>, forwarding
     /// via IPC if this node is not the leader. Used by <see cref="RangeSplitter"/> to release the
     /// quiesce lock on the <em>original</em> partition after cutover, bypassing the locator which

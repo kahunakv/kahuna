@@ -84,6 +84,8 @@ internal sealed class GrpcServerBatcherResponse
 
     public GrpcImportCompletionReceiptsResponse? ImportCompletionReceipts { get; }
 
+    public GrpcImportCoordinatorDecisionsResponse? ImportCoordinatorDecisions { get; }
+
     public GrpcAcquireSnapshotHoldResponse? AcquireSnapshotHold { get; }
 
     public GrpcRenewSnapshotHoldResponse? RenewSnapshotHold { get; }
@@ -318,6 +320,11 @@ internal sealed class GrpcServerBatcherResponse
     public GrpcServerBatcherResponse(GrpcImportCompletionReceiptsResponse importCompletionReceipts)
     {
         ImportCompletionReceipts = importCompletionReceipts;
+    }
+
+    public GrpcServerBatcherResponse(GrpcImportCoordinatorDecisionsResponse importCoordinatorDecisions)
+    {
+        ImportCoordinatorDecisions = importCoordinatorDecisions;
     }
 
     public GrpcServerBatcherResponse(GrpcAcquireSnapshotHoldResponse acquireSnapshotHold)

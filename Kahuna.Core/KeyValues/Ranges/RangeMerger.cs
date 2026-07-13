@@ -3,6 +3,7 @@ using Kommander;
 using Kommander.Time;
 
 using Kahuna.Server.KeyValues.Logging;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues.Ranges;
@@ -146,6 +147,14 @@ internal sealed class RangeMerger
 
             if (movedReceipts.Count > 0)
                 await manager.ImportCompletionReceiptsToPartitionLeaderAsync(left.PartitionId, movedReceipts, ct);
+
+            // Move all decision records anchored in [B,C) to the survivor so a re-drive/finalize routed
+            // there after cutover finds its record. Node-local replicated state, idempotent by tx id.
+            IReadOnlyCollection<CoordinatorDecisionRecord> movedDecisions =
+                manager.GetLocalDecisionsForRange(right.StartKey, right.EndKey);
+
+            if (movedDecisions.Count > 0)
+                await manager.ImportCoordinatorDecisionsToPartitionLeaderAsync(left.PartitionId, movedDecisions, ct);
         }
         catch (Exception ex)
         {
