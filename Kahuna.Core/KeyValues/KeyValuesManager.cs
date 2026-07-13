@@ -79,6 +79,8 @@ internal sealed class KeyValuesManager : IDisposable
 
     private readonly CompletionReceiptStore completionReceiptStore = new();
 
+    private readonly CoordinatorDecisionStore coordinatorDecisionStore;
+
     private readonly RangeQuiesceStore rangeQuiesceStore = new();
 
     private readonly KvStateMachineTransfer kvStateMachineTransfer;
@@ -182,6 +184,11 @@ internal sealed class KeyValuesManager : IDisposable
 
         locator = new(this, configuration, raft, interNodeCommunication, keySpaceRegistry, rangeQuiesceStore, logger);
 
+        // Durable coordinator decision records: replicated on the data partition that currently routes
+        // each transaction's record anchor. The locator resolves an anchor key to its partition and
+        // routing generation (the same pure range-map lookup the write path fences on).
+        coordinatorDecisionStore = new(raft, locator.LocateRange, configuration.StoragePath, configuration.StorageRevision, logger);
+
         restorer = new(backgroundWriter, raft, completionReceiptStore, logger);
         replicator = new(backgroundWriter, persistentKeyValuesRouter, raft, writeFrequencyRegistry, keySpaceRegistry, completionReceiptStore, logger);
         kvStateMachineTransfer = new(this, persistenceBackend, logger);
@@ -248,6 +255,11 @@ internal sealed class KeyValuesManager : IDisposable
     /// The replicated, refcounted, leased MVCC snapshot-floor registry.
     /// </summary>
     internal SnapshotFloorStore SnapshotFloorStore => snapshotFloorStore;
+
+    /// <summary>
+    /// The partition-scoped durable coordinator decision record store.
+    /// </summary>
+    internal CoordinatorDecisionStore CoordinatorDecisionStore => coordinatorDecisionStore;
 
     /// <summary>Node-local persistent-participant completion receipts. Diagnostic/test access.</summary>
     internal CompletionReceiptStore CompletionReceiptStore => completionReceiptStore;
@@ -802,6 +814,9 @@ internal sealed class KeyValuesManager : IDisposable
         if (log.LogType == ReplicationTypes.SnapshotFloor)
             return Task.FromResult(snapshotFloorStore.Restore(partitionId, log));
 
+        if (log.LogType == ReplicationTypes.CoordinatorDecision)
+            return Task.FromResult(coordinatorDecisionStore.Restore(partitionId, log));
+
         return Task.FromResult(log.LogType != ReplicationTypes.KeyValues || restorer.Restore(partitionId, log));
     }
 
@@ -827,6 +842,9 @@ internal sealed class KeyValuesManager : IDisposable
 
         if (log.LogType == ReplicationTypes.SnapshotFloor)
             return Task.FromResult(snapshotFloorStore.Replicate(partitionId, log));
+
+        if (log.LogType == ReplicationTypes.CoordinatorDecision)
+            return Task.FromResult(coordinatorDecisionStore.Replicate(partitionId, log));
 
         return Task.FromResult(log.LogType != ReplicationTypes.KeyValues || replicator.Replicate(partitionId, log));
     }
@@ -4417,6 +4435,7 @@ internal sealed class KeyValuesManager : IDisposable
     {
         rangeMapStore.Dispose();
         snapshotFloorStore.Dispose();
+        coordinatorDecisionStore.Dispose();
         rangeSplitTrigger?.Dispose();
     }
 }

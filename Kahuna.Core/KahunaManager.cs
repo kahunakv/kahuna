@@ -9,6 +9,7 @@ using Kommander.WAL;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Ranges;
+using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Locks;
 using Kahuna.Server.Persistence;
@@ -1219,6 +1220,9 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <summary>Node-local persistent-participant completion receipts. Diagnostic/test access.</summary>
     internal CompletionReceiptStore CompletionReceiptStore => keyValues.CompletionReceiptStore;
 
+    /// <summary>Partition-scoped durable coordinator decision records. Diagnostic/test access.</summary>
+    internal CoordinatorDecisionStore CoordinatorDecisionStore => keyValues.CoordinatorDecisionStore;
+
     /// <summary>
     /// Commits the transaction identified by <paramref name="handle"/>.
     /// </summary>
@@ -1297,6 +1301,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
             ReplicationTypes.KeyValues => await keyValues.OnLogRestored(partitionId, log),
             ReplicationTypes.RangeMap => await keyValues.OnLogRestored(partitionId, log),
             ReplicationTypes.SnapshotFloor => await keyValues.OnLogRestored(partitionId, log),
+            ReplicationTypes.CoordinatorDecision => await keyValues.OnLogRestored(partitionId, log),
             ReplicationTypes.Locks => await locks.OnLogRestored(partitionId, log),
             _ => true
         };
@@ -1309,6 +1314,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
             ReplicationTypes.KeyValues => await keyValues.OnReplicationReceived(partitionId, log),
             ReplicationTypes.RangeMap => await keyValues.OnReplicationReceived(partitionId, log),
             ReplicationTypes.SnapshotFloor => await keyValues.OnReplicationReceived(partitionId, log),
+            ReplicationTypes.CoordinatorDecision => await keyValues.OnReplicationReceived(partitionId, log),
             ReplicationTypes.Locks => await locks.OnReplicationReceived(partitionId, log),
             _ => true
         };

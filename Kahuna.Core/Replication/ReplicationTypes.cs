@@ -23,4 +23,10 @@ public static class ReplicationTypes
     /// (<see cref="Kahuna.Server.KeyValues.Ranges.RangeMapStore.MetaPartitionId"/>).
     /// </summary>
     public const string SnapshotFloor = "snapshotfloor";
+
+    /// <summary>
+    /// A durable coordinator decision record delta, replicated on the data partition that currently owns
+    /// the transaction's record anchor key (never the meta partition).
+    /// </summary>
+    public const string CoordinatorDecision = "coorddecision";
 }

@@ -81,4 +81,28 @@ public static class ReplicationSerializer
 
     public static MetaSystemStateMessage UnserializeMetaSystemStateMessage(ReadOnlySpan<byte> serializedData) =>
         MetaSystemStateMessage.Parser.ParseFrom(serializedData);
+
+    public static byte[] Serialize(CoordinatorDecisionDeltaMessage message)
+    {
+        int size = message.CalculateSize();
+        byte[] buf = new byte[size];
+        using CodedOutputStream cos = new(buf);
+        message.WriteTo(cos);
+        return buf;
+    }
+
+    public static CoordinatorDecisionDeltaMessage UnserializeCoordinatorDecisionDeltaMessage(ReadOnlySpan<byte> serializedData) =>
+        CoordinatorDecisionDeltaMessage.Parser.ParseFrom(serializedData);
+
+    public static byte[] Serialize(CoordinatorDecisionSnapshotMessage message)
+    {
+        int size = message.CalculateSize();
+        byte[] buf = new byte[size];
+        using CodedOutputStream cos = new(buf);
+        message.WriteTo(cos);
+        return buf;
+    }
+
+    public static CoordinatorDecisionSnapshotMessage UnserializeCoordinatorDecisionSnapshotMessage(ReadOnlySpan<byte> serializedData) =>
+        CoordinatorDecisionSnapshotMessage.Parser.ParseFrom(serializedData);
 }
