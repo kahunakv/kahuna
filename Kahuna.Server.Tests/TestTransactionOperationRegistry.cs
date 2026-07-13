@@ -68,7 +68,7 @@ public sealed class TestTransactionOperationRegistry
     public void BeginOperation_AfterFinalizing_IsRejectedSessionClosed()
     {
         TransactionContext ctx = NewContext();
-        Assert.True(ctx.TryBeginFinalizing());
+        Assert.Equal(FinalizeAdmission.Owner, ctx.EnterFinalize(out _));
         Assert.Equal(OperationRegistrationOutcome.RejectedSessionClosed, ctx.BeginOperation(Op(1), OperationKind.Set, [1]).Outcome);
     }
 
@@ -130,7 +130,7 @@ public sealed class TestTransactionOperationRegistry
         TransactionContext ctx = NewContext();
         ctx.BeginOperation(Op(1), OperationKind.Set, null);
         ctx.BeginOperation(Op(2), OperationKind.Set, null);
-        Assert.True(ctx.TryBeginFinalizing());
+        Assert.Equal(FinalizeAdmission.Owner, ctx.EnterFinalize(out _));
 
         Task drain = ctx.WaitForPendingOperations(TestContext.Current.CancellationToken);
         Assert.False(drain.IsCompleted);
@@ -148,34 +148,36 @@ public sealed class TestTransactionOperationRegistry
     {
         TransactionContext ctx = NewContext();
         ctx.BeginOperation(Op(1), OperationKind.Set, null); // never completes
-        Assert.True(ctx.TryBeginFinalizing());
+        Assert.Equal(FinalizeAdmission.Owner, ctx.EnterFinalize(out _));
 
         using CancellationTokenSource cts = new(TimeSpan.FromMilliseconds(100));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => ctx.WaitForPendingOperations(cts.Token));
     }
 
     [Fact]
-    public void Finalize_SecondCallerBeforePublish_SeesNoSnapshot_ThenSeesItAfterPublish()
+    public void CloseSnapshot_NotObservableUntilStored_AndLeavesSessionFinalizable()
     {
         TransactionContext ctx = NewContext();
 
-        Assert.True(ctx.TryBeginFinalizing());
-        // A racing finalize loses the CAS and, before the winner publishes, must not observe a snapshot.
-        Assert.False(ctx.TryBeginFinalizing());
-        Assert.Null(ctx.PublishedSnapshot);
+        Assert.Equal(FinalizeAdmission.Owner, ctx.EnterFinalize(out _));
+        // A racing finalize mirrors the owner; before the owner stores a Close snapshot, none is observable.
+        Assert.Equal(FinalizeAdmission.Mirror, ctx.EnterFinalize(out _));
+        Assert.Null(ctx.CloseSnapshot);
 
         WorkingSetSnapshot snap = ctx.GetWorkingSetSnapshot();
-        ctx.PublishTerminal(snap);
+        ctx.StoreCloseSnapshot(snap);
 
-        Assert.NotNull(ctx.PublishedSnapshot);
-        Assert.Equal(SessionLifecycle.Terminal, ctx.Lifecycle);
+        Assert.NotNull(ctx.CloseSnapshot);
+        // Storing the Close snapshot must leave the session finalizable — never terminal — so a later commit
+        // or rollback can still finalize the frozen transaction.
+        Assert.Equal(SessionLifecycle.Finalizing, ctx.Lifecycle);
     }
 
     [Fact]
     public void Finalizing_StaysClosedToNewOperations()
     {
         TransactionContext ctx = NewContext();
-        Assert.True(ctx.TryBeginFinalizing());
+        Assert.Equal(FinalizeAdmission.Owner, ctx.EnterFinalize(out _));
 
         // Once finalization begins the session never reopens to new operations — even if a finalize
         // attempt is later abandoned (e.g. a drain timeout), a new registration must be rejected.

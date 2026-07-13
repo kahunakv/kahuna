@@ -151,6 +151,16 @@ internal class TransactionContext
     }
 
     /// <summary>
+    /// True while at least one operation the coordinator dispatched has not yet reported completion. The
+    /// reaper never cancels such an operation: it waits out the extended deadline and, if any remain, expires
+    /// the session without reporting <c>RolledBack</c> so a late effect receives no success acknowledgement.
+    /// </summary>
+    internal bool HasPendingOperations
+    {
+        get { lock (registryLock) return pendingOperationCount > 0; }
+    }
+
+    /// <summary>
     /// True once two operations recorded conflicting base observations (differing existence or revision) for
     /// the same key. The transaction read an unstable snapshot of that key, so it must fail read validation
     /// at commit rather than commit on a self-inconsistent read set.
@@ -355,23 +365,6 @@ internal class TransactionContext
     // ---- finalize fence ----
 
     /// <summary>
-    /// Atomically moves the session from <see cref="SessionLifecycle.AcceptingOperations"/> to
-    /// <see cref="SessionLifecycle.Finalizing"/>. Returns false if another finalize already won or
-    /// the session is terminal.
-    /// </summary>
-    internal bool TryBeginFinalizing()
-    {
-        lock (registryLock)
-        {
-            if (lifecycle != SessionLifecycle.AcceptingOperations)
-                return false;
-
-            lifecycle = SessionLifecycle.Finalizing;
-            return true;
-        }
-    }
-
-    /// <summary>
     /// Enters the single finalize slot for a commit or rollback. Exactly one caller owns an active
     /// <see cref="FinalizeAttempt"/> at a time: the owner runs the finalize and publishes its outcome via
     /// <see cref="CompleteFinalize"/>; concurrent commits/rollbacks observe the same attempt and mirror its
@@ -427,6 +420,24 @@ internal class TransactionContext
     }
 
     /// <summary>
+    /// Re-arms the finalize slot for a session already claimed by the reaper whose prior cleanup could not
+    /// fully release (it published a non-terminal <see cref="KeyValueResponseType.MustRetry"/>, freeing the
+    /// slot but leaving the session <see cref="SessionLifecycle.Reaping"/>). A later reaper tick calls this
+    /// to retry the release. Returns null when the session is not Reaping or the slot is still held (a reap
+    /// is mid-flight), so a resume never races the in-flight attempt.
+    /// </summary>
+    internal FinalizeAttempt? TryResumeReap()
+    {
+        lock (registryLock)
+        {
+            if (lifecycle != SessionLifecycle.Reaping || activeFinalize is not null)
+                return null;
+
+            return activeFinalize = new FinalizeAttempt();
+        }
+    }
+
+    /// <summary>
     /// Publishes the outcome of a finalize to every waiter mirroring the attempt. A terminal outcome is
     /// retained (the slot stays installed) so a later duplicate finalize mirrors the same answer; a
     /// non-terminal <see cref="KeyValueResponseType.MustRetry"/> releases the slot so a subsequent call can
@@ -445,21 +456,19 @@ internal class TransactionContext
     }
 
     /// <summary>
-    /// Publishes the terminal working-set snapshot and moves the session to
-    /// <see cref="SessionLifecycle.Terminal"/> as one atomic step, so a racing finalize either sees
-    /// the published snapshot or a still-finalizing session — never a terminal session with no snapshot.
+    /// Stores the immutable working-set snapshot captured by a <c>CloseTransaction</c> once the session is
+    /// frozen (closed to new operations and drained). The session stays <see cref="SessionLifecycle.Finalizing"/>
+    /// — <b>not</b> terminal — so a later commit or rollback can still finalize the frozen transaction and reuse
+    /// this exact snapshot. Stored once; a repeat Close returns the same snapshot rather than re-capturing.
     /// </summary>
-    internal void PublishTerminal(WorkingSetSnapshot snapshot)
+    internal void StoreCloseSnapshot(WorkingSetSnapshot snapshot)
     {
         lock (registryLock)
-        {
-            finalizeSnapshot = snapshot;
-            lifecycle = SessionLifecycle.Terminal;
-        }
+            finalizeSnapshot ??= snapshot;
     }
 
-    /// <summary>The published finalize snapshot, or null if finalize has not completed yet.</summary>
-    internal WorkingSetSnapshot? PublishedSnapshot
+    /// <summary>The frozen Close snapshot, or null if the session has not been closed and snapshotted yet.</summary>
+    internal WorkingSetSnapshot? CloseSnapshot
     {
         get { lock (registryLock) return finalizeSnapshot; }
     }

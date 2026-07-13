@@ -65,4 +65,49 @@ public sealed class TestSessionReaping
         Assert.Equal(FinalizeAdmission.Rejected, ctx.EnterFinalize(out FinalizeAttempt? commit));
         Assert.Null(commit);
     }
+
+    [Fact]
+    public void HasPendingOperations_ReflectsRegisteredButUncompletedWork()
+    {
+        TransactionContext ctx = NewSession();
+        Assert.False(ctx.HasPendingOperations);
+
+        TransactionOperationId opId = TransactionOperationId.NewRandom();
+        Assert.Equal(OperationRegistrationOutcome.New, ctx.BeginOperation(opId, OperationKind.Set, [1]).Outcome);
+        Assert.True(ctx.HasPendingOperations);
+
+        // Completing the operation drains the pending count.
+        ctx.CompleteOperation(opId, effect: null, response: null);
+        Assert.False(ctx.HasPendingOperations);
+    }
+
+    [Fact]
+    public void TryResumeReap_ReArmsSlotForCleanupRetry_OnlyAfterAReleasingPublish()
+    {
+        TransactionContext ctx = NewSession();
+
+        // Not reaping yet → nothing to resume.
+        Assert.Null(ctx.TryResumeReap());
+
+        FinalizeAttempt? first = ctx.TryEnterReap();
+        Assert.NotNull(first);
+        Assert.Equal(SessionLifecycle.Reaping, ctx.Lifecycle);
+
+        // Slot still held by the in-flight reap → resume must not race it.
+        Assert.Null(ctx.TryResumeReap());
+
+        // A cleanup that could not fully release publishes a non-terminal MustRetry, which frees the slot
+        // but leaves the session Reaping.
+        ctx.CompleteFinalize(first!, new FinalizeOutcome(KeyValueResponseType.MustRetry, null));
+        Assert.Equal(SessionLifecycle.Reaping, ctx.Lifecycle);
+
+        // A later sweep re-arms the slot to retry the cleanup.
+        FinalizeAttempt? second = ctx.TryResumeReap();
+        Assert.NotNull(second);
+        Assert.NotSame(first, second);
+
+        // A terminal publish retains the slot (idempotent duplicate mirrors it), so no further resume fires.
+        ctx.CompleteFinalize(second!, new FinalizeOutcome(KeyValueResponseType.RolledBack, null));
+        Assert.Null(ctx.TryResumeReap());
+    }
 }
