@@ -77,29 +77,16 @@ public class KahunaTransactionSession : IAsyncDisposable
     private readonly SemaphoreSlim semaphore = new(1, 1);
 
     /// <summary>
-    /// A set of acquired locks within the transaction session.
+    /// A set of point locks the session has acquired. Retained only as a non-authoritative hint to skip
+    /// re-acquiring a lock the session already holds; it no longer drives finalize (the server owns that).
     /// </summary>
     private HashSet<(string, KeyValueDurability)>? acquiredLocks;
 
     /// <summary>
-    /// A set of acquired prefix locks within the transaction session.
+    /// A set of acquired prefix locks within the transaction session. Retained only as a non-authoritative
+    /// hint to skip re-acquiring a prefix lock the session already holds; the server owns finalize cleanup.
     /// </summary>
     private HashSet<(string prefixKey, KeyValueDurability)>? acquiredPrefixLocks;
-
-    /// <summary>
-    /// A set of acquired range locks within the transaction session.
-    /// </summary>
-    private List<(string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability, RangeLockMode mode)>? acquiredRangeLocks;
-    
-    /// <summary>
-    /// A set of modified keys within the transaction session.
-    /// </summary>
-    private HashSet<(string, KeyValueDurability)>? modifiedKeys;
-
-    /// <summary>
-    /// A set of key revisions observed by the transaction session.
-    /// </summary>
-    private Dictionary<(string, KeyValueDurability), KeyValueTransactionReadKey>? readKeys;
 
     private bool disposed;
     
@@ -175,28 +162,6 @@ public class KahunaTransactionSession : IAsyncDisposable
         acquiredPrefixLocks.Add((prefixKey, durability));
     }
 
-    private async Task ReleaseAllPrefixLocks(CancellationToken cancellationToken)
-    {
-        if (acquiredPrefixLocks is null)
-            return;
-
-        foreach ((string prefixKey, KeyValueDurability durability) in acquiredPrefixLocks)
-        {
-            try
-            {
-                await Client.Communication.TryReleaseExclusivePrefixKeyValueLock(
-                    Url, TransactionId, prefixKey, durability, cancellationToken
-                ).ConfigureAwait(false);
-            }
-            catch
-            {
-                // best-effort release
-            }
-        }
-
-        acquiredPrefixLocks = null;
-    }
-
     private async Task AcquireRangeLock(
         string prefix,
         string? startKey, bool startInclusive,
@@ -206,8 +171,6 @@ public class KahunaTransactionSession : IAsyncDisposable
         CancellationToken cancellationToken
     )
     {
-        acquiredRangeLocks ??= [];
-
         bool successLock = await Client.Communication.TryAcquireRangeKeyValueLock(
             Url, TransactionId, prefix, startKey, startInclusive, endKey, endInclusive,
             TransactionTimeout, durability, mode, cancellationToken
@@ -215,44 +178,8 @@ public class KahunaTransactionSession : IAsyncDisposable
 
         if (!successLock)
             throw new KahunaException($"Failed to acquire range lock for '{prefix}'.", KeyValueResponseType.Aborted);
-
-        acquiredRangeLocks.Add((prefix, startKey, startInclusive, endKey, endInclusive, durability, mode));
     }
 
-    private async Task ReleaseAllRangeLocks(CancellationToken cancellationToken)
-    {
-        if (acquiredRangeLocks is null)
-            return;
-
-        foreach ((string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability, RangeLockMode _) in acquiredRangeLocks)
-        {
-            try
-            {
-                await Client.Communication.TryReleaseExclusiveRangeKeyValueLock(
-                    Url, TransactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken
-                ).ConfigureAwait(false);
-            }
-            catch
-            {
-                // best-effort release
-            }
-        }
-
-        acquiredRangeLocks = null;
-    }
-
-    private void RecordReadKey(string key, KeyValueDurability durability, bool exists, long revision)
-    {
-        readKeys ??= [];
-        readKeys[(key, durability)] = new()
-        {
-            Key = key,
-            Durability = durability,
-            Exists = exists,
-            Revision = revision
-        };
-    }
-    
     /// <summary>
     /// Set key to hold the string value. If key already holds a value, it is overwritten
     /// </summary>
@@ -288,11 +215,6 @@ public class KahunaTransactionSession : IAsyncDisposable
             TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
 
-        if (success)
-        {
-            modifiedKeys ??= [];
-            modifiedKeys.Add((key, durability));
-        }
 
         return new(Client, key, success, value, revision, durability, timeElapsedMs);        
     }
@@ -334,11 +256,6 @@ public class KahunaTransactionSession : IAsyncDisposable
             TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
         
-        if (success)
-        {
-            modifiedKeys ??= [];
-            modifiedKeys.Add((key, durability));
-        }
         
         return new(Client, key, success, valueBytes, revision, durability, timeElapsedMs);
     }
@@ -381,11 +298,6 @@ public class KahunaTransactionSession : IAsyncDisposable
             TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
         
-        if (success)
-        {
-            modifiedKeys ??= [];
-            modifiedKeys.Add((key, durability));
-        }
         
         return new(Client, key, success, value, revision, durability, timeElapsedMs);
     }
@@ -432,11 +344,6 @@ public class KahunaTransactionSession : IAsyncDisposable
             TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
         
-        if (success)
-        {
-            modifiedKeys ??= [];
-            modifiedKeys.Add((key, durability));
-        }
         
         return new(Client, key, success, value, revision, durability, timeElapsedMs);
     }
@@ -486,11 +393,6 @@ public class KahunaTransactionSession : IAsyncDisposable
             TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
         
-        if (success)
-        {
-            modifiedKeys ??= [];
-            modifiedKeys.Add((key, durability));
-        }
         
         return new(Client, key, success, valueBytes, revision, durability, timeElapsedMs);
     }
@@ -533,11 +435,6 @@ public class KahunaTransactionSession : IAsyncDisposable
             TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
         
-        if (success)
-        {
-            modifiedKeys ??= [];
-            modifiedKeys.Add((key, durability));
-        }
         
         return new(Client, key, success, value, revision, durability, timeElapsedMs);
     }
@@ -582,11 +479,6 @@ public class KahunaTransactionSession : IAsyncDisposable
             TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
         
-        if (success)
-        {
-            modifiedKeys ??= [];
-            modifiedKeys.Add((key, durability));
-        }
         
         return new(Client, key, success, valueBytes, revision, durability, timeElapsedMs);
     }
@@ -618,7 +510,6 @@ public class KahunaTransactionSession : IAsyncDisposable
             TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
 
-        RecordReadKey(key, durability, success, success ? revision : -1);
 
         return new(Client, key, success, value, revision, durability, timeElapsedMs, lastModified.L);
     }
@@ -650,7 +541,6 @@ public class KahunaTransactionSession : IAsyncDisposable
             TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
         
-        RecordReadKey(key, durability, success, success ? revision : -1);
         
         return new(Client, key, success, revision, durability, timeElapsedMs);
     }
@@ -686,11 +576,6 @@ public class KahunaTransactionSession : IAsyncDisposable
             TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
         
-        if (success)
-        {
-            modifiedKeys ??= [];
-            modifiedKeys.Add((key, durability));
-        }
         
         return new(Client, key, success, revision, durability, timeElapsedMs);
     }
@@ -726,11 +611,6 @@ public class KahunaTransactionSession : IAsyncDisposable
             TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
         
-        if (success)
-        {
-            modifiedKeys ??= [];
-            modifiedKeys.Add((key, durability));
-        }
         
         return new(Client, key, success, revision, durability, timeElapsedMs);
     }
@@ -763,11 +643,6 @@ public class KahunaTransactionSession : IAsyncDisposable
             TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
         
-        if (success)
-        {
-            modifiedKeys ??= [];
-            modifiedKeys.Add((key, durability));
-        }
         
         return new(Client, key, success, revision, durability, timeElapsedMs);
     }
@@ -819,12 +694,6 @@ public class KahunaTransactionSession : IAsyncDisposable
         foreach (KahunaDeleteKeyValueResponseItem response in responses)
         {
             bool success = response.Type == KeyValueResponseType.Deleted;
-
-            if (success)
-            {
-                modifiedKeys ??= [];
-                modifiedKeys.Add((response.Key ?? "", response.Durability));
-            }
 
             result.Add(new(
                 Client,
@@ -896,10 +765,7 @@ public class KahunaTransactionSession : IAsyncDisposable
         List<KahunaKeyValue> result = new(kv.Count);
 
         foreach (KeyValueGetByBucketItem item in kv)
-        {
-            RecordReadKey(item.Key ?? "", durability, true, item.Revision);
             result.Add(new(Client, item.Key ?? "", true, item.Value, item.Revision, durability, 0));
-        }
 
         return result;
     }
@@ -951,27 +817,40 @@ public class KahunaTransactionSession : IAsyncDisposable
             
             if (Status != KahunaTransactionStatus.Pending)
                 throw new KahunaException("Cannot commit a transaction that is not pending.", KeyValueResponseType.Errored);
-            
-            // The server owns the working set and drives 2PC from its own confirmed effects; commit carries
-            // only the handle identity.
-            (bool result, string? recordAnchorKey) = await Client.Communication.CommitTransactionSession(
-                Url,
-                CoordinatorKey,
-                TransactionId,
-                cancellationToken
-            ).ConfigureAwait(false);
 
-            if (result)
+            // Close the session to new operations before the finalize RPC leaves; a failed finalize
+            // reverts to Pending so the caller can retry.
+            Status = KahunaTransactionStatus.Finalizing;
+
+            try
             {
-                // Fold the coordinator's canonical record anchor into the session handle.
-                RecordAnchorKey = recordAnchorKey;
-                Status = KahunaTransactionStatus.Committed;
+                // The server owns the working set and drives 2PC from its own confirmed effects; commit carries
+                // only the handle identity.
+                (bool result, string? recordAnchorKey) = await Client.Communication.CommitTransactionSession(
+                    Url,
+                    CoordinatorKey,
+                    TransactionId,
+                    cancellationToken
+                ).ConfigureAwait(false);
+
+                if (result)
+                {
+                    // Fold the coordinator's canonical record anchor into the session handle.
+                    RecordAnchorKey = recordAnchorKey;
+                    Status = KahunaTransactionStatus.Committed;
+                }
+                else
+                {
+                    Status = KahunaTransactionStatus.Pending;
+                }
+
+                return result;
             }
-
-            await ReleaseAllPrefixLocks(cancellationToken).ConfigureAwait(false);
-            await ReleaseAllRangeLocks(cancellationToken).ConfigureAwait(false);
-
-            return result;
+            catch
+            {
+                Status = KahunaTransactionStatus.Pending;
+                throw;
+            }
         }
         finally
         {
@@ -995,23 +874,34 @@ public class KahunaTransactionSession : IAsyncDisposable
 
             if (Status != KahunaTransactionStatus.Pending)
                 throw new KahunaException("Cannot rollback a transaction that is not pending.", KeyValueResponseType.Errored);
-            
-            // The server owns cleanup and drives rollback from its own confirmed effects; rollback carries
-            // only the handle identity.
-            bool result = await Client.Communication.RollbackTransactionSession(
-                Url,
-                CoordinatorKey,
-                TransactionId,
-                cancellationToken
-            ).ConfigureAwait(false);
 
-            if (result)
-                Status = KahunaTransactionStatus.Rolledback;
+            // Close the session to new operations before the finalize RPC leaves; a failed finalize
+            // reverts to Pending so the caller can retry.
+            Status = KahunaTransactionStatus.Finalizing;
 
-            await ReleaseAllPrefixLocks(cancellationToken).ConfigureAwait(false);
-            await ReleaseAllRangeLocks(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                // The server owns cleanup and drives rollback from its own confirmed effects; rollback carries
+                // only the handle identity.
+                bool result = await Client.Communication.RollbackTransactionSession(
+                    Url,
+                    CoordinatorKey,
+                    TransactionId,
+                    cancellationToken
+                ).ConfigureAwait(false);
 
-            return result;
+                if (result)
+                    Status = KahunaTransactionStatus.Rolledback;
+                else
+                    Status = KahunaTransactionStatus.Pending;
+
+                return result;
+            }
+            catch
+            {
+                Status = KahunaTransactionStatus.Pending;
+                throw;
+            }
         }
         finally
         {
