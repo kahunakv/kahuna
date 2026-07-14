@@ -1,6 +1,8 @@
 
+using System.Text;
 using Kahuna;
 using Kahuna.Client;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
@@ -84,12 +86,13 @@ public sealed class TestTransactionConcurrencyPolicy
     }
 
     /// <summary>
-    /// An optimistic transaction records a read dependency on the latest committed value it observed.
-    /// If a concurrent transaction changes that key before commit, the read is invalidated and the
-    /// commit aborts rather than committing on a stale read.
+    /// A transaction with <see cref="ReadValidation.TrackAndValidate"/> records a read dependency on the
+    /// latest committed value it observed. If a concurrent transaction changes that key before commit, the read
+    /// is invalidated and the commit aborts rather than committing on a stale read. Read-set validation is
+    /// driven by the read-validation policy, not the locking mode, so the transaction opts into it explicitly.
     /// </summary>
     [Fact]
-    public async Task OptimisticRead_InvalidatedByConcurrentWrite_AbortsCommit()
+    public async Task TrackedRead_InvalidatedByConcurrentWrite_AbortsCommit()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using EmbeddedKahunaNode node = CreateNode(loggerFactory);
@@ -102,7 +105,7 @@ public sealed class TestTransactionConcurrencyPolicy
         await client.SetKeyValue(read, "v0", cancellationToken: ct);
 
         await using KahunaTransactionSession tx = await client.StartTransactionSession(
-            new() { Locking = KeyValueTransactionLocking.Optimistic }, ct);
+            new() { Locking = KeyValueTransactionLocking.Optimistic, ReadValidation = ReadValidation.TrackAndValidate }, ct);
 
         // Record a read dependency on the latest committed value.
         KahunaKeyValue observed = await tx.GetKeyValue(read, KeyValueDurability.Persistent, ct);
@@ -150,7 +153,7 @@ public sealed class TestTransactionConcurrencyPolicy
             try
             {
                 await using KahunaTransactionSession tx = await client.StartTransactionSession(
-                    new() { Locking = KeyValueTransactionLocking.Optimistic }, ct);
+                    new() { Locking = KeyValueTransactionLocking.Optimistic, ReadValidation = ReadValidation.TrackAndValidate }, ct);
 
                 await tx.GetKeyValue(self, KeyValueDurability.Persistent, ct);
                 KahunaKeyValue otherValue = await tx.GetKeyValue(other, KeyValueDurability.Persistent, ct);
@@ -239,6 +242,167 @@ public sealed class TestTransactionConcurrencyPolicy
             }, ct));
 
         Assert.Equal(KeyValueResponseType.InvalidInput, rejected.KeyValueErrorCode);
+    }
+
+    /// <summary>
+    /// Read-set validation is decoupled from the locking mode: an optimistic transaction with
+    /// <see cref="ReadValidation.None"/> takes last-value reads without an OCC check, so a concurrent write to
+    /// a key it read does not invalidate the commit. This is the guarantee the earlier coupling denied —
+    /// optimistic locking used to force validation regardless of the declared read policy.
+    /// </summary>
+    [Fact]
+    public async Task OptimisticReadValidationNone_CommitsDespiteConcurrentWrite()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = CreateNode(loggerFactory);
+        await node.StartAsync(ct);
+        KahunaClient client = Connect(node);
+
+        string read = "cp/none/read/" + Guid.NewGuid().ToString("N")[..8];
+        string write = "cp/none/write/" + Guid.NewGuid().ToString("N")[..8];
+
+        await client.SetKeyValue(read, "v0", cancellationToken: ct);
+
+        await using KahunaTransactionSession tx = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Optimistic, ReadValidation = ReadValidation.None }, ct);
+
+        // Observe the latest value; with ReadValidation.None this records no validated read dependency.
+        KahunaKeyValue observed = await tx.GetKeyValue(read, KeyValueDurability.Persistent, ct);
+        Assert.Equal("v0", observed.ValueAsString());
+
+        // A concurrent committed write moves the observed key forward.
+        await client.SetKeyValue(read, "v1", cancellationToken: ct);
+
+        // A mutation forces 2PC. Because no read-set validation runs, the concurrent change does not abort.
+        await tx.SetKeyValue(write, "w", durability: KeyValueDurability.Persistent, cancellationToken: ct);
+        Assert.True(await tx.Commit(ct));
+
+        KahunaKeyValue writeAfter = await client.GetKeyValue(write, KeyValueDurability.Persistent, cancellationToken: ct);
+        Assert.True(writeAfter.Success);
+    }
+
+    /// <summary>
+    /// The read-validation policy is honored independently of the locking mode in the other direction too: a
+    /// pessimistic transaction with <see cref="ReadValidation.TrackAndValidate"/> is a valid combination that
+    /// runs read-set validation and commits when its reads did not change.
+    /// </summary>
+    [Fact]
+    public async Task PessimisticTrackAndValidate_ValidatesReadSet_AndCommits()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = CreateNode(loggerFactory);
+        await node.StartAsync(ct);
+        KahunaClient client = Connect(node);
+
+        string read = "cp/pv/read/" + Guid.NewGuid().ToString("N")[..8];
+        string write = "cp/pv/write/" + Guid.NewGuid().ToString("N")[..8];
+
+        await client.SetKeyValue(read, "v0", cancellationToken: ct);
+
+        await using KahunaTransactionSession tx = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Pessimistic, ReadValidation = ReadValidation.TrackAndValidate }, ct);
+
+        KahunaKeyValue observed = await tx.GetKeyValue(read, KeyValueDurability.Persistent, ct);
+        Assert.Equal("v0", observed.ValueAsString());
+
+        await tx.SetKeyValue(write, "w", durability: KeyValueDurability.Persistent, cancellationToken: ct);
+        Assert.True(await tx.Commit(ct));
+    }
+
+    /// <summary>
+    /// Begin range-validates every policy enum. An out-of-range ordinal — which an external Begin could produce
+    /// by casting an unknown numeric wire value — is rejected with <see cref="KeyValueResponseType.InvalidInput"/>
+    /// rather than falling into whichever equality branch happens to match.
+    /// </summary>
+    [Fact]
+    public async Task UnknownPolicyEnum_RejectedAtBegin()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = CreateNode(loggerFactory);
+        await node.StartAsync(ct);
+        KahunaManager manager = (KahunaManager)node.Kahuna;
+
+        async Task<KeyValueResponseType> Begin(KeyValueTransactionOptions options)
+        {
+            (KeyValueResponseType type, _) = await manager.LocateAndStartTransaction(options, ct);
+            return type;
+        }
+
+        // A well-formed baseline is accepted (anything other than InvalidInput).
+        Assert.NotEqual(KeyValueResponseType.InvalidInput,
+            await Begin(new() { CoordinatorKey = "cp/enum/ok/" + Guid.NewGuid().ToString("N")[..8] }));
+
+        // Each policy enum, out of range, is rejected.
+        Assert.Equal(KeyValueResponseType.InvalidInput, await Begin(new()
+        {
+            CoordinatorKey = "cp/enum/lock/" + Guid.NewGuid().ToString("N")[..8],
+            Locking = (KeyValueTransactionLocking)99
+        }));
+        Assert.Equal(KeyValueResponseType.InvalidInput, await Begin(new()
+        {
+            CoordinatorKey = "cp/enum/read/" + Guid.NewGuid().ToString("N")[..8],
+            ReadValidation = (ReadValidation)99
+        }));
+        Assert.Equal(KeyValueResponseType.InvalidInput, await Begin(new()
+        {
+            CoordinatorKey = "cp/enum/dur/" + Guid.NewGuid().ToString("N")[..8],
+            DecisionDurability = (DecisionDurability)99
+        }));
+    }
+
+    /// <summary>
+    /// A transaction's read timestamp is a per-transaction property, not a per-call one: a session opened with a
+    /// caller snapshot observes that one pinned snapshot through every read path — point reads, bucket reads,
+    /// full range scans, and paginated range scans — never a mix of pinned and latest state.
+    /// </summary>
+    [Fact]
+    public async Task SessionSnapshot_ConsistentAcrossPointBucketAndRangeScans()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = CreateNode(loggerFactory);
+        await node.StartAsync(ct);
+        KahunaClient client = Connect(node);
+
+        string prefix = "cp/snap/" + Guid.NewGuid().ToString("N")[..8];
+        string ka = prefix + "/a";
+        string kb = prefix + "/b";
+
+        await client.SetKeyValue(ka, "v0", cancellationToken: ct);
+        await client.SetKeyValue(kb, "v0", cancellationToken: ct);
+
+        // Pin a snapshot after v0, then move both keys to v1.
+        HLCTimestamp snapshot = node.Raft.HybridLogicalClock.SendOrLocalEvent(node.Raft.GetLocalNodeId());
+        await client.SetKeyValue(ka, "v1", cancellationToken: ct);
+        await client.SetKeyValue(kb, "v1", cancellationToken: ct);
+
+        await using KahunaTransactionSession tx = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Optimistic, ReadTimestamp = snapshot, ReadValidation = ReadValidation.None }, ct);
+
+        // Point read observes the pinned snapshot.
+        Assert.Equal("v0", (await tx.GetKeyValue(ka, KeyValueDurability.Persistent, ct)).ValueAsString());
+
+        // Bucket read observes the pinned snapshot for every key.
+        List<KahunaKeyValue> bucket = await tx.GetByBucket(prefix, KeyValueDurability.Persistent, ct);
+        Assert.Equal(2, bucket.Count);
+        Assert.All(bucket, kv => Assert.Equal("v0", kv.ValueAsString()));
+
+        // Full range scan observes the pinned snapshot — before the fix this used the latest state (v1).
+        KeyValueGetByRangePageResult range = await tx.GetByRange(
+            prefix, null, true, null, false, 0, KeyValueDurability.Persistent, RangeLockMode.Shared, ct);
+        Assert.Equal(2, range.Items.Count);
+        Assert.All(range.Items, it => Assert.Equal("v0", Encoding.UTF8.GetString(it.Value!)));
+
+        // A paginated range scan (one item per page, continued by moving the start key) stays on the same
+        // snapshot across pages.
+        KeyValueGetByRangePageResult page1 = await tx.GetByRange(
+            prefix, null, true, null, false, 1, KeyValueDurability.Persistent, RangeLockMode.Shared, ct);
+        Assert.Single(page1.Items);
+        Assert.Equal("v0", Encoding.UTF8.GetString(page1.Items[0].Value!));
+
+        KeyValueGetByRangePageResult page2 = await tx.GetByRange(
+            prefix, page1.Items[^1].Key, false, null, false, 1, KeyValueDurability.Persistent, RangeLockMode.Shared, ct);
+        Assert.Single(page2.Items);
+        Assert.Equal("v0", Encoding.UTF8.GetString(page2.Items[0].Value!));
     }
 
     /// <summary>

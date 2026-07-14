@@ -374,12 +374,12 @@ public sealed class TestClientTransactionRegisterRemote
             new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
 
         // Pessimistic range scan acquires (and now registers) an exclusive range lock over the prefix.
-        await txA.GetByRange(prefix, null, false, null, false, 0, default, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct);
+        await txA.GetByRange(prefix, null, false, null, false, 0, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct);
 
         await using (KahunaTransactionSession txB = await client.StartTransactionSession(
                          new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct))
         {
-            await Assert.ThrowsAsync<KahunaException>(() => txB.GetByRange(prefix, null, false, null, false, 0, default, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct));
+            await Assert.ThrowsAsync<KahunaException>(() => txB.GetByRange(prefix, null, false, null, false, 0, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct));
             await txB.Rollback(ct);
         }
 
@@ -388,7 +388,7 @@ public sealed class TestClientTransactionRegisterRemote
 
         await using KahunaTransactionSession txC = await client.StartTransactionSession(
             new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
-        await txC.GetByRange(prefix, null, false, null, false, 0, default, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct);
+        await txC.GetByRange(prefix, null, false, null, false, 0, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct);
         Assert.True(await txC.Commit(ct));
     }
 
@@ -413,9 +413,10 @@ public sealed class TestClientTransactionRegisterRemote
         Assert.Equal(KeyValueResponseType.Set, seed);
 
         (_, Kahuna.Shared.KeyValue.TransactionHandle handle) =
-            await node.Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Optimistic }, ct);
+            await node.Kahuna.LocateAndStartTransaction(
+                new() { Locking = KeyValueTransactionLocking.Optimistic, ReadValidation = ReadValidation.TrackAndValidate }, ct);
 
-        // Read the key under the optimistic transaction (records a read observation at the current revision).
+        // Read the key under the transaction (records a validated read observation at the current revision).
         (KeyValueResponseType readType, _) = await node.Kahuna.LocateAndTryGetValue(
             handle.TransactionId, key, -1, Kommander.Time.HLCTimestamp.Zero, KeyValueDurability.Persistent, ct,
             handle.CoordinatorKey, TransactionOperationId.NewRandom());
@@ -464,9 +465,9 @@ public sealed class TestClientTransactionRegisterRemote
         await client.SetKeyValue(key, "v0", durability: KeyValueDurability.Persistent, cancellationToken: ct);
 
         await using KahunaTransactionSession txA = await client.StartTransactionSession(
-            new() { Locking = KeyValueTransactionLocking.Optimistic }, ct);
+            new() { Locking = KeyValueTransactionLocking.Optimistic, ReadValidation = ReadValidation.TrackAndValidate }, ct);
 
-        // Read inside the optimistic transaction and write a different key (so two-phase commit runs and
+        // Read inside the transaction and write a different key (so two-phase commit runs and
         // validates the read set), then invalidate the read set with a concurrent write.
         await txA.GetKeyValue(key, KeyValueDurability.Persistent, ct);
         await txA.SetKeyValue(key + "/w", "x", durability: KeyValueDurability.Persistent, cancellationToken: ct);
