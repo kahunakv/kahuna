@@ -1653,6 +1653,27 @@ internal sealed class TransactionCoordinator
 
         if (!anchorCommitted)
         {
+            // The anchor commit never returned Committed, but a lost or leadership-changed response can mask a
+            // commit that actually applied and installed the decision. Consult the anchored record before
+            // assuming failure: once a record exists the anchor is durably committed, so recovery — not this
+            // path — owns the outcome, and the still-prepared participants must not be rolled back or the
+            // transaction reported Aborted. The ~5 s of commit retries above give the record ample time to
+            // replicate to this node before we read it.
+            if (manager.CoordinatorDecisionStore.TryGet(context.TransactionId, out CoordinatorDecisionRecord installed))
+            {
+                context.HasOutstandingDurableDecision = true;
+
+                // Already Completed: recovery finished it while we were retrying — settle to terminal Committed.
+                if (installed.Status == CoordinatorDecisionStatus.Completed && TryFinalizeCompletedDurableDecision(context))
+                    return;
+
+                manager.WakeDecisionRecovery();
+                context.Result = new() { Type = KeyValueResponseType.MustRetry, Reason = "Durable anchor committed; recovery will complete the decision" };
+                return;
+            }
+
+            // No decision record exists: the anchor genuinely did not commit, so no participant committed either.
+            // Roll the prepared set (anchor + any secondaries) back cleanly and abort.
             if (context.AsyncRelease)
                 _ = RollbackMutations(context, mutationsPrepared, CancellationToken.None);
             else
@@ -1796,7 +1817,13 @@ internal sealed class TransactionCoordinator
         if (mutationsPrepared.Count == 0)
             return;
 
-        if (!context.SetState(KeyValueTransactionState.RollingBack, KeyValueTransactionState.Prepared))
+        // Pre-decision rollback may begin from Prepared (a prepare or read-set failure rolls back before commit)
+        // or from Committing (a Durable anchor that never committed must roll its prepared set back after
+        // CommitMutations already advanced the state). Both are pre-commit states in which every prepared ticket
+        // is still uncommitted, so settle them from whichever one we are in — anchoring the CAS on Prepared alone
+        // would throw from Committing and orphan the tickets instead of rolling them back.
+        if (!context.SetState(KeyValueTransactionState.RollingBack, KeyValueTransactionState.Prepared) &&
+            !context.SetState(KeyValueTransactionState.RollingBack, KeyValueTransactionState.Committing))
             throw new KahunaAbortedException("Failed to set transaction state to RollingBack");
 
         if (mutationsPrepared.Count == 1)

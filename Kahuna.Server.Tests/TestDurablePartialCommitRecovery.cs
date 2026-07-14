@@ -44,8 +44,11 @@ public sealed class TestDurablePartialCommitRecovery
             Host                 = "localhost",
             Port                 = port,
             InitialPartitions    = 4,
-            StartElectionTimeout = 50,
-            EndElectionTimeout   = 150,
+            // Long election timeouts so that once leadership is placed deterministically it holds through the
+            // whole phase-two retry window — an aggressive timeout lets the dominant node reclaim a partition
+            // mid-commit, which would silently turn a faulted inter-node commit back into a local one.
+            StartElectionTimeout = 2000,
+            EndElectionTimeout   = 4000,
             ElectionTimeoutSeed  = 76000 + nodeId,
             EnableQuiescence     = false
         };
@@ -111,19 +114,23 @@ public sealed class TestDurablePartialCommitRecovery
 
             // The anchor is the first written key; drive the whole transaction from the anchor partition's leader
             // so the coordinator session is colocated with the anchor (its progress replicates). The secondary is
-            // a key in a DIFFERENT data partition; we move that partition's leadership onto another node so its
-            // commit is an inter-node call the fault can intercept while its prepare stays intact on the remote
-            // leader — the partial durable commit. In-memory elections tend to hand one node every partition, so
-            // relocate the secondary's leadership deterministically rather than hoping for a natural spread.
+            // a key in a DIFFERENT data partition, whose leadership we place on another node, so its commit is an
+            // inter-node call the fault can intercept while its prepare stays intact on the remote leader — the
+            // partial durable commit.
             const string anchorKey = "partial:anchor:aaa";
             int anchorPartition = k1.GetDataPartitionForKey(anchorKey);
-            ClusterNode anchorLeaderNode = await LeaderOf(nodes, anchorPartition, ct);
-            ClusterNode coord = anchorLeaderNode;
-
-            string secondaryKey = await FindKeyLedByDifferentNode(nodes, k1, anchorLeaderNode, ct);
+            string secondaryKey = FindKeyInDifferentPartition(k1, anchorPartition);
             int secondaryPartition = k1.GetDataPartitionForKey(secondaryKey);
-            ClusterNode secondaryLeader = await LeaderOf(nodes, secondaryPartition, ct);
-            Assert.NotEqual(anchorLeaderNode.Raft.GetLocalNodeId(), secondaryLeader.Raft.GetLocalNodeId());
+
+            // Place the two partitions on different nodes deterministically: the coordinator/anchor on node 1,
+            // the secondary on node 2. This makes the secondary's commit a genuine inter-node call the fault can
+            // intercept, and the long election timeouts keep it there for the whole retry window.
+            ClusterNode coord = nodes[0];
+            ClusterNode secondaryOwner = nodes[1];
+            await ForceLeader(coord, anchorPartition, ct);
+            await ForceLeader(secondaryOwner, secondaryPartition, ct);
+            ClusterNode anchorLeaderNode = coord;
+            Assert.NotEqual(coord.Raft.GetLocalNodeId(), secondaryOwner.Raft.GetLocalNodeId());
 
             // Fault the secondary's inter-node commit while active; the anchor commit and everything else proceed.
             bool faultActive = true;
@@ -183,25 +190,29 @@ public sealed class TestDurablePartialCommitRecovery
         }
     }
 
-    // Per-partition election timeouts are seeded deterministically (seed ^ partitionId), so each partition has a
-    // stable natural leader that always re-wins — no leadership transfer is needed to obtain a secondary whose
-    // leader differs from the anchor's, and that difference holds through the whole phase-two retry window.
-    private static async Task<string> FindKeyLedByDifferentNode(
-        ClusterNode[] nodes, KahunaManager router, ClusterNode avoidLeader, CancellationToken ct)
+    private static string FindKeyInDifferentPartition(KahunaManager router, int avoidPartition)
     {
-        int avoidPartition = router.GetDataPartitionForKey("partial:anchor:aaa");
         for (int i = 0; i < 8192; i++)
         {
             string candidate = "partial:secondary:b" + i;
-            int partition = router.GetDataPartitionForKey(candidate);
-            if (partition == avoidPartition)
-                continue;
-
-            ClusterNode leader = await LeaderOf(nodes, partition, ct);
-            if (leader.Raft.GetLocalNodeId() != avoidLeader.Raft.GetLocalNodeId())
+            if (router.GetDataPartitionForKey(candidate) != avoidPartition)
                 return candidate;
         }
-        throw new InvalidOperationException("Could not find a key whose data partition is led by a different node.");
+        throw new InvalidOperationException("Could not find a key in a different data partition.");
+    }
+
+    private static async Task ForceLeader(ClusterNode node, int partition, CancellationToken ct)
+    {
+        await node.Raft.ForceLeaderForTestingAsync(partition, ct);
+
+        long deadline = Environment.TickCount64 + 10_000;
+        while (Environment.TickCount64 < deadline)
+        {
+            if (await node.Raft.AmILeader(partition, ct))
+                return;
+            await Task.Delay(25, ct);
+        }
+        throw new TimeoutException($"Node {node.Raft.GetLocalNodeId()} did not become leader of partition {partition}.");
     }
 
     private static async Task<ClusterNode> LeaderOf(ClusterNode[] nodes, int partition, CancellationToken ct)
