@@ -1709,6 +1709,7 @@ public class GrpcCommunication : IKahunaCommunication
         string url,
         string uniqueId,
         HLCTimestamp transactionId,
+        string? recordAnchorKey,
         CancellationToken cancellationToken
     )
     {
@@ -1719,6 +1720,10 @@ public class GrpcCommunication : IKahunaCommunication
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
         };
+
+        // Send the known record anchor so a retry after coordinator loss reaches the durable decision.
+        if (recordAnchorKey is not null)
+            request.RecordAnchorKey = recordAnchorKey;
 
         int retries = 0;
         
@@ -1770,6 +1775,7 @@ public class GrpcCommunication : IKahunaCommunication
         string url,
         string uniqueId,
         HLCTimestamp transactionId,
+        string? recordAnchorKey,
         CancellationToken cancellationToken
     )
     {
@@ -1780,6 +1786,10 @@ public class GrpcCommunication : IKahunaCommunication
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
         };
+
+        // Send the known record anchor so a rollback retry can consult a durably decided commit.
+        if (recordAnchorKey is not null)
+            request.RecordAnchorKey = recordAnchorKey;
 
         int retries = 0;
         

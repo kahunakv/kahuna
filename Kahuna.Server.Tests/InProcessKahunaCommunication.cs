@@ -227,26 +227,26 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
     }
 
     public async Task<(bool committed, string? recordAnchorKey)> CommitTransactionSession(
-        string url, string uniqueId, HLCTimestamp transactionId, CancellationToken cancellationToken)
+        string url, string uniqueId, HLCTimestamp transactionId, string? recordAnchorKey, CancellationToken cancellationToken)
     {
-        TransactionHandle handle = new(transactionId, uniqueId);
+        TransactionHandle handle = new(transactionId, uniqueId, recordAnchorKey);
 
         // Commit returns the coordinator's canonical record anchor from the frozen finalize snapshot, so
         // there is no race between reading the anchor and freezing the working set. Mirror the gRPC transport
         // contract: true = committed, false = transient MustRetry (retryable), throw on a terminal failure so
         // the SDK can move to a terminal state rather than looping on Pending.
-        (KeyValueResponseType type, string? recordAnchorKey) = await kahuna.LocateAndCommitTransaction(handle, cancellationToken);
+        (KeyValueResponseType type, string? returnedAnchor) = await kahuna.LocateAndCommitTransaction(handle, cancellationToken);
         if (type == KeyValueResponseType.Committed)
-            return (true, recordAnchorKey);
+            return (true, returnedAnchor);
         if (type == KeyValueResponseType.MustRetry)
-            return (false, recordAnchorKey);
+            return (false, returnedAnchor);
         throw new KahunaException("Failed to commit key/value transaction: " + type, type);
     }
 
     public async Task<bool> RollbackTransactionSession(
-        string url, string uniqueId, HLCTimestamp transactionId, CancellationToken cancellationToken)
+        string url, string uniqueId, HLCTimestamp transactionId, string? recordAnchorKey, CancellationToken cancellationToken)
     {
-        TransactionHandle handle = new(transactionId, uniqueId);
+        TransactionHandle handle = new(transactionId, uniqueId, recordAnchorKey);
         KeyValueResponseType type = await kahuna.LocateAndRollbackTransaction(handle, cancellationToken);
         if (type == KeyValueResponseType.RolledBack)
             return true;

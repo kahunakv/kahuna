@@ -68,9 +68,9 @@ public interface IKahunaCommunication
      
      Task<(string, HLCTimestamp transactionId)> StartTransactionSession(string url, string uniqueId, KahunaTransactionOptions txOptions, CancellationToken cancellationToken);
      
-     Task<(bool committed, string? recordAnchorKey)> CommitTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, CancellationToken cancellationToken);
+     Task<(bool committed, string? recordAnchorKey)> CommitTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, string? recordAnchorKey, CancellationToken cancellationToken);
 
-     Task<bool> RollbackTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, CancellationToken cancellationToken);
+     Task<bool> RollbackTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, string? recordAnchorKey, CancellationToken cancellationToken);
 
      Task<(SequenceResponseType, ReadOnlySequenceEntry?, int)> GetSequence(string url, string name, SequenceDurability durability, CancellationToken cancellationToken);
 

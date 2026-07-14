@@ -1430,6 +1430,11 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             TransactionIdCounter = handle.TransactionId.C
         };
 
+        // Forward the record anchor so a commit routed to the anchor's node reaches the durable decision even
+        // after the coordinating session was evicted or its node failed.
+        if (handle.RecordAnchorKey is not null)
+            request.RecordAnchorKey = handle.RecordAnchorKey;
+
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
         GrpcCommitTransactionResponse remoteResponse = response.CommitTransaction!;
 
@@ -1449,6 +1454,10 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             TransactionIdPhysical = handle.TransactionId.L,
             TransactionIdCounter = handle.TransactionId.C
         };
+
+        // Forward the record anchor so a rollback routed to the anchor's node can consult the durable decision.
+        if (handle.RecordAnchorKey is not null)
+            request.RecordAnchorKey = handle.RecordAnchorKey;
 
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
         GrpcRollbackTransactionResponse remoteResponse = response.RollbackTransaction!;
