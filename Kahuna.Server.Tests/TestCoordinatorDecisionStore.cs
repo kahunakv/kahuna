@@ -238,6 +238,138 @@ public sealed class TestCoordinatorDecisionStore
         }
     }
 
+    // ── Concurrent applies across partitions lose no record (partition-safe publish) ───────────────
+
+    [Fact]
+    public async Task ConcurrentApplyAcrossPartitions_LosesNoRecord()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode node = new(InMemoryOptions(2), loggerFactory);
+        await node.StartAsync(ct);
+
+        CoordinatorDecisionStore store = StoreOf(node);
+        Assert.Equal(0, store.Count);
+
+        // Build many distinct records and apply them through the follower/restore path concurrently, alternating
+        // the source partition so two partition executors publish into the one node-global set at once. Without a
+        // serialized publish the copy-on-write set lost-updates and drops records; every record must survive.
+        const int total = 400;
+        List<(int partition, CoordinatorDecisionRecord record)> work = new(total);
+        for (int i = 0; i < total; i++)
+        {
+            HLCTimestamp txId = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+            work.Add((i % 2 + 1, Decision(txId, $"loss/{i}", CoordinatorDecisionStatus.CommitDecided, $"loss/{i}")));
+        }
+
+        await Task.WhenAll(work.Select(w => Task.Run(() =>
+        {
+            Assert.True(store.ApplyUpsertForTest(w.partition, w.record));
+        }, ct)));
+
+        Assert.Equal(total, store.Count);
+    }
+
+    // ── Racing request-path and recovery updates on different participants do not regress ──────────
+
+    [Fact]
+    public async Task RacingProgressOnDifferentParticipants_DoesNotRegress()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode node = new(InMemoryOptions(1), loggerFactory);
+        await node.StartAsync(ct);
+
+        const string anchor = "mono/anchor";
+        const string second = "mono/second";
+        await node.WaitForLeaderForKeyAsync(anchor, ct);
+
+        CoordinatorDecisionStore store = StoreOf(node);
+        HLCTimestamp txId = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+
+        CoordinatorDecisionRecord View(bool ackAnchor, bool ackSecond) => new(
+            txId, "coord", anchor, txId, CoordinatorDecisionStatus.CommitDecided,
+            [
+                new CoordinatorParticipant(anchor, KeyValueDurability.Persistent, HLCTimestamp.Zero, ackAnchor, false),
+                new CoordinatorParticipant(second, KeyValueDurability.Persistent, HLCTimestamp.Zero, ackSecond, false)
+            ],
+            [], txId, HLCTimestamp.Zero);
+
+        Assert.Equal(CoordinatorDecisionMutationResult.Applied, await store.UpsertAsync(View(false, false), 0, ct));
+
+        // The request path records the anchor ack (its view still shows the secondary unacked); recovery, from a
+        // stale view where the anchor is unacked, records the secondary ack. Neither may clobber the other.
+        Assert.Equal(CoordinatorDecisionMutationResult.Applied, await store.UpsertAsync(View(true, false), 0, ct));
+        Assert.Equal(CoordinatorDecisionMutationResult.Applied, await store.UpsertAsync(View(false, true), 0, ct));
+
+        Assert.True(store.TryGet(txId, out CoordinatorDecisionRecord merged));
+        Assert.All(merged.Participants, p => Assert.True(p.Acked));
+    }
+
+    // ── An older imported/replayed version never regresses newer local progress ────────────────────
+
+    [Fact]
+    public async Task ImportOlderVersion_DoesNotRegressNewerLocalRecord()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode node = new(InMemoryOptions(1), loggerFactory);
+        await node.StartAsync(ct);
+
+        const string anchor = "import/anchor";
+        await node.WaitForLeaderForKeyAsync(anchor, ct);
+
+        CoordinatorDecisionStore store = StoreOf(node);
+        HLCTimestamp txId = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+
+        // Local progress reaches Completed.
+        Assert.Equal(CoordinatorDecisionMutationResult.Applied,
+            await store.UpsertAsync(Decision(txId, anchor, CoordinatorDecisionStatus.Completed, anchor), 0, ct));
+        Assert.True(store.TryGet(txId, out CoordinatorDecisionRecord local));
+        Assert.Equal(CoordinatorDecisionStatus.Completed, local.Status);
+
+        // A stale handoff carrying the earlier CommitDecided view is imported; it must merge forward, not clobber.
+        store.ImportRecords([Decision(txId, anchor, CoordinatorDecisionStatus.CommitDecided, anchor)]);
+
+        Assert.True(store.TryGet(txId, out CoordinatorDecisionRecord afterImport));
+        Assert.Equal(CoordinatorDecisionStatus.Completed, afterImport.Status);
+    }
+
+    // ── A progress write that changes a participant's prepared ticket is rejected as frozen ────────
+
+    [Fact]
+    public async Task ChangedParticipantTicket_IsRejectedAsFrozen()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode node = new(InMemoryOptions(1), loggerFactory);
+        await node.StartAsync(ct);
+
+        const string anchor = "ticket/anchor";
+        const string second = "ticket/second";
+        await node.WaitForLeaderForKeyAsync(anchor, ct);
+
+        CoordinatorDecisionStore store = StoreOf(node);
+        HLCTimestamp txId = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+        HLCTimestamp ticket = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+        HLCTimestamp otherTicket = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+
+        CoordinatorDecisionRecord WithTicket(HLCTimestamp secondTicket, bool ackSecond) => new(
+            txId, "coord", anchor, txId, CoordinatorDecisionStatus.CommitDecided,
+            [
+                new CoordinatorParticipant(anchor, KeyValueDurability.Persistent, HLCTimestamp.Zero, true, false),
+                new CoordinatorParticipant(second, KeyValueDurability.Persistent, secondTicket, ackSecond, false)
+            ],
+            [], txId, HLCTimestamp.Zero);
+
+        Assert.Equal(CoordinatorDecisionMutationResult.Applied, await store.UpsertAsync(WithTicket(ticket, false), 0, ct));
+
+        // Same ticket → accepted progress; changed ticket → rejected as a frozen-participant violation.
+        Assert.Equal(CoordinatorDecisionMutationResult.Applied, await store.UpsertAsync(WithTicket(ticket, true), 0, ct));
+        Assert.Equal(CoordinatorDecisionMutationResult.RejectedParticipantsFrozen,
+            await store.UpsertAsync(WithTicket(otherTicket, true), 0, ct));
+    }
+
     private static void TryDeleteDirectory(string path)
     {
         try
