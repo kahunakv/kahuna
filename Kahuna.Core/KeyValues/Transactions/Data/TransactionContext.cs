@@ -262,6 +262,11 @@ internal class TransactionContext
         ModifiedKeys ??= [];
         ModifiedKeys.Add(modified);
 
+        // A write supersedes any earlier read observation of the same key: it is validated as a write, not as a
+        // read dependency on external committed state. Dropping it also prevents a later read of the key's own
+        // staged value from tripping the two-inconsistent-snapshots conflict against that write's revision.
+        ReadKeys?.Remove(modified);
+
         if (RecordAnchorKey is null && modified.Durability == KeyValueDurability.Persistent)
             RecordAnchorKey = modified.Key;
     }
@@ -332,8 +337,15 @@ internal class TransactionContext
         if (string.IsNullOrEmpty(observed.Key))
             return;
 
-        ReadKeys ??= [];
         (string, KeyValueDurability) key = (observed.Key, observed.Durability);
+
+        // A key this transaction has written is validated as a write, not a read: reading back its own
+        // uncommitted value is not a dependency on external committed state, so it never enters the read set
+        // (and must not trip the two-inconsistent-snapshots conflict against the staged write's revision).
+        if (ModifiedKeys is not null && ModifiedKeys.Contains(key))
+            return;
+
+        ReadKeys ??= [];
 
         if (ReadKeys.TryGetValue(key, out KeyValueTransactionReadKey? existing))
         {

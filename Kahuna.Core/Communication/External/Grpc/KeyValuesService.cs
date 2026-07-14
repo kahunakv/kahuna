@@ -1455,7 +1455,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             request.PrefixKey,
             new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
             (KeyValueDurability)request.Durability,
-            context.CancellationToken
+            context.CancellationToken,
+            request.CoordinatorKey,
+            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
         );
 
         GrpcGetByBucketResponse response = new()
@@ -1551,7 +1553,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             request.Limit,
             new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
             (KeyValueDurability)request.Durability,
-            context.CancellationToken);
+            context.CancellationToken,
+            request.CoordinatorKey,
+            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow));
 
         GrpcGetByRangeResponse response = new()
         {

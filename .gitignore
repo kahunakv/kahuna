@@ -11,6 +11,7 @@ Kahuna.Tests/.idea
 Kahuna.Client.Tests/obj
 Kahuna.Client.Tests/bin
 Kahuna.Client.Tests/.idea
+Kahuna.Client.Tests/TestResults/
 Kahuna.Server.Tests/obj
 Kahuna.Server.Tests/bin
 Kahuna.Server.Tests/.idea

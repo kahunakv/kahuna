@@ -140,6 +140,17 @@ internal static class OperationDigest
         return hash.GetHashAndReset();
     }
 
+    internal static byte[] ForRangeScan(string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability)
+    {
+        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        AppendTag(hash, OperationKind.Scan);
+        AppendBounds(hash, prefix, startKey, startInclusive, endKey, endInclusive);
+        AppendInt(hash, limit);
+        AppendHlc(hash, readTimestamp);
+        AppendInt(hash, (int)durability);
+        return hash.GetHashAndReset();
+    }
+
     internal static byte[] ForRead(OperationKind kind, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability)
     {
         using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
