@@ -108,6 +108,12 @@ public sealed class KahunaManager : IKahuna, IDisposable
 
         SnapshotFloorStore snapshotFloorStore = new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
 
+        // One completion-receipt store shared between the background writer (which snapshots it durably at
+        // checkpoint time) and the key-value layer (which records and consults receipts), mirroring how the
+        // snapshot-floor store is shared. The writer is spawned before the KeyValuesManager exists, so the
+        // single instance is created here and injected into both.
+        CompletionReceiptStore completionReceiptStore = new(configuration.StoragePath, configuration.StorageRevision, logger);
+
         // Late-bound bridge so the background writer can acknowledge flushes back to the key-value
         // layer; the writer is spawned before the KeyValuesManager exists, so it is wired below.
         FlushNotificationSink flushNotificationSink = new();
@@ -117,13 +123,14 @@ public sealed class KahunaManager : IKahuna, IDisposable
             raft,
             persistenceBackend,
             snapshotFloorStore,
+            completionReceiptStore,
             configuration,
             logger,
             flushNotificationSink
         );
 
         this.locks = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);
-        this.keyValues = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger, snapshotFloorStore);
+        this.keyValues = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger, snapshotFloorStore, completionReceiptStore);
 
         // Now that the key-value router exists, route flush acknowledgements to the owning actor so
         // it can advance FlushedRevision (making committed-but-unflushed entries eligible for eviction).
@@ -1224,6 +1231,13 @@ public sealed class KahunaManager : IKahuna, IDisposable
 
     /// <summary>Partition-scoped durable coordinator decision records. Diagnostic/test access.</summary>
     internal CoordinatorDecisionStore CoordinatorDecisionStore => keyValues.CoordinatorDecisionStore;
+
+    /// <summary>
+    /// Runs one per-partition-leader recovery sweep over outstanding decision records (normally driven by the
+    /// periodic recovery actor and data-partition leadership acquisition). Exposed for deterministic testing.
+    /// </summary>
+    internal Task RecoverOutstandingDecisions(TimeSpan retentionTtl, CancellationToken cancellationToken)
+        => keyValues.RecoverOutstandingDecisions(retentionTtl, cancellationToken);
 
     /// <summary>
     /// Commits the transaction identified by <paramref name="handle"/>.

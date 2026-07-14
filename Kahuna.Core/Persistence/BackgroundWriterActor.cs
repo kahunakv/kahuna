@@ -3,6 +3,7 @@ using Nixie;
 using Kommander;
 using System.Diagnostics;
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Persistence.Logging;
@@ -53,6 +54,8 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     private readonly IPersistenceBackend persistenceBackend;
 
     private readonly SnapshotFloorStore? snapshotFloorStore;
+
+    private readonly CompletionReceiptStore? completionReceiptStore;
 
     private readonly KahunaConfiguration configuration;
 
@@ -132,6 +135,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         IRaft raft,
         IPersistenceBackend persistenceBackend,
         SnapshotFloorStore? snapshotFloorStore,
+        CompletionReceiptStore? completionReceiptStore,
         KahunaConfiguration configuration,
         ILogger<IKahuna> logger,
         FlushNotificationSink flushNotificationSink
@@ -140,6 +144,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         this.raft = raft;
         this.persistenceBackend = persistenceBackend;
         this.snapshotFloorStore = snapshotFloorStore;
+        this.completionReceiptStore = completionReceiptStore;
         this.configuration = configuration;
         this.logger = logger;
         this.flushNotificationSink = flushNotificationSink;
@@ -212,7 +217,14 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
         if (!pendingCheckpoint)
             return;
-        
+
+        // Capture the completion receipts durably before any partition's checkpoint advances the WAL
+        // retention floor: past the floor the receipt-bearing committed log entry is compacted away and can
+        // no longer be replayed, so the on-disk snapshot is what carries the receipt across a cold restart.
+        // Every dirty key-value write has already flushed (guarded above), so the snapshot is consistent
+        // with the backend.
+        completionReceiptStore?.PersistSnapshot();
+
         HashSet<int> partitionsToRemove = [];
         
         DateTime currentTime = DateTime.UtcNow;

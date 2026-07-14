@@ -106,6 +106,9 @@ internal sealed class CoordinatorDecisionStore : IDisposable
     public bool TryGet(HLCTimestamp transactionId, out CoordinatorDecisionRecord record) =>
         records.TryGetValue(transactionId, out record!);
 
+    /// <summary>A point-in-time snapshot of every record, for the per-partition-leader recovery sweep.</summary>
+    public IReadOnlyList<CoordinatorDecisionRecord> SnapshotAll() => records.Values.ToList();
+
     /// <summary>Records whose anchor currently routes into <c>[startKey, endKey)</c> (ordinal, half-open).</summary>
     public IReadOnlyList<CoordinatorDecisionRecord> SnapshotRange(string? startKey, string? endKey)
     {
