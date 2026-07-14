@@ -818,6 +818,15 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             if (CommitMutationsFault is not null && CommitMutationsFault(transactionId, key))
                 return (KeyValueResponseType.MustRetry, 0);
 
+            // Test seam: let the commit apply on the remote leader (so the value, receipt, and — for an anchor —
+            // the durable decision are all installed there) but hide its success from the caller as MustRetry.
+            // This models a committed-but-lost/covered response: the coordinator cannot tell the commit landed.
+            if (CommitMutationsResponseFault is not null && CommitMutationsResponseFault(transactionId, key))
+            {
+                await kahunaNode.TryCommitMutations(transactionId, key, ticketId, durability);
+                return (KeyValueResponseType.MustRetry, 0);
+            }
+
             return await kahunaNode.TryCommitMutations(transactionId, key, ticketId, durability);
         }
 
@@ -901,8 +910,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     public async Task<(KeyValueResponseType, long)> TryRollbackMutations(string node, HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            RollbackObserver?.Invoke(transactionId, key);
             return await kahunaNode.TryRollbackMutations(transactionId, key, ticketId, durability);
-        
+        }
+
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
@@ -924,6 +936,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
 
             foreach ((string key, HLCTimestamp ticketId, KeyValueDurability durability) in xkeys)
             {
+                RollbackObserver?.Invoke(transactionId, key);
                 (KeyValueResponseType type, long commitIndex) = await kahunaNode.TryRollbackMutations(transactionId, key, ticketId, durability);
                 bag.Add((type, key, commitIndex, durability));
             }
@@ -1074,6 +1087,21 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// secondary stays pending — and prove recovery drives that surviving prepare to completion.
     /// </summary>
     public Func<HLCTimestamp, string, bool>? CommitMutationsFault { get; set; }
+
+    /// <summary>
+    /// When set and it returns true for a given (transactionId, key), the inter-node <see cref="TryCommitMutations"/>
+    /// call lets the commit apply on the remote leader — installing the value, receipt, and (for an anchor) the
+    /// durable decision record — but returns <c>MustRetry</c> to the caller, hiding the success. Models a
+    /// committed-but-lost response so the coordinator must consult the durable record instead of assuming failure.
+    /// </summary>
+    public Func<HLCTimestamp, string, bool>? CommitMutationsResponseFault { get; set; }
+
+    /// <summary>
+    /// When set, invoked for every (transactionId, key) whose rollback is issued over the inter-node transport,
+    /// just before it reaches the remote leader. Lets a test observe that a prepared participant's ticket was
+    /// actually driven to rollback — as opposed to being orphaned by a rollback that threw before issuing any RPC.
+    /// </summary>
+    public Action<HLCTimestamp, string>? RollbackObserver { get; set; }
 
     public async Task<TransactionWorkingSet?> GetTransactionWorkingSet(string node, string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken)
     {
