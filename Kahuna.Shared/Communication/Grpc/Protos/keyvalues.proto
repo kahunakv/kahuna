@@ -1172,6 +1172,10 @@ message GrpcCompletionReceiptEntry {
 
 message GrpcImportCompletionReceiptsRequest {
   repeated GrpcCompletionReceiptEntry Receipts = 1;
+  // Data partition whose Raft log the receipts must be replicated onto so every replica of the
+  // destination range holds them after a split/merge handoff. Zero when the message is reused as an
+  // on-disk snapshot container (no destination routing needed).
+  int32 DestinationPartitionId = 2;
 }
 
 message GrpcImportCompletionReceiptsResponse {
@@ -1181,6 +1185,9 @@ message GrpcImportCompletionReceiptsResponse {
 // A batch of coordinator decision records serialized as one CoordinatorDecisionSnapshotMessage blob.
 message GrpcImportCoordinatorDecisionsRequest {
   bytes Records = 1;
+  // Data partition whose Raft log the decision records must be replicated onto so every replica of
+  // the destination range holds them after a split/merge handoff.
+  int32 DestinationPartitionId = 2;
 }
 
 message GrpcImportCoordinatorDecisionsResponse {

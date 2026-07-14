@@ -2077,7 +2077,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return new GrpcImportRangeLocksResponse { Success = true };
     }
 
-    internal Task<GrpcImportCompletionReceiptsResponse> ImportCompletionReceiptsInternal(GrpcImportCompletionReceiptsRequest request, ServerCallContext context)
+    internal async Task<GrpcImportCompletionReceiptsResponse> ImportCompletionReceiptsInternal(GrpcImportCompletionReceiptsRequest request, ServerCallContext context)
     {
         List<CompletionReceiptRecord> receipts = new(request.Receipts.Count);
 
@@ -2090,17 +2090,19 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 (KeyValueDurability)entry.Durability));
         }
 
-        keyValues.ImportCompletionReceipts(receipts);
-        return Task.FromResult(new GrpcImportCompletionReceiptsResponse { Success = true });
+        // The forwarding node routed here because this node is the destination partition leader: replicate
+        // the handoff onto that partition's log and report whether it was durable so the caller gates cutover.
+        bool durable = await keyValues.ImportCompletionReceiptsReplicated(request.DestinationPartitionId, receipts);
+        return new GrpcImportCompletionReceiptsResponse { Success = durable };
     }
 
-    internal Task<GrpcImportCoordinatorDecisionsResponse> ImportCoordinatorDecisionsInternal(GrpcImportCoordinatorDecisionsRequest request, ServerCallContext context)
+    internal async Task<GrpcImportCoordinatorDecisionsResponse> ImportCoordinatorDecisionsInternal(GrpcImportCoordinatorDecisionsRequest request, ServerCallContext context)
     {
         IReadOnlyList<CoordinatorDecisionRecord> records =
             CoordinatorDecisionStore.DeserializeRecords(request.Records.ToByteArray());
 
-        keyValues.ImportCoordinatorDecisions(records);
-        return Task.FromResult(new GrpcImportCoordinatorDecisionsResponse { Success = true });
+        bool durable = await keyValues.ImportCoordinatorDecisionsReplicated(request.DestinationPartitionId, records);
+        return new GrpcImportCoordinatorDecisionsResponse { Success = durable };
     }
 
     internal Task<GrpcAcquireSnapshotHoldResponse> AcquireSnapshotHoldInternal(

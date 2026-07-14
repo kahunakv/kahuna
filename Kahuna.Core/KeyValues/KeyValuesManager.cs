@@ -79,6 +79,14 @@ internal sealed class KeyValuesManager : IDisposable
 
     private readonly CompletionReceiptStore completionReceiptStore;
 
+    /// <summary>
+    /// Test-only injection point: when set and it returns true for a destination partition,
+    /// <see cref="ImportCompletionReceiptsReplicated"/> reports failure without replicating, simulating a
+    /// split/merge receipt handoff that could not be made durable so cutover must abort. Never wired in
+    /// production paths.
+    /// </summary>
+    internal Func<int, bool>? ReplicateReceiptImportFault { get; set; }
+
     private readonly CoordinatorDecisionStore coordinatorDecisionStore;
 
     private readonly IActorRef<CoordinatorDecisionRecoveryActor, CoordinatorDecisionRecoveryRequest> coordinatorDecisionRecovery;
@@ -849,6 +857,9 @@ internal sealed class KeyValuesManager : IDisposable
         if (log.LogType == ReplicationTypes.CoordinatorDecision)
             return Task.FromResult(coordinatorDecisionStore.Restore(partitionId, log));
 
+        if (log.LogType == ReplicationTypes.CompletionReceipt)
+            return Task.FromResult(completionReceiptStore.Restore(partitionId, log));
+
         return Task.FromResult(log.LogType != ReplicationTypes.KeyValues || restorer.Restore(partitionId, log));
     }
 
@@ -877,6 +888,9 @@ internal sealed class KeyValuesManager : IDisposable
 
         if (log.LogType == ReplicationTypes.CoordinatorDecision)
             return Task.FromResult(coordinatorDecisionStore.Replicate(partitionId, log));
+
+        if (log.LogType == ReplicationTypes.CompletionReceipt)
+            return Task.FromResult(completionReceiptStore.Replicate(partitionId, log));
 
         return Task.FromResult(log.LogType != ReplicationTypes.KeyValues || replicator.Replicate(partitionId, log));
     }
@@ -3712,37 +3726,66 @@ internal sealed class KeyValuesManager : IDisposable
     internal IReadOnlyCollection<CompletionReceiptRecord> GetLocalCompletionReceiptsForRange(string? startKey, string? endKey)
         => completionReceiptStore.SnapshotRange(startKey, endKey);
 
-    /// <summary>Records transferred completion receipts into this node's local store.</summary>
+    /// <summary>Records transferred completion receipts into this node's local store (state-transfer seeding).</summary>
     internal void ImportCompletionReceipts(IReadOnlyCollection<CompletionReceiptRecord> receiptsToImport)
         => completionReceiptStore.ImportRange(receiptsToImport);
 
     /// <summary>
-    /// Routes completion receipts to the leader of <paramref name="partitionId"/>, injecting them into
-    /// that node's receipt store. Forwards via IPC when this node is not the leader. Used by split/merge
-    /// so a re-commit routed to the destination partition after cutover finds its receipt.
+    /// Replicates moved completion receipts onto the destination partition's Raft log, so every replica of
+    /// the destination range holds them and a destination-leader change right after cutover still resolves a
+    /// re-commit as <c>Committed</c>. Records them locally on success for immediate read-your-writes (the
+    /// committed entry re-records idempotently on this node's own apply and on every follower). Returns whether
+    /// the handoff was durable; a false return must abort the split/merge cutover.
     /// </summary>
-    internal async Task ImportCompletionReceiptsToPartitionLeaderAsync(
+    internal async Task<bool> ImportCompletionReceiptsReplicated(
         int partitionId,
         IReadOnlyCollection<CompletionReceiptRecord> receiptsToImport,
         CancellationToken cancellationToken)
     {
         if (receiptsToImport.Count == 0)
-            return;
+            return true;
+
+        if (ReplicateReceiptImportFault is not null && ReplicateReceiptImportFault(partitionId))
+            return false;
+
+        byte[] data = CompletionReceiptStore.SerializeImport(receiptsToImport, partitionId);
+
+        RaftReplicationResult result = await raft.ReplicateLogs(
+            partitionId, ReplicationTypes.CompletionReceipt, data, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        if (!result.Success)
+        {
+            logger.LogWarning(
+                "Failed to replicate completion-receipt handoff Partition={Partition} Status={Status}",
+                partitionId, result.Status);
+            return false;
+        }
+
+        completionReceiptStore.ImportRange(receiptsToImport);
+        return true;
+    }
+
+    /// <summary>
+    /// Routes moved completion receipts to the leader of <paramref name="partitionId"/> for a replicated
+    /// handoff. Forwards via IPC when this node is not the leader. Returns whether the handoff was durable on
+    /// the destination partition; used by split/merge to gate cutover.
+    /// </summary>
+    internal async Task<bool> ImportCompletionReceiptsToPartitionLeaderAsync(
+        int partitionId,
+        IReadOnlyCollection<CompletionReceiptRecord> receiptsToImport,
+        CancellationToken cancellationToken)
+    {
+        if (receiptsToImport.Count == 0)
+            return true;
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
-        {
-            ImportCompletionReceipts(receiptsToImport);
-            return;
-        }
+            return await ImportCompletionReceiptsReplicated(partitionId, receiptsToImport, cancellationToken).ConfigureAwait(false);
 
         string leader = await raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
         if (leader == raft.GetLocalEndpoint())
-        {
-            ImportCompletionReceipts(receiptsToImport);
-            return;
-        }
+            return await ImportCompletionReceiptsReplicated(partitionId, receiptsToImport, cancellationToken).ConfigureAwait(false);
 
-        await interNodeCommunication.ImportCompletionReceipts(leader, receiptsToImport, cancellationToken).ConfigureAwait(false);
+        return await interNodeCommunication.ImportCompletionReceipts(leader, partitionId, receiptsToImport, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -3752,37 +3795,42 @@ internal sealed class KeyValuesManager : IDisposable
     internal IReadOnlyList<CoordinatorDecisionRecord> GetLocalDecisionsForRange(string? startKey, string? endKey)
         => coordinatorDecisionStore.SnapshotRange(startKey, endKey);
 
-    /// <summary>Merges transferred decision records into this node's local store.</summary>
+    /// <summary>Merges transferred decision records into this node's local store (state-transfer seeding).</summary>
     internal void ImportCoordinatorDecisions(IReadOnlyCollection<CoordinatorDecisionRecord> recordsToImport)
         => coordinatorDecisionStore.ImportRecords(recordsToImport);
 
     /// <summary>
-    /// Routes decision records to the leader of <paramref name="partitionId"/>, merging them into that
-    /// node's decision store. Forwards via IPC when this node is not the leader. Used by split/merge so a
-    /// re-drive or finalize routed to the destination partition after cutover finds its record.
+    /// Replicates moved decision records onto the destination partition's Raft log, so every replica of the
+    /// destination range holds them and a destination-leader change right after cutover preserves the record.
+    /// Returns whether the handoff was durable; a false return must abort the split/merge cutover.
     /// </summary>
-    internal async Task ImportCoordinatorDecisionsToPartitionLeaderAsync(
+    internal Task<bool> ImportCoordinatorDecisionsReplicated(
+        int partitionId,
+        IReadOnlyCollection<CoordinatorDecisionRecord> recordsToImport,
+        CancellationToken cancellationToken)
+        => coordinatorDecisionStore.ReplicateImportToPartitionAsync(partitionId, recordsToImport, cancellationToken);
+
+    /// <summary>
+    /// Routes moved decision records to the leader of <paramref name="partitionId"/> for a replicated handoff.
+    /// Forwards via IPC when this node is not the leader. Returns whether the handoff was durable on the
+    /// destination partition; used by split/merge to gate cutover.
+    /// </summary>
+    internal async Task<bool> ImportCoordinatorDecisionsToPartitionLeaderAsync(
         int partitionId,
         IReadOnlyCollection<CoordinatorDecisionRecord> recordsToImport,
         CancellationToken cancellationToken)
     {
         if (recordsToImport.Count == 0)
-            return;
+            return true;
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
-        {
-            ImportCoordinatorDecisions(recordsToImport);
-            return;
-        }
+            return await ImportCoordinatorDecisionsReplicated(partitionId, recordsToImport, cancellationToken).ConfigureAwait(false);
 
         string leader = await raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
         if (leader == raft.GetLocalEndpoint())
-        {
-            ImportCoordinatorDecisions(recordsToImport);
-            return;
-        }
+            return await ImportCoordinatorDecisionsReplicated(partitionId, recordsToImport, cancellationToken).ConfigureAwait(false);
 
-        await interNodeCommunication.ImportCoordinatorDecisions(leader, recordsToImport, cancellationToken).ConfigureAwait(false);
+        return await interNodeCommunication.ImportCoordinatorDecisions(leader, partitionId, recordsToImport, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

@@ -1327,6 +1327,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
             ReplicationTypes.RangeMap => await keyValues.OnLogRestored(partitionId, log),
             ReplicationTypes.SnapshotFloor => await keyValues.OnLogRestored(partitionId, log),
             ReplicationTypes.CoordinatorDecision => await keyValues.OnLogRestored(partitionId, log),
+            ReplicationTypes.CompletionReceipt => await keyValues.OnLogRestored(partitionId, log),
             ReplicationTypes.Locks => await locks.OnLogRestored(partitionId, log),
             _ => true
         };
@@ -1340,6 +1341,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
             ReplicationTypes.RangeMap => await keyValues.OnReplicationReceived(partitionId, log),
             ReplicationTypes.SnapshotFloor => await keyValues.OnReplicationReceived(partitionId, log),
             ReplicationTypes.CoordinatorDecision => await keyValues.OnReplicationReceived(partitionId, log),
+            ReplicationTypes.CompletionReceipt => await keyValues.OnReplicationReceived(partitionId, log),
             ReplicationTypes.Locks => await locks.OnReplicationReceived(partitionId, log),
             _ => true
         };
@@ -1429,6 +1431,12 @@ public sealed class KahunaManager : IKahuna, IDisposable
         keyValues.ImportCoordinatorDecisions(records);
         return Task.CompletedTask;
     }
+
+    public Task<bool> ImportCompletionReceiptsReplicated(int partitionId, IReadOnlyCollection<CompletionReceiptRecord> receipts) =>
+        keyValues.ImportCompletionReceiptsReplicated(partitionId, receipts, CancellationToken.None);
+
+    public Task<bool> ImportCoordinatorDecisionsReplicated(int partitionId, IReadOnlyCollection<CoordinatorDecisionRecord> records) =>
+        keyValues.ImportCoordinatorDecisionsReplicated(partitionId, records, CancellationToken.None);
 
     /// <summary>Resolves a key to its owning <c>(partitionId, generation)</c> (key-order router).</summary>
     internal (int PartitionId, long Generation) LocateRange(string key) => keyValues.LocateRange(key);

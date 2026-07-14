@@ -2,8 +2,10 @@
 using System.Collections.Concurrent;
 
 using Google.Protobuf;
+using Kommander.Data;
 using Kommander.Time;
 
+using Kahuna.Server.Replication;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues;
@@ -121,6 +123,73 @@ internal sealed class CompletionReceiptStore
         foreach (CompletionReceiptRecord record in records)
             Record(record.TransactionId, record.Key, record.RecordAnchorKey, record.Durability);
     }
+
+    /// <summary>
+    /// Serializes a batch of receipts to hand to a destination partition as one replicated log entry. The
+    /// wire type is shared with the on-disk snapshot container; <paramref name="destinationPartitionId"/> is
+    /// carried only so the apply side knows nothing extra is needed (routing is already resolved).
+    /// </summary>
+    public static byte[] SerializeImport(IReadOnlyCollection<CompletionReceiptRecord> records, int destinationPartitionId)
+    {
+        GrpcImportCompletionReceiptsRequest message = new() { DestinationPartitionId = destinationPartitionId };
+        foreach (CompletionReceiptRecord record in records)
+        {
+            GrpcCompletionReceiptEntry entry = new()
+            {
+                TransactionIdNode     = record.TransactionId.N,
+                TransactionIdPhysical = record.TransactionId.L,
+                TransactionIdCounter  = record.TransactionId.C,
+                Key                   = record.Key,
+                Durability            = (int)record.Durability,
+            };
+            if (record.RecordAnchorKey is not null)
+                entry.RecordAnchorKey = record.RecordAnchorKey;
+            message.Receipts.Add(entry);
+        }
+        return message.ToByteArray();
+    }
+
+    /// <summary>Applies a batch of receipts replayed from a WAL restore of a split/merge handoff entry.</summary>
+    public bool Restore(int partitionId, RaftLog log) => Apply(partitionId, log);
+
+    /// <summary>Applies a batch of receipts committed to a destination partition's Raft log (follower / leader echo).</summary>
+    public bool Replicate(int partitionId, RaftLog log) => Apply(partitionId, log);
+
+    // Records every receipt carried by a split/merge handoff entry. Idempotent: Record keeps the first
+    // receipt, so a re-delivery or a replay of the same entry after a restart converges.
+    private bool Apply(int partitionId, RaftLog log)
+    {
+        if (log.LogType != ReplicationTypes.CompletionReceipt || log.LogData is null)
+            return true;
+
+        try
+        {
+            GrpcImportCompletionReceiptsRequest message = GrpcImportCompletionReceiptsRequest.Parser.ParseFrom(log.LogData);
+            foreach (GrpcCompletionReceiptEntry entry in message.Receipts)
+                Record(
+                    new HLCTimestamp(entry.TransactionIdNode, entry.TransactionIdPhysical, entry.TransactionIdCounter),
+                    entry.Key,
+                    entry.HasRecordAnchorKey ? entry.RecordAnchorKey : null,
+                    (KeyValueDurability)entry.Durability);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError(ex, "Failed to apply completion-receipt handoff on partition {Partition}", partitionId);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Applies a receipt-handoff batch through the follower/restore apply path, for tests that assert the
+    /// handoff reaches every replica. Mirrors exactly what a replicated receipt entry does on a follower.
+    /// </summary>
+    internal bool ApplyImportForTest(int partitionId, IReadOnlyCollection<CompletionReceiptRecord> records) =>
+        Replicate(partitionId, new RaftLog
+        {
+            LogType = ReplicationTypes.CompletionReceipt,
+            LogData = SerializeImport(records, partitionId)
+        });
 
     /// <summary>
     /// Snapshot of the receipts whose key falls in <c>[startKey, endKey)</c> (ordinal), or all receipts

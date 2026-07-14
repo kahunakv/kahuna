@@ -125,6 +125,9 @@ internal sealed class RangeMerger
         // the survivor after the merge are still blocked by any live range locks.
         // The pre-cutover import is followed by a post-cutover confirm-and-reimport loop
         // (EnsureLocksOnDestinationLeaderAsync) to handle a left-leadership change during the window.
+        // Range locks are actor-local (not Raft-replicated); their transfer stays best-effort and is hardened
+        // after cutover by the confirm-and-reimport loop. Correctness metadata (receipts, decisions) is not
+        // best-effort — see below.
         List<KeyValueRangeLock> clampedLocks = [];
 
         try
@@ -139,29 +142,48 @@ internal sealed class RangeMerger
 
             if (clampedLocks.Count > 0)
                 await manager.ImportRangeLocksToPartitionLeaderAsync(keySpace, left.PartitionId, clampedLocks, ct);
-
-            // Transfer completion receipts for [B,C) into the survivor so a re-commit routed to the
-            // survivor after cutover resolves Committed. Node-local, like the locks above.
-            IReadOnlyCollection<CompletionReceiptRecord> movedReceipts =
-                manager.GetLocalCompletionReceiptsForRange(right.StartKey, right.EndKey);
-
-            if (movedReceipts.Count > 0)
-                await manager.ImportCompletionReceiptsToPartitionLeaderAsync(left.PartitionId, movedReceipts, ct);
-
-            // Move all decision records anchored in [B,C) to the survivor so a re-drive/finalize routed
-            // there after cutover finds its record. Node-local replicated state, idempotent by tx id.
-            IReadOnlyCollection<CoordinatorDecisionRecord> movedDecisions =
-                manager.GetLocalDecisionsForRange(right.StartKey, right.EndKey);
-
-            if (movedDecisions.Count > 0)
-                await manager.ImportCoordinatorDecisionsToPartitionLeaderAsync(left.PartitionId, movedDecisions, ct);
         }
         catch (Exception ex)
         {
             logger.LogWarning(ex,
-                "RangeMerger: lock transfer from P{Right} to P{Left} failed (best-effort; merge continues)",
+                "RangeMerger: range-lock transfer from P{Right} to P{Left} failed (best-effort; merge continues)",
                 right.PartitionId, left.PartitionId);
             clampedLocks = [];
+        }
+
+        // Replicate the moved range's completion receipts and decision records onto the survivor's Raft log so
+        // every replica of P1 holds them — a re-commit, re-drive, or finalize routed to the survivor after
+        // cutover resolves correctly even if P1's leader changes. Unlike the range-lock transfer this is NOT
+        // best-effort: the survivor becomes the sole route for [B,C) at cutover and P2 is retired, so a lost
+        // receipt/decision would be lost for good. A non-durable handoff aborts the merge before cutover.
+        try
+        {
+            IReadOnlyCollection<CompletionReceiptRecord> movedReceipts =
+                manager.GetLocalCompletionReceiptsForRange(right.StartKey, right.EndKey);
+
+            if (!await manager.ImportCompletionReceiptsToPartitionLeaderAsync(left.PartitionId, movedReceipts, ct))
+            {
+                logger.LogError(
+                    "RangeMerger: completion-receipt handoff to P{Left} not durable — aborting merge before cutover", left.PartitionId);
+                return MergeOutcome.TransferFailed;
+            }
+
+            IReadOnlyCollection<CoordinatorDecisionRecord> movedDecisions =
+                manager.GetLocalDecisionsForRange(right.StartKey, right.EndKey);
+
+            if (!await manager.ImportCoordinatorDecisionsToPartitionLeaderAsync(left.PartitionId, movedDecisions, ct))
+            {
+                logger.LogError(
+                    "RangeMerger: coordinator-decision handoff to P{Left} not durable — aborting merge before cutover", left.PartitionId);
+                return MergeOutcome.TransferFailed;
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex,
+                "RangeMerger: correctness-metadata handoff from P{Right} to P{Left} threw — aborting merge before cutover",
+                right.PartitionId, left.PartitionId);
+            return MergeOutcome.TransferFailed;
         }
 
         // -- 3. Atomic cutover ----------------------------------------------------
