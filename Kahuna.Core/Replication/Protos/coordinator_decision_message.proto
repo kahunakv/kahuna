@@ -24,10 +24,27 @@ message CoordinatorParticipantMessage {
   bool   receiptReleased = 7;
 }
 
-// One frozen non-modified-read/lock cleanup effect and its release progress.
+// The shape of a frozen cleanup effect, selecting how it is released on replay.
+enum CoordinatorCleanupKindMessage {
+  COORDINATOR_CLEANUP_KEY_RELEASE = 0; // ticket-free exclusive-lock/read-MVCC release on a single key
+  COORDINATOR_CLEANUP_PREFIX_LOCK = 1; // exclusive prefix-lock release
+  COORDINATOR_CLEANUP_RANGE_LOCK  = 2; // exclusive range-lock release over the frozen bounds
+}
+
+// One frozen non-modified-read/lock cleanup effect and its release progress. key is the point/read key for
+// KEY_RELEASE and the key-space prefix for the prefix/range kinds; the range bounds apply only to
+// RANGE_LOCK. startKeyNull/endKeyNull carry the nullability of the (proto3-non-nullable) range bounds.
 message CoordinatorCleanupEffectMessage {
-  string effect = 1;
-  bool   released = 2;
+  CoordinatorCleanupKindMessage kind = 1;
+  string key = 2;
+  int32  durability = 3; // KeyValueDurability
+  string startKey = 4;
+  bool   startInclusive = 5;
+  string endKey = 6;
+  bool   endInclusive = 7;
+  bool   startKeyNull = 8;
+  bool   endKeyNull = 9;
+  bool   released = 10;
 }
 
 // A durable coordinator decision record, keyed by transaction id. RecordAnchorKey is the logical key

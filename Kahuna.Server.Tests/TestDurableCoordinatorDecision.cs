@@ -107,6 +107,59 @@ public sealed class TestDurableCoordinatorDecision
         Assert.Equal(expected, e!.Value);
     }
 
+    // Registers a non-modified point lock on the transaction's coordinator working set.
+    private static async Task AcquireLockInTxn(EmbeddedKahunaNode node, TransactionHandle handle, string key, KeyValueDurability durability)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (KeyValueResponseType type, _, _, _) = await node.Kahuna.LocateAndTryAcquireExclusiveLock(
+            handle.TransactionId, key, 30_000, durability, ct,
+            coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+        Assert.Equal(KeyValueResponseType.Locked, type);
+    }
+
+    // Registers a held prefix lock on the transaction's coordinator working set.
+    private static async Task AcquirePrefixLockInTxn(EmbeddedKahunaNode node, TransactionHandle handle, string prefix, KeyValueDurability durability)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        KeyValueResponseType type = await node.Kahuna.LocateAndTryAcquireExclusivePrefixLock(
+            handle.TransactionId, prefix, 30_000, durability, ct,
+            coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+        Assert.Equal(KeyValueResponseType.Locked, type);
+    }
+
+    // Registers a held range lock on the transaction's coordinator working set.
+    private static async Task AcquireRangeLockInTxn(
+        EmbeddedKahunaNode node, TransactionHandle handle, string prefix,
+        string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (KeyValueResponseType type, _) = await node.Kahuna.LocateAndTryAcquireRangeLock(
+            handle.TransactionId, prefix, startKey, startInclusive, endKey, endInclusive, 30_000, durability,
+            RangeLockMode.Exclusive, ct, coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+        Assert.Equal(KeyValueResponseType.Locked, type);
+    }
+
+    // Records a non-modified tracked read on the transaction's coordinator working set.
+    private static async Task ReadInTxn(EmbeddedKahunaNode node, TransactionHandle handle, string key, KeyValueDurability durability)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (KeyValueResponseType type, _) = await node.Kahuna.LocateAndTryGetValue(
+            handle.TransactionId, key, -1, HLCTimestamp.Zero, durability, ct,
+            coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+        Assert.True(type is KeyValueResponseType.Get or KeyValueResponseType.DoesNotExist);
+    }
+
+    // Probes whether an exclusive lock on the key is currently held by another transaction: a fresh transaction
+    // that cannot acquire it (AlreadyLocked) means it is held; Locked means it is free.
+    private static async Task<KeyValueResponseType> ProbeExclusiveLock(EmbeddedKahunaNode node, string probeCoordinatorKey, string key, KeyValueDurability durability)
+    {
+        (KeyValueResponseType _, TransactionHandle probe) = await StartDurable(node, probeCoordinatorKey);
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (KeyValueResponseType type, _, _, _) = await node.Kahuna.LocateAndTryAcquireExclusiveLock(
+            probe.TransactionId, key, 5_000, durability, ct);
+        return type;
+    }
+
     // ── A durable multi-key commit installs a Completed record anchored on the data partition ──────────────
 
     [Fact]
@@ -244,6 +297,206 @@ public sealed class TestDurableCoordinatorDecision
         Assert.Equal(KeyValueResponseType.Aborted, commitResult);
     }
 
+    // ── A non-durable Completed transition holds the client at MustRetry until recovery finishes it ─────────
+
+    [Fact]
+    public async Task DurableCommit_CompletedTransitionNotDurable_ReportsMustRetryUntilRecoveryCompletes()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = new(EmbeddedOptions());
+        await node.StartAsync(ct);
+
+        const string anchorKey = "durable:progress:aaa";
+        const string key2      = "durable:progress:bbb";
+        const string key3      = "durable:progress:ccc";
+        byte[] v1 = "one"u8.ToArray();
+        byte[] v2 = "two"u8.ToArray();
+        byte[] v3 = "three"u8.ToArray();
+
+        (KeyValueResponseType startType, TransactionHandle handle) = await StartDurable(node, "durable-progress-1");
+        Assert.Equal(KeyValueResponseType.Set, startType);
+        HLCTimestamp txId = handle.TransactionId;
+
+        await WriteInTxn(node, handle, anchorKey, v1, KeyValueDurability.Persistent);
+        await WriteInTxn(node, handle, key2, v2, KeyValueDurability.Persistent);
+        await WriteInTxn(node, handle, key3, v3, KeyValueDurability.Persistent);
+
+        // Block only the Completed transition from becoming durable. Participant acks (recorded under the
+        // CommitDecided status) still persist, so every value commits — but the decision cannot reach Completed.
+        Store(node).UpsertFault = rec => rec.Status == CoordinatorDecisionStatus.Completed;
+
+        (KeyValueResponseType commitResult, _) = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
+
+        // The client is told MustRetry, never Committed: a definite commit is only reported once the decision is
+        // durably Completed.
+        Assert.Equal(KeyValueResponseType.MustRetry, commitResult);
+
+        // Every participant did commit, and the record is fully acknowledged but stuck below Completed.
+        await AssertValueCommitted(node, anchorKey, v1);
+        await AssertValueCommitted(node, key2, v2);
+        await AssertValueCommitted(node, key3, v3);
+
+        Assert.True(Store(node).TryGet(txId, out CoordinatorDecisionRecord stuck));
+        Assert.Equal(CoordinatorDecisionStatus.CommitDecided, stuck.Status);
+        Assert.True(stuck.AllParticipantsAcked);
+
+        // Once the transition can persist again, recovery drives the outstanding record to Completed.
+        Store(node).UpsertFault = null;
+        await ((KahunaManager)node.Kahuna).RecoverOutstandingDecisions(TimeSpan.FromMinutes(5), ct);
+
+        CoordinatorDecisionRecord? completed = await WaitForDecision(node, txId, CoordinatorDecisionStatus.Completed);
+        Assert.NotNull(completed);
+        Assert.True(completed!.AllParticipantsAcked);
+    }
+
+    // ── A participant ack that never becomes durable keeps its completion receipt (its proof of commit) held ─
+
+    [Fact]
+    public async Task DurableCommit_AckUpsertNotDurable_KeepsCompletionReceiptUntilRecoveryCompletes()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = new(EmbeddedOptions());
+        await node.StartAsync(ct);
+
+        const string anchorKey = "durable:receipt:aaa";
+        const string key2      = "durable:receipt:bbb";
+        byte[] v1 = "one"u8.ToArray();
+        byte[] v2 = "two"u8.ToArray();
+
+        (KeyValueResponseType startType, TransactionHandle handle) = await StartDurable(node, "durable-receipt-1");
+        Assert.Equal(KeyValueResponseType.Set, startType);
+        HLCTimestamp txId = handle.TransactionId;
+
+        await WriteInTxn(node, handle, anchorKey, v1, KeyValueDurability.Persistent);
+        await WriteInTxn(node, handle, key2, v2, KeyValueDurability.Persistent);
+
+        // Block every progress upsert. The secondary commits on its participant (recording a completion receipt),
+        // but its ack never becomes durable — so the receipt, the proof of that commit, must stay held: forgetting
+        // it before the ack is durable would strand the record "unacked" with its proof gone, and recovery (which
+        // re-drives only non-acked participants and resolves an already-applied commit through the still-held
+        // receipt) could never complete it.
+        Store(node).UpsertFault = _ => true;
+
+        (KeyValueResponseType commitResult, _) = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
+        Assert.Equal(KeyValueResponseType.MustRetry, commitResult);
+
+        // The values committed regardless of the progress-write failure.
+        await AssertValueCommitted(node, anchorKey, v1);
+        await AssertValueCommitted(node, key2, v2);
+
+        // The un-acknowledged participant's completion receipt is still present.
+        CompletionReceiptStore receipts = ((KahunaManager)node.Kahuna).CompletionReceiptStore;
+        Assert.True(receipts.Contains(txId, key2), "secondary receipt was forgotten before its ack was durable");
+
+        // Once upserts can persist, recovery records the acks durably, then forgets the receipts and completes.
+        Store(node).UpsertFault = null;
+        await ((KahunaManager)node.Kahuna).RecoverOutstandingDecisions(TimeSpan.FromMinutes(5), ct);
+
+        CoordinatorDecisionRecord? completed = await WaitForDecision(node, txId, CoordinatorDecisionStatus.Completed);
+        Assert.NotNull(completed);
+        Assert.False(receipts.Contains(txId, key2), "receipt should be forgotten once the ack is durable");
+    }
+
+    // ── A held cleanup lock is not stranded on coordinator crash: recovery replays it and Completed waits ──
+
+    [Fact]
+    public async Task DurableCommit_CleanupLockHeldOnCrash_IsReplayedByRecovery_AndCompletedWaits()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = new(EmbeddedOptions());
+        await node.StartAsync(ct);
+
+        const string anchorKey = "durable:cleanup:aaa";
+        const string lockKey   = "durable:cleanup:held";
+        byte[] v1 = "one"u8.ToArray();
+
+        (KeyValueResponseType startType, TransactionHandle handle) = await StartDurable(node, "durable-cleanup-1");
+        Assert.Equal(KeyValueResponseType.Set, startType);
+        HLCTimestamp txId = handle.TransactionId;
+
+        // Write the anchor (the sole participant) and hold an exclusive lock on a key it does not modify — a
+        // non-modified point lock is a frozen cleanup effect, not a participant.
+        await WriteInTxn(node, handle, anchorKey, v1, KeyValueDurability.Persistent);
+        await AcquireLockInTxn(node, handle, lockKey, KeyValueDurability.Persistent);
+
+        // Model a coordinator that dies right after the decision is durable but before it drives cleanup: block
+        // every decision-store progress upsert. The anchor still commits and installs the decision (that path does
+        // not upsert), so the transaction is durably committed, but the cleanup release is never recorded and the
+        // lock stays held.
+        Store(node).UpsertFault = _ => true;
+
+        (KeyValueResponseType commitResult, _) = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
+
+        // Completion waits on cleanup: the client is told MustRetry, never Committed, while the lock is outstanding.
+        Assert.Equal(KeyValueResponseType.MustRetry, commitResult);
+        await AssertValueCommitted(node, anchorKey, v1);
+
+        Assert.True(Store(node).TryGet(txId, out CoordinatorDecisionRecord stuck));
+        Assert.Equal(CoordinatorDecisionStatus.CommitDecided, stuck.Status);
+        CoordinatorCleanupEffect stuckEffect = Assert.Single(stuck.CleanupEffects);
+        Assert.Equal(CoordinatorCleanupKind.KeyRelease, stuckEffect.Kind);
+        Assert.Equal(lockKey, stuckEffect.Key);
+        Assert.False(stuckEffect.Released);
+
+        // The lock really is still held: a different transaction cannot acquire it.
+        Assert.Equal(KeyValueResponseType.AlreadyLocked, await ProbeExclusiveLock(node, "probe-held", lockKey, KeyValueDurability.Persistent));
+
+        // Recovery replays the frozen cleanup: it releases the lock, records the release, and completes.
+        Store(node).UpsertFault = null;
+        await ((KahunaManager)node.Kahuna).RecoverOutstandingDecisions(TimeSpan.FromMinutes(5), ct);
+
+        CoordinatorDecisionRecord? completed = await WaitForDecision(node, txId, CoordinatorDecisionStatus.Completed);
+        Assert.NotNull(completed);
+        Assert.True(completed!.AllCleanupReleased);
+
+        // The lock is now free: another transaction can acquire it.
+        Assert.Equal(KeyValueResponseType.Locked, await ProbeExclusiveLock(node, "probe-free", lockKey, KeyValueDurability.Persistent));
+    }
+
+    // ── A durable commit inline-releases every frozen cleanup kind and reaches Completed with them released ──
+
+    [Fact]
+    public async Task DurableCommit_FreezesAndReleasesReadPrefixAndRangeCleanup_ReachingCompleted()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = new(EmbeddedOptions());
+        await node.StartAsync(ct);
+
+        const string anchorKey  = "durable:kinds:aaa";
+        const string readKey    = "durable:kinds:read";
+        const string prefixKey  = "durable:kinds:prefix/";
+        const string rangePrefix = "durable:kinds:range";
+        byte[] v1 = "one"u8.ToArray();
+
+        (KeyValueResponseType startType, TransactionHandle handle) = await StartDurable(node, "durable-kinds-1");
+        Assert.Equal(KeyValueResponseType.Set, startType);
+        HLCTimestamp txId = handle.TransactionId;
+
+        await WriteInTxn(node, handle, anchorKey, v1, KeyValueDurability.Persistent);
+        await ReadInTxn(node, handle, readKey, KeyValueDurability.Persistent);
+        await AcquirePrefixLockInTxn(node, handle, prefixKey, KeyValueDurability.Persistent);
+        await AcquireRangeLockInTxn(node, handle, rangePrefix, "a", true, "z", false, KeyValueDurability.Persistent);
+
+        (KeyValueResponseType commitResult, string? committedAnchor) =
+            await node.Kahuna.LocateAndCommitTransaction(handle, ct);
+
+        // With every frozen cleanup effect releasable inline, the commit reaches a definite Committed and the
+        // record is durably Completed with every effect released.
+        Assert.Equal(KeyValueResponseType.Committed, commitResult);
+        Assert.Equal(anchorKey, committedAnchor);
+
+        CoordinatorDecisionRecord? completed = await WaitForDecision(node, txId, CoordinatorDecisionStatus.Completed);
+        Assert.NotNull(completed);
+        Assert.True(completed!.AllCleanupReleased);
+
+        // Every non-modified cleanup kind is present and released; the modified anchor is a participant, not a
+        // cleanup effect.
+        Assert.Contains(completed.CleanupEffects, e => e.Kind == CoordinatorCleanupKind.KeyRelease && e.Key == readKey);
+        Assert.Contains(completed.CleanupEffects, e => e.Kind == CoordinatorCleanupKind.PrefixLock && e.Key == prefixKey);
+        Assert.Contains(completed.CleanupEffects, e => e.Kind == CoordinatorCleanupKind.RangeLock && e.Key == rangePrefix);
+        Assert.DoesNotContain(completed.CleanupEffects, e => e.Key == anchorKey);
+    }
+
     // ── The initial record replicates to every node from the one committed anchor proposal ─────────────────
 
     private sealed record ClusterNode(RaftManager Raft, KahunaManager Kahuna);
@@ -362,8 +615,16 @@ public sealed class TestDurableCoordinatorDecision
 
             (KeyValueResponseType commitResult, string? committedAnchor) =
                 await coord.Kahuna.LocateAndCommitTransaction(handle, ct);
-            Assert.Equal(KeyValueResponseType.Committed, commitResult);
-            Assert.Equal(anchorKey, committedAnchor);
+
+            // The anchor commit installs and replicates the decision regardless of whether this coordinator node
+            // also leads the anchor's data partition. When it does, the progress upserts persist locally and the
+            // commit reports Committed; when it does not, the progress delta cannot be replicated from a follower,
+            // so the commit reports MustRetry and leaves the anchor leader's recovery driver to complete the
+            // decision — it never falsely reports Committed on a non-durable progress write. Either way the initial
+            // CommitDecided record — the point of this test — rides the one committed anchor proposal to every node.
+            Assert.Contains(commitResult, new[] { KeyValueResponseType.Committed, KeyValueResponseType.MustRetry });
+            if (commitResult == KeyValueResponseType.Committed)
+                Assert.Equal(anchorKey, committedAnchor);
 
             // The initial CommitDecided record — the frozen participant set with the anchor already acknowledged
             // — rides the one committed anchor proposal and replicates to every node.

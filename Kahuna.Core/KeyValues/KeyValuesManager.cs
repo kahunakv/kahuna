@@ -3831,20 +3831,55 @@ internal sealed class KeyValuesManager : IDisposable
     internal void WakeDecisionRecovery()
         => coordinatorDecisionRecovery.Send(new CoordinatorDecisionRecoveryRequest());
 
+    /// <summary>
+    /// Releases one frozen decision cleanup effect — a non-modified point/read release, prefix lock, or range
+    /// lock — via the ticket-free release path (routed to the effect key's current partition leader), returning
+    /// whether the response is positive proof the effect is gone. Idempotent: re-releasing an already-released
+    /// effect returns proof (<c>DoesNotExist</c>/<c>AlreadyLocked</c>), so both the live commit and recovery may
+    /// drive it repeatedly. Shared by the coordinator commit path and the per-partition recovery driver.
+    /// </summary>
+    internal async Task<bool> TryReleaseCleanupEffectAsync(
+        HLCTimestamp transactionId, CoordinatorCleanupEffect effect, CancellationToken cancellationToken)
+    {
+        switch (effect.Kind)
+        {
+            case CoordinatorCleanupKind.PrefixLock:
+            {
+                KeyValueResponseType type = await LocateAndTryReleaseExclusivePrefixLock(
+                    transactionId, effect.Key, effect.Durability, cancellationToken).ConfigureAwait(false);
+                return TransactionCoordinator.IsReleaseAcked(type);
+            }
+            case CoordinatorCleanupKind.RangeLock:
+            {
+                KeyValueResponseType type = await LocateAndTryReleaseExclusiveRangeLock(
+                    transactionId, effect.Key, effect.StartKey, effect.StartInclusive, effect.EndKey, effect.EndInclusive,
+                    effect.Durability, cancellationToken).ConfigureAwait(false);
+                return TransactionCoordinator.IsReleaseAcked(type);
+            }
+            default:
+            {
+                (KeyValueResponseType type, string _) = await LocateAndTryReleaseExclusiveLock(
+                    transactionId, effect.Key, effect.Durability, cancellationToken).ConfigureAwait(false);
+                return TransactionCoordinator.IsReleaseAcked(type);
+            }
+        }
+    }
+
     private async Task DriveDecisionRecord(
         CoordinatorDecisionRecord record, HLCTimestamp now, TimeSpan retentionTtl, CancellationToken cancellationToken)
     {
-        List<CoordinatorParticipant> updated = new(record.Participants.Count);
-        bool changed = false;
+        // Stage 1: re-drive every not-yet-acknowledged participant and durably record the resulting acks (and the
+        // Completed transition) with all receipts still held. The commit is idempotent: an already-applied commit
+        // resolves via the participant's completion receipt, and a lost prepare (leader changed since) returns
+        // MustRetry — left non-acked for a later sweep, never forced. A receipt must not be forgotten until the
+        // ack is durable, or a crash between the two strands the record "unacked" with its proof already gone.
+        List<CoordinatorParticipant> ackedParticipants = new(record.Participants.Count);
+        bool ackChanged = false;
 
         foreach (CoordinatorParticipant participant in record.Participants)
         {
             bool acked = participant.Acked;
-            bool released = participant.ReceiptReleased;
 
-            // Re-drive a participant that has not been acknowledged. The commit is idempotent: an already-applied
-            // commit resolves via the participant's completion receipt, and a lost prepare (leader changed since)
-            // returns MustRetry — left non-acked for a later sweep, never forced.
             if (!acked)
             {
                 (KeyValueResponseType response, long _) = await LocateAndTryCommitMutations(
@@ -3854,35 +3889,89 @@ internal sealed class KeyValuesManager : IDisposable
                 if (response == KeyValueResponseType.Committed)
                 {
                     acked = true;
-                    changed = true;
+                    ackChanged = true;
                 }
             }
 
-            // Release the completion receipt only after the participant is acknowledged on the record.
-            if (acked && !released)
+            ackedParticipants.Add(participant with { Acked = acked });
+        }
+
+        // Stage 1.5: replay every not-yet-released frozen cleanup effect (idempotent), recording proof-of-release.
+        // A crashed coordinator's non-modified point/read releases, prefix locks, and range locks are recovered
+        // here so they never strand; an effect whose partition briefly has no leader stays unreleased for a later
+        // sweep. Completion is gated on these as well as on participant acks.
+        List<CoordinatorCleanupEffect> releasedEffects = new(record.CleanupEffects.Count);
+        bool cleanupChanged = false;
+        foreach (CoordinatorCleanupEffect effect in record.CleanupEffects)
+        {
+            bool released = effect.Released;
+            if (!released && await TryReleaseCleanupEffectAsync(record.TransactionId, effect, cancellationToken).ConfigureAwait(false))
             {
-                completionReceiptStore.Forget(record.TransactionId, participant.Key);
                 released = true;
-                changed = true;
+                cleanupChanged = true;
             }
 
-            updated.Add(participant with { Acked = acked, ReceiptReleased = released });
+            releasedEffects.Add(effect with { Released = released });
         }
 
         CoordinatorDecisionStatus status = record.Status;
         HLCTimestamp completedAt = record.CompletedAt;
-        if (status == CoordinatorDecisionStatus.CommitDecided && updated.All(static p => p.Acked))
+        bool statusChanged = false;
+        if (status == CoordinatorDecisionStatus.CommitDecided &&
+            ackedParticipants.All(static p => p.Acked) &&
+            releasedEffects.All(static e => e.Released))
         {
             status = CoordinatorDecisionStatus.Completed;
             completedAt = now;
-            changed = true;
+            statusChanged = true;
         }
 
         CoordinatorDecisionRecord current = record;
-        if (changed)
+        if (ackChanged || cleanupChanged || statusChanged)
         {
-            current = record with { Participants = updated, Status = status, CompletedAt = completedAt };
-            await coordinatorDecisionStore.UpsertAsync(current, expectedGeneration: 0, cancellationToken).ConfigureAwait(false);
+            CoordinatorDecisionRecord updated = record with
+            {
+                Participants = ackedParticipants,
+                CleanupEffects = releasedEffects,
+                Status = status,
+                CompletedAt = completedAt
+            };
+            CoordinatorDecisionMutationResult upsertResult =
+                await coordinatorDecisionStore.UpsertAsync(updated, expectedGeneration: 0, cancellationToken).ConfigureAwait(false);
+
+            // The progress is not durable: forget nothing and leave the record at its last durable state; the next
+            // sweep re-drives the idempotent commit/release (the still-held receipt keeps a commit resolvable).
+            if (upsertResult != CoordinatorDecisionMutationResult.Applied)
+                return;
+
+            current = updated;
+        }
+
+        // Stages 2 and 3: the acks are durable, so forgetting each acknowledged participant's receipt is now safe;
+        // record the release on the durable record (best-effort — reconciled by a later idempotent sweep).
+        List<CoordinatorParticipant> releasedParticipants = new(current.Participants.Count);
+        bool releaseChanged = false;
+        foreach (CoordinatorParticipant participant in current.Participants)
+        {
+            bool released = participant.ReceiptReleased;
+            if (participant.Acked && !released)
+            {
+                completionReceiptStore.Forget(record.TransactionId, participant.Key);
+                released = true;
+                releaseChanged = true;
+            }
+
+            releasedParticipants.Add(participant with { ReceiptReleased = released });
+        }
+
+        if (releaseChanged)
+        {
+            CoordinatorDecisionRecord releasedRecord = current with { Participants = releasedParticipants };
+            CoordinatorDecisionMutationResult releaseResult =
+                await coordinatorDecisionStore.UpsertAsync(releasedRecord, expectedGeneration: 0, cancellationToken).ConfigureAwait(false);
+
+            if (releaseResult == CoordinatorDecisionMutationResult.Applied)
+                current = releasedRecord;
         }
 
         // Purge a completed record only after the retention window and once every receipt release is confirmed.

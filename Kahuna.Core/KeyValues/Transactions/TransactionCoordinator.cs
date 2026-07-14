@@ -1422,8 +1422,9 @@ internal sealed class TransactionCoordinator
         }
 
         // 2. Build the initial decision: anchor already acknowledged (its commit is the ack), the rest pending.
-        //    The cleanup plan is empty here — read/lock cleanup runs inline in the finalize; recording it as
-        //    frozen effects for recovery replay is handled by the per-partition recovery driver.
+        //    Freeze the non-modified read/lock cleanup plan into the record so a coordinator crash after the
+        //    decision is durable does not strand those locks and read snapshots — recovery replays every effect
+        //    and the record reaches Completed only once each is durably released.
         HLCTimestamp createdAt = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
         List<CoordinatorParticipant> participants = new(prepared.Count + 1)
         {
@@ -1439,7 +1440,7 @@ internal sealed class TransactionCoordinator
             commitId,
             CoordinatorDecisionStatus.CommitDecided,
             participants,
-            [],
+            BuildCleanupPlan(context),
             createdAt,
             HLCTimestamp.Zero);
 
@@ -1464,6 +1465,55 @@ internal sealed class TransactionCoordinator
         // Anchor at position 0: phase two must commit it first to install the decision before any secondary.
         prepared.Insert(0, (anchorKey, anchorTicket, anchorDurability));
         return (true, prepared);
+    }
+
+    /// <summary>
+    /// Freezes the transaction's non-modified read/lock cleanup into the decision record. These mirror exactly
+    /// what the committed-path <see cref="ReleaseWorkingSet"/> would release: point locks and read-MVCC snapshots
+    /// on keys that are <b>not</b> modified (a modified key is a committed participant, released by its commit),
+    /// plus every prefix and range lock. Deduplicated by key so a key that is both read and point-locked yields a
+    /// single ticket-free release. Encoding them here makes the cleanup recoverable if the coordinator dies after
+    /// the decision is durable.
+    /// </summary>
+    private static List<CoordinatorCleanupEffect> BuildCleanupPlan(TransactionContext context)
+    {
+        List<CoordinatorCleanupEffect> effects = [];
+        HashSet<(string, KeyValueDurability)> seenKeys = [];
+        HashSet<(string, KeyValueDurability)> modified = context.ModifiedKeys ?? [];
+
+        if (context.LocksAcquired is not null)
+        {
+            foreach ((string, KeyValueDurability) lockKey in context.LocksAcquired)
+            {
+                if (modified.Contains(lockKey) || !seenKeys.Add(lockKey))
+                    continue;
+                effects.Add(CoordinatorCleanupEffect.ForKey(lockKey.Item1, lockKey.Item2));
+            }
+        }
+
+        if (context.ReadKeys is not null)
+        {
+            foreach ((string, KeyValueDurability) readKey in context.ReadKeys.Keys)
+            {
+                if (modified.Contains(readKey) || !seenKeys.Add(readKey))
+                    continue;
+                effects.Add(CoordinatorCleanupEffect.ForKey(readKey.Item1, readKey.Item2));
+            }
+        }
+
+        if (context.PrefixLocksAcquired is not null)
+        {
+            foreach ((string prefixKey, KeyValueDurability durability) in context.PrefixLocksAcquired)
+                effects.Add(CoordinatorCleanupEffect.ForPrefix(prefixKey, durability));
+        }
+
+        if (context.RangeLocksAcquired is not null)
+        {
+            foreach (RangeLockKey range in context.RangeLocksAcquired.Keys)
+                effects.Add(CoordinatorCleanupEffect.ForRange(range));
+        }
+
+        return effects;
     }
 
     /// <summary>
@@ -1709,7 +1759,8 @@ internal sealed class TransactionCoordinator
             {
                 if (response == KeyValueResponseType.Committed)
                 {
-                    pendingCommits.Remove(key);
+                    // Committed on the participant, but not yet cleared from the pending set: a key is removed
+                    // only after its ack is durably recorded below, so a failed progress upsert re-drives it.
                     newlyAcked.Add(key);
                     continue;
                 }
@@ -1726,9 +1777,21 @@ internal sealed class TransactionCoordinator
                 logger.LogWarning("CommitDurableMutations: participant {Key} failed {Response}; deferring to recovery", key, response);
             }
 
-            // Persist the ack progress for the participants that committed this round before forgetting receipts.
+            // Durably record this round's acks before forgetting any receipt. Only clear the participants whose
+            // ack became durable; if the progress upsert did not apply, keep them pending and retry — the
+            // re-commit is idempotent through the still-held receipt.
             if (newlyAcked.Count > 0)
-                await PersistDecisionProgress(context, newlyAcked, complete: false, cancellationToken);
+            {
+                if (await PersistDecisionProgress(context, newlyAcked, complete: false, cancellationToken))
+                {
+                    foreach (string ackedKey in newlyAcked)
+                        pendingCommits.Remove(ackedKey);
+                }
+                else
+                {
+                    hasTransientFailure = true;
+                }
+            }
 
             if (hasPermanentFailure)
                 break;
@@ -1739,8 +1802,16 @@ internal sealed class TransactionCoordinator
 
         if (pendingCommits.Count == 0)
         {
-            // Every participant acknowledged: mark the record Completed and finish.
-            await PersistDecisionProgress(context, [], complete: true, cancellationToken);
+            // Every participant is durably acknowledged. Mark the record Completed and only report a definite
+            // commit once that transition is itself durable; if it is not, leave the decision outstanding for
+            // recovery and return MustRetry rather than telling the client Committed prematurely.
+            if (!await PersistDecisionProgress(context, [], complete: true, cancellationToken))
+            {
+                logger.LogWarning("CommitDurableMutations: Completed transition not durable for {TransactionId}; deferring to recovery", context.TransactionId);
+                context.Result = new() { Type = KeyValueResponseType.MustRetry, Reason = "Durable decision outstanding; recovery will complete it" };
+                return;
+            }
+
             context.HasOutstandingDurableDecision = false;
 
             if (!context.SetState(KeyValueTransactionState.Committed, KeyValueTransactionState.Committing))
@@ -1758,55 +1829,145 @@ internal sealed class TransactionCoordinator
     }
 
     /// <summary>
-    /// Records ack progress on the anchored decision record: marks the given participants acknowledged (and,
-    /// on <paramref name="complete"/>, transitions the record to <c>Completed</c>), releasing each newly
-    /// acknowledged participant's local completion receipt. The participant set is preserved exactly (only the
-    /// progress flags change) so the anchor-partition upsert passes the frozen-participant-set check.
+    /// Advances ack progress on the anchored decision record in the correct, crash-safe order and returns
+    /// whether the required progress became durable. A participant's completion receipt is its proof of commit;
+    /// forgetting it before the matching ack is durably recorded would, after a crash between the two, leave the
+    /// record saying "unacked" with the proof already gone — recovery would then re-drive that participant
+    /// forever (no intent, no receipt → <c>MustRetry</c>). So this splits into ordered stages:
+    /// <list type="number">
+    /// <item>Replicate the new acks (and, on <paramref name="complete"/>, the <c>Completed</c> status) with the
+    /// receipts still held, and require the upsert to <c>Apply</c>. If it does not, nothing is forgotten and the
+    /// local record stays at the last durable state — the caller must not treat the progress as made.</item>
+    /// <item>Only once the acks are durable, forget each acked participant's local completion receipt.</item>
+    /// <item>Record <c>ReceiptReleased</c> on the durable record. This is best-effort: the acks are already
+    /// durable, so a failure here is reconciled by an idempotent recovery re-forget on a later sweep.</item>
+    /// </list>
+    /// Returns <c>true</c> only when stage 1 applied; <c>false</c> means the caller must keep the affected
+    /// participants pending and retry (the re-commit is idempotent through the still-held receipt).
     /// </summary>
-    private async Task PersistDecisionProgress(
+    private async Task<bool> PersistDecisionProgress(
         TransactionContext context, HashSet<string> ackedKeys, bool complete, CancellationToken cancellationToken)
     {
         CoordinatorDecisionRecord current = context.PreparedDecisionRecord!;
 
-        List<CoordinatorParticipant> updated = new(current.Participants.Count);
+        // Stage 1: durably record the new acks with every receipt still held. The Completed transition is NOT made
+        // here — a decision reaches Completed only once every participant is acked AND every frozen cleanup effect
+        // is durably released, driven in stage 4 below.
+        List<CoordinatorParticipant> ackedParticipants = new(current.Participants.Count);
+        foreach (CoordinatorParticipant participant in current.Participants)
+            ackedParticipants.Add(participant with { Acked = participant.Acked || ackedKeys.Contains(participant.Key) });
+
+        CoordinatorDecisionRecord acked = current with { Participants = ackedParticipants };
+
+        CoordinatorDecisionMutationResult ackResult =
+            await manager.CoordinatorDecisionStore.UpsertAsync(acked, expectedGeneration: 0, cancellationToken);
+
+        if (ackResult != CoordinatorDecisionMutationResult.Applied)
+        {
+            // The ack is not durable. Do not forget any receipt and do not advance the local record past the
+            // durable state — the caller retries, re-driving the idempotent commit.
+            logger.LogWarning("PersistDecisionProgress: ack upsert returned {Result} for {TransactionId}", ackResult, context.TransactionId);
+            return false;
+        }
+
+        context.PreparedDecisionRecord = acked;
+        current = acked;
+
+        // Stages 2 and 3: the acks are durable, so forgetting each acked participant's receipt is now safe (a
+        // re-drive sees the durable ack and will not re-commit), then record the release on the durable record.
+        List<CoordinatorParticipant> releasedParticipants = new(current.Participants.Count);
+        bool anyReleased = false;
         foreach (CoordinatorParticipant participant in current.Participants)
         {
-            bool nowAcked = participant.Acked || ackedKeys.Contains(participant.Key);
             bool released = participant.ReceiptReleased;
-
-            // Forget the local completion receipt once its participant is acknowledged on the record. The
-            // receipt was needed only to resolve an ack-loss re-commit before the decision existed; the
-            // durable record now authorizes forgetting it. Cross-node receipt copies are swept by recovery.
-            if (nowAcked && !released)
+            if (participant.Acked && !released)
             {
                 manager.CompletionReceiptStore.Forget(context.TransactionId, participant.Key);
                 released = true;
+                anyReleased = true;
             }
 
-            updated.Add(participant with { Acked = nowAcked, ReceiptReleased = released });
+            releasedParticipants.Add(participant with { ReceiptReleased = released });
         }
 
-        CoordinatorDecisionStatus status = complete ? CoordinatorDecisionStatus.Completed : current.Status;
-        HLCTimestamp completedAt = complete
+        if (anyReleased)
+        {
+            CoordinatorDecisionRecord releasedRecord = current with { Participants = releasedParticipants };
+            CoordinatorDecisionMutationResult releaseResult =
+                await manager.CoordinatorDecisionStore.UpsertAsync(releasedRecord, expectedGeneration: 0, cancellationToken);
+
+            if (releaseResult == CoordinatorDecisionMutationResult.Applied)
+            {
+                context.PreparedDecisionRecord = releasedRecord;
+                current = releasedRecord;
+            }
+            else
+            {
+                logger.LogWarning("PersistDecisionProgress: receipt-release upsert returned {Result} for {TransactionId}", releaseResult, context.TransactionId);
+            }
+        }
+
+        if (!complete)
+            return true;
+
+        // Stage 4: release the frozen cleanup plan and mark the decision Completed only once every effect's
+        // release is durably acknowledged, so the client is never told Committed while cleanup is outstanding.
+        return await CompleteWhenCleanupDurable(context, cancellationToken);
+    }
+
+    /// <summary>
+    /// Drives the decision's frozen cleanup effects — non-modified point/read releases, prefix and range locks —
+    /// each idempotent, recording proof-of-release on the durable record, and transitions the record to
+    /// <see cref="CoordinatorDecisionStatus.Completed"/> only once every participant is acknowledged and every
+    /// cleanup effect released. Returns <c>true</c> only when the record is durably Completed; a not-yet-releasable
+    /// effect (its partition briefly has no leader) returns <c>false</c> so the caller reports <c>MustRetry</c> and
+    /// recovery finishes the release. The releases mirror the committed-path <see cref="ReleaseWorkingSet"/>, but
+    /// gate completion so a crash cannot strand them.
+    /// </summary>
+    private async Task<bool> CompleteWhenCleanupDurable(TransactionContext context, CancellationToken cancellationToken)
+    {
+        CoordinatorDecisionRecord current = context.PreparedDecisionRecord!;
+
+        List<CoordinatorCleanupEffect> effects = new(current.CleanupEffects.Count);
+        bool changed = false;
+        foreach (CoordinatorCleanupEffect effect in current.CleanupEffects)
+        {
+            bool released = effect.Released;
+            if (!released && await manager.TryReleaseCleanupEffectAsync(context.TransactionId, effect, cancellationToken))
+            {
+                released = true;
+                changed = true;
+            }
+
+            effects.Add(effect with { Released = released });
+        }
+
+        bool nowComplete = current.Participants.All(static p => p.Acked) && effects.All(static e => e.Released);
+
+        if (!changed && current.Status == CoordinatorDecisionStatus.Completed)
+            return true;
+
+        if (!changed && !nowComplete)
+            return false;
+
+        CoordinatorDecisionStatus status = nowComplete ? CoordinatorDecisionStatus.Completed : current.Status;
+        HLCTimestamp completedAt = nowComplete && current.Status != CoordinatorDecisionStatus.Completed
             ? raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId())
             : current.CompletedAt;
 
-        CoordinatorDecisionRecord next = current with
-        {
-            Participants = updated,
-            Status = status,
-            CompletedAt = completedAt
-        };
+        CoordinatorDecisionRecord next = current with { CleanupEffects = effects, Status = status, CompletedAt = completedAt };
 
         CoordinatorDecisionMutationResult result =
             await manager.CoordinatorDecisionStore.UpsertAsync(next, expectedGeneration: 0, cancellationToken);
 
-        // Publish the advanced record for the next batch regardless of the replication outcome: a transient
-        // MustRetry leaves the durable record behind by one ack, which recovery reconciles idempotently.
-        context.PreparedDecisionRecord = next;
-
         if (result != CoordinatorDecisionMutationResult.Applied)
-            logger.LogWarning("PersistDecisionProgress: decision upsert returned {Result} for {TransactionId}", result, context.TransactionId);
+        {
+            logger.LogWarning("PersistDecisionProgress: cleanup/complete upsert returned {Result} for {TransactionId}", result, context.TransactionId);
+            return false;
+        }
+
+        context.PreparedDecisionRecord = next;
+        return nowComplete;
     }
 
     /// <summary>
