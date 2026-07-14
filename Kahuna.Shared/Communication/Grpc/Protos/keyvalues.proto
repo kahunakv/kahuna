@@ -1176,6 +1176,9 @@ message GrpcImportCompletionReceiptsRequest {
   // destination range holds them after a split/merge handoff. Zero when the message is reused as an
   // on-disk snapshot container (no destination routing needed).
   int32 DestinationPartitionId = 2;
+  // When true the batch forgets the listed receipts on every replica of the partition (a durable
+  // coordinator acknowledgement releasing the proof) instead of recording them.
+  bool Forget = 3;
 }
 
 message GrpcImportCompletionReceiptsResponse {

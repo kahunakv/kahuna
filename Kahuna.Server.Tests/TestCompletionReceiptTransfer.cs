@@ -106,12 +106,12 @@ public sealed class TestCompletionReceiptTransfer : BaseCluster
 
             // The destination leader now holds exactly the moved receipts — never the one left behind.
             await WaitUntilAsync(() =>
-                destLeader.CompletionReceiptStore.Contains(tx, MovedLow) &&
-                destLeader.CompletionReceiptStore.Contains(tx, MovedHigh));
+                destLeader.CompletionReceiptStore.Contains(tx, MovedLow, KeyValueDurability.Persistent) &&
+                destLeader.CompletionReceiptStore.Contains(tx, MovedHigh, KeyValueDurability.Persistent));
 
-            Assert.True(destLeader.CompletionReceiptStore.Contains(tx, MovedLow));
-            Assert.True(destLeader.CompletionReceiptStore.Contains(tx, MovedHigh));
-            Assert.False(destLeader.CompletionReceiptStore.Contains(tx, Below));
+            Assert.True(destLeader.CompletionReceiptStore.Contains(tx, MovedLow, KeyValueDurability.Persistent));
+            Assert.True(destLeader.CompletionReceiptStore.Contains(tx, MovedHigh, KeyValueDurability.Persistent));
+            Assert.False(destLeader.CompletionReceiptStore.Contains(tx, Below, KeyValueDurability.Persistent));
         }
         finally
         {
@@ -152,8 +152,8 @@ public sealed class TestCompletionReceiptTransfer : BaseCluster
             // Routing on the leader itself imports locally.
             await leader.KeyValues.ImportCompletionReceiptsToPartitionLeaderAsync(Pid, moved, ct);
 
-            Assert.True(leader.CompletionReceiptStore.Contains(tx, MovedLow));
-            Assert.True(leader.CompletionReceiptStore.Contains(tx, Below)); // seeded here, unaffected
+            Assert.True(leader.CompletionReceiptStore.Contains(tx, MovedLow, KeyValueDurability.Persistent));
+            Assert.True(leader.CompletionReceiptStore.Contains(tx, Below, KeyValueDurability.Persistent)); // seeded here, unaffected
         }
         finally
         {

@@ -2090,9 +2090,12 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 (KeyValueDurability)entry.Durability));
         }
 
-        // The forwarding node routed here because this node is the destination partition leader: replicate
-        // the handoff onto that partition's log and report whether it was durable so the caller gates cutover.
-        bool durable = await keyValues.ImportCompletionReceiptsReplicated(request.DestinationPartitionId, receipts);
+        // The forwarding node routed here because this node is the destination/participant partition leader:
+        // replicate the record (handoff) or forget (durable-acknowledgement release) onto that partition's log
+        // and report whether it was durable so the caller can gate cutover or the receipt release.
+        bool durable = request.Forget
+            ? await keyValues.ForgetCompletionReceiptsReplicated(request.DestinationPartitionId, receipts)
+            : await keyValues.ImportCompletionReceiptsReplicated(request.DestinationPartitionId, receipts);
         return new GrpcImportCompletionReceiptsResponse { Success = durable };
     }
 

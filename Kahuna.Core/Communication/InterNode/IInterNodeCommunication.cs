@@ -103,10 +103,11 @@ public interface IInterNodeCommunication
     public Task ImportRangeLocks(string node, string keySpace, List<KeyValueRangeLock> locks, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Forwards a split/merge receipt handoff to <paramref name="node"/> (the destination partition leader) so it
-    /// replicates them onto <paramref name="partitionId"/>'s Raft log. Returns whether the handoff was durable.
+    /// Forwards a receipt batch to <paramref name="node"/> (the partition leader) so it replicates the record —
+    /// or, when <paramref name="forget"/> is set, the forget — onto <paramref name="partitionId"/>'s Raft log.
+    /// Returns whether the operation was durable on that partition.
     /// </summary>
-    public Task<bool> ImportCompletionReceipts(string node, int partitionId, IReadOnlyCollection<CompletionReceiptRecord> receipts, CancellationToken cancellationToken);
+    public Task<bool> ImportCompletionReceipts(string node, int partitionId, IReadOnlyCollection<CompletionReceiptRecord> receipts, CancellationToken cancellationToken, bool forget = false);
 
     /// <summary>
     /// Forwards a split/merge decision handoff to <paramref name="node"/> (the destination partition leader) so it

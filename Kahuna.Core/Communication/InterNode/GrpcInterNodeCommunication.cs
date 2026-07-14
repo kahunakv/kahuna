@@ -1774,11 +1774,11 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         _ = batchResponse.ImportRangeLocks;
     }
 
-    public async Task<bool> ImportCompletionReceipts(string node, int partitionId, IReadOnlyCollection<CompletionReceiptRecord> receipts, CancellationToken cancellationToken)
+    public async Task<bool> ImportCompletionReceipts(string node, int partitionId, IReadOnlyCollection<CompletionReceiptRecord> receipts, CancellationToken cancellationToken, bool forget = false)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
-        GrpcImportCompletionReceiptsRequest request = new() { DestinationPartitionId = partitionId };
+        GrpcImportCompletionReceiptsRequest request = new() { DestinationPartitionId = partitionId, Forget = forget };
 
         foreach (CompletionReceiptRecord receipt in receipts)
         {

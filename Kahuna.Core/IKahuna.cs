@@ -205,6 +205,13 @@ public interface IKahuna
     /// </summary>
     public Task<bool> ImportCoordinatorDecisionsReplicated(int partitionId, IReadOnlyCollection<CoordinatorDecisionRecord> records);
 
+    /// <summary>
+    /// Replicates a completion-receipt forget onto <paramref name="partitionId"/>'s Raft log on this node (the
+    /// participant partition leader), so every replica drops the proof. Returns whether it was durable; the
+    /// coordinator persists <c>ReceiptReleased</c> only on a durable forget.
+    /// </summary>
+    public Task<bool> ForgetCompletionReceiptsReplicated(int partitionId, IReadOnlyCollection<CompletionReceiptRecord> receipts);
+
     public Task<(KeyValueResponseType, string)> TryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueDurability durability);
     
     public Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability);

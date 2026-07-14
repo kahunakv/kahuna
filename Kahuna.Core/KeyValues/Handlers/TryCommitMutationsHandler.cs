@@ -45,7 +45,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         // replayed on restore. It holds even across a leadership change that erased the prepare state,
         // and regardless of whether the committed value is currently resident or already flushed to
         // disk, so a re-delivered commit resolves Committed up front rather than racing entry loading.
-        if (context.CompletionReceiptStore.Contains(message.TransactionId, message.Key))
+        if (context.CompletionReceiptStore.Contains(message.TransactionId, message.Key, message.Durability))
             return new(KeyValueResponseType.Committed, 0);
 
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());

@@ -1885,18 +1885,19 @@ internal sealed class TransactionCoordinator
         current = acked;
 
         // Stages 2 and 3: the acks are durable, so forgetting each acked participant's receipt is now safe (a
-        // re-drive sees the durable ack and will not re-commit), then record the release on the durable record.
+        // re-drive sees the durable ack and will not re-commit). The forget is replicated on each participant
+        // key's partition so every replica drops the proof; ReceiptReleased is then recorded on the durable record
+        // only for the participants whose forget was durably acknowledged.
+        HashSet<string> forgotten =
+            await manager.ForgetAckedParticipantReceiptsAsync(context.TransactionId, current.Participants, cancellationToken);
+
         List<CoordinatorParticipant> releasedParticipants = new(current.Participants.Count);
         bool anyReleased = false;
         foreach (CoordinatorParticipant participant in current.Participants)
         {
-            bool released = participant.ReceiptReleased;
-            if (participant.Acked && !released)
-            {
-                manager.CompletionReceiptStore.Forget(context.TransactionId, participant.Key);
-                released = true;
+            bool released = participant.ReceiptReleased || forgotten.Contains(participant.Key);
+            if (released != participant.ReceiptReleased)
                 anyReleased = true;
-            }
 
             releasedParticipants.Add(participant with { ReceiptReleased = released });
         }

@@ -764,7 +764,7 @@ public sealed class TestTwoPhaseCommitRecovery
             Assert.Equal(KeyValueResponseType.Committed, commitType);
 
             // The leader recorded the receipt synchronously.
-            Assert.True(leaderNode.Kahuna.CompletionReceiptStore.Contains(txId, key));
+            Assert.True(leaderNode.Kahuna.CompletionReceiptStore.Contains(txId, key, KeyValueDurability.Persistent));
 
             // Every follower records it once the committed record replicates (apply is async).
             await WaitForReceiptOnAllNodes(txId, key, nodes);
@@ -813,7 +813,7 @@ public sealed class TestTwoPhaseCommitRecovery
 
             // The new leader never held the prepare state (write intent + MVCC), but it recorded the
             // receipt as a follower — so the ack-loss re-commit resolves Committed, not MustRetry.
-            Assert.True(newLeader.Kahuna.CompletionReceiptStore.Contains(txId, key));
+            Assert.True(newLeader.Kahuna.CompletionReceiptStore.Contains(txId, key, KeyValueDurability.Persistent));
             (KeyValueResponseType recommitType, long _) =
                 await newLeader.Kahuna.TryCommitMutations(txId, key, ticketId, KeyValueDurability.Persistent);
             Assert.Equal(KeyValueResponseType.Committed, recommitType);
@@ -832,13 +832,13 @@ public sealed class TestTwoPhaseCommitRecovery
 
         while (true)
         {
-            bool all = nodes.All(n => n.Kahuna.CompletionReceiptStore.Contains(txId, key));
+            bool all = nodes.All(n => n.Kahuna.CompletionReceiptStore.Contains(txId, key, KeyValueDurability.Persistent));
             if (all)
                 return;
 
             if (Environment.TickCount64 >= deadline)
             {
-                string present = string.Join(", ", nodes.Select((n, i) => $"n{i}={n.Kahuna.CompletionReceiptStore.Contains(txId, key)}"));
+                string present = string.Join(", ", nodes.Select((n, i) => $"n{i}={n.Kahuna.CompletionReceiptStore.Contains(txId, key, KeyValueDurability.Persistent)}"));
                 Assert.Fail($"Completion receipt for {txId}/{key} not present on all nodes within deadline: {present}");
             }
 

@@ -637,7 +637,7 @@ public sealed class TestEmbeddedKahunaNode
                     txId, key, ticketId, KeyValueDurability.Persistent);
                 Assert.Equal(KeyValueResponseType.Committed, commitType);
 
-                Assert.True(((KahunaManager)first.Kahuna).CompletionReceiptStore.Contains(txId, key));
+                Assert.True(((KahunaManager)first.Kahuna).CompletionReceiptStore.Contains(txId, key, KeyValueDurability.Persistent));
             }
 
             // Cold restart over the same durable WAL + storage: the committed record replays.
@@ -647,10 +647,10 @@ public sealed class TestEmbeddedKahunaNode
             var store = ((KahunaManager)second.Kahuna).CompletionReceiptStore;
 
             long deadline = Environment.TickCount64 + 10_000;
-            while (!store.Contains(txId, key) && Environment.TickCount64 < deadline)
+            while (!store.Contains(txId, key, KeyValueDurability.Persistent) && Environment.TickCount64 < deadline)
                 await Task.Delay(50, ct);
 
-            Assert.True(store.Contains(txId, key), "receipt was not rebuilt from WAL replay after cold restart");
+            Assert.True(store.Contains(txId, key, KeyValueDurability.Persistent), "receipt was not rebuilt from WAL replay after cold restart");
 
             // The re-commit resolves Committed via the rebuilt receipt (the node never re-prepared).
             (KeyValueResponseType recommit, _) = await second.Kahuna.TryCommitMutations(

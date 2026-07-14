@@ -386,7 +386,7 @@ public sealed class TestDurableCoordinatorDecision
 
         // The un-acknowledged participant's completion receipt is still present.
         CompletionReceiptStore receipts = ((KahunaManager)node.Kahuna).CompletionReceiptStore;
-        Assert.True(receipts.Contains(txId, key2), "secondary receipt was forgotten before its ack was durable");
+        Assert.True(receipts.Contains(txId, key2, KeyValueDurability.Persistent), "secondary receipt was forgotten before its ack was durable");
 
         // Once upserts can persist, recovery records the acks durably, then forgets the receipts and completes.
         Store(node).UpsertFault = null;
@@ -394,7 +394,7 @@ public sealed class TestDurableCoordinatorDecision
 
         CoordinatorDecisionRecord? completed = await WaitForDecision(node, txId, CoordinatorDecisionStatus.Completed);
         Assert.NotNull(completed);
-        Assert.False(receipts.Contains(txId, key2), "receipt should be forgotten once the ack is durable");
+        Assert.False(receipts.Contains(txId, key2, KeyValueDurability.Persistent), "receipt should be forgotten once the ack is durable");
     }
 
     // ── A held cleanup lock is not stranded on coordinator crash: recovery replays it and Completed waits ──

@@ -360,16 +360,25 @@ cannot finish is left for recovery and the caller receives `MustRetry` until the
 A persistent participant records a `CompletionReceipt` when its committed value is applied. A
 duplicate commit can consult that receipt after the original MVCC entry and write intent are gone,
 including after replication or restart. This lets recovery distinguish “already committed” from “the
-prepare is missing.”
+prepare is missing.” A receipt lookup validates the full immutable receipt identity — transaction, key,
+durability, and (when the caller carries it) the record anchor — so a persistent receipt never
+satisfies an ephemeral request for the same logical key, and vice versa.
 
 Receipts are restored from the committed key/value log and are also snapshotted before WAL retention
 advances. They are not count-evicted. A receipt may be forgotten only after the anchored decision
-durably acknowledges that participant. Keep this ordering intact when changing progress persistence:
+durably acknowledges that participant. Forgetting is itself a **replicated participant-partition
+operation**, routed to the leader of each participant *key's* partition (where the receipt lives, not
+the anchor's) and applied on every replica via the shared receipt replication entry with a forget flag,
+so followers drop the proof rather than accumulating it. The decision record persists
+`ReceiptReleased=true` for a participant **only after** that replicated forget is durably acknowledged;
+a forget that cannot be made durable leaves the participant pending for a later idempotent sweep.
+Keep this ordering intact when changing progress persistence:
 
 ```text
 participant value + receipt committed
         -> participant acknowledgement persisted on decision record
-        -> receipt may be forgotten
+        -> receipt forget replicated on the participant partition
+        -> ReceiptReleased persisted on decision record
 ```
 
 ### Decision placement and movement
