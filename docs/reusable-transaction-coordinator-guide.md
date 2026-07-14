@@ -460,16 +460,21 @@ When the deadline passes, the reaper claims the same finalize slot as explicit f
 
 | Setting or limit | Default | Purpose |
 |---|---:|---|
-| `TransactionOutcomeRetentionMax` | 10,000 | Strict maximum retained terminal outcomes; a non-positive value disables best-effort outcome retention and removes the durable-decision admission cap. |
+| `TransactionOutcomeRetentionMax` | 10,000 | Strict maximum retained terminal outcomes; a non-positive value disables best-effort outcome retention. Independent of the durable-decision admission budget. |
+| `DurableDecisionOutstandingMax` | 100,000 | Strict maximum **outstanding** durable decision records this node admits; a non-positive value disables the bound. Completed records do not count against it. |
 | `TransactionOutcomeRetentionTtl` | 5 minutes | Age window for terminal outcomes and completed durable decisions; a non-positive value disables age-based removal. |
 | `CollectionInterval` | 60 seconds | Tick interval for the transaction reaper and durable-decision recovery actor. |
 | Pending operations per session | 4,096 | Fixed safety bound; additional registrations receive `RejectedCapacity`. |
 | Participant in-doubt results | 8,192 per node | Fixed bound for normal acknowledgement-loss recovery. |
 | Participant finalize retries | 20 retries, 250 ms apart | Fixed retry window used while committing or rolling back prepared participants. |
 
-Outstanding durable records count toward `TransactionOutcomeRetentionMax`. When that positive cap is
-full, a new durable transaction with modifications is rejected before prepare; the coordinator does
-not evict recovery state to make room.
+Durable admission is bounded by `DurableDecisionOutstandingMax`, counted over **outstanding**
+(not-yet-completed) decision records only — completed records held for the idempotency window are
+evictable retention and never consume admission budget, so retained outcomes do not throttle steady
+durable throughput. A new durable transaction atomically reserves one slot before prepare (concurrent
+admissions can never collectively exceed the budget); when the budget is full it is rejected before
+prepare, and the coordinator never evicts recovery state to make room. This budget is deliberately
+independent of `TransactionOutcomeRetentionMax` (the best-effort terminal-outcome cache).
 
 ---
 

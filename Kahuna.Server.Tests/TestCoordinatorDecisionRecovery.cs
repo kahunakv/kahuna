@@ -34,6 +34,13 @@ public sealed class TestCoordinatorDecisionRecovery
         InitialPartitions = 1,
     };
 
+    private static EmbeddedKahunaOptions TwoPartitionOptions() => new()
+    {
+        Storage = "memory",
+        WalStorage = "memory",
+        InitialPartitions = 2,
+    };
+
     private static CoordinatorDecisionStore Store(EmbeddedKahunaNode node) =>
         ((KahunaManager)node.Kahuna).CoordinatorDecisionStore;
 
@@ -104,6 +111,70 @@ public sealed class TestCoordinatorDecisionRecovery
         Assert.True(manager.CompletionReceiptStore.Contains(txId, anchor, KeyValueDurability.Persistent));
         Assert.True(Store(node).TryGet(txId, out CoordinatorDecisionRecord rec));
         Assert.False(rec.Participants[0].ReceiptReleased);
+    }
+
+    // ── Records anchored to distinct partitions are re-driven concurrently, not head-of-line ──────────────
+
+    /// <summary>
+    /// The recovery sweep groups outstanding records by anchor partition and drives distinct partitions
+    /// concurrently. A participant that consumes the whole phase-two commit timeout stalls only its own
+    /// partition's records — a record anchored to a different partition makes progress in parallel. Proven by
+    /// parking every drive on a latch and asserting both partitions' drives are in flight at once; a serial sweep
+    /// would enter only the first record's drive and never reach the second.
+    /// </summary>
+    [Fact]
+    public async Task Recovery_DrivesDistinctAnchorPartitionsConcurrently()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = new(TwoPartitionOptions());
+        await node.StartAsync(ct);
+
+        KahunaManager manager = (KahunaManager)node.Kahuna;
+
+        string? anchorA = null, anchorB = null;
+        int partA = -1, partB = -1;
+        for (int i = 0; i < 64 && (anchorA is null || anchorB is null); i++)
+        {
+            string anchor = $"crec{i}/key";
+            int partition = manager.GetDataPartitionForKey(anchor);
+            if (anchorA is null) { anchorA = anchor; partA = partition; }
+            else if (partition != partA) { anchorB = anchor; partB = partition; }
+        }
+        Assert.NotNull(anchorA);
+        Assert.NotNull(anchorB);
+        Assert.NotEqual(partA, partB);
+
+        await node.WaitForLeaderForKeyAsync(anchorA!, ct);
+        await node.WaitForLeaderForKeyAsync(anchorB!, ct);
+
+        HLCTimestamp txA = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+        HLCTimestamp txB = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+
+        CoordinatorDecisionRecord Seed(HLCTimestamp txId, string anchor) => new(
+            txId, "coord", anchor, txId, CoordinatorDecisionStatus.CommitDecided,
+            [Participant(anchor, acked: false, released: false)], [], txId, HLCTimestamp.Zero);
+
+        await node.Kahuna.ImportCoordinatorDecisions([Seed(txA, anchorA!), Seed(txB, anchorB!)]);
+
+        TaskCompletionSource enteredA = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource enteredB = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        manager.KeyValues.RecoveryDriveHook = record =>
+        {
+            int partition = manager.GetDataPartitionForKey(record.RecordAnchorKey);
+            if (partition == partA) enteredA.TrySetResult();
+            else if (partition == partB) enteredB.TrySetResult();
+            return release.Task;
+        };
+
+        Task recoverTask = Recover(node, NoPurge);
+
+        // Both partition drives must be in flight at once — a serial sweep would park in the first and never
+        // enter the second, so this await would time out.
+        await Task.WhenAll(enteredA.Task, enteredB.Task).WaitAsync(TimeSpan.FromSeconds(10), ct);
+
+        release.SetResult();
+        await recoverTask.WaitAsync(TimeSpan.FromSeconds(10), ct);
     }
 
     // ── A committed-but-unacked participant is re-driven to acknowledged, completing the decision ──────────

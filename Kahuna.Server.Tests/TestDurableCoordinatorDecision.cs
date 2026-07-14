@@ -31,12 +31,14 @@ namespace Kahuna.Server.Tests;
 [Collection("ClusterTests")]
 public sealed class TestDurableCoordinatorDecision
 {
-    private static EmbeddedKahunaOptions EmbeddedOptions(int outcomeRetentionMax = 10_000) => new()
+    private static EmbeddedKahunaOptions EmbeddedOptions(
+        int outcomeRetentionMax = 10_000, int durableOutstandingMax = 100_000) => new()
     {
         Storage                        = "memory",
         WalStorage                     = "memory",
         InitialPartitions              = 1,
         TransactionOutcomeRetentionMax = outcomeRetentionMax,
+        DurableDecisionOutstandingMax  = durableOutstandingMax,
     };
 
     private static CoordinatorDecisionStore Store(EmbeddedKahunaNode node) =>
@@ -267,15 +269,16 @@ public sealed class TestDurableCoordinatorDecision
         Assert.Null(record);
     }
 
-    // ── A new durable transaction is rejected under decision-store capacity pressure ───────────────────────
+    // ── A new durable transaction is rejected when the outstanding-decision budget is full ─────────────────
 
     [Fact]
-    public async Task DurableCommit_UnderCapacity_RejectsNewDurableTransaction()
+    public async Task DurableCommit_OutstandingBudgetFull_RejectsNewDurableTransaction()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
-        // Cap the decision store at one record and pre-fill it, so a new durable transaction is rejected
-        // rather than cap-evicting the outstanding record.
-        await using EmbeddedKahunaNode node = new(EmbeddedOptions(outcomeRetentionMax: 1));
+        // Cap the durable-decision budget at one outstanding record and pre-fill it with an outstanding
+        // (CommitDecided) record, so a new durable transaction is rejected rather than overshooting the budget.
+        // The generous outcome-retention cap proves admission is governed by the dedicated budget, not that cache.
+        await using EmbeddedKahunaNode node = new(EmbeddedOptions(outcomeRetentionMax: 10_000, durableOutstandingMax: 1));
         await node.StartAsync(ct);
 
         HLCTimestamp seedTx = new(1, 100, 1);
@@ -295,6 +298,54 @@ public sealed class TestDurableCoordinatorDecision
 
         (KeyValueResponseType commitResult, _) = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
         Assert.Equal(KeyValueResponseType.Aborted, commitResult);
+
+        // The refusal is counted for operators, and the anchor value never committed.
+        Assert.True(Store(node).GetCapacityStats().Rejections >= 1);
+        await AssertValueAbsent(node, anchorKey);
+    }
+
+    // ── Completed records held for the idempotency window do not consume durable-admission budget ───────────
+
+    [Fact]
+    public async Task DurableCommit_CompletedRecordsDoNotConsumeBudget_AdmitsNewDurableTransaction()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        // Budget of one outstanding record, pre-filled with a COMPLETED record. Under the old rule (total record
+        // count) this would block a new durable transaction; a completed record is evictable retention, so it must
+        // not occupy the outstanding budget and the new transaction commits.
+        await using EmbeddedKahunaNode node = new(EmbeddedOptions(durableOutstandingMax: 1));
+        await node.StartAsync(ct);
+
+        HLCTimestamp seedTx = new(1, 100, 1);
+        CoordinatorDecisionRecord seed = new(
+            seedTx, "seed-coord", "durable-done:seed", seedTx, CoordinatorDecisionStatus.Completed,
+            [new CoordinatorParticipant("durable-done:seed", KeyValueDurability.Persistent, HLCTimestamp.Zero, true, true)],
+            [], seedTx, seedTx);
+        await node.Kahuna.ImportCoordinatorDecisions([seed]);
+
+        // The completed seed is present but does not count against the outstanding budget.
+        var stats = Store(node).GetCapacityStats();
+        Assert.Equal(0, stats.Outstanding);
+        Assert.Equal(1, stats.Completed);
+
+        const string anchorKey = "durable-done:key";
+        byte[] value = "y"u8.ToArray();
+
+        (KeyValueResponseType startType, TransactionHandle handle) = await StartDurable(node, "durable-coord-done");
+        Assert.Equal(KeyValueResponseType.Set, startType);
+        await WriteInTxn(node, handle, anchorKey, value, KeyValueDurability.Persistent);
+
+        (KeyValueResponseType commitResult, _) = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
+        Assert.Equal(KeyValueResponseType.Committed, commitResult);
+        await AssertValueCommitted(node, anchorKey, value);
+    }
+
+    private static async Task AssertValueAbsent(EmbeddedKahunaNode node, string key)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (KeyValueResponseType r, ReadOnlyKeyValueEntry? e) = await node.Kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+        Assert.True(r == KeyValueResponseType.DoesNotExist || e?.Value is null);
     }
 
     // ── A non-durable Completed transition holds the client at MustRetry until recovery finishes it ─────────

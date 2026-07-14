@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+
 using Kommander;
 using Kommander.Data;
 using Kommander.Time;
@@ -44,10 +46,11 @@ internal enum CoordinatorDecisionMutationResult
 /// routed generation — a stale generation (after a split/merge) returns
 /// <see cref="CoordinatorDecisionMutationResult.MustRetry"/> so the caller re-resolves the anchor.</para>
 ///
-/// <para><b>Single writer.</b> <see cref="UpsertAsync"/> and <see cref="RemoveAsync"/> serialize through
-/// <see cref="mutateGate"/> locally and the data-partition Raft log globally. Followers and restore
-/// replays call <see cref="Replicate"/> / <see cref="Restore"/>, which apply committed deltas without the
-/// gate (Raft delivers them single-threaded and in order).</para>
+/// <para><b>Single writer per partition.</b> <see cref="UpsertAsync"/> and <see cref="RemoveAsync"/>
+/// serialize through the target partition's gate locally and the data-partition Raft log globally, so
+/// mutations to distinct partitions proceed independently. Followers and restore replays call
+/// <see cref="Replicate"/> / <see cref="Restore"/>, which apply committed deltas without the gate (Raft
+/// delivers them single-threaded and in order).</para>
 /// </summary>
 internal sealed class CoordinatorDecisionStore : IDisposable
 {
@@ -63,7 +66,21 @@ internal sealed class CoordinatorDecisionStore : IDisposable
 
     private readonly ILogger<IKahuna> logger;
 
-    private readonly SemaphoreSlim mutateGate = new(1, 1);
+    // One mutation gate per anchor partition, created on first use. A coordinator-driven mutation acquires only
+    // the gate of the partition it targets, held across that partition's Raft replicate await. Scoping the gate
+    // per partition is what keeps a slow or leaderless anchor partition from blocking decision progress on every
+    // other partition — a single node-wide gate would serialize all partitions behind the stalled one.
+    private readonly ConcurrentDictionary<int, SemaphoreSlim> partitionGates = new();
+
+    private SemaphoreSlim GateFor(int partitionId) =>
+        partitionGates.GetOrAdd(partitionId, static _ => new SemaphoreSlim(1, 1));
+
+    /// <summary>
+    /// Test-only injection point: awaited inside the replicate path before the Raft call, keyed by the target
+    /// partition. Lets a test park one partition's mutation (holding only that partition's gate) and prove a
+    /// mutation on another partition still completes. Never wired in production paths.
+    /// </summary>
+    internal Func<int, Task>? BeforeReplicateHook { get; set; }
 
     // Serializes every in-memory publish of the node-global record set. The set is a single copy-on-write
     // dictionary shared across all partitions, but Kommander runs a separate executor per partition, so two
@@ -94,6 +111,34 @@ internal sealed class CoordinatorDecisionStore : IDisposable
     /// </summary>
     private volatile IReadOnlyDictionary<HLCTimestamp, CoordinatorDecisionRecord> records =
         new Dictionary<HLCTimestamp, CoordinatorDecisionRecord>();
+
+    // Increments once per publish that actually rebuilds and swaps the record set. A publish whose delta advances
+    // nothing (the leader's own commit echo of a delta it already eager-published, a Raft re-delivery, a tail
+    // delta replayed below an installed snapshot) is detected as a no-op and skips the O(record-count) copy, so a
+    // steady stream of leader mutations does not pay for the same forward merge twice. Read by tests only.
+    private long publishGeneration;
+
+    internal long PublishGeneration => Interlocked.Read(ref publishGeneration);
+
+    // Durable-decision admission accounting, all maintained under publishLock so they stay consistent with the
+    // record set. outstandingCount = records whose Status is not Completed (correctness-critical, cannot be shed);
+    // completedCount = records held only for the idempotency window (evictable, bounded by their retention TTL and
+    // the recovery purge). reservedCount = admissions granted whose decision is not yet installed. rejectionCount =
+    // durable admissions refused because the bound was full — operator-visible, never reset.
+    private int outstandingCount;
+    private int completedCount;
+    private int reservedCount;
+    private long rejectionCount;
+
+    /// <summary>
+    /// Strict upper bound on outstanding durable decision records this node admits (0 disables the bound). Set from
+    /// <c>KahunaConfiguration.DurableDecisionOutstandingMax</c> after construction; only the coordinator admission
+    /// path reads it. Deliberately independent of the terminal-outcome cache bound.
+    /// </summary>
+    internal int DurableAdmissionCapacity { get; set; }
+
+    private static bool IsOutstanding(CoordinatorDecisionRecord record) =>
+        record.Status != CoordinatorDecisionStatus.Completed;
 
     /// <summary>
     /// Test-only injection point: when set and it returns true for a record, <see cref="UpsertAsync"/>
@@ -180,13 +225,14 @@ internal sealed class CoordinatorDecisionStore : IDisposable
         if (UpsertFault is not null && UpsertFault(record))
             return CoordinatorDecisionMutationResult.MustRetry;
 
-        await mutateGate.WaitAsync(ct).ConfigureAwait(false);
+        (int partitionId, long generation) = resolveAnchorPartition!(record.RecordAnchorKey);
+        if (expectedGeneration != 0 && generation != expectedGeneration)
+            return CoordinatorDecisionMutationResult.MustRetry;
+
+        SemaphoreSlim gate = GateFor(partitionId);
+        await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            (int partitionId, long generation) = resolveAnchorPartition!(record.RecordAnchorKey);
-            if (expectedGeneration != 0 && generation != expectedGeneration)
-                return CoordinatorDecisionMutationResult.MustRetry;
-
             // The participant set is immutable once the decision is written. Progress fields
             // (acked/receiptReleased/status/cleanup) may change; the participant identities and their
             // prepared proposal tickets may not.
@@ -197,13 +243,11 @@ internal sealed class CoordinatorDecisionStore : IDisposable
             // Replicate first, then merge the upsert into the latest record set under the publish lock — a
             // forward-only merge so a stale request-path/recovery/echo write cannot regress an ack, a
             // receipt-release, a cleanup-release, or the CommitDecided → Completed transition.
-            return await ReplicateThenPublish(
-                partitionId, UpsertDelta(record),
-                next => MergeUpsert(next, record), ct).ConfigureAwait(false);
+            return await ReplicateThenPublish(partitionId, UpsertDelta(record), [Upsert(record)], ct).ConfigureAwait(false);
         }
         finally
         {
-            mutateGate.Release();
+            gate.Release();
         }
     }
 
@@ -211,28 +255,31 @@ internal sealed class CoordinatorDecisionStore : IDisposable
     public async Task<CoordinatorDecisionMutationResult> RemoveAsync(
         HLCTimestamp transactionId, string recordAnchorKey, CancellationToken ct)
     {
-        await mutateGate.WaitAsync(ct).ConfigureAwait(false);
+        (int partitionId, _) = resolveAnchorPartition!(recordAnchorKey);
+
+        SemaphoreSlim gate = GateFor(partitionId);
+        await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            (int partitionId, _) = resolveAnchorPartition!(recordAnchorKey);
-
             return await ReplicateThenPublish(
-                partitionId, RemoveDelta(transactionId),
-                next => next.Remove(transactionId), ct).ConfigureAwait(false);
+                partitionId, RemoveDelta(transactionId), [Remove(transactionId)], ct).ConfigureAwait(false);
         }
         finally
         {
-            mutateGate.Release();
+            gate.Release();
         }
     }
 
-    // Caller holds mutateGate. Replicates the delta on the anchor partition, then applies the same mutation
-    // to the latest record set under the publish lock, so the leader reads its own writes immediately (without
-    // waiting for the commit echo) while never losing a concurrent partition's publish.
+    // Caller holds the target partition's gate. Replicates the delta on the anchor partition, then applies the
+    // same mutation to the latest record set under the publish lock, so the leader reads its own writes immediately
+    // (without waiting for the commit echo) while never losing a concurrent partition's publish.
     private async Task<CoordinatorDecisionMutationResult> ReplicateThenPublish(
         int partitionId, CoordinatorDecisionDeltaMessage delta,
-        Action<Dictionary<HLCTimestamp, CoordinatorDecisionRecord>> publish, CancellationToken ct)
+        IReadOnlyList<DecisionOp> ops, CancellationToken ct)
     {
+        if (BeforeReplicateHook is not null)
+            await BeforeReplicateHook(partitionId).ConfigureAwait(false);
+
         byte[] data = ReplicationSerializer.Serialize(delta);
 
         RaftReplicationResult result = await raft.ReplicateLogs(
@@ -250,7 +297,7 @@ internal sealed class CoordinatorDecisionStore : IDisposable
             return CoordinatorDecisionMutationResult.MustRetry;
         }
 
-        PublishUnderLock(publish);
+        ApplyOps(ops);
         return CoordinatorDecisionMutationResult.Applied;
     }
 
@@ -276,8 +323,9 @@ internal sealed class CoordinatorDecisionStore : IDisposable
             // never racing another partition's publish). Idempotent and forward-only by transaction id — a
             // re-delivery or a tail delta replayed below an already-advanced on-disk snapshot merges forward
             // rather than regressing it, and Raft's in-order apply means an upsert cannot resurrect a record a
-            // later remove already retired.
-            PublishUnderLock(next => ApplyDeltaEntries(next, delta));
+            // later remove already retired. A delta that advances nothing (the leader's own commit echo of a
+            // delta it already eager-published) is detected as a no-op and skips the record-set rebuild.
+            ApplyOps(DeltaOps(delta));
             return true;
         }
         catch (Exception ex)
@@ -287,17 +335,15 @@ internal sealed class CoordinatorDecisionStore : IDisposable
         }
     }
 
-    private static void ApplyDeltaEntries(
-        Dictionary<HLCTimestamp, CoordinatorDecisionRecord> target, CoordinatorDecisionDeltaMessage delta)
+    private static IReadOnlyList<DecisionOp> DeltaOps(CoordinatorDecisionDeltaMessage delta)
     {
+        List<DecisionOp> ops = new(delta.Entries.Count);
         foreach (CoordinatorDecisionDeltaEntry entry in delta.Entries)
         {
             CoordinatorDecisionRecord record = FromMessage(entry.Record);
-            if (entry.Remove)
-                target.Remove(record.TransactionId);
-            else
-                MergeUpsert(target, record);
+            ops.Add(entry.Remove ? Remove(record.TransactionId) : Upsert(record));
         }
+        return ops;
     }
 
     // ── Initial install riding the anchor key-value commit ───────────────────────────────────────
@@ -312,7 +358,7 @@ internal sealed class CoordinatorDecisionStore : IDisposable
     /// because the anchor commit precedes those deltas in the anchor partition's single ordered log.
     /// </summary>
     public void InstallFromAnchorCommit(CoordinatorDecisionRecord record)
-        => PublishUnderLock(next => MergeUpsert(next, record));
+        => ApplyOps([Upsert(record)]);
 
     /// <summary>Serializes one record into the anchor commit envelope's embedded-decision blob.</summary>
     public static byte[] SerializeRecord(CoordinatorDecisionRecord record) => SerializeRecords([record]);
@@ -357,11 +403,10 @@ internal sealed class CoordinatorDecisionStore : IDisposable
         if (toMerge.Count == 0)
             return;
 
-        PublishUnderLock(next =>
-        {
-            foreach (CoordinatorDecisionRecord record in toMerge)
-                MergeUpsert(next, record);
-        });
+        List<DecisionOp> ops = new(toMerge.Count);
+        foreach (CoordinatorDecisionRecord record in toMerge)
+            ops.Add(Upsert(record));
+        ApplyOps(ops);
 
         // Imported records arrive by state transfer, not through this partition's WAL, so WAL-tail replay cannot
         // reconstruct them after a restart. Capture the affected partitions' snapshots now so an imported record
@@ -396,25 +441,25 @@ internal sealed class CoordinatorDecisionStore : IDisposable
             return false;
 
         CoordinatorDecisionDeltaMessage delta = new();
+        List<DecisionOp> ops = new(incoming.Count);
         foreach (CoordinatorDecisionRecord record in incoming)
+        {
             delta.Entries.Add(new CoordinatorDecisionDeltaEntry { Remove = false, Record = ToMessage(record) });
+            ops.Add(Upsert(record));
+        }
 
-        await mutateGate.WaitAsync(ct).ConfigureAwait(false);
+        SemaphoreSlim gate = GateFor(destinationPartitionId);
+        await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            CoordinatorDecisionMutationResult result = await ReplicateThenPublish(
-                destinationPartitionId, delta,
-                next =>
-                {
-                    foreach (CoordinatorDecisionRecord record in incoming)
-                        MergeUpsert(next, record);
-                }, ct).ConfigureAwait(false);
+            CoordinatorDecisionMutationResult result =
+                await ReplicateThenPublish(destinationPartitionId, delta, ops, ct).ConfigureAwait(false);
 
             return result == CoordinatorDecisionMutationResult.Applied;
         }
         finally
         {
-            mutateGate.Release();
+            gate.Release();
         }
     }
 
@@ -446,21 +491,197 @@ internal sealed class CoordinatorDecisionStore : IDisposable
 
     // ── In-memory publish + durable snapshot ──────────────────────────────────────────────────
 
-    // Applies one mutation to a copy of the current record set and publishes it, serialized against every
-    // other publish site (leader upsert/remove, follower/restore apply, anchor install, import) so the
-    // node-global copy-on-write set is never lost-updated by a concurrent partition's executor. Purely
-    // synchronous: never holds the lock across an await, so it cannot deadlock with a replicate in flight.
-    private void PublishUnderLock(Action<Dictionary<HLCTimestamp, CoordinatorDecisionRecord>> mutate)
+    // One publish op: an upsert (Record set) or a remove (Record null). Small batches only — a single mutation,
+    // a delta's entries, or a handoff import — never the whole set.
+    private readonly record struct DecisionOp(HLCTimestamp TransactionId, CoordinatorDecisionRecord? Record);
+
+    private static DecisionOp Upsert(CoordinatorDecisionRecord record) => new(record.TransactionId, record);
+
+    private static DecisionOp Remove(HLCTimestamp transactionId) => new(transactionId, null);
+
+    // Applies a small batch of ops to the record set, serialized against every other publish site (leader
+    // upsert/remove, follower/restore apply, anchor install, import) so the node-global copy-on-write set is never
+    // lost-updated by a concurrent partition's executor. Purely synchronous: never holds the lock across an await,
+    // so it cannot deadlock with a replicate in flight.
+    //
+    // The O(record-count) copy-and-swap runs only when at least one op actually changes the set — an insert, a
+    // removal of a present record, or a forward-advancing progress merge. A batch that advances nothing (the
+    // leader's own commit echo of a delta it already eager-published, a Raft re-delivery, a tail delta replayed
+    // below an installed snapshot) is detected against the current set in O(batch) and skips the rebuild entirely,
+    // so a steady stream of leader mutations never pays for the identical forward merge twice.
+    private void ApplyOps(IReadOnlyList<DecisionOp> ops)
     {
+        if (ops.Count == 0)
+            return;
+
         lock (publishLock)
         {
-            Dictionary<HLCTimestamp, CoordinatorDecisionRecord> next = new(records);
-            mutate(next);
+            IReadOnlyDictionary<HLCTimestamp, CoordinatorDecisionRecord> current = records;
+
+            bool changes = false;
+            foreach (DecisionOp op in ops)
+            {
+                if (op.Record is null)
+                {
+                    if (current.ContainsKey(op.TransactionId))
+                    {
+                        changes = true;
+                        break;
+                    }
+                }
+                else if (!current.TryGetValue(op.TransactionId, out CoordinatorDecisionRecord? existing) ||
+                         Advances(existing, op.Record))
+                {
+                    changes = true;
+                    break;
+                }
+            }
+
+            if (!changes)
+                return;
+
+            Dictionary<HLCTimestamp, CoordinatorDecisionRecord> next = new(current);
+            foreach (DecisionOp op in ops)
+            {
+                if (op.Record is null)
+                {
+                    if (next.Remove(op.TransactionId, out CoordinatorDecisionRecord? removed))
+                        AdjustCounts(removed, delta: -1);
+                }
+                else
+                {
+                    bool present = next.TryGetValue(op.TransactionId, out CoordinatorDecisionRecord? before);
+                    MergeUpsert(next, op.Record);
+                    if (!present)
+                        AdjustCounts(next[op.TransactionId], delta: +1);
+                    else
+                    {
+                        // Only the status can change on a forward merge; reflect a CommitDecided → Completed
+                        // transition by moving the record from the outstanding tally to the completed tally.
+                        AdjustCounts(before!, delta: -1);
+                        AdjustCounts(next[op.TransactionId], delta: +1);
+                    }
+                }
+            }
+
             records = next;
+            Interlocked.Increment(ref publishGeneration);
             // No eager per-mutation snapshot: every mutation is already durable in the anchor partition's WAL
             // (a replicated decision delta, or the anchor commit that embeds the install). The on-disk snapshot
             // is written per partition at checkpoint time, gating the WAL retention floor so a compacted entry is
             // always captured first; between checkpoints, WAL-tail replay reconstructs the record set.
+        }
+    }
+
+    // True when applying <paramref name="incoming"/> onto <paramref name="existing"/> would move any monotonic
+    // field forward — exactly the fields MergeForward latches. When it returns false the merge would reproduce the
+    // existing record byte-for-byte, so the publish is a no-op that can skip the record-set rebuild.
+    private static bool Advances(CoordinatorDecisionRecord existing, CoordinatorDecisionRecord incoming)
+    {
+        if ((int)incoming.Status > (int)existing.Status)
+            return true;
+        if (existing.CompletedAt == HLCTimestamp.Zero && incoming.CompletedAt != HLCTimestamp.Zero)
+            return true;
+
+        int participants = Math.Min(existing.Participants.Count, incoming.Participants.Count);
+        for (int i = 0; i < participants; i++)
+        {
+            CoordinatorParticipant e = existing.Participants[i];
+            CoordinatorParticipant n = incoming.Participants[i];
+            if ((!e.Acked && n.Acked) || (!e.ReceiptReleased && n.ReceiptReleased))
+                return true;
+        }
+
+        int cleanup = Math.Min(existing.CleanupEffects.Count, incoming.CleanupEffects.Count);
+        for (int i = 0; i < cleanup; i++)
+            if (!existing.CleanupEffects[i].Released && incoming.CleanupEffects[i].Released)
+                return true;
+
+        return false;
+    }
+
+    // Moves the outstanding/completed tallies by <paramref name="delta"/> (+1 when a record enters the set, -1 when
+    // it leaves) for the bucket matching the record's status. Caller holds publishLock.
+    private void AdjustCounts(CoordinatorDecisionRecord record, int delta)
+    {
+        if (IsOutstanding(record))
+            outstandingCount += delta;
+        else
+            completedCount += delta;
+    }
+
+    // ── Durable-decision admission ─────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Atomically reserves one durable-admission slot when the outstanding-plus-reserved total is below the
+    /// configured capacity, returning a reservation the caller disposes once the transaction's decision is
+    /// installed or its attempt ends. Concurrent callers cannot collectively overshoot the bound: the reserve is
+    /// serialized and counts in-flight reservations, closing the read-then-act race of a bare count check. A
+    /// non-positive capacity disables the bound and always admits. A refused admission increments the rejection
+    /// counter. Only outstanding records count — completed records held for the idempotency window never consume
+    /// admission capacity, so retained outcomes do not throttle steady durable throughput.
+    /// </summary>
+    internal bool TryReserveAdmission(out DurableDecisionReservation? reservation)
+    {
+        lock (publishLock)
+        {
+            int capacity = DurableAdmissionCapacity;
+            if (capacity > 0 && outstandingCount + reservedCount >= capacity)
+            {
+                rejectionCount++;
+                reservation = null;
+                return false;
+            }
+
+            reservedCount++;
+            reservation = new DurableDecisionReservation(this);
+            return true;
+        }
+    }
+
+    private void ReleaseReservation()
+    {
+        lock (publishLock)
+        {
+            if (reservedCount > 0)
+                reservedCount--;
+        }
+    }
+
+    /// <summary>A point-in-time view of durable-admission accounting, for operator diagnostics.</summary>
+    internal DurableDecisionCapacityStats GetCapacityStats()
+    {
+        lock (publishLock)
+        {
+            HLCTimestamp oldestOutstanding = HLCTimestamp.Zero;
+            foreach (CoordinatorDecisionRecord record in records.Values)
+            {
+                if (!IsOutstanding(record))
+                    continue;
+                if (oldestOutstanding == HLCTimestamp.Zero || record.CreatedAt < oldestOutstanding)
+                    oldestOutstanding = record.CreatedAt;
+            }
+
+            return new DurableDecisionCapacityStats(
+                outstandingCount, completedCount, reservedCount, DurableAdmissionCapacity, rejectionCount, oldestOutstanding);
+        }
+    }
+
+    /// <summary>
+    /// One durable-admission slot held from admission until the transaction's decision is installed or its attempt
+    /// ends. Disposing it releases the slot exactly once; a reservation whose transaction commits leaves behind an
+    /// outstanding record that keeps the slot accounted, so releasing the reservation does not free real capacity.
+    /// </summary>
+    internal sealed class DurableDecisionReservation : IDisposable
+    {
+        private CoordinatorDecisionStore? owner;
+
+        internal DurableDecisionReservation(CoordinatorDecisionStore owner) => this.owner = owner;
+
+        public void Dispose()
+        {
+            CoordinatorDecisionStore? released = Interlocked.Exchange(ref owner, null);
+            released?.ReleaseReservation();
         }
     }
 
@@ -618,6 +839,11 @@ internal sealed class CoordinatorDecisionStore : IDisposable
         }
 
         records = loaded;
+
+        // Seed the admission tallies from the reloaded set so a cold restart resumes bounding against the records
+        // it actually holds.
+        foreach (CoordinatorDecisionRecord record in loaded.Values)
+            AdjustCounts(record, delta: +1);
     }
 
     // ── Proto <-> model conversion ─────────────────────────────────────────────────────────────
@@ -737,6 +963,22 @@ internal sealed class CoordinatorDecisionStore : IDisposable
 
     public void Dispose()
     {
-        mutateGate.Dispose();
+        foreach (SemaphoreSlim gate in partitionGates.Values)
+            gate.Dispose();
+        partitionGates.Clear();
     }
 }
+
+/// <summary>
+/// Operator-visible snapshot of durable-decision admission accounting: how many records are outstanding
+/// (correctness-critical) versus completed (evictable retention), how many admission slots are reserved in-flight,
+/// the configured capacity, the running count of admissions refused for capacity, and the creation timestamp of
+/// the oldest outstanding record (<see cref="HLCTimestamp.Zero"/> when none) for age monitoring.
+/// </summary>
+internal readonly record struct DurableDecisionCapacityStats(
+    int Outstanding,
+    int Completed,
+    int Reserved,
+    int Capacity,
+    long Rejections,
+    HLCTimestamp OldestOutstandingCreatedAt);

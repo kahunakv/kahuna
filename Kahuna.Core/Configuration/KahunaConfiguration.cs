@@ -80,6 +80,19 @@ public sealed class KahunaConfiguration
     /// </summary>
     public TimeSpan TransactionOutcomeRetentionTtl { get; set; } = TimeSpan.FromMinutes(5);
 
+    /// <summary>
+    /// Strict upper bound on the number of <b>outstanding</b> durable coordinator decision records — those still
+    /// being driven to completion — that this node admits. It gates admission of a new <c>Durable</c> transaction:
+    /// a slot is reserved atomically before prepare and released once the transaction's decision is installed or
+    /// its attempt ends, so concurrent admissions can never collectively exceed this bound. Only outstanding
+    /// (not-yet-<c>Completed</c>) records count against it; completed records held for the idempotency window are
+    /// bounded separately by <see cref="TransactionOutcomeRetentionTtl"/> and never consume durable-admission
+    /// capacity. This is deliberately decoupled from <see cref="TransactionOutcomeRetentionMax"/> (the best-effort
+    /// terminal-outcome cache), so steady durable throughput is not throttled by retained completed outcomes. A
+    /// value &lt;= 0 <b>disables</b> the bound (unbounded admission).
+    /// </summary>
+    public int DurableDecisionOutstandingMax { get; set; } = 100_000;
+
     public int RevisionsToKeepCached { get; set; }
 
     public TimeSpan CacheEntryTtl { get; set; }

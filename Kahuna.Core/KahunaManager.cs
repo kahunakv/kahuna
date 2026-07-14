@@ -118,7 +118,10 @@ public sealed class KahunaManager : IKahuna, IDisposable
         // at checkpoint time, gating the WAL retention floor) and the key-value layer (which installs, replicates,
         // and drives decision records), mirroring the receipt store. Created here — before the writer is spawned —
         // so the single instance is injected into both; the key-value layer attaches its anchor resolver later.
-        CoordinatorDecisionStore coordinatorDecisionStore = new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
+        CoordinatorDecisionStore coordinatorDecisionStore = new(raft, configuration.StoragePath, configuration.StorageRevision, logger)
+        {
+            DurableAdmissionCapacity = configuration.DurableDecisionOutstandingMax
+        };
 
         // Late-bound bridge so the background writer can acknowledge flushes back to the key-value
         // layer; the writer is spawned before the KeyValuesManager exists, so it is wired below.

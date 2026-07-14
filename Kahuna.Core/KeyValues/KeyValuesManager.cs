@@ -3960,6 +3960,10 @@ internal sealed class KeyValuesManager : IDisposable
 
         HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
+        // Group the outstanding records by the data partition their anchor currently routes to, keeping only the
+        // partitions this node leads. A node drives only records anchored to a data partition it currently leads;
+        // in a standalone (not-joined) node it always drives.
+        Dictionary<int, List<CoordinatorDecisionRecord>> byPartition = [];
         foreach (CoordinatorDecisionRecord record in all)
         {
             if (cancellationToken.IsCancellationRequested)
@@ -3967,20 +3971,61 @@ internal sealed class KeyValuesManager : IDisposable
 
             (int partitionId, _) = locator.LocateRange(record.RecordAnchorKey);
 
-            // A node drives only records anchored to a data partition it currently leads. In a standalone
-            // (not-joined) node it always drives; otherwise the leader check gates it, so exactly one node in a
-            // partition group re-drives a given record.
             if (raft.Joined && !await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
                 continue;
 
-            try
+            if (!byPartition.TryGetValue(partitionId, out List<CoordinatorDecisionRecord>? bucket))
+                byPartition[partitionId] = bucket = [];
+            bucket.Add(record);
+        }
+
+        if (byPartition.Count == 0)
+            return;
+
+        // Drive distinct partitions concurrently (bounded), each partition's records serially. A participant that
+        // consumes the whole phase-two commit timeout stalls only its own partition's remaining records — records
+        // anchored to other partitions make progress in parallel instead of head-of-line blocking behind it.
+        using SemaphoreSlim concurrency = new(Math.Min(MaxConcurrentRecoveryPartitions, byPartition.Count));
+        List<Task> partitionDrives = new(byPartition.Count);
+
+        foreach (List<CoordinatorDecisionRecord> bucket in byPartition.Values)
+        {
+            partitionDrives.Add(DrivePartitionRecordsAsync(bucket, now, retentionTtl, concurrency, cancellationToken));
+        }
+
+        await Task.WhenAll(partitionDrives).ConfigureAwait(false);
+    }
+
+    // Drives one partition's outstanding decision records in order, under the shared cross-partition concurrency
+    // bound. Each record's failure is isolated so one bad record does not abandon the rest of its partition.
+    private async Task DrivePartitionRecordsAsync(
+        IReadOnlyList<CoordinatorDecisionRecord> partitionRecords,
+        HLCTimestamp now,
+        TimeSpan retentionTtl,
+        SemaphoreSlim concurrency,
+        CancellationToken cancellationToken)
+    {
+        await concurrency.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            foreach (CoordinatorDecisionRecord record in partitionRecords)
             {
-                await DriveDecisionRecord(record, now, retentionTtl, cancellationToken).ConfigureAwait(false);
+                if (cancellationToken.IsCancellationRequested)
+                    return;
+
+                try
+                {
+                    await DriveDecisionRecord(record, now, retentionTtl, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "Failed to recover coordinator decision {TransactionId}", record.TransactionId);
+                }
             }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Failed to recover coordinator decision {TransactionId}", record.TransactionId);
-            }
+        }
+        finally
+        {
+            concurrency.Release();
         }
     }
 
@@ -4026,9 +4071,23 @@ internal sealed class KeyValuesManager : IDisposable
         }
     }
 
+    // Caps how many anchor partitions the recovery sweep drives at once. Bounds fan-out (and downstream commit
+    // load) while still letting an unrelated partition make progress instead of blocking behind a stalled one.
+    private const int MaxConcurrentRecoveryPartitions = 8;
+
+    /// <summary>
+    /// Test-only injection point: awaited at the start of each per-record recovery drive, keyed by the record.
+    /// Lets a test park one partition's drive and prove another partition's drive runs concurrently rather than
+    /// head-of-line blocking behind it. Never wired in production paths.
+    /// </summary>
+    internal Func<CoordinatorDecisionRecord, Task>? RecoveryDriveHook { get; set; }
+
     private async Task DriveDecisionRecord(
         CoordinatorDecisionRecord record, HLCTimestamp now, TimeSpan retentionTtl, CancellationToken cancellationToken)
     {
+        if (RecoveryDriveHook is not null)
+            await RecoveryDriveHook(record).ConfigureAwait(false);
+
         // Stage 1: re-drive every not-yet-acknowledged participant and durably record the resulting acks (and the
         // Completed transition) with all receipts still held. The commit is idempotent: an already-applied commit
         // resolves via the participant's completion receipt, and a lost prepare (leader changed since) returns
