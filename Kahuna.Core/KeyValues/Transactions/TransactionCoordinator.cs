@@ -1023,6 +1023,7 @@ internal sealed class TransactionCoordinator
         // Durable policy rejections, before any write intent is placed. A Durable transaction records its
         // decision on the data partition of its anchor (first confirmed persistent modified key), so it may
         // not mutate an ephemeral key (no durable participant) and must have an anchor.
+        CoordinatorDecisionStore.DurableDecisionReservation? admissionReservation = null;
         if (context.DecisionDurability == DecisionDurability.Durable)
         {
             if (context.ModifiedKeys.Any(static k => k.Item2 != KeyValueDurability.Persistent))
@@ -1037,48 +1038,57 @@ internal sealed class TransactionCoordinator
                 return;
             }
 
-            // Never cap-evict an outstanding decision to admit a new one: reject the new Durable transaction
-            // under capacity pressure instead. A non-positive cap disables the bound.
-            int decisionCap = configuration.TransactionOutcomeRetentionMax;
-            if (decisionCap > 0 && manager.CoordinatorDecisionStore.Count >= decisionCap)
+            // Reserve a durable-admission slot atomically before any write intent is placed. Concurrent
+            // admissions count in-flight reservations, so they cannot collectively exceed the configured bound;
+            // only outstanding decision records occupy capacity, so retained completed outcomes never throttle a
+            // new durable transaction. The slot is released when this attempt ends — by then its decision is
+            // installed (and holds its own outstanding count) or the transaction aborted and installed nothing.
+            if (!manager.CoordinatorDecisionStore.TryReserveAdmission(out admissionReservation))
             {
-                context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Coordinator decision store at capacity; reject new durable transaction" };
+                context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Durable decision capacity reached; reject new durable transaction" };
                 return;
             }
         }
 
-        if (!await ValidateReadSet(context, cancellationToken))
-            return;
-
-        // Place write intents before checking for concurrent writers on the read set so that a
-        // racing peer's conflict check sees them and aborts — preventing write-skew anomalies.
-        (bool success, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>? mutationsPrepared) = await PrepareMutations(
-            context,
-            cancellationToken
-        );
-
-        if (mutationsPrepared is null)
-            return;
-
-        if (!success)
+        try
         {
-            if (context.AsyncRelease)
-                _ = RollbackMutations(context, mutationsPrepared, CancellationToken.None);
-            else
-                await RollbackMutations(context, mutationsPrepared, cancellationToken);
-            return;
-        }
+            if (!await ValidateReadSet(context, cancellationToken))
+                return;
 
-        if (!await CheckReadSetForConflicts(context, cancellationToken))
+            // Place write intents before checking for concurrent writers on the read set so that a
+            // racing peer's conflict check sees them and aborts — preventing write-skew anomalies.
+            (bool success, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>? mutationsPrepared) = await PrepareMutations(
+                context,
+                cancellationToken
+            );
+
+            if (mutationsPrepared is null)
+                return;
+
+            if (!success)
+            {
+                if (context.AsyncRelease)
+                    _ = RollbackMutations(context, mutationsPrepared, CancellationToken.None);
+                else
+                    await RollbackMutations(context, mutationsPrepared, cancellationToken);
+                return;
+            }
+
+            if (!await CheckReadSetForConflicts(context, cancellationToken))
+            {
+                if (context.AsyncRelease)
+                    _ = RollbackMutations(context, mutationsPrepared, CancellationToken.None);
+                else
+                    await RollbackMutations(context, mutationsPrepared, cancellationToken);
+                return;
+            }
+
+            await CommitMutations(context, mutationsPrepared, cancellationToken);
+        }
+        finally
         {
-            if (context.AsyncRelease)
-                _ = RollbackMutations(context, mutationsPrepared, CancellationToken.None);
-            else
-                await RollbackMutations(context, mutationsPrepared, cancellationToken);
-            return;
+            admissionReservation?.Dispose();
         }
-
-        await CommitMutations(context, mutationsPrepared, cancellationToken);
     }
 
     /// <summary>

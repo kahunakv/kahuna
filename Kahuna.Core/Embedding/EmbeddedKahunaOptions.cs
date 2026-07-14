@@ -79,6 +79,8 @@ public sealed class EmbeddedKahunaOptions
 
     public TimeSpan TransactionOutcomeRetentionTtl { get; set; } = TimeSpan.FromMinutes(5);
 
+    public int DurableDecisionOutstandingMax { get; set; } = 100_000;
+
     public int MaxEntriesPerActor { get; set; } = 50_000;
 
     public long MaxBytesPerActor { get; set; } = 256L * 1024 * 1024;
