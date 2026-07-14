@@ -72,9 +72,21 @@ internal sealed class CoordinatorDecisionStore : IDisposable
     // copy-modify-publish (never across an await), so it cannot deadlock with the mutation path's replicate.
     private readonly object publishLock = new();
 
-    private readonly string? snapshotPath;
+    // Directory + filename prefix for the per-partition on-disk snapshots. Each data partition writes its own
+    // subset to "{prefix}_p{partitionId}.snapshot", so a per-partition WAL checkpoint can gate on the matching
+    // snapshot being durable, and one partition's snapshot failure never blocks another's checkpoint. Null when
+    // persistence is disabled (memory-only stores).
+    private readonly string? snapshotDirectory;
+    private readonly string? snapshotPrefix;
 
     private readonly object fileLock = new();
+
+    /// <summary>
+    /// Test-only injection point: when set and it returns true for a partition, <see cref="PersistSnapshot"/>
+    /// reports failure without writing, simulating a snapshot write that could not be made durable so the
+    /// checkpoint gate must not advance the WAL retention floor. Never wired in production paths.
+    /// </summary>
+    internal Func<int, bool>? PersistSnapshotFault { get; set; }
 
     /// <summary>
     /// The committed record set, keyed by transaction id. Written only inside <see cref="CommitInMemory"/>
@@ -99,9 +111,16 @@ internal sealed class CoordinatorDecisionStore : IDisposable
         this.raft = raft;
         this.logger = logger;
 
-        snapshotPath = string.IsNullOrEmpty(storagePath)
-            ? null
-            : Path.Combine(storagePath, $"coordinatordecision_{storageRevision}.snapshot");
+        if (string.IsNullOrEmpty(storagePath))
+        {
+            snapshotDirectory = null;
+            snapshotPrefix = null;
+        }
+        else
+        {
+            snapshotDirectory = storagePath;
+            snapshotPrefix = $"coordinatordecision_{storageRevision}";
+        }
 
         LoadFromDisk();
     }
@@ -335,6 +354,19 @@ internal sealed class CoordinatorDecisionStore : IDisposable
             foreach (CoordinatorDecisionRecord record in toMerge)
                 MergeUpsert(next, record);
         });
+
+        // Imported records arrive by state transfer, not through this partition's WAL, so WAL-tail replay cannot
+        // reconstruct them after a restart. Capture the affected partitions' snapshots now so an imported record
+        // is durable before the next checkpoint; the checkpoint gate re-persists and confirms it thereafter.
+        if (resolveAnchorPartition is null)
+            return;
+
+        HashSet<int> affected = [];
+        foreach (CoordinatorDecisionRecord record in toMerge)
+            affected.Add(resolveAnchorPartition(record.RecordAnchorKey).PartitionId);
+
+        foreach (int partitionId in affected)
+            PersistSnapshot(partitionId);
     }
 
     // ── Delta builders ────────────────────────────────────────────────────────────────────────
@@ -376,7 +408,10 @@ internal sealed class CoordinatorDecisionStore : IDisposable
             Dictionary<HLCTimestamp, CoordinatorDecisionRecord> next = new(records);
             mutate(next);
             records = next;
-            PersistToDisk(next);
+            // No eager per-mutation snapshot: every mutation is already durable in the anchor partition's WAL
+            // (a replicated decision delta, or the anchor commit that embeds the install). The on-disk snapshot
+            // is written per partition at checkpoint time, gating the WAL retention floor so a compacted entry is
+            // always captured first; between checkpoints, WAL-tail replay reconstructs the record set.
         }
     }
 
@@ -442,57 +477,98 @@ internal sealed class CoordinatorDecisionStore : IDisposable
             LogData = ReplicationSerializer.Serialize(UpsertDelta(record))
         });
 
-    private void PersistToDisk(IReadOnlyDictionary<HLCTimestamp, CoordinatorDecisionRecord> snapshot)
+    /// <summary>
+    /// Writes the records anchored to <paramref name="partitionId"/> to that partition's on-disk snapshot
+    /// (atomic tmp-then-move) and reports whether the write is durable. Called at checkpoint time, before the
+    /// partition's WAL retention floor advances: only on a <c>true</c> return may the checkpoint proceed, so a
+    /// decision entry about to be compacted is always captured first. A no-op returning <c>true</c> when
+    /// persistence is disabled or the anchor resolver is not yet attached (no checkpoint runs that early).
+    /// </summary>
+    public bool PersistSnapshot(int partitionId)
     {
-        if (snapshotPath is null)
-            return;
+        if (snapshotDirectory is null || snapshotPrefix is null)
+            return true;
+
+        if (PersistSnapshotFault is not null && PersistSnapshotFault(partitionId))
+            return false;
+
+        if (resolveAnchorPartition is null)
+            return true;
+
+        string path = Path.Combine(snapshotDirectory, $"{snapshotPrefix}_p{partitionId}.snapshot");
 
         try
         {
             CoordinatorDecisionSnapshotMessage message = new();
-            foreach (CoordinatorDecisionRecord record in snapshot.Values)
-                message.Records.Add(ToMessage(record));
+            foreach (CoordinatorDecisionRecord record in records.Values)
+            {
+                (int recordPartition, _) = resolveAnchorPartition(record.RecordAnchorKey);
+                if (recordPartition == partitionId)
+                    message.Records.Add(ToMessage(record));
+            }
 
             byte[] data = ReplicationSerializer.Serialize(message);
             lock (fileLock)
             {
-                string tmp = snapshotPath + ".tmp";
+                string tmp = path + ".tmp";
                 File.WriteAllBytes(tmp, data);
-                File.Move(tmp, snapshotPath, overwrite: true);
+                File.Move(tmp, path, overwrite: true);
             }
+
+            return true;
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Failed to persist coordinator-decision snapshot to {Path}", snapshotPath);
+            logger.LogError(ex, "Failed to persist coordinator-decision snapshot to {Path}", path);
+            return false;
         }
     }
 
+    // Loads every per-partition snapshot present in the storage directory into the record set, merging forward
+    // so overlapping partition files converge. A snapshot file that exists but cannot be parsed is corruption
+    // that the record set cannot silently recover from — a below-floor entry may be gone from the WAL — so it
+    // fails closed (throws) rather than starting empty and losing a committed decision.
     private void LoadFromDisk()
     {
-        if (snapshotPath is null || !File.Exists(snapshotPath))
+        if (snapshotDirectory is null || snapshotPrefix is null || !Directory.Exists(snapshotDirectory))
             return;
 
-        try
+        string[] files;
+        lock (fileLock)
+            files = Directory.GetFiles(snapshotDirectory, $"{snapshotPrefix}_p*.snapshot");
+
+        if (files.Length == 0)
+            return;
+
+        Dictionary<HLCTimestamp, CoordinatorDecisionRecord> loaded = [];
+        foreach (string path in files)
         {
             byte[] data;
-            lock (fileLock)
-                data = File.ReadAllBytes(snapshotPath);
-
-            CoordinatorDecisionSnapshotMessage message =
-                ReplicationSerializer.UnserializeCoordinatorDecisionSnapshotMessage(data);
-
-            Dictionary<HLCTimestamp, CoordinatorDecisionRecord> loaded = [];
-            foreach (CoordinatorDecisionMessage recordMessage in message.Records)
+            try
             {
-                CoordinatorDecisionRecord record = FromMessage(recordMessage);
-                loaded[record.TransactionId] = record;
+                lock (fileLock)
+                    data = File.ReadAllBytes(path);
             }
-            records = loaded;
+            catch (Exception ex)
+            {
+                throw new IOException($"Failed to read coordinator-decision snapshot {path}; refusing to start with a possibly incomplete decision set", ex);
+            }
+
+            CoordinatorDecisionSnapshotMessage message;
+            try
+            {
+                message = ReplicationSerializer.UnserializeCoordinatorDecisionSnapshotMessage(data);
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidDataException($"Corrupt coordinator-decision snapshot {path}; refusing to start empty and lose a committed decision", ex);
+            }
+
+            foreach (CoordinatorDecisionMessage recordMessage in message.Records)
+                MergeUpsert(loaded, FromMessage(recordMessage));
         }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Failed to load coordinator-decision snapshot from {Path}", snapshotPath);
-        }
+
+        records = loaded;
     }
 
     // ── Proto <-> model conversion ─────────────────────────────────────────────────────────────

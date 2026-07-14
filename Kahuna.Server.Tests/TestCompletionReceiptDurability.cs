@@ -28,8 +28,10 @@ public sealed class TestCompletionReceiptDurability
         WalRevision     = walRevision,
         WalSyncWrites   = false,
         InitialPartitions = 1,
-        // Flush promptly so the checkpoint (and its receipt snapshot) is reached within the test window.
+        // Flush promptly and checkpoint soon so the receipt snapshot (written when the partition's WAL floor
+        // advances) is reached within the test window.
         DirtyObjectsWriterDelay = 250,
+        CheckpointInterval = TimeSpan.FromSeconds(1),
     };
 
     private static void TryDeleteDirectory(string path)
@@ -51,7 +53,9 @@ public sealed class TestCompletionReceiptDurability
         string walPath = Path.Combine(Path.GetTempPath(), "kahuna-receiptdur-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(storagePath);
         Directory.CreateDirectory(walPath);
-        string snapshotFile = Path.Combine(storagePath, $"completionreceipts_{StorageRevision}.snapshot");
+        // The receipt snapshot is written per data partition at checkpoint time ("_p{partitionId}").
+        bool ReceiptSnapshotWritten() =>
+            Directory.GetFiles(storagePath, $"completionreceipts_{StorageRevision}_p*.snapshot").Length > 0;
 
         try
         {
@@ -83,9 +87,9 @@ public sealed class TestCompletionReceiptDurability
                 // receipt set to disk — that snapshot is what carries the receipt when the WAL cannot replay.
                 await first.FlushAsync();
                 long deadline = Environment.TickCount64 + 15_000;
-                while (!File.Exists(snapshotFile) && Environment.TickCount64 < deadline)
+                while (!ReceiptSnapshotWritten() && Environment.TickCount64 < deadline)
                     await Task.Delay(50, ct);
-                Assert.True(File.Exists(snapshotFile), "completion-receipt snapshot was not written at checkpoint");
+                Assert.True(ReceiptSnapshotWritten(), "completion-receipt snapshot was not written at checkpoint");
             }
 
             // Restart over the same storage (backend + receipt snapshot) but a FRESH WAL: there is nothing to

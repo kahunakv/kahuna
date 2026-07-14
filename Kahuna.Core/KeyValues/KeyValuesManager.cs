@@ -125,7 +125,8 @@ internal sealed class KeyValuesManager : IDisposable
         KahunaConfiguration configuration,
         ILogger<IKahuna> logger,
         SnapshotFloorStore? externalFloorStore = null,
-        CompletionReceiptStore? externalReceiptStore = null
+        CompletionReceiptStore? externalReceiptStore = null,
+        CoordinatorDecisionStore? externalDecisionStore = null
     )
     {
         this.actorSystem = actorSystem;
@@ -163,7 +164,7 @@ internal sealed class KeyValuesManager : IDisposable
         // each transaction's record anchor. Constructed before the key-value routers so every actor
         // shares this one instance and can install the initial record as the anchor commit applies; the
         // anchor → partition resolver is attached below once the locator exists.
-        coordinatorDecisionStore = new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
+        coordinatorDecisionStore = externalDecisionStore ?? new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
 
         proposalRouter = GetProposalRouter(configuration);
         ephemeralKeyValuesRouter = GetEphemeralRouter(configuration);
@@ -203,6 +204,9 @@ internal sealed class KeyValuesManager : IDisposable
         // routers) so the actors could share the one instance for install-on-anchor-commit; that install
         // path needs no resolver, only the coordinator's UpsertAsync/RemoveAsync do.
         coordinatorDecisionStore.AttachAnchorResolver(locator.LocateRange);
+
+        // The receipt store's per-partition checkpoint snapshot routes each receipt by its key the same way.
+        completionReceiptStore.AttachPartitionResolver(key => locator.LocateRange(key).PartitionId);
 
         // Per-node recovery driver for outstanding durable coordinator decisions. Runs off the request and
         // key-value actor mailboxes; each sweep drives only records anchored to partitions this node leads,

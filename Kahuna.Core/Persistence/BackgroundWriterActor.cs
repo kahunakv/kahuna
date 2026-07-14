@@ -5,6 +5,7 @@ using System.Diagnostics;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Ranges;
+using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Persistence.Logging;
 using Kahuna.Server.Persistence.Pitr;
@@ -56,6 +57,8 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     private readonly SnapshotFloorStore? snapshotFloorStore;
 
     private readonly CompletionReceiptStore? completionReceiptStore;
+
+    private readonly CoordinatorDecisionStore? coordinatorDecisionStore;
 
     private readonly KahunaConfiguration configuration;
 
@@ -136,6 +139,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         IPersistenceBackend persistenceBackend,
         SnapshotFloorStore? snapshotFloorStore,
         CompletionReceiptStore? completionReceiptStore,
+        CoordinatorDecisionStore? coordinatorDecisionStore,
         KahunaConfiguration configuration,
         ILogger<IKahuna> logger,
         FlushNotificationSink flushNotificationSink
@@ -145,6 +149,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         this.persistenceBackend = persistenceBackend;
         this.snapshotFloorStore = snapshotFloorStore;
         this.completionReceiptStore = completionReceiptStore;
+        this.coordinatorDecisionStore = coordinatorDecisionStore;
         this.configuration = configuration;
         this.logger = logger;
         this.flushNotificationSink = flushNotificationSink;
@@ -218,17 +223,10 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         if (!pendingCheckpoint)
             return;
 
-        // Capture the completion receipts durably before any partition's checkpoint advances the WAL
-        // retention floor: past the floor the receipt-bearing committed log entry is compacted away and can
-        // no longer be replayed, so the on-disk snapshot is what carries the receipt across a cold restart.
-        // Every dirty key-value write has already flushed (guarded above), so the snapshot is consistent
-        // with the backend.
-        completionReceiptStore?.PersistSnapshot();
-
         HashSet<int> partitionsToRemove = [];
-        
+
         DateTime currentTime = DateTime.UtcNow;
-        TimeSpan maxTime = TimeSpan.FromSeconds(30);
+        TimeSpan maxTime = configuration.CheckpointInterval;
 
         foreach (KeyValuePair<int, DateTime> kv in partitionIds)
         {
@@ -238,8 +236,19 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             if (!await raft.AmILeader(kv.Key, CancellationToken.None))
             {
                 //logger.LogWarning("No longer leader to checkpoint partition #{PartitionId}", kv.Key);
-                
+
                 partitionsToRemove.Add(kv.Key);
+                continue;
+            }
+
+            // Capture this partition's receipts and decision records durably before its checkpoint advances the
+            // WAL retention floor: past the floor the receipt/decision-bearing log entries are compacted and can
+            // no longer be replayed. Every dirty key-value write has already flushed (guarded above), so the
+            // snapshots are consistent with the backend. If either cannot be made durable, skip this partition's
+            // checkpoint and retry next cycle rather than compacting away the only proof of a commit or decision.
+            if (!TryCaptureCheckpointSnapshots(kv.Key))
+            {
+                logger.LogWarning("Skipping checkpoint of partition #{PartitionId}: snapshot capture not durable", kv.Key);
                 continue;
             }
 
@@ -248,16 +257,29 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             if (result.Success)
             {
                 logger.LogSuccessfullyCheckpointedPartition(kv.Key);
-                
+
                 partitionsToRemove.Add(kv.Key);
             }
         }
-        
+
         foreach (int partitionToRemove in partitionsToRemove)
             partitionIds.Remove(partitionToRemove);
-        
+
         if (partitionIds.Count == 0)
             pendingCheckpoint = false;
+    }
+
+    /// <summary>
+    /// Persists the partition-scoped receipt and decision snapshots a partition's WAL checkpoint must not advance
+    /// past, returning true only when both are durable. This is the sole gate before <c>ReplicateCheckpoint</c>,
+    /// so a false return keeps the retention floor where it is and the entries remain replayable. Extracted so
+    /// the gate is directly testable under injected snapshot failure.
+    /// </summary>
+    internal bool TryCaptureCheckpointSnapshots(int partitionId)
+    {
+        bool receiptsDurable = completionReceiptStore?.PersistSnapshot(partitionId) ?? true;
+        bool decisionsDurable = coordinatorDecisionStore?.PersistSnapshot(partitionId) ?? true;
+        return receiptsDurable && decisionsDurable;
     }
 
     /// <summary>

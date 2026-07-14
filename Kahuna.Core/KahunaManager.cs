@@ -114,6 +114,12 @@ public sealed class KahunaManager : IKahuna, IDisposable
         // single instance is created here and injected into both.
         CompletionReceiptStore completionReceiptStore = new(configuration.StoragePath, configuration.StorageRevision, logger);
 
+        // One coordinator-decision store shared between the background writer (which snapshots it per partition
+        // at checkpoint time, gating the WAL retention floor) and the key-value layer (which installs, replicates,
+        // and drives decision records), mirroring the receipt store. Created here — before the writer is spawned —
+        // so the single instance is injected into both; the key-value layer attaches its anchor resolver later.
+        CoordinatorDecisionStore coordinatorDecisionStore = new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
+
         // Late-bound bridge so the background writer can acknowledge flushes back to the key-value
         // layer; the writer is spawned before the KeyValuesManager exists, so it is wired below.
         FlushNotificationSink flushNotificationSink = new();
@@ -124,13 +130,14 @@ public sealed class KahunaManager : IKahuna, IDisposable
             persistenceBackend,
             snapshotFloorStore,
             completionReceiptStore,
+            coordinatorDecisionStore,
             configuration,
             logger,
             flushNotificationSink
         );
 
         this.locks = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);
-        this.keyValues = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger, snapshotFloorStore, completionReceiptStore);
+        this.keyValues = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger, snapshotFloorStore, completionReceiptStore, coordinatorDecisionStore);
 
         // Now that the key-value router exists, route flush acknowledgements to the owning actor so
         // it can advance FlushedRevision (making committed-but-unflushed entries eligible for eviction).
