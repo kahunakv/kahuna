@@ -102,11 +102,17 @@ public interface IInterNodeCommunication
     /// <summary>Injects clamped lock entries into the actor pool for <paramref name="keySpace"/> on <paramref name="node"/>.</summary>
     public Task ImportRangeLocks(string node, string keySpace, List<KeyValueRangeLock> locks, CancellationToken cancellationToken);
 
-    /// <summary>Injects transferred completion receipts into the receipt store on <paramref name="node"/> (split/merge routing).</summary>
-    public Task ImportCompletionReceipts(string node, IReadOnlyCollection<CompletionReceiptRecord> receipts, CancellationToken cancellationToken);
+    /// <summary>
+    /// Forwards a split/merge receipt handoff to <paramref name="node"/> (the destination partition leader) so it
+    /// replicates them onto <paramref name="partitionId"/>'s Raft log. Returns whether the handoff was durable.
+    /// </summary>
+    public Task<bool> ImportCompletionReceipts(string node, int partitionId, IReadOnlyCollection<CompletionReceiptRecord> receipts, CancellationToken cancellationToken);
 
-    /// <summary>Merges transferred coordinator decision records into the decision store on <paramref name="node"/> (split/merge routing).</summary>
-    public Task ImportCoordinatorDecisions(string node, IReadOnlyCollection<CoordinatorDecisionRecord> records, CancellationToken cancellationToken);
+    /// <summary>
+    /// Forwards a split/merge decision handoff to <paramref name="node"/> (the destination partition leader) so it
+    /// replicates them onto <paramref name="partitionId"/>'s Raft log. Returns whether the handoff was durable.
+    /// </summary>
+    public Task<bool> ImportCoordinatorDecisions(string node, int partitionId, IReadOnlyCollection<CoordinatorDecisionRecord> records, CancellationToken cancellationToken);
 
     /// <summary>Forwards a snapshot-hold acquire to the meta-partition leader on <paramref name="node"/>.</summary>
     public Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)> AcquireSnapshotHold(string node, string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken cancellationToken);

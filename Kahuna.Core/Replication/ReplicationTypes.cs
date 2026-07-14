@@ -29,4 +29,13 @@ public static class ReplicationTypes
     /// the transaction's record anchor key (never the meta partition).
     /// </summary>
     public const string CoordinatorDecision = "coorddecision";
+
+    /// <summary>
+    /// A batch of persistent-participant completion receipts handed to a destination data partition during
+    /// a range split or merge, replicated on that partition so every replica of the moved range holds them
+    /// (a re-commit routed to a new leader after cutover still resolves <c>Committed</c>). In steady state a
+    /// receipt rides its key-value commit and needs no dedicated entry; this type carries only the split/merge
+    /// handoff, which is otherwise not present in the destination partition's log.
+    /// </summary>
+    public const string CompletionReceipt = "receipt";
 }

@@ -1774,11 +1774,11 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         _ = batchResponse.ImportRangeLocks;
     }
 
-    public async Task ImportCompletionReceipts(string node, IReadOnlyCollection<CompletionReceiptRecord> receipts, CancellationToken cancellationToken)
+    public async Task<bool> ImportCompletionReceipts(string node, int partitionId, IReadOnlyCollection<CompletionReceiptRecord> receipts, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
-        GrpcImportCompletionReceiptsRequest request = new();
+        GrpcImportCompletionReceiptsRequest request = new() { DestinationPartitionId = partitionId };
 
         foreach (CompletionReceiptRecord receipt in receipts)
         {
@@ -1803,17 +1803,18 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         else
             batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
 
-        _ = batchResponse.ImportCompletionReceipts;
+        return batchResponse.ImportCompletionReceipts?.Success ?? false;
     }
 
-    public async Task ImportCoordinatorDecisions(string node, IReadOnlyCollection<CoordinatorDecisionRecord> records, CancellationToken cancellationToken)
+    public async Task<bool> ImportCoordinatorDecisions(string node, int partitionId, IReadOnlyCollection<CoordinatorDecisionRecord> records, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
         // The full record set (participants, cleanup effects) rides as one serialized snapshot blob.
         GrpcImportCoordinatorDecisionsRequest request = new()
         {
-            Records = UnsafeByteOperations.UnsafeWrap(CoordinatorDecisionStore.SerializeRecords(records))
+            Records = UnsafeByteOperations.UnsafeWrap(CoordinatorDecisionStore.SerializeRecords(records)),
+            DestinationPartitionId = partitionId
         };
 
         GrpcServerBatcherResponse batchResponse;
@@ -1823,7 +1824,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         else
             batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
 
-        _ = batchResponse.ImportCoordinatorDecisions;
+        return batchResponse.ImportCoordinatorDecisions?.Success ?? false;
     }
 
     public async Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)>

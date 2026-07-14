@@ -102,6 +102,14 @@ internal sealed class CoordinatorDecisionStore : IDisposable
     /// </summary>
     internal Func<CoordinatorDecisionRecord, bool>? UpsertFault { get; set; }
 
+    /// <summary>
+    /// Test-only injection point: when set and it returns true for a destination partition,
+    /// <see cref="ReplicateImportToPartitionAsync"/> reports failure without replicating, simulating a
+    /// split/merge decision handoff that could not be made durable so cutover must abort. Never wired in
+    /// production paths.
+    /// </summary>
+    internal Func<int, bool>? ReplicateImportFault { get; set; }
+
     public CoordinatorDecisionStore(
         IRaft raft,
         string? storagePath,
@@ -367,6 +375,47 @@ internal sealed class CoordinatorDecisionStore : IDisposable
 
         foreach (int partitionId in affected)
             PersistSnapshot(partitionId);
+    }
+
+    /// <summary>
+    /// Replicates a batch of decision records onto an explicit destination partition's Raft log during a
+    /// range split or merge — not the anchor's currently-resolved partition, because before cutover the anchor
+    /// still routes to the source. Every replica of the destination range applies the delta, so a
+    /// destination-leader change right after cutover preserves the record instead of stranding it on a former
+    /// leader. Returns whether the replication was durable; the split/merge caller gates cutover on it. The
+    /// batch is a forward-only upsert, so a record already present on the destination is advanced, never
+    /// regressed.
+    /// </summary>
+    public async Task<bool> ReplicateImportToPartitionAsync(
+        int destinationPartitionId, IReadOnlyCollection<CoordinatorDecisionRecord> incoming, CancellationToken ct)
+    {
+        if (incoming.Count == 0)
+            return true;
+
+        if (ReplicateImportFault is not null && ReplicateImportFault(destinationPartitionId))
+            return false;
+
+        CoordinatorDecisionDeltaMessage delta = new();
+        foreach (CoordinatorDecisionRecord record in incoming)
+            delta.Entries.Add(new CoordinatorDecisionDeltaEntry { Remove = false, Record = ToMessage(record) });
+
+        await mutateGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            CoordinatorDecisionMutationResult result = await ReplicateThenPublish(
+                destinationPartitionId, delta,
+                next =>
+                {
+                    foreach (CoordinatorDecisionRecord record in incoming)
+                        MergeUpsert(next, record);
+                }, ct).ConfigureAwait(false);
+
+            return result == CoordinatorDecisionMutationResult.Applied;
+        }
+        finally
+        {
+            mutateGate.Release();
+        }
     }
 
     // ── Delta builders ────────────────────────────────────────────────────────────────────────
