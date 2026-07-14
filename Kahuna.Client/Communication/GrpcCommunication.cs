@@ -1357,7 +1357,9 @@ public class GrpcCommunication : IKahunaCommunication
         int limit,
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
         // Intentionally unary: range scan returns a paginated result set; it carries its own
@@ -1374,7 +1376,10 @@ public class GrpcCommunication : IKahunaCommunication
             ReadTimestampNode = readTimestamp.N,
             ReadTimestampPhysical = readTimestamp.L,
             ReadTimestampCounter = readTimestamp.C,
-            Durability = (GrpcKeyValueDurability)durability
+            Durability = (GrpcKeyValueDurability)durability,
+            CoordinatorKey = coordinatorKey,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low
         };
 
         if (startKey is not null) request.StartKey = startKey;
@@ -1512,15 +1517,21 @@ public class GrpcCommunication : IKahunaCommunication
     /// <exception cref="KahunaException">
     /// Thrown if the operation fails or encounters an error while attempting to retrieve keys by prefix.
     /// </exception>
-    public async Task<List<KeyValueGetByBucketItem>> GetByBucket(string url, string prefixKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<List<KeyValueGetByBucketItem>> GetByBucket(string url, HLCTimestamp transactionId, string prefixKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
     {
         GrpcGetByBucketRequest request = new()
         {
+            TransactionIdNode = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
             PrefixKey = prefixKey,
             Durability = (GrpcKeyValueDurability)durability,
             ReadTimestampNode = readTimestamp.N,
             ReadTimestampPhysical = readTimestamp.L,
-            ReadTimestampCounter = readTimestamp.C
+            ReadTimestampCounter = readTimestamp.C,
+            CoordinatorKey = coordinatorKey,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low
         };
 
         int retries = 0;

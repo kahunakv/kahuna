@@ -469,6 +469,70 @@ public class TestTransactionLockingAnomalies
         await inflightSession.Rollback(cancellationToken);
     }
 
+    /// <summary>
+    /// A range scan inside an optimistic transaction must register the keys it returns as read dependencies:
+    /// if a concurrent transaction commits a change to one of those keys before this transaction commits, the
+    /// read-set validation must detect it and abort. Under pessimistic locking the range lock serializes the two
+    /// instead, so they never both commit concurrently.
+    /// </summary>
+    [Theory, CombinatorialData]
+    public async Task TestRangeReadRegistersAsOptimisticDependency(
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType,
+        [CombinatorialValues(KeyValueTransactionLocking.Optimistic, KeyValueTransactionLocking.Pessimistic)] KeyValueTransactionLocking locking,
+        [CombinatorialValues(KeyValueDurability.Ephemeral, KeyValueDurability.Persistent)] KeyValueDurability durability
+    )
+    {
+        CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+        KahunaClient client = GetClientByType(clientType);
+
+        await AssertClusterAvailable(client, cancellationToken);
+
+        string prefix = $"tx-anomaly/{Guid.NewGuid():N}/range";
+        string keyA = $"{prefix}/a";
+        string summaryKey = $"{prefix}/summary";
+
+        KahunaKeyValue seed = await client.SetKeyValue(keyA, "old-a", 10000, durability: durability, cancellationToken: cancellationToken);
+        Assert.True(seed.Success);
+
+        await using KahunaTransactionSession rangeSession = await client.StartTransactionSession(
+            new() { Locking = locking, Timeout = 5000 }, cancellationToken);
+
+        // The range scan observes keyA — for an optimistic transaction this records a read dependency on it.
+        KeyValueGetByRangePageResult page = await rangeSession.GetByRange(
+            prefix, null, true, null, true, durability: durability, cancellationToken: cancellationToken);
+        Assert.Contains(page.Items, item => item.Key == keyA);
+
+        Task<SimpleCommitAttempt> updaterTask = ExecuteValueUpdateAttempt(
+            client, keyA, "new-a", locking, durability, cancellationToken);
+        bool updaterCommittedFast = await TryAwaitSuccess(updaterTask, TimeSpan.FromMilliseconds(250), cancellationToken);
+
+        // A modification is required so commit actually runs two-phase commit (and read-set validation).
+        KahunaKeyValue summaryWrite = await rangeSession.SetKeyValue(
+            summaryKey, "1", 10000, durability: durability, cancellationToken: cancellationToken);
+        Assert.True(summaryWrite.Success);
+
+        CommitAttempt rangeCommit = await CommitTransactionAttempt(rangeSession, cancellationToken);
+        SimpleCommitAttempt updater = await updaterTask;
+
+        KahunaKeyValue finalA = await client.GetKeyValue(keyA, durability, cancellationToken: cancellationToken);
+        KahunaKeyValue finalSummary = await client.GetKeyValue(summaryKey, durability, cancellationToken: cancellationToken);
+
+        if (locking == KeyValueTransactionLocking.Optimistic)
+        {
+            // The concurrent commit to keyA invalidates the range transaction's stale read → it must abort.
+            Assert.True(updaterCommittedFast);
+            Assert.True(updater.Committed);
+            Assert.False(rangeCommit.Committed);
+            Assert.Equal("new-a", finalA.ValueAsString());
+            Assert.False(finalSummary.Success);
+        }
+        else
+        {
+            // The range lock serializes the update behind this transaction: they never both commit concurrently.
+            Assert.False(rangeCommit.Committed && updaterCommittedFast && updater.Committed);
+        }
+    }
+
     [Theory, CombinatorialData]
     public async Task TestPhantomInsertUnderBucketRead(
         [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType,

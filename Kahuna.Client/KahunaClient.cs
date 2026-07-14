@@ -909,8 +909,9 @@ public class KahunaClient
     {
         HLCTimestamp readTimestamp = snapshotMs == 0 ? HLCTimestamp.Zero : new HLCTimestamp(0, snapshotMs, uint.MaxValue);
 
+        // Non-transactional scan: no transaction identity, so no read dependency is registered.
         List<KeyValueGetByBucketItem> kv = await communication.GetByBucket(
-            GetRoundRobinUrl(), prefixKey, readTimestamp, durability, cancellationToken).ConfigureAwait(false);
+            GetRoundRobinUrl(), HLCTimestamp.Zero, prefixKey, readTimestamp, durability, cancellationToken).ConfigureAwait(false);
 
         List<KahunaKeyValue> result = new(kv.Count);
 

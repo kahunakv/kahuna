@@ -680,6 +680,9 @@ message GrpcGetByBucketRequest {
   int32 ReadTimestampNode = 6;
   int64 ReadTimestampPhysical = 7;
   uint32 ReadTimestampCounter = 8;
+  string CoordinatorKey = 9;
+  uint64 OperationIdHigh = 10;
+  uint64 OperationIdLow = 11;
 }
 
 message GrpcGetByBucketResponse {
@@ -702,6 +705,9 @@ message GrpcGetByRangeRequest {
   int64 ReadTimestampPhysical = 11;
   uint32 ReadTimestampCounter = 12;
   GrpcKeyValueDurability Durability = 13;
+  string CoordinatorKey = 14;
+  uint64 OperationIdHigh = 15;
+  uint64 OperationIdLow = 16;
 }
 
 message GrpcGetByRangePageResponse {

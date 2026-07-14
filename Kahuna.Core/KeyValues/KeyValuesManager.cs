@@ -2142,9 +2142,74 @@ internal sealed class KeyValuesManager : IDisposable
         CancellationToken cancellationToken) =>
         locator.LocateAndGetByBucket(transactionId, prefixedKey, HLCTimestamp.Zero, durability, beforeQuery, afterDescriptor, cancellationToken);
 
-    public Task<KeyValueGetByRangeResult> LocateAndGetByRange(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+    public Task<KeyValueGetByRangeResult> LocateAndGetByRange(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
     {
-        return locator.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
+        if (string.IsNullOrEmpty(coordinatorKey))
+            return locator.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
+
+        return RegisterAndGetByRange(transactionId, coordinatorKey, operationId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
+    }
+
+    /// <summary>
+    /// Registers a paged range scan as a coordinator operation so every key it observes becomes a read
+    /// dependency of the transaction: an optimistic commit validates them and aborts if any changed after the
+    /// scan. Mirrors <see cref="RegisterAndGetByBucket"/>; a snapshot scan (pinned read timestamp) owns no live
+    /// transactional MVCC and so records no observations, but still registers for finalize fencing and idempotent
+    /// replay. Paging issues one registered operation per page (distinct bounds → distinct digest).
+    /// </summary>
+    private async Task<KeyValueGetByRangeResult> RegisterAndGetByRange(
+        HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string prefix,
+        string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit,
+        HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        (OperationRegistrationOutcome outcome, _, _, _, _) =
+            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Scan,
+                OperationDigest.ForRangeScan(prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability), cancellationToken);
+
+        switch (outcome)
+        {
+            case OperationRegistrationOutcome.AlreadyCompleted:
+            case OperationRegistrationOutcome.AlreadyPending:
+            case OperationRegistrationOutcome.RejectedCapacity:
+                // A pending or already-completed scan re-runs the read without re-recording observations;
+                // the read-set already holds the first observation and reads are idempotent.
+                if (outcome == OperationRegistrationOutcome.AlreadyCompleted)
+                    return await locator.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
+                return new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false);
+            case OperationRegistrationOutcome.RejectedSessionClosed:
+                return new KeyValueGetByRangeResult(KeyValueResponseType.Aborted, [], null, false);
+            case OperationRegistrationOutcome.RejectedDuplicate:
+                return new KeyValueGetByRangeResult(KeyValueResponseType.Errored, [], null, false);
+        }
+
+        KeyValueGetByRangeResult result =
+            await locator.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
+
+        List<KeyValueTransactionReadKey>? observations = null;
+        if (readTimestamp.IsNull() && result.Type == KeyValueResponseType.Get && result.Items.Count > 0)
+        {
+            observations = new(result.Items.Count);
+            foreach ((string itemKey, ReadOnlyKeyValueEntry entry) in result.Items)
+                observations.Add(new KeyValueTransactionReadKey
+                {
+                    Key = itemKey,
+                    Durability = durability,
+                    Exists = entry.State == KeyValueState.Set,
+                    Revision = entry.Revision
+                });
+        }
+
+        await LocateAndCompleteOperation(
+            coordinatorKey, transactionId, operationId,
+            new OperationCompletionPayload
+            {
+                ReadObservations = observations,
+                Durability = durability,
+                CachedType = result.Type
+            },
+            cancellationToken);
+
+        return result;
     }
 
     /// <summary>

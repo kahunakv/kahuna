@@ -49,11 +49,12 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
     public async Task<KeyValueGetByRangePageResult> GetByRange(
         string url, HLCTimestamp transactionId, string prefix,
         string? startKey, bool startInclusive, string? endKey, bool endInclusive,
-        int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+        int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken,
+        string coordinatorKey = "", TransactionOperationId operationId = default)
     {
         KeyValueGetByRangeResult result = await kahuna.LocateAndGetByRange(
             transactionId, prefix, startKey, startInclusive, endKey, endInclusive,
-            limit, readTimestamp, durability, cancellationToken);
+            limit, readTimestamp, durability, cancellationToken, coordinatorKey, operationId);
 
         return new()
         {
@@ -185,10 +186,10 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
     }
     public Task TryReleaseExclusiveRangeKeyValueLock(string url, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
     public async Task<List<KeyValueGetByBucketItem>> GetByBucket(
-        string url, string prefixKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+        string url, HLCTimestamp transactionId, string prefixKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
     {
         KeyValueGetByBucketResult result = await kahuna.LocateAndGetByBucket(
-            HLCTimestamp.Zero, prefixKey, readTimestamp, durability, cancellationToken);
+            transactionId, prefixKey, readTimestamp, durability, cancellationToken, coordinatorKey, operationId);
         return result.Items.Select(t => new KeyValueGetByBucketItem
         {
             Key = t.Item1, Value = t.Item2.Value, Revision = t.Item2.Revision, LastModified = t.Item2.LastModified
