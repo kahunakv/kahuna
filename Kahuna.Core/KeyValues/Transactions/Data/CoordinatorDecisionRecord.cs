@@ -29,9 +29,52 @@ public readonly record struct CoordinatorParticipant(
     bool ReceiptReleased);
 
 /// <summary>
-/// One frozen non-modified-read/lock cleanup effect and its release progress.
+/// The shape of a frozen cleanup effect, which selects how it is released on replay.
 /// </summary>
-public readonly record struct CoordinatorCleanupEffect(string Effect, bool Released);
+public enum CoordinatorCleanupKind
+{
+    /// <summary>A point lock and/or read-MVCC snapshot on a single key: a ticket-free exclusive-lock release.</summary>
+    KeyRelease = 0,
+
+    /// <summary>A prefix lock: an exclusive prefix-lock release.</summary>
+    PrefixLock = 1,
+
+    /// <summary>A range lock: an exclusive range-lock release over the frozen bounds.</summary>
+    RangeLock = 2
+}
+
+/// <summary>
+/// One frozen non-modified-read/lock cleanup effect of a committed transaction and its release progress.
+/// Modified keys are recorded as participants (their commit releases them) and are never cleanup effects;
+/// these cover the non-modified point locks, read-MVCC snapshots, prefix locks, and range locks that the
+/// live finalize would otherwise release only best-effort. <see cref="Key"/> is the point/read key for
+/// <see cref="CoordinatorCleanupKind.KeyRelease"/> and the key-space prefix for the prefix/range kinds; the
+/// range bounds apply only to <see cref="CoordinatorCleanupKind.RangeLock"/>. The key/prefix is the routing
+/// authority for replay. <see cref="Released"/> marks the release durably acknowledged on the record.
+/// </summary>
+public readonly record struct CoordinatorCleanupEffect(
+    CoordinatorCleanupKind Kind,
+    string Key,
+    KeyValueDurability Durability,
+    string? StartKey,
+    bool StartInclusive,
+    string? EndKey,
+    bool EndInclusive,
+    bool Released)
+{
+    /// <summary>A non-modified point lock and/or read-MVCC snapshot on a single key.</summary>
+    public static CoordinatorCleanupEffect ForKey(string key, KeyValueDurability durability) =>
+        new(CoordinatorCleanupKind.KeyRelease, key, durability, null, false, null, false, false);
+
+    /// <summary>A held prefix lock.</summary>
+    public static CoordinatorCleanupEffect ForPrefix(string prefix, KeyValueDurability durability) =>
+        new(CoordinatorCleanupKind.PrefixLock, prefix, durability, null, false, null, false, false);
+
+    /// <summary>A held range lock over its frozen bounds.</summary>
+    public static CoordinatorCleanupEffect ForRange(RangeLockKey range) =>
+        new(CoordinatorCleanupKind.RangeLock, range.Prefix, range.Durability,
+            range.StartKey, range.StartInclusive, range.EndKey, range.EndInclusive, false);
+}
 
 /// <summary>
 /// A durable coordinator decision record, keyed by <see cref="TransactionId"/> and owned by the data

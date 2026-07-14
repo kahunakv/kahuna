@@ -76,6 +76,13 @@ internal sealed class CoordinatorDecisionStore : IDisposable
     private volatile IReadOnlyDictionary<HLCTimestamp, CoordinatorDecisionRecord> records =
         new Dictionary<HLCTimestamp, CoordinatorDecisionRecord>();
 
+    /// <summary>
+    /// Test-only injection point: when set and it returns true for a record, <see cref="UpsertAsync"/>
+    /// returns <see cref="CoordinatorDecisionMutationResult.MustRetry"/> without replicating, simulating a
+    /// leader that could not durably persist the progress write. Never wired in production paths.
+    /// </summary>
+    internal Func<CoordinatorDecisionRecord, bool>? UpsertFault { get; set; }
+
     public CoordinatorDecisionStore(
         IRaft raft,
         string? storagePath,
@@ -136,6 +143,9 @@ internal sealed class CoordinatorDecisionStore : IDisposable
     public async Task<CoordinatorDecisionMutationResult> UpsertAsync(
         CoordinatorDecisionRecord record, long expectedGeneration, CancellationToken ct)
     {
+        if (UpsertFault is not null && UpsertFault(record))
+            return CoordinatorDecisionMutationResult.MustRetry;
+
         await mutateGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -448,7 +458,20 @@ internal sealed class CoordinatorDecisionStore : IDisposable
         foreach (CoordinatorCleanupEffect effect in record.CleanupEffects)
             message.CleanupEffects.Add(new CoordinatorCleanupEffectMessage
             {
-                Effect = effect.Effect,
+                Kind = effect.Kind switch
+                {
+                    CoordinatorCleanupKind.PrefixLock => CoordinatorCleanupKindMessage.CoordinatorCleanupPrefixLock,
+                    CoordinatorCleanupKind.RangeLock => CoordinatorCleanupKindMessage.CoordinatorCleanupRangeLock,
+                    _ => CoordinatorCleanupKindMessage.CoordinatorCleanupKeyRelease
+                },
+                Key = effect.Key,
+                Durability = (int)effect.Durability,
+                StartKey = effect.StartKey ?? "",
+                StartInclusive = effect.StartInclusive,
+                EndKey = effect.EndKey ?? "",
+                EndInclusive = effect.EndInclusive,
+                StartKeyNull = effect.StartKey is null,
+                EndKeyNull = effect.EndKey is null,
                 Released = effect.Released
             });
 
@@ -468,7 +491,20 @@ internal sealed class CoordinatorDecisionStore : IDisposable
 
         List<CoordinatorCleanupEffect> cleanupEffects = new(message.CleanupEffects.Count);
         foreach (CoordinatorCleanupEffectMessage effect in message.CleanupEffects)
-            cleanupEffects.Add(new CoordinatorCleanupEffect(effect.Effect, effect.Released));
+            cleanupEffects.Add(new CoordinatorCleanupEffect(
+                effect.Kind switch
+                {
+                    CoordinatorCleanupKindMessage.CoordinatorCleanupPrefixLock => CoordinatorCleanupKind.PrefixLock,
+                    CoordinatorCleanupKindMessage.CoordinatorCleanupRangeLock => CoordinatorCleanupKind.RangeLock,
+                    _ => CoordinatorCleanupKind.KeyRelease
+                },
+                effect.Key,
+                (KeyValueDurability)effect.Durability,
+                effect.StartKeyNull ? null : effect.StartKey,
+                effect.StartInclusive,
+                effect.EndKeyNull ? null : effect.EndKey,
+                effect.EndInclusive,
+                effect.Released));
 
         return new CoordinatorDecisionRecord(
             new HLCTimestamp(message.TransactionIdNode, message.TransactionIdPhysical, message.TransactionIdCounter),
