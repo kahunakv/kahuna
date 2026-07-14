@@ -132,13 +132,13 @@ public sealed class TestSplitMergeCorrectnessHandoff : BaseCluster
 
             // Every replica of the destination partition holds both moved receipts.
             await WaitUntilAsync(() => nodes.All(n =>
-                n.Item2.CompletionReceiptStore.Contains(tx, MovedLow) &&
-                n.Item2.CompletionReceiptStore.Contains(tx, MovedHigh)));
+                n.Item2.CompletionReceiptStore.Contains(tx, MovedLow, KeyValueDurability.Persistent) &&
+                n.Item2.CompletionReceiptStore.Contains(tx, MovedHigh, KeyValueDurability.Persistent)));
 
             foreach ((IRaft _, KahunaManager kahuna) in nodes)
             {
-                Assert.True(kahuna.CompletionReceiptStore.Contains(tx, MovedLow));
-                Assert.True(kahuna.CompletionReceiptStore.Contains(tx, MovedHigh));
+                Assert.True(kahuna.CompletionReceiptStore.Contains(tx, MovedLow, KeyValueDurability.Persistent));
+                Assert.True(kahuna.CompletionReceiptStore.Contains(tx, MovedHigh, KeyValueDurability.Persistent));
             }
         }
         finally
@@ -238,7 +238,7 @@ public sealed class TestSplitMergeCorrectnessHandoff : BaseCluster
             Assert.True(await source.KeyValues.ImportCoordinatorDecisionsToPartitionLeaderAsync(Pid, movedDecisions, ct));
 
             await WaitUntilAsync(() => nodes.All(n =>
-                n.Item2.CompletionReceiptStore.Contains(tx, MovedHigh) &&
+                n.Item2.CompletionReceiptStore.Contains(tx, MovedHigh, KeyValueDurability.Persistent) &&
                 n.Item2.CoordinatorDecisionStore.TryGet(tx, out _)));
 
             // Force the destination leader to step down; a different node takes over the partition.
@@ -258,7 +258,7 @@ public sealed class TestSplitMergeCorrectnessHandoff : BaseCluster
             });
 
             // The freshly-elected leader — a former follower — still has both records.
-            Assert.True(newLeader.CompletionReceiptStore.Contains(tx, MovedHigh));
+            Assert.True(newLeader.CompletionReceiptStore.Contains(tx, MovedHigh, KeyValueDurability.Persistent));
             Assert.True(newLeader.CoordinatorDecisionStore.TryGet(tx, out _));
         }
         finally

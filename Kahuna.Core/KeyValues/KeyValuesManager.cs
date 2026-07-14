@@ -87,6 +87,14 @@ internal sealed class KeyValuesManager : IDisposable
     /// </summary>
     internal Func<int, bool>? ReplicateReceiptImportFault { get; set; }
 
+    /// <summary>
+    /// Test-only injection point: when set and it returns true for a participant partition,
+    /// <see cref="ForgetCompletionReceiptsReplicated"/> reports failure without replicating, simulating a receipt
+    /// forget that could not be made durable so the decision must keep the participant unreleased. Never wired in
+    /// production paths.
+    /// </summary>
+    internal Func<int, bool>? ReplicateReceiptForgetFault { get; set; }
+
     private readonly CoordinatorDecisionStore coordinatorDecisionStore;
 
     private readonly IActorRef<CoordinatorDecisionRecoveryActor, CoordinatorDecisionRecoveryRequest> coordinatorDecisionRecovery;
@@ -3789,6 +3797,107 @@ internal sealed class KeyValuesManager : IDisposable
     }
 
     /// <summary>
+    /// Replicates a receipt <b>forget</b> onto a participant partition's Raft log, so every replica of that
+    /// partition drops the proof — not just the node that ran the coordinator drive. Forgets locally on success.
+    /// Returns whether the forget was durable; only then may the decision record persist <c>ReceiptReleased</c>.
+    /// </summary>
+    internal async Task<bool> ForgetCompletionReceiptsReplicated(
+        int partitionId,
+        IReadOnlyCollection<CompletionReceiptRecord> receiptsToForget,
+        CancellationToken cancellationToken)
+    {
+        if (receiptsToForget.Count == 0)
+            return true;
+
+        if (ReplicateReceiptForgetFault is not null && ReplicateReceiptForgetFault(partitionId))
+            return false;
+
+        byte[] data = CompletionReceiptStore.SerializeImport(receiptsToForget, partitionId, forget: true);
+
+        RaftReplicationResult result = await raft.ReplicateLogs(
+            partitionId, ReplicationTypes.CompletionReceipt, data, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        if (!result.Success)
+        {
+            logger.LogWarning(
+                "Failed to replicate completion-receipt forget Partition={Partition} Status={Status}",
+                partitionId, result.Status);
+            return false;
+        }
+
+        foreach (CompletionReceiptRecord receipt in receiptsToForget)
+            completionReceiptStore.Forget(receipt.TransactionId, receipt.Key);
+
+        return true;
+    }
+
+    /// <summary>
+    /// Routes a receipt forget to the leader of <paramref name="partitionId"/> for a replicated forget, forwarding
+    /// via IPC when this node is not the leader. Returns whether the forget was durable on that partition.
+    /// </summary>
+    internal async Task<bool> ForgetCompletionReceiptsToPartitionLeaderAsync(
+        int partitionId,
+        IReadOnlyCollection<CompletionReceiptRecord> receiptsToForget,
+        CancellationToken cancellationToken)
+    {
+        if (receiptsToForget.Count == 0)
+            return true;
+
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
+            return await ForgetCompletionReceiptsReplicated(partitionId, receiptsToForget, cancellationToken).ConfigureAwait(false);
+
+        string leader = await raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        if (leader == raft.GetLocalEndpoint())
+            return await ForgetCompletionReceiptsReplicated(partitionId, receiptsToForget, cancellationToken).ConfigureAwait(false);
+
+        return await interNodeCommunication.ImportCompletionReceipts(leader, partitionId, receiptsToForget, cancellationToken, forget: true).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Replicates the receipt forget for every acknowledged-but-not-yet-released participant, each routed to its
+    /// own key's partition leader (receipts live on the participant key's partition, not the anchor's). Returns
+    /// the set of participant keys whose forget was durably acknowledged on every replica; the caller persists
+    /// <c>ReceiptReleased</c> only for those, so a failed forget leaves the participant pending for a later sweep.
+    /// Shared by the request-path drive and the per-partition recovery driver.
+    /// </summary>
+    internal async Task<HashSet<string>> ForgetAckedParticipantReceiptsAsync(
+        HLCTimestamp transactionId,
+        IReadOnlyList<CoordinatorParticipant> participants,
+        CancellationToken cancellationToken)
+    {
+        Dictionary<int, List<CompletionReceiptRecord>> byPartition = [];
+        Dictionary<int, List<string>> keysByPartition = [];
+
+        foreach (CoordinatorParticipant participant in participants)
+        {
+            if (!participant.Acked || participant.ReceiptReleased)
+                continue;
+
+            int partitionId = locator.LocateRange(participant.Key).PartitionId;
+
+            if (!byPartition.TryGetValue(partitionId, out List<CompletionReceiptRecord>? batch))
+            {
+                batch = [];
+                byPartition[partitionId] = batch;
+                keysByPartition[partitionId] = [];
+            }
+
+            batch.Add(new CompletionReceiptRecord(transactionId, participant.Key, null, participant.Durability));
+            keysByPartition[partitionId].Add(participant.Key);
+        }
+
+        HashSet<string> forgotten = [];
+        foreach (KeyValuePair<int, List<CompletionReceiptRecord>> entry in byPartition)
+        {
+            if (await ForgetCompletionReceiptsToPartitionLeaderAsync(entry.Key, entry.Value, cancellationToken).ConfigureAwait(false))
+                foreach (string key in keysByPartition[entry.Key])
+                    forgotten.Add(key);
+        }
+
+        return forgotten;
+    }
+
+    /// <summary>
     /// Coordinator decision records whose anchor falls in <c>[startKey, endKey)</c> from this node's local
     /// store. Read locally (the decision store is node-global, like the receipt store).
     /// </summary>
@@ -3999,19 +4108,20 @@ internal sealed class KeyValuesManager : IDisposable
             current = updated;
         }
 
-        // Stages 2 and 3: the acks are durable, so forgetting each acknowledged participant's receipt is now safe;
-        // record the release on the durable record (best-effort — reconciled by a later idempotent sweep).
+        // Stages 2 and 3: the acks are durable, so forgetting each acknowledged participant's receipt is now safe.
+        // The forget is replicated on each participant key's partition, so every replica drops the proof — then
+        // ReceiptReleased is persisted only for the participants whose forget was durably acknowledged. A forget
+        // that did not replicate leaves the participant unreleased for a later idempotent sweep.
+        HashSet<string> forgotten =
+            await ForgetAckedParticipantReceiptsAsync(record.TransactionId, current.Participants, cancellationToken).ConfigureAwait(false);
+
         List<CoordinatorParticipant> releasedParticipants = new(current.Participants.Count);
         bool releaseChanged = false;
         foreach (CoordinatorParticipant participant in current.Participants)
         {
-            bool released = participant.ReceiptReleased;
-            if (participant.Acked && !released)
-            {
-                completionReceiptStore.Forget(record.TransactionId, participant.Key);
-                released = true;
+            bool released = participant.ReceiptReleased || forgotten.Contains(participant.Key);
+            if (released != participant.ReceiptReleased)
                 releaseChanged = true;
-            }
 
             releasedParticipants.Add(participant with { ReceiptReleased = released });
         }

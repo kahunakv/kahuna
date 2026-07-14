@@ -19,10 +19,29 @@ public sealed class TestCompletionReceiptStore
 
         store.Record(tx, "k1", "anchor", KeyValueDurability.Persistent);
 
-        Assert.True(store.Contains(tx, "k1"));
-        Assert.False(store.Contains(tx, "k2"));
-        Assert.False(store.Contains(new HLCTimestamp(1, 200, 0), "k1"));
+        Assert.True(store.Contains(tx, "k1", KeyValueDurability.Persistent));
+        Assert.False(store.Contains(tx, "k2", KeyValueDurability.Persistent));
+        Assert.False(store.Contains(new HLCTimestamp(1, 200, 0), "k1", KeyValueDurability.Persistent));
         Assert.Equal(1, store.Count);
+    }
+
+    [Fact]
+    public void Contains_ValidatesFullTuple_RejectsMismatchedDurabilityOrAnchor()
+    {
+        CompletionReceiptStore store = new();
+        HLCTimestamp tx = new(1, 100, 0);
+
+        store.Record(tx, "k1", "anchor", KeyValueDurability.Persistent);
+
+        // The exact tuple matches, with or without an anchor to check.
+        Assert.True(store.Contains(tx, "k1", KeyValueDurability.Persistent));
+        Assert.True(store.Contains(tx, "k1", KeyValueDurability.Persistent, "anchor"));
+
+        // A persistent receipt must not satisfy an ephemeral request for the same logical key.
+        Assert.False(store.Contains(tx, "k1", KeyValueDurability.Ephemeral));
+
+        // A mismatched anchor is rejected when the caller supplies one to validate.
+        Assert.False(store.Contains(tx, "k1", KeyValueDurability.Persistent, "other-anchor"));
     }
 
     [Fact]
@@ -34,7 +53,7 @@ public sealed class TestCompletionReceiptStore
         store.Record(tx, "k1", "anchor", KeyValueDurability.Persistent);
         store.Record(tx, "k1", "anchor-changed", KeyValueDurability.Persistent);
 
-        Assert.True(store.Contains(tx, "k1"));
+        Assert.True(store.Contains(tx, "k1", KeyValueDurability.Persistent));
         Assert.Equal(1, store.Count);
     }
 
@@ -47,7 +66,7 @@ public sealed class TestCompletionReceiptStore
         store.Record(new HLCTimestamp(1, 100, 0), "", null, KeyValueDurability.Persistent);
 
         Assert.Equal(0, store.Count);
-        Assert.False(store.Contains(HLCTimestamp.Zero, "k1"));
+        Assert.False(store.Contains(HLCTimestamp.Zero, "k1", KeyValueDurability.Persistent));
     }
 
     [Fact]
@@ -58,7 +77,7 @@ public sealed class TestCompletionReceiptStore
         store.Record(tx, "k1", null, KeyValueDurability.Persistent);
 
         Assert.True(store.Forget(tx, "k1"));
-        Assert.False(store.Contains(tx, "k1"));
+        Assert.False(store.Contains(tx, "k1", KeyValueDurability.Persistent));
         Assert.False(store.Forget(tx, "k1"));
     }
 
@@ -84,8 +103,8 @@ public sealed class TestCompletionReceiptStore
         // Importing into a fresh store restores the receipts.
         CompletionReceiptStore destination = new();
         destination.ImportRange(moved);
-        Assert.True(destination.Contains(txB, "user/m"));
-        Assert.False(destination.Contains(txA, "user/a"));
+        Assert.True(destination.Contains(txB, "user/m", KeyValueDurability.Persistent));
+        Assert.False(destination.Contains(txA, "user/a", KeyValueDurability.Persistent));
         Assert.Equal(1, destination.Count);
     }
 }

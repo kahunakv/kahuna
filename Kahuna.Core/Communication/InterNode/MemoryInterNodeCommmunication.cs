@@ -1154,10 +1154,12 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    public async Task<bool> ImportCompletionReceipts(string node, int partitionId, IReadOnlyCollection<CompletionReceiptRecord> receipts, CancellationToken cancellationToken)
+    public async Task<bool> ImportCompletionReceipts(string node, int partitionId, IReadOnlyCollection<CompletionReceiptRecord> receipts, CancellationToken cancellationToken, bool forget = false)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.ImportCompletionReceiptsReplicated(partitionId, receipts);
+            return forget
+                ? await kahunaNode.ForgetCompletionReceiptsReplicated(partitionId, receipts)
+                : await kahunaNode.ImportCompletionReceiptsReplicated(partitionId, receipts);
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }

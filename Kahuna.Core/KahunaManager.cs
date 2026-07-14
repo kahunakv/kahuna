@@ -1438,6 +1438,9 @@ public sealed class KahunaManager : IKahuna, IDisposable
     public Task<bool> ImportCoordinatorDecisionsReplicated(int partitionId, IReadOnlyCollection<CoordinatorDecisionRecord> records) =>
         keyValues.ImportCoordinatorDecisionsReplicated(partitionId, records, CancellationToken.None);
 
+    public Task<bool> ForgetCompletionReceiptsReplicated(int partitionId, IReadOnlyCollection<CompletionReceiptRecord> receipts) =>
+        keyValues.ForgetCompletionReceiptsReplicated(partitionId, receipts, CancellationToken.None);
+
     /// <summary>Resolves a key to its owning <c>(partitionId, generation)</c> (key-order router).</summary>
     internal (int PartitionId, long Generation) LocateRange(string key) => keyValues.LocateRange(key);
 

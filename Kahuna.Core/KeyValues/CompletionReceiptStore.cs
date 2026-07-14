@@ -101,10 +101,22 @@ internal sealed class CompletionReceiptStore
     }
 
     /// <summary>
-    /// True when a completion receipt exists for the transaction's mutation on <paramref name="key"/>.
+    /// True when a completion receipt exists for the transaction's mutation on <paramref name="key"/> whose
+    /// stored identity matches the request. The full immutable tuple is validated: a receipt proves a specific
+    /// <paramref name="durability"/> committed, so a persistent receipt must not satisfy an ephemeral request for
+    /// the same logical key. When <paramref name="expectedAnchor"/> is supplied it must also equal the stored
+    /// record anchor; callers that do not carry the anchor pass null and validate on transaction/key/durability.
     /// </summary>
-    public bool Contains(HLCTimestamp transactionId, string key)
-        => receipts.ContainsKey(new ReceiptKey(transactionId, key));
+    public bool Contains(HLCTimestamp transactionId, string key, KeyValueDurability durability, string? expectedAnchor = null)
+    {
+        if (!receipts.TryGetValue(new ReceiptKey(transactionId, key), out CompletionReceipt receipt))
+            return false;
+        if (receipt.Durability != durability)
+            return false;
+        if (expectedAnchor is not null && !string.Equals(receipt.RecordAnchorKey, expectedAnchor, StringComparison.Ordinal))
+            return false;
+        return true;
+    }
 
     /// <summary>
     /// Idempotently forgets a receipt once a durable coordinator acknowledgement confirms the
@@ -125,13 +137,15 @@ internal sealed class CompletionReceiptStore
     }
 
     /// <summary>
-    /// Serializes a batch of receipts to hand to a destination partition as one replicated log entry. The
-    /// wire type is shared with the on-disk snapshot container; <paramref name="destinationPartitionId"/> is
-    /// carried only so the apply side knows nothing extra is needed (routing is already resolved).
+    /// Serializes a batch of receipts as one replicated log entry, either to <b>record</b> them on a destination
+    /// partition (split/merge handoff) or to <b>forget</b> them on a participant partition (a durable coordinator
+    /// acknowledgement releasing the proof on every replica). The wire type is shared with the on-disk snapshot
+    /// container; <paramref name="destinationPartitionId"/> is carried so the apply side knows routing is resolved,
+    /// and <paramref name="forget"/> selects record vs. remove.
     /// </summary>
-    public static byte[] SerializeImport(IReadOnlyCollection<CompletionReceiptRecord> records, int destinationPartitionId)
+    public static byte[] SerializeImport(IReadOnlyCollection<CompletionReceiptRecord> records, int destinationPartitionId, bool forget = false)
     {
-        GrpcImportCompletionReceiptsRequest message = new() { DestinationPartitionId = destinationPartitionId };
+        GrpcImportCompletionReceiptsRequest message = new() { DestinationPartitionId = destinationPartitionId, Forget = forget };
         foreach (CompletionReceiptRecord record in records)
         {
             GrpcCompletionReceiptEntry entry = new()
@@ -155,8 +169,9 @@ internal sealed class CompletionReceiptStore
     /// <summary>Applies a batch of receipts committed to a destination partition's Raft log (follower / leader echo).</summary>
     public bool Replicate(int partitionId, RaftLog log) => Apply(partitionId, log);
 
-    // Records every receipt carried by a split/merge handoff entry. Idempotent: Record keeps the first
-    // receipt, so a re-delivery or a replay of the same entry after a restart converges.
+    // Applies a receipt batch committed to a partition's Raft log: records each receipt (split/merge handoff) or
+    // forgets each (durable-acknowledgement release), on every replica. Idempotent: Record keeps the first
+    // receipt and Forget of an absent receipt is a no-op, so a re-delivery or a replay after restart converges.
     private bool Apply(int partitionId, RaftLog log)
     {
         if (log.LogType != ReplicationTypes.CompletionReceipt || log.LogData is null)
@@ -166,16 +181,18 @@ internal sealed class CompletionReceiptStore
         {
             GrpcImportCompletionReceiptsRequest message = GrpcImportCompletionReceiptsRequest.Parser.ParseFrom(log.LogData);
             foreach (GrpcCompletionReceiptEntry entry in message.Receipts)
-                Record(
-                    new HLCTimestamp(entry.TransactionIdNode, entry.TransactionIdPhysical, entry.TransactionIdCounter),
-                    entry.Key,
-                    entry.HasRecordAnchorKey ? entry.RecordAnchorKey : null,
-                    (KeyValueDurability)entry.Durability);
+            {
+                HLCTimestamp transactionId = new(entry.TransactionIdNode, entry.TransactionIdPhysical, entry.TransactionIdCounter);
+                if (message.Forget)
+                    Forget(transactionId, entry.Key);
+                else
+                    Record(transactionId, entry.Key, entry.HasRecordAnchorKey ? entry.RecordAnchorKey : null, (KeyValueDurability)entry.Durability);
+            }
             return true;
         }
         catch (Exception ex)
         {
-            logger?.LogError(ex, "Failed to apply completion-receipt handoff on partition {Partition}", partitionId);
+            logger?.LogError(ex, "Failed to apply completion-receipt batch on partition {Partition}", partitionId);
             return false;
         }
     }

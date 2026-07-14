@@ -67,6 +67,45 @@ public sealed class TestCoordinatorDecisionRecovery
         Assert.NotEqual(HLCTimestamp.Zero, rec.CompletedAt);
     }
 
+    // ── A receipt forget that cannot be made durable leaves the receipt and the unreleased flag ───────────
+
+    /// <summary>
+    /// The decision record persists <c>ReceiptReleased</c> only after the participant's receipt forget is durably
+    /// replicated. When the forget cannot be made durable, the receipt stays held and the record keeps the
+    /// participant unreleased, so a later sweep re-drives the forget rather than reporting a release that never
+    /// reached the participant replicas.
+    /// </summary>
+    [Fact]
+    public async Task Recovery_ReceiptForgetNotDurable_KeepsReceiptAndLeavesReceiptReleasedFalse()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = new(EmbeddedOptions());
+        await node.StartAsync(ct);
+
+        KahunaManager manager = (KahunaManager)node.Kahuna;
+
+        HLCTimestamp txId = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+        const string anchor = "recover-forget:aaa";
+
+        // A real receipt exists for the acked participant.
+        manager.CompletionReceiptStore.Record(txId, anchor, anchor, KeyValueDurability.Persistent);
+
+        CoordinatorDecisionRecord seed = new(
+            txId, "coord", anchor, txId, CoordinatorDecisionStatus.CommitDecided,
+            [Participant(anchor, acked: true, released: false)], [], txId, HLCTimestamp.Zero);
+        await node.Kahuna.ImportCoordinatorDecisions([seed]);
+
+        // The receipt forget cannot be made durable.
+        manager.KeyValues.ReplicateReceiptForgetFault = _ => true;
+
+        await Recover(node, NoPurge);
+
+        // The proof is still held and the record still reports the participant unreleased.
+        Assert.True(manager.CompletionReceiptStore.Contains(txId, anchor, KeyValueDurability.Persistent));
+        Assert.True(Store(node).TryGet(txId, out CoordinatorDecisionRecord rec));
+        Assert.False(rec.Participants[0].ReceiptReleased);
+    }
+
     // ── A committed-but-unacked participant is re-driven to acknowledged, completing the decision ──────────
 
     [Fact]
