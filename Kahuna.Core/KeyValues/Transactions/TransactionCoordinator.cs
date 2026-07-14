@@ -91,6 +91,14 @@ internal sealed class TransactionCoordinator
             ? Guid.NewGuid().ToString("N")
             : options.CoordinatorKey;
 
+        // Reject an out-of-range policy value up front. External Begin casts numeric wire values straight to
+        // these enums, so an unknown ordinal would otherwise slip through and fall into whichever equality
+        // branch happens to match instead of being reported as malformed input.
+        if (!Enum.IsDefined(options.Locking) ||
+            !Enum.IsDefined(options.ReadValidation) ||
+            !Enum.IsDefined(options.DecisionDurability))
+            return (KeyValueResponseType.InvalidInput, new TransactionHandle(HLCTimestamp.Zero, coordinatorKey));
+
         // A fixed read snapshot and write-skew validation are mutually exclusive: pinning reads to a past
         // timestamp cannot detect concurrent writes that land after that snapshot, so the two together would
         // silently promise a guarantee the engine cannot honor. Reject the combination up front.
@@ -1080,8 +1088,11 @@ internal sealed class TransactionCoordinator
     /// </summary>
     private static bool RequiresReadSetValidation(TransactionContext context)
     {
-        return context.Locking == KeyValueTransactionLocking.Optimistic
-            || context.ReadValidation == ReadValidation.TrackAndValidate;
+        // Read-set validation is governed solely by the declared read-validation policy, independent of the
+        // locking mode. An optimistic transaction with ReadValidation.None takes last-value reads without an
+        // OCC check; a pessimistic transaction with TrackAndValidate still validates its read set. Coupling the
+        // two would deny an optimistic caller the last-value reads its policy asks for.
+        return context.ReadValidation == ReadValidation.TrackAndValidate;
     }
 
     /// <summary>

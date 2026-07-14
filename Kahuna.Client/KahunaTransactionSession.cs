@@ -789,7 +789,10 @@ public class KahunaTransactionSession : IAsyncDisposable
     }
 
     /// <summary>
-    /// Get keys within a specific range under a prefix
+    /// Get keys within a specific range under a prefix. The scan reads at the session's immutable snapshot
+    /// timestamp, the same one used by the transaction's point reads and bucket reads, so a single transaction
+    /// observes one consistent snapshot across every read path (including a paginated scan continued by moving
+    /// the start key). The read timestamp is a per-transaction property, not a per-call one.
     /// </summary>
     public async Task<KeyValueGetByRangePageResult> GetByRange(
         string prefix,
@@ -798,7 +801,6 @@ public class KahunaTransactionSession : IAsyncDisposable
         string? endKey,
         bool endInclusive,
         int limit = 0,
-        HLCTimestamp readTimestamp = default,
         KeyValueDurability durability = KeyValueDurability.Persistent,
         RangeLockMode lockMode = RangeLockMode.Exclusive,
         CancellationToken cancellationToken = default
@@ -811,10 +813,10 @@ public class KahunaTransactionSession : IAsyncDisposable
             await AcquireRangeLock(prefix, startKey, startInclusive, endKey, endInclusive, durability, lockMode, cancellationToken).ConfigureAwait(false);
 
         // Register the scan with the coordinator so its observed keys become read dependencies of this
-        // transaction: an optimistic commit validates them and aborts if any changed after the scan.
+        // transaction: a TrackAndValidate commit validates them and aborts if any changed after the scan.
         return await Client.Communication.GetByRange(
             Url, TransactionId, prefix, startKey, startInclusive, endKey, endInclusive,
-            limit <= 0 ? int.MaxValue : limit, readTimestamp, durability, cancellationToken,
+            limit <= 0 ? int.MaxValue : limit, ReadTimestamp, durability, cancellationToken,
             CoordinatorKey, TransactionOperationId.NewRandom()
         ).ConfigureAwait(false);
     }

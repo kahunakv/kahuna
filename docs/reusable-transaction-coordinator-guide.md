@@ -125,8 +125,8 @@ that avoids redundant acquisition calls; they are not the source of truth for fi
 | `Locking` | Pessimistic or optimistic concurrency behavior. | Use pessimistic when reads need point/predicate locks. Use optimistic when conflicts should be detected from read observations at commit. |
 | `Timeout` | Session operation/finalize drain deadline in milliseconds. | Choose a value long enough for the largest expected participant fan-out. Non-positive values use the server default. |
 | `AsyncRelease` | Whether eligible post-commit cleanup may continue asynchronously. | Leave off when prompt cleanup matters. Rollback still requires confirmed mandatory releases before it reports success. |
-| `ReadValidation` | Whether latest-value reads are tracked and checked for revision/write-intent changes. | `TrackAndValidate` provides an explicit read-set check. Optimistic locking also enables validation for compatibility. |
-| `ReadTimestamp` | A historical HLC timestamp for point `Get` and `Exists`; zero means latest. | A fixed timestamp cannot be combined with `TrackAndValidate`; Begin rejects that combination. `GetByRange` currently takes its own per-call timestamp, while `GetByBucket` reads latest. |
+| `ReadValidation` | Whether reads are tracked and checked for revision/write-intent changes at commit. | `TrackAndValidate` performs the read-set check; `None` takes last-value reads with no check. This is independent of the locking mode: an optimistic transaction with `None` skips validation, a pessimistic transaction with `TrackAndValidate` still validates. |
+| `ReadTimestamp` | A historical HLC snapshot applied to every read the transaction performs; zero means latest. | The read timestamp is a per-transaction property, so point, bucket, range, and paginated-range reads all observe the same pinned snapshot. A fixed timestamp cannot be combined with `TrackAndValidate`; Begin rejects that combination. |
 | `DecisionDurability` | Whether the commit decision is best-effort or recoverable after it is installed. | `BestEffort` is the default. Choose `Durable` only for all-persistent write sets that need post-decision recovery. |
 
 `DecisionDurability` and `KeyValueDurability` answer different questions. The first controls recovery
@@ -378,9 +378,21 @@ participant value + receipt committed
 anchor key. The record keeps logical participant keys, not fixed partition IDs, so recovery reuses the
 current router after a split, merge, or leadership change.
 
-Range split and merge orchestration explicitly copies both decision records and completion receipts
-as part of the pre-cutover handoff. Imports are idempotent by transaction/key identity, so a temporary
-duplicate copy during handoff is safe.
+Range split and merge orchestration hands both decision records and completion receipts to the
+destination partition as part of the pre-cutover handoff. The handoff is **replicated onto the
+destination partition's Raft log**, not merely written into the current leader's memory, so every
+replica of the destination range holds it — a re-commit, re-drive, or finalize routed to the
+destination after cutover still resolves even if the destination leader changes. Decision records ride
+the same decision-delta replication as steady-state progress; completion receipts, which in steady
+state ride their key/value commit and have no standalone log entry, get a dedicated replicated handoff
+entry. Imports are idempotent by transaction/key identity, so a temporary duplicate copy during
+handoff is safe.
+
+The handoff **gates cutover**: if the receipt or decision transfer cannot be made durable on the
+destination, the split or merge aborts before cutover instead of retiring the source range with the
+only outstanding record lost. Range-lock transfer is separate and remains best-effort (locks are
+in-memory, non-replicated actor state, hardened by a post-cutover confirm-and-reimport loop); only the
+correctness metadata gates cutover.
 
 ### Recovery
 
@@ -532,6 +544,7 @@ The coordinator currently relies primarily on structured logs. Useful messages i
 - outstanding durable decisions deferred to recovery;
 - decision replication, snapshot load/save, and recovery errors;
 - completion-receipt snapshot load/save errors;
+- split/merge receipt or decision handoff not durable, aborting cutover;
 - abandoned-session reaping and cleanup failures.
 
 The focused server tests are organized around the same boundaries:
@@ -546,6 +559,7 @@ The focused server tests are organized around the same boundaries:
 | Reaper/finalize-slot interaction | `TestSessionReaping.cs` |
 | Completion receipt persistence and movement | `TestCompletionReceiptDurability.cs`, `TestCompletionReceiptTransfer.cs` |
 | Decision persistence, movement, and recovery | `TestCoordinatorDecisionStore.cs`, `TestCoordinatorDecisionTransfer.cs`, `TestCoordinatorDecisionRecovery.cs` |
+| Replicated, cutover-gating split/merge handoff | `TestSplitMergeCorrectnessHandoff.cs` |
 | Durable commit and restart behavior | `TestDurableCoordinatorDecision.cs`, `TestDurablePersistentRestart.cs` |
 | Partial commit and uncertain anchor outcomes | `TestDurablePartialCommitRecovery.cs`, `TestDurableAnchorUncertainty.cs` |
 
@@ -590,7 +604,7 @@ the server project does not.
 | `Kahuna.Core/KeyValues/Handlers/TryCommitMutationsHandler.cs` | Participant commit, receipt lookup/recording, and inline anchor-decision installation. |
 | `Kahuna.Core/KeyValues/KeyValueReplicator.cs`, `KeyValueRestorer.cs` | Receipt and embedded-decision reconstruction on replication and WAL restore. |
 | `Kahuna.Core/Persistence/BackgroundWriterActor.cs` | Receipt snapshot ordering before partition checkpoints advance WAL retention. |
-| `Kahuna.Core/KeyValues/Ranges/RangeSplitter.cs`, `RangeMerger.cs` | Receipt and decision movement across routing changes. |
+| `Kahuna.Core/KeyValues/Ranges/RangeSplitter.cs`, `RangeMerger.cs` | Replicated, cutover-gating receipt and decision handoff across routing changes. |
 
 ---
 
