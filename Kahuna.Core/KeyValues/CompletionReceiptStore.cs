@@ -32,13 +32,27 @@ internal sealed class CompletionReceiptStore
     private readonly ConcurrentDictionary<ReceiptKey, CompletionReceipt> receipts = new();
 
     /// <summary>
-    /// On-disk snapshot path, or null when persistence is disabled (memory-only stores and the
-    /// no-arg fallback). Holds the full receipt set so a receipt survives a cold restart even when
-    /// its committed log entry has been compacted past the WAL retention floor.
+    /// Directory + filename prefix for the per-partition on-disk snapshots, or null when persistence is
+    /// disabled (memory-only stores and the no-arg fallback). Each data partition writes the receipts whose key
+    /// routes to it into "{prefix}_p{partitionId}.snapshot", so a per-partition WAL checkpoint can gate on the
+    /// matching snapshot being durable before it compacts the receipt-bearing log entry.
     /// </summary>
-    private readonly string? snapshotPath;
+    private readonly string? snapshotDirectory;
+    private readonly string? snapshotPrefix;
+
+    private readonly object fileLock = new();
+
+    // Resolves a receipt key to its current owning data partition (RangeRouting.Locate). Attached after
+    // construction, once the locator exists; a per-partition snapshot needs it, load does not.
+    private Func<string, int>? keyToPartition;
 
     private readonly ILogger<IKahuna>? logger;
+
+    /// <summary>
+    /// Test-only injection point: when set and it returns true for a partition, <see cref="PersistSnapshot"/>
+    /// reports failure without writing, so the checkpoint gate must not advance the WAL retention floor.
+    /// </summary>
+    internal Func<int, bool>? PersistSnapshotFault { get; set; }
 
     /// <summary>Memory-only store: no durable snapshot. Used by the no-persistence fallback and tests.</summary>
     public CompletionReceiptStore()
@@ -46,18 +60,31 @@ internal sealed class CompletionReceiptStore
     }
 
     /// <summary>
-    /// Durable store: reloads any persisted receipts from disk immediately, and writes the full set back
-    /// on <see cref="PersistSnapshot"/> (driven at checkpoint time, before the WAL retention floor advances).
+    /// Durable store: reloads any persisted receipts from disk immediately, and writes the per-partition sets
+    /// back on <see cref="PersistSnapshot"/> (driven at checkpoint time, before the WAL retention floor advances).
     /// </summary>
     public CompletionReceiptStore(string? storagePath, string storageRevision, ILogger<IKahuna> logger)
     {
         this.logger = logger;
-        snapshotPath = string.IsNullOrEmpty(storagePath)
-            ? null
-            : Path.Combine(storagePath, $"completionreceipts_{storageRevision}.snapshot");
+        if (string.IsNullOrEmpty(storagePath))
+        {
+            snapshotDirectory = null;
+            snapshotPrefix = null;
+        }
+        else
+        {
+            snapshotDirectory = storagePath;
+            snapshotPrefix = $"completionreceipts_{storageRevision}";
+        }
 
         LoadFromDisk();
     }
+
+    /// <summary>
+    /// Wires the receipt-key → data-partition resolver once the locator is constructed. Called during manager
+    /// construction, before any checkpoint can run.
+    /// </summary>
+    public void AttachPartitionResolver(Func<string, int> resolver) => keyToPartition = resolver;
 
     /// <summary>
     /// Records a completion receipt for a committed persistent participant. Idempotent: a replayed
@@ -120,21 +147,31 @@ internal sealed class CompletionReceiptStore
     }
 
     /// <summary>
-    /// Writes the full current receipt set to the on-disk snapshot (atomic tmp-then-move). A no-op when
-    /// persistence is disabled. Called at checkpoint time — after every dirty key-value write has flushed
-    /// and before the WAL retention floor advances — so a receipt whose committed log entry is about to be
-    /// compacted is captured durably. An over-inclusive snapshot is safe: a stale receipt only ever answers
-    /// <c>Committed</c> for a value that genuinely committed, and recovery forgets it when the decision
-    /// reconciles.
+    /// Writes the receipts whose key routes to <paramref name="partitionId"/> to that partition's on-disk
+    /// snapshot (atomic tmp-then-move) and reports whether the write is durable. Called at checkpoint time —
+    /// after every dirty key-value write has flushed and before the partition's WAL retention floor advances —
+    /// so a receipt whose committed log entry is about to be compacted is captured durably; only on a
+    /// <c>true</c> return may the checkpoint proceed. A no-op returning <c>true</c> when persistence is disabled
+    /// or the resolver is not yet attached. An over-inclusive snapshot is safe: a stale receipt only ever answers
+    /// <c>Committed</c> for a value that genuinely committed, and recovery forgets it when the decision reconciles.
     /// </summary>
-    public void PersistSnapshot()
+    public bool PersistSnapshot(int partitionId)
     {
-        if (snapshotPath is null)
-            return;
+        if (snapshotDirectory is null || snapshotPrefix is null)
+            return true;
+
+        if (PersistSnapshotFault is not null && PersistSnapshotFault(partitionId))
+            return false;
+
+        if (keyToPartition is null)
+            return true;
 
         GrpcImportCompletionReceiptsRequest message = new();
         foreach (KeyValuePair<ReceiptKey, CompletionReceipt> receipt in receipts)
         {
+            if (keyToPartition(receipt.Key.Key) != partitionId)
+                continue;
+
             GrpcCompletionReceiptEntry entry = new()
             {
                 TransactionIdNode     = receipt.Key.TransactionId.N,
@@ -149,38 +186,68 @@ internal sealed class CompletionReceiptStore
             message.Receipts.Add(entry);
         }
 
+        string path = Path.Combine(snapshotDirectory, $"{snapshotPrefix}_p{partitionId}.snapshot");
+
         try
         {
             byte[] data = message.ToByteArray();
-            string tmp = snapshotPath + ".tmp";
-            File.WriteAllBytes(tmp, data);
-            File.Move(tmp, snapshotPath, overwrite: true);
+            lock (fileLock)
+            {
+                string tmp = path + ".tmp";
+                File.WriteAllBytes(tmp, data);
+                File.Move(tmp, path, overwrite: true);
+            }
+
+            return true;
         }
         catch (Exception ex)
         {
-            logger?.LogError(ex, "Failed to persist completion-receipt snapshot to {Path}", snapshotPath);
+            logger?.LogError(ex, "Failed to persist completion-receipt snapshot to {Path}", path);
+            return false;
         }
     }
 
+    // Loads every per-partition snapshot present in the storage directory. A snapshot file that exists but
+    // cannot be parsed is corruption the receipt set cannot silently recover from — a below-floor receipt may be
+    // gone from the WAL — so it fails closed (throws) rather than starting empty and losing proof of a commit.
     private void LoadFromDisk()
     {
-        if (snapshotPath is null || !File.Exists(snapshotPath))
+        if (snapshotDirectory is null || snapshotPrefix is null || !Directory.Exists(snapshotDirectory))
             return;
 
-        try
+        string[] files;
+        lock (fileLock)
+            files = Directory.GetFiles(snapshotDirectory, $"{snapshotPrefix}_p*.snapshot");
+
+        foreach (string path in files)
         {
-            byte[] data = File.ReadAllBytes(snapshotPath);
-            GrpcImportCompletionReceiptsRequest message = GrpcImportCompletionReceiptsRequest.Parser.ParseFrom(data);
+            byte[] data;
+            try
+            {
+                lock (fileLock)
+                    data = File.ReadAllBytes(path);
+            }
+            catch (Exception ex)
+            {
+                throw new IOException($"Failed to read completion-receipt snapshot {path}; refusing to start with a possibly incomplete receipt set", ex);
+            }
+
+            GrpcImportCompletionReceiptsRequest message;
+            try
+            {
+                message = GrpcImportCompletionReceiptsRequest.Parser.ParseFrom(data);
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidDataException($"Corrupt completion-receipt snapshot {path}; refusing to start empty and lose proof of a commit", ex);
+            }
+
             foreach (GrpcCompletionReceiptEntry entry in message.Receipts)
                 Record(
                     new HLCTimestamp(entry.TransactionIdNode, entry.TransactionIdPhysical, entry.TransactionIdCounter),
                     entry.Key,
                     entry.HasRecordAnchorKey ? entry.RecordAnchorKey : null,
                     (KeyValueDurability)entry.Durability);
-        }
-        catch (Exception ex)
-        {
-            logger?.LogError(ex, "Failed to load completion-receipt snapshot from {Path}", snapshotPath);
         }
     }
 

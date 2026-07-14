@@ -156,6 +156,12 @@ public sealed class EmbeddedKahunaOptions
     public TimeSpan BaseSnapshotInterval { get; set; } = TimeSpan.FromMinutes(30);
 
     /// <summary>
+    /// Minimum age a dirty partition must reach before its WAL retention floor advances via a checkpoint; the
+    /// gating receipt/decision snapshots are written on the same cadence.
+    /// </summary>
+    public TimeSpan CheckpointInterval { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
     /// Root directory for PITR backup artifacts and catalog manifests.
     /// When empty, backup operations are disabled.
     /// </summary>

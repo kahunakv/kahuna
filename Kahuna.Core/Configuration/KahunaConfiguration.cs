@@ -223,6 +223,13 @@ public sealed class KahunaConfiguration
     public TimeSpan BaseSnapshotInterval { get; set; } = TimeSpan.FromMinutes(30);
 
     /// <summary>
+    /// Minimum age a dirty partition must reach before the background writer advances its WAL retention floor
+    /// with a checkpoint. The receipt and decision snapshots that gate that checkpoint are written on the same
+    /// cadence, so a committed receipt/decision stays replayable in the WAL until this interval elapses.
+    /// </summary>
+    public TimeSpan CheckpointInterval { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
     /// Root directory for PITR backup artifacts and catalog manifests.
     /// When empty, backup operations are disabled.
     /// </summary>

@@ -1,5 +1,6 @@
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Ranges;
+using Kahuna.Server.Persistence;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
@@ -368,6 +369,157 @@ public sealed class TestCoordinatorDecisionStore
         Assert.Equal(CoordinatorDecisionMutationResult.Applied, await store.UpsertAsync(WithTicket(ticket, true), 0, ct));
         Assert.Equal(CoordinatorDecisionMutationResult.RejectedParticipantsFrozen,
             await store.UpsertAsync(WithTicket(otherTicket, true), 0, ct));
+    }
+
+    // ── The per-partition checkpoint snapshot holds only that partition's records and reports success ──────
+
+    [Fact]
+    public async Task PersistSnapshot_WritesOnlyThePartitionsRecords_AndReportsSuccess()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        string storagePath = Path.Combine(Path.GetTempPath(), "kahuna-cdsnap-" + Guid.NewGuid().ToString("N"));
+        string walPath = Path.Combine(Path.GetTempPath(), "kahuna-cdsnap-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(storagePath);
+        Directory.CreateDirectory(walPath);
+
+        try
+        {
+            await using EmbeddedKahunaNode node = new(PersistentOptions(storagePath, walPath), loggerFactory);
+            await node.StartAsync(ct);
+
+            // A standalone store over a private directory, with a deterministic anchor → partition mapping.
+            CoordinatorDecisionStore store = new(node.Raft, storagePath, "cdsnap", loggerFactory.CreateLogger<IKahuna>());
+            store.AttachAnchorResolver(key => (key.StartsWith("p1", StringComparison.Ordinal) ? 1 : 2, 1L));
+
+            HLCTimestamp tx1 = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+            HLCTimestamp tx2 = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+            store.InstallFromAnchorCommit(Decision(tx1, "p1/a", CoordinatorDecisionStatus.CommitDecided, "p1/a"));
+            store.InstallFromAnchorCommit(Decision(tx2, "p2/b", CoordinatorDecisionStatus.CommitDecided, "p2/b"));
+
+            Assert.True(store.PersistSnapshot(1));
+            Assert.True(store.PersistSnapshot(2));
+
+            string p1File = Path.Combine(storagePath, "coordinatordecision_cdsnap_p1.snapshot");
+            IReadOnlyList<CoordinatorDecisionRecord> p1 = CoordinatorDecisionStore.DeserializeRecords(File.ReadAllBytes(p1File));
+            CoordinatorDecisionRecord only = Assert.Single(p1);
+            Assert.Equal("p1/a", only.RecordAnchorKey);
+
+            // A fresh store over the same directory reloads both partitions' snapshots.
+            CoordinatorDecisionStore reloaded = new(node.Raft, storagePath, "cdsnap", loggerFactory.CreateLogger<IKahuna>());
+            Assert.True(reloaded.TryGet(tx1, out _));
+            Assert.True(reloaded.TryGet(tx2, out _));
+        }
+        finally
+        {
+            TryDeleteDirectory(storagePath);
+            TryDeleteDirectory(walPath);
+        }
+    }
+
+    // ── A snapshot write failure is reported, so the checkpoint gate can hold the WAL floor ─────────────────
+
+    [Fact]
+    public async Task PersistSnapshot_ReportsFailure_WhenWriteFaultInjected()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        string storagePath = Path.Combine(Path.GetTempPath(), "kahuna-cdsnap-" + Guid.NewGuid().ToString("N"));
+        string walPath = Path.Combine(Path.GetTempPath(), "kahuna-cdsnap-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(storagePath);
+        Directory.CreateDirectory(walPath);
+
+        try
+        {
+            await using EmbeddedKahunaNode node = new(PersistentOptions(storagePath, walPath), loggerFactory);
+            await node.StartAsync(ct);
+
+            CoordinatorDecisionStore store = new(node.Raft, storagePath, "cdsnap", loggerFactory.CreateLogger<IKahuna>());
+            store.AttachAnchorResolver(key => (1, 1L));
+
+            store.PersistSnapshotFault = _ => true;
+            Assert.False(store.PersistSnapshot(1));
+
+            store.PersistSnapshotFault = null;
+            Assert.True(store.PersistSnapshot(1));
+        }
+        finally
+        {
+            TryDeleteDirectory(storagePath);
+            TryDeleteDirectory(walPath);
+        }
+    }
+
+    // ── A corrupt snapshot fails closed rather than starting empty and losing a committed decision ─────────
+
+    [Fact]
+    public async Task LoadFromDisk_FailsClosed_OnCorruptSnapshot()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        string storagePath = Path.Combine(Path.GetTempPath(), "kahuna-cdsnap-" + Guid.NewGuid().ToString("N"));
+        string walPath = Path.Combine(Path.GetTempPath(), "kahuna-cdsnap-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(storagePath);
+        Directory.CreateDirectory(walPath);
+
+        try
+        {
+            await using EmbeddedKahunaNode node = new(PersistentOptions(storagePath, walPath), loggerFactory);
+            await node.StartAsync(ct);
+
+            File.WriteAllBytes(Path.Combine(storagePath, "coordinatordecision_cdsnap_p1.snapshot"),
+                "not a valid decision snapshot"u8.ToArray());
+
+            Assert.ThrowsAny<Exception>(() =>
+                new CoordinatorDecisionStore(node.Raft, storagePath, "cdsnap", loggerFactory.CreateLogger<IKahuna>()));
+        }
+        finally
+        {
+            TryDeleteDirectory(storagePath);
+            TryDeleteDirectory(walPath);
+        }
+    }
+
+    // ── The checkpoint gate refuses to advance the WAL floor when a snapshot cannot be made durable ────────
+
+    [Fact]
+    public async Task CheckpointGate_RefusesToCheckpoint_WhenASnapshotCannotPersist()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        string storagePath = Path.Combine(Path.GetTempPath(), "kahuna-cdgate-" + Guid.NewGuid().ToString("N"));
+        string walPath = Path.Combine(Path.GetTempPath(), "kahuna-cdgate-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(storagePath);
+        Directory.CreateDirectory(walPath);
+
+        try
+        {
+            await using EmbeddedKahunaNode node = new(PersistentOptions(storagePath, walPath), loggerFactory);
+            await node.StartAsync(ct);
+
+            var manager = (KahunaManager)node.Kahuna;
+            int partition = manager.GetDataPartitionForKey("gate/key");
+            BackgroundWriterActor? writer = manager.BackgroundWriterActor;
+            Assert.NotNull(writer);
+
+            // With both snapshots durable, the gate lets the checkpoint proceed.
+            Assert.True(writer!.TryCaptureCheckpointSnapshots(partition));
+
+            // A decision-snapshot failure blocks the checkpoint — the WAL floor must not advance past a decision
+            // whose only durable copy could not be written.
+            manager.CoordinatorDecisionStore.PersistSnapshotFault = _ => true;
+            Assert.False(writer.TryCaptureCheckpointSnapshots(partition));
+            manager.CoordinatorDecisionStore.PersistSnapshotFault = null;
+
+            // A receipt-snapshot failure blocks it just the same.
+            manager.CompletionReceiptStore.PersistSnapshotFault = _ => true;
+            Assert.False(writer.TryCaptureCheckpointSnapshots(partition));
+            manager.CompletionReceiptStore.PersistSnapshotFault = null;
+
+            // Cleared, the gate proceeds again.
+            Assert.True(writer.TryCaptureCheckpointSnapshots(partition));
+        }
+        finally
+        {
+            TryDeleteDirectory(storagePath);
+            TryDeleteDirectory(walPath);
+        }
     }
 
     private static void TryDeleteDirectory(string path)
