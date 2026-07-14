@@ -77,9 +77,11 @@ internal sealed class KeyValuesManager : IDisposable
 
     private readonly SnapshotFloorStore snapshotFloorStore;
 
-    private readonly CompletionReceiptStore completionReceiptStore = new();
+    private readonly CompletionReceiptStore completionReceiptStore;
 
     private readonly CoordinatorDecisionStore coordinatorDecisionStore;
+
+    private readonly IActorRef<CoordinatorDecisionRecoveryActor, CoordinatorDecisionRecoveryRequest> coordinatorDecisionRecovery;
 
     private readonly RangeQuiesceStore rangeQuiesceStore = new();
 
@@ -122,7 +124,8 @@ internal sealed class KeyValuesManager : IDisposable
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         KahunaConfiguration configuration,
         ILogger<IKahuna> logger,
-        SnapshotFloorStore? externalFloorStore = null
+        SnapshotFloorStore? externalFloorStore = null,
+        CompletionReceiptStore? externalReceiptStore = null
     )
     {
         this.actorSystem = actorSystem;
@@ -143,6 +146,11 @@ internal sealed class KeyValuesManager : IDisposable
         // When an external store is provided (shared with BackgroundWriterActor) use it directly;
         // otherwise create a new instance owned by this manager.
         snapshotFloorStore = externalFloorStore ?? new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
+
+        // Completion-receipt store: shared with the BackgroundWriterActor when provided (so the writer
+        // snapshots the receipts this manager records), otherwise owned locally. The durable overload
+        // reloads any persisted receipts so a re-commit after a cold restart still answers Committed.
+        completionReceiptStore = externalReceiptStore ?? new CompletionReceiptStore(configuration.StoragePath, configuration.StorageRevision, logger);
 
         // Sync the per-node key-space registry with any descriptors loaded from the durable snapshot.
         // RangeMapStore.LoadFromDisk (called above) restores the range map but does not touch the
@@ -195,6 +203,17 @@ internal sealed class KeyValuesManager : IDisposable
         // routers) so the actors could share the one instance for install-on-anchor-commit; that install
         // path needs no resolver, only the coordinator's UpsertAsync/RemoveAsync do.
         coordinatorDecisionStore.AttachAnchorResolver(locator.LocateRange);
+
+        // Per-node recovery driver for outstanding durable coordinator decisions. Runs off the request and
+        // key-value actor mailboxes; each sweep drives only records anchored to partitions this node leads,
+        // completing any decision a coordinator could not finish (crash, or not colocated with the anchor
+        // leader so unable to replicate its own progress). Spawned after the locator so it can resolve anchors.
+        coordinatorDecisionRecovery = actorSystem.Spawn<CoordinatorDecisionRecoveryActor, CoordinatorDecisionRecoveryRequest>(
+            "coordinator-decision-recovery",
+            this,
+            configuration,
+            logger
+        );
 
         restorer = new(backgroundWriter, raft, completionReceiptStore, coordinatorDecisionStore, logger);
         replicator = new(backgroundWriter, persistentKeyValuesRouter, raft, writeFrequencyRegistry, keySpaceRegistry, completionReceiptStore, coordinatorDecisionStore, logger);
@@ -910,6 +929,13 @@ internal sealed class KeyValuesManager : IDisposable
     public Task<bool> OnLeaderChanged(int partitionId, string node)
     {
         logger.LogDebug("KeyValues: leader for partition {PartitionId} is now {Node}", partitionId, node);
+
+        // On acquiring leadership of a data partition, wake the recovery driver so decisions anchored to that
+        // partition — which only its leader may drive — are re-driven promptly rather than waiting for the next
+        // periodic tick. Partition 0 (meta) holds no decision records.
+        if (partitionId >= RangeMapStore.FirstDataPartitionId && node == raft.GetLocalEndpoint())
+            coordinatorDecisionRecovery.Send(new CoordinatorDecisionRecoveryRequest());
+
         return Task.FromResult(true);
     }
 
@@ -3688,6 +3714,122 @@ internal sealed class KeyValuesManager : IDisposable
         }
 
         await interNodeCommunication.ImportCoordinatorDecisions(leader, recordsToImport, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Drives every outstanding coordinator decision record whose anchor's data partition this node currently
+    /// leads: re-commits participants that were not yet acknowledged, records their acks and releases their
+    /// completion receipts, marks a decision <c>Completed</c> once every participant is acknowledged, and purges
+    /// a completed record after the configured retention window once every receipt is released. Runs off the
+    /// request and key-value actor mailboxes (the recovery actor), so a coordinator that died mid-phase-two — or
+    /// one that was never colocated with the anchor leader and so could not replicate its own progress — is
+    /// completed here on the anchor partition's leader. Idempotent against a racing request-path drive: the
+    /// participant commit, receipt forget, decision upsert, and remove are all idempotent.
+    /// </summary>
+    internal async Task RecoverOutstandingDecisions(TimeSpan retentionTtl, CancellationToken cancellationToken)
+    {
+        IReadOnlyList<CoordinatorDecisionRecord> all = coordinatorDecisionStore.SnapshotAll();
+        if (all.Count == 0)
+            return;
+
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        foreach (CoordinatorDecisionRecord record in all)
+        {
+            if (cancellationToken.IsCancellationRequested)
+                return;
+
+            (int partitionId, _) = locator.LocateRange(record.RecordAnchorKey);
+
+            // A node drives only records anchored to a data partition it currently leads. In a standalone
+            // (not-joined) node it always drives; otherwise the leader check gates it, so exactly one node in a
+            // partition group re-drives a given record.
+            if (raft.Joined && !await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
+                continue;
+
+            try
+            {
+                await DriveDecisionRecord(record, now, retentionTtl, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Failed to recover coordinator decision {TransactionId}", record.TransactionId);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Wakes the recovery driver for an immediate sweep (in addition to its periodic tick). Used when a
+    /// missing-session commit finds an outstanding <c>CommitDecided</c> record, so recovery is nudged to finish
+    /// it rather than waiting for the next interval.
+    /// </summary>
+    internal void WakeDecisionRecovery()
+        => coordinatorDecisionRecovery.Send(new CoordinatorDecisionRecoveryRequest());
+
+    private async Task DriveDecisionRecord(
+        CoordinatorDecisionRecord record, HLCTimestamp now, TimeSpan retentionTtl, CancellationToken cancellationToken)
+    {
+        List<CoordinatorParticipant> updated = new(record.Participants.Count);
+        bool changed = false;
+
+        foreach (CoordinatorParticipant participant in record.Participants)
+        {
+            bool acked = participant.Acked;
+            bool released = participant.ReceiptReleased;
+
+            // Re-drive a participant that has not been acknowledged. The commit is idempotent: an already-applied
+            // commit resolves via the participant's completion receipt, and a lost prepare (leader changed since)
+            // returns MustRetry — left non-acked for a later sweep, never forced.
+            if (!acked)
+            {
+                (KeyValueResponseType response, long _) = await LocateAndTryCommitMutations(
+                    record.TransactionId, participant.Key, participant.TicketId, participant.Durability, cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (response == KeyValueResponseType.Committed)
+                {
+                    acked = true;
+                    changed = true;
+                }
+            }
+
+            // Release the completion receipt only after the participant is acknowledged on the record.
+            if (acked && !released)
+            {
+                completionReceiptStore.Forget(record.TransactionId, participant.Key);
+                released = true;
+                changed = true;
+            }
+
+            updated.Add(participant with { Acked = acked, ReceiptReleased = released });
+        }
+
+        CoordinatorDecisionStatus status = record.Status;
+        HLCTimestamp completedAt = record.CompletedAt;
+        if (status == CoordinatorDecisionStatus.CommitDecided && updated.All(static p => p.Acked))
+        {
+            status = CoordinatorDecisionStatus.Completed;
+            completedAt = now;
+            changed = true;
+        }
+
+        CoordinatorDecisionRecord current = record;
+        if (changed)
+        {
+            current = record with { Participants = updated, Status = status, CompletedAt = completedAt };
+            await coordinatorDecisionStore.UpsertAsync(current, expectedGeneration: 0, cancellationToken).ConfigureAwait(false);
+        }
+
+        // Purge a completed record only after the retention window and once every receipt release is confirmed.
+        if (current.Status == CoordinatorDecisionStatus.Completed &&
+            current.Participants.All(static p => p.ReceiptReleased) &&
+            current.AllCleanupReleased &&
+            retentionTtl > TimeSpan.Zero &&
+            current.CompletedAt != HLCTimestamp.Zero &&
+            now - current.CompletedAt >= retentionTtl)
+        {
+            await coordinatorDecisionStore.RemoveAsync(current.TransactionId, current.RecordAnchorKey, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary>

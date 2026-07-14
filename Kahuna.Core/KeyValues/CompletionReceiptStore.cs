@@ -1,6 +1,7 @@
 
 using System.Collections.Concurrent;
 
+using Google.Protobuf;
 using Kommander.Time;
 
 using Kahuna.Shared.KeyValue;
@@ -29,6 +30,34 @@ namespace Kahuna.Server.KeyValues;
 internal sealed class CompletionReceiptStore
 {
     private readonly ConcurrentDictionary<ReceiptKey, CompletionReceipt> receipts = new();
+
+    /// <summary>
+    /// On-disk snapshot path, or null when persistence is disabled (memory-only stores and the
+    /// no-arg fallback). Holds the full receipt set so a receipt survives a cold restart even when
+    /// its committed log entry has been compacted past the WAL retention floor.
+    /// </summary>
+    private readonly string? snapshotPath;
+
+    private readonly ILogger<IKahuna>? logger;
+
+    /// <summary>Memory-only store: no durable snapshot. Used by the no-persistence fallback and tests.</summary>
+    public CompletionReceiptStore()
+    {
+    }
+
+    /// <summary>
+    /// Durable store: reloads any persisted receipts from disk immediately, and writes the full set back
+    /// on <see cref="PersistSnapshot"/> (driven at checkpoint time, before the WAL retention floor advances).
+    /// </summary>
+    public CompletionReceiptStore(string? storagePath, string storageRevision, ILogger<IKahuna> logger)
+    {
+        this.logger = logger;
+        snapshotPath = string.IsNullOrEmpty(storagePath)
+            ? null
+            : Path.Combine(storagePath, $"completionreceipts_{storageRevision}.snapshot");
+
+        LoadFromDisk();
+    }
 
     /// <summary>
     /// Records a completion receipt for a committed persistent participant. Idempotent: a replayed
@@ -88,6 +117,71 @@ internal sealed class CompletionReceiptStore
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Writes the full current receipt set to the on-disk snapshot (atomic tmp-then-move). A no-op when
+    /// persistence is disabled. Called at checkpoint time — after every dirty key-value write has flushed
+    /// and before the WAL retention floor advances — so a receipt whose committed log entry is about to be
+    /// compacted is captured durably. An over-inclusive snapshot is safe: a stale receipt only ever answers
+    /// <c>Committed</c> for a value that genuinely committed, and recovery forgets it when the decision
+    /// reconciles.
+    /// </summary>
+    public void PersistSnapshot()
+    {
+        if (snapshotPath is null)
+            return;
+
+        GrpcImportCompletionReceiptsRequest message = new();
+        foreach (KeyValuePair<ReceiptKey, CompletionReceipt> receipt in receipts)
+        {
+            GrpcCompletionReceiptEntry entry = new()
+            {
+                TransactionIdNode     = receipt.Key.TransactionId.N,
+                TransactionIdPhysical = receipt.Key.TransactionId.L,
+                TransactionIdCounter  = receipt.Key.TransactionId.C,
+                Key                   = receipt.Key.Key,
+                Durability            = (int)receipt.Value.Durability,
+            };
+            if (receipt.Value.RecordAnchorKey is not null)
+                entry.RecordAnchorKey = receipt.Value.RecordAnchorKey;
+
+            message.Receipts.Add(entry);
+        }
+
+        try
+        {
+            byte[] data = message.ToByteArray();
+            string tmp = snapshotPath + ".tmp";
+            File.WriteAllBytes(tmp, data);
+            File.Move(tmp, snapshotPath, overwrite: true);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError(ex, "Failed to persist completion-receipt snapshot to {Path}", snapshotPath);
+        }
+    }
+
+    private void LoadFromDisk()
+    {
+        if (snapshotPath is null || !File.Exists(snapshotPath))
+            return;
+
+        try
+        {
+            byte[] data = File.ReadAllBytes(snapshotPath);
+            GrpcImportCompletionReceiptsRequest message = GrpcImportCompletionReceiptsRequest.Parser.ParseFrom(data);
+            foreach (GrpcCompletionReceiptEntry entry in message.Receipts)
+                Record(
+                    new HLCTimestamp(entry.TransactionIdNode, entry.TransactionIdPhysical, entry.TransactionIdCounter),
+                    entry.Key,
+                    entry.HasRecordAnchorKey ? entry.RecordAnchorKey : null,
+                    (KeyValueDurability)entry.Durability);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError(ex, "Failed to load completion-receipt snapshot from {Path}", snapshotPath);
+        }
     }
 
     /// <summary>Composite receipt key. String keys compare with ordinal semantics (default for string).</summary>

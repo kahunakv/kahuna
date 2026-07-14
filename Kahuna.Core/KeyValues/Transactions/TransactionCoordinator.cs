@@ -137,6 +137,38 @@ internal sealed class TransactionCoordinator
         => sessions.TryGetValue(transactionId, out TransactionContext? context) ? context.DecisionDurability : null;
 
     /// <summary>
+    /// Consults the durable coordinator decision for a handle whose in-memory session is gone. Returns true with
+    /// the outcome only when the handle carries its record anchor <b>and</b> a decision record exists: a
+    /// <c>Completed</c> record answers <c>Committed</c> (the transaction is durably committed); a
+    /// <c>CommitDecided</c> record answers <c>MustRetry</c> and wakes recovery to finish it. Returns false — so
+    /// the caller reports the unknown outcome as <c>Errored</c> — for a stale unanchored handle (it cannot locate
+    /// a lost session) or when no record exists (never created, or its retention window has expired). The record
+    /// is read from the node-global decision store, which holds the anchor partition's replicated records.
+    /// </summary>
+    private bool TryConsultDurableOutcome(TransactionHandle handle, out KeyValueResponseType response)
+    {
+        response = KeyValueResponseType.Errored;
+
+        if (string.IsNullOrEmpty(handle.RecordAnchorKey))
+            return false;
+
+        if (!manager.CoordinatorDecisionStore.TryGet(handle.TransactionId, out CoordinatorDecisionRecord record))
+            return false;
+
+        if (record.Status == CoordinatorDecisionStatus.Completed)
+        {
+            response = KeyValueResponseType.Committed;
+            return true;
+        }
+
+        // CommitDecided: the anchor is committed but participants/cleanup are not yet all durable. Never report
+        // Committed before that — answer MustRetry and nudge the anchor leader's recovery to complete it.
+        manager.WakeDecisionRecovery();
+        response = KeyValueResponseType.MustRetry;
+        return true;
+    }
+
+    /// <summary>
     /// Commits the transaction identified by the supplied handle.
     /// The handle carries both the transaction ID (used to locate the session) and the
     /// coordinator key (used by the caller to route this request to the right node).
@@ -152,6 +184,14 @@ internal sealed class TransactionCoordinator
             // reported as Errored — never a conflict Aborted.
             if (terminalOutcomes.TryGetValue(transactionId, out RetainedOutcome retained))
                 return (retained.Outcome.Type, retained.Outcome.RecordAnchorKey);
+
+            // The in-memory session is gone (evicted, restarted, or it lived on a node that failed), but a
+            // Durable transaction's outcome survives as a decision record anchored on its data partition. Route
+            // by the handle's anchor and consult that record: Completed → Committed; CommitDecided → MustRetry
+            // (and nudge recovery to finish it). Only the anchored handle can find a lost session — a stale
+            // unanchored handle cannot scan the cluster by transaction id and stays unknown Errored.
+            if (TryConsultDurableOutcome(handle, out KeyValueResponseType durable))
+                return (durable, handle.RecordAnchorKey);
 
             logger.LogWarning("Trying to commit unknown transaction {TransactionId}", transactionId);
 
@@ -294,6 +334,12 @@ internal sealed class TransactionCoordinator
             // Replay a retained terminal outcome within the idempotency window; otherwise unknown → Errored.
             if (terminalOutcomes.TryGetValue(transactionId, out RetainedOutcome retained))
                 return retained.Outcome.Type;
+
+            // A rollback cannot override a durably decided commit: if a decision record exists for this lost
+            // session, return its outcome (Completed → Committed, CommitDecided → MustRetry) instead of rolling
+            // back a transaction whose anchor is already committed.
+            if (TryConsultDurableOutcome(handle, out KeyValueResponseType durable))
+                return durable;
 
             logger.LogWarning("Trying to rollback unknown transaction {TransactionId}", transactionId);
 
