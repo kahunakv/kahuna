@@ -65,6 +65,13 @@ internal sealed class CoordinatorDecisionStore : IDisposable
 
     private readonly SemaphoreSlim mutateGate = new(1, 1);
 
+    // Serializes every in-memory publish of the node-global record set. The set is a single copy-on-write
+    // dictionary shared across all partitions, but Kommander runs a separate executor per partition, so two
+    // partitions' apply paths (and the leader's own publish) can otherwise read the same old dictionary, each
+    // build a copy, and each publish — silently dropping one partition's change. Held only for the synchronous
+    // copy-modify-publish (never across an await), so it cannot deadlock with the mutation path's replicate.
+    private readonly object publishLock = new();
+
     private readonly string? snapshotPath;
 
     private readonly object fileLock = new();
@@ -154,17 +161,18 @@ internal sealed class CoordinatorDecisionStore : IDisposable
                 return CoordinatorDecisionMutationResult.MustRetry;
 
             // The participant set is immutable once the decision is written. Progress fields
-            // (acked/receiptReleased/status/cleanup) may change; the participant identities may not.
+            // (acked/receiptReleased/status/cleanup) may change; the participant identities and their
+            // prepared proposal tickets may not.
             if (records.TryGetValue(record.TransactionId, out CoordinatorDecisionRecord? existing) &&
                 !SameParticipants(existing.Participants, record.Participants))
                 return CoordinatorDecisionMutationResult.RejectedParticipantsFrozen;
 
-            Dictionary<HLCTimestamp, CoordinatorDecisionRecord> next = new(records)
-            {
-                [record.TransactionId] = record
-            };
-
-            return await ReplicateDeltaAsync(partitionId, UpsertDelta(record), next, ct).ConfigureAwait(false);
+            // Replicate first, then merge the upsert into the latest record set under the publish lock — a
+            // forward-only merge so a stale request-path/recovery/echo write cannot regress an ack, a
+            // receipt-release, a cleanup-release, or the CommitDecided → Completed transition.
+            return await ReplicateThenPublish(
+                partitionId, UpsertDelta(record),
+                next => MergeUpsert(next, record), ct).ConfigureAwait(false);
         }
         finally
         {
@@ -181,10 +189,9 @@ internal sealed class CoordinatorDecisionStore : IDisposable
         {
             (int partitionId, _) = resolveAnchorPartition!(recordAnchorKey);
 
-            Dictionary<HLCTimestamp, CoordinatorDecisionRecord> next = new(records);
-            next.Remove(transactionId);
-
-            return await ReplicateDeltaAsync(partitionId, RemoveDelta(transactionId), next, ct).ConfigureAwait(false);
+            return await ReplicateThenPublish(
+                partitionId, RemoveDelta(transactionId),
+                next => next.Remove(transactionId), ct).ConfigureAwait(false);
         }
         finally
         {
@@ -192,11 +199,12 @@ internal sealed class CoordinatorDecisionStore : IDisposable
         }
     }
 
-    // Caller holds mutateGate. Replicates the delta on the anchor partition, then publishes the
-    // already-computed record set so the leader reads its own writes without waiting for the commit echo.
-    private async Task<CoordinatorDecisionMutationResult> ReplicateDeltaAsync(
+    // Caller holds mutateGate. Replicates the delta on the anchor partition, then applies the same mutation
+    // to the latest record set under the publish lock, so the leader reads its own writes immediately (without
+    // waiting for the commit echo) while never losing a concurrent partition's publish.
+    private async Task<CoordinatorDecisionMutationResult> ReplicateThenPublish(
         int partitionId, CoordinatorDecisionDeltaMessage delta,
-        Dictionary<HLCTimestamp, CoordinatorDecisionRecord> next, CancellationToken ct)
+        Action<Dictionary<HLCTimestamp, CoordinatorDecisionRecord>> publish, CancellationToken ct)
     {
         byte[] data = ReplicationSerializer.Serialize(delta);
 
@@ -215,7 +223,7 @@ internal sealed class CoordinatorDecisionStore : IDisposable
             return CoordinatorDecisionMutationResult.MustRetry;
         }
 
-        CommitInMemory(next);
+        PublishUnderLock(publish);
         return CoordinatorDecisionMutationResult.Applied;
     }
 
@@ -237,12 +245,12 @@ internal sealed class CoordinatorDecisionStore : IDisposable
             CoordinatorDecisionDeltaMessage delta =
                 ReplicationSerializer.UnserializeCoordinatorDecisionDeltaMessage(log.LogData);
 
-            // Layer the delta onto the current record set (never a wholesale replace). Idempotent by
-            // transaction id — re-delivery or tail replay above an installed snapshot converges, and Raft's
-            // in-order apply means an upsert cannot resurrect a record a later remove already retired.
-            Dictionary<HLCTimestamp, CoordinatorDecisionRecord> next = new(records);
-            ApplyDeltaEntries(next, delta);
-            CommitInMemory(next);
+            // Layer the delta onto the latest record set under the publish lock (never a wholesale replace, and
+            // never racing another partition's publish). Idempotent and forward-only by transaction id — a
+            // re-delivery or a tail delta replayed below an already-advanced on-disk snapshot merges forward
+            // rather than regressing it, and Raft's in-order apply means an upsert cannot resurrect a record a
+            // later remove already retired.
+            PublishUnderLock(next => ApplyDeltaEntries(next, delta));
             return true;
         }
         catch (Exception ex)
@@ -261,7 +269,7 @@ internal sealed class CoordinatorDecisionStore : IDisposable
             if (entry.Remove)
                 target.Remove(record.TransactionId);
             else
-                target[record.TransactionId] = record;
+                MergeUpsert(target, record);
         }
     }
 
@@ -277,13 +285,7 @@ internal sealed class CoordinatorDecisionStore : IDisposable
     /// because the anchor commit precedes those deltas in the anchor partition's single ordered log.
     /// </summary>
     public void InstallFromAnchorCommit(CoordinatorDecisionRecord record)
-    {
-        Dictionary<HLCTimestamp, CoordinatorDecisionRecord> next = new(records)
-        {
-            [record.TransactionId] = record
-        };
-        CommitInMemory(next);
-    }
+        => PublishUnderLock(next => MergeUpsert(next, record));
 
     /// <summary>Serializes one record into the anchor commit envelope's embedded-decision blob.</summary>
     public static byte[] SerializeRecord(CoordinatorDecisionRecord record) => SerializeRecords([record]);
@@ -317,18 +319,22 @@ internal sealed class CoordinatorDecisionStore : IDisposable
         return result;
     }
 
-    /// <summary>Merges transferred records into the local set (split/merge and catch-up repair).</summary>
+    /// <summary>
+    /// Merges transferred records into the local set (split/merge and catch-up repair). Forward-only: a record
+    /// already present is advanced, never overwritten backward, so an older handoff cannot clobber newer local
+    /// progress and a newer handoff repairs a lagging local copy.
+    /// </summary>
     public void ImportRecords(IEnumerable<CoordinatorDecisionRecord> incoming)
     {
-        Dictionary<HLCTimestamp, CoordinatorDecisionRecord> next = new(records);
-        bool changed = false;
-        foreach (CoordinatorDecisionRecord record in incoming)
+        List<CoordinatorDecisionRecord> toMerge = incoming as List<CoordinatorDecisionRecord> ?? incoming.ToList();
+        if (toMerge.Count == 0)
+            return;
+
+        PublishUnderLock(next =>
         {
-            next[record.TransactionId] = record;
-            changed = true;
-        }
-        if (changed)
-            CommitInMemory(next);
+            foreach (CoordinatorDecisionRecord record in toMerge)
+                MergeUpsert(next, record);
+        });
     }
 
     // ── Delta builders ────────────────────────────────────────────────────────────────────────
@@ -359,11 +365,82 @@ internal sealed class CoordinatorDecisionStore : IDisposable
 
     // ── In-memory publish + durable snapshot ──────────────────────────────────────────────────
 
-    private void CommitInMemory(Dictionary<HLCTimestamp, CoordinatorDecisionRecord> next)
+    // Applies one mutation to a copy of the current record set and publishes it, serialized against every
+    // other publish site (leader upsert/remove, follower/restore apply, anchor install, import) so the
+    // node-global copy-on-write set is never lost-updated by a concurrent partition's executor. Purely
+    // synchronous: never holds the lock across an await, so it cannot deadlock with a replicate in flight.
+    private void PublishUnderLock(Action<Dictionary<HLCTimestamp, CoordinatorDecisionRecord>> mutate)
     {
-        records = next;
-        PersistToDisk(next);
+        lock (publishLock)
+        {
+            Dictionary<HLCTimestamp, CoordinatorDecisionRecord> next = new(records);
+            mutate(next);
+            records = next;
+            PersistToDisk(next);
+        }
     }
+
+    // Forward-only upsert into a record-set copy: installs a record that is not yet present, otherwise merges
+    // the incoming progress into the existing record without ever regressing it.
+    private static void MergeUpsert(
+        Dictionary<HLCTimestamp, CoordinatorDecisionRecord> target, CoordinatorDecisionRecord record)
+    {
+        target[record.TransactionId] = target.TryGetValue(record.TransactionId, out CoordinatorDecisionRecord? existing)
+            ? MergeForward(existing, record)
+            : record;
+    }
+
+    // Merges two views of the same decision record so every monotonic progress field moves only forward: the
+    // status advances CommitDecided → Completed but never back, and each participant ack, receipt-release, and
+    // cleanup-release latches true. Participant and cleanup identities are frozen at install, so they are taken
+    // from the existing record and paired positionally; the immutable header (coordinator/anchor/timestamps) is
+    // kept from the existing record. This makes a request-path vs recovery vs echo race, and an out-of-order
+    // transfer/replay, converge to the forward-most state instead of clobbering newer progress.
+    private static CoordinatorDecisionRecord MergeForward(
+        CoordinatorDecisionRecord existing, CoordinatorDecisionRecord incoming)
+    {
+        List<CoordinatorParticipant> participants = new(existing.Participants.Count);
+        for (int i = 0; i < existing.Participants.Count; i++)
+        {
+            CoordinatorParticipant e = existing.Participants[i];
+            CoordinatorParticipant n = i < incoming.Participants.Count ? incoming.Participants[i] : e;
+            participants.Add(e with
+            {
+                Acked = e.Acked || n.Acked,
+                ReceiptReleased = e.ReceiptReleased || n.ReceiptReleased
+            });
+        }
+
+        List<CoordinatorCleanupEffect> cleanup = new(existing.CleanupEffects.Count);
+        for (int i = 0; i < existing.CleanupEffects.Count; i++)
+        {
+            CoordinatorCleanupEffect e = existing.CleanupEffects[i];
+            CoordinatorCleanupEffect n = i < incoming.CleanupEffects.Count ? incoming.CleanupEffects[i] : e;
+            cleanup.Add(e with { Released = e.Released || n.Released });
+        }
+
+        CoordinatorDecisionStatus status = (CoordinatorDecisionStatus)Math.Max((int)existing.Status, (int)incoming.Status);
+        HLCTimestamp completedAt = existing.CompletedAt != HLCTimestamp.Zero ? existing.CompletedAt : incoming.CompletedAt;
+
+        return existing with
+        {
+            Status = status,
+            Participants = participants,
+            CleanupEffects = cleanup,
+            CompletedAt = completedAt
+        };
+    }
+
+    /// <summary>
+    /// Applies an upsert delta through the follower/restore apply path, for tests that exercise the
+    /// concurrent cross-partition publish. Mirrors exactly what a replicated decision delta does.
+    /// </summary>
+    internal bool ApplyUpsertForTest(int partitionId, CoordinatorDecisionRecord record) =>
+        Replicate(partitionId, new RaftLog
+        {
+            LogType = ReplicationTypes.CoordinatorDecision,
+            LogData = ReplicationSerializer.Serialize(UpsertDelta(record))
+        });
 
     private void PersistToDisk(IReadOnlyDictionary<HLCTimestamp, CoordinatorDecisionRecord> snapshot)
     {
@@ -526,7 +603,9 @@ internal sealed class CoordinatorDecisionStore : IDisposable
         if (a.Count != b.Count)
             return false;
         for (int i = 0; i < a.Count; i++)
-            if (!string.Equals(a[i].Key, b[i].Key, StringComparison.Ordinal) || a[i].Durability != b[i].Durability)
+            if (!string.Equals(a[i].Key, b[i].Key, StringComparison.Ordinal) ||
+                a[i].Durability != b[i].Durability ||
+                a[i].TicketId != b[i].TicketId)
                 return false;
         return true;
     }
