@@ -811,8 +811,16 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            // Test seam: fail a specific participant's inter-node commit transiently before it reaches the
+            // remote leader, so its prepare survives on that leader for recovery to drive — the partial durable
+            // commit condition. Returns the retryable signal, never a definite failure.
+            if (CommitMutationsFault is not null && CommitMutationsFault(transactionId, key))
+                return (KeyValueResponseType.MustRetry, 0);
+
             return await kahunaNode.TryCommitMutations(transactionId, key, ticketId, durability);
-        
+        }
+
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
@@ -841,6 +849,14 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
 
             foreach ((string key, HLCTimestamp ticketId, KeyValueDurability durability) in xkeys)
             {
+                // Same transient fault seam as the single-key inter-node commit: a faulted participant's commit
+                // never reaches the remote leader, so its prepare survives for recovery to drive.
+                if (CommitMutationsFault is not null && CommitMutationsFault(transactionId, key))
+                {
+                    bag.Add((KeyValueResponseType.MustRetry, key, 0, durability));
+                    continue;
+                }
+
                 (KeyValueResponseType type, long commitIndex) = await kahunaNode.TryCommitMutations(transactionId, key, ticketId, durability);
                 bag.Add((type, key, commitIndex, durability));
             }
@@ -1050,6 +1066,14 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// retry must recover it from the participant cache instead of reapplying the operation.
     /// </summary>
     public Func<HLCTimestamp, TransactionOperationId, bool>? CompleteOperationFault { get; set; }
+
+    /// <summary>
+    /// Test seam: when set and it returns true for a given (transaction, key), that inter-node
+    /// <see cref="TryCommitMutations"/> call returns <c>MustRetry</c> before reaching the remote leader, so the
+    /// participant's prepare survives there. Used to force a partial durable commit — the anchor commits while a
+    /// secondary stays pending — and prove recovery drives that surviving prepare to completion.
+    /// </summary>
+    public Func<HLCTimestamp, string, bool>? CommitMutationsFault { get; set; }
 
     public async Task<TransactionWorkingSet?> GetTransactionWorkingSet(string node, string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken)
     {

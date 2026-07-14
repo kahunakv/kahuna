@@ -311,14 +311,21 @@ internal sealed class TransactionCoordinator
         }
         finally
         {
-            // Post-commit cleanup is best-effort: the mutations (if any) are already durably committed, so a
-            // Committed result never depends on it. Release every confirmed lock shape not finalized by 2PC
-            // and clean the transaction's read MVCC snapshots. Because no terminal promise rides on its
-            // completion, AsyncRelease may run it detached without over-promising cleanup.
-            if (context.AsyncRelease)
-                _ = ReleaseWorkingSet(context);
-            else
-                await ReleaseWorkingSet(context);
+            // While a Durable decision is still outstanding, the prepared participants belong to recovery:
+            // releasing the working set here would clear the write intents/MVCC recovery must commit, stranding
+            // the decision and losing those writes. Defer all cleanup until a later finalize (or the reaper)
+            // observes the decision Completed and clears the flag — only then is the release safe.
+            if (!context.HasOutstandingDurableDecision)
+            {
+                // Post-commit cleanup is best-effort: the mutations (if any) are already durably committed, so a
+                // Committed result never depends on it. Release every confirmed lock shape not finalized by 2PC
+                // and clean the transaction's read MVCC snapshots. Because no terminal promise rides on its
+                // completion, AsyncRelease may run it detached without over-promising cleanup.
+                if (context.AsyncRelease)
+                    _ = ReleaseWorkingSet(context);
+                else
+                    await ReleaseWorkingSet(context);
+            }
         }
     }
 
@@ -664,6 +671,23 @@ internal sealed class TransactionCoordinator
         {
             TransactionContext context = pair.Value;
 
+            // A session left Committing by a partial Durable commit is owned by recovery, never a reaper rollback
+            // (its anchor is durably committed). Reclaim it only once recovery has completed the decision: release
+            // the working set (now safe — every participant committed) and drop the session so its locks and read
+            // snapshots are freed even if the client stopped retrying; a duplicate finalize still answers Committed
+            // from retention. While the decision is outstanding, leave it for a later sweep — never roll it back.
+            if (context.State is KeyValueTransactionState.Committing && context.HasOutstandingDurableDecision)
+            {
+                if (TryFinalizeCompletedDurableDecision(context))
+                {
+                    await ReleaseWorkingSet(context);
+                    RetainTerminalOutcome(pair.Key, new FinalizeOutcome(KeyValueResponseType.Committed, context.RecordAnchorKey), now);
+                    sessions.TryRemove(pair.Key, out _);
+                }
+
+                continue;
+            }
+
             if (context.State is KeyValueTransactionState.Preparing
                 or KeyValueTransactionState.Committing
                 or KeyValueTransactionState.RollingBack)
@@ -937,15 +961,50 @@ internal sealed class TransactionCoordinator
              or KeyValueResponseType.AlreadyLocked;
 
     /// <summary>
+    /// A Durable commit that installs its anchor decision but cannot drive every participant to a durable ack
+    /// leaves the session in <c>Committing</c> with <see cref="TransactionContext.HasOutstandingDurableDecision"/>
+    /// set and its working set intact: recovery drives the remaining commits from those still-live prepares, so
+    /// finalize must not release them. This returns true once recovery has driven the decision to <c>Completed</c>
+    /// — it clears the outstanding flag and transitions the context to terminal <c>Committed</c> so the caller may
+    /// now release the working set and report a definite <c>Committed</c>. While the decision is not yet complete
+    /// it leaves the context untouched and nudges the anchor leader's recovery so an abandoned session still
+    /// converges.
+    /// </summary>
+    private bool TryFinalizeCompletedDurableDecision(TransactionContext context)
+    {
+        if (!context.HasOutstandingDurableDecision)
+            return false;
+
+        if (!manager.CoordinatorDecisionStore.TryGet(context.TransactionId, out CoordinatorDecisionRecord record) ||
+            record.Status != CoordinatorDecisionStatus.Completed)
+        {
+            manager.WakeDecisionRecovery();
+            return false;
+        }
+
+        context.HasOutstandingDurableDecision = false;
+        context.SetState(KeyValueTransactionState.Committed, KeyValueTransactionState.Committing);
+        return true;
+    }
+
+    /// <summary>
     /// Executes the 2PC protocol for the transaction.
     /// </summary>
     internal async Task TwoPhaseCommit(TransactionContext context, CancellationToken cancellationToken)
     {
         // A finalize re-entered after a Durable commit installed its anchor decision but left participants to
-        // recover must not re-prepare (its 2PC state is already past Pending) and must not report a definite
-        // outcome: the decision is durable, so answer MustRetry until recovery completes it.
+        // recovery must not re-prepare (its 2PC state is already past Pending). Consult the durable record: once
+        // recovery has driven it to Completed the transaction is durably committed — clear the flag, move to
+        // terminal Committed, and let the finally release the working set. Until then answer MustRetry and leave
+        // the still-prepared participants intact for recovery.
         if (context.HasOutstandingDurableDecision)
         {
+            if (TryFinalizeCompletedDurableDecision(context))
+            {
+                context.Result = new() { Type = KeyValueResponseType.Set, Reason = null };
+                return;
+            }
+
             context.Result = new() { Type = KeyValueResponseType.MustRetry, Reason = "Durable decision outstanding; recovery in progress" };
             return;
         }

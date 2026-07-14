@@ -843,20 +843,22 @@ public class KahunaTransactionSession : IAsyncDisposable
                     Url,
                     CoordinatorKey,
                     TransactionId,
+                    RecordAnchorKey,
                     cancellationToken
                 ).ConfigureAwait(false);
 
-                if (result)
-                {
-                    // Fold the coordinator's canonical record anchor into the session handle.
+                // Fold the coordinator's canonical record anchor into the session handle as soon as it is
+                // known — including on a retryable MustRetry — so a subsequent commit retry (after the
+                // coordinating session or its node is lost) still carries the anchor and reaches the durable
+                // decision instead of returning unknown Errored.
+                if (recordAnchorKey is not null)
                     RecordAnchorKey = recordAnchorKey;
+
+                if (result)
                     Status = KahunaTransactionStatus.Committed;
-                }
                 else
-                {
                     // A transient MustRetry: the same finalize can be retried, so remain retryable.
                     Status = KahunaTransactionStatus.Pending;
-                }
 
                 return result;
             }
@@ -905,11 +907,13 @@ public class KahunaTransactionSession : IAsyncDisposable
             try
             {
                 // The server owns cleanup and drives rollback from its own confirmed effects; rollback carries
-                // only the handle identity.
+                // the handle identity plus the known record anchor, so a retry after coordinator loss can
+                // consult a durably decided commit (which a rollback must not override).
                 bool result = await Client.Communication.RollbackTransactionSession(
                     Url,
                     CoordinatorKey,
                     TransactionId,
+                    RecordAnchorKey,
                     cancellationToken
                 ).ConfigureAwait(false);
 

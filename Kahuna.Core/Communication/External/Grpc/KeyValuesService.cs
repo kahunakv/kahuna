@@ -1722,7 +1722,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             };
 
         HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
-        TransactionHandle handle = new(transactionId, request.CoordinatorKey);
+        // Carry the caller's record anchor: after the coordinator session is gone, it is the only route to the
+        // durable decision, so a commit retry that supplies it resolves the outcome instead of unknown Errored.
+        TransactionHandle handle = new(transactionId, request.CoordinatorKey,
+            request.HasRecordAnchorKey ? request.RecordAnchorKey : null);
 
         // Commit returns the coordinator's canonical record anchor captured from the frozen finalize
         // snapshot under the fence, so there is no race window between reading the anchor and freezing the
@@ -1767,7 +1770,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
         TransactionHandle handle = new(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            request.CoordinatorKey
+            request.CoordinatorKey,
+            // The anchor lets a rollback retry consult the durable decision (a decided commit cannot be undone).
+            request.HasRecordAnchorKey ? request.RecordAnchorKey : null
         );
 
         KeyValueResponseType type = await keyValues.LocateAndRollbackTransaction(handle, context.CancellationToken);

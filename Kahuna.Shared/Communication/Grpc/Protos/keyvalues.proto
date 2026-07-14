@@ -761,6 +761,7 @@ message GrpcCommitTransactionRequest
   int32 TransactionIdNode = 2;
   int64 TransactionIdPhysical = 3;
   uint32 TransactionIdCounter = 4;
+  optional string RecordAnchorKey = 5;
 }
 
 message GrpcRollbackTransactionRequest
@@ -769,6 +770,7 @@ message GrpcRollbackTransactionRequest
   int32 TransactionIdNode = 2;
   int64 TransactionIdPhysical = 3;
   uint32 TransactionIdCounter = 4;
+  optional string RecordAnchorKey = 5;
 }
 
 message GrpcTransactionModifiedKey
