@@ -122,7 +122,11 @@ internal sealed class TransactionCoordinator
                 ReadTimestamp      = options.ReadTimestamp,
                 Action             = KeyValueTransactionAction.Commit,
                 AsyncRelease       = options.AsyncRelease,
-                Timeout            = options.Timeout <= 0 ? configuration.DefaultTransactionTimeout : options.Timeout
+                // Clamp to the server's hard maximum so no admitted session can outlive it — the bound that
+                // makes age-based reclamation of a transaction's orphaned MVCC read snapshots correct.
+                Timeout            = Math.Min(
+                                         options.Timeout <= 0 ? configuration.DefaultTransactionTimeout : options.Timeout,
+                                         configuration.MaxTransactionTimeout)
             };
 
             added = sessions.TryAdd(transactionId, context);

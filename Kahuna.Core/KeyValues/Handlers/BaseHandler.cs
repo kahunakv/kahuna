@@ -336,11 +336,13 @@ internal abstract class BaseHandler
         if (entry.MvccEntries is null || entry.MvccEntries.Count == 0)
             return;
 
-        // Maximum wall-clock span a session can remain alive: its own timeout (we use the configured
-        // default as a conservative upper bound) plus the reaper grace window plus the maximum time a
-        // dispatched participant effect can still land after the session is reaped. Any MVCC snapshot
-        // whose owning transaction started more than this span ago must be from a dead session.
-        long sessionMaxLifespanMs = context.Configuration.DefaultTransactionTimeout
+        // Maximum wall-clock span a session can remain alive: the server's hard maximum session timeout
+        // (every admitted session's timeout is clamped to it at Begin, so no live session can exceed it)
+        // plus the reaper grace window plus the maximum time a dispatched participant effect can still land
+        // after the session is reaped. Any MVCC snapshot whose owning transaction started more than this
+        // span ago must be from a dead session — using the *maximum* (not the default) timeout is what keeps
+        // this safe for a long-running transaction started with a larger-than-default timeout.
+        long sessionMaxLifespanMs = context.Configuration.MaxTransactionTimeout
             + TransactionCoordinator.ReapGraceMs
             + TransactionCoordinator.MaxParticipantEffectTtlMs;
 

@@ -31,6 +31,16 @@ public sealed class KahunaConfiguration
     public int DefaultTransactionTimeout { get; set; }
 
     /// <summary>
+    /// Hard upper bound, in milliseconds, on how long any interactive transaction session may live. A
+    /// caller-supplied timeout is clamped to this at Begin, so no admitted session can outlive it. This is
+    /// the quantity that bounds server-side reclamation of a transaction's orphaned MVCC read snapshots: a
+    /// zero-expiry snapshot whose owning transaction started longer ago than this bound (plus the reaper
+    /// grace and participant-effect windows) is provably from a dead session and safe to reclaim, regardless
+    /// of that session's own timeout. Keep it comfortably above the longest legitimate transaction.
+    /// </summary>
+    public int MaxTransactionTimeout { get; set; } = 300_000;
+
+    /// <summary>
     /// Upper bound, in milliseconds, on how long a single two-phase-commit <c>CommitLogs</c>/<c>RollbackLogs</c>
     /// Raft wait may block before it is cancelled and returns a retryable <c>OperationCancelled</c>
     /// (mapped to <c>MustRetry</c>) so the coordinator re-drives the same ticket against the settled
