@@ -345,7 +345,9 @@ public sealed class TestKeyValueLruEviction
 
     private static KahunaConfiguration CreateConfiguration(
         int maxEntries = 50_000,
-        long dirtyWindowMs = 1_000
+        long dirtyWindowMs = 1_000,
+        TimeSpan? cacheEntryTtl = null,
+        int collectBatchMax = 1000
     )
     {
         KahunaConfiguration cfg = ConfigurationValidator.Validate(new()
@@ -354,11 +356,11 @@ public sealed class TestKeyValueLruEviction
             KeyValueWorkers = 1,
             BackgroundWriterWorkers = 1,
             Storage = "memory",
-            CacheEntryTtl = TimeSpan.FromMinutes(5),
+            CacheEntryTtl = cacheEntryTtl ?? TimeSpan.FromMinutes(5),
             CacheEntriesToRemove = 1000,
             MaxEntriesPerActor = maxEntries,
             MaxBytesPerActor = 256L * 1024 * 1024,
-            CollectBatchMax = 1000,
+            CollectBatchMax = collectBatchMax,
             RevisionRetention = 16
         });
         cfg.DirtyObjectsWriterDelay = (int)dirtyWindowMs;
@@ -376,5 +378,139 @@ public sealed class TestKeyValueLruEviction
             Revision = 0,
             FlushedRevision = 0
         });
+    }
+
+    // ── B.idle: CacheEntryTtl idle eviction ─────────────────────────────────────────────
+
+    /// <summary>
+    /// An entry whose LastUsed is far older than CacheEntryTtl must be evicted even when the
+    /// actor is well below its count and byte budgets — TTL eviction is budget-independent.
+    /// </summary>
+    [Fact]
+    public void IdleEntry_EvictedWhenAgeExceedsTtl_UnderBudget()
+    {
+        // TTL = 1 second; the idle entry has LastUsed = HLCTimestamp.Zero (epoch), so its age
+        // in milliseconds equals currentTime.L, which is current wall-clock ms — orders of
+        // magnitude above 1 s. The actor is well under the 50 000-entry budget.
+        KahunaConfiguration config = CreateConfiguration(cacheEntryTtl: TimeSpan.FromSeconds(1));
+        (TryCollectHandler handler, KeyValueContext context, RaftManager raft) = CreateHandler(config);
+
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        InsertEntry(context, "idle-key", HLCTimestamp.Zero); // last used at epoch → always stale
+        InsertEntry(context, "fresh-key", now);              // last used now → within TTL
+
+        handler.Execute();
+
+        Assert.False(context.Store.ContainsKey("idle-key"), "idle entry must be evicted by TTL sweep");
+        Assert.True(context.Store.ContainsKey("fresh-key"), "fresh entry must survive TTL sweep");
+    }
+
+    /// <summary>
+    /// A dirty idle entry (unflushed revision) must not be evicted by the TTL sweep — the
+    /// dirty-eviction guard applies regardless of idle age, matching the budget-LRU behavior.
+    /// </summary>
+    [Fact]
+    public void DirtyIdleEntry_NotEvictedByIdleSweep_EvenWhenStale()
+    {
+        KahunaConfiguration config = CreateConfiguration(cacheEntryTtl: TimeSpan.FromSeconds(1));
+        (TryCollectHandler handler, KeyValueContext context, _) = CreateHandler(config);
+
+        context.InsertStoreEntry("dirty-idle", new KeyValueEntry
+        {
+            Value = Encoding.UTF8.GetBytes("v"),
+            State = KeyValueState.Set,
+            LastUsed = HLCTimestamp.Zero,    // stale
+            LastModified = HLCTimestamp.Zero,
+            Revision = 5,
+            FlushedRevision = 3              // dirty: Revision > FlushedRevision
+        });
+
+        handler.Execute();
+
+        Assert.True(context.Store.ContainsKey("dirty-idle"), "dirty idle entry must not be evicted");
+    }
+
+    /// <summary>
+    /// When CacheEntryTtl is zero (disabled), no idle eviction occurs — entries are retained
+    /// even if their LastUsed is older than the typical TTL window.
+    /// </summary>
+    [Fact]
+    public void IdleEviction_Disabled_WhenCacheEntryTtlIsZero()
+    {
+        // TimeSpan.Zero disables idle eviction; the budget is huge so budget-LRU doesn't run either.
+        KahunaConfiguration config = CreateConfiguration(cacheEntryTtl: TimeSpan.Zero);
+        (TryCollectHandler handler, KeyValueContext context, _) = CreateHandler(config);
+
+        context.InsertStoreEntry("old-key", new KeyValueEntry
+        {
+            Value = Encoding.UTF8.GetBytes("v"),
+            State = KeyValueState.Set,
+            LastUsed = HLCTimestamp.Zero,    // ancient
+            LastModified = HLCTimestamp.Zero,
+            Revision = 0,
+            FlushedRevision = 0
+        });
+
+        handler.Execute();
+
+        Assert.True(context.Store.ContainsKey("old-key"), "entry must not be evicted when TTL is disabled");
+        Assert.Equal(0, handler.LastCycleStats.IdleEvicted);
+    }
+
+    /// <summary>
+    /// An idle entry that holds a live write intent must not be idle-evicted — the intent guard
+    /// applies regardless of age, mirroring the budget-LRU walk. Evicting it would drop the
+    /// in-memory prepare state of an in-flight transaction.
+    /// </summary>
+    [Fact]
+    public void IdleEntry_WithLiveWriteIntent_NotEvictedByIdleSweep()
+    {
+        KahunaConfiguration config = CreateConfiguration(cacheEntryTtl: TimeSpan.FromSeconds(1));
+        (TryCollectHandler handler, KeyValueContext context, RaftManager raft) = CreateHandler(config);
+
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        context.InsertStoreEntry("intent-idle", new KeyValueEntry
+        {
+            Value = Encoding.UTF8.GetBytes("v"),
+            State = KeyValueState.Set,
+            LastUsed = HLCTimestamp.Zero,        // stale
+            LastModified = HLCTimestamp.Zero,
+            Revision = 0,
+            FlushedRevision = 0,
+            WriteIntent = new KeyValueWriteIntent { TransactionId = now, Expires = new(now.N, now.L + 60_000, 0) }
+        });
+
+        handler.Execute();
+
+        Assert.True(context.Store.ContainsKey("intent-idle"), "idle entry with a live write intent must not be evicted");
+        Assert.Equal(0, handler.LastCycleStats.IdleEvicted);
+    }
+
+    /// <summary>
+    /// The idle sweep is bounded per turn: with a small inspection budget it evicts at most that
+    /// many stale entries per cycle and resumes on the next cycle via its cursor, so a large store
+    /// is never swept in a single mailbox turn. Successive cycles eventually evict every idle entry.
+    /// </summary>
+    [Fact]
+    public void IdleSweep_IsBoundedPerTurn_AndResumesUntilComplete()
+    {
+        KahunaConfiguration config = CreateConfiguration(cacheEntryTtl: TimeSpan.FromSeconds(1), collectBatchMax: 2);
+        (TryCollectHandler handler, KeyValueContext context, _) = CreateHandler(config);
+
+        const int total = 5;
+        for (int i = 0; i < total; i++)
+            InsertEntry(context, $"idle/{i}", HLCTimestamp.Zero); // all stale (epoch LastUsed)
+
+        // One bounded cycle inspects at most the budget (2), so it cannot evict all five.
+        handler.Execute();
+        Assert.Equal(2, handler.LastCycleStats.IdleEvicted);
+        Assert.Equal(total - 2, context.Store.Count);
+
+        // Successive cycles resume from the cursor and complete the sweep.
+        for (int i = 0; i < total && context.Store.Count > 0; i++)
+            handler.Execute();
+
+        Assert.Equal(0, context.Store.Count);
     }
 }

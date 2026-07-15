@@ -553,10 +553,7 @@ public sealed class TestTryGetHandler
             LastModified = now,
             LastUsed = now,
             State = KeyValueState.Set,
-            Revisions = new Dictionary<long, KeyValueRevisionEntry>
-            {
-                [3] = new() { Value = Encoding.UTF8.GetBytes("old-v3"), State = KeyValueState.Set }
-            }
+            Revisions = new KeyValueRevisionHistory { [3] = new() { Value = Encoding.UTF8.GetBytes("old-v3"), State = KeyValueState.Set } }
         };
         context.InsertStoreEntry("rev-dict-key", resident);
 

@@ -65,8 +65,10 @@ internal sealed class KeyValueEntry
     /// Recently archived revisions, keyed by revision number. Each entry carries the value plus
     /// the HLC timestamp at which it was committed, enabling snapshot-isolated reads via
     /// <see cref="TryGetRevisionAtOrBefore"/>. Bounded by RevisionsToKeepCached / RevisionRetention.
+    /// Stored as a compact sorted array (<see cref="KeyValueRevisionHistory"/>) rather than a
+    /// dictionary, eliminating per-bucket and per-entry hash-table overhead for the small n ≤ 17 bound.
     /// </summary>
-    public Dictionary<long, KeyValueRevisionEntry>? Revisions { get; set; }
+    public KeyValueRevisionHistory? Revisions { get; set; }
 
     /// <summary>
     /// Multiversion Concurrency Control (MVCC) values per TransactionId

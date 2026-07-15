@@ -13,7 +13,8 @@ namespace Kahuna.Server.KeyValues.Handlers;
 
 /// <summary>
 /// Handles periodic collection and eviction of key-value pairs: garbage reclamation always runs;
-/// approximate LRU eviction runs when the actor exceeds entry or byte budgets.
+/// approximate LRU eviction runs when the actor exceeds entry or byte budgets; idle-TTL eviction
+/// runs when <see cref="KahunaConfiguration.CacheEntryTtl"/> is configured.
 /// </summary>
 /// <summary>Per-cycle eviction statistics captured by TryCollectHandler.Execute.</summary>
 internal readonly record struct CollectCycleStats(
@@ -22,6 +23,7 @@ internal readonly record struct CollectCycleStats(
     int ExpiryInspected,
     int LruEvicted,
     int LruVisited,
+    int IdleEvicted,
     int TotalEvicted,
     bool Backlog,
     long ElapsedMs
@@ -52,6 +54,12 @@ internal sealed class TryCollectHandler : BaseHandler
     // cold keys, advancing by at most the inspection budget per cycle and resuming here next cycle. Null =
     // start from the coldest entry; a cursor whose entry was evicted (StoreKey cleared) restarts from head.
     private KeyValueEntry? mvccSweepCursor;
+
+    // Resume point for the bounded idle-TTL sweep. When CacheEntryTtl is configured, this walk
+    // evicts clean entries that have not been touched within the TTL window, independent of budget.
+    // Null = start from the coldest entry. A cursor whose entry was evicted is abandoned and the
+    // next cycle restarts from the head.
+    private KeyValueEntry? lruIdleCursor;
 
     public TryCollectHandler(KeyValueContext context) : base(context)
     {
@@ -245,6 +253,13 @@ internal sealed class TryCollectHandler : BaseHandler
             $"LRU walk visited {lruVisited} entries but the per-cycle inspection budget is {inspectionMax}");
 #endif
 
+        // Step 2b: idle-TTL eviction — evict clean entries that have not been accessed within
+        // CacheEntryTtl, independent of budget pressure. The LRU list is ordered coldest → hottest,
+        // so we walk from the head and stop as soon as we reach an entry used within the TTL window
+        // (everything hotter is at least as recent). Dirty and intent-held entries are skipped with
+        // the same guards as the budget-LRU walk.
+        int idleEvicted = SweepIdleEntries(currentTime, inspectionMax);
+
         // Step 3: sweep abandoned predicate/range locks. A lock is otherwise cleared only by a
         // matching release, so a transaction that acquires and never releases (crash, abandoned
         // client) would pin the record on a cold key space forever. Bounded by the inspection budget
@@ -282,6 +297,7 @@ internal sealed class TryCollectHandler : BaseHandler
                 tombstoneEvicted,
                 expiryEvicted,
                 lruEvicted,
+                idleEvicted,
                 context.Store.Count,
                 context.ApproximateStoreBytes,
                 stopwatch.ElapsedMilliseconds,
@@ -289,7 +305,7 @@ internal sealed class TryCollectHandler : BaseHandler
             );
         }
 
-        lastCycleStats = new(tombstoneEvicted, expiryEvicted, expiryInspected, lruEvicted, lruVisited, evicted, backlog, stopwatch.ElapsedMilliseconds);
+        lastCycleStats = new(tombstoneEvicted, expiryEvicted, expiryInspected, lruEvicted, lruVisited, idleEvicted, evicted + idleEvicted, backlog, stopwatch.ElapsedMilliseconds);
         keysToEvict.Clear();
 
         if (backlog)
@@ -385,6 +401,63 @@ internal sealed class TryCollectHandler : BaseHandler
 
         foreach (ReadContinuation cont in expired)
             cont.Expire(context, KeyValueStaticResponses.MustRetryResponse);
+    }
+
+    /// <summary>
+    /// Walks the LRU list from the coldest end, evicting clean entries whose idle age exceeds
+    /// <see cref="KahunaConfiguration.CacheEntryTtl"/>. Runs independently of budget pressure;
+    /// skips dirty and intent-held entries with the same guards as the budget-LRU walk.
+    /// Because the list is ordered coldest → hottest, the walk stops early at the first entry
+    /// used within the TTL window — every subsequent entry is at least as recently used.
+    /// Resumes from <c>lruIdleCursor</c> across collect cycles so a large store is not
+    /// scanned in a single mailbox turn.
+    /// </summary>
+    private int SweepIdleEntries(HLCTimestamp currentTime, int budget)
+    {
+        TimeSpan ttl = context.Configuration.CacheEntryTtl;
+        if (ttl <= TimeSpan.Zero)
+            return 0;
+
+        KeyValueEntry? candidate =
+            lruIdleCursor is not null && lruIdleCursor.StoreKey is not null
+                ? lruIdleCursor
+                : context.LruHead;
+        lruIdleCursor = null;
+
+        int idleEvicted = 0;
+        int inspected = 0;
+        while (candidate is not null && inspected < budget)
+        {
+            inspected++;
+            KeyValueEntry? next = candidate.LruNext;
+            string? candidateKey = candidate.StoreKey;
+
+            // The LRU list is coldest → hottest (TouchEntry moves accessed entries to the tail), so
+            // once we reach an entry used within the TTL window all subsequent entries are equally or
+            // more recently used and we can stop. This assumes LastUsed is monotone with list order;
+            // if an access ever recorded a stale LastUsed, some idle entries past this point are simply
+            // deferred to a later cycle (this only ever under-evicts, never drops a live entry).
+            if ((currentTime - candidate.LastUsed) <= ttl)
+                break;
+
+            if (candidateKey is not null
+                && !keysToEvict.Contains(candidateKey)
+                && !HasLiveWriteIntent(candidate, currentTime)
+                && candidate.ReplicationIntent is null
+                && !candidate.IsDirty())
+            {
+                keysToEvict.Add(candidateKey);
+                idleEvicted++;
+            }
+
+            candidate = next;
+        }
+
+        // Stopped on the inspection budget mid-list: resume here next cycle.
+        if (candidate is not null)
+            lruIdleCursor = candidate;
+
+        return idleEvicted;
     }
 
     /// <summary>

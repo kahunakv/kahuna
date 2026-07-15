@@ -143,7 +143,7 @@ public sealed class TestSnapshotFloorBoundaryTrim
     /// </summary>
     private static KeyValueEntry BuildEntry(int count)
     {
-        Dictionary<long, KeyValueRevisionEntry> revisions = new(count);
+        KeyValueRevisionHistory revisions = new();
         for (int i = 1; i <= count; i++)
         {
             HLCTimestamp ts = new(1, i * 1000L, 0);
