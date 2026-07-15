@@ -1249,6 +1249,15 @@ public sealed class KahunaManager : IKahuna, IDisposable
     }
 
     /// <summary>
+    /// Reads the clamped session timeout recorded for an active interactive session, or null when no active
+    /// session with that id exists. Reflects the value after the MaxTransactionTimeout clamp applied in Begin.
+    /// </summary>
+    internal int? GetRecordedSessionTimeout(HLCTimestamp transactionId)
+    {
+        return keyValues.GetRecordedSessionTimeout(transactionId);
+    }
+
+    /// <summary>
     /// Renews the range locks of every live interactive session so they outlive their original acquire TTL
     /// without a client heartbeat. Driven periodically by the transaction reaper; exposed for a deterministic
     /// trigger.

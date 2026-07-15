@@ -28,7 +28,7 @@ public sealed class KahunaConfiguration
     /// </summary>
     public int ScriptCacheMaxEntries { get; set; } = 1_000;
     
-    public int DefaultTransactionTimeout { get; set; }
+    public int DefaultTransactionTimeout { get; set; } = 5000;
 
     /// <summary>
     /// Hard upper bound, in milliseconds, on how long any interactive transaction session may live. A

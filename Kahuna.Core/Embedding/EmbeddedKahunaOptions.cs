@@ -63,7 +63,30 @@ public sealed class EmbeddedKahunaOptions
 
     public int BackgroundWriterWorkers { get; set; } = 1;
 
+    /// <summary>
+    /// Default session timeout (milliseconds) applied when a caller supplies a non-positive <c>Timeout</c>.
+    /// A non-positive requested timeout resolves to this value — there is no "unbounded" mode; every session
+    /// must have a finite deadline so the coordinator can reclaim abandoned sessions and their MVCC snapshots.
+    /// </summary>
     public int DefaultTransactionTimeout { get; set; } = 5000;
+
+    /// <summary>
+    /// Hard upper bound on any admitted session timeout (milliseconds). The coordinator clamps every
+    /// requested <c>Timeout</c> to this value, so no session can outlive it.
+    /// <para>
+    /// <b>Reaper coupling:</b> this value also bounds the orphaned-snapshot reclamation horizon.
+    /// An abandoned zero-expiry MVCC read snapshot is retained for at least
+    /// <c>MaxTransactionTimeout + ReapGraceMs + MaxParticipantEffectTtlMs</c> before it can be reaped.
+    /// Raising this value therefore lengthens the window during which orphaned snapshots occupy memory.
+    /// Set it only as high as the longest legitimate transaction requires.
+    /// </para>
+    /// <para>
+    /// <b>No unbounded mode:</b> a non-positive value is rejected at startup. A consumer that wants a
+    /// long-lived transaction must supply an explicit finite timeout here and a matching explicit
+    /// <c>Timeout</c> on the session — never rely on <c>0</c> or a non-positive value.
+    /// </para>
+    /// </summary>
+    public int MaxTransactionTimeout { get; set; } = 300_000;
 
     public TimeSpan ScriptCacheExpiration { get; set; } = TimeSpan.FromMinutes(1);
 

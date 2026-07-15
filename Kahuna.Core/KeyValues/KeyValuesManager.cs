@@ -5212,6 +5212,15 @@ internal sealed class KeyValuesManager : IDisposable
     }
 
     /// <summary>
+    /// Reads the clamped session timeout recorded for an active interactive session, or null when no active
+    /// session with that id exists. Reflects the value after the MaxTransactionTimeout clamp applied in Begin.
+    /// </summary>
+    internal int? GetRecordedSessionTimeout(HLCTimestamp transactionId)
+    {
+        return txCoordinator.GetRecordedSessionTimeout(transactionId);
+    }
+
+    /// <summary>
     /// Commits the transaction identified by <paramref name="handle"/>.
     /// </summary>
     /// <param name="handle">The handle returned by <see cref="StartTransaction"/>.</param>
