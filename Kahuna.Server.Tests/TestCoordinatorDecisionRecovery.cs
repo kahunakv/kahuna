@@ -17,7 +17,7 @@ using Nixie;
 namespace Kahuna.Server.Tests;
 
 /// <summary>
-/// Acceptance tests for the per-partition-leader recovery driver (Phase 6.4): it re-drives outstanding durable
+/// Acceptance tests for the per-partition-leader recovery driver: it re-drives outstanding durable
 /// coordinator decisions to completion on the anchor partition's leader — re-committing not-yet-acked
 /// participants, marking a decision <c>Completed</c> once all are acknowledged, and purging completed records
 /// after the retention window — while a follower drives nothing.

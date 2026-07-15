@@ -406,9 +406,10 @@ public sealed class TestTransactionConcurrencyPolicy
     }
 
     /// <summary>
-    /// The decision-durability policy is captured at Begin: a default session records BestEffort while
-    /// an explicit Durable session records Durable. (Durable has no runtime effect yet; this confirms
-    /// the policy is carried through the coordinator's session state.)
+    /// The decision-durability policy is captured at Begin: a default session records BestEffort while an
+    /// explicit Durable session records Durable. Durable drives real behavior at commit — an anchored, replicated
+    /// coordinator decision, per-partition-leader recovery, and admission bounding — so this asserts the policy is
+    /// carried through the coordinator's session state where that behavior keys off it.
     /// </summary>
     [Fact]
     public async Task DecisionDurability_DefaultRecordsBestEffort_ExplicitRecordsDurable()
