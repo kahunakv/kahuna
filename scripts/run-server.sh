@@ -26,7 +26,7 @@ for port in 8082 8084 8086; do
   if [ "$ready" -ne 1 ]; then
     echo "Kahuna server did not become ready on port ${port}"
     docker compose ps
-    docker compose logs --tail=200
+    docker compose logs --tail=500
     exit 1
   fi
 done
@@ -57,7 +57,14 @@ for port in 8082 8084 8086; do
   if [ "$converged" -ne 1 ]; then
     echo "Kahuna cluster did not elect leaders (still electing) on port ${port}"
     docker compose ps
-    docker compose logs --tail=200
+    # Per-service tail so each node's election/replication warnings are attributable, plus a full
+    # interleaved tail for cross-node ordering. Helps pin down why one node fails to converge.
+    for svc in kahuna1 kahuna2 kahuna3; do
+      echo "===== ${svc} logs (tail) ====="
+      docker compose logs --no-color --tail=300 "${svc}"
+    done
+    echo "===== interleaved logs (tail) ====="
+    docker compose logs --no-color --tail=500
     exit 1
   fi
 done

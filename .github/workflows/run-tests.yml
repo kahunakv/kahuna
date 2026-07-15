@@ -11,7 +11,10 @@ jobs:
       GIT_BRANCH: ${{ github.head_ref || github.ref_name }}
       GIT_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
       KAHUNA_SERVER_DEFAULT_LOG_LEVEL: Warning
-      KAHUNA_SERVER_LOG_LEVEL: Error
+      # Temporarily Warning (was Error) so the cluster bring-up failure dump surfaces Kommander's
+      # leader-election/replication warnings (log-hole repair, log-matching rejection, "outdated,
+      # cannot become leader"). Restore to Error once the convergence issue is diagnosed.
+      KAHUNA_SERVER_LOG_LEVEL: Warning
       KAHUNA_TEST_LOG_LEVEL: Error
       KAHUNA_TEST_TIMING_SCALE: "3"
     steps:
