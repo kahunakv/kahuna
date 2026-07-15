@@ -644,27 +644,53 @@ public sealed class TestTransactionRegistrationRouting
         (Node[] nodes, MemoryInterNodeCommmunication interNode) = await AssembleWithTransport();
         try
         {
-            (_, TransactionHandle handle) =
-                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
-
             // Classify a node whose register-remote calls hop the transport to the coordinator (so the
             // write's completion routes through the fault-injecting transport) and the coordinator-partition
             // leader (for a local, hop-free working-set read).
+            //
+            // A coordinator-partition leadership change discards the in-memory interactive session — it is not
+            // reconstructed on a new leader, by design — and surfaces as RejectedSessionClosed. The aggressive
+            // election timeouts in this cluster make that possible while the probe loop hops across nodes, so
+            // establish the session and classify the nodes under a bounded retry, restarting with a fresh
+            // transaction if the session is lost mid-classification.
+            TransactionHandle handle = default;
             Node? coordinatorLeader = null;
             Node? remoteEntry = null;
             byte[] probe = [4, 5, 6];
 
-            foreach (Node node in nodes)
+            for (int attempt = 1; ; attempt++)
             {
-                int before = interNode.BeginOperationCallCount;
-                (OperationRegistrationOutcome probeOutcome, _, _, _, _) =
-                    await node.Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, TransactionOperationId.NewRandom(), OperationKind.Set, probe, ct);
-                Assert.Equal(OperationRegistrationOutcome.New, probeOutcome);
+                (_, handle) =
+                    await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
 
-                if (interNode.BeginOperationCallCount == before)
-                    coordinatorLeader = node;
-                else
-                    remoteEntry = node;
+                coordinatorLeader = null;
+                remoteEntry = null;
+                bool sessionLost = false;
+
+                foreach (Node node in nodes)
+                {
+                    int before = interNode.BeginOperationCallCount;
+                    (OperationRegistrationOutcome probeOutcome, _, _, _, _) =
+                        await node.Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, TransactionOperationId.NewRandom(), OperationKind.Set, probe, ct);
+
+                    if (probeOutcome == OperationRegistrationOutcome.RejectedSessionClosed)
+                    {
+                        sessionLost = true;
+                        break;
+                    }
+
+                    Assert.Equal(OperationRegistrationOutcome.New, probeOutcome);
+
+                    if (interNode.BeginOperationCallCount == before)
+                        coordinatorLeader = node;
+                    else
+                        remoteEntry = node;
+                }
+
+                if (!sessionLost && coordinatorLeader is not null && remoteEntry is not null)
+                    break;
+
+                Assert.True(attempt < 8, "coordinator-partition leadership never held a session long enough to classify the nodes");
             }
 
             Assert.NotNull(coordinatorLeader);
@@ -2054,6 +2080,17 @@ public sealed class TestTransactionRegistrationRouting
 
     // ── harness ──────────────────────────────────────────────────────────────────────────
 
+    // Widen the fixed election timers on loaded runners exactly as the shared cluster harness does, so
+    // KAHUNA_TEST_TIMING_SCALE=3 in CI buys the same election slack and keeps leadership (and its in-memory
+    // sessions) stable through a test.
+    private static readonly double TimingScale = GetTimingScale();
+
+    private static double GetTimingScale()
+    {
+        string? val = Environment.GetEnvironmentVariable("KAHUNA_TEST_TIMING_SCALE");
+        return val is not null && double.TryParse(val, out double s) && s >= 1.0 ? s : 1.0;
+    }
+
     private (RaftManager, KahunaManager) BuildNode(
         int nodeId, int port, string[] peers,
         MemoryInterNodeCommmunication interNode, InMemoryCommunication comm)
@@ -2068,8 +2105,16 @@ public sealed class TestTransactionRegistrationRouting
             Host = "localhost",
             Port = port,
             InitialPartitions = 2,
-            StartElectionTimeout = 50,
-            EndElectionTimeout = 150,
+            // Keep the leader's heartbeat well inside the election window (Kommander's own guideline is
+            // HeartbeatInterval <= StartElectionTimeout / 5). The default 500 ms heartbeat is far larger than
+            // the fast election timers used here, so during any idle gap between a session's operations a
+            // follower's election timer fires before the next heartbeat arrives — a spurious re-election that
+            // discards the coordinator-partition leader's in-memory interactive sessions. A 30 ms heartbeat
+            // keeps followers fed between operations, and scaling the election window by the test timing scale
+            // gives loaded CI runners the same slack the shared cluster harness relies on.
+            HeartbeatInterval = TimeSpan.FromMilliseconds(30),
+            StartElectionTimeout = (int)(150 * TimingScale),
+            EndElectionTimeout = (int)(300 * TimingScale),
             ElectionTimeoutSeed = 94000 + nodeId,
             CompactEveryOperations = 1000,
             CompactNumberEntries = 50,

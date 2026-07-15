@@ -257,8 +257,14 @@ public sealed class TestSplitMergeCorrectnessHandoff : BaseCluster
                 return false;
             });
 
-            // The freshly-elected leader — a former follower — still has both records.
-            Assert.True(newLeader.CompletionReceiptStore.Contains(tx, MovedHigh, KeyValueDurability.Persistent));
+            // The freshly-elected leader is a former follower that already applied both replicated records —
+            // asserted for every node above, before the step-down. A memory-only import would have stranded
+            // them on the retired leader, leaving this one with nothing; the surviving durable decision record
+            // is the witness that the handoff was replicated rather than memory-only. Acquiring data-partition
+            // leadership also wakes the decision-recovery driver, which legitimately re-drives this committed
+            // decision and asynchronously releases its completion receipt — so the receipt is transient here and
+            // must not be asserted post-election (that is the race). The decision record is retained (marked
+            // Completed) for the outcome-retention window, so it is the race-free survival check.
             Assert.True(newLeader.CoordinatorDecisionStore.TryGet(tx, out _));
         }
         finally
