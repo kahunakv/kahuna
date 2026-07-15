@@ -106,8 +106,7 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
 
         if (message.Durability != KeyValueDurability.Persistent)
         {
-            if (entry.MvccEntries.Remove(message.TransactionId, out KeyValueMvccEntry? removedMvccE))
-                context.AdjustEstimatedEntryBytes(entry, -KeyValueStoreAccounting.MvccEntryRemovedBytes(entry.MvccEntries.Count == 0, removedMvccE.Value));
+            RemoveMvccEntry(entry, message.TransactionId);
             TrimExpiredMvccEntries(entry, currentTime);
             entry.WriteIntent = null;
 
@@ -135,8 +134,7 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
             return KeyValueStaticResponses.ErroredResponse;
 
         // Confirmed terminal rollback: clear MVCC + write intent.
-        if (entry.MvccEntries.Remove(message.TransactionId, out KeyValueMvccEntry? removedMvccP))
-            context.AdjustEstimatedEntryBytes(entry, -KeyValueStoreAccounting.MvccEntryRemovedBytes(entry.MvccEntries.Count == 0, removedMvccP.Value));
+        RemoveMvccEntry(entry, message.TransactionId);
         TrimExpiredMvccEntries(entry, currentTime);
         entry.WriteIntent = null;
 

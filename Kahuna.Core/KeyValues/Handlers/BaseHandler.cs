@@ -326,6 +326,22 @@ internal abstract class BaseHandler
     }
 
     /// <summary>
+    /// Removes the MVCC snapshot for <paramref name="txId"/> from <paramref name="entry"/>,
+    /// reclaims its byte budget, and nulls the dictionary when the last entry is removed so the
+    /// dictionary object itself is eligible for GC. No-op when the entry is absent.
+    /// </summary>
+    protected void RemoveMvccEntry(KeyValueEntry entry, HLCTimestamp txId)
+    {
+        if (entry.MvccEntries is null) return;
+        if (!entry.MvccEntries.Remove(txId, out KeyValueMvccEntry? removed)) return;
+
+        bool lastEntry = entry.MvccEntries.Count == 0;
+        context.AdjustEstimatedEntryBytes(entry, -KeyValueStoreAccounting.MvccEntryRemovedBytes(lastEntry, removed.Value));
+        if (lastEntry)
+            entry.MvccEntries = null;
+    }
+
+    /// <summary>
     /// Removes MvccEntries from other transactions that have elapsed their Expires deadline, or whose
     /// transaction is definitively no longer live (committed, rolled back, or older than the maximum
     /// possible session lifetime). Called at transaction resolve time (commit/rollback) so the collector
@@ -370,16 +386,7 @@ internal abstract class BaseHandler
 
         if (stale is null) return;
 
-        long bytesFreed = 0;
         foreach (HLCTimestamp txId in stale)
-        {
-            if (entry.MvccEntries.Remove(txId, out KeyValueMvccEntry? removed))
-                bytesFreed += KeyValueStoreAccounting.MvccEntryRemovedBytes(false, removed.Value);
-        }
-
-        if (entry.MvccEntries.Count == 0)
-            bytesFreed += KeyValueStoreAccounting.DictionaryOverheadBytes;
-
-        context.AdjustEstimatedEntryBytes(entry, -bytesFreed);
+            RemoveMvccEntry(entry, txId);
     }
 }
