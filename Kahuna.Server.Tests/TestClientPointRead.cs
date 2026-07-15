@@ -46,6 +46,14 @@ public sealed class TestClientPointRead
 
         long snapshotMs = readV1.LastModified;
 
+        // Snapshot reads resolve at millisecond granularity, so v2 must commit in a strictly later
+        // millisecond than v1 — otherwise both writes share the snapshotMs bucket and a read "as of
+        // snapshotMs" is free to return either. The commit HLC's physical component is
+        // max(previousMillisecond, wallClockMillisecond), so once the wall clock passes snapshotMs the
+        // next write is guaranteed a larger timestamp. Without this the test races on fast runners.
+        while (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() <= snapshotMs)
+            await Task.Delay(1, TestContext.Current.CancellationToken);
+
         KahunaKeyValue setV2 = await client.SetKeyValue(key, "version-two", 0, KeyValueFlags.Set, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
         Assert.True(setV2.Success);
 
