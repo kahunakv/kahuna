@@ -1764,6 +1764,92 @@ public sealed class TestTransactionRegistrationRouting
         }
     }
 
+    /// <summary>
+    /// An optimistic transaction whose only writes go through batch set-many / delete-many — with no explicit
+    /// <c>AcquireMany</c> — folds the implicit point lock of each confirmed write into the coordinator's held-lock
+    /// set and commits. Before batch writes folded their implicit locks, such a transaction reached
+    /// <c>PrepareMutations</c> with an empty lock set and aborted every time.
+    /// </summary>
+    [Fact]
+    public async Task OptimisticBatchWrites_CommitWithoutExplicitLocks_FoldingImplicitPointLocks()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            // Seed two committed keys so the optimistic transaction can also batch-delete.
+            (_, TransactionHandle seed) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+            foreach (string key in new[] { "cbatch/x", "cbatch/y" })
+                Assert.Equal(KeyValueResponseType.Set,
+                    await SetKeyWithRetry(nodes[1], seed, TransactionOperationId.NewRandom(), key, "v"u8.ToArray(), KeyValueDurability.Persistent, ct));
+            Assert.Equal(KeyValueResponseType.Committed, await CommitWithRetry(nodes[0], seed, ct));
+
+            // Optimistic transaction: batch set + batch delete, and no explicit lock acquire anywhere.
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Optimistic }, ct);
+
+            List<KahunaSetKeyValueResponseItem> setResponses = await SetManyWithRetry(
+                nodes[1], handle, TransactionOperationId.NewRandom(),
+                SetItems(handle, KeyValueFlags.None, KeyValueDurability.Persistent, "cbatch/a", "cbatch/b"), ct);
+            Assert.All(setResponses, r => Assert.Equal(KeyValueResponseType.Set, r.Type));
+
+            List<KahunaDeleteKeyValueResponseItem> delResponses = await DeleteManyWithRetry(
+                nodes[2], handle, TransactionOperationId.NewRandom(), ["cbatch/x", "cbatch/y"], KeyValueDurability.Persistent, ct);
+            Assert.All(delResponses, r => Assert.Equal(KeyValueResponseType.Deleted, r.Type));
+
+            // Every confirmed batch write folded its implicit point lock into the coordinator working set.
+            TransactionWorkingSet? ws = await nodes[0].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(ws);
+            foreach (string key in new[] { "cbatch/a", "cbatch/b", "cbatch/x", "cbatch/y" })
+                Assert.Contains(ws!.AcquiredLocks, l => l.Key == key);
+
+            // Commit succeeds off the server-owned working set — no explicit locks, no client lists.
+            Assert.Equal(KeyValueResponseType.Committed, await CommitWithRetry(nodes[0], handle, ct));
+
+            // The effects are durable: the set keys exist, the deleted keys are gone.
+            (KeyValueResponseType getA, _) = await nodes[1].Kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, "cbatch/a", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Get, getA);
+            (KeyValueResponseType getX, _) = await nodes[1].Kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, "cbatch/x", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+            Assert.NotEqual(KeyValueResponseType.Get, getX);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// Folding a batch write's implicit point lock does not weaken write-write detection: two optimistic
+    /// transactions that each batch-write the same key cannot both stage the write, and cannot both commit it.
+    /// The first writer stages its intent; the second's overlapping batch write is rejected by the write-intent
+    /// conflict, so exactly one holds the write — no lost update.
+    /// </summary>
+    [Fact]
+    public async Task OptimisticBatchWrites_ConcurrentOverlap_CannotBothWin()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            const string shared = "cww/shared";
+            (_, TransactionHandle txA) = await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Optimistic }, ct);
+            (_, TransactionHandle txB) = await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Optimistic }, ct);
+
+            // The first batch write stages its intent with no contention and wins the key; the second's
+            // overlapping batch write hits that intent and is rejected — it never stages a Set, so the two
+            // writers cannot both write the shared key (no lost update).
+            List<KahunaSetKeyValueResponseItem> a = await nodes[1].Kahuna.LocateAndTrySetManyKeyValue(
+                SetItems(txA, KeyValueFlags.None, KeyValueDurability.Persistent, shared), ct, txA.CoordinatorKey, TransactionOperationId.NewRandom());
+            List<KahunaSetKeyValueResponseItem> b = await nodes[1].Kahuna.LocateAndTrySetManyKeyValue(
+                SetItems(txB, KeyValueFlags.None, KeyValueDurability.Persistent, shared), ct, txB.CoordinatorKey, TransactionOperationId.NewRandom());
+
+            Assert.Equal(KeyValueResponseType.Set, a[0].Type);
+            Assert.NotEqual(KeyValueResponseType.Set, b[0].Type);
+        }
+        finally { await LeaveAll(nodes); }
+    }
+
     private static async Task<List<KahunaSetKeyValueResponseItem>> SetManyWithRetry(
         Node node, TransactionHandle handle, TransactionOperationId op, List<KahunaSetKeyValueRequestItem> items, CancellationToken ct)
     {

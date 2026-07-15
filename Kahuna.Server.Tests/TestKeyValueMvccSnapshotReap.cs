@@ -185,6 +185,139 @@ public sealed class TestKeyValueMvccSnapshotReap
             "zero-Expires snapshot for a live (young) transaction must not be reaped prematurely");
     }
 
+    /// <summary>
+    /// A still-live transaction whose own timeout is larger than the default must not have its snapshot
+    /// age-reaped once it passes the default-timeout window: the age bound is the server's <em>maximum</em>
+    /// admissible timeout, not the default. Here the reader is older than the default-based window but well
+    /// within the maximum-based window, so it is preserved — reaping it would silently drop the participant's
+    /// first-committer-wins conflict detection for that transaction.
+    /// </summary>
+    [Fact]
+    public async Task ZeroExpiresSnapshot_PreservedForLiveLongTransactionBeyondDefaultTimeout()
+    {
+        // Default timeout 5 s (default-based window = 35 s), maximum timeout 60 s (max-based window = 90 s).
+        KahunaConfiguration config = CreateConfiguration(defaultTransactionTimeoutMs: 5000, maxTransactionTimeoutMs: 60000);
+        (TryReleaseExclusiveLockHandler handler, KeyValueContext context, RaftManager raft) = CreateHandler(config);
+
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        // 40 s ago: past the default-based 35 s window (would be wrongly reaped) but within the max-based 90 s.
+        HLCTimestamp readerTx = new(now.N, now.L - 40_000, 0);
+        HLCTimestamp writerTx = now;
+
+        InsertWithMvcc(context, "snap/key", writerTx, readerTx, HLCTimestamp.Zero);
+
+        // No commit or rollback recorded — a still-live long transaction.
+
+        await handler.Execute(new KeyValueRequest(
+            KeyValueRequestType.TryReleaseExclusiveLock,
+            writerTx, HLCTimestamp.Zero, "snap/key",
+            null, null, -1, KeyValueFlags.None, 0,
+            HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
+            0, 0, null));
+
+        KeyValueEntry? entry = context.Store.Get("snap/key");
+        Assert.NotNull(entry);
+        Assert.True(
+            entry.MvccEntries is not null && entry.MvccEntries.ContainsKey(readerTx),
+            "a live transaction whose larger-than-default timeout has not elapsed must not be age-reaped");
+    }
+
+    // ── cold read-only keys: reclaimed by the periodic collector sweep ────────────────────
+
+    /// <summary>
+    /// A key read once under a now-dead transaction and never written again is reclaimed by the periodic
+    /// collector sweep, without any later commit/rollback/lock-release on that key.
+    /// </summary>
+    [Fact]
+    public void ColdReadOnlyKey_DeadSessionSnapshot_ReclaimedByCollectorSweep()
+    {
+        (TryCollectHandler collect, KeyValueContext context, RaftManager raft) = CreateCollectHandler();
+
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        HLCTimestamp readerTx = new(now.N, now.L - 2000, 0);
+        context.RecordCommitted(readerTx);
+
+        InsertReadSnapshotOnly(context, "cold/key", readerTx);
+
+        // No write ever touches the key; only the periodic collector runs.
+        collect.Execute();
+
+        KeyValueEntry? entry = context.Store.Get("cold/key");
+        Assert.NotNull(entry);
+        Assert.True(
+            entry!.MvccEntries is null || !entry.MvccEntries.ContainsKey(readerTx),
+            "the collector sweep must reclaim a dead-session snapshot on a cold, never-rewritten key");
+    }
+
+    /// <summary>
+    /// The collector sweep preserves a live transaction's snapshot on a cold key — it is not budget/count
+    /// eviction, only dead-session reclamation.
+    /// </summary>
+    [Fact]
+    public void ColdReadOnlyKey_LiveSessionSnapshot_PreservedByCollectorSweep()
+    {
+        (TryCollectHandler collect, KeyValueContext context, RaftManager raft) = CreateCollectHandler();
+
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        HLCTimestamp readerTx = new(now.N, now.L - 500, 0);   // young; no commit/rollback recorded
+
+        InsertReadSnapshotOnly(context, "cold/key", readerTx);
+
+        collect.Execute();
+
+        KeyValueEntry? entry = context.Store.Get("cold/key");
+        Assert.NotNull(entry);
+        Assert.True(
+            entry!.MvccEntries is not null && entry.MvccEntries.ContainsKey(readerTx),
+            "a live transaction's snapshot on a cold key must survive the collector sweep");
+    }
+
+    /// <summary>
+    /// The collector's MVCC sweep is bounded per turn: with a small inspection budget it trims at most that
+    /// many entries per cycle and resumes on the next cycle, so a large store is never swept in one mailbox
+    /// turn. Successive cycles eventually reclaim every dead-session snapshot.
+    /// </summary>
+    [Fact]
+    public void CollectorMvccSweep_IsBoundedPerTurn_AndResumesUntilComplete()
+    {
+        (TryCollectHandler collect, KeyValueContext context, RaftManager raft) =
+            CreateCollectHandler(CreateConfiguration(collectBatchMax: 2));
+
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        const int total = 5;
+        for (int i = 0; i < total; i++)
+        {
+            HLCTimestamp readerTx = new(now.N, now.L - (2000 + i), 0);
+            context.RecordCommitted(readerTx);
+            InsertReadSnapshotOnly(context, $"cold/{i}", readerTx);
+        }
+
+        int WithSnapshotRemaining()
+        {
+            int remaining = 0;
+            for (int i = 0; i < total; i++)
+            {
+                KeyValueEntry? e = context.Store.Get($"cold/{i}");
+                if (e?.MvccEntries is { Count: > 0 })
+                    remaining++;
+            }
+            return remaining;
+        }
+
+        // One cycle inspects at most the budget (2), so it cannot have reclaimed all five.
+        collect.Execute();
+        int afterOne = WithSnapshotRemaining();
+        Assert.True(afterOne >= total - 2, $"one bounded cycle must not reclaim more than the budget; {afterOne} remain");
+        Assert.True(afterOne < total, "one cycle must make progress");
+
+        // Enough cycles complete the sweep.
+        for (int c = 0; c < total; c++)
+            collect.Execute();
+        Assert.Equal(0, WithSnapshotRemaining());
+    }
+
     // ── expiring-key snapshots are unaffected ────────────────────────────────────────────
 
     /// <summary>
@@ -402,7 +535,53 @@ public sealed class TestKeyValueMvccSnapshotReap
         return (new TryReleaseExclusiveLockHandler(context), context, raft);
     }
 
-    private static KahunaConfiguration CreateConfiguration(int defaultTransactionTimeoutMs = 5000)
+    private static (TryCollectHandler, KeyValueContext, RaftManager) CreateCollectHandler(
+        KahunaConfiguration? config = null)
+    {
+        config ??= CreateConfiguration();
+
+        BTree<string, KeyValueEntry> store = new(32);
+        ILogger<IKahuna> logger = NullLogger<IKahuna>.Instance;
+        ILogger<IRaft> raftLogger = NullLogger<IRaft>.Instance;
+
+        RaftManager raft = new(
+            new RaftConfiguration
+            {
+                NodeName = "mvcc-reap-collect-test",
+                NodeId = 1,
+                Host = "localhost",
+                Port = 0,
+                InitialPartitions = 1,
+                EnableQuiescence = false
+            },
+            new StaticDiscovery([]),
+            new InMemoryWAL(raftLogger),
+            new InMemoryCommunication(),
+            new HybridLogicalClock(),
+            raftLogger
+        );
+
+        KeyValueContext context = new(
+            null!,
+            store,
+            new Dictionary<string, KeyValueWriteIntent>(),
+            new Dictionary<string, List<KeyValueRangeLock>>(),
+            new Dictionary<int, KeyValueProposal>(),
+            null!,
+            null!,
+            null!,
+            raft,
+            new KeySpaceRegistry(),
+            new RangeMapStore(raft, null, null, logger),
+            config,
+            logger
+        );
+
+        return (new TryCollectHandler(context), context, raft);
+    }
+
+    private static KahunaConfiguration CreateConfiguration(
+        int defaultTransactionTimeoutMs = 5000, int maxTransactionTimeoutMs = 5000, int collectBatchMax = 1000)
     {
         KahunaConfiguration cfg = ConfigurationValidator.Validate(new()
         {
@@ -412,7 +591,42 @@ public sealed class TestKeyValueMvccSnapshotReap
             Storage = "memory",
         });
         cfg.DefaultTransactionTimeout = defaultTransactionTimeoutMs;
+        cfg.MaxTransactionTimeout = maxTransactionTimeoutMs;
+        cfg.CollectBatchMax = collectBatchMax;
         return cfg;
+    }
+
+    /// <summary>
+    /// Seeds a cold, non-expiring read-only key: a live value with no write intent and a single zero-Expires
+    /// MVCC snapshot owned by <paramref name="readerTx"/>. Mirrors a key that was read once under a
+    /// transaction and never written again — the case the collector sweep must reclaim.
+    /// </summary>
+    private static void InsertReadSnapshotOnly(KeyValueContext context, string key, HLCTimestamp readerTx)
+    {
+        HLCTimestamp now = readerTx;
+        KeyValueEntry entry = new()
+        {
+            Value = Encoding.UTF8.GetBytes("v"),
+            State = KeyValueState.Set,
+            LastUsed = now,
+            LastModified = now,
+            Revision = 1,
+            FlushedRevision = 1
+        };
+        context.InsertStoreEntry(key, entry);
+
+        entry.MvccEntries = new Dictionary<HLCTimestamp, KeyValueMvccEntry>
+        {
+            [readerTx] = new()
+            {
+                State = KeyValueState.Set,
+                Revision = 0,
+                Value = Encoding.UTF8.GetBytes("snap"),
+                Expires = HLCTimestamp.Zero
+            }
+        };
+        context.AdjustEstimatedEntryBytes(entry,
+            KeyValueStoreAccounting.MvccEntryAddedBytes(true, entry.MvccEntries[readerTx].Value));
     }
 
     /// <summary>

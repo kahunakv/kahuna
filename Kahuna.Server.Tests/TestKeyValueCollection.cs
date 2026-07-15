@@ -215,13 +215,14 @@ public sealed class TestKeyValueCollection
     }
 
     /// <summary>
-    /// Phase C.3: the collector no longer has a metadata pass — stale MVCC entries with elapsed
-    /// Expires are not trimmed by the collector. Trimming now happens at transaction resolve time
-    /// (Phase C.2). An entry carrying both a live and an expired MVCC entry must be left intact
-    /// by the collector.
+    /// A key that is read transactionally but never written again is never re-resolved, so its
+    /// orphaned MVCC snapshots would otherwise be retained forever. The collector's bounded sweep
+    /// therefore trims MVCC entries whose Expires has elapsed even on such cold keys, while leaving
+    /// still-live siblings intact. An entry carrying both a live and an expired MVCC entry must come
+    /// out of a collect cycle with only the live entry remaining.
     /// </summary>
     [Fact]
-    public void Collector_DoesNotTrimStaleMvccEntries()
+    public void Collector_TrimsExpiredMvccEntriesButKeepsLiveOnes()
     {
         (TryCollectHandler handler, KeyValueContext context, _, RaftManager raft) = CreateHandler();
         HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
@@ -245,10 +246,11 @@ public sealed class TestKeyValueCollection
 
         handler.Execute();
 
-        // Collector leaves both entries untouched — MVCC trim is the resolver's job.
+        // The expired snapshot is swept; the live one survives.
         KeyValueEntry? surviving = context.Store.Get("tx/key");
         Assert.NotNull(surviving?.MvccEntries);
-        Assert.Equal(2, surviving.MvccEntries.Count);
+        Assert.Single(surviving.MvccEntries);
+        Assert.True(surviving.MvccEntries.ContainsKey(liveTx));
     }
 
     /// <summary>

@@ -61,6 +61,9 @@ public static class ConfigurationValidator
         if (configuration.RevisionRetention <= 0)
             configuration.RevisionRetention = configuration.RevisionsToKeepCached > 0 ? configuration.RevisionsToKeepCached : 16;
 
+        if (configuration.MaxTransactionTimeout <= 0)
+            configuration.MaxTransactionTimeout = 300_000;
+
         ValidatePersistentRevisionRetention(configuration);
         ValidatePitr(configuration);
 

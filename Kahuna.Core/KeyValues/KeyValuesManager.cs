@@ -1250,6 +1250,11 @@ internal sealed class KeyValuesManager : IDisposable
                 new OperationCompletionPayload
                 {
                     ModifiedKeys = modifiedKeys.Count > 0 ? modifiedKeys : null,
+                    // A confirmed delete folds its implicit point lock, exactly as the single-key path does. An
+                    // optimistic transaction takes no explicit locks, so this is its only source of the held-lock
+                    // set that PrepareMutations requires; for a pessimistic caller the explicit lock already
+                    // recorded these keys, so the HashSet fold is idempotent.
+                    AcquiredPointLocks = modifiedKeys.Count > 0 ? modifiedKeys : null,
                     // A definitive (non-MustRetry) terminal type just lets the registration complete and the
                     // effects fold.
                     CachedType = KeyValueResponseType.Deleted

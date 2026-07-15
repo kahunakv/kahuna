@@ -45,6 +45,14 @@ internal sealed class TryCollectHandler : BaseHandler
     private List<string>? lockSweepKeys;
     private int lockSweepPos;
 
+    // Resume point for the bounded MVCC read-snapshot sweep. A transactional read of a non-expiring key
+    // leaves a zero-expiry MVCC snapshot behind, and TrimExpiredMvccEntries only fires when that key is
+    // next committed/rolled-back/unlocked — so a read-only key that is never written again would retain the
+    // orphaned snapshot indefinitely. This sweep walks the store and trims dead-session snapshots even for
+    // cold keys, advancing by at most the inspection budget per cycle and resuming here next cycle. Null =
+    // start from the coldest entry; a cursor whose entry was evicted (StoreKey cleared) restarts from head.
+    private KeyValueEntry? mvccSweepCursor;
+
     public TryCollectHandler(KeyValueContext context) : base(context)
     {
 
@@ -252,6 +260,14 @@ internal sealed class TryCollectHandler : BaseHandler
         foreach (string key in keysToEvict)
             context.RemoveStoreEntry(key);
 
+        // Step 5: reclaim dead-session MVCC read snapshots on cold keys. TrimExpiredMvccEntries otherwise
+        // only fires when a key is next written/unlocked, so a key that is read once under a transaction and
+        // never touched again would keep its orphaned zero-expiry snapshot forever. Bounded by the inspection
+        // budget and resumed via mvccSweepCursor so the whole store is never swept in one mailbox turn; the
+        // sweep completes over successive natural collect cycles (reclamation is eventual, so it does not
+        // force a follow-up).
+        SweepDeadMvccSnapshots(currentTime, inspectionMax);
+
         // Self-schedule a follow-up when work was carried past this cycle's budget: the LRU walk was
         // cut short with the store still over budget (lruCursor set), or the expiry loop hit its
         // inspection cap while still making progress (more evictable expired entries likely remain).
@@ -369,6 +385,38 @@ internal sealed class TryCollectHandler : BaseHandler
 
         foreach (ReadContinuation cont in expired)
             cont.Expire(context, KeyValueStaticResponses.MustRetryResponse);
+    }
+
+    /// <summary>
+    /// Walks the store from the persisted cursor (coldest first), trimming dead-session zero-expiry MVCC read
+    /// snapshots from at most <paramref name="budget"/> entries this cycle and resuming from where it stopped.
+    /// The walk follows the intrusive LRU list and does not modify it, so <c>LruNext</c> pointers stay stable;
+    /// <see cref="TrimExpiredMvccEntries"/> only mutates an entry's MvccEntries. When the walk reaches the end
+    /// the cursor is cleared so the next cycle restarts from the head.
+    /// </summary>
+    private void SweepDeadMvccSnapshots(HLCTimestamp currentTime, int budget)
+    {
+        KeyValueEntry? candidate =
+            mvccSweepCursor is not null && mvccSweepCursor.StoreKey is not null
+                ? mvccSweepCursor
+                : context.LruHead;
+        mvccSweepCursor = null;
+
+        int inspected = 0;
+        while (candidate is not null && inspected < budget)
+        {
+            inspected++;
+            KeyValueEntry? next = candidate.LruNext;
+
+            if (candidate.MvccEntries is { Count: > 0 })
+                TrimExpiredMvccEntries(candidate, currentTime);
+
+            candidate = next;
+        }
+
+        // Stopped mid-list on the inspection budget: resume here next cycle rather than re-scanning the head.
+        if (candidate is not null)
+            mvccSweepCursor = candidate;
     }
 
     private long EstimateEvictionBytes(HashSet<string> keys)
