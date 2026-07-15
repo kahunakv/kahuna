@@ -813,7 +813,8 @@ public class KahunaTransactionSession : IAsyncDisposable
             await AcquireRangeLock(prefix, startKey, startInclusive, endKey, endInclusive, durability, lockMode, cancellationToken).ConfigureAwait(false);
 
         // Register the scan with the coordinator so its observed keys become read dependencies of this
-        // transaction: a TrackAndValidate commit validates them and aborts if any changed after the scan.
+        // transaction: an optimistic (or TrackAndValidate) commit validates them and aborts if any changed
+        // after the scan.
         return await Client.Communication.GetByRange(
             Url, TransactionId, prefix, startKey, startInclusive, endKey, endInclusive,
             limit <= 0 ? int.MaxValue : limit, ReadTimestamp, durability, cancellationToken,

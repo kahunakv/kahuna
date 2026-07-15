@@ -245,40 +245,44 @@ public sealed class TestTransactionConcurrencyPolicy
     }
 
     /// <summary>
-    /// Read-set validation is decoupled from the locking mode: an optimistic transaction with
-    /// <see cref="ReadValidation.None"/> takes last-value reads without an OCC check, so a concurrent write to
-    /// a key it read does not invalidate the commit. This is the guarantee the earlier coupling denied —
-    /// optimistic locking used to force validation regardless of the declared read policy.
+    /// Optimistic locking is validate-at-commit by definition, so it checks its read set even when the caller
+    /// left <see cref="ReadValidation"/> at its default <see cref="ReadValidation.None"/>: a latest read records
+    /// a dependency, and a concurrent committed write to that key invalidates it and aborts the commit. An
+    /// optimistic transaction that skipped validation would silently admit lost updates and write skew.
     /// </summary>
     [Fact]
-    public async Task OptimisticReadValidationNone_CommitsDespiteConcurrentWrite()
+    public async Task OptimisticLocking_ValidatesReadSet_AbortsOnConcurrentWrite()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using EmbeddedKahunaNode node = CreateNode(loggerFactory);
         await node.StartAsync(ct);
         KahunaClient client = Connect(node);
 
-        string read = "cp/none/read/" + Guid.NewGuid().ToString("N")[..8];
-        string write = "cp/none/write/" + Guid.NewGuid().ToString("N")[..8];
+        string read = "cp/occ/read/" + Guid.NewGuid().ToString("N")[..8];
+        string write = "cp/occ/write/" + Guid.NewGuid().ToString("N")[..8];
 
         await client.SetKeyValue(read, "v0", cancellationToken: ct);
 
         await using KahunaTransactionSession tx = await client.StartTransactionSession(
-            new() { Locking = KeyValueTransactionLocking.Optimistic, ReadValidation = ReadValidation.None }, ct);
+            new() { Locking = KeyValueTransactionLocking.Optimistic }, ct);
 
-        // Observe the latest value; with ReadValidation.None this records no validated read dependency.
+        // A latest read records a validated read dependency for an optimistic transaction.
         KahunaKeyValue observed = await tx.GetKeyValue(read, KeyValueDurability.Persistent, ct);
         Assert.Equal("v0", observed.ValueAsString());
 
-        // A concurrent committed write moves the observed key forward.
+        // A concurrent committed write moves the observed key forward, invalidating the dependency.
         await client.SetKeyValue(read, "v1", cancellationToken: ct);
 
-        // A mutation forces 2PC. Because no read-set validation runs, the concurrent change does not abort.
+        // A mutation forces 2PC; read-set validation detects the concurrent change and aborts the commit.
         await tx.SetKeyValue(write, "w", durability: KeyValueDurability.Persistent, cancellationToken: ct);
-        Assert.True(await tx.Commit(ct));
 
+        KahunaException aborted = await Assert.ThrowsAsync<KahunaException>(async () => await tx.Commit(ct));
+        Assert.Equal(KeyValueResponseType.Aborted, aborted.KeyValueErrorCode);
+        Assert.Equal(KahunaTransactionStatus.Aborted, tx.Status);
+
+        // The aborted transaction left no write behind.
         KahunaKeyValue writeAfter = await client.GetKeyValue(write, KeyValueDurability.Persistent, cancellationToken: ct);
-        Assert.True(writeAfter.Success);
+        Assert.False(writeAfter.Success);
     }
 
     /// <summary>

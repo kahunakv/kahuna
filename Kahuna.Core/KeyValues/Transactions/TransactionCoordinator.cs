@@ -1093,16 +1093,15 @@ internal sealed class TransactionCoordinator
 
     /// <summary>
     /// Whether the transaction's read-set must be validated for write-skew before prepare. Optimistic locking
-    /// implies validation for backward compatibility; an explicit <see cref="ReadValidation.TrackAndValidate"/>
-    /// policy requests it regardless of locking mode.
+    /// is validate-at-commit by definition, so it always checks its read set: an optimistic transaction that
+    /// skipped validation would provide no isolation and silently admit lost updates and write skew. An
+    /// explicit <see cref="ReadValidation.TrackAndValidate"/> policy additionally requests validation for a
+    /// pessimistic transaction, independent of locking mode.
     /// </summary>
     private static bool RequiresReadSetValidation(TransactionContext context)
     {
-        // Read-set validation is governed solely by the declared read-validation policy, independent of the
-        // locking mode. An optimistic transaction with ReadValidation.None takes last-value reads without an
-        // OCC check; a pessimistic transaction with TrackAndValidate still validates its read set. Coupling the
-        // two would deny an optimistic caller the last-value reads its policy asks for.
-        return context.ReadValidation == ReadValidation.TrackAndValidate;
+        return context.ReadValidation == ReadValidation.TrackAndValidate
+            || context.Locking == KeyValueTransactionLocking.Optimistic;
     }
 
     /// <summary>
