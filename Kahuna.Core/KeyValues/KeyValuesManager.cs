@@ -1068,11 +1068,105 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="cancellationToken">Token to signal cancellation of the operation.</param>
     /// <returns>A task that represents the asynchronous operation, containing a list of responses for the key-value set requests.</returns>
     public Task<List<KahunaSetKeyValueResponseItem>> LocateAndTrySetManyKeyValue(
-        List<KahunaSetKeyValueRequestItem> setManyItems, 
-        CancellationToken cancellationToken
+        List<KahunaSetKeyValueRequestItem> setManyItems,
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
-        return locator.LocateAndTrySetManyKeyValue(setManyItems, cancellationToken);
+        // The whole batch registers as a single coordinator operation so its confirmed persistent keys fold
+        // in canonical request order and anchor the transaction record deterministically. Fall back to the
+        // unregistered fan-out when the caller supplied no operation identity (non-transactional path).
+        HLCTimestamp transactionId = setManyItems.Count > 0 ? setManyItems[0].TransactionId : HLCTimestamp.Zero;
+
+        RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
+        if (routing is RegistrationRouting.Legacy)
+            return locator.LocateAndTrySetManyKeyValue(setManyItems, cancellationToken);
+        if (routing is RegistrationRouting.Malformed)
+            return Task.FromResult(AllSetItemsResponse(setManyItems, KeyValueResponseType.InvalidInput));
+
+        return RegisterAndTrySetManyKeyValue(transactionId, coordinatorKey, operationId, setManyItems, cancellationToken);
+    }
+
+    private async Task<List<KahunaSetKeyValueResponseItem>> RegisterAndTrySetManyKeyValue(
+        HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId,
+        List<KahunaSetKeyValueRequestItem> setManyItems, CancellationToken cancellationToken)
+    {
+        (OperationRegistrationOutcome outcome, _, _, _, _) =
+            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.SetMany, OperationDigest.ForSetMany(setManyItems), cancellationToken);
+
+
+        switch (outcome)
+        {
+            case OperationRegistrationOutcome.AlreadyPending:
+                // A batch stuck pending from a lost completion cannot re-register as New, so re-driving is
+                // impossible here; recover the confirmed effect from the participant cache instead.
+                if (await TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId) is { } recovered)
+                    return (List<KahunaSetKeyValueResponseItem>)recovered;
+                return AllSetItemsResponse(setManyItems, KeyValueResponseType.MustRetry);
+            case OperationRegistrationOutcome.RejectedCapacity:
+                return AllSetItemsResponse(setManyItems, KeyValueResponseType.MustRetry);
+            case OperationRegistrationOutcome.RejectedSessionClosed:
+                return AllSetItemsResponse(setManyItems, KeyValueResponseType.Aborted);
+            case OperationRegistrationOutcome.RejectedDuplicate:
+                return AllSetItemsResponse(setManyItems, KeyValueResponseType.Errored);
+            // New and AlreadyCompleted both execute: a batch is re-driven on retry rather than replaying a
+            // cached list, and CompleteOperation is a no-op if it already completed. Re-driving is safe here
+            // because CamusDB reissues the identical batch under the same operation id; the coordinator folds
+            // the confirmed keys only once via the completion below.
+        }
+
+        List<KahunaSetKeyValueResponseItem> responses =
+            await locator.LocateAndTrySetManyKeyValue(setManyItems, cancellationToken);
+
+        // Fold the confirmed writes in canonical request order (fan-out returns them unordered), so the first
+        // persistent key deterministically anchors the transaction record. Only a genuine Set is a confirmed
+        // write; a failed SetIfNotExists (NotSet) or a transient (MustRetry) item folds nothing.
+        //
+        // Unlike delete-many, this does NOT cancel the registration when some items come back transient. The
+        // caller (a mass writer) resends only the transient keys on retry — never the already-written ones,
+        // whose intents now exist — so a "cancel then re-drive the whole batch under the same id" contract
+        // would re-issue a SetIfNotExists for an already-set unique key and get a false NotSet. Instead the
+        // confirmed keys fold now, the operation completes, and the caller retries the transient keys as a
+        // fresh operation. A confirmed write is idempotent under participant-cache replay of the same id.
+        Dictionary<string, KeyValueResponseType> byKey = new(responses.Count, StringComparer.Ordinal);
+        foreach (KahunaSetKeyValueResponseItem response in responses)
+            byKey[response.Key ?? ""] = response.Type;
+
+        List<(string, KeyValueDurability)> modifiedKeys = [];
+        foreach (KahunaSetKeyValueRequestItem item in setManyItems)
+        {
+            if (byKey.TryGetValue(item.Key ?? "", out KeyValueResponseType type) && type == KeyValueResponseType.Set)
+                modifiedKeys.Add((item.Key ?? "", item.Durability));
+        }
+
+        // Cache the batch result and drive the completion off the caller token; if it is not acknowledged,
+        // surface MustRetry so a same-id retry recovers the confirmed effect without re-writing.
+
+        if (!await CompleteRegisteredOperation(
+                coordinatorKey, transactionId, operationId, responses,
+                new OperationCompletionPayload
+                {
+                    ModifiedKeys = modifiedKeys.Count > 0 ? modifiedKeys : null,
+                    CachedType = KeyValueResponseType.Set
+                }))
+            return AllSetItemsResponse(setManyItems, KeyValueResponseType.MustRetry);
+
+        return responses;
+    }
+
+    private static List<KahunaSetKeyValueResponseItem> AllSetItemsResponse(
+        List<KahunaSetKeyValueRequestItem> items, KeyValueResponseType type)
+    {
+        List<KahunaSetKeyValueResponseItem> responses = new(items.Count);
+        foreach (KahunaSetKeyValueRequestItem item in items)
+            responses.Add(new()
+            {
+                Key = item.Key ?? "",
+                Durability = item.Durability,
+                Type = type
+            });
+        return responses;
     }
 
     public Task<List<KahunaDeleteKeyValueResponseItem>> LocateAndTryDeleteManyKeyValue(
@@ -1128,27 +1222,11 @@ internal sealed class KeyValuesManager : IDisposable
         List<KahunaDeleteKeyValueResponseItem> responses =
             await locator.LocateAndTryDeleteManyKeyValue(deleteManyItems, cancellationToken);
 
-        // A transient outcome on any item leaves the batch undecided: cancel the registration (no effect was
-        // folded — folding only happens on completion) so a same-id retry re-registers as New and re-drives
-        // every item, converging without losing keys that only succeed on the retry.
-        bool anyTransient = false;
-        foreach (KahunaDeleteKeyValueResponseItem response in responses)
-        {
-            if (response.Type == KeyValueResponseType.MustRetry)
-            {
-                anyTransient = true;
-                break;
-            }
-        }
-
-        if (anyTransient)
-        {
-            txCoordinator.CancelOperation(transactionId, operationId);
-            return responses;
-        }
-
         // Fold the confirmed deletes in canonical request order (fan-out returns them unordered), so the
-        // first persistent key deterministically anchors the transaction record.
+        // first persistent key deterministically anchors the transaction record. A transient (MustRetry) item
+        // folds nothing. The registration is NOT cancelled on a partial-transient batch: the caller (a mass
+        // deleter) resends only the transient keys on retry as a fresh operation, so the confirmed keys must
+        // fold now rather than be discarded for a full re-drive that never comes.
         Dictionary<(string, KeyValueDurability), KeyValueResponseType> byKey = new(responses.Count);
         foreach (KahunaDeleteKeyValueResponseItem response in responses)
             byKey[(response.Key ?? "", response.Durability)] = response.Type;
@@ -1641,10 +1719,67 @@ internal sealed class KeyValuesManager : IDisposable
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)>> LocateAndTryAcquireManyExclusiveLocks(
         HLCTimestamp transactionId,
         List<(string key, int expiresMs, KeyValueDurability durability)> keys,
-        CancellationToken cancelationToken
+        CancellationToken cancelationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
-        return locator.LocateAndTryAcquireManyExclusiveLocks(transactionId, keys, cancelationToken);
+        // The whole batch registers as one coordinator operation so every acquired point lock folds into the
+        // server-owned working set and is released on commit/rollback. Without this an interactive
+        // transaction's batch locks are foreign to the coordinator, and a committed batch write reads back as
+        // if never written. Fall back to the unregistered fan-out when no operation identity is supplied.
+        RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
+        if (routing is RegistrationRouting.Legacy)
+            return locator.LocateAndTryAcquireManyExclusiveLocks(transactionId, keys, cancelationToken);
+        if (routing is RegistrationRouting.Malformed)
+            return Task.FromResult(keys.Select(k => (KeyValueResponseType.InvalidInput, k.key, k.durability, HLCTimestamp.Zero)).ToList());
+
+        return RegisterAndTryAcquireManyExclusiveLocks(transactionId, coordinatorKey, operationId, keys, cancelationToken);
+    }
+
+    private async Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)>> RegisterAndTryAcquireManyExclusiveLocks(
+        HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId,
+        List<(string key, int expiresMs, KeyValueDurability durability)> keys, CancellationToken cancellationToken)
+    {
+        (OperationRegistrationOutcome outcome, _, _, _, _) =
+            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.ManyPointLock, OperationDigest.ForManyPointLockAcquire(keys), cancellationToken);
+
+        switch (outcome)
+        {
+            case OperationRegistrationOutcome.AlreadyPending:
+                if (await TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId) is { } recovered)
+                    return (List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)>)recovered;
+                return keys.Select(k => (KeyValueResponseType.MustRetry, k.key, k.durability, HLCTimestamp.Zero)).ToList();
+            case OperationRegistrationOutcome.RejectedCapacity:
+                return keys.Select(k => (KeyValueResponseType.MustRetry, k.key, k.durability, HLCTimestamp.Zero)).ToList();
+            case OperationRegistrationOutcome.RejectedSessionClosed:
+                return keys.Select(k => (KeyValueResponseType.Aborted, k.key, k.durability, HLCTimestamp.Zero)).ToList();
+            case OperationRegistrationOutcome.RejectedDuplicate:
+                return keys.Select(k => (KeyValueResponseType.Errored, k.key, k.durability, HLCTimestamp.Zero)).ToList();
+        }
+
+        List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)> responses =
+            await locator.LocateAndTryAcquireManyExclusiveLocks(transactionId, keys, cancellationToken);
+
+        // Fold every confirmed Locked key as a held point lock so commit/rollback release it. A transient
+        // (MustRetry) key folds nothing; the caller resends only the transient subset as a fresh operation.
+        List<(string, KeyValueDurability)> acquired = [];
+        foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp _) in responses)
+        {
+            if (type == KeyValueResponseType.Locked)
+                acquired.Add((key, durability));
+        }
+
+        if (!await CompleteRegisteredOperation(
+                coordinatorKey, transactionId, operationId, responses,
+                new OperationCompletionPayload
+                {
+                    AcquiredPointLocks = acquired.Count > 0 ? acquired : null,
+                    CachedType = KeyValueResponseType.Locked
+                }))
+            return keys.Select(k => (KeyValueResponseType.MustRetry, k.key, k.durability, HLCTimestamp.Zero)).ToList();
+
+        return responses;
     }
     
     /// <summary>
@@ -2475,6 +2610,7 @@ internal sealed class KeyValuesManager : IDisposable
         bool hasEffect =
             !string.IsNullOrEmpty(payload.ModifiedKey) ||
             (payload.ModifiedKeys is { Count: > 0 }) ||
+            (payload.AcquiredPointLocks is { Count: > 0 }) ||
             !string.IsNullOrEmpty(payload.AcquiredPointLock) || !string.IsNullOrEmpty(payload.ReleasedPointLock) ||
             !string.IsNullOrEmpty(payload.AcquiredPrefixLock) || !string.IsNullOrEmpty(payload.ReleasedPrefixLock) ||
             payload.AcquiredRangeLock is not null || payload.ReleasedRangeLock is not null ||
@@ -2489,6 +2625,7 @@ internal sealed class KeyValuesManager : IDisposable
             ModifiedKey = string.IsNullOrEmpty(payload.ModifiedKey) ? null : (payload.ModifiedKey, durability),
             ModifiedKeys = payload.ModifiedKeys is { Count: > 0 } ? payload.ModifiedKeys : null,
             PointLock = string.IsNullOrEmpty(payload.AcquiredPointLock) ? null : (payload.AcquiredPointLock, durability),
+            AcquiredPointLocks = payload.AcquiredPointLocks is { Count: > 0 } ? payload.AcquiredPointLocks : null,
             RemovePointLock = string.IsNullOrEmpty(payload.ReleasedPointLock) ? null : (payload.ReleasedPointLock, durability),
             PrefixLock = string.IsNullOrEmpty(payload.AcquiredPrefixLock) ? null : (payload.AcquiredPrefixLock, durability),
             RemovePrefixLock = string.IsNullOrEmpty(payload.ReleasedPrefixLock) ? null : (payload.ReleasedPrefixLock, durability),

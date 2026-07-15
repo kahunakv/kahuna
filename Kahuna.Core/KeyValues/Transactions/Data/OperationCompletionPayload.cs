@@ -26,6 +26,13 @@ public sealed record OperationCompletionPayload
     /// <summary>A point lock the operation acquired.</summary>
     public string? AcquiredPointLock { get; init; }
 
+    /// <summary>
+    /// The point locks a batch lock-acquire operation acquired (each with its own durability, independent of
+    /// <see cref="Durability"/>). The coordinator folds every one into the held-lock set so commit/rollback
+    /// release them all.
+    /// </summary>
+    public IReadOnlyList<(string Key, KeyValueDurability Durability)>? AcquiredPointLocks { get; init; }
+
     /// <summary>A point lock the operation released.</summary>
     public string? ReleasedPointLock { get; init; }
 
