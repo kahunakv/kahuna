@@ -77,7 +77,7 @@ Background maintenance processes continuously perform compaction and garbage col
 
 ## Running Tests
 
-Tests under `Kahuna.Tests/Client/*` are integration tests that connect to a running Kahuna
+The `Kahuna.Client.Tests` project holds end-to-end tests that connect to a running Kahuna
 cluster. Start the Docker cluster before running those tests locally:
 
 ```bash
@@ -95,7 +95,7 @@ https://localhost:8086
 Then run the tests:
 
 ```bash
-dotnet test Kahuna.Tests/Kahuna.Tests.csproj
+dotnet test Kahuna.Client.Tests/Kahuna.Client.Tests.csproj
 ```
 
 When finished, stop the cluster with:
@@ -104,9 +104,15 @@ When finished, stop the cluster with:
 docker compose -f docker/local.yml down
 ```
 
-Tests under `Kahuna.Tests/Server/*` may use embedded or in-process nodes and do not require the
-external Docker cluster unless the test explicitly says so. GitHub Actions starts the server
-cluster before running the test suite through `scripts/run-server.sh`.
+The `Kahuna.Server.Tests` project uses embedded, in-process nodes and does not require the
+external Docker cluster:
+
+```bash
+dotnet test Kahuna.Server.Tests/Kahuna.Server.Tests.csproj
+```
+
+GitHub Actions starts the server cluster before running the end-to-end suite through
+`scripts/run-server.sh`.
 
 ---
 
