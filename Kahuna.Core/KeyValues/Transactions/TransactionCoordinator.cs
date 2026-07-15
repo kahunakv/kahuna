@@ -659,6 +659,64 @@ internal sealed class TransactionCoordinator
         }
     }
 
+    // ---- session range-lock renewal ----
+
+    /// <summary>
+    /// Server-owned lease, in milliseconds, granted to a live session's range locks on each renewal tick.
+    /// Set to twice the renewal cadence (the reaper's <see cref="KahunaConfiguration.CollectionInterval"/>) so a
+    /// single missed tick cannot let a lock lapse while its session is alive. This is the server policy that
+    /// replaces client heartbeats: the coordinator, not the client, owns range-lock liveness for the session's
+    /// lifetime. A client acquires a range lock once with any TTL and never touches it again.
+    /// </summary>
+    private int RangeLockRenewalTtlMs => (int)Math.Max(configuration.CollectionInterval.TotalMilliseconds * 2, 1);
+
+    /// <summary>
+    /// Re-extends the range locks held by every live session so they outlive their original acquire TTL without
+    /// any client heartbeat. For each session still accepting operations and not yet past its reap deadline,
+    /// re-acquires each recorded range lock over its identical bounds/mode with the server renewal TTL — the
+    /// participant treats a same-transaction, same-bounds re-acquire as a renewal that refreshes the expiry, not
+    /// a second lock. A session that has entered the finalize fence contributes nothing (its snapshot is empty),
+    /// and an abandoned session past <c>Timeout + grace</c> is skipped so its locks lapse and the reaper reclaims
+    /// it — an abandoned transaction can never hold range locks indefinitely.
+    /// </summary>
+    public async Task RenewSessionRangeLocks()
+    {
+        if (sessions.IsEmpty)
+            return;
+
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        int renewalTtlMs = RangeLockRenewalTtlMs;
+
+        foreach (KeyValuePair<HLCTimestamp, TransactionContext> pair in sessions)
+        {
+            TransactionContext context = pair.Value;
+
+            // Past its reap deadline: leave it to the reaper. Renewing a doomed session would only extend locks
+            // the reaper is about to release, so stop renewing once the abandonment window has elapsed.
+            HLCTimestamp deadline = pair.Key + (context.Timeout + ReapGraceMs);
+            if ((deadline - now) <= TimeSpan.Zero)
+                continue;
+
+            // The snapshot is empty unless the session is still accepting operations, so a session that has
+            // entered the finalize fence is never renewed against a concurrent release.
+            List<(RangeLockKey Range, RangeLockMode Mode)> renewable = context.SnapshotRenewableRangeLocks();
+
+            foreach ((RangeLockKey range, RangeLockMode mode) in renewable)
+            {
+                try
+                {
+                    await manager.LocateAndTryAcquireRangeLock(
+                        context.TransactionId, range.Prefix, range.StartKey, range.StartInclusive,
+                        range.EndKey, range.EndInclusive, renewalTtlMs, range.Durability, mode, CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError("RenewSessionRangeLocks {Prefix}: {Type} {Message}", range.Prefix, ex.GetType().Name, ex.Message);
+                }
+            }
+        }
+    }
+
     // ---- session reaper ----
 
     /// <summary>

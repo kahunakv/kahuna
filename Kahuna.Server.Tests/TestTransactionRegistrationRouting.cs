@@ -2,6 +2,7 @@ using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Ranges;
+using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 using Kommander;
@@ -1625,6 +1626,127 @@ public sealed class TestTransactionRegistrationRouting
             Assert.Equal(KeyValueResponseType.Set,
                 await SetKeyWithRetry(nodes[1], handleC, TransactionOperationId.NewRandom(), $"{prefix}/writerC", "w"u8.ToArray(), KeyValueDurability.Persistent, ct));
             Assert.Equal(KeyValueResponseType.Committed, await CommitWithRetry(nodes[2], handleC, ct));
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// A range lock a live session holds is kept alive by the coordinator's server-driven renewal, so it
+    /// outlives its short original acquire TTL without any client re-acquire: after the TTL would have lapsed, a
+    /// conflicting acquire from another transaction is still blocked.
+    /// </summary>
+    [Fact]
+    public async Task SessionRenewedRangeLock_OutlivesItsAcquireTtl()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            const string prefix = "rlrenew";
+            const int shortTtlMs = 800;
+
+            (_, TransactionHandle handleA) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+            KeyValueResponseType acquired = await RangeLockWithRetry(() =>
+                nodes[1].Kahuna.LocateAndTryAcquireRangeLock(handleA.TransactionId, prefix, "a", true, "z", false, shortTtlMs, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct, handleA.CoordinatorKey, TransactionOperationId.NewRandom()), ct);
+            Assert.Equal(KeyValueResponseType.Locked, acquired);
+
+            // Server-driven renewal — every node renews its own hosted sessions, exactly as the reaper does.
+            foreach (Node node in nodes)
+                await node.Kahuna.RenewSessionRangeLocks();
+
+            // Advance well past the original short TTL; only server renewal can be keeping the lock alive.
+            await Task.Delay(shortTtlMs + 700, ct);
+
+            // A different transaction's conflicting exclusive acquire over the same range is still blocked.
+            (_, TransactionHandle handleB) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+            KeyValueResponseType conflict = await RangeLockWithRetry(() =>
+                nodes[2].Kahuna.LocateAndTryAcquireRangeLock(handleB.TransactionId, prefix, "a", true, "z", false, 10_000, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct, handleB.CoordinatorKey, TransactionOperationId.NewRandom()), ct);
+            Assert.Equal(KeyValueResponseType.AlreadyLocked, conflict);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// Control for <see cref="SessionRenewedRangeLock_OutlivesItsAcquireTtl"/>: without any renewal, a range
+    /// lock genuinely lapses at its short acquire TTL, so a conflicting acquire then succeeds. This proves the
+    /// TTL is real and that renewal — not a long implicit lease — is what keeps the lock alive in the positive
+    /// test.
+    /// </summary>
+    [Fact]
+    public async Task RangeLock_WithoutRenewal_LapsesAtItsAcquireTtl()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            const string prefix = "rllapse";
+            const int shortTtlMs = 800;
+
+            (_, TransactionHandle handleA) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+            KeyValueResponseType acquired = await RangeLockWithRetry(() =>
+                nodes[1].Kahuna.LocateAndTryAcquireRangeLock(handleA.TransactionId, prefix, "a", true, "z", false, shortTtlMs, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct, handleA.CoordinatorKey, TransactionOperationId.NewRandom()), ct);
+            Assert.Equal(KeyValueResponseType.Locked, acquired);
+
+            // No renewal: advance past the TTL and the lock lapses.
+            await Task.Delay(shortTtlMs + 700, ct);
+
+            (_, TransactionHandle handleB) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+            KeyValueResponseType afterLapse = await RangeLockWithRetry(() =>
+                nodes[2].Kahuna.LocateAndTryAcquireRangeLock(handleB.TransactionId, prefix, "a", true, "z", false, 10_000, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct, handleB.CoordinatorKey, TransactionOperationId.NewRandom()), ct);
+            Assert.Equal(KeyValueResponseType.Locked, afterLapse);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// An abandoned session's range lock still lapses: once the reaper reclaims the session (past its deadline)
+    /// its locks are released, so renewal cannot keep an abandoned transaction's locks alive forever. Here the
+    /// reaper is driven directly and the session is confirmed gone, after which a conflicting acquire succeeds.
+    /// </summary>
+    [Fact]
+    public async Task ReapedSession_ReleasesItsRangeLock_EvenAfterRenewal()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            const string prefix = "rlreap";
+
+            // A short transaction timeout so the reaper's deadline (Timeout + grace) is reachable quickly.
+            (_, TransactionHandle handleA) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic, Timeout = 1 }, ct);
+            KeyValueResponseType acquired = await RangeLockWithRetry(() =>
+                nodes[1].Kahuna.LocateAndTryAcquireRangeLock(handleA.TransactionId, prefix, "a", true, "z", false, 60_000, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct, handleA.CoordinatorKey, TransactionOperationId.NewRandom()), ct);
+            Assert.Equal(KeyValueResponseType.Locked, acquired);
+
+            // Renewal keeps live sessions alive, but must not resurrect one past its reap deadline. Wait out the
+            // deadline (Timeout + ReapGraceMs), then renew (should skip it) and reap (should reclaim it).
+            await Task.Delay(TransactionCoordinator.ReapGraceMs + 1500, ct);
+            foreach (Node node in nodes)
+            {
+                await node.Kahuna.RenewSessionRangeLocks();
+                await node.Kahuna.ReapAbandonedSessions();
+            }
+
+            // The reaper released the abandoned session's range lock: a conflicting acquire now succeeds.
+            (_, TransactionHandle handleB) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+            KeyValueResponseType afterReap = await RangeLockWithRetry(() =>
+                nodes[2].Kahuna.LocateAndTryAcquireRangeLock(handleB.TransactionId, prefix, "a", true, "z", false, 10_000, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct, handleB.CoordinatorKey, TransactionOperationId.NewRandom()), ct);
+            Assert.Equal(KeyValueResponseType.Locked, afterReap);
         }
         finally
         {
