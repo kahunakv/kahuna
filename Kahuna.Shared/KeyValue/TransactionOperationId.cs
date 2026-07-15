@@ -27,4 +27,26 @@ public readonly record struct TransactionOperationId(ulong High, ulong Low)
 
     /// <summary>Allocates a new random <see cref="TransactionOperationId"/>.</summary>
     public static TransactionOperationId NewRandom() => FromGuid(Guid.NewGuid());
+
+    /// <summary>
+    /// Deterministically derives a distinct operation id for an indexed sub-step of this operation — for
+    /// example one page of a paged scan. The result is a pure function of this id and <paramref name="index"/>,
+    /// so a retried sub-step re-derives the same id and replays idempotently. Distinct indices always yield
+    /// distinct ids (the mix is a bijection of the index for a fixed base), and the well-mixed output makes a
+    /// clash with an unrelated random operation id in the same transaction negligible.
+    /// </summary>
+    public TransactionOperationId Derive(int index)
+    {
+        ulong seed = Mix(High) ^ Mix(Low + 0x9E3779B97F4A7C15UL) ^ (uint)index;
+        return new(Mix(seed), Mix(~seed));
+    }
+
+    // splitmix64 finalizer — a bijection over ulong, so it preserves the injectivity of the index mix.
+    private static ulong Mix(ulong z)
+    {
+        z += 0x9E3779B97F4A7C15UL;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9UL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBUL;
+        return z ^ (z >> 31);
+    }
 }

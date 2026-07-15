@@ -1383,6 +1383,265 @@ public sealed class TestTransactionRegistrationRouting
         }
     }
 
+    /// <summary>
+    /// A registered batch read (GetMany) folds one observation per returned key into the coordinator read
+    /// set, and a replay under the same operation id re-runs the read without folding the observations a
+    /// second time (the coordinator completion is a no-op on the already-completed id).
+    /// </summary>
+    [Fact]
+    public async Task RegisteredBatchGet_FoldsOneObservationPerKey_AndReplayDoesNotDoubleCount()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            const string gk1 = "bget/one";
+            const string gk2 = "bget/two";
+            Assert.Equal(KeyValueResponseType.Set, (await nodes[0].Kahuna.LocateAndTrySetKeyValue(HLCTimestamp.Zero, gk1, "v1"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct)).Item1);
+            Assert.Equal(KeyValueResponseType.Set, (await nodes[0].Kahuna.LocateAndTrySetKeyValue(HLCTimestamp.Zero, gk2, "v2"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct)).Item1);
+
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Optimistic }, ct);
+
+            List<(string, long, KeyValueDurability)> keys =
+                [(gk1, -1, KeyValueDurability.Persistent), (gk2, -1, KeyValueDurability.Persistent)];
+
+            TransactionOperationId op = TransactionOperationId.NewRandom();
+            List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> results =
+                await nodes[1].Kahuna.LocateAndTryGetManyValues(handle.TransactionId, HLCTimestamp.Zero, keys, ct, handle.CoordinatorKey, op);
+            Assert.All(results, r => Assert.Equal(KeyValueResponseType.Get, r.Item1));
+
+            TransactionWorkingSet? live = await nodes[2].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(live);
+            Assert.Contains(live!.ReadKeys, r => r.Key == gk1);
+            Assert.Contains(live.ReadKeys, r => r.Key == gk2);
+            int readCount = live.ReadKeys.Count;
+
+            // Replay under the same op id: re-runs the read, records nothing new.
+            List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> replay =
+                await nodes[2].Kahuna.LocateAndTryGetManyValues(handle.TransactionId, HLCTimestamp.Zero, keys, ct, handle.CoordinatorKey, op);
+            Assert.All(replay, r => Assert.Equal(KeyValueResponseType.Get, r.Item1));
+
+            TransactionWorkingSet? afterReplay = await nodes[0].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(afterReplay);
+            Assert.Equal(readCount, afterReplay!.ReadKeys.Count);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// A registered batch existence check (ExistsMany) folds one observation per probed key into the
+    /// coordinator read set, so a concurrent write to a probed key can later fail an optimistic commit.
+    /// </summary>
+    [Fact]
+    public async Task RegisteredBatchExists_FoldsOneObservationPerKey()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            const string ek1 = "bexists/one";
+            const string ek2 = "bexists/two";
+            Assert.Equal(KeyValueResponseType.Set, (await nodes[0].Kahuna.LocateAndTrySetKeyValue(HLCTimestamp.Zero, ek1, "v1"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct)).Item1);
+            Assert.Equal(KeyValueResponseType.Set, (await nodes[0].Kahuna.LocateAndTrySetKeyValue(HLCTimestamp.Zero, ek2, "v2"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct)).Item1);
+
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Optimistic }, ct);
+
+            List<(string, long, KeyValueDurability)> keys =
+                [(ek1, -1, KeyValueDurability.Persistent), (ek2, -1, KeyValueDurability.Persistent)];
+
+            List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> results =
+                await nodes[1].Kahuna.LocateAndTryExistsManyValues(handle.TransactionId, HLCTimestamp.Zero, keys, ct, handle.CoordinatorKey, TransactionOperationId.NewRandom());
+            Assert.All(results, r => Assert.Equal(KeyValueResponseType.Exists, r.Item1));
+
+            TransactionWorkingSet? live = await nodes[2].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(live);
+            Assert.Contains(live!.ReadKeys, r => r.Key == ek1);
+            Assert.Contains(live.ReadKeys, r => r.Key == ek2);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// A batch read with an empty coordinator key takes the legacy (unregistered) path: the values still
+    /// come back, but no read observation is folded into any coordinator working set — the dominant
+    /// non-optimistic path is unchanged.
+    /// </summary>
+    [Fact]
+    public async Task LegacyBatchRead_EmptyCoordinatorKey_FoldsNoObservation()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            const string lk1 = "blegacy/one";
+            Assert.Equal(KeyValueResponseType.Set, (await nodes[0].Kahuna.LocateAndTrySetKeyValue(HLCTimestamp.Zero, lk1, "v1"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct)).Item1);
+
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Optimistic }, ct);
+
+            List<(string, long, KeyValueDurability)> keys = [(lk1, -1, KeyValueDurability.Persistent)];
+
+            // No coordinator key/op → legacy fan-out, identical results, no registration.
+            List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> results =
+                await nodes[1].Kahuna.LocateAndTryGetManyValues(handle.TransactionId, HLCTimestamp.Zero, keys, ct);
+            Assert.All(results, r => Assert.Equal(KeyValueResponseType.Get, r.Item1));
+
+            TransactionWorkingSet? live = await nodes[2].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(live);
+            Assert.DoesNotContain(live!.ReadKeys, r => r.Key == lk1);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// A registered streaming scan folds an observation for every returned key, exercised across a page
+    /// boundary (small page size forces multiple pages, each registered under its own derived operation id).
+    /// </summary>
+    [Fact]
+    public async Task RegisteredScanRange_FoldsObservationsAcrossPageBoundary()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            const string prefix = "rscan";
+            string[] seeded = [$"{prefix}/0", $"{prefix}/1", $"{prefix}/2"];
+            foreach (string key in seeded)
+                Assert.Equal(KeyValueResponseType.Set, (await nodes[0].Kahuna.LocateAndTrySetKeyValue(HLCTimestamp.Zero, key, "v"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct)).Item1);
+
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Optimistic }, ct);
+
+            List<string> seen = [];
+            await foreach ((string key, ReadOnlyKeyValueEntry _) in nodes[1].Kahuna.LocateAndScanRange(
+                handle.TransactionId, prefix, null, true, null, false,
+                pageSize: 1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct,
+                handle.CoordinatorKey, TransactionOperationId.NewRandom()))
+                seen.Add(key);
+
+            Assert.Equal(3, seen.Count);
+
+            TransactionWorkingSet? live = await nodes[2].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(live);
+            foreach (string key in seeded)
+                Assert.Contains(live!.ReadKeys, r => r.Key == key);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// A snapshot streaming scan (pinned read timestamp) registers each page for finalize fencing and
+    /// idempotent replay but records no read dependency — a fixed past timestamp owns no live transactional
+    /// MVCC to validate at commit.
+    /// </summary>
+    [Fact]
+    public async Task SnapshotScanRange_RegistersButRecordsNoObservation()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            const string prefix = "sscan";
+            foreach (string key in new[] { $"{prefix}/0", $"{prefix}/1" })
+                Assert.Equal(KeyValueResponseType.Set, (await nodes[0].Kahuna.LocateAndTrySetKeyValue(HLCTimestamp.Zero, key, "v"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct)).Item1);
+
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Optimistic }, ct);
+
+            // A pinned (non-null) read timestamp → snapshot scan.
+            await foreach ((string _, ReadOnlyKeyValueEntry _) in nodes[1].Kahuna.LocateAndScanRange(
+                handle.TransactionId, prefix, null, true, null, false,
+                pageSize: 1, handle.TransactionId, KeyValueDurability.Persistent, ct,
+                handle.CoordinatorKey, TransactionOperationId.NewRandom()))
+            {
+            }
+
+            TransactionWorkingSet? live = await nodes[2].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(live);
+            Assert.DoesNotContain(live!.ReadKeys, r => r.Key is not null && r.Key.StartsWith(prefix, StringComparison.Ordinal));
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// End-to-end read-set validation over a registered scan: an optimistic transaction that streamed a
+    /// multi-page scan (folding every observed key) and then wrote a key commits <c>Aborted</c> once another
+    /// transaction commits a write to a key it observed, and the same flow with no conflicting write commits.
+    /// The writer key is what carries the transaction into two-phase commit, where its scanned read set is
+    /// validated.
+    /// </summary>
+    [Fact]
+    public async Task RegisteredScanRange_OptimisticCommit_AbortsOnConflict_CommitsOtherwise()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            const string prefix = "rconf";
+            string[] seeded = [$"{prefix}/0", $"{prefix}/1", $"{prefix}/2"];
+            foreach (string key in seeded)
+                Assert.Equal(KeyValueResponseType.Set, (await nodes[0].Kahuna.LocateAndTrySetKeyValue(HLCTimestamp.Zero, key, "v"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct)).Item1);
+
+            // Transaction A streams the scan (folding observations) and writes an unrelated key so it enters
+            // two-phase commit and validates its scanned read set.
+            (_, TransactionHandle handleA) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Optimistic }, ct);
+            await ScanAll(nodes[1], handleA, prefix, ct);
+            Assert.Equal(KeyValueResponseType.Set,
+                await SetKeyWithRetry(nodes[1], handleA, TransactionOperationId.NewRandom(), $"{prefix}/writerA", "w"u8.ToArray(), KeyValueDurability.Persistent, ct));
+
+            // Transaction B commits a write to one key A observed, advancing its revision.
+            (_, TransactionHandle handleB) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+            Assert.Equal(KeyValueResponseType.Set,
+                await SetKeyWithRetry(nodes[1], handleB, TransactionOperationId.NewRandom(), $"{prefix}/1", "changed"u8.ToArray(), KeyValueDurability.Persistent, ct));
+            Assert.Equal(KeyValueResponseType.Committed, await CommitWithRetry(nodes[2], handleB, ct));
+
+            // A's commit fails read-set validation over the scanned observation whose revision B advanced.
+            (KeyValueResponseType commitA, _) = await CommitReturningAnchor(nodes[2], handleA, ct);
+            Assert.Equal(KeyValueResponseType.Aborted, commitA);
+
+            // Control: a fresh optimistic scan + write with no conflicting write commits.
+            (_, TransactionHandle handleC) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Optimistic }, ct);
+            await ScanAll(nodes[1], handleC, prefix, ct);
+            Assert.Equal(KeyValueResponseType.Set,
+                await SetKeyWithRetry(nodes[1], handleC, TransactionOperationId.NewRandom(), $"{prefix}/writerC", "w"u8.ToArray(), KeyValueDurability.Persistent, ct));
+            Assert.Equal(KeyValueResponseType.Committed, await CommitWithRetry(nodes[2], handleC, ct));
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    private static async Task ScanAll(Node node, TransactionHandle handle, string prefix, CancellationToken ct)
+    {
+        await foreach ((string _, ReadOnlyKeyValueEntry _) in node.Kahuna.LocateAndScanRange(
+            handle.TransactionId, prefix, null, true, null, false,
+            pageSize: 1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct,
+            handle.CoordinatorKey, TransactionOperationId.NewRandom()))
+        {
+        }
+    }
+
     private static async Task<List<KahunaSetKeyValueResponseItem>> SetManyWithRetry(
         Node node, TransactionHandle handle, TransactionOperationId op, List<KahunaSetKeyValueRequestItem> items, CancellationToken ct)
     {

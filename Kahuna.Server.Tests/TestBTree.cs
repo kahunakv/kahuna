@@ -5,6 +5,254 @@ namespace Kahuna.Server.Tests;
 
 public class TestBTree
 {
+    // ── Memory-retention regression tests ───────────────────────────────────────
+
+    // Forces a full GC collection cycle and asserts the weak reference is dead.
+    private static void AssertCollected(WeakReference weakRef)
+    {
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+        GC.WaitForPendingFinalizers();
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+        Assert.False(weakRef.IsAlive, "Removed value must not remain reachable through a stale array slot");
+    }
+
+    // Returns a WeakReference to a large byte-array payload inserted under key.
+    private static WeakReference InsertPayload(BTree<int, object> btree, int key)
+    {
+        // 1 MB payload — large enough that GC.Collect can't miss it if it's still rooted.
+        object payload = new byte[1024 * 1024];
+        btree.Insert(key, payload);
+        return new WeakReference(payload);
+    }
+
+    // Structural invariant: no node may hold a populated slot beyond its logical extent. Merge and
+    // borrow leave a *duplicate* of a still-live sibling/subtree in the vacated slot, so a WeakReference
+    // on a value cannot observe those clears — but this whole-tree walk asserts every slot >= KeyCount is
+    // cleared, which fails if any shrink path forgot to null a vacated slot. Keys inserted by these tests
+    // are always >= 1, so a cleared int key slot (default 0) is unambiguous.
+    private static void AssertNoStaleSlots(BTree<int, object> btree)
+    {
+        if (btree.Root is not null)
+            AssertNodeNoStaleSlots(btree.Root);
+    }
+
+    private static void AssertNodeNoStaleSlots(Node<int, object> node)
+    {
+        for (int i = node.KeyCount; i < node.Keys.Length; i++)
+            Assert.Equal(0, node.Keys[i]);
+
+        if (node.IsLeaf)
+        {
+            for (int i = node.KeyCount; i < node.Values.Length; i++)
+                Assert.Null(node.Values[i]);
+            return;
+        }
+
+        // An internal node with KeyCount keys has KeyCount+1 live children [0, KeyCount]; every slot
+        // above that must be null.
+        for (int i = node.KeyCount + 1; i < node.Children.Length; i++)
+            Assert.Null(node.Children[i]);
+
+        for (int i = 0; i <= node.KeyCount; i++)
+            AssertNodeNoStaleSlots(node.Children[i]!);
+    }
+
+    [Fact]
+    public void RemovedValueIsCollectable_LastKeyOfLeaf()
+    {
+        // Removing the LAST key of a leaf is the case that exercises the trailing-slot clear: removing an
+        // interior key already overwrites its slot via the shift-left, so it would pass without the fix.
+        BTree<int, object> btree = new(4);
+        btree.Insert(1, "other");
+        WeakReference weakRef = InsertPayload(btree, 2);   // payload under the last key
+
+        btree.Remove(2);
+
+        AssertCollected(weakRef);
+    }
+
+    [Fact]
+    public void RemovedValueIsCollectable_LeafRootDrainedToEmpty()
+    {
+        // This is the reported count=0, alive=True case: after draining the root leaf to zero
+        // the Values array must not retain any reference to the last removed entry.
+        BTree<int, object> btree = new(4);
+        WeakReference weakRef = InsertPayload(btree, 1);
+
+        btree.Remove(1);
+
+        Assert.Equal(0, btree.Count);
+        AssertCollected(weakRef);
+    }
+
+    // Borrow and merge leave a duplicate of a still-live sibling/subtree in the vacated slot, so they are
+    // verified structurally (the value stays live either way — only the stale *slot* is the defect).
+
+    [Fact]
+    public void NoStaleSlots_AfterBorrowFromLeft()
+    {
+        // Order-4 tree, minKeys = 1. Drive an underflow whose left sibling can spare a key so the child
+        // borrows from the left, then assert the donor left no populated slot behind.
+        BTree<int, object> btree = new(4);
+        for (int i = 1; i <= 6; i++)
+            btree.Insert(i, $"v{i}");
+
+        btree.Remove(4);
+        btree.Remove(3);
+
+        AssertNoStaleSlots(btree);
+    }
+
+    [Fact]
+    public void NoStaleSlots_AfterBorrowFromRight()
+    {
+        BTree<int, object> btree = new(4);
+        for (int i = 1; i <= 6; i++)
+            btree.Insert(i, $"v{i}");
+
+        btree.Remove(1);
+        btree.Remove(2);
+
+        AssertNoStaleSlots(btree);
+    }
+
+    [Fact]
+    public void RemovedValueIsCollectable_BorrowFromRight()
+    {
+        // Leaves: [[1,2],[3,4],[5,6]]. Remove key 2 (frees payload), then 1 (underflow on left
+        // leaf → borrow-from-right from [3,4]).
+        BTree<int, object> btree = new(4);
+        for (int i = 1; i <= 6; i++)
+            btree.Insert(i, $"v{i}");
+
+        WeakReference weakRef = InsertPayload(btree, 2);
+
+        btree.Remove(2);
+        btree.Remove(1);
+
+        AssertCollected(weakRef);
+    }
+
+    [Fact]
+    public void NoStaleSlots_AfterMergeWithLeft()
+    {
+        // Drain the right side so an underflowing node merges into its left sibling; the parent must not
+        // keep a dangling separator key or child pointer in the vacated trailing slot.
+        BTree<int, object> btree = new(4);
+        for (int i = 1; i <= 9; i++)
+            btree.Insert(i, $"v{i}");
+
+        btree.Remove(9);
+        btree.Remove(8);
+        btree.Remove(7);
+
+        AssertNoStaleSlots(btree);
+    }
+
+    [Fact]
+    public void NoStaleSlots_AfterMergeWithRight()
+    {
+        // Drain the left side so an underflowing node merges its right sibling into itself.
+        BTree<int, object> btree = new(4);
+        for (int i = 1; i <= 9; i++)
+            btree.Insert(i, $"v{i}");
+
+        btree.Remove(1);
+        btree.Remove(2);
+        btree.Remove(3);
+
+        AssertNoStaleSlots(btree);
+    }
+
+    [Fact]
+    public void RemovedValueIsCollectable_LastKeyOfPostSplitSourceLeaf()
+    {
+        // After a split, the source (left) leaf is no longer the root. Put the payload under its last
+        // key and remove it, exercising the trailing-slot clear on a non-root leaf reached via recursion.
+        BTree<int, object> btree = new(4);
+        btree.Insert(1, "v1");
+        btree.Insert(2, "v2");
+        btree.Insert(3, "v3");
+
+        WeakReference weakRef = InsertPayload(btree, 2);   // updates key 2's value in leaf [1,2,3]
+        btree.Insert(4, "v4");                             // splits → source [1,2(payload)], sibling [3,4]
+
+        btree.Remove(2);                                   // remove the last key of the source leaf
+
+        AssertCollected(weakRef);
+    }
+
+    [Fact]
+    public void SplitMovedValueIsCollectable()
+    {
+        // Values moved into the sibling during SplitLeaf must not be double-rooted by stale
+        // source-array slots — removing from the sibling must make them collectible.
+        BTree<int, object> btree = new(4);
+        btree.Insert(1, "v1");
+        btree.Insert(2, "v2");
+        btree.Insert(3, "v3");
+
+        // Key 4 triggers SplitLeaf; the payload lands in the new sibling.
+        WeakReference weakRef = InsertPayload(btree, 4);
+
+        btree.Remove(4);
+
+        AssertCollected(weakRef);
+    }
+
+    [Fact]
+    public void NoStaleSlots_AfterHeavyInsertRemoveWorkload()
+    {
+        // Shape-independent catch-all: a large churn drives many splits, borrows, and merges across a
+        // multi-level tree; the surviving nodes must carry no populated slot beyond their logical extent.
+        BTree<int, object> btree = new(4);
+        for (int i = 1; i <= 200; i++)
+            btree.Insert(i, $"v{i}");
+
+        // Remove most keys (interleaved) to churn structure while leaving a populated multi-level tree.
+        for (int i = 1; i <= 200; i++)
+            if (i % 4 != 0)
+                btree.Remove(i);
+
+        Assert.True(btree.Count > 0);
+        AssertNoStaleSlots(btree);
+
+        // Surviving keys still resolve correctly after all the structural churn.
+        for (int i = 1; i <= 200; i++)
+            if (i % 4 == 0)
+                Assert.NotNull(btree.Get(i));
+    }
+
+    [Fact]
+    public void LeafNodesHaveZeroLengthChildrenArray()
+    {
+        // F7: leaf nodes must not allocate a Children array; they share a static empty array.
+        Node<int, string> leaf = new(4, true, Comparer<int>.Default);
+        Assert.Empty(leaf.Children);
+
+        // Internal nodes must still allocate order+1 slots.
+        Node<int, string> inner = new(4, false, Comparer<int>.Default);
+        Assert.Equal(5, inner.Children.Length);
+    }
+
+    [Fact]
+    public void InternalNodesStillFunctionAfterSplitsAndMerges()
+    {
+        // Regression guard: F7 must not break correctness of internal-node Children.
+        BTree<int, int> btree = new(4);
+        for (int i = 0; i < 50; i++)
+            btree.Insert(i, i * 10);
+
+        for (int i = 0; i < 50; i++)
+            Assert.Equal(i * 10, btree.Get(i));
+
+        for (int i = 0; i < 50; i++)
+            btree.Remove(i);
+
+        Assert.Equal(0, btree.Count);
+    }
+
+
     [Fact]
     public void TestBTreeBasic()
     {

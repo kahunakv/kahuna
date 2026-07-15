@@ -24,7 +24,7 @@ internal sealed class TransactionCoordinator
     /// the write-intent TTL (DefaultTxCompleteTimeout, 15 s) so that by the time a session is reaped
     /// any commit it could still attempt would already fail on expired intents.
     /// </summary>
-    private const int ReapGraceMs = 15_000;
+    internal const int ReapGraceMs = 15_000;
 
     /// <summary>
     /// Upper bound, in milliseconds, on how long a participant retains an effect a dispatched operation may
@@ -32,7 +32,7 @@ internal sealed class TransactionCoordinator
     /// unresolved dispatched operations, the reaper waits at least this long past the session deadline before
     /// expiring it, so it never abandons a session whose in-flight effect could still land at a participant.
     /// </summary>
-    private const int MaxParticipantEffectTtlMs = 15_000;
+    internal const int MaxParticipantEffectTtlMs = 15_000;
 
     /// <summary>
     /// Maximum number of phase-two (commit/rollback) retry attempts when a participant returns

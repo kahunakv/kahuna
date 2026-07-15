@@ -824,6 +824,8 @@ enum GrpcOperationKind {
   GRPC_OP_KIND_RANGE_LOCK = 9;
   GRPC_OP_KIND_SET_MANY = 10;
   GRPC_OP_KIND_MANY_POINT_LOCK = 11;
+  GRPC_OP_KIND_GET_MANY = 12;
+  GRPC_OP_KIND_EXISTS_MANY = 13;
 }
 
 enum GrpcOperationRegistrationOutcome {

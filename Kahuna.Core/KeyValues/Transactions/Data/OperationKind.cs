@@ -20,5 +20,7 @@ public enum OperationKind
     PrefixLock = 8,
     RangeLock = 9,
     SetMany = 10,
-    ManyPointLock = 11
+    ManyPointLock = 11,
+    GetMany = 12,
+    ExistsMany = 13
 }

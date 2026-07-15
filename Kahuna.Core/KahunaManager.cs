@@ -424,10 +424,12 @@ public sealed class KahunaManager : IKahuna, IDisposable
         HLCTimestamp transactionId,
         HLCTimestamp readTimestamp,
         List<(string key, long revision, KeyValueDurability durability)> keys,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
-        return keyValues.LocateAndTryGetManyValues(transactionId, readTimestamp, keys, cancellationToken);
+        return keyValues.LocateAndTryGetManyValues(transactionId, readTimestamp, keys, cancellationToken, coordinatorKey, operationId);
     }
     
     /// <summary>
@@ -457,10 +459,12 @@ public sealed class KahunaManager : IKahuna, IDisposable
         HLCTimestamp transactionId,
         HLCTimestamp readTimestamp,
         List<(string key, long revision, KeyValueDurability durability)> keys,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
-        return keyValues.LocateAndTryExistsManyValues(transactionId, readTimestamp, keys, cancellationToken);
+        return keyValues.LocateAndTryExistsManyValues(transactionId, readTimestamp, keys, cancellationToken, coordinatorKey, operationId);
     }
 
     public Task<KeyValueResponseType> LocateAndTryCheckWriteIntent(
@@ -830,9 +834,11 @@ public sealed class KahunaManager : IKahuna, IDisposable
         int pageSize,
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
-        CancellationToken ct)
+        CancellationToken ct,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default)
     {
-        return keyValues.LocateAndScanRange(txId, prefix, startKey, startInclusive, endKey, endInclusive, pageSize, readTimestamp, durability, ct);
+        return keyValues.LocateAndScanRange(txId, prefix, startKey, startInclusive, endKey, endInclusive, pageSize, readTimestamp, durability, ct, coordinatorKey, operationId);
     }
 
     /// <summary>

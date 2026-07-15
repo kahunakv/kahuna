@@ -13,7 +13,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     private readonly int _order;
     private readonly IComparer<TKey> _comparer;
 
-    private Node<TKey, TValue>? Root { get; set; }
+    internal Node<TKey, TValue>? Root { get; private set; }
 
     public int Count { get; internal set; }
 
@@ -367,10 +367,24 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
         _comparer = comparer;
         Keys = new TKey[order];
         Values = isLeaf ? new TValue?[order] : [];
-        Children = new Node<TKey, TValue>[order + 1];
+        // Leaf nodes never use Children; share a static empty array to avoid allocating per-leaf.
+        Children = isLeaf ? [] : new Node<TKey, TValue>[order + 1];
         IsLeaf = isLeaf;
         KeyCount = 0;
         Next = null;
+    }
+
+    // Null the key (and value for leaf nodes) at slot i so the GC can reclaim the vacated objects.
+    private static void ClearKeyValue(Node<TKey, TValue> node, int i)
+    {
+        node.Keys[i] = default!;
+        if (node.IsLeaf) node.Values[i] = default;
+    }
+
+    // Null the child pointer at slot i so the GC can reclaim the vacated subtree.
+    private static void ClearChild(Node<TKey, TValue> node, int i)
+    {
+        node.Children[i] = null!;
     }
 
     // returns (newSibling, keyToPromote) if split happened
@@ -425,14 +439,18 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
     private (Node<TKey, TValue> sibling, TKey promoteKey) SplitLeaf()
     {
         int mid = KeyCount / 2;
+        int oldCount = KeyCount;
         Node<TKey, TValue> sibling = new(_order, true, _comparer);
 
-        int count = KeyCount - mid;
+        int count = oldCount - mid;
         Array.Copy(Keys, mid, sibling.Keys, 0, count);
         Array.Copy(Values, mid, sibling.Values, 0, count);
 
         sibling.KeyCount = count;
         KeyCount = mid;
+        // Release references moved into sibling so the GC can collect them.
+        for (int i = mid; i < oldCount; i++)
+            ClearKeyValue(this, i);
         sibling.Next = Next;
         Next = sibling;
 
@@ -442,15 +460,21 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
     private (Node<TKey, TValue> sibling, TKey promoteKey) SplitInternal()
     {
         int mid = KeyCount / 2;
+        int oldCount = KeyCount;
         Node<TKey, TValue> sibling = new(_order, false, _comparer);
 
-        int count = KeyCount - mid - 1;
+        int count = oldCount - mid - 1;
         Array.Copy(Keys, mid + 1, sibling.Keys, 0, count);
         Array.Copy(Children, mid + 1, sibling.Children, 0, count + 1);
 
         sibling.KeyCount = count;
         TKey promoteKey = Keys[mid];
         KeyCount = mid;
+        // Release the promoted key and all keys/children moved into sibling so the GC can reclaim them.
+        for (int i = mid; i < oldCount; i++)
+            ClearKeyValue(this, i);
+        for (int i = mid + 1; i <= oldCount; i++)
+            ClearChild(this, i);
 
         return (sibling, promoteKey);
     }
@@ -485,6 +509,8 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
             Array.Copy(Values, idx + 1, Values, idx, KeyCount - idx - 1);
 
             KeyCount--;
+            // Release the vacated trailing slot so the GC can reclaim the removed entry.
+            ClearKeyValue(this, KeyCount);
             return true;
         }
 
@@ -536,6 +562,8 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
             left.KeyCount--;
             // update separator
             Keys[idxChild - 1] = child.Keys[0];
+            // Release left's vacated trailing slot so the GC can reclaim the donated entry.
+            ClearKeyValue(left, left.KeyCount);
         }
         else
         {
@@ -547,6 +575,9 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
             Keys[idxChild - 1] = left.Keys[left.KeyCount - 1];
             child.KeyCount++;
             left.KeyCount--;
+            // Release left's vacated key and child slots so the GC can reclaim the donated entries.
+            ClearKeyValue(left, left.KeyCount);
+            ClearChild(left, left.KeyCount + 1);
         }
     }
 
@@ -567,6 +598,8 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
             right.KeyCount--;
             // update separator
             Keys[idxChild] = right.Keys[0];
+            // Release right's vacated trailing slot so the GC can reclaim the donated entry.
+            ClearKeyValue(right, right.KeyCount);
         }
         else
         {
@@ -580,6 +613,9 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
             Array.Copy(right.Children, 1, right.Children, 0, right.KeyCount);
 
             right.KeyCount--;
+            // Release right's vacated trailing key and child slots so the GC can reclaim them.
+            ClearKeyValue(right, right.KeyCount);
+            ClearChild(right, right.KeyCount + 1);
         }
     }
 
@@ -611,6 +647,9 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
         Array.Copy(Children, idxChild + 1, Children, idxChild, KeyCount - idxChild);
 
         KeyCount--;
+        // Release the parent's now-dangling trailing separator and child pointer.
+        ClearKeyValue(this, KeyCount);
+        ClearChild(this, KeyCount + 1);
     }
 
     private void MergeWithRight(int idxChild)
@@ -641,5 +680,8 @@ public class Node<TKey, TValue> where TKey : IComparable<TKey>
         Array.Copy(Children, idxChild + 2, Children, idxChild + 1, KeyCount - idxChild - 1);
 
         KeyCount--;
+        // Release the parent's now-dangling trailing separator and child pointer.
+        ClearKeyValue(this, KeyCount);
+        ClearChild(this, KeyCount + 1);
     }
 }

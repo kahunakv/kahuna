@@ -2,6 +2,7 @@
 using Google.Protobuf;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Ranges;
+using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
@@ -325,19 +326,41 @@ internal abstract class BaseHandler
     }
 
     /// <summary>
-    /// Removes MvccEntries from other transactions that have elapsed their Expires deadline.
-    /// Called at transaction resolve time (commit/rollback) so the collector never needs a
-    /// separate metadata pass for MVCC cleanup.
+    /// Removes MvccEntries from other transactions that have elapsed their Expires deadline, or whose
+    /// transaction is definitively no longer live (committed, rolled back, or older than the maximum
+    /// possible session lifetime). Called at transaction resolve time (commit/rollback) so the collector
+    /// never needs a separate metadata pass for MVCC cleanup.
     /// </summary>
     protected void TrimExpiredMvccEntries(KeyValueEntry entry, HLCTimestamp currentTime)
     {
         if (entry.MvccEntries is null || entry.MvccEntries.Count == 0)
             return;
 
+        // Maximum wall-clock span a session can remain alive: its own timeout (we use the configured
+        // default as a conservative upper bound) plus the reaper grace window plus the maximum time a
+        // dispatched participant effect can still land after the session is reaped. Any MVCC snapshot
+        // whose owning transaction started more than this span ago must be from a dead session.
+        long sessionMaxLifespanMs = context.Configuration.DefaultTransactionTimeout
+            + TransactionCoordinator.ReapGraceMs
+            + TransactionCoordinator.MaxParticipantEffectTtlMs;
+
         List<HLCTimestamp>? stale = null;
         foreach ((HLCTimestamp txId, KeyValueMvccEntry mvcc) in entry.MvccEntries)
         {
-            if (mvcc.Expires == HLCTimestamp.Zero) continue;
+            if (mvcc.Expires == HLCTimestamp.Zero)
+            {
+                // Reclaim read-only snapshots for non-expiring keys whose transaction is no longer live:
+                // either this actor recorded a terminal decision for it, or enough time has passed that
+                // no session started at txId could still be alive regardless of its per-session timeout.
+                if (context.WasCommittedHere(txId) || context.WasRolledBackHere(txId) ||
+                    (currentTime - txId).TotalMilliseconds > sessionMaxLifespanMs)
+                {
+                    stale ??= [];
+                    stale.Add(txId);
+                }
+                continue;
+            }
+
             if ((mvcc.Expires - currentTime) > TimeSpan.Zero) continue;
             stale ??= [];
             stale.Add(txId);
