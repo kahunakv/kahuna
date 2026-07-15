@@ -67,8 +67,8 @@ public sealed class KahunaCommandLineOptions
     [Option("graceful-leave-on-shutdown", Required = false, HelpText = "On planned shutdown, commit a RemoveMember so the roster shrinks immediately rather than waiting for SWIM eviction. Default false; do not enable on rolling restarts.", Default = false)]
     public bool RaftGracefulLeaveOnShutdown { get; set; }
 
-    [Option("initial-cluster-partitions", Required = false, HelpText = "Initial cluster number of partitions", Default = 128)] // 32
-    public int InitialClusterPartitions { get; set; } = 128;
+    [Option("initial-cluster-partitions", Required = false, HelpText = "Initial cluster number of partitions", Default = 3)] // 32
+    public int InitialClusterPartitions { get; set; } = 3;
     
     [Option("raft-nodename", Required = false, HelpText = "Unique name to identify the node in the cluster")]
     public string RaftNodeName { get; set; } = "";

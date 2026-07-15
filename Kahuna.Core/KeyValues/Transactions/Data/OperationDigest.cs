@@ -194,6 +194,33 @@ internal static class OperationDigest
         return hash.GetHashAndReset();
     }
 
+    /// <summary>
+    /// Digest for a batch point read (<see cref="OperationKind.GetMany"/> / <see cref="OperationKind.ExistsMany"/>):
+    /// the whole batch is one registered operation, so the digest binds every (key, revision, durability) in the
+    /// exact submission order plus the shared snapshot timestamp. A same-operation-id retry must resend the
+    /// identical ordered list at the identical snapshot.
+    /// </summary>
+    internal static byte[] ForManyRead(OperationKind kind, IReadOnlyList<(string key, long revision, KeyValueDurability durability)> keys, HLCTimestamp readTimestamp)
+    {
+        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        AppendTag(hash, kind);
+        AppendInt(hash, keys.Count);
+        foreach ((string key, long revision, KeyValueDurability durability) in keys)
+        {
+            AppendString(hash, key);
+            AppendLong(hash, revision);
+            AppendInt(hash, (int)durability);
+        }
+        AppendHlc(hash, readTimestamp);
+        return hash.GetHashAndReset();
+    }
+
+    internal static byte[] ForGetMany(IReadOnlyList<(string key, long revision, KeyValueDurability durability)> keys, HLCTimestamp readTimestamp) =>
+        ForManyRead(OperationKind.GetMany, keys, readTimestamp);
+
+    internal static byte[] ForExistsMany(IReadOnlyList<(string key, long revision, KeyValueDurability durability)> keys, HLCTimestamp readTimestamp) =>
+        ForManyRead(OperationKind.ExistsMany, keys, readTimestamp);
+
     internal static byte[] ForRead(OperationKind kind, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability)
     {
         using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);

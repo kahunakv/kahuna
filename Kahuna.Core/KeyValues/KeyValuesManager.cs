@@ -1386,24 +1386,127 @@ internal sealed class KeyValuesManager : IDisposable
         return RegisterAndTryReadValue(OperationKind.Exists, transactionId, coordinatorKey, operationId, key, revision, readTimestamp, durability, cancellationToken);
     }
 
-    public async Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryExistsManyValues(
+    public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryExistsManyValues(
         HLCTimestamp transactionId,
         HLCTimestamp readTimestamp,
         List<(string key, long revision, KeyValueDurability durability)> keys,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
-        return await locator.LocateAndTryExistsManyValues(transactionId, readTimestamp, keys, cancellationToken);
+        RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
+        if (routing is RegistrationRouting.Legacy)
+            return locator.LocateAndTryExistsManyValues(transactionId, readTimestamp, keys, cancellationToken);
+        if (routing is RegistrationRouting.Malformed)
+            return Task.FromResult(BuildManyReadRejection(keys, KeyValueResponseType.InvalidInput));
+
+        return RegisterAndTryReadManyValues(OperationKind.ExistsMany, transactionId, coordinatorKey, operationId, readTimestamp, keys, cancellationToken);
     }
 
-    public async Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(
+    public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(
         HLCTimestamp transactionId,
         HLCTimestamp readTimestamp,
         List<(string key, long revision, KeyValueDurability durability)> keys,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
-        return await locator.LocateAndTryGetManyValues(transactionId, readTimestamp, keys, cancellationToken);
+        RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
+        if (routing is RegistrationRouting.Legacy)
+            return locator.LocateAndTryGetManyValues(transactionId, readTimestamp, keys, cancellationToken);
+        if (routing is RegistrationRouting.Malformed)
+            return Task.FromResult(BuildManyReadRejection(keys, KeyValueResponseType.InvalidInput));
+
+        return RegisterAndTryReadManyValues(OperationKind.GetMany, transactionId, coordinatorKey, operationId, readTimestamp, keys, cancellationToken);
+    }
+
+    /// <summary>
+    /// Builds a uniform per-key result list for a batch read that never reached the leaders (malformed
+    /// registration, capacity/session rejection). One tuple per requested key carries the shared
+    /// <paramref name="type"/> and the key's declared durability so callers see the same shape a real fan-out
+    /// would return.
+    /// </summary>
+    private static List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> BuildManyReadRejection(
+        List<(string key, long revision, KeyValueDurability durability)> keys, KeyValueResponseType type)
+    {
+        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> rejected = new(keys.Count);
+        foreach ((string key, _, KeyValueDurability durability) in keys)
+            rejected.Add((type, key, durability, null));
+        return rejected;
+    }
+
+    /// <summary>
+    /// Registers a batch point read (GetMany/ExistsMany) as a single coordinator operation so every key it
+    /// observes becomes a read dependency of the transaction: an optimistic commit validates them and aborts if
+    /// any changed after the read. Mirrors <see cref="RegisterAndTryReadValue"/> but folds one observation per
+    /// returned key into <see cref="OperationCompletionPayload.ReadObservations"/>. A snapshot read (pinned read
+    /// timestamp) owns no live transactional MVCC and so records no observations, but still registers for
+    /// finalize fencing and idempotent replay.
+    /// </summary>
+    private async Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> RegisterAndTryReadManyValues(
+        OperationKind kind, HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId,
+        HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys,
+        CancellationToken cancellationToken)
+    {
+        byte[] digest = kind == OperationKind.ExistsMany
+            ? OperationDigest.ForExistsMany(keys, readTimestamp)
+            : OperationDigest.ForGetMany(keys, readTimestamp);
+
+        (OperationRegistrationOutcome outcome, _, _, _, _) =
+            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, digest, cancellationToken);
+
+        switch (outcome)
+        {
+            case OperationRegistrationOutcome.AlreadyPending:
+            case OperationRegistrationOutcome.RejectedCapacity:
+                return BuildManyReadRejection(keys, KeyValueResponseType.MustRetry);
+            case OperationRegistrationOutcome.RejectedSessionClosed:
+                return BuildManyReadRejection(keys, KeyValueResponseType.Aborted);
+            case OperationRegistrationOutcome.RejectedDuplicate:
+                return BuildManyReadRejection(keys, KeyValueResponseType.Errored);
+        }
+
+        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> result = kind == OperationKind.ExistsMany
+            ? await locator.LocateAndTryExistsManyValues(transactionId, readTimestamp, keys, cancellationToken)
+            : await locator.LocateAndTryGetManyValues(transactionId, readTimestamp, keys, cancellationToken);
+
+        // A re-read under an already-completed id keeps the first recorded observations.
+        if (outcome != OperationRegistrationOutcome.New)
+            return result;
+
+        // A snapshot read is pinned to a past timestamp: it owns no live transactional MVCC entry and so
+        // contributes no read dependency to validate at commit. It still completes for finalize fencing and
+        // idempotent replay, but records no observation into the read set.
+        List<KeyValueTransactionReadKey>? observations = null;
+        if (readTimestamp.IsNull())
+        {
+            observations = new(result.Count);
+            foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry) in result)
+            {
+                bool exists = entry is not null && type is KeyValueResponseType.Get or KeyValueResponseType.Exists;
+                observations.Add(new KeyValueTransactionReadKey
+                {
+                    Key = key,
+                    Durability = durability,
+                    Exists = exists,
+                    Revision = exists ? entry!.Revision : -1
+                });
+            }
+        }
+
+        await LocateAndCompleteOperation(
+            coordinatorKey, transactionId, operationId,
+            new OperationCompletionPayload
+            {
+                ReadObservations = observations,
+                Durability = keys.Count > 0 ? keys[0].durability : KeyValueDurability.Persistent,
+                CachedType = kind == OperationKind.ExistsMany ? KeyValueResponseType.Exists : KeyValueResponseType.Get
+            },
+            cancellationToken);
+
+        return result;
     }
     
     /// <summary>
@@ -2308,20 +2411,26 @@ internal sealed class KeyValuesManager : IDisposable
         if (string.IsNullOrEmpty(coordinatorKey))
             return locator.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
 
-        return RegisterAndGetByRange(transactionId, coordinatorKey, operationId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
+        // A single-shot registered scan folds observations exactly when it is a latest read.
+        return RegisterAndGetByRange(transactionId, coordinatorKey, operationId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, readTimestamp.IsNull(), cancellationToken);
     }
 
     /// <summary>
     /// Registers a paged range scan as a coordinator operation so every key it observes becomes a read
     /// dependency of the transaction: an optimistic commit validates them and aborts if any changed after the
-    /// scan. Mirrors <see cref="RegisterAndGetByBucket"/>; a snapshot scan (pinned read timestamp) owns no live
-    /// transactional MVCC and so records no observations, but still registers for finalize fencing and idempotent
-    /// replay. Paging issues one registered operation per page (distinct bounds → distinct digest).
+    /// scan. Mirrors <see cref="RegisterAndGetByBucket"/>; still registers for finalize fencing and idempotent
+    /// replay even when it folds nothing. Paging issues one registered operation per page (distinct bounds →
+    /// distinct digest).
+    ///
+    /// <paramref name="recordObservations"/> is decoupled from <paramref name="readTimestamp"/>: a streaming
+    /// latest scan latches a consistent snapshot on its first page and reads pages 1+ <em>as of</em> that pinned
+    /// timestamp, but still folds every page's rows as read dependencies. A genuine snapshot scan (the caller
+    /// pinned the read timestamp) owns no live transactional MVCC and folds nothing.
     /// </summary>
     private async Task<KeyValueGetByRangeResult> RegisterAndGetByRange(
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string prefix,
         string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit,
-        HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+        HLCTimestamp readTimestamp, KeyValueDurability durability, bool recordObservations, CancellationToken cancellationToken)
     {
         (OperationRegistrationOutcome outcome, _, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Scan,
@@ -2347,7 +2456,7 @@ internal sealed class KeyValuesManager : IDisposable
             await locator.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
 
         List<KeyValueTransactionReadKey>? observations = null;
-        if (readTimestamp.IsNull() && result.Type == KeyValueResponseType.Get && result.Items.Count > 0)
+        if (recordObservations && result.Type == KeyValueResponseType.Get && result.Items.Count > 0)
         {
             observations = new(result.Items.Count);
             foreach ((string itemKey, ReadOnlyKeyValueEntry entry) in result.Items)
@@ -2390,23 +2499,41 @@ internal sealed class KeyValuesManager : IDisposable
         int pageSize,
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
-        [EnumeratorCancellation] CancellationToken ct)
+        [EnumeratorCancellation] CancellationToken ct,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default)
     {
         string? cursorKey       = startKey;
         bool    cursorInclusive = startInclusive;
         // Seed from caller's T when supplied; Zero means "capture on first successful page".
         HLCTimestamp snapshotTs = readTimestamp;
         int backoffMs           = 1;
+        // Each streamed page registers as its own coordinator operation (distinct bounds → distinct digest),
+        // so it needs a distinct, deterministic operationId derived from the caller's base id and the page
+        // number. An empty coordinatorKey means "legacy raw paging" and never registers.
+        bool registered         = !string.IsNullOrEmpty(coordinatorKey);
+        // Fold every page's rows as read dependencies exactly when the caller asked for a latest scan.
+        // A latest scan latches a snapshot on page 0 for a consistent view, so pages 1+ read as of that
+        // pinned timestamp — but they are still latest-scan observations and must fold. A genuine snapshot
+        // scan (caller pinned readTimestamp) folds nothing.
+        bool foldObservations   = readTimestamp.IsNull();
+        int pageIndex           = 0;
 
         while (true)
         {
             ct.ThrowIfCancellationRequested();
 
-            KeyValueGetByRangeResult page = await locator.LocateAndGetByRange(
-                txId, prefix,
-                cursorKey, cursorInclusive,
-                endKey, endInclusive,
-                pageSize, snapshotTs, durability, ct);
+            KeyValueGetByRangeResult page = registered
+                ? await RegisterAndGetByRange(
+                    txId, coordinatorKey, operationId.Derive(pageIndex), prefix,
+                    cursorKey, cursorInclusive,
+                    endKey, endInclusive,
+                    pageSize, snapshotTs, durability, foldObservations, ct)
+                : await locator.LocateAndGetByRange(
+                    txId, prefix,
+                    cursorKey, cursorInclusive,
+                    endKey, endInclusive,
+                    pageSize, snapshotTs, durability, ct);
 
             if (page.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
             {
@@ -2443,6 +2570,7 @@ internal sealed class KeyValuesManager : IDisposable
 
             cursorKey       = lastKey;
             cursorInclusive = false;
+            pageIndex++;
         }
     }
 
