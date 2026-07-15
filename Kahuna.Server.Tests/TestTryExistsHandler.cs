@@ -68,10 +68,7 @@ public sealed class TestTryExistsHandler
             LastModified = now,
             LastUsed = now,
             State = KeyValueState.Set,
-            Revisions = new Dictionary<long, KeyValueRevisionEntry>
-            {
-                [2] = new() { Value = null, State = KeyValueState.Set }
-            }
+            Revisions = new KeyValueRevisionHistory { [2] = new() { Value = null, State = KeyValueState.Set } }
         };
         context.InsertStoreEntry("exists-rev-key", resident);
 
