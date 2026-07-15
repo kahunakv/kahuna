@@ -1148,6 +1148,11 @@ internal sealed class KeyValuesManager : IDisposable
                 new OperationCompletionPayload
                 {
                     ModifiedKeys = modifiedKeys.Count > 0 ? modifiedKeys : null,
+                    // A confirmed write folds its implicit point lock, exactly as the single-key path does. An
+                    // optimistic transaction takes no explicit locks, so this is its only source of the held-lock
+                    // set that PrepareMutations requires; for a pessimistic caller the explicit lock already
+                    // recorded these keys, so the HashSet fold is idempotent.
+                    AcquiredPointLocks = modifiedKeys.Count > 0 ? modifiedKeys : null,
                     CachedType = KeyValueResponseType.Set
                 }))
             return AllSetItemsResponse(setManyItems, KeyValueResponseType.MustRetry);
@@ -5219,6 +5224,26 @@ internal sealed class KeyValuesManager : IDisposable
     public Task<KeyValueResponseType> RollbackTransaction(TransactionHandle handle)
     {
         return txCoordinator.RollbackTransaction(handle);
+    }
+
+    /// <summary>
+    /// Renews the range locks of every live interactive session so they outlive their original acquire TTL
+    /// without a client heartbeat. Driven periodically by the transaction reaper; exposed directly so a caller
+    /// (or a test) can trigger the sweep deterministically.
+    /// </summary>
+    internal Task RenewSessionRangeLocks()
+    {
+        return txCoordinator.RenewSessionRangeLocks();
+    }
+
+    /// <summary>
+    /// Reclaims interactive sessions abandoned without commit or rollback, releasing their held locks and read
+    /// snapshots. Driven periodically by the transaction reaper; exposed directly so a caller (or a test) can
+    /// trigger the sweep deterministically.
+    /// </summary>
+    internal Task ReapAbandonedSessions()
+    {
+        return txCoordinator.ReapAbandonedSessions();
     }
 
     internal async Task RunCollectOnAllInstancesAsync()

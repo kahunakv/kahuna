@@ -560,6 +560,29 @@ internal class TransactionContext
         }
     }
 
+    /// <summary>
+    /// Returns a point-in-time copy of the range locks this session holds, but only while it is still
+    /// accepting operations. A session that has entered the finalize fence
+    /// (<see cref="SessionLifecycle.Finalizing"/> / <see cref="SessionLifecycle.Reaping"/> /
+    /// <see cref="SessionLifecycle.Terminal"/>) returns an empty list so a renewal tick never re-extends a
+    /// range lock that a concurrent commit/rollback/reap is releasing — coupling the lifecycle check with the
+    /// snapshot under the same lock closes the window where renewal reads "accepting" and then races a release.
+    /// </summary>
+    internal List<(RangeLockKey Range, RangeLockMode Mode)> SnapshotRenewableRangeLocks()
+    {
+        lock (registryLock)
+        {
+            if (lifecycle != SessionLifecycle.AcceptingOperations || RangeLocksAcquired is null || RangeLocksAcquired.Count == 0)
+                return [];
+
+            List<(RangeLockKey, RangeLockMode)> snapshot = new(RangeLocksAcquired.Count);
+            foreach ((RangeLockKey range, RangeLockMode mode) in RangeLocksAcquired)
+                snapshot.Add((range, mode));
+
+            return snapshot;
+        }
+    }
+
     private static bool DigestsEqual(byte[]? a, byte[]? b)
     {
         if (ReferenceEquals(a, b))

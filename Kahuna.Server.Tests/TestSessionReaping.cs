@@ -87,6 +87,59 @@ public sealed class TestSessionReaping
         Assert.Equal(SessionLifecycle.Reaping, ctx.Lifecycle);
     }
 
+    /// <summary>
+    /// A range lock a live session holds is renewable while the session is still accepting operations, but the
+    /// snapshot goes empty the instant the session enters the finalize fence — so a renewal tick can never
+    /// re-extend a lock a concurrent commit/rollback is releasing.
+    /// </summary>
+    [Fact]
+    public void SnapshotRenewableRangeLocks_ReturnsHeldLockWhileAccepting_EmptyOnceFinalizing()
+    {
+        TransactionContext ctx = NewSession();
+
+        TransactionOperationId opId = TransactionOperationId.NewRandom();
+        Assert.Equal(OperationRegistrationOutcome.New, ctx.BeginOperation(opId, OperationKind.RangeLock, [1]).Outcome);
+        RangeLockKey range = new("pfx", "a", true, "z", false, KeyValueDurability.Persistent);
+        ctx.CompleteOperation(opId, new OperationEffect { RangeLock = (range, RangeLockMode.Exclusive) }, response: null);
+
+        List<(RangeLockKey Range, RangeLockMode Mode)> whileAccepting = ctx.SnapshotRenewableRangeLocks();
+        Assert.Single(whileAccepting);
+        Assert.Equal(range, whileAccepting[0].Range);
+        Assert.Equal(RangeLockMode.Exclusive, whileAccepting[0].Mode);
+
+        // A commit/rollback owns the finalize slot: the lock is now the finalize path's to release, not the
+        // renewal tick's to extend.
+        Assert.Equal(FinalizeAdmission.Owner, ctx.EnterFinalize(out _));
+        Assert.Empty(ctx.SnapshotRenewableRangeLocks());
+    }
+
+    /// <summary>
+    /// A session claimed by the reaper likewise contributes no renewable range locks: the reaper is releasing
+    /// them, so renewal must not fight it.
+    /// </summary>
+    [Fact]
+    public void SnapshotRenewableRangeLocks_EmptyOnceReaping()
+    {
+        TransactionContext ctx = NewSession();
+
+        TransactionOperationId opId = TransactionOperationId.NewRandom();
+        Assert.Equal(OperationRegistrationOutcome.New, ctx.BeginOperation(opId, OperationKind.RangeLock, [1]).Outcome);
+        RangeLockKey range = new("pfx", null, true, null, false, KeyValueDurability.Persistent);
+        ctx.CompleteOperation(opId, new OperationEffect { RangeLock = (range, RangeLockMode.Shared) }, response: null);
+        Assert.Single(ctx.SnapshotRenewableRangeLocks());
+
+        Assert.NotNull(ctx.TryEnterReap());
+        Assert.Empty(ctx.SnapshotRenewableRangeLocks());
+    }
+
+    /// <summary>A session that holds no range locks has nothing to renew.</summary>
+    [Fact]
+    public void SnapshotRenewableRangeLocks_EmptyWhenNoRangeLocksHeld()
+    {
+        TransactionContext ctx = NewSession();
+        Assert.Empty(ctx.SnapshotRenewableRangeLocks());
+    }
+
     [Fact]
     public void HasPendingOperations_ReflectsRegisteredButUncompletedWork()
     {

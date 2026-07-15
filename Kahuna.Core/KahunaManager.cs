@@ -1248,6 +1248,19 @@ public sealed class KahunaManager : IKahuna, IDisposable
         return keyValues.GetRecordedDecisionDurability(transactionId);
     }
 
+    /// <summary>
+    /// Renews the range locks of every live interactive session so they outlive their original acquire TTL
+    /// without a client heartbeat. Driven periodically by the transaction reaper; exposed for a deterministic
+    /// trigger.
+    /// </summary>
+    internal Task RenewSessionRangeLocks() => keyValues.RenewSessionRangeLocks();
+
+    /// <summary>
+    /// Reclaims interactive sessions abandoned without commit or rollback, releasing their held locks. Driven
+    /// periodically by the transaction reaper; exposed for a deterministic trigger.
+    /// </summary>
+    internal Task ReapAbandonedSessions() => keyValues.ReapAbandonedSessions();
+
     /// <summary>Node-local persistent-participant completion receipts. Diagnostic/test access.</summary>
     internal CompletionReceiptStore CompletionReceiptStore => keyValues.CompletionReceiptStore;
 
