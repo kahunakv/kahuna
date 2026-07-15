@@ -219,6 +219,73 @@ public sealed class TestCoordinatorDecisionRecovery
         Assert.All(rec.Participants, p => Assert.True(p.ReceiptReleased));
     }
 
+    // ── Concurrent drives on one record converge idempotently: single Completed, no double-apply ───────────
+
+    /// <summary>
+    /// The request path and the recovery actor may drive the same decision at once, and the underlying commit,
+    /// receipt forget, and decision upsert are all designed to be idempotent so correctness does not depend on a
+    /// single winner. This forces the worst case — several drives held on a barrier so they all run through the
+    /// same record concurrently — and asserts they converge to one <c>Completed</c> record with the frozen
+    /// participant set intact (no duplicated participant, no regressed ack/release), never throwing or double
+    /// applying.
+    /// </summary>
+    [Fact]
+    public async Task ConcurrentDrivesOnSameRecord_ConvergeToSingleCompleted_NoDoubleApply()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = new(EmbeddedOptions());
+        await node.StartAsync(ct);
+
+        KahunaManager manager = (KahunaManager)node.Kahuna;
+
+        const string anchor = "recover-race:anchor";
+        const string other  = "recover-race:other";
+
+        // Commit `other` through 2PC so its completion receipt exists — the proof every concurrent re-drive uses
+        // to resolve the participant as Committed.
+        HLCTimestamp txId = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+        HLCTimestamp commitId = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+
+        (KeyValueResponseType setType, _, _) = await node.Kahuna.TrySetKeyValue(
+            txId, other, "v"u8.ToArray(), null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent);
+        Assert.Equal(KeyValueResponseType.Set, setType);
+        (KeyValueResponseType prepType, HLCTimestamp ticket, _, _) = await node.Kahuna.TryPrepareMutations(
+            txId, commitId, other, KeyValueDurability.Persistent, recordAnchorKey: anchor);
+        Assert.Equal(KeyValueResponseType.Prepared, prepType);
+        (KeyValueResponseType commitType, _) = await node.Kahuna.TryCommitMutations(
+            txId, other, ticket, KeyValueDurability.Persistent);
+        Assert.Equal(KeyValueResponseType.Committed, commitType);
+
+        CoordinatorDecisionRecord seed = new(
+            txId, "coord", anchor, commitId, CoordinatorDecisionStatus.CommitDecided,
+            [Participant(anchor, acked: true, released: false), Participant(other, acked: false, released: false)],
+            [], txId, HLCTimestamp.Zero);
+        await node.Kahuna.ImportCoordinatorDecisions([seed]);
+
+        // Hold every drive on a barrier so all of them are inside the record's drive at once, maximizing the race.
+        const int drives = 5;
+        int entered = 0;
+        TaskCompletionSource allEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        manager.KeyValues.RecoveryDriveHook = _ =>
+        {
+            if (Interlocked.Increment(ref entered) >= drives)
+                allEntered.TrySetResult();
+            return allEntered.Task;
+        };
+
+        Task[] sweeps = Enumerable.Range(0, drives).Select(_ => Recover(node, NoPurge)).ToArray();
+        await Task.WhenAll(sweeps).WaitAsync(TimeSpan.FromSeconds(20), ct);
+
+        // Exactly one record, Completed once, the frozen two-participant set intact, every participant acked and
+        // released — a double-apply or a regressed merge would break one of these.
+        Assert.Equal(1, Store(node).Count);
+        Assert.True(Store(node).TryGet(txId, out CoordinatorDecisionRecord rec));
+        Assert.Equal(CoordinatorDecisionStatus.Completed, rec.Status);
+        Assert.Equal(2, rec.Participants.Count);
+        Assert.True(rec.AllParticipantsAcked);
+        Assert.All(rec.Participants, p => Assert.True(p.ReceiptReleased));
+    }
+
     // ── A completed record is purged once past the retention window and every receipt is released ──────────
 
     [Fact]

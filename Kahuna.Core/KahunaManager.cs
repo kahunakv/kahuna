@@ -382,11 +382,13 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="setManyItems"></param>
     /// <param name="contextCancellationToken"></param>
     /// <returns></returns>
-    public Task<List<KahunaSetKeyValueResponseItem>> LocateAndTrySetManyKeyValue(List<KahunaSetKeyValueRequestItem> setManyItems, CancellationToken cancellationToken)
+    public Task<List<KahunaSetKeyValueResponseItem>> LocateAndTrySetManyKeyValue(List<KahunaSetKeyValueRequestItem> setManyItems, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
     {
         return keyValues.LocateAndTrySetManyKeyValue(
-            setManyItems, 
-            cancellationToken
+            setManyItems,
+            cancellationToken,
+            coordinatorKey,
+            operationId
         );
     }
 
@@ -567,10 +569,12 @@ public sealed class KahunaManager : IKahuna, IDisposable
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)>> LocateAndTryAcquireManyExclusiveLocks(
         HLCTimestamp transactionId,
         List<(string key, int expiresMs, KeyValueDurability durability)> keys,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
     )
     {
-        return keyValues.LocateAndTryAcquireManyExclusiveLocks(transactionId, keys, cancellationToken);
+        return keyValues.LocateAndTryAcquireManyExclusiveLocks(transactionId, keys, cancellationToken, coordinatorKey, operationId);
     }
 
     /// <summary>

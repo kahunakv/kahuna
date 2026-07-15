@@ -294,6 +294,13 @@ internal class TransactionContext
             LocksAcquired.Add(pointLock);
         }
 
+        if (effect.AcquiredPointLocks is { } acquiredPointLocks)
+        {
+            LocksAcquired ??= [];
+            foreach ((string, KeyValueDurability) batchLock in acquiredPointLocks)
+                LocksAcquired.Add(batchLock);
+        }
+
         if (effect.RemovePointLock is { } removedLock)
             LocksAcquired?.Remove(removedLock);
 

@@ -343,6 +343,89 @@ public sealed class TestSplitMergeCorrectnessHandoff : BaseCluster
         }
     }
 
+    // ── 4b. Live merge survives a source-side leadership change and still transfers the decision ──
+
+    /// <summary>
+    /// A leadership change on the <b>source</b> (retiring/right) partition around cutover must not lose the moved
+    /// correctness record: the record is replicated across the source partition's replicas, so a freshly-elected
+    /// source leader still holds it, and the merge — gated on the handoff being durable on the survivor — still
+    /// transfers it and cuts over. Complements <see cref="Handoff_SurvivesDestinationLeadershipChange"/>, which
+    /// exercises the destination side.
+    /// </summary>
+    [Fact]
+    public async Task LiveMerge_SurvivesSourceLeadershipChange_TransfersDecisionToSurvivor()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        const string space = "t:hms";
+        string boundary = space + "/0010";
+
+        (IRaft r1, IRaft r2, IRaft r3, IKahuna k1, IKahuna k2, IKahuna k3) =
+            await AssembleThreNodeCluster("memory", 4, raftLogger, kahunaLogger);
+
+        (IRaft, KahunaManager)[] nodes =
+            [(r1, (KahunaManager)k1), (r2, (KahunaManager)k2), (r3, (KahunaManager)k3)];
+
+        try
+        {
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                kahuna.RegisterKeyRange(space);
+
+            const int leftPid = RangeMapStore.FirstDataPartitionId;
+            const int rightPid = RangeMapStore.FirstDataPartitionId + 1;
+
+            var left = new RangeDescriptor { KeySpace = space, StartKey = null, EndKey = boundary, PartitionId = leftPid, Generation = 1 };
+            var right = new RangeDescriptor { KeySpace = space, StartKey = boundary, EndKey = null, PartitionId = rightPid, Generation = 1 };
+
+            (IRaft _, KahunaManager metaLeader0) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+            Assert.True(await metaLeader0.RangeMapStore.MutateAsync(_ => [left, right], ct));
+
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                await WaitUntilAsync(() => kahuna.RangeMapStore.Current.FindAll(space).Count == 2);
+
+            // One key in each half so both ranges are non-empty merge candidates.
+            (IRaft _, KahunaManager leftLeader) = await LeaderOf(leftPid, nodes);
+            (IRaft _, KahunaManager rightLeader) = await LeaderOf(rightPid, nodes);
+            string leftKey = space + "/0001";
+            string rightKey = space + "/0011";
+            Assert.Equal(KeyValueResponseType.Set, (await leftLeader.TrySetKeyValue(
+                HLCTimestamp.Zero, leftKey, V("v"), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent)).Item1);
+            Assert.Equal(KeyValueResponseType.Set, (await rightLeader.TrySetKeyValue(
+                HLCTimestamp.Zero, rightKey, V("v"), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent)).Item1);
+
+            // Change the SOURCE (right, retiring) partition's leadership before cutover: step the current right
+            // leader down and let a former follower take over.
+            (IRaft rightRaft, KahunaManager _) = await LeaderOf(rightPid, nodes);
+            string oldRightEndpoint = rightRaft.GetLocalEndpoint();
+            await rightRaft.StepDownAsync(rightPid, ct);
+            await WaitUntilAsync(async () =>
+            {
+                foreach ((IRaft raft, KahunaManager _) in nodes)
+                    if (raft.GetLocalEndpoint() != oldRightEndpoint && await raft.AmILeader(rightPid, ct))
+                        return true;
+                return false;
+            });
+
+            // Pin the meta leader and seed an outstanding decision anchored in the moving (right) range.
+            (IRaft metaRaft, KahunaManager metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+            await ForceMetaLeaderAsync((metaRaft, metaLeader), ct);
+
+            HLCTimestamp tx = NextTx(metaRaft);
+            await metaLeader.ImportCoordinatorDecisions([Decision(tx, rightKey, CoordinatorDecisionStatus.CommitDecided)]);
+
+            // The merge succeeds despite the source-side leadership change, cuts over, and hands the decision to
+            // the survivor — where every replica holds it.
+            MergeOutcome outcome = await metaLeader.RangeMerger.MergeAsync(space, left, right, ct);
+            Assert.True(outcome.IsSuccess);
+
+            await WaitUntilAsync(() => metaLeader.RangeMapStore.Current.FindAll(space).Count == 1);
+            await WaitUntilAsync(() => nodes.All(n => n.Item2.CoordinatorDecisionStore.TryGet(tx, out _)));
+        }
+        finally
+        {
+            await LeaveCluster(r1, r2, r3);
+        }
+    }
+
     // ── 5. Live split aborts cutover when the handoff is not durable ─────────────────────────────
 
     /// <summary>

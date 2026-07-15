@@ -56,6 +56,30 @@ internal static class OperationDigest
         return hash.GetHashAndReset();
     }
 
+    /// <summary>
+    /// Digest for a batch set: the whole batch is one registered operation, so the digest binds every
+    /// item's full write declaration (key, value, compare-value/revision, flags, expiry, durability) in the
+    /// exact submission (canonical request) order. A same-operation-id retry must resend the identical
+    /// ordered list, which is also the order the coordinator folds the anchor in.
+    /// </summary>
+    internal static byte[] ForSetMany(IReadOnlyList<KahunaSetKeyValueRequestItem> items)
+    {
+        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        AppendTag(hash, OperationKind.SetMany);
+        AppendInt(hash, items.Count);
+        foreach (KahunaSetKeyValueRequestItem item in items)
+        {
+            AppendString(hash, item.Key ?? "");
+            AppendBytes(hash, item.Value);
+            AppendBytes(hash, item.CompareValue);
+            AppendLong(hash, item.CompareRevision);
+            AppendInt(hash, (int)item.Flags);
+            AppendInt(hash, item.ExpiresMs);
+            AppendInt(hash, (int)item.Durability);
+        }
+        return hash.GetHashAndReset();
+    }
+
     internal static byte[] ForExtend(string key, int expiresMs, KeyValueDurability durability)
     {
         using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -73,6 +97,25 @@ internal static class OperationDigest
         AppendString(hash, key);
         AppendInt(hash, expiresMs);
         AppendInt(hash, (int)durability);
+        return hash.GetHashAndReset();
+    }
+
+    /// <summary>
+    /// Digest for a batch exclusive point-lock acquire: the whole batch is one registered operation, so the
+    /// digest binds every (key, expiry, durability) in the exact submission order. A same-operation-id retry
+    /// must resend the identical ordered list.
+    /// </summary>
+    internal static byte[] ForManyPointLockAcquire(IReadOnlyList<(string Key, int ExpiresMs, KeyValueDurability Durability)> items)
+    {
+        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        AppendTag(hash, OperationKind.ManyPointLock);
+        AppendInt(hash, items.Count);
+        foreach ((string key, int expiresMs, KeyValueDurability durability) in items)
+        {
+            AppendString(hash, key);
+            AppendInt(hash, expiresMs);
+            AppendInt(hash, (int)durability);
+        }
         return hash.GetHashAndReset();
     }
 

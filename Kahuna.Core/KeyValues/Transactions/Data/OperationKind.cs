@@ -18,5 +18,7 @@ public enum OperationKind
     Scan = 6,
     PointLock = 7,
     PrefixLock = 8,
-    RangeLock = 9
+    RangeLock = 9,
+    SetMany = 10,
+    ManyPointLock = 11
 }

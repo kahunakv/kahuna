@@ -22,6 +22,10 @@ internal sealed class OperationEffect
     /// <summary>A point lock the operation acquired (the implicit write lock, or an explicit lock op).</summary>
     public (string Key, KeyValueDurability Durability)? PointLock { get; init; }
 
+    /// <summary>The point locks a batch lock-acquire operation acquired, folded into the held-lock set so
+    /// commit/rollback release every one. Used by the batch exclusive-lock path.</summary>
+    public IReadOnlyList<(string Key, KeyValueDurability Durability)>? AcquiredPointLocks { get; init; }
+
     /// <summary>A point lock the operation released, dropped from the held-lock set so it is not released again.</summary>
     public (string Key, KeyValueDurability Durability)? RemovePointLock { get; init; }
 

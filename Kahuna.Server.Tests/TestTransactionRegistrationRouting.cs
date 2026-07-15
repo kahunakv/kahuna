@@ -1225,6 +1225,196 @@ public sealed class TestTransactionRegistrationRouting
         }
     }
 
+    /// <summary>
+    /// A batch set registers as a single coordinator operation whose confirmed persistent keys fold in
+    /// canonical request order, so the anchor is the first key in the submitted list — not the arrival order
+    /// of the per-partition fan-out, and not the sorted order.
+    /// </summary>
+    [Fact]
+    public async Task RecordAnchor_BatchSet_UsesFirstPersistentKeyInRequestOrder()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+
+            // Submit deliberately un-sorted request order: first item "bset/m" is neither the sorted-first
+            // key ("bset/a") nor guaranteed to be the earliest per-partition fan-out completion.
+            List<KahunaSetKeyValueResponseItem> responses = await SetManyWithRetry(
+                nodes[2], handle, TransactionOperationId.NewRandom(),
+                SetItems(handle, KeyValueFlags.None, KeyValueDurability.Persistent, "bset/m", "bset/a", "bset/z"), ct);
+
+            foreach (KahunaSetKeyValueResponseItem r in responses)
+                Assert.Equal(KeyValueResponseType.Set, r.Type);
+
+            TransactionWorkingSet? ws = await nodes[1].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(ws);
+            Assert.Equal("bset/m", ws!.RecordAnchorKey);
+            Assert.Contains(ws.ModifiedKeys, m => m.Key == "bset/m");
+            Assert.Contains(ws.ModifiedKeys, m => m.Key == "bset/a");
+            Assert.Contains(ws.ModifiedKeys, m => m.Key == "bset/z");
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// A batch set replayed under the same operation id is re-driven and recovers the same anchor without
+    /// double-recording: the coordinator completion is a no-op the second time.
+    /// </summary>
+    [Fact]
+    public async Task RecordAnchor_BatchSet_RetrySameOperationId_RecoversSameAnchor()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+
+            TransactionOperationId op = TransactionOperationId.NewRandom();
+            await SetManyWithRetry(nodes[2], handle, op,
+                SetItems(handle, KeyValueFlags.None, KeyValueDurability.Persistent, "rset/m", "rset/a"), ct);
+
+            TransactionWorkingSet? afterFirst = await nodes[1].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.Equal("rset/m", afterFirst!.RecordAnchorKey);
+            int modifiedCount = afterFirst.ModifiedKeys.Count;
+
+            // Replay the identical batch under the same operation id.
+            await SetManyWithRetry(nodes[2], handle, op,
+                SetItems(handle, KeyValueFlags.None, KeyValueDurability.Persistent, "rset/m", "rset/a"), ct);
+
+            TransactionWorkingSet? afterReplay = await nodes[0].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.Equal("rset/m", afterReplay!.RecordAnchorKey);
+            Assert.Equal(modifiedCount, afterReplay.ModifiedKeys.Count);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// Only genuinely confirmed writes fold into the coordinator record: a conditional set that fails
+    /// (a <c>SetIfNotExists</c> on an already-present key returns <c>NotSet</c>) contributes no modified key
+    /// and never anchors, yet the batch still completes — the failed item does not cancel the registration.
+    /// The anchor is therefore the first <em>confirmed</em> key in request order, skipping the earlier item
+    /// whose conditional set was rejected.
+    /// </summary>
+    [Fact]
+    public async Task BatchSet_FoldsOnlyConfirmedWrites_SkipsNotSet_AndAnchorsFirstConfirmedInRequestOrder()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            // Seed one committed persistent key so a SetIfNotExists on it later fails while the others succeed.
+            (_, TransactionHandle seed) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+            Assert.Equal(KeyValueResponseType.Set,
+                await SetKeyWithRetry(nodes[1], seed, TransactionOperationId.NewRandom(), "mixset/exists", "v"u8.ToArray(), KeyValueDurability.Persistent, ct));
+            Assert.Equal(KeyValueResponseType.Committed, await CommitWithRetry(nodes[0], seed, ct));
+
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+
+            // Request order puts the pre-existing (will-fail) key first, then two fresh keys in non-sorted
+            // order, so the anchor must be the first CONFIRMED key ("mixset/znew"), not the sorted-first
+            // ("mixset/anew") and not the earlier rejected item.
+            List<KahunaSetKeyValueResponseItem> responses = await SetManyWithRetry(
+                nodes[2], handle, TransactionOperationId.NewRandom(),
+                SetItems(handle, KeyValueFlags.SetIfNotExists, KeyValueDurability.Persistent, "mixset/exists", "mixset/znew", "mixset/anew"), ct);
+
+            Dictionary<string, KeyValueResponseType> byKey = responses.ToDictionary(r => r.Key, r => r.Type, StringComparer.Ordinal);
+            Assert.Equal(KeyValueResponseType.NotSet, byKey["mixset/exists"]);
+            Assert.Equal(KeyValueResponseType.Set, byKey["mixset/znew"]);
+            Assert.Equal(KeyValueResponseType.Set, byKey["mixset/anew"]);
+
+            TransactionWorkingSet? ws = await nodes[1].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(ws);
+            Assert.Equal("mixset/znew", ws!.RecordAnchorKey);
+            Assert.Contains(ws.ModifiedKeys, m => m.Key == "mixset/znew");
+            Assert.Contains(ws.ModifiedKeys, m => m.Key == "mixset/anew");
+            Assert.DoesNotContain(ws.ModifiedKeys, m => m.Key == "mixset/exists");
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// A batch set carrying only one of {coordinator key, operation id} is malformed: it must return
+    /// <c>InvalidInput</c> for every item rather than silently degrade to the unregistered fan-out and mutate
+    /// participants outside the finalize fence. No effect is folded and no anchor is assigned.
+    /// </summary>
+    [Fact]
+    public async Task BatchSet_MalformedIdentity_IsRejectedAsInvalidInput()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+
+            // Coordinator key but no operation id → malformed.
+            List<KahunaSetKeyValueResponseItem> noOp = await nodes[0].Kahuna.LocateAndTrySetManyKeyValue(
+                SetItems(handle, KeyValueFlags.None, KeyValueDurability.Persistent, "bad/1", "bad/2"), ct, handle.CoordinatorKey, default);
+            Assert.All(noOp, r => Assert.Equal(KeyValueResponseType.InvalidInput, r.Type));
+
+            // Operation id but no coordinator key → malformed.
+            List<KahunaSetKeyValueResponseItem> noCoord = await nodes[0].Kahuna.LocateAndTrySetManyKeyValue(
+                SetItems(handle, KeyValueFlags.None, KeyValueDurability.Persistent, "bad/1", "bad/2"), ct, "", TransactionOperationId.NewRandom());
+            Assert.All(noCoord, r => Assert.Equal(KeyValueResponseType.InvalidInput, r.Type));
+
+            // Neither rejected request registered or folded an effect: no anchor was assigned.
+            TransactionWorkingSet? ws = await nodes[0].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(ws);
+            Assert.Null(ws!.RecordAnchorKey);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    private static async Task<List<KahunaSetKeyValueResponseItem>> SetManyWithRetry(
+        Node node, TransactionHandle handle, TransactionOperationId op, List<KahunaSetKeyValueRequestItem> items, CancellationToken ct)
+    {
+        long deadline = Environment.TickCount64 + 10_000;
+        while (true)
+        {
+            List<KahunaSetKeyValueResponseItem> responses =
+                await node.Kahuna.LocateAndTrySetManyKeyValue(items, ct, handle.CoordinatorKey, op);
+
+            if (!responses.Any(r => r.Type == KeyValueResponseType.MustRetry) || Environment.TickCount64 >= deadline)
+                return responses;
+
+            await Task.Delay(50, ct);
+        }
+    }
+
+    private static List<KahunaSetKeyValueRequestItem> SetItems(
+        TransactionHandle handle, KeyValueFlags flags, KeyValueDurability durability, params string[] keys)
+    {
+        return [.. keys.Select(k => new KahunaSetKeyValueRequestItem
+        {
+            TransactionId = handle.TransactionId,
+            Key = k,
+            Value = "v"u8.ToArray(),
+            CompareValue = null,
+            CompareRevision = -1,
+            Flags = flags,
+            ExpiresMs = 0,
+            Durability = durability
+        })];
+    }
+
     private static async Task<List<KahunaDeleteKeyValueResponseItem>> DeleteManyWithRetry(
         Node node, TransactionHandle handle, TransactionOperationId op, string[] keys, KeyValueDurability durability, CancellationToken ct)
     {

@@ -11,7 +11,7 @@
         <ToolCommandName>kahuna-bench</ToolCommandName>
         <PackageOutputPath>./nupkg</PackageOutputPath>
         <PackageId>Kahuna.Benchmark</PackageId>
-        <Version>0.6.3</Version>
+        <Version>0.7.0</Version>
         <Authors>Andres Gutierrez</Authors>
         <Company>Kahuna KV</Company>
         <Description>kahuna-bench sends sustained load to a Kahuna cluster and reports latency percentiles and throughput</Description>
