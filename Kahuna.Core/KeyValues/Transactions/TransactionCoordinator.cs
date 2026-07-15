@@ -149,6 +149,14 @@ internal sealed class TransactionCoordinator
         => sessions.TryGetValue(transactionId, out TransactionContext? context) ? context.DecisionDurability : null;
 
     /// <summary>
+    /// Reads the clamped session timeout (milliseconds) recorded for an active session, or null when no
+    /// active session with that id exists. Reflects the value after the <c>MaxTransactionTimeout</c> clamp
+    /// applied in <see cref="StartTransaction"/>.
+    /// </summary>
+    internal int? GetRecordedSessionTimeout(HLCTimestamp transactionId)
+        => sessions.TryGetValue(transactionId, out TransactionContext? context) ? context.Timeout : null;
+
+    /// <summary>
     /// Consults the durable coordinator decision for a handle whose in-memory session is gone. Returns true with
     /// the outcome only when the handle carries its record anchor <b>and</b> a decision record exists: a
     /// <c>Completed</c> record answers <c>Committed</c> (the transaction is durably committed); a

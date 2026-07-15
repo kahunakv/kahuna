@@ -61,8 +61,19 @@ public static class ConfigurationValidator
         if (configuration.RevisionRetention <= 0)
             configuration.RevisionRetention = configuration.RevisionsToKeepCached > 0 ? configuration.RevisionsToKeepCached : 16;
 
+        if (configuration.DefaultTransactionTimeout <= 0)
+            throw new KahunaServerException(
+                $"DefaultTransactionTimeout ({configuration.DefaultTransactionTimeout} ms) must be greater than zero; " +
+                "a non-positive value resolves every unconstrained session request to zero, which fires the cancellation token immediately.");
+
         if (configuration.MaxTransactionTimeout <= 0)
-            configuration.MaxTransactionTimeout = 300_000;
+            throw new KahunaServerException(
+                $"MaxTransactionTimeout ({configuration.MaxTransactionTimeout} ms) must be greater than zero.");
+
+        if (configuration.MaxTransactionTimeout < configuration.DefaultTransactionTimeout)
+            throw new KahunaServerException(
+                $"MaxTransactionTimeout ({configuration.MaxTransactionTimeout} ms) must be >= DefaultTransactionTimeout ({configuration.DefaultTransactionTimeout} ms); " +
+                "a maximum below the default would clamp every default-length session.");
 
         ValidatePersistentRevisionRetention(configuration);
         ValidatePitr(configuration);
