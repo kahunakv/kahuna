@@ -159,8 +159,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             if (proposal.State is KeyValueState.Deleted or KeyValueState.Undefined)
                 context.EnqueueTombstone(message.Key);
 
-            if (entry.MvccEntries.Remove(message.TransactionId, out KeyValueMvccEntry? removedMvccE))
-                context.AdjustEstimatedEntryBytes(entry, -KeyValueStoreAccounting.MvccEntryRemovedBytes(entry.MvccEntries.Count == 0, removedMvccE.Value));
+            RemoveMvccEntry(entry, message.TransactionId);
             TrimExpiredMvccEntries(entry, currentTime);
             entry.WriteIntent = null;
 
@@ -191,8 +190,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             return KeyValueStaticResponses.ErroredResponse;
 
         // Confirmed terminal commit: clear MVCC + write intent, then advance the entry.
-        if (entry.MvccEntries.Remove(message.TransactionId, out KeyValueMvccEntry? removedMvccP))
-            context.AdjustEstimatedEntryBytes(entry, -KeyValueStoreAccounting.MvccEntryRemovedBytes(entry.MvccEntries.Count == 0, removedMvccP.Value));
+        RemoveMvccEntry(entry, message.TransactionId);
         TrimExpiredMvccEntries(entry, currentTime);
         entry.WriteIntent = null;
 

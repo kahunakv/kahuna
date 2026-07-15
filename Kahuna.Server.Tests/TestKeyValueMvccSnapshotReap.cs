@@ -488,6 +488,239 @@ public sealed class TestKeyValueMvccSnapshotReap
             "writer's own MVCC entry must be removed by the release handler");
     }
 
+    // ── Removing the last MVCC entry nulls the dictionary and conserves byte accounting ──
+
+    /// <summary>
+    /// After the only MVCC entry is removed via a lock-release, the dictionary is nulled and
+    /// CachedBytes returns exactly to the pre-insert baseline (no double-charge, no leak).
+    /// </summary>
+    [Fact]
+    public async Task LastMvccEntry_RemovedViaRelease_NullsDictionaryAndResetsAccounting()
+    {
+        (TryReleaseExclusiveLockHandler handler, KeyValueContext context, RaftManager raft) = CreateHandler();
+
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        HLCTimestamp writerTx = now;
+        HLCTimestamp readerTx = new(now.N, now.L - 1000, 0);  // committed 1 s ago
+
+        InsertWithMvcc(context, "null/key", writerTx, readerTx, HLCTimestamp.Zero);
+
+        KeyValueEntry entry = context.Store.Get("null/key")!;
+        long baselineBytes = entry.CachedBytes
+            - KeyValueStoreAccounting.MvccEntryAddedBytes(true, entry.MvccEntries![readerTx].Value);
+
+        context.RecordCommitted(readerTx);
+
+        await handler.Execute(new KeyValueRequest(
+            KeyValueRequestType.TryReleaseExclusiveLock,
+            writerTx, HLCTimestamp.Zero, "null/key",
+            null, null, -1, KeyValueFlags.None, 0,
+            HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
+            0, 0, null));
+
+        Assert.Null(entry.MvccEntries);
+        Assert.Equal(baselineBytes, entry.CachedBytes);
+    }
+
+    /// <summary>
+    /// After the only MVCC entry is removed by the expired-entry trim (age-based dead-session
+    /// reap), the dictionary is nulled and CachedBytes returns to the pre-insert baseline.
+    /// </summary>
+    [Fact]
+    public async Task LastMvccEntry_RemovedViaTrim_NullsDictionaryAndResetsAccounting()
+    {
+        KahunaConfiguration config = CreateConfiguration(defaultTransactionTimeoutMs: 5000, maxTransactionTimeoutMs: 5000);
+        (TryReleaseExclusiveLockHandler handler, KeyValueContext context, RaftManager raft) = CreateHandler(config);
+
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        // An abandoned (age-expired) reader — old enough to be reaped.
+        long pastMs = TransactionCoordinator.ReapGraceMs + TransactionCoordinator.MaxParticipantEffectTtlMs + 5000 + 1000;
+        HLCTimestamp readerTx = new(now.N, now.L - pastMs, 0);
+
+        // writerTx's own MVCC entry has a non-zero Expires so it stays (we want the trim to only
+        // remove the abandoned reader, not the writer's own intent entry).
+        HLCTimestamp writerTx = now;
+        HLCTimestamp writerExpires = new(writerTx.N, writerTx.L + 60_000, 0);
+
+        // Seed: no writer MVCC entry, just the abandoned reader snapshot.
+        KeyValueEntry seedEntry = new()
+        {
+            Value = Encoding.UTF8.GetBytes("v"),
+            State = KeyValueState.Set,
+            LastUsed = writerTx,
+            LastModified = writerTx,
+            Revision = 1,
+            FlushedRevision = 1,
+            WriteIntent = new KeyValueWriteIntent { TransactionId = writerTx, Expires = writerExpires }
+        };
+        context.InsertStoreEntry("trim/key", seedEntry);
+
+        long preInsertBytes = seedEntry.CachedBytes;
+
+        seedEntry.MvccEntries = new Dictionary<HLCTimestamp, KeyValueMvccEntry>
+        {
+            [readerTx] = new() { State = KeyValueState.Set, Revision = 0, Value = Encoding.UTF8.GetBytes("snap"), Expires = HLCTimestamp.Zero }
+        };
+        context.AdjustEstimatedEntryBytes(seedEntry, KeyValueStoreAccounting.MvccEntryAddedBytes(true, seedEntry.MvccEntries[readerTx].Value));
+
+        // Trigger: release the writer's lock — writerTx has no MVCC entry, but Trim fires.
+        await handler.Execute(new KeyValueRequest(
+            KeyValueRequestType.TryReleaseExclusiveLock,
+            writerTx, HLCTimestamp.Zero, "trim/key",
+            null, null, -1, KeyValueFlags.None, 0,
+            HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
+            0, 0, null));
+
+        Assert.Null(seedEntry.MvccEntries);
+        Assert.Equal(preInsertBytes, seedEntry.CachedBytes);
+    }
+
+    /// <summary>
+    /// When two MVCC entries exist and only one is removed, the dictionary stays non-null.
+    /// </summary>
+    [Fact]
+    public async Task PartialMvccRemoval_DictionaryRemainsNonNull()
+    {
+        KahunaConfiguration config = CreateConfiguration(defaultTransactionTimeoutMs: 5000, maxTransactionTimeoutMs: 5000);
+        (TryReleaseExclusiveLockHandler handler, KeyValueContext context, RaftManager raft) = CreateHandler(config);
+
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        HLCTimestamp writerTx = now;
+
+        // Dead reader (age-expired) — will be trimmed.
+        long pastMs = TransactionCoordinator.ReapGraceMs + TransactionCoordinator.MaxParticipantEffectTtlMs + 5000 + 1000;
+        HLCTimestamp deadReader = new(now.N, now.L - pastMs, 0);
+
+        // Live reader (1 s ago) — must survive.
+        HLCTimestamp liveReader = new(now.N, now.L - 1000, 0);
+
+        InsertWithMvcc(context, "partial/key", writerTx, deadReader, HLCTimestamp.Zero);
+
+        KeyValueEntry entry = context.Store.Get("partial/key")!;
+        // Add a second (live) snapshot.
+        entry.MvccEntries![liveReader] = new KeyValueMvccEntry
+            { State = KeyValueState.Set, Revision = 0, Value = Encoding.UTF8.GetBytes("live"), Expires = HLCTimestamp.Zero };
+        context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.MvccEntryAddedBytes(false, entry.MvccEntries[liveReader].Value));
+
+        context.RecordCommitted(writerTx);
+
+        await handler.Execute(new KeyValueRequest(
+            KeyValueRequestType.TryReleaseExclusiveLock,
+            writerTx, HLCTimestamp.Zero, "partial/key",
+            null, null, -1, KeyValueFlags.None, 0,
+            HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
+            0, 0, null));
+
+        // Dead reader removed, live reader kept.
+        Assert.NotNull(entry.MvccEntries);
+        Assert.False(entry.MvccEntries.ContainsKey(deadReader), "dead reader must be removed");
+        Assert.True(entry.MvccEntries.ContainsKey(liveReader), "live reader must survive");
+    }
+
+    /// <summary>
+    /// After a committing transaction's own MVCC snapshot — the last one on the entry — is removed by an
+    /// ephemeral commit, the dictionary is nulled and CachedBytes returns to the pre-insert baseline. The
+    /// snapshot value matches the entry's current value length and carries NoRevision, so the commit's only
+    /// accounting change is the MVCC removal.
+    /// </summary>
+    [Fact]
+    public async Task LastMvccEntry_RemovedViaCommit_NullsDictionaryAndResetsAccounting()
+    {
+        (_, KeyValueContext context, RaftManager raft) = CreateHandler();
+        TryCommitMutationsHandler handler = new(context);
+
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        HLCTimestamp committerTx = now;
+        byte[] value = Encoding.UTF8.GetBytes("v");
+
+        KeyValueEntry entry = new()
+        {
+            Value = value,
+            State = KeyValueState.Set,
+            LastUsed = committerTx,
+            LastModified = committerTx,
+            Revision = 1,
+            FlushedRevision = 1,
+            WriteIntent = new KeyValueWriteIntent { TransactionId = committerTx, Expires = new(committerTx.N, committerTx.L + 60_000, 0) }
+        };
+        context.InsertStoreEntry("commit/key", entry);
+
+        long preInsertBytes = entry.CachedBytes;
+
+        entry.MvccEntries = new Dictionary<HLCTimestamp, KeyValueMvccEntry>
+        {
+            [committerTx] = new()
+            {
+                State = KeyValueState.Set, Revision = 1, NoRevision = true, Value = value,
+                Expires = HLCTimestamp.Zero, LastUsed = committerTx, LastModified = committerTx
+            }
+        };
+        context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.MvccEntryAddedBytes(true, entry.MvccEntries[committerTx].Value));
+
+        KeyValueResponse response = await handler.Execute(new KeyValueRequest(
+            KeyValueRequestType.TryCommitMutations,
+            committerTx, HLCTimestamp.Zero, "commit/key",
+            null, null, -1, KeyValueFlags.None, 0,
+            HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
+            0, 0, null));
+
+        Assert.Equal(KeyValueResponseType.Committed, response.Type);
+        Assert.Null(entry.MvccEntries);
+        Assert.Equal(preInsertBytes, entry.CachedBytes);
+    }
+
+    /// <summary>
+    /// After a rolling-back transaction's own MVCC snapshot — the last one on the entry — is removed by an
+    /// ephemeral rollback, the dictionary is nulled and CachedBytes returns to the pre-insert baseline. An
+    /// ephemeral rollback touches neither the entry value nor its revisions, so the only accounting change
+    /// is the MVCC removal.
+    /// </summary>
+    [Fact]
+    public async Task LastMvccEntry_RemovedViaRollback_NullsDictionaryAndResetsAccounting()
+    {
+        (_, KeyValueContext context, RaftManager raft) = CreateHandler();
+        TryRollbackMutationsHandler handler = new(context);
+
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        HLCTimestamp rollbackTx = now;
+
+        KeyValueEntry entry = new()
+        {
+            Value = Encoding.UTF8.GetBytes("v"),
+            State = KeyValueState.Set,
+            LastUsed = rollbackTx,
+            LastModified = rollbackTx,
+            Revision = 1,
+            FlushedRevision = 1,
+            WriteIntent = new KeyValueWriteIntent { TransactionId = rollbackTx, Expires = new(rollbackTx.N, rollbackTx.L + 60_000, 0) }
+        };
+        context.InsertStoreEntry("rollback/key", entry);
+
+        long preInsertBytes = entry.CachedBytes;
+
+        entry.MvccEntries = new Dictionary<HLCTimestamp, KeyValueMvccEntry>
+        {
+            [rollbackTx] = new()
+            {
+                State = KeyValueState.Set, Revision = 2, Value = Encoding.UTF8.GetBytes("pending"),
+                Expires = new(rollbackTx.N, rollbackTx.L + 60_000, 0)
+            }
+        };
+        context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.MvccEntryAddedBytes(true, entry.MvccEntries[rollbackTx].Value));
+
+        KeyValueResponse response = await handler.Execute(new KeyValueRequest(
+            KeyValueRequestType.TryRollbackMutations,
+            rollbackTx, HLCTimestamp.Zero, "rollback/key",
+            null, null, -1, KeyValueFlags.None, 0,
+            HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
+            0, 0, null));
+
+        Assert.Equal(KeyValueResponseType.RolledBack, response.Type);
+        Assert.Null(entry.MvccEntries);
+        Assert.Equal(preInsertBytes, entry.CachedBytes);
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────────────────
 
     private static (TryReleaseExclusiveLockHandler, KeyValueContext, RaftManager) CreateHandler(
