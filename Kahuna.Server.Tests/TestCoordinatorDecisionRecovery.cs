@@ -415,7 +415,7 @@ public sealed class TestCoordinatorDecisionRecovery
         ClusterNode[] nodes = [new(r1, k1), new(r2, k2), new(r3, k3)];
         try
         {
-            await Task.WhenAll(r1.JoinCluster(), r2.JoinCluster(), r3.JoinCluster());
+            await Task.WhenAll(r1.JoinCluster(ct), r2.JoinCluster(ct), r3.JoinCluster(ct));
             for (int partition = 0; partition <= 1; partition++)
                 while (!await r1.AmILeader(partition, ct) && !await r2.AmILeader(partition, ct) && !await r3.AmILeader(partition, ct))
                     await Task.Delay(50, ct);
