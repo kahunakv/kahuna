@@ -11,7 +11,7 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference Include="BenchmarkDotNet" Version="0.14.0" />
+        <PackageReference Include="BenchmarkDotNet" Version="0.15.8" />
         <PackageReference Include="Google.Protobuf" Version="3.29.6" />
         <PackageReference Include="Grpc.Net.Client" Version="2.67.0" />
         <PackageReference Include="Microsoft.IO.RecyclableMemoryStream" Version="3.0.1" />
