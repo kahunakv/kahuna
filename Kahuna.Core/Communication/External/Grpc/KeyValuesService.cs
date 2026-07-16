@@ -1820,7 +1820,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
 
     /// <summary>Inter-node landing point for a register-remote operation completion.</summary>
-    internal Task<GrpcCompleteOperationResponse> CompleteOperationInternal(GrpcCompleteOperationRequest request, ServerCallContext context)
+    internal async Task<GrpcCompleteOperationResponse> CompleteOperationInternal(GrpcCompleteOperationRequest request, ServerCallContext context)
     {
         HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
         TransactionOperationId operationId = new(request.OperationIdHigh, request.OperationIdLow);
@@ -1843,13 +1843,16 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             CachedTimestamp = new(request.CachedTimestampNode, request.CachedTimestampPhysical, request.CachedTimestampCounter)
         };
 
-        string? recordAnchorKey = keyValues.CompleteOperation(transactionId, operationId, payload);
+        (KeyValueResponseType outcome, string? recordAnchorKey) = await keyValues.CompleteOperationInbound(request.CoordinatorKey, transactionId, operationId, payload);
 
-        GrpcCompleteOperationResponse response = new();
+        GrpcCompleteOperationResponse response = new()
+        {
+            Acknowledged = outcome == KeyValueResponseType.Set
+        };
         if (recordAnchorKey is not null)
             response.RecordAnchorKey = recordAnchorKey;
 
-        return Task.FromResult(response);
+        return response;
     }
 
     /// <summary>Inter-node landing point for a working-set query against the node-local session.</summary>

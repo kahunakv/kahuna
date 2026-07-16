@@ -70,6 +70,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// </summary>
     internal IPersistenceBackend PersistenceBackend => persistenceBackend;
 
+
     /// <summary>
     /// Constructor
     /// </summary>
@@ -879,7 +880,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
         return keyValues.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
     }
 
-    public Task<string?> LocateAndCompleteOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken)
+    public Task<(KeyValueResponseType outcome, string? anchor)> LocateAndCompleteOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken)
     {
         return keyValues.LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, cancellationToken);
     }
@@ -892,6 +893,11 @@ public sealed class KahunaManager : IKahuna, IDisposable
     public string? CompleteOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload)
     {
         return keyValues.CompleteOperation(transactionId, operationId, payload);
+    }
+
+    public Task<(KeyValueResponseType outcome, string? anchor)> CompleteOperationInbound(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload)
+    {
+        return keyValues.CompleteOperationInbound(coordinatorKey, transactionId, operationId, payload);
     }
 
     public Task<TransactionWorkingSet?> LocateAndGetTransactionWorkingSet(string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken)
@@ -1425,6 +1431,13 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// Not part of the production API surface.
     /// </summary>
     internal KeyValuesManager KeyValues => keyValues;
+
+    /// <summary>Test-only: Raft instance for HLC timestamp generation.</summary>
+    internal IRaft Raft => keyValues.Raft;
+
+    /// <summary>Test-only: inter-node transport for fault/latency injection (cast assumes memory transport).</summary>
+    internal MemoryInterNodeCommmunication GetInterNodeCommunication() =>
+        (MemoryInterNodeCommmunication)keyValues.InterNodeCommunication;
 
     /// <inheritdoc/>
     public void RegisterKeyRange(string keySpace) => keyValues.KeySpaceRegistry.RegisterKeyRange(keySpace);

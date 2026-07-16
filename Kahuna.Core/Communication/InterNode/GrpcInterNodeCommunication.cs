@@ -1499,7 +1499,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         );
     }
 
-    public async Task<string?> CompleteOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken)
+    public async Task<(KeyValueResponseType outcome, string? anchor)> CompleteOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
@@ -1534,7 +1534,8 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
 
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
         GrpcCompleteOperationResponse remoteResponse = response.CompleteOperation!;
-        return remoteResponse.HasRecordAnchorKey ? remoteResponse.RecordAnchorKey : null;
+        KeyValueResponseType outcome = remoteResponse.Acknowledged ? KeyValueResponseType.Set : KeyValueResponseType.MustRetry;
+        return (outcome, remoteResponse.HasRecordAnchorKey ? remoteResponse.RecordAnchorKey : null);
     }
 
     public async Task<TransactionWorkingSet?> GetTransactionWorkingSet(string node, string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken)

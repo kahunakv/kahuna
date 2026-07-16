@@ -147,13 +147,20 @@ public interface IKahuna
     /// <paramref name="operationId"/>. Routed by <paramref name="coordinatorKey"/> to the coordinator node.
     /// Returns the transaction's record anchor after the effect is folded in, or null if none yet.
     /// </summary>
-    public Task<string?> LocateAndCompleteOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken);
+    public Task<(KeyValueResponseType outcome, string? anchor)> LocateAndCompleteOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken);
 
     /// <summary>Node-local operation registration on the coordinator that owns the session (called after routing).</summary>
     public (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey) BeginOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest);
 
     /// <summary>Node-local operation completion on the coordinator that owns the session (called after routing). Returns the record anchor after the effect folds in, or null if none.</summary>
     public string? CompleteOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload);
+
+    /// <summary>
+    /// Inbound landing point used by both transports for a remote completion. Re-checks local leadership
+    /// before folding; returns <c>MustRetry</c> if this node is no longer the coordinator-partition leader.
+    /// Does not re-forward — callers retry through a fresh route.
+    /// </summary>
+    public Task<(KeyValueResponseType outcome, string? anchor)> CompleteOperationInbound(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload);
 
     /// <summary>
     /// Returns a snapshot of the coordinator-owned working set (modified keys, held locks, read

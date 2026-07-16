@@ -88,12 +88,13 @@ public sealed class TestSessionReaping
     }
 
     /// <summary>
-    /// A range lock a live session holds is renewable while the session is still accepting operations, but the
-    /// snapshot goes empty the instant the session enters the finalize fence — so a renewal tick can never
-    /// re-extend a lock a concurrent commit/rollback is releasing.
+    /// A range lock held by a live session is renewable while the session is accepting operations. Entering the
+    /// finalize fence (<see cref="SessionLifecycle.Finalizing"/>) does NOT stop renewal — the lease must stay
+    /// effective through the finalize drain. Renewal stops only when <see cref="TransactionContext.MarkRenewalExcluded"/>
+    /// is called at the top of <c>ReleaseWorkingSet</c>, the single hand-off point where cleanup takes ownership.
     /// </summary>
     [Fact]
-    public void SnapshotRenewableRangeLocks_ReturnsHeldLockWhileAccepting_EmptyOnceFinalizing()
+    public void SnapshotRenewableRangeLocks_ReturnsHeldLockWhileAccepting_AndWhileFinalizing_EmptyOnlyAfterMarkRenewalExcluded()
     {
         TransactionContext ctx = NewSession();
 
@@ -107,18 +108,27 @@ public sealed class TestSessionReaping
         Assert.Equal(range, whileAccepting[0].Range);
         Assert.Equal(RangeLockMode.Exclusive, whileAccepting[0].Mode);
 
-        // A commit/rollback owns the finalize slot: the lock is now the finalize path's to release, not the
-        // renewal tick's to extend.
+        // Entering the finalize fence closes the session to new operations but must NOT stop renewal:
+        // the finalize drain (WaitForPendingOperations) can outlast the renewal TTL, and the predicate
+        // lock must stay effective throughout.
         Assert.Equal(FinalizeAdmission.Owner, ctx.EnterFinalize(out _));
+        Assert.Equal(SessionLifecycle.Finalizing, ctx.Lifecycle);
+        Assert.Single(ctx.SnapshotRenewableRangeLocks());
+
+        // Cleanup calls MarkRenewalExcluded before releasing: from this instant no renewal snapshot
+        // includes the session, and cleanup is the sole owner of the range lock.
+        ctx.MarkRenewalExcluded();
         Assert.Empty(ctx.SnapshotRenewableRangeLocks());
     }
 
     /// <summary>
-    /// A session claimed by the reaper likewise contributes no renewable range locks: the reaper is releasing
-    /// them, so renewal must not fight it.
+    /// A session claimed by the reaper contributes renewable range locks until cleanup calls
+    /// <see cref="TransactionContext.MarkRenewalExcluded"/>. In practice the reaper only claims
+    /// sessions past their reap deadline, so the renewal sweep's deadline guard already skips them;
+    /// the flag hand-off is the authoritative stop.
     /// </summary>
     [Fact]
-    public void SnapshotRenewableRangeLocks_EmptyOnceReaping()
+    public void SnapshotRenewableRangeLocks_ReturnsHeldLockWhileReaping_EmptyAfterMarkRenewalExcluded()
     {
         TransactionContext ctx = NewSession();
 
@@ -128,7 +138,12 @@ public sealed class TestSessionReaping
         ctx.CompleteOperation(opId, new OperationEffect { RangeLock = (range, RangeLockMode.Shared) }, response: null);
         Assert.Single(ctx.SnapshotRenewableRangeLocks());
 
+        // The reaper claims the session, but the lock is still held until ReleaseWorkingSet runs.
         Assert.NotNull(ctx.TryEnterReap());
+        Assert.Single(ctx.SnapshotRenewableRangeLocks());
+
+        // MarkRenewalExcluded (called at the top of ReleaseWorkingSet) is the authoritative hand-off.
+        ctx.MarkRenewalExcluded();
         Assert.Empty(ctx.SnapshotRenewableRangeLocks());
     }
 

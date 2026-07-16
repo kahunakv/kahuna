@@ -407,12 +407,49 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> readResponses =
                 await kahunaNode.TryGetManyValues(transactionId, readTimestamp, keys);
 
+            // Test seam: replace designated per-key results with MustRetry to simulate a per-key routing
+            // transient. Only fires when GetManyValuesFault is set by a test.
+            if (GetManyValuesFault is not null)
+            {
+                for (int i = 0; i < readResponses.Count; i++)
+                {
+                    (_, string key, KeyValueDurability dur, _) = readResponses[i];
+                    if (GetManyValuesFault(transactionId, key))
+                        readResponses[i] = (KeyValueResponseType.MustRetry, key, dur, null);
+                }
+            }
+
+            // Test seam: replace designated per-key results with Errored to simulate a dropped actor
+            // response (a non-transient, non-confirmed type). Only fires when GetManyValuesErrorFault is set.
+            if (GetManyValuesErrorFault is not null)
+            {
+                for (int i = 0; i < readResponses.Count; i++)
+                {
+                    (_, string key, KeyValueDurability dur, _) = readResponses[i];
+                    if (GetManyValuesErrorFault(transactionId, key))
+                        readResponses[i] = (KeyValueResponseType.Errored, key, dur, null);
+                }
+            }
+
             AddToReadManyResponses(readResponses, lockSync, responses);
             return;
         }
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
+
+    /// <summary>
+    /// Test seam: when set, invoked per-key after the remote batch read completes. Returns true to replace
+    /// that key's result with <c>MustRetry</c>, simulating a per-key routing transient in a batch read.
+    /// </summary>
+    public Func<HLCTimestamp, string, bool>? GetManyValuesFault { get; set; }
+
+    /// <summary>
+    /// Test seam: when set, invoked per-key after the remote batch read completes. Returns true to replace
+    /// that key's result with <c>Errored</c>, simulating a dropped actor response — a non-transient,
+    /// non-confirmed type that must still be excluded from the read set rather than folded as "absent".
+    /// </summary>
+    public Func<HLCTimestamp, string, bool>? GetManyValuesErrorFault { get; set; }
 
     public async Task TryExistsManyNodeValues(
         string node,
@@ -609,6 +646,13 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
+    /// <summary>
+    /// Optional hook invoked before every <c>TryAcquireRangeLock</c> RPC. Used by tests to inject latency
+    /// or cancellation for a specific transaction so the bounded-parallel sweep can be stressed without
+    /// needing a real slow participant.
+    /// </summary>
+    public Func<HLCTimestamp, string, CancellationToken, Task>? AcquireRangeLockHook { get; set; }
+
     public async Task<(KeyValueResponseType, HLCTimestamp HolderTransactionId)> TryAcquireRangeLock(
         string node,
         HLCTimestamp transactionId,
@@ -621,6 +665,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         CancellationToken cancellationToken
     )
     {
+        // Pass the caller's token so an injected delay can honor the renewal-sweep deadline (a slow
+        // participant is cancelled at the budget, not merely delayed).
+        if (AcquireRangeLockHook is not null)
+            await AcquireRangeLockHook(transactionId, prefix, cancellationToken);
+
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
             return await kahunaNode.TryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode);
         throw new KahunaServerException($"The node {node} does not exist.");
@@ -1055,7 +1104,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    public async Task<string?> CompleteOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken)
+    public async Task<(KeyValueResponseType outcome, string? anchor)> CompleteOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
         {
@@ -1067,7 +1116,13 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             if (CompleteOperationFault is not null && CompleteOperationFault(transactionId, operationId))
                 throw new KahunaServerException("Injected completion fault (test seam).");
 
-            return await Task.FromResult(kahunaNode.CompleteOperation(transactionId, operationId, payload));
+            // Test seam: simulate a non-throwing "not delivered" response (e.g. a leader swap between
+            // the routing decision and the RPC landing) — returns MustRetry without calling the
+            // coordinator, exercising the aliasing path that previously returned a silent false-ack.
+            if (CompleteOperationRedirectFault is not null && CompleteOperationRedirectFault(transactionId, operationId))
+                return (KeyValueResponseType.MustRetry, null);
+
+            return await kahunaNode.CompleteOperationInbound(coordinatorKey, transactionId, operationId, payload);
         }
 
         throw new KahunaServerException($"The node {node} does not exist.");
@@ -1079,6 +1134,14 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// retry must recover it from the participant cache instead of reapplying the operation.
     /// </summary>
     public Func<HLCTimestamp, TransactionOperationId, bool>? CompleteOperationFault { get; set; }
+
+    /// <summary>
+    /// Test seam: when set and it returns true for a given completion, that <see cref="CompleteOperation"/>
+    /// call returns <c>(MustRetry, null)</c> without reaching the coordinator, simulating the non-throwing
+    /// not-delivered outcome that arises when the target node loses its coordinator-partition leadership
+    /// between the routing decision and the RPC landing.
+    /// </summary>
+    public Func<HLCTimestamp, TransactionOperationId, bool>? CompleteOperationRedirectFault { get; set; }
 
     /// <summary>
     /// Test seam: when set and it returns true for a given (transaction, key), that inter-node
