@@ -498,7 +498,8 @@ takes ownership of the lock set, so the predicate lock never lapses in the gap b
 | `DurableDecisionOutstandingMax` | 100,000 | Strict maximum **outstanding** durable decision records this node admits; a non-positive value disables the bound. Completed records do not count against it. |
 | `TransactionOutcomeRetentionTtl` | 5 minutes | Age window for terminal outcomes and completed durable decisions; a non-positive value disables age-based removal. |
 | `CollectionInterval` | 60 seconds | Tick interval for the transaction reaper and durable-decision recovery actor. |
-| Pending operations per session | 4,096 | Fixed safety bound; additional registrations receive `RejectedCapacity`. |
+| Pending operations per session | 4,096 | Fixed safety bound on *in-flight* operations; additional registrations receive `RejectedCapacity` (transient — a completion frees a pending slot, so the caller retries in place). |
+| Total operations per session | 65,536 | Fixed bound on *retained* operation records (pending **plus** completed). Completed records are never evicted — they stay for duplicate-response replay — so this counter only rises within a session and the rejection is terminal: registrations beyond it receive `RejectedSessionBudget`, surfaced as `Aborted` (retry as a new transaction, never `MustRetry`). A non-positive value disables the bound. |
 | Participant in-doubt results | 8,192 per node | Fixed bound for normal acknowledgement-loss recovery. |
 | Participant finalize retries | 20 retries, 250 ms apart | Fixed retry window used while committing or rolling back prepared participants. |
 

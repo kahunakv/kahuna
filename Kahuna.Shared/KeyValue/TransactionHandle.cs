@@ -17,7 +17,7 @@ namespace Kahuna.Shared.KeyValue;
 /// </summary>
 public readonly record struct TransactionHandle(HLCTimestamp TransactionId, string CoordinatorKey, string? RecordAnchorKey = null)
 {
-    public static readonly TransactionHandle None = default;
+    public static readonly TransactionHandle None;
 
     /// <summary>Returns true when this handle carries no meaningful identity.</summary>
     public bool IsEmpty => TransactionId == HLCTimestamp.Zero || string.IsNullOrEmpty(CoordinatorKey);

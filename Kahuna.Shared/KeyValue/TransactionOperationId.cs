@@ -10,7 +10,7 @@ namespace Kahuna.Shared.KeyValue;
 /// </summary>
 public readonly record struct TransactionOperationId(ulong High, ulong Low)
 {
-    public static readonly TransactionOperationId None = default;
+    public static readonly TransactionOperationId None;
 
     /// <summary>Returns true when this ID carries no meaningful identity.</summary>
     public bool IsEmpty => High == 0 && Low == 0;

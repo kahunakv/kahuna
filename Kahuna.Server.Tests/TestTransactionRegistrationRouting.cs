@@ -1358,7 +1358,7 @@ public sealed class TestTransactionRegistrationRouting
                 nodes[2], handle, TransactionOperationId.NewRandom(),
                 SetItems(handle, KeyValueFlags.SetIfNotExists, KeyValueDurability.Persistent, "mixset/exists", "mixset/znew", "mixset/anew"), ct);
 
-            Dictionary<string, KeyValueResponseType> byKey = responses.ToDictionary(r => r.Key, r => r.Type, StringComparer.Ordinal);
+            Dictionary<string, KeyValueResponseType> byKey = responses.ToDictionary(r => r.Key!, r => r.Type, StringComparer.Ordinal);
             Assert.Equal(KeyValueResponseType.NotSet, byKey["mixset/exists"]);
             Assert.Equal(KeyValueResponseType.Set, byKey["mixset/znew"]);
             Assert.Equal(KeyValueResponseType.Set, byKey["mixset/anew"]);
@@ -2497,6 +2497,66 @@ public sealed class TestTransactionRegistrationRouting
                 // With only two partitions and three nodes, there must be at least one follower.
                 Assert.Fail("Expected at least one follower node in the three-node cluster");
             }
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// When a session's total retained-operation budget is exhausted, the manager must surface
+    /// <see cref="KeyValueResponseType.Aborted"/> — not <see cref="KeyValueResponseType.MustRetry"/>.
+    /// <c>MustRetry</c> would livelock the caller because completed records are never evicted and the
+    /// budget can never free itself without starting a new transaction.
+    /// </summary>
+    [Fact]
+    public async Task TransactionalSet_BudgetSaturatedSession_ReturnsAbortedNotMustRetry()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+
+        try
+        {
+            // Start a transaction and locate its context in the coordinator so we can inject a tiny budget.
+            (_, TransactionHandle handle) = await nodes[0].Kahuna.LocateAndStartTransaction(
+                new KeyValueTransactionOptions { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+            Assert.False(handle.IsEmpty);
+
+            // The coordinator key routes to a partition leader — find which node holds the session.
+            TransactionContext? ctx = null;
+            for (int attempt = 0; attempt < 50 && ctx is null; attempt++)
+            {
+                foreach (Node n in nodes)
+                {
+                    KahunaManager mgr = (KahunaManager)n.Kahuna;
+                    if (mgr.KeyValues.Coordinator.sessions.TryGetValue(handle.TransactionId, out ctx))
+                        break;
+                }
+                if (ctx is null) await Task.Delay(20, ct);
+            }
+            Assert.NotNull(ctx);
+
+            // Inject a tiny budget: 2 retained ops maximum.
+            ctx!.TestOperationBudgetOverride = 2;
+
+            // Fill the 2 budget slots via LocateAndBeginOperation (direct coordinator path).
+            byte[] digest = [1, 2, 3];
+            for (int i = 0; i < 2; i++)
+            {
+                (OperationRegistrationOutcome reg, _, _, _, _) = await nodes[0].Kahuna.LocateAndBeginOperation(
+                    handle.CoordinatorKey, handle.TransactionId, TransactionOperationId.NewRandom(),
+                    OperationKind.Set, digest, ct);
+                Assert.Equal(OperationRegistrationOutcome.New, reg);
+            }
+
+            // Now try a transactional set through the manager — it must surface Aborted, not MustRetry.
+            (KeyValueResponseType result, _, _) = await nodes[0].Kahuna.LocateAndTrySetKeyValue(
+                handle.TransactionId, "budget/k", "v"u8.ToArray(), null, -1,
+                KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct,
+                0, handle.CoordinatorKey, TransactionOperationId.NewRandom());
+
+            Assert.Equal(KeyValueResponseType.Aborted, result);
         }
         finally
         {

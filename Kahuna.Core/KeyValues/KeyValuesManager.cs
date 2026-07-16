@@ -963,7 +963,8 @@ internal sealed class KeyValuesManager : IDisposable
     /// </summary>
     public Task<bool> OnLeaderChanged(int partitionId, string node)
     {
-        logger.LogDebug("KeyValues: leader for partition {PartitionId} is now {Node}", partitionId, node);
+        if (logger.IsEnabled(LogLevel.Debug))
+            logger.LogDebug("KeyValues: leader for partition {PartitionId} is now {Node}", partitionId, node);
 
         // On acquiring leadership of a data partition, wake the recovery driver so decisions anchored to that
         // partition — which only its leader may drive — are re-driven promptly rather than waiting for the next
@@ -1010,7 +1011,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         byte[] digest = OperationDigest.ForSet(key, value, compareValue, compareRevision, flags, expiresMs, durability);
 
-        return RegisterAndTrySetKeyValue(transactionId, coordinatorKey, operationId, key, value, compareValue, compareRevision, flags, expiresMs, durability, digest, cancellationToken, routedGeneration);
+        return RegisterAndTrySetKeyValue(transactionId, coordinatorKey, operationId, key, value, compareValue, compareRevision, flags, expiresMs, durability, digest, routedGeneration, cancellationToken);
     }
 
     /// <summary>
@@ -1022,7 +1023,7 @@ internal sealed class KeyValuesManager : IDisposable
     private async Task<(KeyValueResponseType, long, HLCTimestamp)> RegisterAndTrySetKeyValue(
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string key,
         byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs,
-        KeyValueDurability durability, byte[] digest, CancellationToken cancellationToken, long routedGeneration)
+        KeyValueDurability durability, byte[] digest, long routedGeneration, CancellationToken cancellationToken)
     {
         (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Set, digest, cancellationToken);
@@ -1038,6 +1039,8 @@ internal sealed class KeyValuesManager : IDisposable
                 return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedCapacity:
                 return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+            case OperationRegistrationOutcome.RejectedSessionBudget:
+                return (KeyValueResponseType.Aborted, 0, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return (KeyValueResponseType.Aborted, 0, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -1115,6 +1118,8 @@ internal sealed class KeyValuesManager : IDisposable
                 return AllSetItemsResponse(setManyItems, KeyValueResponseType.MustRetry);
             case OperationRegistrationOutcome.RejectedCapacity:
                 return AllSetItemsResponse(setManyItems, KeyValueResponseType.MustRetry);
+            case OperationRegistrationOutcome.RejectedSessionBudget:
+                return AllSetItemsResponse(setManyItems, KeyValueResponseType.Aborted);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return AllSetItemsResponse(setManyItems, KeyValueResponseType.Aborted);
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -1225,6 +1230,8 @@ internal sealed class KeyValuesManager : IDisposable
                 return AllItemsResponse(deleteManyItems, KeyValueResponseType.MustRetry);
             case OperationRegistrationOutcome.RejectedCapacity:
                 return AllItemsResponse(deleteManyItems, KeyValueResponseType.MustRetry);
+            case OperationRegistrationOutcome.RejectedSessionBudget:
+                return AllItemsResponse(deleteManyItems, KeyValueResponseType.Aborted);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return AllItemsResponse(deleteManyItems, KeyValueResponseType.Aborted);
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -1338,6 +1345,8 @@ internal sealed class KeyValuesManager : IDisposable
             case OperationRegistrationOutcome.AlreadyPending:
             case OperationRegistrationOutcome.RejectedCapacity:
                 return (KeyValueResponseType.MustRetry, null);
+            case OperationRegistrationOutcome.RejectedSessionBudget:
+                return (KeyValueResponseType.Aborted, null);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return (KeyValueResponseType.Aborted, null);
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -1482,6 +1491,8 @@ internal sealed class KeyValuesManager : IDisposable
             case OperationRegistrationOutcome.AlreadyPending:
             case OperationRegistrationOutcome.RejectedCapacity:
                 return BuildManyReadRejection(keys, KeyValueResponseType.MustRetry);
+            case OperationRegistrationOutcome.RejectedSessionBudget:
+                return BuildManyReadRejection(keys, KeyValueResponseType.Aborted);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return BuildManyReadRejection(keys, KeyValueResponseType.Aborted);
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -1604,6 +1615,8 @@ internal sealed class KeyValuesManager : IDisposable
                 return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedCapacity:
                 return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+            case OperationRegistrationOutcome.RejectedSessionBudget:
+                return (KeyValueResponseType.Aborted, 0, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return (KeyValueResponseType.Aborted, 0, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -1671,6 +1684,8 @@ internal sealed class KeyValuesManager : IDisposable
                 return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedCapacity:
                 return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+            case OperationRegistrationOutcome.RejectedSessionBudget:
+                return (KeyValueResponseType.Aborted, 0, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return (KeyValueResponseType.Aborted, 0, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -1754,6 +1769,8 @@ internal sealed class KeyValuesManager : IDisposable
                 return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedCapacity:
                 return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero);
+            case OperationRegistrationOutcome.RejectedSessionBudget:
+                return (KeyValueResponseType.Aborted, key, durability, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return (KeyValueResponseType.Aborted, key, durability, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -1832,6 +1849,8 @@ internal sealed class KeyValuesManager : IDisposable
                 return KeyValueResponseType.MustRetry;
             case OperationRegistrationOutcome.RejectedCapacity:
                 return KeyValueResponseType.MustRetry;
+            case OperationRegistrationOutcome.RejectedSessionBudget:
+                return KeyValueResponseType.Aborted;
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return KeyValueResponseType.Aborted;
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -1899,6 +1918,8 @@ internal sealed class KeyValuesManager : IDisposable
                 return keys.Select(k => (KeyValueResponseType.MustRetry, k.key, k.durability, HLCTimestamp.Zero)).ToList();
             case OperationRegistrationOutcome.RejectedCapacity:
                 return keys.Select(k => (KeyValueResponseType.MustRetry, k.key, k.durability, HLCTimestamp.Zero)).ToList();
+            case OperationRegistrationOutcome.RejectedSessionBudget:
+                return keys.Select(k => (KeyValueResponseType.Aborted, k.key, k.durability, HLCTimestamp.Zero)).ToList();
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return keys.Select(k => (KeyValueResponseType.Aborted, k.key, k.durability, HLCTimestamp.Zero)).ToList();
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -1973,6 +1994,8 @@ internal sealed class KeyValuesManager : IDisposable
                 return (KeyValueResponseType.MustRetry, key);
             case OperationRegistrationOutcome.RejectedCapacity:
                 return (KeyValueResponseType.MustRetry, key);
+            case OperationRegistrationOutcome.RejectedSessionBudget:
+                return (KeyValueResponseType.Aborted, key);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return (KeyValueResponseType.Aborted, key);
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -2050,6 +2073,8 @@ internal sealed class KeyValuesManager : IDisposable
                 return KeyValueResponseType.MustRetry;
             case OperationRegistrationOutcome.RejectedCapacity:
                 return KeyValueResponseType.MustRetry;
+            case OperationRegistrationOutcome.RejectedSessionBudget:
+                return KeyValueResponseType.Aborted;
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return KeyValueResponseType.Aborted;
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -2125,6 +2150,8 @@ internal sealed class KeyValuesManager : IDisposable
                 return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedCapacity:
                 return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
+            case OperationRegistrationOutcome.RejectedSessionBudget:
+                return (KeyValueResponseType.Aborted, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return (KeyValueResponseType.Aborted, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -2229,6 +2256,8 @@ internal sealed class KeyValuesManager : IDisposable
                 return KeyValueResponseType.MustRetry;
             case OperationRegistrationOutcome.RejectedCapacity:
                 return KeyValueResponseType.MustRetry;
+            case OperationRegistrationOutcome.RejectedSessionBudget:
+                return KeyValueResponseType.Aborted;
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return KeyValueResponseType.Aborted;
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -2407,6 +2436,8 @@ internal sealed class KeyValuesManager : IDisposable
                 if (outcome == OperationRegistrationOutcome.AlreadyCompleted)
                     return await locator.LocateAndGetByBucket(transactionId, prefixedKey, readTimestamp, durability, cancellationToken);
                 return new KeyValueGetByBucketResult(KeyValueResponseType.MustRetry, []);
+            case OperationRegistrationOutcome.RejectedSessionBudget:
+                return new KeyValueGetByBucketResult(KeyValueResponseType.Aborted, []);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return new KeyValueGetByBucketResult(KeyValueResponseType.Aborted, []);
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -2492,6 +2523,8 @@ internal sealed class KeyValuesManager : IDisposable
                 if (outcome == OperationRegistrationOutcome.AlreadyCompleted)
                     return await locator.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
                 return new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false);
+            case OperationRegistrationOutcome.RejectedSessionBudget:
+                return new KeyValueGetByRangeResult(KeyValueResponseType.Aborted, [], null, false);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return new KeyValueGetByRangeResult(KeyValueResponseType.Aborted, [], null, false);
             case OperationRegistrationOutcome.RejectedDuplicate:

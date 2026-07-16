@@ -149,11 +149,26 @@ internal class TransactionContext
     /// <summary>Upper bound on operations that may be pending before new registrations are rejected.</summary>
     private const int MaxPendingOperations = 4096;
 
+    /// <summary>
+    /// Upper bound on total retained operation records per session (pending + completed). Completed records
+    /// are never evicted — they remain until session teardown for duplicate-response replay — so this counter
+    /// is incremented on every new registration and never decremented. A non-positive value disables the bound.
+    /// Must be strictly greater than <see cref="MaxPendingOperations"/> so the two caps do not interfere.
+    /// </summary>
+    private const int MaxOperationsPerSession = 65536;
+
     private readonly object registryLock = new();
     private SessionLifecycle lifecycle = SessionLifecycle.AcceptingOperations;
     private bool renewalExcluded;
     private bool readObservationConflict;
     private int pendingOperationCount;
+    private int retainedOperationCount;
+
+    /// <summary>
+    /// Overrides <see cref="MaxOperationsPerSession"/> for test scenarios. Zero or negative restores
+    /// the production default. Only set from test assemblies via <c>InternalsVisibleTo</c>.
+    /// </summary>
+    internal int TestOperationBudgetOverride { private get; set; }
     private Dictionary<TransactionOperationId, OperationRecord>? operations;
     private WorkingSetSnapshot? finalizeSnapshot;
     private FinalizeAttempt? activeFinalize;
@@ -219,11 +234,16 @@ internal class TransactionContext
                 };
             }
 
+            int effectiveBudget = TestOperationBudgetOverride > 0 ? TestOperationBudgetOverride : MaxOperationsPerSession;
+            if (effectiveBudget > 0 && retainedOperationCount >= effectiveBudget)
+                return new(OperationRegistrationOutcome.RejectedSessionBudget, recordAnchorKey: RecordAnchorKey);
+
             if (pendingOperationCount >= MaxPendingOperations)
                 return new(OperationRegistrationOutcome.RejectedCapacity, recordAnchorKey: RecordAnchorKey);
 
             operations[operationId] = new() { Kind = kind, PayloadDigest = payloadDigest };
             pendingOperationCount++;
+            retainedOperationCount++;
             return new(OperationRegistrationOutcome.New, recordAnchorKey: RecordAnchorKey);
         }
     }
