@@ -78,7 +78,7 @@ public sealed class TestReadContinuationLifecycle
     }
 
     [Fact]
-    public void ReadContinuation_DeadlineExpires_ResolvesWaitersMustRetry_IgnoresLateCompletion()
+    public async Task ReadContinuation_DeadlineExpires_ResolvesWaitersMustRetry_IgnoresLateCompletion()
     {
         KahunaConfiguration config = CreateConfiguration();
         (TryCollectHandler collect, KeyValueContext context, RaftManager raft) = CreateCollectHandler(config);
@@ -100,8 +100,8 @@ public sealed class TestReadContinuationLifecycle
         Assert.False(context.PendingReads.ContainsKey((key, -1L, false)));
         Assert.True(primary.Task.IsCompletedSuccessfully);
         Assert.True(waiter.Task.IsCompletedSuccessfully);
-        Assert.Equal(KeyValueResponseType.MustRetry, primary.Task.Result!.Type);
-        Assert.Equal(KeyValueResponseType.MustRetry, waiter.Task.Result!.Type);
+        Assert.Equal(KeyValueResponseType.MustRetry, (await primary.Task)!.Type);
+        Assert.Equal(KeyValueResponseType.MustRetry, (await waiter.Task)!.Type);
 
         // Late completion: the backend read finally finishes and dispatches ResumeRead. It must be
         // dropped — running Execute now would populate the cache for a read the callers already retried.

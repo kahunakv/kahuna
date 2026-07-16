@@ -27,6 +27,8 @@ public sealed class TestKeyValueScanBounds
     private const int PrefixInspectionBudget =
         KeyValueScanLimits.MaxPrefixScanResults + KeyValueScanLimits.MaxScanInspectionSlack;
 
+    private static readonly string[] TwoKKeys = ["k/a", "k/b"];
+
     [Fact]
     public async Task EphemeralPrefixScan_WithManyTombstones_IsInspectionBounded()
     {
@@ -120,7 +122,7 @@ public sealed class TestKeyValueScanBounds
 
         Assert.Equal(KeyValueResponseType.Get, response.Type);
         Assert.False(page.HasMore);
-        Assert.Equal(new[] { "k/a", "k/b" }, page.Items.Select(i => i.Item1).OrderBy(k => k));
+        Assert.Equal(TwoKKeys, page.Items.Select(i => i.Item1).OrderBy(k => k));
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────────────────

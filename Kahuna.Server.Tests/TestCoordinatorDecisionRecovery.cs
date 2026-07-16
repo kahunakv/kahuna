@@ -446,7 +446,7 @@ public sealed class TestCoordinatorDecisionRecovery
         {
             foreach (ClusterNode n in nodes)
             {
-                try { await n.Raft.LeaveCluster(dispose: true); }
+                try { await n.Raft.LeaveCluster(dispose: true, cancellationToken: ct); }
                 catch (ObjectDisposedException) { }
             }
         }
