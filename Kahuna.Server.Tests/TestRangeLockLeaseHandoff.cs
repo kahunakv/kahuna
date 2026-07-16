@@ -276,36 +276,42 @@ public sealed class TestRangeLockLeaseHandoff : BaseCluster
     /// <summary>
     /// Starts sessions (each holding a range lock over a distinct prefix) on a node whose range-lock
     /// renewal routes to a <b>remote</b> leader, so the transport latency hook fires during the sweep.
-    /// Probes each node with a counting hook until one is found whose renewal acquire is remote.
+    /// Round-robins the nodes, keeping only sessions the probing node actually hosts (so its sweep owns
+    /// them), until one node's renewal acquire routes remotely.
+    ///
+    /// The search is bounded by wall-clock, not a fixed attempt count, and each acquire retries transient
+    /// <c>MustRetry</c>: on a loaded runner a single-shot acquire can miss on election churn, leaving the
+    /// probe with nothing to route and starving the search of any remote hit.
     /// </summary>
     private async Task<(KahunaManager Host, List<TransactionHandle> Handles)> SetupRemoteRoutedSessions(
         IKahuna[] kahunas, MemoryInterNodeCommmunication transport, int sessionCount, int collectionMs, CancellationToken ct)
     {
         int acquireTtlMs = (int)(collectionMs * 4 * TimingScale);
+        long deadline = Environment.TickCount64 + (long)(30_000 * TimingScale);
 
-        for (int attempt = 0; attempt < 12; attempt++)
+        for (int round = 0; Environment.TickCount64 < deadline; round++)
         {
-            KahunaManager host = (KahunaManager)kahunas[attempt % kahunas.Length];
+            KahunaManager host = (KahunaManager)kahunas[round % kahunas.Length];
             List<TransactionHandle> handles = [];
 
-            for (int i = 0; i < sessionCount; i++)
+            // Assemble sessions that are actually hosted on this node — only those are renewed by its
+            // sweep — each holding a range lock over a distinct prefix.
+            for (int i = 0; i < sessionCount && Environment.TickCount64 < deadline; i++)
             {
-                (_, TransactionHandle h) = await host.LocateAndStartTransaction(
-                    new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
-                if (h.IsEmpty)
+                if (await StartLocallyHostedTransaction(host, ct) is not { } h)
                     break;
 
-                TransactionOperationId op = TransactionOperationId.NewRandom();
-                (KeyValueResponseType lt, _) = await host.LocateAndTryAcquireRangeLock(
-                    h.TransactionId, $"{Space}/{attempt}/{i}", null, true, null, false,
-                    acquireTtlMs, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct, h.CoordinatorKey, op);
+                KeyValueResponseType lt = await AcquireRangeLockUntilLocked(
+                    host, h, $"{Space}/{round}/{i}", acquireTtlMs, ct);
                 if (lt == KeyValueResponseType.Locked)
                     handles.Add(h);
+                else
+                    await host.LocateAndRollbackTransaction(h, ct);
             }
 
             if (handles.Count == sessionCount)
             {
-                // Probe: does this host's renewal route remotely? Counting hook, no delay.
+                // Probe: does this host's renewal route remotely for at least one session? Counting hook, no delay.
                 int probeCalls = 0;
                 transport.AcquireRangeLockHook = (_, _, _) => { Interlocked.Increment(ref probeCalls); return Task.CompletedTask; };
                 await host.KeyValues.Coordinator.RenewSessionRangeLocks();
@@ -315,12 +321,62 @@ public sealed class TestRangeLockLeaseHandoff : BaseCluster
                     return (host, handles);
             }
 
-            // Not remote (or partial setup) — roll back and try the next node.
+            // No remote route (all locks happened to be local, or partial setup) — roll back and try again.
             foreach (TransactionHandle h in handles)
                 await host.LocateAndRollbackTransaction(h, ct);
         }
 
         throw new InvalidOperationException("could not find a node whose range-lock renewal routes remotely");
+    }
+
+    /// <summary>
+    /// Starts a transaction and returns its handle only when the session landed on <paramref name="host"/>
+    /// itself, so that node's renewal sweep owns it. A session that routed to a remote coordinator-partition
+    /// leader is rolled back and null is returned. Bounded retry over transient <c>MustRetry</c> starts.
+    /// </summary>
+    private static async Task<TransactionHandle?> StartLocallyHostedTransaction(KahunaManager host, CancellationToken ct)
+    {
+        long deadline = Environment.TickCount64 + 5_000;
+        while (Environment.TickCount64 < deadline)
+        {
+            (_, TransactionHandle h) = await host.LocateAndStartTransaction(
+                new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+            if (h.IsEmpty)
+            {
+                await Task.Delay(25, ct);
+                continue;
+            }
+
+            if (host.KeyValues.Coordinator.sessions.ContainsKey(h.TransactionId))
+                return h;
+
+            // Hosted on a remote coordinator-partition leader — this node's sweep would not renew it.
+            await host.LocateAndRollbackTransaction(h, ct);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Acquires an exclusive range lock over <paramref name="prefix"/>, retrying transient <c>MustRetry</c>
+    /// within a bounded deadline. Returns the terminal acquire outcome (<c>Locked</c> on success).
+    /// </summary>
+    private static async Task<KeyValueResponseType> AcquireRangeLockUntilLocked(
+        KahunaManager host, TransactionHandle h, string prefix, int ttlMs, CancellationToken ct)
+    {
+        long deadline = Environment.TickCount64 + 5_000;
+        while (true)
+        {
+            TransactionOperationId op = TransactionOperationId.NewRandom();
+            (KeyValueResponseType lt, _) = await host.LocateAndTryAcquireRangeLock(
+                h.TransactionId, prefix, null, true, null, false,
+                ttlMs, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct, h.CoordinatorKey, op);
+
+            if (lt != KeyValueResponseType.MustRetry || Environment.TickCount64 >= deadline)
+                return lt;
+
+            await Task.Delay(25, ct);
+        }
     }
 
     private async Task<(IRaft, IRaft, IRaft, IKahuna, IKahuna, IKahuna, MemoryInterNodeCommmunication)>
