@@ -71,8 +71,11 @@ public sealed class TestPredicateLockLifecycle
         HLCTimestamp expired = new(now.N, TimeSpan.FromSeconds(1).Ticks, now.C);
         HLCTimestamp live = now + 60_000;
 
-        HLCTimestamp abandonedTx = now + 1;
-        HLCTimestamp holderTx = now + 2;
+        // Lock identities are pure identity, unrelated to the Expires field below. Place them an
+        // hour past `now` so the real-clock freshTx (a few ms after `now`) can never collide with
+        // one of them — a 1-2 ms offset here was flaky when the wall clock ticked between calls.
+        HLCTimestamp abandonedTx = now + 3_600_000;
+        HLCTimestamp holderTx = now + 3_600_001;
 
         // ── Pruned on acquire ──────────────────────────────────────────────────────────────
         // "acc" holds an expired lock over [a,m) and a live lock over [p,z). A fresh acquire whose
