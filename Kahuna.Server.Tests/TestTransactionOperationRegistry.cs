@@ -406,4 +406,126 @@ public sealed class TestTransactionOperationRegistry
         // Mutating the live session does not change the captured snapshot.
         Assert.Single(snap.ModifiedKeys!);
     }
+
+    // ── Total per-session operation budget ──────────────────────────────────────────────────────
+
+    private static TransactionContext NewContextWithBudget(int budget) => new()
+    {
+        TransactionId  = new HLCTimestamp(1, 200, 0),
+        CoordinatorKey = "coord",
+        Timeout        = 5000,
+        TestOperationBudgetOverride = budget
+    };
+
+    /// <summary>
+    /// Filling the total retained budget (mix of pending and completed records) then registering
+    /// one more distinct id must yield the terminal <see cref="OperationRegistrationOutcome.RejectedSessionBudget"/>
+    /// — not <see cref="OperationRegistrationOutcome.RejectedCapacity"/> (the pending-only cap) and
+    /// not <see cref="OperationRegistrationOutcome.New"/>.
+    /// </summary>
+    [Fact]
+    public void BeginOperation_BeyondTotalBudget_IsRejectedSessionBudget()
+    {
+        const int budget = 8;
+        TransactionContext ctx = NewContextWithBudget(budget);
+
+        // Fill 6 slots, then complete 3 of them so pending=3, retained=6.
+        for (int i = 0; i < 6; i++)
+            Assert.Equal(OperationRegistrationOutcome.New, ctx.BeginOperation(Op(i), OperationKind.Set, null).Outcome);
+        for (int i = 0; i < 3; i++)
+            ctx.CompleteOperation(Op(i), null, null);
+
+        // Fill the remaining 2 budget slots — retained will reach 8.
+        Assert.Equal(OperationRegistrationOutcome.New, ctx.BeginOperation(Op(6), OperationKind.Set, null).Outcome);
+        Assert.Equal(OperationRegistrationOutcome.New, ctx.BeginOperation(Op(7), OperationKind.Set, null).Outcome);
+
+        // Next distinct id hits the total budget cap.
+        OperationRegistrationOutcome over = ctx.BeginOperation(Op(8), OperationKind.Set, null).Outcome;
+        Assert.Equal(OperationRegistrationOutcome.RejectedSessionBudget, over);
+    }
+
+    /// <summary>
+    /// Completing operations does not free the total budget: completed records remain in the session
+    /// dictionary for duplicate-response replay. A new distinct-id registration after completion
+    /// must still be rejected as <see cref="OperationRegistrationOutcome.RejectedSessionBudget"/>.
+    /// This is the exact property that makes the total-budget rejection terminal rather than transient.
+    /// </summary>
+    [Fact]
+    public void BeginOperation_CompletingDoesNotFreeTotalBudget()
+    {
+        const int budget = 4;
+        TransactionContext ctx = NewContextWithBudget(budget);
+
+        for (int i = 0; i < budget; i++)
+            Assert.Equal(OperationRegistrationOutcome.New, ctx.BeginOperation(Op(i), OperationKind.Set, null).Outcome);
+
+        // Complete all of them: pending=0, but retained=4 (records stay in the dictionary).
+        for (int i = 0; i < budget; i++)
+            ctx.CompleteOperation(Op(i), null, null);
+
+        // The budget is exhausted despite pending count being zero.
+        Assert.Equal(OperationRegistrationOutcome.RejectedSessionBudget,
+            ctx.BeginOperation(Op(budget), OperationKind.Set, null).Outcome);
+    }
+
+    /// <summary>
+    /// With the default production budget (strictly above 4096), filling 4096 pending slots must
+    /// still yield <see cref="OperationRegistrationOutcome.RejectedCapacity"/> (the pending cap),
+    /// not <see cref="OperationRegistrationOutcome.RejectedSessionBudget"/> (the total budget).
+    /// Completing one must free the pending slot as before.
+    /// </summary>
+    [Fact]
+    public void BeginOperation_PendingCapAndTotalBudgetCoexist_PendingCapFiresFirst()
+    {
+        // No override → production default (65536) applies; pending cap (4096) fires first.
+        TransactionContext ctx = NewContext();
+        for (int i = 0; i < 4096; i++)
+            Assert.Equal(OperationRegistrationOutcome.New, ctx.BeginOperation(Op(i), OperationKind.Set, null).Outcome);
+
+        // 4096 pending → next new id hits the pending cap, not the total budget.
+        Assert.Equal(OperationRegistrationOutcome.RejectedCapacity,
+            ctx.BeginOperation(Op(4096), OperationKind.Set, null).Outcome);
+
+        // Completing one frees a pending slot: the next registration is accepted.
+        ctx.CompleteOperation(Op(0), null, null);
+        Assert.Equal(OperationRegistrationOutcome.New,
+            ctx.BeginOperation(Op(4096), OperationKind.Set, null).Outcome);
+    }
+
+    /// <summary>
+    /// At the budget boundary, re-registering an already-completed operation must return
+    /// <see cref="OperationRegistrationOutcome.AlreadyCompleted"/> with the cached response —
+    /// not <see cref="OperationRegistrationOutcome.RejectedSessionBudget"/>, because the gate
+    /// only fires on the new-insert branch.
+    /// Re-registering an in-flight (pending) operation must return
+    /// <see cref="OperationRegistrationOutcome.AlreadyPending"/>, for the same reason.
+    /// </summary>
+    [Fact]
+    public void BeginOperation_AtBudgetEdge_DuplicateAndReplayUnaffected()
+    {
+        const int budget = 4;
+        TransactionContext ctx = NewContextWithBudget(budget);
+
+        // Fill the budget.
+        for (int i = 0; i < budget; i++)
+            Assert.Equal(OperationRegistrationOutcome.New, ctx.BeginOperation(Op(i), OperationKind.Set, null).Outcome);
+
+        // Complete the first two, leaving id 0 and 1 completed, 2 and 3 still pending.
+        object cachedResponse = new();
+        ctx.CompleteOperation(Op(0), null, cachedResponse);
+        ctx.CompleteOperation(Op(1), null, null);
+
+        // Budget is full; a truly new id is rejected.
+        Assert.Equal(OperationRegistrationOutcome.RejectedSessionBudget,
+            ctx.BeginOperation(Op(budget), OperationKind.Set, null).Outcome);
+
+        // Re-registration of a completed id: AlreadyCompleted with its cached response.
+        OperationRegistrationResult replay = ctx.BeginOperation(Op(0), OperationKind.Set, null);
+        Assert.Equal(OperationRegistrationOutcome.AlreadyCompleted, replay.Outcome);
+        Assert.Same(cachedResponse, replay.CachedResponse);
+
+        // Re-registration of a pending id: AlreadyPending.
+        Assert.Equal(OperationRegistrationOutcome.AlreadyPending,
+            ctx.BeginOperation(Op(2), OperationKind.Set, null).Outcome);
+    }
 }

@@ -133,7 +133,7 @@ public sealed class TestFinalizeSlot
         // publishes an outcome, so the mirror's await completes instead of hanging forever.
         ctx.CompleteFinalize(owner!, new FinalizeOutcome(KeyValueResponseType.Aborted, null));
 
-        FinalizeOutcome mirrored = await mirror!.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+        FinalizeOutcome mirrored = await mirror!.Completion.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.Equal(KeyValueResponseType.Aborted, mirrored.Type);
     }
 }

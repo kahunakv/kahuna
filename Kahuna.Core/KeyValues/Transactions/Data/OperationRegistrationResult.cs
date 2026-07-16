@@ -22,7 +22,12 @@ public enum OperationRegistrationOutcome
     RejectedDuplicate,
 
     /// <summary>The session already holds the maximum number of pending operations.</summary>
-    RejectedCapacity
+    RejectedCapacity,
+
+    /// <summary>The session reached its total retained-operation budget (pending + completed). Unlike
+    /// <see cref="RejectedCapacity"/> this does not clear as in-flight work drains — the transaction must
+    /// be retried as a new one, so callers surface a terminal outcome, never MustRetry.</summary>
+    RejectedSessionBudget
 }
 
 /// <summary>
