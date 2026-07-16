@@ -151,6 +151,7 @@ internal class TransactionContext
 
     private readonly object registryLock = new();
     private SessionLifecycle lifecycle = SessionLifecycle.AcceptingOperations;
+    private bool renewalExcluded;
     private bool readObservationConflict;
     private int pendingOperationCount;
     private Dictionary<TransactionOperationId, OperationRecord>? operations;
@@ -561,18 +562,31 @@ internal class TransactionContext
     }
 
     /// <summary>
-    /// Returns a point-in-time copy of the range locks this session holds, but only while it is still
-    /// accepting operations. A session that has entered the finalize fence
-    /// (<see cref="SessionLifecycle.Finalizing"/> / <see cref="SessionLifecycle.Reaping"/> /
-    /// <see cref="SessionLifecycle.Terminal"/>) returns an empty list so a renewal tick never re-extends a
-    /// range lock that a concurrent commit/rollback/reap is releasing — coupling the lifecycle check with the
-    /// snapshot under the same lock closes the window where renewal reads "accepting" and then races a release.
+    /// Excludes this session from all future renewal snapshots. Called under <see cref="registryLock"/>
+    /// at the top of <c>ReleaseWorkingSet</c> — the single hand-off point where cleanup takes ownership of
+    /// the range locks. After this call <see cref="SnapshotRenewableRangeLocks"/> returns an empty list,
+    /// so no renewal tick can re-extend a lock that cleanup is in the process of releasing.
+    /// </summary>
+    internal void MarkRenewalExcluded()
+    {
+        lock (registryLock)
+            renewalExcluded = true;
+    }
+
+    /// <summary>
+    /// Returns a point-in-time copy of the range locks this session holds for renewal, gated on the
+    /// <see cref="renewalExcluded"/> flag rather than the session lifecycle. A <see cref="SessionLifecycle.Finalizing"/>
+    /// session whose drain is still in progress keeps renewing so the lease never lapses while
+    /// <c>WaitForPendingOperations</c> is blocking — renewal stops only when <see cref="MarkRenewalExcluded"/>
+    /// is called at the top of <c>ReleaseWorkingSet</c>, ensuring cleanup owns the lock from that instant.
+    /// The reap-deadline guard in the renewal sweep independently stops renewing sessions past their timeout,
+    /// so a stuck transaction can never hold locks indefinitely.
     /// </summary>
     internal List<(RangeLockKey Range, RangeLockMode Mode)> SnapshotRenewableRangeLocks()
     {
         lock (registryLock)
         {
-            if (lifecycle != SessionLifecycle.AcceptingOperations || RangeLocksAcquired is null || RangeLocksAcquired.Count == 0)
+            if (renewalExcluded || RangeLocksAcquired is null || RangeLocksAcquired.Count == 0)
                 return [];
 
             List<(RangeLockKey, RangeLockMode)> snapshot = new(RangeLocksAcquired.Count);

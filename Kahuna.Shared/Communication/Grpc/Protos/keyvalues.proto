@@ -913,6 +913,7 @@ message GrpcCompleteOperationResponse
 {
   optional string ServedFrom = 1;
   optional string RecordAnchorKey = 2;
+  bool Acknowledged = 3;
 }
 
 message GrpcGetTransactionWorkingSetRequest

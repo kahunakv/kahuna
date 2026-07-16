@@ -95,6 +95,15 @@ internal sealed class KeyValuesManager : IDisposable
     /// </summary>
     internal Func<int, bool>? ReplicateReceiptForgetFault { get; set; }
 
+    /// <summary>Test-only access to the transaction coordinator for driving renewal and reap directly.</summary>
+    internal TransactionCoordinator Coordinator => txCoordinator;
+
+    /// <summary>Test-only access to the Raft instance for HLC timestamp generation in tests.</summary>
+    internal IRaft Raft => raft;
+
+    /// <summary>Test-only access to the inter-node communication for fault/latency injection.</summary>
+    internal IInterNodeCommunication InterNodeCommunication => interNodeCommunication;
+
     private readonly CoordinatorDecisionStore coordinatorDecisionStore;
 
     private readonly IActorRef<CoordinatorDecisionRecoveryActor, CoordinatorDecisionRecoveryRequest> coordinatorDecisionRecovery;
@@ -1311,9 +1320,9 @@ internal sealed class KeyValuesManager : IDisposable
 
     /// <summary>
     /// Register-remote wrapper for a transaction-scoped read: registers the read for finalize fencing
-    /// and records its <c>{exists, revision}</c> observation into the coordinator-owned read set. Reads
-    /// are idempotent, so a repeat under the same operation id simply re-reads (latest / read-your-writes)
-    /// without re-recording the original observation.
+    /// and records its <c>{exists, revision}</c> observation into the coordinator-owned read set. On a
+    /// duplicate operation id the read is re-executed without re-folding: the first-recorded observation
+    /// is authoritative for commit validation even if this re-execution returns a newer value.
     /// </summary>
     private async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> RegisterAndTryReadValue(
         OperationKind kind, HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string key,
@@ -1339,7 +1348,8 @@ internal sealed class KeyValuesManager : IDisposable
             ? await locator.LocateAndTryExistsValue(transactionId, key, revision, readTimestamp, durability, cancellationToken)
             : await locator.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
 
-        // A re-read under an already-completed id keeps the first recorded observation.
+        // A re-read under an already-completed id re-executes without re-folding:
+        // the first-recorded observation is authoritative for commit validation.
         if (outcome != OperationRegistrationOutcome.New)
             return (type, entry);
 
@@ -1482,7 +1492,8 @@ internal sealed class KeyValuesManager : IDisposable
             ? await locator.LocateAndTryExistsManyValues(transactionId, readTimestamp, keys, cancellationToken)
             : await locator.LocateAndTryGetManyValues(transactionId, readTimestamp, keys, cancellationToken);
 
-        // A re-read under an already-completed id keeps the first recorded observations.
+        // A re-read under an already-completed id re-executes without re-folding:
+        // the first-recorded observations are authoritative for commit validation.
         if (outcome != OperationRegistrationOutcome.New)
             return result;
 
@@ -1490,11 +1501,26 @@ internal sealed class KeyValuesManager : IDisposable
         // contributes no read dependency to validate at commit. It still completes for finalize fencing and
         // idempotent replay, but records no observation into the read set.
         List<KeyValueTransactionReadKey>? observations = null;
+        KeyValueResponseType batchCachedType = kind == OperationKind.ExistsMany ? KeyValueResponseType.Exists : KeyValueResponseType.Get;
+
         if (readTimestamp.IsNull())
         {
+            // Fold only confirmed per-key responses: Get (present), Exists (present, exists-check), and
+            // DoesNotExist (confirmed absent). Every other type — transients (MustRetry/WaitingForReplication),
+            // Errored (dropped actor response), InvalidInput (malformed key) — means the key's state is
+            // unknown, not "absent". Folding a non-confirmed result as absent manufactures a false "missing"
+            // observation that conflicts with a retry confirming the key present, aborting an otherwise
+            // conflict-free optimistic commit. An allowlist (not a transient denylist) stays correct if a
+            // future read path introduces another non-confirmed response type.
             observations = new(result.Count);
+            bool anyConfirmed = false;
+
             foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry) in result)
             {
+                if (type is not (KeyValueResponseType.Get or KeyValueResponseType.Exists or KeyValueResponseType.DoesNotExist))
+                    continue;  // state unknown (transient/errored/invalid), not "absent" — exclude from read set
+
+                anyConfirmed = true;
                 bool exists = entry is not null && type is KeyValueResponseType.Get or KeyValueResponseType.Exists;
                 observations.Add(new KeyValueTransactionReadKey
                 {
@@ -1504,6 +1530,14 @@ internal sealed class KeyValuesManager : IDisposable
                     Revision = exists ? entry!.Revision : -1
                 });
             }
+
+            // An all-transient latest batch has no confirmed observations: cancel the registration so a
+            // same-id retry re-registers as New (mirrors the point/write transient-cancel path).
+            if (!anyConfirmed)
+            {
+                observations = null;
+                batchCachedType = KeyValueResponseType.MustRetry;
+            }
         }
 
         await LocateAndCompleteOperation(
@@ -1512,7 +1546,7 @@ internal sealed class KeyValuesManager : IDisposable
             {
                 ReadObservations = observations,
                 Durability = keys.Count > 0 ? keys[0].durability : KeyValueDurability.Persistent,
-                CachedType = kind == OperationKind.ExistsMany ? KeyValueResponseType.Exists : KeyValueResponseType.Get
+                CachedType = batchCachedType
             },
             cancellationToken);
 
@@ -2367,8 +2401,9 @@ internal sealed class KeyValuesManager : IDisposable
             case OperationRegistrationOutcome.AlreadyCompleted:
             case OperationRegistrationOutcome.AlreadyPending:
             case OperationRegistrationOutcome.RejectedCapacity:
-                // A pending or already-completed scan re-runs the read without re-recording observations;
-                // the read-set already holds the first observation and reads are idempotent.
+                // A pending or already-completed scan re-executes the read without re-folding observations:
+                // the first-recorded observations are authoritative for commit validation even if this
+                // re-execution returns a newer value.
                 if (outcome == OperationRegistrationOutcome.AlreadyCompleted)
                     return await locator.LocateAndGetByBucket(transactionId, prefixedKey, readTimestamp, durability, cancellationToken);
                 return new KeyValueGetByBucketResult(KeyValueResponseType.MustRetry, []);
@@ -2451,8 +2486,9 @@ internal sealed class KeyValuesManager : IDisposable
             case OperationRegistrationOutcome.AlreadyCompleted:
             case OperationRegistrationOutcome.AlreadyPending:
             case OperationRegistrationOutcome.RejectedCapacity:
-                // A pending or already-completed scan re-runs the read without re-recording observations;
-                // the read-set already holds the first observation and reads are idempotent.
+                // A pending or already-completed scan re-executes the read without re-folding observations:
+                // the first-recorded observations are authoritative for commit validation even if this
+                // re-execution returns a newer value.
                 if (outcome == OperationRegistrationOutcome.AlreadyCompleted)
                     return await locator.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
                 return new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false);
@@ -2658,14 +2694,23 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            await LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, CancellationToken.None);
-            participantOperationCache.Remove(transactionId, operationId);
-            return true;
+            (KeyValueResponseType outcome, _) = await LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, CancellationToken.None);
+
+            if (outcome == KeyValueResponseType.Set)
+            {
+                participantOperationCache.Remove(transactionId, operationId);
+                return true;
+            }
+
+            // The routing resolved without an exception but the completion did not reach the coordinator
+            // (e.g. a leadership flip between routing and landing). Retain the cache entry so a same-id
+            // retry re-drives the idempotent completion through TryRecoverRegisteredOperation.
+            logger.LogWarning("Completion of transaction operation {OperationId} was not acknowledged by coordinator; retaining participant result for retry", operationId);
+            return false;
         }
         catch (Exception ex)
         {
-            // The completion did not reach the coordinator (lost/cancelled RPC, transient leader change).
-            // Keep the pinned participant result so a same-id retry re-drives the idempotent completion.
+            // RPC loss or transient fault — retain the cache entry for same-id retry recovery.
             logger.LogWarning(ex, "Completion of transaction operation {OperationId} was not acknowledged; retaining participant result for retry", operationId);
             return false;
         }
@@ -2687,9 +2732,17 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            await LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload!, CancellationToken.None);
-            participantOperationCache.Remove(transactionId, operationId);
-            return response;
+            (KeyValueResponseType outcome, _) = await LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload!, CancellationToken.None);
+
+            if (outcome == KeyValueResponseType.Set)
+            {
+                participantOperationCache.Remove(transactionId, operationId);
+                return response;
+            }
+
+            // Coordinator did not acknowledge — retain cache entry so the next same-id retry re-drives.
+            logger.LogWarning("Retry completion of transaction operation {OperationId} was not acknowledged by coordinator; will retry again", operationId);
+            return null;
         }
         catch (Exception ex)
         {
@@ -2704,8 +2757,8 @@ internal sealed class KeyValuesManager : IDisposable
         return locator.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
     }
 
-    /// <summary>Routes an operation completion to the coordinator node identified by <paramref name="coordinatorKey"/>. Returns the record anchor after the fold, or null.</summary>
-    public Task<string?> LocateAndCompleteOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken)
+    /// <summary>Routes an operation completion to the coordinator node identified by <paramref name="coordinatorKey"/>. Returns Set+anchor on acknowledgement, MustRetry when routing did not deliver.</summary>
+    public Task<(KeyValueResponseType outcome, string? anchor)> LocateAndCompleteOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken)
     {
         return locator.LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, cancellationToken);
     }
@@ -2728,16 +2781,42 @@ internal sealed class KeyValuesManager : IDisposable
     /// </summary>
     public string? CompleteOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload)
     {
-        // A transient outcome must never be cached as terminal — cancel the registration so a retry
-        // with the same operation id re-registers as new and actually applies the mutation.
-        if (payload.CachedType == KeyValueResponseType.MustRetry)
+        OperationEffect? effect = BuildEffect(payload);
+
+        // A transient outcome, or a WaitingForReplication registration that produced no effect, must not
+        // be cached as terminal: cancel so a same-id retry re-registers as new and actually applies the
+        // mutation. A WaitingForReplication that DID produce an effect keeps the cached-response replay
+        // path (do not cancel) — a retry would see the cached response and skip reapplication.
+        if (payload.CachedType == KeyValueResponseType.MustRetry ||
+            (payload.CachedType == KeyValueResponseType.WaitingForReplication && effect is null))
         {
             txCoordinator.CancelOperation(transactionId, operationId);
             return null;
         }
 
-        OperationEffect? effect = BuildEffect(payload);
         return txCoordinator.CompleteOperation(transactionId, operationId, effect, new CachedOperationResponse(payload.CachedType, payload.CachedRevision, payload.CachedTimestamp));
+    }
+
+    /// <summary>
+    /// Inbound landing point for a remote completion: re-checks local leadership before folding, so a
+    /// node that lost the coordinator partition between the caller's route decision and the RPC landing
+    /// does not silently swallow the completion as a false acknowledgement. Returns <c>Set</c>+anchor
+    /// when this node is still the leader and the fold succeeded; <c>MustRetry</c> when leadership was
+    /// lost. Does not re-forward — the caller's retry re-routes through a fresh
+    /// <see cref="LocateAndCompleteOperation"/>.
+    /// </summary>
+    public async Task<(KeyValueResponseType outcome, string? anchor)> CompleteOperationInbound(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload)
+    {
+        if (string.IsNullOrEmpty(coordinatorKey))
+            return (KeyValueResponseType.MustRetry, null);
+
+        int partitionId = locator.LocatePartition(coordinatorKey);
+
+        if (raft.Joined && !await raft.AmILeader(partitionId, CancellationToken.None))
+            return (KeyValueResponseType.MustRetry, null);
+
+        string? anchor = CompleteOperation(transactionId, operationId, payload);
+        return (KeyValueResponseType.Set, anchor);
     }
 
     /// <summary>Maps a completion payload into the coordinator-owned working-set effect, or null when it records nothing.</summary>

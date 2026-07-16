@@ -684,12 +684,18 @@ internal sealed class TransactionCoordinator
 
     /// <summary>
     /// Re-extends the range locks held by every live session so they outlive their original acquire TTL without
-    /// any client heartbeat. For each session still accepting operations and not yet past its reap deadline,
-    /// re-acquires each recorded range lock over its identical bounds/mode with the server renewal TTL — the
-    /// participant treats a same-transaction, same-bounds re-acquire as a renewal that refreshes the expiry, not
-    /// a second lock. A session that has entered the finalize fence contributes nothing (its snapshot is empty),
-    /// and an abandoned session past <c>Timeout + grace</c> is skipped so its locks lapse and the reaper reclaims
-    /// it — an abandoned transaction can never hold range locks indefinitely.
+    /// any client heartbeat. For each session not yet past its reap deadline, re-acquires each recorded range
+    /// lock over its identical bounds/mode with the server renewal TTL — the participant treats a
+    /// same-transaction, same-bounds re-acquire as a renewal that refreshes the expiry, not a second lock.
+    /// A session past <c>Timeout + grace</c> is skipped so its locks lapse and the reaper reclaims it.
+    /// A session whose cleanup has started (<see cref="TransactionContext.MarkRenewalExcluded"/> called)
+    /// contributes an empty snapshot. A renewal whose snapshot was taken just before that flip can still
+    /// land its re-acquire after cleanup released the lock, briefly resurrecting it; that hold is bounded
+    /// by one renewal TTL (nothing renews it again) and errs toward over-protecting the range — the safe
+    /// direction, never an early lapse.
+    /// The sweep runs under a self-imposed deadline (<c>RangeLockRenewalTtlMs / 2</c>) with bounded
+    /// concurrency, and the deadline token is passed into each acquire so a slow or stuck participant is
+    /// cancelled at the budget rather than blocking the reaper or overflowing the next tick.
     /// </summary>
     public async Task RenewSessionRangeLocks()
     {
@@ -699,34 +705,82 @@ internal sealed class TransactionCoordinator
         HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
         int renewalTtlMs = RangeLockRenewalTtlMs;
 
+        // Flatten (context, range, mode) tuples for all sessions not past their reap deadline.
+        List<(TransactionContext Context, RangeLockKey Range, RangeLockMode Mode)> workList = [];
+
         foreach (KeyValuePair<HLCTimestamp, TransactionContext> pair in sessions)
         {
             TransactionContext context = pair.Value;
 
-            // Past its reap deadline: leave it to the reaper. Renewing a doomed session would only extend locks
-            // the reaper is about to release, so stop renewing once the abandonment window has elapsed.
+            // Past its reap deadline: leave it to the reaper. Renewing a doomed session would only extend
+            // locks the reaper is about to release, so stop renewing once the abandonment window has elapsed.
             HLCTimestamp deadline = pair.Key + (context.Timeout + ReapGraceMs);
             if ((deadline - now) <= TimeSpan.Zero)
                 continue;
 
-            // The snapshot is empty unless the session is still accepting operations, so a session that has
-            // entered the finalize fence is never renewed against a concurrent release.
+            // The snapshot is empty once MarkRenewalExcluded has been called (cleanup owns the locks).
+            // A Finalizing session whose drain is still in progress still returns its locks — renewal
+            // continues through the drain so the predicate lock does not lapse mid-finalize.
             List<(RangeLockKey Range, RangeLockMode Mode)> renewable = context.SnapshotRenewableRangeLocks();
-
             foreach ((RangeLockKey range, RangeLockMode mode) in renewable)
+                workList.Add((context, range, mode));
+        }
+
+        if (workList.Count == 0)
+            return;
+
+        // Self-imposed sweep deadline: half the renewal TTL. A lock last renewed at the start of the prior
+        // tick has ~half the TTL remaining; renewing it within this budget keeps it alive. Locks that do not
+        // finish within the budget are abandoned this tick (they lapse only if already near expiry); the next
+        // tick retries. Abandoned count is logged so silent truncation is visible.
+        int sweepDeadlineMs = Math.Max(1, renewalTtlMs / 2);
+        int concurrencyLimit = Math.Min(16, Environment.ProcessorCount);
+
+        using CancellationTokenSource sweepCts = new(sweepDeadlineMs);
+        CancellationToken sweepToken = sweepCts.Token;
+        using SemaphoreSlim concurrencyGate = new(concurrencyLimit, concurrencyLimit);
+        int[] abandoned = [0];
+
+        async Task RenewOne(TransactionContext ctx, RangeLockKey range, RangeLockMode mode)
+        {
+            bool acquired = false;
+            try
             {
-                try
-                {
-                    await manager.LocateAndTryAcquireRangeLock(
-                        context.TransactionId, range.Prefix, range.StartKey, range.StartInclusive,
-                        range.EndKey, range.EndInclusive, renewalTtlMs, range.Durability, mode, CancellationToken.None);
-                }
-                catch (Exception ex)
-                {
-                    logger.LogError("RenewSessionRangeLocks {Prefix}: {Type} {Message}", range.Prefix, ex.GetType().Name, ex.Message);
-                }
+                await concurrencyGate.WaitAsync(sweepToken).ConfigureAwait(false);
+                acquired = true;
+
+                // Pass the sweep deadline token into the acquire so a slow/stuck participant is cancelled at
+                // the budget instead of blocking Task.WhenAll (and therefore the reaper) indefinitely.
+                await manager.LocateAndTryAcquireRangeLock(
+                    ctx.TransactionId, range.Prefix, range.StartKey, range.StartInclusive,
+                    range.EndKey, range.EndInclusive, renewalTtlMs, range.Durability, mode, sweepToken);
+            }
+            catch (OperationCanceledException)
+            {
+                // Deadline elapsed while queued or mid-acquire: this lock is abandoned for this tick and
+                // retried on the next one (it only lapses if it was already near expiry).
+                Interlocked.Increment(ref abandoned[0]);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError("RenewSessionRangeLocks {Prefix}: {Type} {Message}", range.Prefix, ex.GetType().Name, ex.Message);
+            }
+            finally
+            {
+                if (acquired)
+                    concurrencyGate.Release();
             }
         }
+
+        List<Task> tasks = new(workList.Count);
+        foreach ((TransactionContext context, RangeLockKey range, RangeLockMode mode) in workList)
+            tasks.Add(RenewOne(context, range, mode));
+
+        await Task.WhenAll(tasks);
+
+        int totalAbandoned = Volatile.Read(ref abandoned[0]);
+        if (totalAbandoned > 0)
+            logger.LogWarning("RenewSessionRangeLocks: {Abandoned}/{Total} locks abandoned to sweep budget", totalAbandoned, workList.Count);
     }
 
     // ---- session reaper ----
@@ -884,6 +938,11 @@ internal sealed class TransactionCoordinator
     /// </remarks>
     internal async Task<bool> ReleaseWorkingSet(TransactionContext context)
     {
+        // Exclude from renewal before releasing any lock: from this point cleanup owns the range locks,
+        // and no renewal snapshot will include this session. This closes the gap where renewal has stopped
+        // (lifecycle fence) but cleanup has not yet run, which would leave the predicate lock unprotected.
+        context.MarkRenewalExcluded();
+
         bool committed = context.State == KeyValueTransactionState.Committed;
         bool allMandatoryAcked = true;
 

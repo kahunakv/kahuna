@@ -1984,20 +1984,23 @@ internal sealed class KeyValueLocator
         return await interNodeCommunication.BeginOperation(leader, coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
     }
 
-    /// <summary>Routes an operation completion to the coordinator-partition leader for <paramref name="coordinatorKey"/>. Returns the record anchor after the fold, or null.</summary>
-    public async Task<string?> LocateAndCompleteOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken)
+    /// <summary>Returns the partition id that owns the coordinator session for <paramref name="coordinatorKey"/>.</summary>
+    public int LocatePartition(string coordinatorKey) => dataPartitionRouter.Locate(coordinatorKey);
+
+    /// <summary>Routes an operation completion to the coordinator-partition leader for <paramref name="coordinatorKey"/>. Returns the acknowledged outcome and the record anchor after the fold, or MustRetry when routing did not deliver the completion.</summary>
+    public async Task<(KeyValueResponseType outcome, string? anchor)> LocateAndCompleteOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(coordinatorKey))
-            return null;
+            return (KeyValueResponseType.MustRetry, null);
 
         int partitionId = dataPartitionRouter.Locate(coordinatorKey);
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
-            return manager.CompleteOperation(transactionId, operationId, payload);
+            return (KeyValueResponseType.Set, manager.CompleteOperation(transactionId, operationId, payload));
 
         string leader = await raft.WaitForLeader(partitionId, cancellationToken);
         if (leader == raft.GetLocalEndpoint())
-            return null;
+            return (KeyValueResponseType.MustRetry, null);
 
         return await interNodeCommunication.CompleteOperation(leader, coordinatorKey, transactionId, operationId, payload, cancellationToken);
     }

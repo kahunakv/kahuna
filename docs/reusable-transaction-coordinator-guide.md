@@ -456,6 +456,40 @@ When the deadline passes, the reaper claims the same finalize slot as explicit f
 - A durable session with an outstanding commit decision is never rolled back. Recovery finishes the
   record; the reaper releases its working set only after the record is `Completed`.
 
+### Range-lock lease renewal and leader change
+
+On the same periodic tick, the coordinator renews the range locks held by its live sessions. Renewal is
+entirely server-side — there is no client heartbeat. Each sweep re-acquires every range lock in a
+session's confirmed working set with a fresh TTL (`RangeLockRenewalTtlMs`, derived from
+`CollectionInterval`), so a lock a caller acquired with a short TTL stays effective for as long as the
+session is alive without the caller having to extend it.
+
+Two leader-local facts shape what renewal can and cannot guarantee. Neither range locks nor their write
+intents are Raft-replicated: they are in-memory state on the **range-lock partition leader** and are not
+reconstructed by a new leader. Likewise, the session and its acquired-lock set live only on the
+**coordinator-partition leader**. Renewal bridges the first of these: a range-lock acquire always routes
+to the current partition leader, so if that leader changes, the next sweep simply re-establishes the lock
+on the new leader — a range-lock-partition leader change is transparently re-covered as long as the
+session still exists.
+
+What renewal does not bridge is loss of the session itself. If the **coordinator-partition** leader
+changes, the session and its acquired-lock set are gone, renewal stops, and the range locks lapse at their
+current TTL. This is not a silent inconsistency: a commit that depended on a now-missing lock returns the
+retryable `MustRetry`, never a false all-commit, and MVCC read-set validation in the two-phase commit is
+the actual correctness backstop — range locks are a best-effort fencing and contention-reduction layer on
+top of it. This is also why an end-to-end "is the lock still held" assertion is only stable on a single
+node or a cluster with a settled leader: while leadership is still moving (for example a young in-memory
+test cluster), the authoritative copy migrates between nodes and a probe can momentarily observe a stale
+follower copy.
+
+Two details keep the sweep well-behaved. It runs under a self-imposed deadline (half the renewal TTL) with
+bounded concurrency and passes that deadline into each acquire, so one slow or stuck participant is
+cancelled at the budget instead of making the whole sweep — and therefore the reaper tick — as slow as the
+slowest RPC. And renewal continues through a finalize drain: a `Finalizing` session whose in-flight
+operations are still draining keeps renewing its locks, and renewal stops only once cleanup atomically
+takes ownership of the lock set, so the predicate lock never lapses in the gap between "finalize began" and
+"cleanup released the locks."
+
 ### Relevant bounds
 
 | Setting or limit | Default | Purpose |
