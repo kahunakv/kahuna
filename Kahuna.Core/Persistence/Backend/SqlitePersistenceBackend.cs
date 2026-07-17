@@ -7,6 +7,7 @@ using Kommander.Time;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using Kahuna.Server.Locks.Data;
 
 namespace Kahuna.Server.Persistence.Backend;
@@ -262,7 +263,9 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
             // INSERT for every row.
             Dictionary<int, List<PersistenceRequestItem>> plan = new();
 
-            foreach (PersistenceRequestItem item in items)
+            // Source list is not mutated while planning; iterate its backing storage by reference to
+            // avoid copying every wide struct into the loop variable.
+            foreach (ref readonly PersistenceRequestItem item in CollectionsMarshal.AsSpan(items))
             {
                 int shard = (int)HashUtils.InversePrefixedHash(item.Key, '/', MaxShards);
 
@@ -305,7 +308,7 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
 
                         command.Prepare();
 
-                        foreach (PersistenceRequestItem item in kv.Value)
+                        foreach (ref readonly PersistenceRequestItem item in CollectionsMarshal.AsSpan(kv.Value))
                         {
                             pResource.Value = item.Key;
                             pOwner.Value = item.Value is null ? DBNull.Value : item.Value;
@@ -396,7 +399,9 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
 
             Dictionary<int, List<PersistenceRequestItem>> plan = new();
 
-            foreach (PersistenceRequestItem item in items)
+            // Source list is not mutated while planning; iterate its backing storage by reference to
+            // avoid copying every wide struct into the loop variable.
+            foreach (ref readonly PersistenceRequestItem item in CollectionsMarshal.AsSpan(items))
             {
                 int shard = (int)HashUtils.InversePrefixedHash(item.Key, '/', MaxShards);
                 
@@ -430,15 +435,15 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                         ShardInsertParameters keysParams = ShardInsertParameters.Create(keysCommand);
                         keysCommand.Prepare();
 
-                        foreach (PersistenceRequestItem item in kv.Value)
+                        foreach (ref readonly PersistenceRequestItem item in CollectionsMarshal.AsSpan(kv.Value))
                         {
                             if (!item.NoRevision)
                             {
-                                revisionsParams.Bind(item);
+                                revisionsParams.Bind(in item);
                                 revisionsCommand.ExecuteNonQuery();
                             }
 
-                            keysParams.Bind(item);
+                            keysParams.Bind(in item);
                             keysCommand.ExecuteNonQuery();
                         }
 
@@ -1543,7 +1548,7 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
             );
         }
 
-        public void Bind(PersistenceRequestItem item)
+        public void Bind(in PersistenceRequestItem item)
         {
             key.Value = item.Key;
             value.Value = item.Value is null ? DBNull.Value : item.Value;

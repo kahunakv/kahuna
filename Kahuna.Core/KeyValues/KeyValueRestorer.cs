@@ -66,8 +66,8 @@ internal sealed class KeyValueRestorer
                 return true;
             }
 
-            backgroundWriter.Send(new(
-                BackgroundWriteType.QueueStoreKeyValue,
+            backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
+            BackgroundWriteType.QueueStoreKeyValue,
                 partitionId,
                 keyValueMessage.Key,
                 messageValue,

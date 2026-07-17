@@ -1,348 +1,209 @@
 
 namespace Kahuna.Server.Communication.Internode.Grpc;
 
-internal sealed class GrpcServerBatcherRequest
-{   
-    public GrpcTryLockRequest? TryLock { get; }
+/// <summary>
+/// A single queued inter-node batch operation's request. Exactly one operation payload is ever
+/// populated, so rather than a wide class with one nullable field per operation type (an allocation
+/// per queued operation) the single payload is held as one reference in a value type. The
+/// per-operation accessors preserve the original API by narrowing that reference.
+/// </summary>
+internal readonly struct GrpcServerBatcherRequest
+{
+    private readonly object? payload;
 
-    public GrpcUnlockRequest? Unlock { get; }
-    
-    public GrpcExtendLockRequest? ExtendLock { get; }
-    
-    public GrpcGetLockRequest? GetLock { get; }
-    
-    public GrpcTrySetKeyValueRequest? TrySetKeyValue { get; }
-    
-    public GrpcTrySetManyKeyValueRequest? TrySetManyKeyValue { get; }
+    public GrpcServerBatcherRequest(GrpcTryLockRequest tryLock) => payload = tryLock;
 
-    public GrpcTryDeleteManyKeyValueRequest? TryDeleteManyKeyValue { get; }
-    
-    public GrpcTryGetKeyValueRequest? TryGetKeyValue { get; }
+    public GrpcServerBatcherRequest(GrpcUnlockRequest unlock) => payload = unlock;
 
-    public GrpcTryGetManyValuesRequest? TryGetManyValues { get; }
-    
-    public GrpcTryDeleteKeyValueRequest? TryDeleteKeyValue { get; }
-    
-    public GrpcTryExtendKeyValueRequest? TryExtendKeyValue { get; }
-    
-    public GrpcTryExistsKeyValueRequest? TryExistsKeyValue { get; }
+    public GrpcServerBatcherRequest(GrpcExtendLockRequest extendLock) => payload = extendLock;
 
-    public GrpcTryExistsManyValuesRequest? TryExistsManyValues { get; }
+    public GrpcServerBatcherRequest(GrpcGetLockRequest getLock) => payload = getLock;
 
-    public GrpcTryCheckWriteIntentRequest? TryCheckWriteIntent { get; }
+    public GrpcServerBatcherRequest(GrpcTrySetKeyValueRequest trySetKeyValue) => payload = trySetKeyValue;
 
-    public GrpcGetByBucketRequest? GetByBucket { get; }
+    public GrpcServerBatcherRequest(GrpcTrySetManyKeyValueRequest trySetManyKeyValue) => payload = trySetManyKeyValue;
 
-    public GrpcGetByRangeRequest? GetByRange { get; }
-    
-    public GrpcScanByPrefixRequest? ScanByPrefix { get; }
-    
-    public GrpcTryExecuteTransactionScriptRequest? TryExecuteTransactionScript { get; }
-    
-    public GrpcTryAcquireExclusiveLockRequest? TryAcquireExclusiveLock { get; }
-    
-    public GrpcTryAcquireExclusivePrefixLockRequest? TryAcquireExclusivePrefixLock { get; }
+    public GrpcServerBatcherRequest(GrpcTryDeleteManyKeyValueRequest tryDeleteManyKeyValue) => payload = tryDeleteManyKeyValue;
 
-    public GrpcTryAcquireExclusiveRangeLockRequest? TryAcquireExclusiveRangeLock { get; }
+    public GrpcServerBatcherRequest(GrpcTryGetKeyValueRequest tryGetKeyValue) => payload = tryGetKeyValue;
 
-    public GrpcTryAcquireManyExclusiveLocksRequest? TryAcquireManyExclusiveLocks { get; }
+    public GrpcServerBatcherRequest(GrpcTryGetManyValuesRequest tryGetManyValues) => payload = tryGetManyValues;
 
-    public GrpcTryReleaseExclusiveLockRequest? TryReleaseExclusiveLock { get; }
+    public GrpcServerBatcherRequest(GrpcTryDeleteKeyValueRequest tryDeleteKeyValue) => payload = tryDeleteKeyValue;
 
-    public GrpcTryReleaseExclusivePrefixLockRequest? TryReleaseExclusivePrefixLock { get; }
+    public GrpcServerBatcherRequest(GrpcTryExtendKeyValueRequest tryExtendKeyValue) => payload = tryExtendKeyValue;
 
-    public GrpcTryReleaseExclusiveRangeLockRequest? TryReleaseExclusiveRangeLock { get; }
-    
-    public GrpcTryReleaseManyExclusiveLocksRequest? TryReleaseManyExclusiveLocks { get; }
-    
-    public GrpcTryPrepareMutationsRequest? TryPrepareMutations { get; }
-    
-    public GrpcTryPrepareManyMutationsRequest? TryPrepareManyMutations { get; }
-    
-    public GrpcTryCommitMutationsRequest? TryCommitMutations { get; }
-    
-    public GrpcTryCommitManyMutationsRequest? TryCommitManyMutations { get; }
-    
-    public GrpcTryRollbackMutationsRequest? TryRollbackMutations { get; }
-    
-    public GrpcTryRollbackManyMutationsRequest? TryRollbackManyMutations { get; }
-    
-    public GrpcStartTransactionRequest? StartTransaction { get; }
-    
-    public GrpcCommitTransactionRequest? CommitTransaction { get; }
-    
-    public GrpcRollbackTransactionRequest? RollbackTransaction { get; }
+    public GrpcServerBatcherRequest(GrpcTryExistsKeyValueRequest tryExistsKeyValue) => payload = tryExistsKeyValue;
 
-    public GrpcEnsureKeyRangeSeededRequest? EnsureKeyRangeSeeded { get; }
+    public GrpcServerBatcherRequest(GrpcTryExistsManyValuesRequest tryExistsManyValues) => payload = tryExistsManyValues;
 
-    public GrpcEnsureKeyRangeRemovedRequest? EnsureKeyRangeRemoved { get; }
+    public GrpcServerBatcherRequest(GrpcTryCheckWriteIntentRequest tryCheckWriteIntent) => payload = tryCheckWriteIntent;
 
-    public GrpcGetRangeLocksRequest? GetRangeLocks { get; }
+    public GrpcServerBatcherRequest(GrpcGetByBucketRequest getByBucket) => payload = getByBucket;
 
-    public GrpcImportRangeLocksRequest? ImportRangeLocks { get; }
+    public GrpcServerBatcherRequest(GrpcGetByRangeRequest getByRange) => payload = getByRange;
 
-    public GrpcAcquireSnapshotHoldRequest? AcquireSnapshotHold { get; }
+    public GrpcServerBatcherRequest(GrpcScanByPrefixRequest scanByPrefix) => payload = scanByPrefix;
 
-    public GrpcRenewSnapshotHoldRequest? RenewSnapshotHold { get; }
+    public GrpcServerBatcherRequest(GrpcTryExecuteTransactionScriptRequest tryExecuteTransactionScript) => payload = tryExecuteTransactionScript;
 
-    public GrpcReleaseSnapshotHoldRequest? ReleaseSnapshotHold { get; }
+    public GrpcServerBatcherRequest(GrpcTryAcquireExclusiveLockRequest tryAcquireExclusiveLock) => payload = tryAcquireExclusiveLock;
 
-    public GrpcGetSnapshotFloorRequest? GetSnapshotFloor { get; }
+    public GrpcServerBatcherRequest(GrpcTryAcquireExclusivePrefixLockRequest tryAcquireExclusivePrefixLock) => payload = tryAcquireExclusivePrefixLock;
 
-    public GrpcBeginOperationRequest? BeginOperation { get; }
+    public GrpcServerBatcherRequest(GrpcTryAcquireExclusiveRangeLockRequest tryAcquireExclusiveRangeLock) => payload = tryAcquireExclusiveRangeLock;
 
-    public GrpcCompleteOperationRequest? CompleteOperation { get; }
+    public GrpcServerBatcherRequest(GrpcTryAcquireManyExclusiveLocksRequest tryAcquireManyExclusiveLocks) => payload = tryAcquireManyExclusiveLocks;
 
-    public GrpcGetTransactionWorkingSetRequest? GetTransactionWorkingSet { get; }
+    public GrpcServerBatcherRequest(GrpcTryReleaseExclusiveLockRequest tryReleaseExclusiveLock) => payload = tryReleaseExclusiveLock;
 
-    public GrpcCloseTransactionRequest? CloseTransaction { get; }
+    public GrpcServerBatcherRequest(GrpcTryReleaseExclusivePrefixLockRequest tryReleaseExclusivePrefixLock) => payload = tryReleaseExclusivePrefixLock;
 
-    public GrpcImportCompletionReceiptsRequest? ImportCompletionReceipts { get; }
+    public GrpcServerBatcherRequest(GrpcTryReleaseExclusiveRangeLockRequest tryReleaseExclusiveRangeLock) => payload = tryReleaseExclusiveRangeLock;
 
-    public GrpcImportCoordinatorDecisionsRequest? ImportCoordinatorDecisions { get; }
+    public GrpcServerBatcherRequest(GrpcTryReleaseManyExclusiveLocksRequest tryReleaseManyExclusiveLocks) => payload = tryReleaseManyExclusiveLocks;
 
-    public GrpcServerBatcherRequest(GrpcTryLockRequest tryLock)
-    {
-        TryLock = tryLock;
-    }
-    
-    public GrpcServerBatcherRequest(GrpcUnlockRequest unlock)
-    {
-        Unlock = unlock;
-    }
-    
-    public GrpcServerBatcherRequest(GrpcExtendLockRequest extendLock)
-    {
-        ExtendLock = extendLock;
-    }
-    
-    public GrpcServerBatcherRequest(GrpcGetLockRequest getLock)
-    {
-        GetLock = getLock;
-    }
+    public GrpcServerBatcherRequest(GrpcTryPrepareMutationsRequest tryPrepareMutations) => payload = tryPrepareMutations;
 
-    public GrpcServerBatcherRequest(GrpcTrySetKeyValueRequest trySetKeyValue)
-    {
-        TrySetKeyValue = trySetKeyValue;
-    }
-    
-    public GrpcServerBatcherRequest(GrpcTrySetManyKeyValueRequest trySetManyKeyValue)
-    {
-        TrySetManyKeyValue = trySetManyKeyValue;
-    }
+    public GrpcServerBatcherRequest(GrpcTryPrepareManyMutationsRequest tryPrepareManyMutations) => payload = tryPrepareManyMutations;
 
-    public GrpcServerBatcherRequest(GrpcTryDeleteManyKeyValueRequest tryDeleteManyKeyValue)
-    {
-        TryDeleteManyKeyValue = tryDeleteManyKeyValue;
-    }
-    
-    public GrpcServerBatcherRequest(GrpcTryGetKeyValueRequest tryGetKeyValue)
-    {
-        TryGetKeyValue = tryGetKeyValue;
-    }
+    public GrpcServerBatcherRequest(GrpcTryCommitMutationsRequest tryCommitMutations) => payload = tryCommitMutations;
 
-    public GrpcServerBatcherRequest(GrpcTryGetManyValuesRequest tryGetManyValues)
-    {
-        TryGetManyValues = tryGetManyValues;
-    }
-    
-    public GrpcServerBatcherRequest(GrpcTryDeleteKeyValueRequest tryDeleteKeyValue)
-    {
-        TryDeleteKeyValue = tryDeleteKeyValue;
-    }
-    
-    public GrpcServerBatcherRequest(GrpcTryExtendKeyValueRequest tryExtendKeyValue)
-    {
-        TryExtendKeyValue = tryExtendKeyValue;
-    }
-    
-    public GrpcServerBatcherRequest(GrpcTryExistsKeyValueRequest tryExistsKeyValue)
-    {
-        TryExistsKeyValue = tryExistsKeyValue;
-    }
+    public GrpcServerBatcherRequest(GrpcTryCommitManyMutationsRequest tryCommitManyMutations) => payload = tryCommitManyMutations;
 
-    public GrpcServerBatcherRequest(GrpcTryExistsManyValuesRequest tryExistsManyValues)
-    {
-        TryExistsManyValues = tryExistsManyValues;
-    }
+    public GrpcServerBatcherRequest(GrpcTryRollbackMutationsRequest tryRollbackMutations) => payload = tryRollbackMutations;
 
-    public GrpcServerBatcherRequest(GrpcTryCheckWriteIntentRequest tryCheckWriteIntent)
-    {
-        TryCheckWriteIntent = tryCheckWriteIntent;
-    }
+    public GrpcServerBatcherRequest(GrpcTryRollbackManyMutationsRequest tryRollbackManyMutations) => payload = tryRollbackManyMutations;
 
-    public GrpcServerBatcherRequest(GrpcGetByBucketRequest getByBucket)
-    {
-        GetByBucket = getByBucket;
-    }
+    public GrpcServerBatcherRequest(GrpcStartTransactionRequest startTransaction) => payload = startTransaction;
 
-    public GrpcServerBatcherRequest(GrpcGetByRangeRequest getByRange)
-    {
-        GetByRange = getByRange;
-    }
-    
-    public GrpcServerBatcherRequest(GrpcScanByPrefixRequest scanByPrefix)
-    {
-        ScanByPrefix = scanByPrefix;
-    }
-    
-    public GrpcServerBatcherRequest(GrpcTryExecuteTransactionScriptRequest tryExecuteTransactionScript)
-    {
-        TryExecuteTransactionScript = tryExecuteTransactionScript;
-    }
-    
-    public GrpcServerBatcherRequest(GrpcTryAcquireExclusiveLockRequest tryAcquireExclusiveLock)
-    {
-        TryAcquireExclusiveLock = tryAcquireExclusiveLock;
-    }
-    
-    public GrpcServerBatcherRequest(GrpcTryAcquireExclusivePrefixLockRequest tryAcquireExclusivePrefixLock)
-    {
-        TryAcquireExclusivePrefixLock = tryAcquireExclusivePrefixLock;
-    }
-    
-    public GrpcServerBatcherRequest(GrpcTryAcquireManyExclusiveLocksRequest tryAcquireManyExclusiveLocks)
-    {
-        TryAcquireManyExclusiveLocks = tryAcquireManyExclusiveLocks;
-    }
-    
-    public GrpcServerBatcherRequest(GrpcTryReleaseExclusiveLockRequest tryReleaseExclusiveLock)
-    {
-        TryReleaseExclusiveLock = tryReleaseExclusiveLock;
-    }
-    
-    public GrpcServerBatcherRequest(GrpcTryAcquireExclusiveRangeLockRequest tryAcquireExclusiveRangeLock)
-    {
-        TryAcquireExclusiveRangeLock = tryAcquireExclusiveRangeLock;
-    }
+    public GrpcServerBatcherRequest(GrpcCommitTransactionRequest commitTransaction) => payload = commitTransaction;
 
-    public GrpcServerBatcherRequest(GrpcTryReleaseExclusivePrefixLockRequest tryReleaseExclusivePrefixLock)
-    {
-        TryReleaseExclusivePrefixLock = tryReleaseExclusivePrefixLock;
-    }
+    public GrpcServerBatcherRequest(GrpcRollbackTransactionRequest rollbackTransaction) => payload = rollbackTransaction;
 
-    public GrpcServerBatcherRequest(GrpcTryReleaseExclusiveRangeLockRequest tryReleaseExclusiveRangeLock)
-    {
-        TryReleaseExclusiveRangeLock = tryReleaseExclusiveRangeLock;
-    }
+    public GrpcServerBatcherRequest(GrpcEnsureKeyRangeSeededRequest ensureKeyRangeSeeded) => payload = ensureKeyRangeSeeded;
 
-    public GrpcServerBatcherRequest(GrpcTryReleaseManyExclusiveLocksRequest tryReleaseManyExclusiveLocks)
-    {
-        TryReleaseManyExclusiveLocks = tryReleaseManyExclusiveLocks;
-    }
-    
-    public GrpcServerBatcherRequest(GrpcTryPrepareMutationsRequest tryPrepareMutations)
-    {
-        TryPrepareMutations = tryPrepareMutations;
-    }
-    
-    public GrpcServerBatcherRequest(GrpcTryPrepareManyMutationsRequest tryPrepareManyMutations)
-    {
-        TryPrepareManyMutations = tryPrepareManyMutations;
-    }
-    
-    public GrpcServerBatcherRequest(GrpcTryCommitMutationsRequest tryCommitMutations)
-    {
-        TryCommitMutations = tryCommitMutations;
-    }
-    
-    public GrpcServerBatcherRequest(GrpcTryCommitManyMutationsRequest tryCommitManyMutations)
-    {
-        TryCommitManyMutations = tryCommitManyMutations;
-    }
-    
-    public GrpcServerBatcherRequest(GrpcTryRollbackMutationsRequest tryRollbackMutations)
-    {
-        TryRollbackMutations = tryRollbackMutations;
-    }
-    
-    public GrpcServerBatcherRequest(GrpcTryRollbackManyMutationsRequest tryRollbackManyMutations)
-    {
-        TryRollbackManyMutations = tryRollbackManyMutations;
-    }
-    
-    public GrpcServerBatcherRequest(GrpcStartTransactionRequest startTransaction)
-    {
-        StartTransaction = startTransaction;
-    }
-    
-    public GrpcServerBatcherRequest(GrpcCommitTransactionRequest commitTransaction)
-    {
-        CommitTransaction = commitTransaction;
-    }
-    
-    public GrpcServerBatcherRequest(GrpcRollbackTransactionRequest rollbackTransaction)
-    {
-        RollbackTransaction = rollbackTransaction;
-    }
+    public GrpcServerBatcherRequest(GrpcEnsureKeyRangeRemovedRequest ensureKeyRangeRemoved) => payload = ensureKeyRangeRemoved;
 
-    public GrpcServerBatcherRequest(GrpcBeginOperationRequest beginOperation)
-    {
-        BeginOperation = beginOperation;
-    }
+    public GrpcServerBatcherRequest(GrpcGetRangeLocksRequest getRangeLocks) => payload = getRangeLocks;
 
-    public GrpcServerBatcherRequest(GrpcCompleteOperationRequest completeOperation)
-    {
-        CompleteOperation = completeOperation;
-    }
+    public GrpcServerBatcherRequest(GrpcImportRangeLocksRequest importRangeLocks) => payload = importRangeLocks;
 
-    public GrpcServerBatcherRequest(GrpcGetTransactionWorkingSetRequest getTransactionWorkingSet)
-    {
-        GetTransactionWorkingSet = getTransactionWorkingSet;
-    }
+    public GrpcServerBatcherRequest(GrpcAcquireSnapshotHoldRequest acquireSnapshotHold) => payload = acquireSnapshotHold;
 
-    public GrpcServerBatcherRequest(GrpcCloseTransactionRequest closeTransaction)
-    {
-        CloseTransaction = closeTransaction;
-    }
+    public GrpcServerBatcherRequest(GrpcRenewSnapshotHoldRequest renewSnapshotHold) => payload = renewSnapshotHold;
 
-    public GrpcServerBatcherRequest(GrpcEnsureKeyRangeSeededRequest ensureKeyRangeSeeded)
-    {
-        EnsureKeyRangeSeeded = ensureKeyRangeSeeded;
-    }
+    public GrpcServerBatcherRequest(GrpcReleaseSnapshotHoldRequest releaseSnapshotHold) => payload = releaseSnapshotHold;
 
-    public GrpcServerBatcherRequest(GrpcEnsureKeyRangeRemovedRequest ensureKeyRangeRemoved)
-    {
-        EnsureKeyRangeRemoved = ensureKeyRangeRemoved;
-    }
+    public GrpcServerBatcherRequest(GrpcGetSnapshotFloorRequest getSnapshotFloor) => payload = getSnapshotFloor;
 
-    public GrpcServerBatcherRequest(GrpcGetRangeLocksRequest getRangeLocks)
-    {
-        GetRangeLocks = getRangeLocks;
-    }
+    public GrpcServerBatcherRequest(GrpcBeginOperationRequest beginOperation) => payload = beginOperation;
 
-    public GrpcServerBatcherRequest(GrpcImportRangeLocksRequest importRangeLocks)
-    {
-        ImportRangeLocks = importRangeLocks;
-    }
+    public GrpcServerBatcherRequest(GrpcCompleteOperationRequest completeOperation) => payload = completeOperation;
 
-    public GrpcServerBatcherRequest(GrpcImportCompletionReceiptsRequest importCompletionReceipts)
-    {
-        ImportCompletionReceipts = importCompletionReceipts;
-    }
+    public GrpcServerBatcherRequest(GrpcGetTransactionWorkingSetRequest getTransactionWorkingSet) => payload = getTransactionWorkingSet;
 
-    public GrpcServerBatcherRequest(GrpcImportCoordinatorDecisionsRequest importCoordinatorDecisions)
-    {
-        ImportCoordinatorDecisions = importCoordinatorDecisions;
-    }
+    public GrpcServerBatcherRequest(GrpcCloseTransactionRequest closeTransaction) => payload = closeTransaction;
 
-    public GrpcServerBatcherRequest(GrpcAcquireSnapshotHoldRequest acquireSnapshotHold)
-    {
-        AcquireSnapshotHold = acquireSnapshotHold;
-    }
+    public GrpcServerBatcherRequest(GrpcImportCompletionReceiptsRequest importCompletionReceipts) => payload = importCompletionReceipts;
 
-    public GrpcServerBatcherRequest(GrpcRenewSnapshotHoldRequest renewSnapshotHold)
-    {
-        RenewSnapshotHold = renewSnapshotHold;
-    }
+    public GrpcServerBatcherRequest(GrpcImportCoordinatorDecisionsRequest importCoordinatorDecisions) => payload = importCoordinatorDecisions;
 
-    public GrpcServerBatcherRequest(GrpcReleaseSnapshotHoldRequest releaseSnapshotHold)
-    {
-        ReleaseSnapshotHold = releaseSnapshotHold;
-    }
+    public GrpcTryLockRequest? TryLock => payload as GrpcTryLockRequest;
 
-    public GrpcServerBatcherRequest(GrpcGetSnapshotFloorRequest getSnapshotFloor)
-    {
-        GetSnapshotFloor = getSnapshotFloor;
-    }
+    public GrpcUnlockRequest? Unlock => payload as GrpcUnlockRequest;
+
+    public GrpcExtendLockRequest? ExtendLock => payload as GrpcExtendLockRequest;
+
+    public GrpcGetLockRequest? GetLock => payload as GrpcGetLockRequest;
+
+    public GrpcTrySetKeyValueRequest? TrySetKeyValue => payload as GrpcTrySetKeyValueRequest;
+
+    public GrpcTrySetManyKeyValueRequest? TrySetManyKeyValue => payload as GrpcTrySetManyKeyValueRequest;
+
+    public GrpcTryDeleteManyKeyValueRequest? TryDeleteManyKeyValue => payload as GrpcTryDeleteManyKeyValueRequest;
+
+    public GrpcTryGetKeyValueRequest? TryGetKeyValue => payload as GrpcTryGetKeyValueRequest;
+
+    public GrpcTryGetManyValuesRequest? TryGetManyValues => payload as GrpcTryGetManyValuesRequest;
+
+    public GrpcTryDeleteKeyValueRequest? TryDeleteKeyValue => payload as GrpcTryDeleteKeyValueRequest;
+
+    public GrpcTryExtendKeyValueRequest? TryExtendKeyValue => payload as GrpcTryExtendKeyValueRequest;
+
+    public GrpcTryExistsKeyValueRequest? TryExistsKeyValue => payload as GrpcTryExistsKeyValueRequest;
+
+    public GrpcTryExistsManyValuesRequest? TryExistsManyValues => payload as GrpcTryExistsManyValuesRequest;
+
+    public GrpcTryCheckWriteIntentRequest? TryCheckWriteIntent => payload as GrpcTryCheckWriteIntentRequest;
+
+    public GrpcGetByBucketRequest? GetByBucket => payload as GrpcGetByBucketRequest;
+
+    public GrpcGetByRangeRequest? GetByRange => payload as GrpcGetByRangeRequest;
+
+    public GrpcScanByPrefixRequest? ScanByPrefix => payload as GrpcScanByPrefixRequest;
+
+    public GrpcTryExecuteTransactionScriptRequest? TryExecuteTransactionScript => payload as GrpcTryExecuteTransactionScriptRequest;
+
+    public GrpcTryAcquireExclusiveLockRequest? TryAcquireExclusiveLock => payload as GrpcTryAcquireExclusiveLockRequest;
+
+    public GrpcTryAcquireExclusivePrefixLockRequest? TryAcquireExclusivePrefixLock => payload as GrpcTryAcquireExclusivePrefixLockRequest;
+
+    public GrpcTryAcquireExclusiveRangeLockRequest? TryAcquireExclusiveRangeLock => payload as GrpcTryAcquireExclusiveRangeLockRequest;
+
+    public GrpcTryAcquireManyExclusiveLocksRequest? TryAcquireManyExclusiveLocks => payload as GrpcTryAcquireManyExclusiveLocksRequest;
+
+    public GrpcTryReleaseExclusiveLockRequest? TryReleaseExclusiveLock => payload as GrpcTryReleaseExclusiveLockRequest;
+
+    public GrpcTryReleaseExclusivePrefixLockRequest? TryReleaseExclusivePrefixLock => payload as GrpcTryReleaseExclusivePrefixLockRequest;
+
+    public GrpcTryReleaseExclusiveRangeLockRequest? TryReleaseExclusiveRangeLock => payload as GrpcTryReleaseExclusiveRangeLockRequest;
+
+    public GrpcTryReleaseManyExclusiveLocksRequest? TryReleaseManyExclusiveLocks => payload as GrpcTryReleaseManyExclusiveLocksRequest;
+
+    public GrpcTryPrepareMutationsRequest? TryPrepareMutations => payload as GrpcTryPrepareMutationsRequest;
+
+    public GrpcTryPrepareManyMutationsRequest? TryPrepareManyMutations => payload as GrpcTryPrepareManyMutationsRequest;
+
+    public GrpcTryCommitMutationsRequest? TryCommitMutations => payload as GrpcTryCommitMutationsRequest;
+
+    public GrpcTryCommitManyMutationsRequest? TryCommitManyMutations => payload as GrpcTryCommitManyMutationsRequest;
+
+    public GrpcTryRollbackMutationsRequest? TryRollbackMutations => payload as GrpcTryRollbackMutationsRequest;
+
+    public GrpcTryRollbackManyMutationsRequest? TryRollbackManyMutations => payload as GrpcTryRollbackManyMutationsRequest;
+
+    public GrpcStartTransactionRequest? StartTransaction => payload as GrpcStartTransactionRequest;
+
+    public GrpcCommitTransactionRequest? CommitTransaction => payload as GrpcCommitTransactionRequest;
+
+    public GrpcRollbackTransactionRequest? RollbackTransaction => payload as GrpcRollbackTransactionRequest;
+
+    public GrpcEnsureKeyRangeSeededRequest? EnsureKeyRangeSeeded => payload as GrpcEnsureKeyRangeSeededRequest;
+
+    public GrpcEnsureKeyRangeRemovedRequest? EnsureKeyRangeRemoved => payload as GrpcEnsureKeyRangeRemovedRequest;
+
+    public GrpcGetRangeLocksRequest? GetRangeLocks => payload as GrpcGetRangeLocksRequest;
+
+    public GrpcImportRangeLocksRequest? ImportRangeLocks => payload as GrpcImportRangeLocksRequest;
+
+    public GrpcAcquireSnapshotHoldRequest? AcquireSnapshotHold => payload as GrpcAcquireSnapshotHoldRequest;
+
+    public GrpcRenewSnapshotHoldRequest? RenewSnapshotHold => payload as GrpcRenewSnapshotHoldRequest;
+
+    public GrpcReleaseSnapshotHoldRequest? ReleaseSnapshotHold => payload as GrpcReleaseSnapshotHoldRequest;
+
+    public GrpcGetSnapshotFloorRequest? GetSnapshotFloor => payload as GrpcGetSnapshotFloorRequest;
+
+    public GrpcBeginOperationRequest? BeginOperation => payload as GrpcBeginOperationRequest;
+
+    public GrpcCompleteOperationRequest? CompleteOperation => payload as GrpcCompleteOperationRequest;
+
+    public GrpcGetTransactionWorkingSetRequest? GetTransactionWorkingSet => payload as GrpcGetTransactionWorkingSetRequest;
+
+    public GrpcCloseTransactionRequest? CloseTransaction => payload as GrpcCloseTransactionRequest;
+
+    public GrpcImportCompletionReceiptsRequest? ImportCompletionReceipts => payload as GrpcImportCompletionReceiptsRequest;
+
+    public GrpcImportCoordinatorDecisionsRequest? ImportCoordinatorDecisions => payload as GrpcImportCoordinatorDecisionsRequest;
 }

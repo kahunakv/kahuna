@@ -8,131 +8,85 @@
 
 namespace Kahuna.Client.Communication;
 
-internal sealed class GrpcBatcherResponse
+/// <summary>
+/// A batched operation's reply. Exactly one operation payload is ever populated, so rather than a
+/// wide class with one nullable field per operation type (an allocation per completed request) the
+/// single payload is held as one reference in a value type. The per-operation accessors preserve the
+/// original API by narrowing that reference, so callers read <c>response.TryLock</c> exactly as before.
+/// </summary>
+internal readonly struct GrpcBatcherResponse
 {
-    public GrpcTryLockResponse? TryLock { get; }
-    
-    public GrpcUnlockResponse? Unlock { get; }
-    
-    public GrpcExtendLockResponse? ExtendLock { get; }
-    
-    public GrpcGetLockResponse? GetLock { get; }
-    
-    public GrpcTrySetKeyValueResponse? TrySetKeyValue { get; }
-    
-    public GrpcTrySetManyKeyValueResponse? TrySetManyKeyValues { get; }
+    private readonly object? payload;
 
-    public GrpcTryDeleteManyKeyValueResponse? TryDeleteManyKeyValues { get; }
-    
-    public GrpcTryGetKeyValueResponse? TryGetKeyValue { get; }
-    
-    public GrpcTryDeleteKeyValueResponse? TryDeleteKeyValue { get; }
-    
-    public GrpcTryExtendKeyValueResponse? TryExtendKeyValue { get; }
+    public GrpcBatcherResponse(GrpcTryLockResponse tryLock) => payload = tryLock;
 
-    public GrpcTryExistsKeyValueResponse? TryExistsKeyValue { get; }
-    
-    public GrpcTryAcquireExclusiveLockResponse? TryAcquireExclusiveLock { get; }
-    
-    public GrpcTryExecuteTransactionScriptResponse? TryExecuteTransactionScript { get; }     
-    
-    public GrpcGetByBucketResponse? GetByBucket { get; }
-    
-    public GrpcScanAllByPrefixResponse? ScanByPrefix { get; }
-    
-    public GrpcStartTransactionResponse? StartTransaction { get; }
-    
-    public GrpcCommitTransactionResponse? CommitTransaction { get; }
-    
-    public GrpcRollbackTransactionResponse? RollbackTransaction { get; }
-    
-    public GrpcBatcherResponse(GrpcTryLockResponse tryLock)
-    {
-        TryLock = tryLock;
-    }
-    
-    public GrpcBatcherResponse(GrpcUnlockResponse unlock)
-    {
-        Unlock = unlock;
-    }
-    
-    public GrpcBatcherResponse(GrpcExtendLockResponse extendLock)
-    {
-        ExtendLock = extendLock;
-    }
-    
-    public GrpcBatcherResponse(GrpcGetLockResponse getLock)
-    {
-        GetLock = getLock;
-    }
+    public GrpcBatcherResponse(GrpcUnlockResponse unlock) => payload = unlock;
 
-    public GrpcBatcherResponse(GrpcTrySetKeyValueResponse trySetKeyValue)
-    {
-        TrySetKeyValue = trySetKeyValue;
-    }
+    public GrpcBatcherResponse(GrpcExtendLockResponse extendLock) => payload = extendLock;
 
-    public GrpcBatcherResponse(GrpcTrySetManyKeyValueResponse trySetManyKeyValues)
-    {
-        TrySetManyKeyValues = trySetManyKeyValues;
-    }
+    public GrpcBatcherResponse(GrpcGetLockResponse getLock) => payload = getLock;
 
-    public GrpcBatcherResponse(GrpcTryDeleteManyKeyValueResponse tryDeleteManyKeyValues)
-    {
-        TryDeleteManyKeyValues = tryDeleteManyKeyValues;
-    }
-    
-    public GrpcBatcherResponse(GrpcTryGetKeyValueResponse tryGetKeyValue)
-    {
-        TryGetKeyValue = tryGetKeyValue;
-    }
-    
-    public GrpcBatcherResponse(GrpcTryDeleteKeyValueResponse tryDeleteKeyValue)
-    {
-        TryDeleteKeyValue = tryDeleteKeyValue;
-    }
-    
-    public GrpcBatcherResponse(GrpcTryExtendKeyValueResponse tryExtendKeyValue)
-    {
-        TryExtendKeyValue = tryExtendKeyValue;
-    }
-    
-    public GrpcBatcherResponse(GrpcTryExistsKeyValueResponse tryExistsKeyValue)
-    {
-        TryExistsKeyValue = tryExistsKeyValue;
-    }
-    
-    public GrpcBatcherResponse(GrpcTryAcquireExclusiveLockResponse tryAcquireExclusiveLock)
-    {
-        TryAcquireExclusiveLock = tryAcquireExclusiveLock;
-    }       
-    
-    public GrpcBatcherResponse(GrpcTryExecuteTransactionScriptResponse tryExecuteTransactionScript)
-    {
-        TryExecuteTransactionScript = tryExecuteTransactionScript;
-    }
-    
-    public GrpcBatcherResponse(GrpcGetByBucketResponse getByBucket)
-    {
-        GetByBucket = getByBucket;
-    }
-    
-    public GrpcBatcherResponse(GrpcScanAllByPrefixResponse scanByPrefix)
-    {
-        ScanByPrefix = scanByPrefix;
-    }
-    
-    public GrpcBatcherResponse(GrpcStartTransactionResponse startTransaction)
-    {
-        StartTransaction = startTransaction;
-    }
-    
-    public GrpcBatcherResponse(GrpcCommitTransactionResponse commitTransaction)
-    {
-        CommitTransaction = commitTransaction;
-    }
-    
-    public GrpcBatcherResponse(GrpcRollbackTransactionResponse rollbackTransaction)
-    {
-        RollbackTransaction = rollbackTransaction;
-    }
+    public GrpcBatcherResponse(GrpcTrySetKeyValueResponse trySetKeyValue) => payload = trySetKeyValue;
+
+    public GrpcBatcherResponse(GrpcTrySetManyKeyValueResponse trySetManyKeyValues) => payload = trySetManyKeyValues;
+
+    public GrpcBatcherResponse(GrpcTryDeleteManyKeyValueResponse tryDeleteManyKeyValues) => payload = tryDeleteManyKeyValues;
+
+    public GrpcBatcherResponse(GrpcTryGetKeyValueResponse tryGetKeyValue) => payload = tryGetKeyValue;
+
+    public GrpcBatcherResponse(GrpcTryDeleteKeyValueResponse tryDeleteKeyValue) => payload = tryDeleteKeyValue;
+
+    public GrpcBatcherResponse(GrpcTryExtendKeyValueResponse tryExtendKeyValue) => payload = tryExtendKeyValue;
+
+    public GrpcBatcherResponse(GrpcTryExistsKeyValueResponse tryExistsKeyValue) => payload = tryExistsKeyValue;
+
+    public GrpcBatcherResponse(GrpcTryAcquireExclusiveLockResponse tryAcquireExclusiveLock) => payload = tryAcquireExclusiveLock;
+
+    public GrpcBatcherResponse(GrpcTryExecuteTransactionScriptResponse tryExecuteTransactionScript) => payload = tryExecuteTransactionScript;
+
+    public GrpcBatcherResponse(GrpcGetByBucketResponse getByBucket) => payload = getByBucket;
+
+    public GrpcBatcherResponse(GrpcScanAllByPrefixResponse scanByPrefix) => payload = scanByPrefix;
+
+    public GrpcBatcherResponse(GrpcStartTransactionResponse startTransaction) => payload = startTransaction;
+
+    public GrpcBatcherResponse(GrpcCommitTransactionResponse commitTransaction) => payload = commitTransaction;
+
+    public GrpcBatcherResponse(GrpcRollbackTransactionResponse rollbackTransaction) => payload = rollbackTransaction;
+
+    public GrpcTryLockResponse? TryLock => payload as GrpcTryLockResponse;
+
+    public GrpcUnlockResponse? Unlock => payload as GrpcUnlockResponse;
+
+    public GrpcExtendLockResponse? ExtendLock => payload as GrpcExtendLockResponse;
+
+    public GrpcGetLockResponse? GetLock => payload as GrpcGetLockResponse;
+
+    public GrpcTrySetKeyValueResponse? TrySetKeyValue => payload as GrpcTrySetKeyValueResponse;
+
+    public GrpcTrySetManyKeyValueResponse? TrySetManyKeyValues => payload as GrpcTrySetManyKeyValueResponse;
+
+    public GrpcTryDeleteManyKeyValueResponse? TryDeleteManyKeyValues => payload as GrpcTryDeleteManyKeyValueResponse;
+
+    public GrpcTryGetKeyValueResponse? TryGetKeyValue => payload as GrpcTryGetKeyValueResponse;
+
+    public GrpcTryDeleteKeyValueResponse? TryDeleteKeyValue => payload as GrpcTryDeleteKeyValueResponse;
+
+    public GrpcTryExtendKeyValueResponse? TryExtendKeyValue => payload as GrpcTryExtendKeyValueResponse;
+
+    public GrpcTryExistsKeyValueResponse? TryExistsKeyValue => payload as GrpcTryExistsKeyValueResponse;
+
+    public GrpcTryAcquireExclusiveLockResponse? TryAcquireExclusiveLock => payload as GrpcTryAcquireExclusiveLockResponse;
+
+    public GrpcTryExecuteTransactionScriptResponse? TryExecuteTransactionScript => payload as GrpcTryExecuteTransactionScriptResponse;
+
+    public GrpcGetByBucketResponse? GetByBucket => payload as GrpcGetByBucketResponse;
+
+    public GrpcScanAllByPrefixResponse? ScanByPrefix => payload as GrpcScanAllByPrefixResponse;
+
+    public GrpcStartTransactionResponse? StartTransaction => payload as GrpcStartTransactionResponse;
+
+    public GrpcCommitTransactionResponse? CommitTransaction => payload as GrpcCommitTransactionResponse;
+
+    public GrpcRollbackTransactionResponse? RollbackTransaction => payload as GrpcRollbackTransactionResponse;
 }

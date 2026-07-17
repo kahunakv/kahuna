@@ -6,6 +6,7 @@ using Kahuna.Server.Locks.Data;
 using Kahuna.Server.Persistence.Pitr;
 using Kommander.Time;
 using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 
 namespace Kahuna.Server.Persistence.Backend;
 
@@ -44,7 +45,7 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
     /// <returns>Returns <c>true</c> if the locks were successfully stored or updated.</returns>
     public bool StoreLocks(List<PersistenceRequestItem> items)
     {
-        foreach (PersistenceRequestItem item in items)
+        foreach (ref readonly PersistenceRequestItem item in CollectionsMarshal.AsSpan(items))
         {
             if (locks.TryGetValue(item.Key, out LockEntry? lockContext))
             {
@@ -82,7 +83,7 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
     {
         lock (kvLock)
         {
-            foreach (PersistenceRequestItem item in items)
+            foreach (ref readonly PersistenceRequestItem item in CollectionsMarshal.AsSpan(items))
             {
                 if (keyValues.TryGetValue(item.Key, out KeyValueEntry? existing))
                 {
