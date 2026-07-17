@@ -510,6 +510,299 @@ public sealed class TestPhaseTwoOffMailbox
         worker.BeforeRaftCallHook = null;
     }
 
+    /// <summary>
+    /// The committed-log apply (InvalidateOrApply) must defer to a live 2PC write intent — the phase-two
+    /// completion owns the apply. When the intent has expired (leadership lost), it clears it and applies.
+    /// </summary>
+    [Fact]
+    public void InvalidateOrApply_SkipsUnderLiveWriteIntent_AppliesUnderExpired()
+    {
+        ILogger<IKahuna> logger = loggerFactory.CreateLogger<IKahuna>();
+        RaftManager raft = CreateRaft("invalidate-writeintent");
+        KeyValueContext context = DirectContext(raft, Config(), logger);
+
+        const string key = "phasetwo/invalidate";
+        HLCTimestamp txId = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        KeyValueEntry entry = new()
+        {
+            Value = "old"u8.ToArray(),
+            Revision = 4,
+            State = KeyValueState.Set,
+            LastUsed = txId,
+            LastModified = txId,
+            WriteIntent = new() { TransactionId = txId, Expires = txId + 15000 }
+        };
+        context.Store.Insert(key, entry);
+
+        InvalidateOrApplyHandler handler = new(context);
+
+        // Live write intent: the committed-log apply must not advance the entry.
+        handler.Execute(KeyValueRequest.ForInvalidateOrApply(key, 5, "new"u8.ToArray(), HLCTimestamp.Zero, txId, txId, KeyValueState.Set));
+        Assert.Equal(4, entry.Revision);
+        Assert.Equal("old"u8.ToArray(), entry.Value);
+        Assert.NotNull(entry.WriteIntent);
+
+        // Expired write intent (leadership lost before the completion): clear it and apply.
+        entry.WriteIntent!.Expires = HLCTimestamp.Zero;
+        handler.Execute(KeyValueRequest.ForInvalidateOrApply(key, 5, "new"u8.ToArray(), HLCTimestamp.Zero, txId, txId, KeyValueState.Set));
+        Assert.Equal(5, entry.Revision);
+        Assert.Equal("new"u8.ToArray(), entry.Value);
+        Assert.Null(entry.WriteIntent);
+    }
+
+    /// <summary>
+    /// B2 regression: on the leader the committed-log apply is enqueued before the phase-two completion.
+    /// With the live-write-intent guard, InvalidateOrApply defers, so the completion archives the correct
+    /// superseded revision — not the already-advanced value.
+    /// </summary>
+    [Fact]
+    public void InvalidateOrApplyBeforeCompletion_DoesNotCorruptRevisionArchive()
+    {
+        ILogger<IKahuna> logger = loggerFactory.CreateLogger<IKahuna>();
+        KahunaConfiguration config = Config();
+        RaftManager raft = CreateRaft("invalidate-ordering");
+        MemoryPersistenceBackend backend = new();
+
+        using ActorSystem actorSystem = new();
+        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> bgWriter =
+            actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
+                "bg-order", raft, backend, null!, null!, null!, config, logger, new FlushNotificationSink());
+
+        BTree<string, KeyValueEntry> store = new(32);
+        KeyValueContext context = new(
+            null!, store, new(), new(), new(), bgWriter, null!, backend, raft,
+            new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+
+        const string key = "phasetwo/ordering";
+        HLCTimestamp txId = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        // Prepared entry: current revision 4 "old", live write intent + MVCC staging revision 5 "new".
+        KeyValueEntry entry = new()
+        {
+            Value = "old"u8.ToArray(),
+            Revision = 4,
+            State = KeyValueState.Set,
+            LastUsed = txId,
+            LastModified = txId,
+            WriteIntent = new() { TransactionId = txId, Expires = txId + 15000 },
+            MvccEntries = new() { [txId] = new KeyValueMvccEntry { Value = "new"u8.ToArray(), Revision = 5, State = KeyValueState.Set } }
+        };
+        store.Insert(key, entry);
+
+        KeyValueProposal proposal = new(
+            KeyValueRequestType.TrySet, key, "new"u8.ToArray(), 5, false,
+            HLCTimestamp.Zero, txId, txId, KeyValueState.Set, KeyValueDurability.Persistent);
+        int phaseTwoId = context.NextPhaseTwoId();
+        context.PendingPhaseTwos[phaseTwoId] = PendingPhaseTwo.ForCommit(
+            txId, key, KeyValueDurability.Persistent, proposal, txId, txId, 1, null, null);
+
+        // Leader ordering: the committed-log apply arrives BEFORE the phase-two completion.
+        InvalidateOrApplyHandler invalidate = new(context);
+        invalidate.Execute(KeyValueRequest.ForInvalidateOrApply(key, 5, "new"u8.ToArray(), HLCTimestamp.Zero, txId, txId, KeyValueState.Set));
+
+        // The live write intent deferred the apply — the entry is still at the superseded revision.
+        Assert.Equal(4, entry.Revision);
+        Assert.Equal("old"u8.ToArray(), entry.Value);
+
+        // The completion then applies once, archiving the superseded revision correctly.
+        CompletePhaseTwoHandler complete = new(context);
+        TaskCompletionSource<KeyValueResponse?> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        KeyValueResponse resp = complete.Execute(KeyValueRequest.ForCompletePhaseTwo(
+            new PhaseTwoCompletionData(phaseTwoId, PhaseTwoOpKind.Commit, true, RaftOperationStatus.Success, 5, HLCTimestamp.Zero),
+            promise));
+
+        Assert.Equal(KeyValueResponseType.Committed, resp.Type);
+        Assert.Equal(5, entry.Revision);
+        Assert.Equal("new"u8.ToArray(), entry.Value);
+        Assert.Null(entry.WriteIntent);
+
+        // Revision 4 was archived with its OLD value; the current version 5 is not archived under itself.
+        Assert.NotNull(entry.Revisions);
+        Assert.True(entry.Revisions!.TryGetValue(4, out KeyValueRevisionEntry archived));
+        Assert.Equal("old"u8.ToArray(), archived.Value);
+        Assert.False(entry.Revisions.ContainsKey(5));
+    }
+
+    /// <summary>
+    /// R2 (B7): the worker must not fabricate a success because the node left the cluster after the
+    /// request queued. With a non-joined raft it still runs the Raft op (reaching the hook) and the
+    /// doomed call resolves to a non-Committed outcome — never a fabricated commit.
+    /// </summary>
+    [Fact]
+    public async Task Worker_NotJoined_DoesNotFabricateSuccess()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        ILogger<IKahuna> logger = loggerFactory.CreateLogger<IKahuna>();
+        RaftManager raft = CreateRaft("phasetwo-notjoined");
+        Assert.False(raft.Joined);
+
+        KahunaConfiguration config = ConfigurationValidator.Validate(new()
+        {
+            LocksWorkers = 1,
+            KeyValueWorkers = 1,
+            BackgroundWriterWorkers = 1,
+            Storage = "memory",
+            CacheEntryTtl = TimeSpan.FromMinutes(5),
+            CacheEntriesToRemove = 1000,
+            MaxEntriesPerActor = 50_000,
+            MaxBytesPerActor = 256L * 1024 * 1024,
+            CollectBatchMax = 1000,
+            RevisionRetention = 16,
+            Phase2CommitTimeout = 500
+        });
+
+        using ActorSystem actorSystem = new();
+        IActorRef<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest> worker =
+            actorSystem.Spawn<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>("notjoined-worker", raft, config, logger);
+        IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> replyActor =
+            actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                "notjoined-reply", null!, null!, new MemoryPersistenceBackend(), raft,
+                new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+
+        KeyValuePhaseTwoActor workerInstance = (worker.Runner.Actor as KeyValuePhaseTwoActor)!;
+        TaskCompletionSource entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        workerInstance.BeforeRaftCallHook = () =>
+        {
+            entered.TrySetResult();
+            return Task.CompletedTask;
+        };
+
+        TaskCompletionSource<KeyValueResponse?> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        worker.Send(KeyValuePhaseTwoRequest.ForCommit(
+            1, 1, raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()), replyActor, promise));
+
+        // The worker reaches the Raft-call path even when not joined (before R2 it short-circuited).
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), ct);
+
+        // The doomed Raft op resolves to a non-Committed result — never a fabricated success.
+        KeyValueResponse? response = await promise.Task.WaitAsync(TimeSpan.FromSeconds(10), ct);
+        Assert.NotNull(response);
+        Assert.NotEqual(KeyValueResponseType.Committed, response!.Type);
+    }
+
+    /// <summary>
+    /// R3 (S3): a joined commit with no phase-two worker wired must drive CommitLogs (durable), not
+    /// apply locally and fabricate success. A bogus (never-prepared) ticket makes CommitLogs fail, so
+    /// the commit resolves non-Committed and retains its state — proving CommitLogs is actually driven.
+    /// </summary>
+    [Fact]
+    public async Task NullRouterCommit_DrivesCommitLogs_NotFabricatedSuccess()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        ILogger<IKahuna> logger = loggerFactory.CreateLogger<IKahuna>();
+
+        KahunaConfiguration config = ConfigurationValidator.Validate(new()
+        {
+            LocksWorkers = 1,
+            KeyValueWorkers = 1,
+            BackgroundWriterWorkers = 1,
+            Storage = "memory",
+            CacheEntryTtl = TimeSpan.FromMinutes(5),
+            CacheEntriesToRemove = 1000,
+            MaxEntriesPerActor = 50_000,
+            MaxBytesPerActor = 256L * 1024 * 1024,
+            CollectBatchMax = 1000,
+            RevisionRetention = 16,
+            Phase2CommitTimeout = 500
+        });
+
+        await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
+        {
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 1
+        }, loggerFactory);
+        await node.StartAsync(ct);
+        const int partitionId = 1;
+        await node.Raft.WaitForLeader(partitionId, ct);
+
+        MemoryPersistenceBackend backend = new();
+        using ActorSystem actorSystem = new();
+        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> bgWriter =
+            actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
+                "bg-r3", node.Raft, backend, null!, null!, null!, config, logger, new FlushNotificationSink());
+
+        // Note: PhaseTwoRouter defaults to null here — the fallback path under test.
+        BTree<string, KeyValueEntry> store = new(32);
+        KeyValueContext context = new(
+            null!, store, new(), new(), new(), bgWriter, null!, backend, node.Raft,
+            new KeySpaceRegistry(), new RangeMapStore(node.Raft, null, null, logger), config, logger);
+
+        const string key = "r3/key";
+        HLCTimestamp txId = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+        KeyValueEntry entry = new()
+        {
+            Value = "old"u8.ToArray(),
+            Revision = 4,
+            State = KeyValueState.Set,
+            LastUsed = txId,
+            LastModified = txId,
+            WriteIntent = new() { TransactionId = txId, Expires = txId + 15000 },
+            MvccEntries = new() { [txId] = new KeyValueMvccEntry { Value = "new"u8.ToArray(), Revision = 5, State = KeyValueState.Set } }
+        };
+        store.Insert(key, entry);
+
+        HLCTimestamp bogusTicket = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+        KeyValueRequest commit = new(
+            KeyValueRequestType.TryCommitMutations, txId, HLCTimestamp.Zero, key, null, null, -1,
+            KeyValueFlags.None, 0, bogusTicket, KeyValueDurability.Persistent, 0, 0, null);
+
+        TryCommitMutationsHandler handler = new(context);
+        KeyValueResponse resp = await handler.Execute(commit);
+
+        // CommitLogs on a never-prepared ticket fails — the commit is not fabricated as Committed.
+        Assert.NotEqual(KeyValueResponseType.Committed, resp.Type);
+        // State retained for retry (durability was not silently dropped).
+        Assert.NotNull(entry.WriteIntent);
+    }
+
+    /// <summary>
+    /// R6 (B6): if the after-Raft apply throws, the completion must still resolve the caller's promise
+    /// (retryable) rather than leak it. Forced here with a null background writer inside ApplyConfirmedCommit.
+    /// </summary>
+    [Fact]
+    public void Completion_ApplyException_ResolvesPromiseRetryable_NotLeaked()
+    {
+        ILogger<IKahuna> logger = loggerFactory.CreateLogger<IKahuna>();
+        RaftManager raft = CreateRaft("apply-exception");
+        KeyValueContext context = DirectContext(raft, Config(), logger); // null background writer
+
+        const string key = "phasetwo/apply-throws";
+        HLCTimestamp txId = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        KeyValueEntry entry = new()
+        {
+            Value = "old"u8.ToArray(),
+            Revision = 4,
+            State = KeyValueState.Set,
+            LastUsed = txId,
+            LastModified = txId,
+            WriteIntent = new() { TransactionId = txId, Expires = txId + 15000 },
+            MvccEntries = new() { [txId] = new KeyValueMvccEntry { Value = "new"u8.ToArray(), Revision = 5, State = KeyValueState.Set } }
+        };
+        context.Store.Insert(key, entry);
+
+        KeyValueProposal proposal = new(
+            KeyValueRequestType.TrySet, key, "new"u8.ToArray(), 5, false,
+            HLCTimestamp.Zero, txId, txId, KeyValueState.Set, KeyValueDurability.Persistent);
+        int phaseTwoId = context.NextPhaseTwoId();
+        context.PendingPhaseTwos[phaseTwoId] = PendingPhaseTwo.ForCommit(
+            txId, key, KeyValueDurability.Persistent, proposal, txId, txId, 1, null, null);
+
+        CompletePhaseTwoHandler handler = new(context);
+        TaskCompletionSource<KeyValueResponse?> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        // ApplyConfirmedCommit reaches context.BackgroundWriter.Send (null) and throws; the handler must
+        // catch it and resolve the promise retryable instead of letting it propagate and leak the promise.
+        KeyValueResponse resp = handler.Execute(KeyValueRequest.ForCompletePhaseTwo(
+            new PhaseTwoCompletionData(phaseTwoId, PhaseTwoOpKind.Commit, true, RaftOperationStatus.Success, 5, HLCTimestamp.Zero),
+            promise));
+
+        Assert.Equal(KeyValueResponseType.MustRetry, resp.Type);
+        Assert.True(promise.Task.IsCompleted);
+        Assert.Equal(KeyValueResponseType.MustRetry, promise.Task.Result!.Type);
+    }
+
     private static KeyValueContext DirectContext(RaftManager raft, KahunaConfiguration config, ILogger<IKahuna> logger)
     {
         return new KeyValueContext(

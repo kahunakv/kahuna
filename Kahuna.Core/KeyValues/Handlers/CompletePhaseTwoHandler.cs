@@ -47,13 +47,25 @@ internal sealed class CompletePhaseTwoHandler : BaseHandler
             return duplicate;
         }
 
-        KeyValueResponse response = pending.OpKind switch
+        KeyValueResponse response;
+        try
         {
-            PhaseTwoOpKind.Prepare => ApplyPrepare(completion),
-            PhaseTwoOpKind.Commit => ApplyCommit(pending, completion),
-            PhaseTwoOpKind.Rollback => ApplyRollback(pending, completion),
-            _ => KeyValueStaticResponses.ErroredResponse
-        };
+            response = pending.OpKind switch
+            {
+                PhaseTwoOpKind.Prepare => ApplyPrepare(completion),
+                PhaseTwoOpKind.Commit => ApplyCommit(pending, completion),
+                PhaseTwoOpKind.Rollback => ApplyRollback(pending, completion),
+                _ => KeyValueStaticResponses.ErroredResponse
+            };
+        }
+        catch (Exception ex)
+        {
+            // The after-Raft apply threw. Never leak the caller's promise: resolve it retryable so the
+            // coordinator re-drives (idempotent — the receipt/recent-decision check and re-apply reconcile
+            // any partial state). The pending entry is already removed; the re-drive registers a fresh one.
+            context.Logger.LogError(ex, "KeyValueActor/CompletePhaseTwo: apply threw for {OpKind} {TxId}", pending.OpKind, pending.TxId);
+            response = KeyValueStaticResponses.MustRetryResponse;
+        }
 
         message.Promise?.TrySetResult(response);
 

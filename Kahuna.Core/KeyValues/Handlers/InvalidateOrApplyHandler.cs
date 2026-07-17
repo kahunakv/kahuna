@@ -27,18 +27,31 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
         if (!context.Store.TryGetValue(message.Key, out KeyValueEntry? entry))
             return null;
 
-        // Don't touch an entry whose proposal is still live: the leader actor owns it and will
-        // apply the committed value via CompleteProposal. If the intent has expired (the node was
-        // leader, stamped the intent, then lost leadership before CompleteProposal ran), clear it
-        // and fall through so the committed value is applied — matching the expiry-aware pattern
-        // used by TryGet, TrySet, TryDelete, etc.
-        if (entry.ReplicationIntent is not null)
+        // Don't touch an entry whose apply is still owned by a live in-flight operation: the owning
+        // actor applies the committed value via CompleteProposal (direct write, ReplicationIntent) or
+        // CompletePhaseTwo (2PC, WriteIntent), which archives the correct superseded revision and
+        // adjusts accounting exactly once. Advancing the entry here first would corrupt that archive.
+        // If an intent has expired (the node was leader, stamped the intent, then lost leadership before
+        // the completion ran), clear it and fall through so the committed value is applied — it is
+        // authoritative — matching the expiry-aware pattern used by TryGet, TrySet, TryDelete, etc.
+        if (entry.ReplicationIntent is not null || entry.WriteIntent is not null)
         {
             HLCTimestamp now = context.Raft.HybridLogicalClock
                 .TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
-            if (entry.ReplicationIntent.Expires - now > TimeSpan.Zero)
-                return null;
-            entry.ReplicationIntent = null;
+
+            if (entry.ReplicationIntent is not null)
+            {
+                if (entry.ReplicationIntent.Expires - now > TimeSpan.Zero)
+                    return null;
+                entry.ReplicationIntent = null;
+            }
+
+            if (entry.WriteIntent is not null)
+            {
+                if (entry.WriteIntent.Expires - now > TimeSpan.Zero)
+                    return null;
+                entry.WriteIntent = null;
+            }
         }
 
         InvalidateOrApplyData data = message.InvalidateOrApplyData!;

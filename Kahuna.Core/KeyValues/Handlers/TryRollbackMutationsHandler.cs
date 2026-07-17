@@ -6,6 +6,7 @@ using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Utils;
 using Kommander;
+using Kommander.Data;
 using Kommander.Time;
 using Nixie;
 
@@ -109,18 +110,23 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
             return new(KeyValueResponseType.RolledBack);
         }
 
-        // Persistent rollback. When not joined to a Raft cluster (embedded single-node), or when no
-        // phase-two worker is wired (bare test contexts), the rollback is an immediate success — apply
-        // inline. Otherwise dispatch the RollbackLogs Raft round trip to the off-mailbox worker so this
-        // actor is free while it runs; the completion applies the confirmed rollback back on the mailbox.
-        int partitionId = context.Raft.Joined ? ResolvePartition(message.Key) : -1;
-
-        if (!context.Raft.Joined || context.PhaseTwoRouter is null)
+        // Not joined to a Raft cluster (embedded single-node, no replication): there is nothing to roll
+        // back in Raft, so the rollback is an immediate success — apply inline.
+        if (!context.Raft.Joined)
         {
             ApplyConfirmedRollback(entry, message.TransactionId, currentTime);
             return new(KeyValueResponseType.RolledBack, 0);
         }
 
+        int partitionId = ResolvePartition(message.Key);
+
+        // Joined but no off-mailbox worker wired (bare test contexts): roll the ticket back inline so it
+        // is durably settled in Raft before the local state is cleared — never skip RollbackLogs.
+        if (context.PhaseTwoRouter is null)
+            return await RollbackInline(message, entry, currentTime, partitionId);
+
+        // Otherwise dispatch the RollbackLogs Raft round trip to the off-mailbox worker so this actor is
+        // free while it runs; the completion applies the confirmed rollback back on the mailbox.
         IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext = context.ActorContext;
         if (!actorContext.Reply.HasValue)
             return KeyValueStaticResponses.ErroredResponse;
@@ -139,4 +145,39 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
 
         return KeyValueStaticResponses.WaitingForReplicationResponse;
     }
+
+    /// <summary>
+    /// Rolls the prepared ticket back inline (durable), bounded by the phase-two deadline, then clears
+    /// the local state — the fallback when no off-mailbox worker is wired. Transient failures return
+    /// MustRetry with state retained.
+    /// </summary>
+    private async Task<KeyValueResponse> RollbackInline(
+        KeyValueRequest message, KeyValueEntry entry, HLCTimestamp currentTime, int partitionId)
+    {
+        int timeoutMs = context.Configuration.Phase2CommitTimeout;
+        using CancellationTokenSource? cts = timeoutMs > 0 ? new CancellationTokenSource(timeoutMs) : null;
+
+        (bool success, RaftOperationStatus status, long logIndex) = await context.Raft.RollbackLogs(
+            partitionId, message.ProposalTicketId, cts?.Token ?? CancellationToken.None);
+
+        if (!success)
+            return IsTransientRaftStatus(status)
+                ? KeyValueStaticResponses.MustRetryResponse
+                : KeyValueStaticResponses.ErroredResponse;
+
+        if (entry.WriteIntent is null || entry.WriteIntent.TransactionId != message.TransactionId)
+            return new(KeyValueResponseType.RolledBack, logIndex);
+
+        ApplyConfirmedRollback(entry, message.TransactionId, currentTime);
+
+        return new(KeyValueResponseType.RolledBack, logIndex);
+    }
+
+    private static bool IsTransientRaftStatus(RaftOperationStatus status) => status is
+        RaftOperationStatus.NodeIsNotLeader or
+        RaftOperationStatus.ProposalQueueFull or
+        RaftOperationStatus.RestoreInProgress or
+        RaftOperationStatus.ProposalTimeout or
+        RaftOperationStatus.ReplicationFailed or
+        RaftOperationStatus.OperationCancelled;
 }

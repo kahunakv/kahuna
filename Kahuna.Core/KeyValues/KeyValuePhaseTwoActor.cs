@@ -46,13 +46,12 @@ internal sealed class KeyValuePhaseTwoActor : IActor<KeyValuePhaseTwoRequest>
 
     public async Task Receive(KeyValuePhaseTwoRequest message)
     {
-        // Not joined to a Raft cluster (embedded single-node without replication): the participant
-        // handlers treat the Raft round trip as an immediate success, so mirror that here.
-        if (!raft.Joined)
-        {
-            SendCompletion(message, success: true, RaftOperationStatus.Success, commitIndex: 0, HLCTimestamp.Zero);
-            return;
-        }
+        // Do NOT re-read the mutable raft.Joined here. The participant handler only dispatches to this
+        // worker when the node was joined at dispatch time (a not-joined node applies inline, never
+        // dispatches). Short-circuiting to a fabricated success because membership changed after the
+        // request queued (e.g. LeaveCluster set Joined=false) would report a commit/rollback as durable
+        // without ever settling the Raft ticket. Always run the Raft op and surface its real
+        // leadership/cancellation/failure status.
 
         // Test seam (null in production): hold the op in flight before the Raft call.
         if (BeforeRaftCallHook is { } gate)

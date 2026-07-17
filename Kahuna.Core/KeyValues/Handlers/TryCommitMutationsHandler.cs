@@ -165,19 +165,25 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             return new(KeyValueResponseType.Committed, 0);
         }
 
-        // Persistent commit. When not joined to a Raft cluster (embedded single-node), or when no
-        // phase-two worker is wired (bare test contexts), the commit is an immediate success — apply
-        // inline. Otherwise dispatch the CommitLogs Raft round trip to the off-mailbox worker so this
-        // actor is free while it runs; the completion applies the confirmed commit back on the mailbox.
-        int partitionId = context.Raft.Joined ? ResolvePartition(message.Key) : -1;
-
-        if (!context.Raft.Joined || context.PhaseTwoRouter is null)
+        // Not joined to a Raft cluster (embedded single-node, no replication): there is nothing to
+        // commit to, so the commit is an immediate success — apply inline.
+        if (!context.Raft.Joined)
         {
-            ApplyConfirmedCommit(entry, proposal, message.TransactionId, currentTime, partitionId, recordAnchorKey, embeddedDecision);
+            ApplyConfirmedCommit(entry, proposal, message.TransactionId, currentTime, -1, recordAnchorKey, embeddedDecision);
 
             return new(KeyValueResponseType.Committed, 0);
         }
 
+        int partitionId = ResolvePartition(message.Key);
+
+        // Joined but no off-mailbox worker wired (bare test contexts): commit the ticket inline so the
+        // mutation is durably committed to Raft before it is applied — never skip CommitLogs, which would
+        // silently drop durability. Mirrors the prepare fallback's inline replication.
+        if (context.PhaseTwoRouter is null)
+            return await CommitInline(message, entry, proposal, currentTime, partitionId, recordAnchorKey, embeddedDecision);
+
+        // Otherwise dispatch the CommitLogs Raft round trip to the off-mailbox worker so this actor is
+        // free while it runs; the completion applies the confirmed commit back on the mailbox.
         IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext = context.ActorContext;
         if (!actorContext.Reply.HasValue)
             return KeyValueStaticResponses.ErroredResponse;
@@ -196,4 +202,41 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
 
         return KeyValueStaticResponses.WaitingForReplicationResponse;
     }
+
+    /// <summary>
+    /// Commits the prepared ticket inline (durable), bounded by the phase-two deadline, then applies —
+    /// the fallback when no off-mailbox worker is wired. Transient failures return MustRetry with state
+    /// retained; a confirmed commit applies exactly once (post-await idempotency re-checks the intent).
+    /// </summary>
+    private async Task<KeyValueResponse> CommitInline(
+        KeyValueRequest message, KeyValueEntry entry, KeyValueProposal proposal, HLCTimestamp currentTime,
+        int partitionId, string? recordAnchorKey, Transactions.Data.CoordinatorDecisionRecord? embeddedDecision)
+    {
+        int timeoutMs = context.Configuration.Phase2CommitTimeout;
+        using CancellationTokenSource? cts = timeoutMs > 0 ? new CancellationTokenSource(timeoutMs) : null;
+
+        (bool success, RaftOperationStatus status, long commitIndex) = await context.Raft.CommitLogs(
+            partitionId, message.ProposalTicketId, cts?.Token ?? CancellationToken.None);
+
+        if (!success)
+            return IsTransientRaftStatus(status)
+                ? KeyValueStaticResponses.MustRetryResponse
+                : KeyValueStaticResponses.ErroredResponse;
+
+        // Post-await: the intent may have been cleared by an idempotent re-commit while suspended.
+        if (entry.WriteIntent is null || entry.WriteIntent.TransactionId != message.TransactionId)
+            return new(KeyValueResponseType.Committed, commitIndex);
+
+        ApplyConfirmedCommit(entry, proposal, message.TransactionId, currentTime, partitionId, recordAnchorKey, embeddedDecision);
+
+        return new(KeyValueResponseType.Committed, commitIndex);
+    }
+
+    private static bool IsTransientRaftStatus(RaftOperationStatus status) => status is
+        RaftOperationStatus.NodeIsNotLeader or
+        RaftOperationStatus.ProposalQueueFull or
+        RaftOperationStatus.RestoreInProgress or
+        RaftOperationStatus.ProposalTimeout or
+        RaftOperationStatus.ReplicationFailed or
+        RaftOperationStatus.OperationCancelled;
 }
