@@ -30,7 +30,7 @@ internal sealed class TryReleaseExclusiveLockHandler : BaseHandler
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
 
         if (entry.MvccEntries is null)
-            context.Logger.LogWarning("Trying to release exclusive lock for {Key} but MVCC entries are null", message.Key);
+            context.Logger.LogDebug("Trying to release exclusive lock for {Key} but MVCC entries are null", message.Key);
         else
             RemoveMvccEntry(entry, message.TransactionId);
 
